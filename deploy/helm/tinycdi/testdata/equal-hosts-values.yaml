@@ -9,10 +9,10 @@ sessionHost: portal.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   existingSecret: tinycdi-oidc-client
 
 database:
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   allowedPeers:
     - ipBlock: {cidr: 10.20.30.40/32}

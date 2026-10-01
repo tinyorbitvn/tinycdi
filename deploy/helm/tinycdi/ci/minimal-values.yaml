@@ -12,10 +12,16 @@ sessionHost: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   existingSecret: tinycdi-oidc-client
 
 database:
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   allowedPeers:
     - ipBlock: {cidr: 10.20.30.40/32}
+
+# OIDC login-state sealing keys (required): a pre-created Secret with a
+# 32-byte "current" key (and "previous" during rotation).
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
