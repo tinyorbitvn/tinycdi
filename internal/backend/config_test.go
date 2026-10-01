@@ -27,7 +27,7 @@ func envMap(m map[string]string) func(string) string {
 // defaults). Tests mutate copies of it.
 func mergedArgs() []string {
 	return []string{
-		"-session-origin", "https://session.example.test",
+		"-session-domain", "session.example.test",
 		"-database-url", "postgres://api:pw@db.internal:5432/tinycdi?sslmode=verify-full",
 		"-oidc-issuer", "https://idp.example.test",
 		"-oidc-client-id", "tinycdi",
@@ -35,7 +35,7 @@ func mergedArgs() []string {
 		"-login-key-file", "/run/secrets/login.key",
 		"-session-tls-cert", "/run/secrets/session.crt",
 		"-session-tls-key", "/run/secrets/session.key",
-		"-session-allowed-hosts", "session.example.test",
+		"-session-control-hosts", "session.example.test",
 		"-internal-tls-cert", "/run/secrets/internal.crt",
 		"-internal-tls-key", "/run/secrets/internal.key",
 		"-internal-client-ca", "/run/secrets/clients.ca",
@@ -47,10 +47,10 @@ func mergedArgs() []string {
 func splitArgs() []string {
 	return []string{
 		"-listen=", "-internal-listen=",
-		"-session-origin", "https://session.example.test",
+		"-session-domain", "session.example.test",
 		"-session-tls-cert", "/run/secrets/session.crt",
 		"-session-tls-key", "/run/secrets/session.key",
-		"-session-allowed-hosts", "session.example.test",
+		"-session-control-hosts", "session.example.test",
 		"-broker-url", "https://broker.internal:9443",
 		"-broker-ca", "/run/secrets/broker.ca",
 		"-mtls-cert", "/run/secrets/client.crt",
@@ -191,9 +191,9 @@ func TestParseFlags_CookieModeValues(t *testing.T) {
 
 func TestParseFlags_RequiredInputs(t *testing.T) {
 	for _, flag := range []string{
-		"-session-origin", "-database-url", "-oidc-issuer",
+		"-session-domain", "-database-url", "-oidc-issuer",
 		"-oidc-client-id", "-oidc-redirect-url",
-		"-session-tls-cert", "-session-tls-key", "-session-allowed-hosts",
+		"-session-tls-cert", "-session-tls-key",
 		"-internal-tls-cert", "-internal-tls-key", "-internal-client-ca",
 	} {
 		if _, err := ParseFlags(dropArg(mergedArgs(), flag), noEnv); err == nil {
@@ -206,33 +206,24 @@ func TestParseFlags_RequiredInputs(t *testing.T) {
 // Ported from cmd/api/main_test.go and cmd/gateway/main_test.go.
 // ---------------------------------------------------------------------------
 
-func TestNormalizeSessionOrigin(t *testing.T) {
-	ok := map[string]string{
-		"https://session.example.dev":      "https://session.example.dev",
-		"https://SESSION.Example.Dev:8443": "https://session.example.dev:8443",
-		"https://session.example.dev:443":  "https://session.example.dev",
-	}
-	for in, want := range ok {
-		got, err := normalizeSessionOrigin(in)
-		if err != nil || got != want {
-			t.Fatalf("normalizeSessionOrigin(%q) = %q, %v; want %q", in, got, err, want)
+func TestParseFlags_SessionDomain(t *testing.T) {
+	// host[:port] only — the domain is not an origin; sessionhost.ParseDomain
+	// does the full validation (its own tests pin the grammar).
+	for _, good := range []string{"session.example.dev", "session.example.dev:8443"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-session-domain", good), noEnv); err != nil {
+			t.Fatalf("-session-domain %q rejected: %v", good, err)
 		}
 	}
-
 	for _, bad := range []string{
-		"http://session.example.dev",       // plaintext must not carry tickets
-		"javascript:alert(1)",              // non-http scheme
-		"session.example.dev",              // missing scheme
-		"https://session.example.dev/",     // path not allowed
-		"https://session.example.dev/app",  // path not allowed
-		"https://session.example.dev/?x=1", // query not allowed
-		"https://session.example.dev#frag", // fragment not allowed
-		"https://user@session.example.dev", // userinfo not allowed
-		"https://user:pw@session.example.dev",
-		"",
+		"https://session.example.dev", // origins are not domains
+		"Session.Example.Dev",         // host must be lower case
+		"*.example.dev",               // no wildcards
+		"10.0.0.1",                    // no IP literals
+		"session.example.dev/",        // no paths
+		"session.example.dev:bad",
 	} {
-		if got, err := normalizeSessionOrigin(bad); err == nil {
-			t.Fatalf("normalizeSessionOrigin(%q) = %q, want error", bad, got)
+		if _, err := ParseFlags(withArg(mergedArgs(), "-session-domain", bad), noEnv); err == nil {
+			t.Fatalf("-session-domain %q must be rejected", bad)
 		}
 	}
 }

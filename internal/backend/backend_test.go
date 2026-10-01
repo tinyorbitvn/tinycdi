@@ -233,8 +233,8 @@ func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.H
 	b := &Backend{log: testLog()}
 	b.ready.Store(true)
 	cfg := Config{
-		SessionOrigin:       "https://session.test",
-		SessionAllowedHosts: "session.test",
+		SessionDomain:       "session.test",
+		SessionControlHosts: "session.test",
 		RenewInterval:       25 * time.Millisecond,
 		RevokeDeadline:      150 * time.Millisecond,
 		ControlToken:        "control-test-token",
@@ -269,7 +269,7 @@ func TestRouteIsolation_SessionListener(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Host = "session.test"
+		req.Host = "ws-0000000a.session.test" // a workspace host: API paths 401 behind the cookie gate
 		resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -595,7 +595,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 
 	// Fake remote broker behind the internal mTLS API contract.
 	fb := newFakeBrokerClient(t)
-	fb.scriptTicket("tk-1", "ws-aaaa")
+	fb.scriptTicket("tk-1", "ws_aaaa0001")
 	internalH := httpapi.NewHandler(httpapi.Config{
 		Broker:   internalAdapter{fb},
 		Audience: "session.test",
@@ -612,8 +612,8 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 		"-session-listen", "127.0.0.1:0",
 		"-session-tls-cert", sessionCert,
 		"-session-tls-key", sessionKey,
-		"-session-allowed-hosts", "session.test",
-		"-session-origin", "https://session.test",
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
 		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
@@ -650,9 +650,9 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = "session.test"
+	req.Host = "ws-aaaa0001.session.test"
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", "https://session.test")
+	req.Header.Set("Origin", "https://ws-aaaa0001.session.test")
 	resp, err := insecure.Transport.(*http.Transport).RoundTrip(req)
 	if err != nil {
 		t.Fatalf("launch: %v", err)
@@ -674,8 +674,8 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wsReq.Host = "session.test"
-	wsReq.Header.Set("Origin", "https://session.test")
+	wsReq.Host = "ws-aaaa0001.session.test"
+	wsReq.Header.Set("Origin", "https://ws-aaaa0001.session.test")
 	wsReq.Header.Set("Cookie", gateway.SessionCookieName+"="+cookie)
 	wsReq.Header.Set("Connection", "upgrade")
 	wsReq.Header.Set("Upgrade", "websocket")
@@ -740,7 +740,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	db := newDB(t)
 	src := newFakeBindings()
-	// Production binds the ticket audience to the session-origin host
+	// Production binds the ticket audience to the session domain
 	// (resolveGatewayIdentity); the test broker does the same.
 	brk := broker.New(db, src, broker.WithGatewayAudience("session.test"))
 
@@ -748,7 +748,7 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	src.set(readyBinding("ws-shared-1", "tenant-a", "iss|alice", 1, "rt-1", time.Now()))
 
 	cfg, err := ParseFlags(withArg(
-		withArg(mergedArgs(), "-session-origin", "https://session.test"),
+		withArg(mergedArgs(), "-session-domain", "session.test"),
 		"-gateway-id", "gw-shared"), noEnv)
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
@@ -798,7 +798,7 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 
 	// A different gateway ID remains foreign: same DB, ErrDenied.
 	cfgOther, _ := ParseFlags(withArg(
-		withArg(mergedArgs(), "-session-origin", "https://session.test"),
+		withArg(mergedArgs(), "-session-domain", "session.test"),
 		"-gateway-id", "gw-other"), noEnv)
 	b3 := &Backend{cfg: cfgOther, log: testLog()}
 	id3, err := resolveGatewayIdentity(b3.cfg)

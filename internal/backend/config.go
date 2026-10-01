@@ -33,6 +33,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
 // stringList collects repeated flags and comma-separated values into one
@@ -97,7 +98,7 @@ type Config struct {
 	SessionListen       string // empty disables the session listener
 	SessionTLSCert      string // required when the session listener is on
 	SessionTLSKey       string
-	SessionAllowedHosts string // comma-separated Host allowlist
+	SessionControlHosts string // comma-separated Host allowlist for /healthz and /v1/control/*
 	SessionCookieMode   string // lax | partitioned
 	UpstreamCA          string
 	ControlTokenFile    string
@@ -117,7 +118,7 @@ type Config struct {
 	MetricsListen string // empty disables
 
 	// Shared.
-	SessionOrigin   string // public session origin (scheme://host[:port])
+	SessionDomain   string // session domain for per-workspace hosts (host[:port])
 	PortalOrigins   stringList
 	GatewayID       string
 	GatewayAudience string
@@ -192,7 +193,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"session listener address (empty disables it)")
 	fs.StringVar(&c.SessionTLSCert, "session-tls-cert", envOr(getenv, "TCDI_SESSION_TLS_CERT", ""), "session listener TLS cert (PEM)")
 	fs.StringVar(&c.SessionTLSKey, "session-tls-key", envOr(getenv, "TCDI_SESSION_TLS_KEY", ""), "session listener TLS key (PEM)")
-	fs.StringVar(&c.SessionAllowedHosts, "session-allowed-hosts", envOr(getenv, "TCDI_SESSION_ALLOWED_HOSTS", ""), "comma-separated Host allowlist for the session listener")
+	fs.StringVar(&c.SessionControlHosts, "session-control-hosts", envOr(getenv, "TCDI_SESSION_CONTROL_HOSTS", ""), "comma-separated Host allowlist for /healthz and /v1/control/* on the session listener (in-cluster Service names)")
 	fs.StringVar(&c.SessionCookieMode, "session-cookie-mode", envOr(getenv, "TCDI_SESSION_COOKIE_MODE", "lax"),
 		"session cookie mode: lax (same-site portal) or partitioned (CHIPS)")
 	fs.StringVar(&c.UpstreamCA, "upstream-ca", envOr(getenv, "TCDI_UPSTREAM_CA", ""), "optional default PEM CA for runtime upstreams")
@@ -214,14 +215,14 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.MetricsListen, "metrics-listen", envOr(getenv, "TCDI_METRICS_LISTEN", ""), "metrics listen address (empty disables)")
 
 	// Shared.
-	fs.StringVar(&c.SessionOrigin, "session-origin", envOr(getenv, "TCDI_SESSION_ORIGIN", ""),
-		"public session origin used to build launch URLs (required, https://host[:port])")
+	fs.StringVar(&c.SessionDomain, "session-domain", envOr(getenv, "TCDI_SESSION_DOMAIN", ""),
+		"session domain: workspaces are served on ws-<id>.<domain> (host[:port]; required when the session listener is on)")
 	fs.Var(&c.PortalOrigins, "portal-origin",
 		"portal Origin allowed to make cookie-authenticated state-changing requests (repeatable or CSV; env TCDI_PORTAL_ORIGINS; default: origin of -oidc-redirect-url)")
 	fs.StringVar(&c.GatewayID, "gateway-id", envOr(getenv, "TCDI_GATEWAY_ID", ""),
 		"session-gateway identity (merged mode default: backend; split mode default: client cert CN)")
 	fs.StringVar(&c.GatewayAudience, "gateway-audience", envOr(getenv, "TCDI_GATEWAY_AUDIENCE", ""),
-		"audience launch tickets bind to (default: session-origin host)")
+		"audience launch tickets bind to (default: session domain)")
 	fs.Var(&c.LoginKeyFiles, "login-key-file",
 		"OIDC login-state sealing key file (repeatable or CSV; env TCDI_LOGIN_KEY_FILE; first file seals, all open; required when the app listener is on)")
 
@@ -319,7 +320,7 @@ func (c *Config) validate() error {
 		missing := []string{}
 		for name, v := range map[string]string{
 			"session-tls-cert": c.SessionTLSCert, "session-tls-key": c.SessionTLSKey,
-			"session-allowed-hosts": c.SessionAllowedHosts,
+			"session-domain": c.SessionDomain,
 		} {
 			if v == "" {
 				missing = append(missing, "-"+name)
@@ -354,17 +355,13 @@ func (c *Config) validate() error {
 		}
 	}
 
-	if c.SessionOrigin == "" {
-		return errors.New("required: -session-origin")
+	// The session domain is required by the session-listener check above;
+	// when set without it the value is still validated so a typo fails fast.
+	if c.SessionDomain != "" {
+		if _, err := sessionhost.ParseDomain(c.SessionDomain); err != nil {
+			return err
+		}
 	}
-	// SEC-26: the session origin is the destination launch tickets are
-	// POSTed to — it must be a bare https origin (no path/query/fragment/
-	// userinfo).
-	so, err := normalizeSessionOrigin(c.SessionOrigin)
-	if err != nil {
-		return err
-	}
-	c.SessionOrigin = so
 
 	// Default the Origin allowlist to the redirect URL's origin: the chart
 	// derives the callback from portalHost, so portal and API share it.
@@ -382,21 +379,13 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// normalizeSessionOrigin validates that raw is a bare https origin and
-// returns its normalized form: scheme://lowercased-host[:non-default-port]
-// — the same serialization a browser produces for URL.origin, so the
-// SPA's launchUrl origin check byte-compares correctly.
-func normalizeSessionOrigin(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
-		return "", fmt.Errorf("bad session-origin %q (want https://host[:port])", raw)
+// sessionOrigin derives the https origin the API advertises as the launch
+// POST target from the session domain; empty when no domain is configured.
+func (c Config) sessionOrigin() string {
+	if c.SessionDomain == "" {
+		return ""
 	}
-	host := strings.ToLower(u.Host)
-	if u.Port() == "443" {
-		host = strings.TrimSuffix(host, ":443")
-	}
-	return "https://" + host, nil
+	return "https://" + c.SessionDomain
 }
 
 // checkDatabaseTLS resolves the TLS configuration pgx will actually apply

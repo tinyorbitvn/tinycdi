@@ -27,13 +27,13 @@ import (
 // lease itself.
 func TestRehydrate_SecondGatewayServesCookie(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-rehy", "ws-1")
+	fb.scriptTicket("tk-rehy", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
 	_, srvB := newReplica(t, fb, "gw-B")
 
-	cookie := launchOK(t, srvA, "tk-rehy")
+	cookie := launchOK(t, srvA, testHost, "tk-rehy")
 
-	resp := proxied(t, srvB, "/", cookie, nil)
+	resp := proxied(t, srvB, testHost, "/", cookie, nil)
 	defer drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("proxied on B = %d, want 200", resp.StatusCode)
@@ -57,7 +57,7 @@ func TestRehydrate_UnknownCookieAllocatesNothing(t *testing.T) {
 	fb := newFakeBroker(t)
 	_, srvB := newReplica(t, fb, "gw-B")
 
-	resp := proxied(t, srvB, "/", "random", nil)
+	resp := proxied(t, srvB, testHost, "/", "random", nil)
 	drain(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("proxied with random cookie = %d, want 401", resp.StatusCode)
@@ -75,16 +75,16 @@ func TestRehydrate_UnknownCookieAllocatesNothing(t *testing.T) {
 // 401 on the other replica, not a resurrected session.
 func TestRehydrate_DeadLeaseRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-dead", "ws-1")
+	fb.scriptTicket("tk-dead", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
 	_, srvB := newReplica(t, fb, "gw-B")
-	cookie := launchOK(t, srvA, "tk-dead")
+	cookie := launchOK(t, srvA, testHost, "tk-dead")
 	lease := fb.leaseOf(t, "tk-dead")
 
 	if err := fb.RevokeLease(context.Background(), lease.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	resp := proxied(t, srvB, "/", cookie, nil)
+	resp := proxied(t, srvB, testHost, "/", cookie, nil)
 	defer drain(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("proxied on B after revoke = %d, want 401", resp.StatusCode)
@@ -95,10 +95,10 @@ func TestRehydrate_DeadLeaseRejected(t *testing.T) {
 // the same unseen cookie share a single directory lookup.
 func TestRehydrate_ConcurrentRequestsSingleLookup(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-conc", "ws-1")
+	fb.scriptTicket("tk-conc", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
 	_, srvB := newReplica(t, fb, "gw-B")
-	cookie := launchOK(t, srvA, "tk-conc")
+	cookie := launchOK(t, srvA, testHost, "tk-conc")
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -140,12 +140,12 @@ func TestRehydrate_ConcurrentRequestsSingleLookup(t *testing.T) {
 // replica has only its own sessions — A's cookie is a miss on B.
 func TestRehydrate_NilDirectoryKeepsV01Behaviour(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-nil", "ws-1")
+	fb.scriptTicket("tk-nil", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
 	srvB := newGateway(t, fb, nil) // no Sessions: v0.1 single-process mode
 
-	cookie := launchOK(t, srvA, "tk-nil")
-	resp := proxied(t, srvB, "/", cookie, nil)
+	cookie := launchOK(t, srvA, testHost, "tk-nil")
+	resp := proxied(t, srvB, testHost, "/", cookie, nil)
 	defer drain(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("proxied on directory-less B = %d, want 401", resp.StatusCode)
@@ -156,11 +156,11 @@ func TestRehydrate_NilDirectoryKeepsV01Behaviour(t *testing.T) {
 // the digest, launch fails closed — the lease is revoked, no cookie is set.
 func TestLaunch_BindFailureIssuesNoCookie(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-bindfail", "ws-1")
+	fb.scriptTicket("tk-bindfail", testWSUID)
 	fb.setBindErr(errors.New("directory unreachable"))
 	_, srv := newReplica(t, fb, "gw-A")
 
-	resp := doLaunch(t, srv, "tk-bindfail", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-bindfail", map[string]string{
 		"Origin":         testOrigin,
 		"Sec-Fetch-Site": "same-origin",
 	})
@@ -181,12 +181,12 @@ func TestLaunch_BindFailureIssuesNoCookie(t *testing.T) {
 // stream while the session itself stays alive.
 func TestStreamFence_CrossGateway(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-fence", "ws-1")
+	fb.scriptTicket("tk-fence", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
 	_, srvB := newReplica(t, fb, "gw-B")
-	cookie := launchOK(t, srvA, "tk-fence")
+	cookie := launchOK(t, srvA, testHost, "tk-fence")
 
-	respA := upgrade(t, srvA, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	respA := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if respA.StatusCode != http.StatusSwitchingProtocols {
 		drain(respA)
 		t.Fatalf("upgrade on A = %d, want 101", respA.StatusCode)
@@ -195,7 +195,7 @@ func TestStreamFence_CrossGateway(t *testing.T) {
 	wsWrite(t, respA, []byte("x"))
 	wsRead(t, respA, 1, 2*time.Second) // prove the stream is live
 
-	respB := upgrade(t, srvB, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	respB := upgrade(t, srvB, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if respB.StatusCode != http.StatusSwitchingProtocols {
 		drain(respB)
 		t.Fatalf("upgrade on B = %d, want 101", respB.StatusCode)
@@ -226,12 +226,12 @@ func TestStreamFence_CrossGateway(t *testing.T) {
 // each, and never revokes — the same cookie reconnects on replica B.
 func TestDrain_KeepsLease(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-drain", "ws-1")
+	fb.scriptTicket("tk-drain", testWSUID)
 	gwA, srvA := newReplica(t, fb, "gw-A")
 	_, srvB := newReplica(t, fb, "gw-B")
-	cookie := launchOK(t, srvA, "tk-drain")
+	cookie := launchOK(t, srvA, testHost, "tk-drain")
 
-	resp := upgrade(t, srvA, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
@@ -263,7 +263,7 @@ func TestDrain_KeepsLease(t *testing.T) {
 		t.Fatalf("RevokeLease calls = %d, want 0", n)
 	}
 
-	respB := proxied(t, srvB, "/", cookie, nil)
+	respB := proxied(t, srvB, testHost, "/", cookie, nil)
 	defer drain(respB)
 	if respB.StatusCode != http.StatusOK {
 		t.Fatalf("proxied on B after A drained = %d, want 200", respB.StatusCode)
@@ -274,15 +274,15 @@ func TestDrain_KeepsLease(t *testing.T) {
 // WebSocket upgrades get 503 even with a valid cookie.
 func TestDrain_RefusesNewUpgrades(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-drain2", "ws-1")
+	fb.scriptTicket("tk-drain2", testWSUID)
 	gwA, srvA := newReplica(t, fb, "gw-A")
-	cookie := launchOK(t, srvA, "tk-drain2")
+	cookie := launchOK(t, srvA, testHost, "tk-drain2")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	gwA.Drain(ctx)
 	cancel()
 
-	resp := upgrade(t, srvA, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("upgrade after Drain = %d, want 503", resp.StatusCode)

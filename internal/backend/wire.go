@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -94,9 +93,7 @@ func (b *Backend) wire(ctx context.Context) error {
 func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
-		if u, err := url.Parse(cfg.SessionOrigin); err == nil && u.Hostname() != "" {
-			audience = u.Hostname()
-		}
+		audience = cfg.SessionDomain
 	}
 	if audience == "" {
 		audience = broker.DefaultGatewayAudience
@@ -384,11 +381,22 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 	if err != nil {
 		return err
 	}
+	dom, err := sessionhost.ParseDomain(cfg.SessionDomain)
+	if err != nil {
+		return fmt.Errorf("gateway init: %w", err)
+	}
+	var controlHosts []string
+	for _, h := range strings.Split(cfg.SessionControlHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			controlHosts = append(controlHosts, h)
+		}
+	}
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
-		PublicOrigin:   cfg.SessionOrigin,
+		SessionDomain:  dom,
 		PortalOrigins:  []string(cfg.PortalOrigins),
-		AllowedHosts:   strings.Split(cfg.SessionAllowedHosts, ","),
+		ControlHosts:   controlHosts,
+		CookieMode:     gateway.CookieMode(cfg.SessionCookieMode),
 		Broker:         bc,
 		Sessions:       sessions,
 		UpstreamCA:     upCA,
@@ -430,7 +438,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		ClientID:       cfg.OIDCClientID,
 		ClientSecret:   cfg.OIDCClientSecret,
 		RedirectURL:    cfg.OIDCRedirectURL,
-		SessionOrigin:  cfg.SessionOrigin,
+		SessionOrigin:  cfg.sessionOrigin(),
 		RequiredGroups: cfg.RequiredGroups,
 		LoginSealer:    sealer,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
@@ -438,9 +446,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		return fmt.Errorf("oidc: %w", err)
 	}
 
-	// The session domain is the host[:port] of the normalized session
-	// origin; launch URLs resolve to per-workspace hosts under it (D9).
-	sessionDomain, err := sessionhost.ParseDomain(strings.TrimPrefix(cfg.SessionOrigin, "https://"))
+	// The session domain maps workspace IDs to per-workspace launch hosts
+	// (D9) — launch URLs resolve to ws-<suffix>.<SessionDomain>/v1/launch.
+	sessionDomain, err := sessionhost.ParseDomain(cfg.SessionDomain)
 	if err != nil {
 		return fmt.Errorf("session domain: %w", err)
 	}
