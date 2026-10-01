@@ -132,14 +132,14 @@ test.describe("keyboard", () => {
     const probed: string[] = [];
     for (let i = 0; i < count; i++) {
       const el = interactive.nth(i);
-      const usable = await el.evaluate((node) => {
+      const usable = await el.evaluate((node, idx) => {
         const e = node as HTMLElement;
         if (e.getAttribute("tabindex") === "-1") return false;
         if ("disabled" in e && (e as HTMLButtonElement).disabled) return false;
         if (e.getAttribute("aria-disabled") === "true") return false;
-        e.setAttribute("data-a11y-probe", String(i));
+        e.setAttribute("data-a11y-probe", String(idx));
         return true;
-      });
+      }, i);
       if (usable) probed.push(String(i));
     }
 
