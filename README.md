@@ -1,80 +1,88 @@
-# tinycdi
+# TinyCDI
 
-Self-hosted virtual desktop workspaces on Kubernetes: Linux desktop/browser
-sessions streamed over KasmVNC (WebSocket), behind a custom API/broker and a
-Workspace operator. The Windows desktop track (KubeVirt + Guacamole/RDP) is
-deferred pending its own proof gate — see `docs/compatibility.md`.
+[![ci](https://github.com/tinyorbitvn/tinycdi/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyorbitvn/tinycdi/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/tinyorbitvn/tinycdi)](https://github.com/tinyorbitvn/tinycdi/releases)
+[![license](https://img.shields.io/github/license/tinyorbitvn/tinycdi)](LICENSE)
 
-## Architecture
+TinyCDI is a self-hosted platform that gives users disposable Linux desktop
+and browser workspaces on Kubernetes — streamed straight into their browser
+over KasmVNC. It exists for teams that want Kasm-style remote desktops
+without the Kasm Workspaces control plane: a small Go API + session
+gateway, an operator that reconciles `Workspace` CRDs into locked-down
+pods, and a React portal on top. The Windows desktop track (KubeVirt +
+Guacamole/RDP) is deferred pending its own proof gate.
 
-- **Portal** (`web/` + `build/portal`): React SPA served with the API on one
-  origin; session launches open the gateway origin.
-- **API** (`cmd/api`, `internal/api`): public REST surface (`/v1`),
-  identity/OIDC, quotas, workspace CRUD, retained-data inventory.
-- **Broker** (`internal/broker`): connection tickets (opaque, single-use,
-  TTL-bound), leases, revocation, activity.
-- **Gateway** (`cmd/gateway`, `internal/gateway`): session edge — ticket
-  redemption, launch-origin policy, authenticated reverse proxy to the
-  runtime's streaming endpoint.
-- **Operator** (`cmd/operator`, `internal/operator`): reconciles `Workspace`
-  / `WorkspaceTemplate` CRDs (`api/`), provisions runtime pods, enforces
-  per-workspace NetworkPolicy, runs the teardown finalizer.
-- **Runtime images** (`build/linux-desktop`, `build/browser`): non-root
-  KasmVNC desktop on Debian bookworm, HTTPS endpoint on :8443, credentials
-  via mounted secrets.
+## Features
 
-Design decisions live in `docs/architecture.md` and `docs/adr/`. Pinned
-dependency/toolchain versions are in `docs/compatibility.md`.
+- **Desktop & browser workspaces in the browser** — Linux desktop and
+  ephemeral Chromium/Firefox sessions streamed over KasmVNC WebSocket
+  (HTTPS, no client install).
+- **OIDC SSO with a group gate** — users authenticate through your
+  identity provider; only allowed groups get in.
+- **One-use launch tickets + hardened session gateway** — opaque,
+  TTL-bound, single-use tickets redeem at a separate session origin that
+  enforces launch-origin policy and reverse-proxies to the runtime.
+- **Kubernetes operator** — `workspaces.cdi.tinyorbit.vn` CRDs
+  (`Workspace`, `WorkspaceTemplate`) reconcile pods, PVCs and lifecycle.
+- **Isolation by default** — per-workspace NetworkPolicy/egress profiles,
+  Localhost seccomp + AppArmor node profiles, non-root runtime with all
+  capabilities dropped, and Chromium's sandbox kept *on*.
+- **Persistent / retained home data** — Retain or Ephemeral data policy
+  per workspace; retained disks can be re-attached or purged.
+- **Per-tenant quotas**, workspace lifecycle controls and idempotent API.
+- **Helm chart** — one-command install/upgrade, CRDs, RBAC and
+  NetworkPolicy baseline included.
+- **Signed releases** — images on `ghcr.io` with SBOMs, SLSA provenance
+  and signature verification (see `docs/security/provenance.md`).
 
-## Layout
+## Screenshots
 
-```
-api/       Kubernetes API types (workspaces/v1alpha1) + deepcopy/CRDs source
-build/     one directory per image: build/<name>/Dockerfile (context = repo root)
-cmd/       Go entrypoints: api, gateway, operator
-config/    kubebuilder config: CRDs, RBAC, manager, samples
-deploy/    deploy/helm/tinycdi — the Helm chart (install/upgrade)
-docs/      architecture, ADRs, runbooks, security policy, compatibility pins
-hack/      codegen helpers (boilerplate header)
-internal/  control-plane packages (api, broker, gateway, operator, runtime, ...)
-tests/     integration tests (Go, envtest + Docker — no cluster required)
-web/       portal SPA (React/TypeScript, Vite, vitest + Playwright mock suite)
-```
+| Workspace portal | Live session |
+|---|---|
+| ![Workspace list — desktop and browser workspaces with phase, desired state and data policy](docs/images/screenshots/portal-workspaces.png) | ![Workspace detail — conditions, connect and lifecycle actions](docs/images/screenshots/portal-detail.png) |
+| ![Create workspace — pick a template, data policy and start state](docs/images/screenshots/portal-create.png) | ![Retained data — disks kept after workspace deletion](docs/images/screenshots/portal-data.png) |
+| ![Linux desktop workspace streamed over KasmVNC](docs/images/screenshots/session-desktop.png) | ![Browser workspace — sandboxed Chromium in the browser](docs/images/screenshots/session-browser.png) |
 
-## Build & test
+Screenshots are real captures of the shipped images and portal —
+regenerate them with `node web/scripts/screenshots.mjs`
+(see `docs/development.md`).
+
+## Quick start
+
+Requires a Kubernetes cluster (≥ 1.30) with NetworkPolicy enforcement, a
+PostgreSQL database, an OIDC provider and a StorageClass for retained
+data. Install the published chart:
 
 ```sh
-go build ./...                                  # all Go binaries
-go vet ./...                                    # vet (incl. test files)
-go test -race ./internal/... ./cmd/...          # unit + envtest suites
-go test -tags=integration ./tests/integration   # envtest + Docker contract tests
-
-npm --prefix web ci && npm --prefix web test    # UI: vitest + Playwright mock suite
-npm --prefix web run build                      # production bundle -> web/dist
-
-# Every image builds from a clean checkout with repo-root context:
-docker build -f build/operator/Dockerfile -t tcdi/operator .
-docker build -f build/api/Dockerfile       -t tcdi/api .
-docker build -f build/gateway/Dockerfile   -t tcdi/gateway .
-docker build -f build/portal/Dockerfile    -t tcdi/portal .   # builds web/ in-stage
-docker build -f build/linux-desktop/Dockerfile -t tcdi/linux-desktop .
-docker build -f build/browser/Dockerfile   -t tcdi/browser \
-    --build-arg BASE_IMAGE=tcdi/linux-desktop .
+helm install tinycdi oci://ghcr.io/tinyorbitvn/charts/tinycdi \
+  -n tinycdi-system --create-namespace -f my-values.yaml
 ```
 
-See `docs/images.md` for the runtime-image contract and pinned inputs.
+Start from `deploy/helm/tinycdi/ci/example-values.yaml`, then follow the
+full procedure — secrets, TLS, node profiles — in
+[`docs/runbooks/install.md`](docs/runbooks/install.md). Chart reference:
+[`deploy/helm/tinycdi/README.md`](deploy/helm/tinycdi/README.md).
 
-## Deploy
+## Documentation
 
-Install or upgrade with the Helm chart — see `deploy/helm/tinycdi/README.md`
-and the runbooks `docs/runbooks/install.md`, `docs/runbooks/upgrade.md`.
-Security policy, private vulnerability reporting and mandatory hardening rules: [`SECURITY.md`](SECURITY.md).
+- [Documentation index](docs/README.md)
+- [Architecture](docs/architecture.md) — design doc + ADRs
+- [Runtime image contract](docs/images.md) · [Compatibility pins](docs/compatibility.md)
+- [Runbooks](docs/runbooks/install.md) — install, upgrade, retained data, DR, capacity
+- [Development](docs/development.md) — repo layout, build, test, screenshots
+
+## Security
+
+TinyCDI runs other people's desktops — vulnerability reports go through
+GitHub private reporting, and hardening rules are mandatory for
+contributors and operators. See [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-MIT — see `LICENSE`. Third-party notices: `NOTICE`,
-`THIRD_PARTY_LICENSES.md`; the GPL-2.0 corresponding-source offer for the
-KasmVNC binaries in the runtime images: `SOURCE-OFFER`.
+MIT — see [`LICENSE`](LICENSE). Third-party notices: [`NOTICE`](NOTICE),
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). The runtime images
+redistribute KasmVNC under GPL-2.0 — the corresponding-source offer is in
+[`SOURCE-OFFER`](SOURCE-OFFER).
 
 TinyCDI is an independent project, not affiliated with or endorsed by
 Kasm Technologies, Google or the Mozilla Foundation. "KasmVNC"/"Kasm",
