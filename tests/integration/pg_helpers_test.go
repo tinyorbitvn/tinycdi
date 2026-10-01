@@ -21,6 +21,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
@@ -43,6 +44,10 @@ var (
 	dbCounter   atomic.Int64
 	k8sClient   client.Client
 	testEnvStop func()
+	// testEnvConfig is the rest.Config of the envtest apiserver — tests
+	// that run a full binary (backend_restart_test.go) serialize it into a
+	// -kubeconfig file.
+	testEnvConfig *rest.Config
 )
 
 // errDockerMissing marks the docker-less environment skip path.
@@ -78,6 +83,7 @@ func TestMain(m *testing.M) {
 		if err != nil {
 			panic(err)
 		}
+		testEnvConfig = cfg
 		for _, ns := range []string{"ns-a", "ns-b", "ns-e2e", "ns-crash"} {
 			if err := k8sClient.Create(context.Background(), &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: ns},
