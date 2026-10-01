@@ -22,7 +22,7 @@ mkdir -p "$WORK/bin"
 # --- gh stub: canned GETs; --jq applied through real jq -------------------
 cat > "$WORK/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-# gh stub — state selected via GH_STUB_MODE: clean | partial | err500
+# gh stub — state selected via GH_STUB_MODE: clean | partial | converged | err500
 [ "$1" = "api" ] || { echo "gh stub: unsupported '$*'" >&2; exit 2; }
 shift
 endpoint="" ; jqexpr=""
@@ -43,27 +43,37 @@ notfound() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
 err500()   { echo "gh: boom (HTTP 500)" >&2; exit 1; }
 mode="${GH_STUB_MODE:-clean}"
 case "$endpoint" in
-  repos/test/repo)          reply '{"visibility":"public","security_and_analysis":{}}' ;;
+  repos/test/repo)
+    [ "$mode" = "converged" ] && reply '{"visibility":"public","security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
+    reply '{"visibility":"public","security_and_analysis":{}}' ;;
   user)                     reply '{"login":"octocat"}' ;;
   users/vanlongme)          reply '{"id":1234}' ;;
   repos/test/repo/environments/release)
     [ "$mode" = "err500" ] && err500
-    [ "$mode" = "partial" ] && reply '{"protection_rules":[{"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"vanlongme","id":1234}}]}]}'
+    case "$mode" in partial|converged) reply '{"protection_rules":[{"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"vanlongme","id":1234}}]}]}' ;; esac
     notfound ;;
   repos/test/repo/environments/release/deployment-branch-policies)
-    [ "$mode" = "partial" ] && reply '{"total_count":1,"branch_policies":[{"name":"v*","type":"tag"}]}'
+    case "$mode" in partial|converged) reply '{"total_count":1,"branch_policies":[{"name":"v*","type":"tag"}]}' ;; esac
     notfound ;;
   repos/test/repo/rulesets)
-    [ "$mode" = "partial" ] && reply '[{"id":7,"name":"release-tags"}]'
+    case "$mode" in partial|converged) reply '[{"id":7,"name":"release-tags"}]' ;; esac
     reply '[]' ;;
+  repos/test/repo/rulesets/7)
+    [ "$mode" = "converged" ] && reply '{"id":7,"name":"release-tags","target":"tag","source_type":"Repository","enforcement":"active","bypass_actors":[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}],"conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*"]}},"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],"created_at":"2026-01-01T00:00:00Z"}'
+    reply '{"id":7,"name":"release-tags","target":"tag","enforcement":"evaluate","bypass_actors":[],"conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*"]}},"rules":[{"type":"deletion"}]}' ;;
   repos/test/repo/branches/main/protection)
     [ "$mode" = "partial" ] && reply '{}'
+    [ "$mode" = "converged" ] && reply '{"url":"x","required_status_checks":{"strict":true,"contexts":["workflow lint (actionlint + yamllint + zizmor)","go vet + test -race (envtest)","integration (postgres service + envtest)","portal ui (npm ci, tsc, vitest, build)","chart (helm lint --strict + chart tests)","govulncheck (Go vuln scan)","dependency review (PRs)","workflow policy tests (.github)"],"checks":[]},"enforce_admins":{"enabled":true},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"required_approving_review_count":0},"required_linear_history":{"enabled":false},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"lock_branch":{"enabled":false},"allow_fork_syncing":{"enabled":false}}'
     notfound ;;
+  repos/test/repo/private-vulnerability-reporting)
+    [ "$mode" = "converged" ] && reply '{"enabled":true}'
+    reply '{"enabled":false}' ;;
   repos/test/repo/actions/variables/ATTESTATIONS_ENABLED)
-    [ "$mode" = "partial" ] && reply '{"name":"ATTESTATIONS_ENABLED","value":"true"}'
+    case "$mode" in partial|converged) reply '{"name":"ATTESTATIONS_ENABLED","value":"true"}' ;; esac
     notfound ;;
   repos/test/repo/actions/variables/CODE_SCANNING_ENABLED)
     [ "$mode" = "partial" ] && reply '{"name":"CODE_SCANNING_ENABLED","value":"false"}'
+    [ "$mode" = "converged" ] && reply '{"name":"CODE_SCANNING_ENABLED","value":"true"}'
     notfound ;;
   *) echo "gh stub: unmocked endpoint '$endpoint'" >&2; exit 2 ;;
 esac
@@ -115,6 +125,16 @@ chk "$WORK/partial.out" "ok: 'v\*' tag deployment policy present" "idempotent: t
 chk "$WORK/partial.out" 'WOULD: gh api -X PUT repos/test/repo/rulesets/7' "idempotent: ruleset sync missing"
 chk "$WORK/partial.out" 'ok: ATTESTATIONS_ENABLED already true' "idempotent: variable re-detected wrongly"
 chk "$WORK/partial.out" 'WOULD: gh api -X PATCH repos/test/repo/actions/variables/CODE_SCANNING_ENABLED' "idempotent: stale variable not PATCHed"
+
+chk "$WORK/partial.out" 'WOULD: gh api -X PUT repos/test/repo/branches/main/protection' "idempotent: protection drift not detected"
+
+# ---- scenario: fully converged — the plan must be empty -------------------
+GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=converged \
+  bash "$SCRIPT" > "$WORK/converged.out" 2>&1 || { echo "FAIL: converged dry-run exited nonzero"; cat "$WORK/converged.out"; fails=1; }
+absent "$WORK/converged.out" 'WOULD:' "converged state still plans changes"
+chk    "$WORK/converged.out" 'ok: ruleset release-tags matches' "converged: ruleset not recognised"
+chk    "$WORK/converged.out" 'ok: main branch protection matches' "converged: protection not recognised"
+chk    "$WORK/converged.out" 'ok: private vulnerability reporting already enabled' "converged: PVR not recognised"
 
 # ---- scenario: GET fails with a non-404 — must fail CLOSED ---------------
 if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500 \
