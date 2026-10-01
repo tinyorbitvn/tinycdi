@@ -2247,8 +2247,10 @@ func TestAllowSharedNodes(t *testing.T) {
 		t.Fatal("no operator Deployment rendered")
 	}
 	for _, a := range firstContainerArgs(op) {
+		// --runtime-host-users is NOT a placement flag — it renders
+		// independently (default false) even on shared nodes.
 		for _, p := range []string{
-			"--runtime-node-selector=", "--runtime-tolerations=", "--runtime-host-users=",
+			"--runtime-node-selector=", "--runtime-tolerations=",
 		} {
 			if strings.HasPrefix(a, p) {
 				t.Errorf("allowSharedNodes must pass no placement flags, got %q", a)
@@ -2277,6 +2279,41 @@ func TestDedicatedPoolRequiresSelector(t *testing.T) {
 		"--set-json", `runtime.placement.nodeSelector=null`)
 	if !strings.Contains(errOut, "runtime.placement.nodeSelector") {
 		t.Fatalf("render error must name runtime.placement.nodeSelector, got:\n%s", errOut)
+	}
+}
+
+// T4.2/D26: runtime.hostUsers defaults to false — the operator gets
+// --runtime-host-users=false so runtime pods run in their own user
+// namespace (verified on the reference environment, T4.3). Setting the
+// value to null renders NO flag, leaving pod.spec.hostUsers unset.
+func TestRuntimeHostUsersDefault(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"))
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	found := false
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			found = true
+			if a != "--runtime-host-users=false" {
+				t.Errorf("operator hostUsers arg = %q, want --runtime-host-users=false", a)
+			}
+		}
+	}
+	if !found {
+		t.Error("operator must get --runtime-host-users=false by default")
+	}
+
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set-json", `runtime.hostUsers=null`)
+	op = deployment(docs, "operator")
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			t.Errorf("runtime.hostUsers=null must render no host-users flag, got %q", a)
+		}
 	}
 }
 

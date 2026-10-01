@@ -267,6 +267,7 @@ func main() {
 	var watchNamespaces string
 	var leaderElectionNamespace string
 	var bf brokerFlags
+	var pf runtimePlacementFlags
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -317,6 +318,7 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	bindBrokerFlags(flag.CommandLine, &bf, os.Getenv)
+	bindRuntimePlacementFlags(flag.CommandLine, &pf)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -433,6 +435,11 @@ func main() {
 		setupLog.Error(err, "invalid kasm adapter image")
 		os.Exit(1)
 	}
+	placement, err := pf.parse()
+	if err != nil {
+		setupLog.Error(err, "invalid runtime placement flags")
+		os.Exit(1)
+	}
 	if gatewayNamespace == "" {
 		setupLog.Info("WARNING: --gateway-namespace unset (POD_NAMESPACE empty); " +
 			"runtime ingress is scoped to each workspace's own namespace — " +
@@ -462,6 +469,11 @@ func main() {
 			DisableBuiltinEgressExcepts: disableBuiltinExcepts,
 			GatewayNamespace:            gatewayNamespace,
 			KasmAdapterImage:            kasmAdapter,
+			DefaultPlacement: workspacesv1alpha1.PlacementSpec{
+				NodeSelector: placement.nodeSelector,
+				Tolerations:  placement.tolerations,
+			},
+			DefaultHostUsers: placement.hostUsers,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.

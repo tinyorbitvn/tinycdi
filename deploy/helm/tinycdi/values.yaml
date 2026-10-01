@@ -426,10 +426,12 @@ runtime:
     nodeSelector: {cdi.tinyorbit.vn/workspace: "true"}
     tolerations:
       - {key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}
-  # Default pod.spec.hostUsers for runtime pods (--runtime-host-users):
-  # null leaves the field unset, true/false sets the explicit default a
-  # template's spec.linux.hostUsers can still override.
-  hostUsers: null
+  # Default pod.spec.hostUsers for runtime pods (--runtime-host-users).
+  # false since v0.2 (verified on the reference environment — see
+  # docs/compatibility.md): runtime pods run in their own user namespace.
+  # null leaves the field unset (the apiserver default — host user
+  # namespace); a template's spec.linux.hostUsers overrides either way.
+  hostUsers: false
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must
