@@ -88,7 +88,7 @@ func TestKasmAdapterInitAdmittedUnderQuota(t *testing.T) {
 	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
 	ws := testWorkspace()
 	ws.Namespace = ns.Name
-	pod := buildPod(ws, tpl, nil, testAdapterImage)
+	pod := buildPod(ws, tpl, nil, Options{KasmAdapterImage: testAdapterImage})
 
 	if err := kc.Create(ctx, pod); err != nil {
 		t.Fatalf("kasm pod rejected under compute quota (init must carry requests): %v", err)

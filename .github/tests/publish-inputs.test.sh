@@ -15,8 +15,8 @@ fails=0
 
 VERSION="v0.1.0"
 CHART_VERSION="0.1.0"
-IMGS=(api browser gateway linux-desktop operator portal)
-RELEASE_IMAGES='["api","browser","gateway","linux-desktop","operator","portal"]'
+IMGS=(backend browser frontend kasm-adapter linux-desktop operator)
+RELEASE_IMAGES='["backend","browser","frontend","kasm-adapter","linux-desktop","operator"]'
 KV="1.5.0"
 
 WORK="$(mktemp -d)"
@@ -41,10 +41,11 @@ build_store() {
   mkdir -p "$cd_/tinycdi"
   {
     echo "images:"
-    for img in api browser gateway operator portal; do
+    for img in backend browser frontend operator; do
       printf '  %s:\n    repository: tinyorbitvn/tinycdi-%s\n    digest: ""\n' "$img" "$img"
     done
     printf '  linuxDesktop:\n    repository: tinyorbitvn/tinycdi-linux-desktop\n    digest: ""\n'
+    printf 'kasmAdapter:\n  image:\n    repository: tinyorbitvn/tinycdi-kasm-adapter\n    digest: ""\n'
   } > "$cd_/tinycdi/values.yaml"
   local src_refs="$WORK/src-refs"
   mkdir -p "$src_refs"
@@ -56,9 +57,8 @@ build_store() {
   tar -czf "$dl/release-chart/tinycdi-$CHART_VERSION.tgz" -C "$cd_" tinycdi
 
   mkdir -p "$dl/release-assets"
-  for f in "tinycdi-api-$VERSION-linux-amd64" \
+  for f in "tinycdi-backend-$VERSION-linux-amd64" \
            "tinycdi-operator-$VERSION-linux-amd64" \
-           "tinycdi-gateway-$VERSION-linux-amd64" \
            "tinycdi-crds-$VERSION.yaml"; do
     echo "blob $f" > "$dl/release-assets/$f"
   done
@@ -113,39 +113,46 @@ expect_fail() { # expect_fail <name> <stderr-substr> <mutator-fn>
 }
 
 mut_extra_artifact() { mkdir -p "$1/image-ref-zz"; echo x > "$1/image-ref-zz/zz.ref"; }
-mut_extra_file()     { echo evil > "$1/image-ref-api/evil.sh"; }
-mut_bad_ref()        { echo "ghcr.io/evil/tinycdi-api@$(digest_for api)" > "$1/image-ref-api/api.ref"; }
-mut_wrong_digest()   { echo "ghcr.io/tinyorbitvn/tinycdi-api@sha256:$(printf 'f%.0s' $(seq 64))" \
-                         > "$1/image-ref-api/api.ref"; }
+mut_extra_file()     { echo evil > "$1/image-ref-backend/evil.sh"; }
+mut_bad_ref()        { echo "ghcr.io/evil/tinycdi-backend@$(digest_for backend)" > "$1/image-ref-backend/backend.ref"; }
+mut_wrong_digest()   { echo "ghcr.io/tinyorbitvn/tinycdi-backend@sha256:$(printf 'f%.0s' $(seq 64))" \
+                         > "$1/image-ref-backend/backend.ref"; }
 mut_bad_chart() {
-  # chart stamped with a different api digest than the ref ships
+  # chart stamped with a different backend digest than the ref ships
   local cd_="$WORK/chart-evil"
   mkdir -p "$cd_/tinycdi"
   cp -r "$WORK/chart-src/tinycdi/." "$cd_/tinycdi/" 2>/dev/null || true
   mkdir -p "$cd_/tinycdi"
   {
     echo "images:"
-    for img in api browser gateway operator portal linuxDesktop; do
+    for img in backend browser frontend operator linuxDesktop; do
       printf '  %s:\n    digest: "sha256:%s"\n' "$img" "$(printf 'e%.0s' $(seq 64))"
     done
+    printf 'kasmAdapter:\n  image:\n    digest: "sha256:%s"\n' "$(printf 'e%.0s' $(seq 64))"
   } > "$cd_/tinycdi/values.yaml"
   rm -f "$1/release-chart/tinycdi-$CHART_VERSION.tgz"
   tar -czf "$1/release-chart/tinycdi-$CHART_VERSION.tgz" -C "$cd_" tinycdi
 }
 mut_no_kasmvnc()     { rm -f "$1/release-assets/kasmvnc-$KV-corresponding-source.tar.gz.sha256"; }
-mut_bad_sbom()       { echo 'not json' > "$1/sbom-api/sbom-api.spdx.json"; }
-mut_missing_bin()    { rm -f "$1/release-assets/tinycdi-api-$VERSION-linux-amd64"; }
+mut_bad_sbom()       { echo 'not json' > "$1/sbom-backend/sbom-backend.spdx.json"; }
+mut_missing_bin()    { rm -f "$1/release-assets/tinycdi-backend-$VERSION-linux-amd64"; }
+# v0.2 removed the api/gateway commands — a stale binary must not ride along.
+mut_stale_bin()      { local c=api; echo old > "$1/release-assets/tinycdi-$c-$VERSION-linux-amd64"; }
+# a removed image (api/gateway/portal) must not slip into the publish set.
+mut_removed_image()  { local i=portal; mkdir -p "$1/image-ref-$i"; echo "ghcr.io/tinyorbitvn/tinycdi-$i@$(digest_for "$i")" > "$1/image-ref-$i/$i.ref"; }
 mut_stowaway_bundle(){ echo evil > "$1/release-chart/extra.tgz"; }
 
 expect_ok
 expect_fail "forged extra artifact folder" "artifact folder set" mut_extra_artifact
-expect_fail "extra file inside artifact" "image-ref-api" mut_extra_file
+expect_fail "extra file inside artifact" "image-ref-backend" mut_extra_file
 expect_fail "ref with foreign repo" "sha256" mut_bad_ref
 expect_fail "ref digest != chart digest" "digest" mut_wrong_digest
 expect_fail "chart stamped with wrong digests" "digest" mut_bad_chart
 expect_fail "missing kasmvnc checksum" "KasmVNC" mut_no_kasmvnc
 expect_fail "invalid sbom json" "not valid JSON" mut_bad_sbom
 expect_fail "missing release binary" "missing" mut_missing_bin
+expect_fail "stale removed-component binary" "unexpected release-assets file" mut_stale_bin
+expect_fail "removed image artifact" "artifact folder set" mut_removed_image
 expect_fail "stowaway in chart artifact" "release-chart" mut_stowaway_bundle
 
 # KASMVNC_SRC=false must reject the bundle and accept a store without it.

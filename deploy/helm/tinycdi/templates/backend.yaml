@@ -1,0 +1,344 @@
+# Backend (cmd/backend): the public API and the session gateway in ONE
+# deployment, with a separate TLS listener per role:
+#   :8443 app      — public API /v1/* for the PORTAL host (the edge routes
+#                    portalHost /v1/ here; everything else on that host
+#                    goes to the frontend)
+#   :8444 session  — session gateway for every <label>.<sessionDomain>
+#                    workspace host (launch, desktop proxy, websockify)
+#                    plus the in-cluster control surface (/healthz,
+#                    /v1/control/*) on the Service names below
+#   :9443 internal — mTLS broker listener for the operator (ADR 0003)
+#   :9090 metrics  — only with backend.metrics.enabled, on its own
+#                    ClusterIP Service (SEC-33)
+# The gateway resolves launch tickets in-process — no gateway mTLS client.
+#
+# workspaces.cdi.tinyorbit.vn/role=gateway is what the operator's
+# per-workspace NetworkPolicy matches on for runtime ingress (SEC-29).
+#
+# Restart safety (D22): two replicas with a shared -gateway-id,
+# maxUnavailable=0 (a surge pod must be Ready before an old one drains),
+# a PDB (minAvailable 1) and preferred node anti-affinity. SIGTERM starts
+# Gateway.Drain inside the 30s termination grace period; clients reconnect
+# to the other replica with the same session cookie.
+{{- $loginSecret := .Values.backend.loginKeys.existingSecret | default (printf "%s-backend-login-keys" .Release.Name) -}}
+{{- $loginPrevious := false -}}
+{{- with lookup "v1" "Secret" $.Release.Namespace $loginSecret -}}
+{{- if hasKey (default dict .data) "previous" -}}
+{{- $loginPrevious = true -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.backend.loginKeys.generate }}
+# Chart-managed login-state sealing keys (D20): written ONCE — on upgrade
+# the existing Secret is read back via lookup and re-emitted unchanged,
+# so the keys survive `helm upgrade`. helm.sh/resource-policy=keep keeps
+# them on uninstall too. Not for GitOps: `helm template` cannot see the
+# cluster and would mint a fresh "current" on every render.
+{{- $existing := lookup "v1" "Secret" $.Release.Namespace $loginSecret -}}
+{{- $data := dict -}}
+{{- if $existing -}}
+{{- $data = default dict $existing.data -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $loginSecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  current: {{ get $data "current" | default (randAlphaNum 32 | b64enc) }}
+  {{- with get $data "previous" }}
+  previous: {{ . }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    rollingUpdate:
+      # Never drop below the replica count: surge first, then drain the
+      # old pod — a session replica stays available at every step (D22).
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: tinycdi
+        cdi.tinyorbit.vn/needs-apiserver: "true"
+        workspaces.cdi.tinyorbit.vn/role: gateway
+      {{- with .Values.backend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: backend
+      # The API projects Workspace CRs and reads templates/secrets in the
+      # managed namespaces (rbac.yaml backend-role).
+      automountServiceAccountToken: true
+      # SIGTERM runs Gateway.Drain then graceful listener shutdown; 30 s
+      # covers the stream-close path.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "tinycdi.podSecurityContext" .Values.backend.podSecurityContext | nindent 8 }}
+      {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Spread replicas across nodes (P8: preferred, not required — a
+      # required rule would strand the second replica on single-node
+      # clusters). backend.affinity keys merge over this default.
+      {{- $defaultAffinity := dict "podAntiAffinity" (dict "preferredDuringSchedulingIgnoredDuringExecution" (list (dict "weight" 100 "podAffinityTerm" (dict "labelSelector" (dict "matchLabels" (dict "app.kubernetes.io/name" "backend" "app.kubernetes.io/instance" .Release.Name)) "topologyKey" "kubernetes.io/hostname")))) }}
+      affinity:
+        {{- toYaml (mergeOverwrite $defaultAffinity (.Values.backend.affinity | default dict)) | nindent 8 }}
+      containers:
+        - name: backend
+          image: {{ include "tinycdi.image" (dict "image" .Values.images.backend "root" $) }}
+          imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.backend.pullPolicy }}
+          ports:
+            - {name: app, containerPort: 8443}
+            - {name: session, containerPort: 8444}
+            - {name: internal, containerPort: 9443}
+            {{- if .Values.backend.metrics.enabled }}
+            - {name: metrics, containerPort: {{ .Values.backend.metrics.port | int }}}
+            {{- end }}
+          args:
+            # app listener: public API for the portal host.
+            - -listen=:8443
+            - -tls-cert=/tls/app/tls.crt
+            - -tls-key=/tls/app/tls.key
+            - -session-idle={{ .Values.backend.sessionIdle }}
+            {{- if .Values.oidc.requiredGroups }}
+            - --required-groups={{ join "," .Values.oidc.requiredGroups }}
+            {{- end }}
+            {{- if and .Values.dev.enabled (not (has (printf "%v" .Values.database.tls.mode) (list "verify-ca" "verify-full"))) }}
+            - --dev-insecure-db
+            {{- end }}
+            # AEAD keys sealing the __Host-tcdi_login cookie (D20): the
+            # FIRST file seals, every file opens — "previous" carries the
+            # pre-rotation key while it exists in the Secret (in-cluster
+            # lookup decides; under helm template/GitOps add
+            # "-login-key-file=/login-keys/previous" via backend.extraArgs
+            # during a rotation).
+            - -login-key-file=/login-keys/current
+            {{- if $loginPrevious }}
+            - -login-key-file=/login-keys/previous
+            {{- end }}
+            # session listener: session gateway on every workspace host
+            # <label>.<sessionDomain> (D9).
+            - -session-listen=:8444
+            - -session-tls-cert=/tls/session/tls.crt
+            - -session-tls-key=/tls/session/tls.key
+            # /healthz and the bearer-gated /v1/control/* answer ONLY on
+            # these Hosts — the in-cluster Service names — never on a
+            # workspace host (D9); backend.controlHosts adds extras (the
+            # allowlist compares the hostname sans port).
+            - -session-control-hosts={{ join "," (concat (list "backend" (printf "backend.%s" .Release.Namespace) (printf "backend.%s.svc" .Release.Namespace) (printf "backend.%s.svc.cluster.local" .Release.Namespace)) (.Values.backend.controlHosts | default (list))) }}
+            # lax requires portal and session on the same registrable
+            # domain; partitioned (SameSite=None; Secure; Partitioned) is
+            # for cross-site deployments.
+            - -session-cookie-mode={{ .Values.backend.sessionCookieMode }}
+            {{- if .Values.backend.upstreamCA.existingSecret }}
+            - -upstream-ca=/etc/upstream-ca/{{ .Values.backend.upstreamCA.key | default "ca.crt" }}
+            {{- end }}
+            {{- if .Values.backend.controlToken.existingSecret }}
+            - -control-token-file=/control/{{ .Values.backend.controlToken.key | default "token" }}
+            {{- end }}
+            # internal listener: operator mTLS broker API (ADR 0003).
+            - -internal-listen=:9443
+            - -internal-tls-cert=/tls/internal/tls.crt
+            - -internal-tls-key=/tls/internal/tls.key
+            - -internal-client-ca=/etc/client-ca/ca.crt
+            {{- if .Values.backend.operatorCN }}
+            - -operator-cn={{ .Values.backend.operatorCN }}
+            {{- end }}
+            {{- if .Values.backend.metrics.enabled }}
+            - -metrics-listen=:{{ .Values.backend.metrics.port | int }}
+            {{- end }}
+            # shared: the session domain names the per-workspace hosts
+            # (launch target + ticket audience); the portal origins are
+            # the API CSRF Origin allowlist, the launch Origin allowlist
+            # (ADR 0004) and the session listener's frame-ancestors.
+            - -session-domain={{ .Values.sessionDomain }}
+            {{- range prepend (.Values.backend.extraPortalOrigins | default (list)) (printf "https://%s" .Values.portalHost) }}
+            - -portal-origin={{ . }}
+            {{- end }}
+            - -gateway-audience={{ .Values.backend.audience | default .Values.sessionDomain }}
+            # ONE identity for the whole Deployment (D19/D22): the lease
+            # directory is shared, so a per-pod id would split ownership
+            # across replicas. Literal value — never the pod name.
+            - -gateway-id={{ .Values.backend.gatewayID }}
+            {{- with .Values.backend.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: TCDI_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.urlKey }}
+            {{- if .Values.database.tls.mode }}
+            # pgx honours the libpq env vars for DSN keys the URL omits —
+            # an explicit sslmode= in the DSN still wins.
+            - {name: PGSSLMODE, value: {{ .Values.database.tls.mode | quote }}}
+            {{- end }}
+            {{- if .Values.database.tls.caSecret.name }}
+            - {name: PGSSLROOTCERT, value: {{ printf "/etc/db-ca/%s" (.Values.database.tls.caSecret.key | default "ca.crt") | quote }}}
+            {{- end }}
+            - {name: TCDI_OIDC_ISSUER, value: {{ .Values.oidc.issuer | quote }}}
+            - {name: TCDI_OIDC_CLIENT_ID, value: {{ .Values.oidc.clientID | quote }}}
+            - name: TCDI_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.clientSecretKey }}
+            {{- $redirect := .Values.oidc.redirectURL | default (printf "https://%s/v1/auth/callback" .Values.portalHost) }}
+            - {name: TCDI_OIDC_REDIRECT_URL, value: {{ $redirect | quote }}}
+            - {name: TCDI_TENANT_NAMESPACES, value: {{ include "tinycdi.tenantNamespaces" . | quote }}}
+            # Bounded tenant label values for session metrics/leases.
+            - {name: TCDI_TENANT_ALLOWLIST, value: {{ include "tinycdi.tenantAllowlist" . | quote }}}
+            {{- if .Values.backend.extraCA.existingSecret }}
+            - {name: SSL_CERT_FILE, value: "/etc/extra-ca/{{ .Values.backend.extraCA.key | default "ca.crt" }}"}
+            {{- end }}
+            {{- with .Values.backend.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket: {port: app}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 24
+          securityContext:
+            {{- include "tinycdi.containerSecurityContext" .Values.backend.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tls-app, mountPath: /tls/app, readOnly: true}
+            - {name: tls-session, mountPath: /tls/session, readOnly: true}
+            - {name: tls-internal, mountPath: /tls/internal, readOnly: true}
+            - {name: client-ca, mountPath: /etc/client-ca, readOnly: true}
+            - {name: login-keys, mountPath: /login-keys, readOnly: true}
+            {{- if .Values.backend.extraCA.existingSecret }}
+            - {name: extra-ca, mountPath: /etc/extra-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.database.tls.caSecret.name }}
+            - {name: db-ca, mountPath: /etc/db-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.backend.upstreamCA.existingSecret }}
+            - {name: upstream-ca, mountPath: /etc/upstream-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.backend.controlToken.existingSecret }}
+            - {name: control-token, mountPath: /control, readOnly: true}
+            {{- end }}
+            {{- with .Values.backend.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        # One certificate per listener — the app, session and internal
+        # listeners never share TLS material.
+        - name: tls-app
+          secret: {secretName: {{ .Values.backend.tls.app.existingSecret }}}
+        - name: tls-session
+          secret: {secretName: {{ .Values.backend.tls.session.existingSecret }}}
+        - name: tls-internal
+          secret: {secretName: {{ .Values.backend.tls.internal.existingSecret }}}
+        - name: client-ca
+          # SEC-08: project ONLY the CA key — the Secret may also carry
+          # tls.key (the cert-manager CA Secret does).
+          secret:
+            secretName: {{ .Values.backend.clientCA.existingSecret }}
+            items: [{key: {{ .Values.backend.clientCA.key | default "ca.crt" }}, path: ca.crt}]
+        - name: login-keys
+          # Login-state seal keys: "current" is required, "previous" is
+          # mounted when the Secret carries it (key rotation).
+          secret: {secretName: {{ $loginSecret }}}
+        {{- if .Values.backend.extraCA.existingSecret }}
+        - name: extra-ca
+          secret:
+            secretName: {{ .Values.backend.extraCA.existingSecret }}
+            items: [{key: {{ .Values.backend.extraCA.key | default "ca.crt" }}, path: {{ .Values.backend.extraCA.key | default "ca.crt" }}}]
+        {{- end }}
+        {{- if .Values.database.tls.caSecret.name }}
+        - name: db-ca
+          secret:
+            secretName: {{ .Values.database.tls.caSecret.name }}
+            items: [{key: {{ .Values.database.tls.caSecret.key | default "ca.crt" }}, path: {{ .Values.database.tls.caSecret.key | default "ca.crt" }}}]
+        {{- end }}
+        {{- if .Values.backend.upstreamCA.existingSecret }}
+        - name: upstream-ca
+          secret:
+            secretName: {{ .Values.backend.upstreamCA.existingSecret }}
+            items: [{key: {{ .Values.backend.upstreamCA.key | default "ca.crt" }}, path: {{ .Values.backend.upstreamCA.key | default "ca.crt" }}}]
+        {{- end }}
+        {{- if .Values.backend.controlToken.existingSecret }}
+        - name: control-token
+          secret:
+            secretName: {{ .Values.backend.controlToken.existingSecret }}
+            items: [{key: {{ .Values.backend.controlToken.key | default "token" }}, path: {{ .Values.backend.controlToken.key | default "token" }}}]
+        {{- end }}
+        {{- with .Values.backend.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+---
+# app (portal host /v1/), session (every <label>.<sessionDomain> host)
+# and internal (operator mTLS) ports. ClusterIP only: the portal host
+# needs an L7 path router
+# (Ingress / Gateway API) in front, and a NodePort/LoadBalancer would also
+# publish the internal port. The NetworkPolicies decide who reaches which
+# port: the edge only app/session, the operator only internal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+  {{- with .Values.backend.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - {name: app, port: 8443, targetPort: app}
+    - {name: session, port: 8444, targetPort: session}
+    - {name: internal, port: 9443, targetPort: internal}
+    # SEC-33: metrics are NEVER exposed on this Service — with
+    # backend.metrics.enabled they live on the dedicated ClusterIP
+    # backend-metrics Service below, reachable only via the
+    # allow-metrics-scrape NetworkPolicy peers.
+{{- if .Values.backend.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    cdi.tinyorbit.vn/metrics: "true"
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - {name: metrics, port: {{ .Values.backend.metrics.port | int }}, targetPort: metrics}
+{{- end }}

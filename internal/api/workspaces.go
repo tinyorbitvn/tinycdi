@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -70,7 +71,11 @@ type TemplateEntry struct {
 	MaxRunningSeconds      int64
 	DataPolicyDefault      string
 	ClipboardPolicy        string
+	NetworkProfile         string
 	PublishedAt            time.Time
+	// ImageBuiltAt is the raw image-built-at annotation value carried by
+	// the resolved WorkspaceTemplate (RFC 3339 when well formed).
+	ImageBuiltAt string
 }
 
 // ErrTemplateNotFound means templateRef does not resolve in the caller's
@@ -101,15 +106,36 @@ type WorkspaceHandler struct {
 	catalog    TemplateCatalog
 	tenants    TenantResolver
 	statusView StatusView
+	directory  Directory
+	intentLog  IntentLog
 	maxBody    int64
+	staleAfter time.Duration
 	now        func() time.Time
+	log        *slog.Logger
+}
+
+// WithDirectory attaches the principal directory that fills owner display
+// names on views. Nil falls back to bare subjects.
+func (h *WorkspaceHandler) WithDirectory(d Directory) *WorkspaceHandler {
+	h.directory = d
+	return h
 }
 
 // NewWorkspaceHandler wires the handler. catalog may be nil when
 // /v1/workspaces create is not served (tests); tenants is required.
 func NewWorkspaceHandler(b workspaceBackend, c TemplateCatalog, t TenantResolver) *WorkspaceHandler {
 	return &WorkspaceHandler{backend: b, catalog: c, tenants: t,
-		maxBody: 64 << 10, now: time.Now}
+		maxBody: 64 << 10, staleAfter: DefaultImageStaleAfter, now: time.Now}
+}
+
+// WithImageStaleAfter sets the age after which a workspace's runtime image
+// reports imageStale (the -image-stale-after flag). Non-positive keeps the
+// default.
+func (h *WorkspaceHandler) WithImageStaleAfter(d time.Duration) *WorkspaceHandler {
+	if d > 0 {
+		h.staleAfter = d
+	}
+	return h
 }
 
 // MountWorkspaceRoutes registers the workspace/template routes with the
@@ -121,6 +147,7 @@ func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *Workspace
 	mux.Handle("GET /v1/workspaces", safe(http.HandlerFunc(h.List)))
 	mux.Handle("POST /v1/workspaces", unsafe(http.HandlerFunc(h.Create)))
 	mux.Handle("GET /v1/workspaces/{id}", safe(http.HandlerFunc(h.Get)))
+	mux.Handle("GET /v1/workspaces/{id}/events", safe(http.HandlerFunc(h.Events)))
 	mux.Handle("DELETE /v1/workspaces/{id}", unsafe(http.HandlerFunc(h.Delete)))
 	mux.Handle("POST /v1/workspaces/{id}/start", unsafe(http.HandlerFunc(h.Start)))
 	mux.Handle("POST /v1/workspaces/{id}/stop", unsafe(http.HandlerFunc(h.Stop)))
@@ -153,6 +180,7 @@ type workspaceCondition struct {
 type WorkspaceView struct {
 	ID              string               `json:"id"`
 	Name            string               `json:"name"`
+	Owner           Owner                `json:"owner"`
 	Template        templateSummary      `json:"template"`
 	Phase           string               `json:"phase"`
 	Conditions      []workspaceCondition `json:"conditions"`
@@ -162,6 +190,8 @@ type WorkspaceView struct {
 	FailureReason   string               `json:"failureReason,omitempty"`
 	CreatedAt       time.Time            `json:"createdAt"`
 	UpdatedAt       time.Time            `json:"updatedAt"`
+	ImageBuiltAt    *time.Time           `json:"imageBuiltAt,omitempty"`
+	ImageStale      *bool                `json:"imageStale,omitempty"`
 }
 
 // WorkspaceList is the paginated list response.
@@ -172,8 +202,9 @@ type WorkspaceList struct {
 
 func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
 	return WorkspaceView{
-		ID:   r.ID,
-		Name: r.Name,
+		ID:    r.ID,
+		Name:  r.Name,
+		Owner: ownerFallback(r.Owner),
 		Template: templateSummary{
 			ID:         r.Template.ID,
 			Name:       r.Template.Name,
@@ -219,6 +250,30 @@ func ownerScope(p Principal) string {
 	return p.Owner()
 }
 
+// listScope resolves the ?scope= list parameter into the owner filter the
+// store applies (D34): omitted keeps the caller's natural scope (admins
+// see the tenant, users their own rows), "mine" forces the caller's own
+// rows even for admins, and "tenant" widens to the whole tenant — which
+// requires the tenant-admin role, else 403 FORBIDDEN. Unknown values are
+// a 400. Shared by /v1/workspaces and /v1/data.
+func listScope(w http.ResponseWriter, r *http.Request, p Principal) (string, bool) {
+	switch r.URL.Query().Get("scope") {
+	case "":
+		return ownerScope(p), true
+	case "mine":
+		return p.Owner(), true
+	case "tenant":
+		if !p.InGroup(TenantAdminGroup) {
+			writeError(w, r, CodeForbidden, "scope=tenant requires the tenant-admin role")
+			return "", false
+		}
+		return "", true
+	default:
+		writeError(w, r, CodeInvalidRequest, "scope must be mine or tenant")
+		return "", false
+	}
+}
+
 func (h *WorkspaceHandler) principalOrFail(w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	p, ok := PrincipalFromContext(r.Context())
 	if !ok {
@@ -248,18 +303,35 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	scope, ok := listScope(w, r, p)
+	if !ok {
+		return
+	}
 	phase := q.Get("phase")
 	recs, next, err := h.backend.ListWorkspaces(r.Context(), p.TenantID,
-		ownerScope(p), phase, q.Get("pageToken"), limit)
+		scope, phase, q.Get("pageToken"), limit)
 	if err != nil {
 		h.writeBackendError(w, r, err)
 		return
 	}
+	owners := h.resolveOwnerRefs(r.Context(), p.TenantID, recs)
 	out := WorkspaceList{Items: make([]WorkspaceView, 0, len(recs)), NextPageToken: next}
 	for i := range recs {
-		out.Items = append(out.Items, h.viewWithStatus(r.Context(), &recs[i]))
+		v := h.viewWithStatus(r.Context(), &recs[i])
+		v.Owner = owners[recs[i].Owner]
+		out.Items = append(out.Items, v)
 	}
 	respondJSON(w, out)
+}
+
+// resolveOwnerRefs batches one directory lookup for a page of records so
+// the list path does not query per row.
+func (h *WorkspaceHandler) resolveOwnerRefs(ctx context.Context, tenantID string, recs []provisioning.WorkspaceRecord) map[string]Owner {
+	refs := make([]string, 0, len(recs))
+	for i := range recs {
+		refs = append(refs, recs[i].Owner)
+	}
+	return resolveOwners(ctx, h.directory, tenantID, refs)
 }
 
 // Create handles POST /v1/workspaces.
@@ -364,7 +436,9 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(h.viewWithStatus(r.Context(), &rec))
+	v := h.viewWithStatus(r.Context(), &rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // Get handles GET /v1/workspaces/{id}.
@@ -383,7 +457,9 @@ func (h *WorkspaceHandler) Get(w http.ResponseWriter, r *http.Request) {
 		h.writeBackendError(w, r, err)
 		return
 	}
-	respondJSON(w, h.viewWithStatus(r.Context(), &rec))
+	v := h.viewWithStatus(r.Context(), &rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	respondJSON(w, v)
 }
 
 // signal shares the start/stop/delete path.
@@ -432,7 +508,9 @@ func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, kind p
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(h.viewWithStatus(r.Context(), &rec))
+	v := h.viewWithStatus(r.Context(), &rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // Start handles POST /v1/workspaces/{id}/start.

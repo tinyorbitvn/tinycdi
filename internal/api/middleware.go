@@ -70,14 +70,31 @@ func RequestIDFromContext(ctx context.Context) string {
 // RequireAuth rejects requests without a valid server-side session (opaque
 // host-only cookie) and attaches the verified Principal and Session to the
 // request context. Handlers must derive owner/tenant from that principal.
+// Each authenticated request slides the session's idle deadline (Get).
 func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
+	return a.requireAuth(next, true)
+}
+
+// RequireAuthPassive authenticates exactly like RequireAuth but does not
+// slide the idle timer (Peek): passive endpoints the portal polls on a timer
+// must not keep an unattended session alive forever (P4, D18).
+func (a *Authenticator) RequireAuthPassive(next http.Handler) http.Handler {
+	return a.requireAuth(next, false)
+}
+
+func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(a.cfg.SessionCookieName)
 		if err != nil || c.Value == "" {
 			writeError(w, r, CodeUnauthenticated, "authentication required")
 			return
 		}
-		sess, err := a.sessions.Get(r.Context(), c.Value)
+		var sess *Session
+		if slide {
+			sess, err = a.sessions.Get(r.Context(), c.Value)
+		} else {
+			sess, err = a.sessions.Peek(r.Context(), c.Value)
+		}
 		if err != nil {
 			writeError(w, r, CodeUnauthenticated, "session missing or expired")
 			return
@@ -108,11 +125,10 @@ var safeMethods = map[string]bool{
 
 // RequireCSRF enforces the synchronizer-token check on state-changing
 // methods: the request must carry the CSRFHeader value matching the token
-// stored server-side in the authenticated session. Stores keep only the
-// MAC form of the token (SEC-27), so the presented token is MAC'd under the
-// session ID before the constant-time compare. Safe methods pass through.
-// Use after RequireAuth so the session is in context; a request that reaches
-// here without a session is rejected rather than trusted.
+// derived from the session ID (csrfTokenFor, P1 — the token the portal
+// read from GET /v1/me). Safe methods pass through. Use after RequireAuth
+// or RequireAuthPassive so the session is in context; a request that
+// reaches here without a session is rejected rather than trusted.
 func (a *Authenticator) RequireCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if safeMethods[r.Method] {
@@ -126,7 +142,7 @@ func (a *Authenticator) RequireCSRF(next http.Handler) http.Handler {
 		}
 		got := r.Header.Get(a.cfg.CSRFHeader)
 		if got == "" ||
-			subtle.ConstantTimeCompare([]byte(csrfTokenMAC(sess.ID, got)), []byte(sess.CSRFToken)) != 1 {
+			subtle.ConstantTimeCompare([]byte(got), []byte(csrfTokenFor(sess.ID))) != 1 {
 			writeError(w, r, CodeCSRFFailed, "missing or invalid CSRF token")
 			return
 		}

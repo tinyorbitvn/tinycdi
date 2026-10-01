@@ -1,20 +1,61 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 )
 
+// DefaultImageStaleAfter is the -image-stale-after default (14 days): a
+// runtime image older than this reports imageStale on template and
+// workspace views. The signal is advisory only — a stale image never
+// blocks a Start (D28).
+const DefaultImageStaleAfter = 14 * 24 * time.Hour
+
+// imageFreshness maps the raw image-built-at annotation value to the
+// optional view fields: the parsed timestamp and the stale flag (image age
+// > staleAfter). A missing or malformed value leaves both fields absent;
+// malformed values log one warning and never fail the request.
+func imageFreshness(log *slog.Logger, raw string, staleAfter time.Duration, now time.Time, attrs ...any) (*time.Time, *bool) {
+	if raw == "" {
+		return nil, nil
+	}
+	built, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("ignoring malformed image-built-at annotation",
+			append(attrs, "value", raw, "error", err)...)
+		return nil, nil
+	}
+	stale := now.Sub(built) > staleAfter
+	return &built, &stale
+}
+
 // TemplateHandler implements GET /v1/templates per openapi.yaml.
 type TemplateHandler struct {
-	catalog TemplateCatalog
-	tenants TenantResolver
+	catalog    TemplateCatalog
+	tenants    TenantResolver
+	staleAfter time.Duration
+	now        func() time.Time
+	log        *slog.Logger
 }
 
 // NewTemplateHandler wires the catalog endpoint.
 func NewTemplateHandler(c TemplateCatalog, t TenantResolver) *TemplateHandler {
-	return &TemplateHandler{catalog: c, tenants: t}
+	return &TemplateHandler{catalog: c, tenants: t,
+		staleAfter: DefaultImageStaleAfter, now: time.Now}
+}
+
+// WithImageStaleAfter sets the age after which a runtime image reports
+// imageStale (the -image-stale-after flag). Non-positive keeps the default.
+func (h *TemplateHandler) WithImageStaleAfter(d time.Duration) *TemplateHandler {
+	if d > 0 {
+		h.staleAfter = d
+	}
+	return h
 }
 
 type templateResources struct {
@@ -40,7 +81,10 @@ type templateView struct {
 	LifecycleDefaults lifecycleDefaults `json:"lifecycleDefaults"`
 	DataPolicyDefault string            `json:"dataPolicyDefault"`
 	ClipboardPolicy   string            `json:"clipboardPolicy"`
+	NetworkProfile    string            `json:"networkProfile"`
 	PublishedAt       time.Time         `json:"publishedAt"`
+	ImageBuiltAt      *time.Time        `json:"imageBuiltAt,omitempty"`
+	ImageStale        *bool             `json:"imageStale,omitempty"`
 }
 
 type templateList struct {
@@ -76,13 +120,16 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := templateList{Items: make([]templateView, 0, len(entries)), NextPageToken: next}
 	for _, e := range entries {
+		builtAt, stale := imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(), "template", e.ID)
 		out.Items = append(out.Items, templateView{
-			ID:          e.ID,
-			Name:        e.Name,
-			Description: e.Description,
-			Revision:    e.Revision,
-			Runtime:     e.Runtime,
-			Experience:  e.Experience,
+			ID:           e.ID,
+			Name:         e.Name,
+			Description:  e.Description,
+			Revision:     e.Revision,
+			Runtime:      e.Runtime,
+			Experience:   e.Experience,
+			ImageBuiltAt: builtAt,
+			ImageStale:   stale,
 			Resources: templateResources{
 				CPUMillis:  e.CPUMillis,
 				MemoryMiB:  e.MemoryMiB,
@@ -95,6 +142,7 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 			},
 			DataPolicyDefault: e.DataPolicyDefault,
 			ClipboardPolicy:   e.ClipboardPolicy,
+			NetworkProfile:    e.NetworkProfile,
 			PublishedAt:       e.PublishedAt,
 		})
 	}

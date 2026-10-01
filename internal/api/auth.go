@@ -19,7 +19,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // AuthConfig configures the OIDC authorization-code + PKCE login flow and the
@@ -43,25 +45,24 @@ type AuthConfig struct {
 	// the cookie is set without a Domain attribute so the browser scopes it
 	// to the API host exactly). Secure + HttpOnly + SameSite=Lax.
 	SessionCookieName string
-	// LoginCookieName defaults to "__Host-tcdi_login". It binds an in-flight
-	// OIDC login to the initiating browser (SEC-03): LoginHandler sets it,
-	// CallbackHandler requires it. Secure + HttpOnly + SameSite=Lax,
-	// Path=/, Max-Age=PendingTTL (600 s by default).
+	// LoginCookieName defaults to "__Host-tcdi_login". It carries the
+	// AEAD-sealed login state that binds an in-flight OIDC login to the
+	// initiating browser (SEC-03): LoginHandler sets it, CallbackHandler
+	// requires it. Secure + HttpOnly + SameSite=Lax, Path=/,
+	// Max-Age=PendingTTL (600 s by default).
 	LoginCookieName string
-	// SessionOriginCookieName defaults to "tcdi_session_origin". It is
-	// intentionally NOT HttpOnly: portal JS reads it to pin the origin a
-	// launch ticket may be POSTed to (SEC-26). Empty SessionOrigin disables
-	// the cookie.
+	// SessionOriginCookieName defaults to "tcdi_session_origin" — the v0.1
+	// cookie name. In v0.2 the cookie is never set; login and logout only
+	// send a deletion (Max-Age=0) for it so upgraded browsers drop it (D17).
 	SessionOriginCookieName string
-	// SessionOrigin is the public session origin (https://host[:port]) the
-	// SPA is allowed to POST launch tickets to. When set, the login callback
-	// publishes it to the browser in SessionOriginCookieName.
+	// SessionOrigin is retained for configuration compatibility only —
+	// v0.2 derives the session origin per workspace from the session domain
+	// and never publishes it in a cookie.
 	SessionOrigin string
-	// CSRFCookieName defaults to "tcdi_csrf". It is intentionally NOT
-	// HttpOnly: portal JS reads it and echoes the value in the CSRF header.
-	// The value is also stored server-side in the session and the middleware
-	// compares against the session copy (synchronizer pattern), so the
-	// cookie alone proves nothing.
+	// CSRFCookieName defaults to "tcdi_csrf" — the v0.1 cookie name. In v0.2
+	// the CSRF token is derived from the session ID (P1) and returned by
+	// GET /v1/me; this cookie is never set, only deleted on login/logout so
+	// upgraded browsers drop it.
 	CSRFCookieName string
 	// CSRFHeader is the header the CSRF middleware reads.
 	// Defaults to "X-CSRF-Token".
@@ -81,13 +82,14 @@ type AuthConfig struct {
 	IdleTimeout     time.Duration
 	AbsoluteTimeout time.Duration
 	// PendingTTL bounds how long a login attempt (state/nonce/PKCE
-	// verifier) stays valid (default 10m).
+	// verifier) stays valid (default 10m). It is sealed into the login
+	// cookie as the State.Expires timestamp and caps the cookie Max-Age.
 	PendingTTL time.Duration
-	// PendingLimit caps the number of concurrently in-flight logins
-	// (default 10_000). When full, the oldest pending entry is evicted —
-	// an unauthenticated flood can displace other pending logins but can
-	// never grow memory or per-request work without bound (SEC-12).
-	PendingLimit int
+
+	// LoginSealer seals in-flight login state into the login cookie so any
+	// replica holding the keys can complete the login — there is no
+	// server-side pending-login state to bound or lose (SEC-12). Required.
+	LoginSealer *loginstate.Sealer
 
 	// TenantClaim / GroupsClaim name the ID-token claims that carry tenant
 	// membership and group membership. Defaults: "tenant_id", "groups".
@@ -139,9 +141,6 @@ func (c *AuthConfig) withDefaults() {
 	if c.PendingTTL == 0 {
 		c.PendingTTL = 10 * time.Minute
 	}
-	if c.PendingLimit <= 0 {
-		c.PendingLimit = 10_000
-	}
 	if c.TenantClaim == "" {
 		c.TenantClaim = "tenant_id"
 	}
@@ -162,10 +161,9 @@ func (c *AuthConfig) withDefaults() {
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID while the
 // session is in flight, but stores persist it only as a SHA-256 digest.
-// CSRFToken is the raw synchronizer token before Save; a Session returned by
-// SessionStore.Get carries csrfTokenMAC(ID, rawToken) instead — the raw token
-// is never recoverable from a store read and RequireCSRF MACs the presented
-// token before comparing.
+// CSRFToken is written as "" — since v0.2 the synchronizer token is derived
+// from the session ID (csrfTokenFor, P1) and never stored; the column stays
+// until v0.3.
 type Session struct {
 	ID        string
 	Principal Principal
@@ -189,6 +187,15 @@ type SessionStore interface {
 	// Get returns the session and slides its idle deadline. Expired or
 	// unknown IDs return ErrSessionNotFound.
 	Get(ctx context.Context, id string) (*Session, error)
+	// Peek returns the session without writing last_seen_at — the read
+	// passive endpoints use so polling never extends the idle window (P4).
+	// Expired or unknown IDs return ErrSessionNotFound.
+	Peek(ctx context.Context, id string) (*Session, error)
+	// TouchPrincipal slides last_seen_at for the principal's sessions that
+	// are still inside the idle window and before their absolute expiry
+	// (D18). principal is the "issuer|subject" owner string. Returns the
+	// number of sessions touched.
+	TouchPrincipal(ctx context.Context, principal string) (int64, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -225,26 +232,67 @@ func (s *InMemorySessionStore) Save(_ context.Context, sess *Session) error {
 	return nil
 }
 
-func (s *InMemorySessionStore) Get(_ context.Context, id string) (*Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := sessionKey(id)
+// peekLocked returns the live session or nil — no last_seen_at write. The
+// caller holds s.mu; expired sessions are dropped opportunistically.
+func (s *InMemorySessionStore) peekLocked(key string, now time.Time) *Session {
 	sess, ok := s.sessions[key]
 	if !ok {
-		return nil, ErrSessionNotFound
+		return nil
 	}
-	now := s.now()
 	if !sess.ExpiresAt.IsZero() && !now.Before(sess.ExpiresAt) {
 		delete(s.sessions, key)
-		return nil, ErrSessionNotFound
+		return nil
 	}
 	if s.idle > 0 && now.Sub(sess.LastSeenAt) >= s.idle {
 		delete(s.sessions, key)
+		return nil
+	}
+	return sess
+}
+
+func (s *InMemorySessionStore) Get(_ context.Context, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.peekLocked(sessionKey(id), s.now())
+	if sess == nil {
 		return nil, ErrSessionNotFound
 	}
-	sess.LastSeenAt = now
+	sess.LastSeenAt = s.now()
 	cp := *sess
 	return &cp, nil
+}
+
+// Peek returns the session without writing last_seen_at (P4).
+func (s *InMemorySessionStore) Peek(_ context.Context, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.peekLocked(sessionKey(id), s.now())
+	if sess == nil {
+		return nil, ErrSessionNotFound
+	}
+	cp := *sess
+	return &cp, nil
+}
+
+// TouchPrincipal slides last_seen_at for the principal's live sessions —
+// those still inside the idle window and before their absolute expiry
+// (D18). principal is the "issuer|subject" owner string.
+func (s *InMemorySessionStore) TouchPrincipal(_ context.Context, principal string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	now := s.now()
+	for key, sess := range s.sessions {
+		if sess.Principal.Owner() != principal {
+			continue
+		}
+		if s.peekLocked(key, now) == nil {
+			continue // expired sessions stay dead — input never revives them
+		}
+		sess.LastSeenAt = now
+		n++
+	}
+	return n, nil
 }
 
 func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
@@ -254,39 +302,18 @@ func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-// pendingAuth is a single-use login attempt tracked server-side, keyed by the
-// OAuth state value. Keeping nonce + PKCE verifier server-side (instead of in
-// cookies) means a stolen state value alone is useless; cookieHash (SHA-256
-// of the __Host-tcdi_login cookie value) additionally binds the login to the
-// browser that started it (SEC-03).
-type pendingAuth struct {
-	nonce      string
-	verifier   string
-	cookieHash [sha256.Size]byte
-	expires    time.Time
-}
-
 // Authenticator implements the OIDC login/logout endpoints and exposes the
 // session accessors the middleware needs.
 type Authenticator struct {
-	cfg      *AuthConfig
-	verifier *oidc.IDTokenVerifier
-	oauth2   oauth2.Config
-	sessions SessionStore
-
-	mu           sync.Mutex
-	pendings     map[string]pendingAuth
-	pendingOrder []string  // insertion order; front is oldest (eviction)
-	pendingSweep time.Time // last expiry sweep; gated by pendingSweepEvery
+	cfg       *AuthConfig
+	verifier  *oidc.IDTokenVerifier
+	oauth2    oauth2.Config
+	sessions  SessionStore
+	directory Directory
 
 	log *slog.Logger
 	now func() time.Time
 }
-
-// pendingSweepEvery bounds how often the expired-pending scan may run. It is
-// time-gated (never per request) so an unauthenticated /v1/login flood does
-// not serialize an O(n) scan under a.mu on every call (SEC-12).
-const pendingSweepEvery = time.Minute
 
 // NewAuthenticator runs OIDC discovery on cfg.Issuer and returns a ready
 // Authenticator. Discovery happens once at startup; JWKS keys are fetched and
@@ -303,6 +330,9 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 	}
 	if sessions == nil {
 		return nil, errors.New("api: SessionStore is required")
+	}
+	if cfg.LoginSealer == nil {
+		return nil, errors.New("api: AuthConfig requires LoginSealer")
 	}
 	if log == nil {
 		log = slog.Default()
@@ -322,11 +352,17 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 			Scopes:       cfg.Scopes,
 		},
 		sessions: sessions,
-		pendings: make(map[string]pendingAuth),
 		log:      log,
 		now:      time.Now,
 	}
 	return a, nil
+}
+
+// WithDirectory attaches the principal directory that logins upsert
+// (display names for tenant views — best effort, never authz input).
+func (a *Authenticator) WithDirectory(d Directory) *Authenticator {
+	a.directory = d
+	return a
 }
 
 func (a *Authenticator) SessionStore() SessionStore      { return a.sessions }
@@ -337,9 +373,11 @@ func (a *Authenticator) CSRFCookieName() string          { return a.cfg.CSRFCook
 func (a *Authenticator) CSRFHeader() string              { return a.cfg.CSRFHeader }
 
 // LoginHandler starts the authorization-code + PKCE flow: it generates state,
-// nonce, a verifier and a browser-binding login proof, stores them
-// server-side keyed by state, sets the proof as a __Host- login cookie, and
-// redirects to the IdP authorization endpoint.
+// nonce and a PKCE verifier, seals them together with the login's expiry into
+// the __Host- login cookie, and redirects to the IdP authorization endpoint.
+// Keeping the login state in a sealed cookie (instead of process memory)
+// binds the login to the initiating browser (SEC-03) and lets any replica
+// holding the keys complete the flow.
 func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	state, err := randToken(32)
 	if err != nil {
@@ -356,63 +394,43 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInternal, "could not start login")
 		return
 	}
-	proof, err := randToken(32) // browser-binding login cookie value (SEC-03)
+	token, err := a.cfg.LoginSealer.Seal(loginstate.State{
+		OAuthState: state,
+		Nonce:      nonce,
+		Verifier:   verifier,
+		Expires:    a.now().Add(a.cfg.PendingTTL).Unix(),
+	})
 	if err != nil {
 		writeError(w, r, CodeInternal, "could not start login")
 		return
 	}
-
-	now := a.now()
-	a.mu.Lock()
-	if now.Sub(a.pendingSweep) >= pendingSweepEvery {
-		a.sweepPendingsLocked(now)
-		a.pendingSweep = now
-	}
-	a.pendings[state] = pendingAuth{
-		nonce:      nonce,
-		verifier:   verifier,
-		cookieHash: sha256.Sum256([]byte(proof)),
-		expires:    now.Add(a.cfg.PendingTTL),
-	}
-	a.pendingOrder = append(a.pendingOrder, state)
-	// Bound the map (SEC-12): oldest-first eviction once the cap is hit,
-	// then compact the order slice when dead entries dominate.
-	for len(a.pendings) > a.cfg.PendingLimit && len(a.pendingOrder) > 0 {
-		delete(a.pendings, a.pendingOrder[0])
-		a.pendingOrder = a.pendingOrder[1:]
-	}
-	if len(a.pendingOrder) > 2*a.cfg.PendingLimit {
-		live := a.pendingOrder[:0]
-		for _, s := range a.pendingOrder {
-			if _, ok := a.pendings[s]; ok {
-				live = append(live, s)
-			}
-		}
-		a.pendingOrder = live
-	}
-	a.mu.Unlock()
 
 	url := a.oauth2.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce),
 	)
 	// Deliberately log only that a login was initiated — never the state,
-	// nonce, verifier, proof, or the authorization URL carrying them.
+	// nonce, verifier, or the authorization URL carrying them.
 	a.log.Debug("oidc login started", "request_id", RequestIDFromContext(r.Context()))
 	// Max-Age=600 per the SEC-03 spec, and never longer than the pending TTL.
 	maxAge := int(a.cfg.PendingTTL.Seconds())
 	if maxAge > 600 {
 		maxAge = 600
 	}
-	http.SetCookie(w, a.loginCookie(proof, maxAge))
+	http.SetCookie(w, a.loginCookie(token, maxAge))
+	// Any browser that still carries the v0.1 non-__Host- cookies drops them
+	// on its next login (D17).
+	a.expireLegacyCookies(w)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
-// CallbackHandler completes the flow. It consumes the pending state (single
-// use — a replayed state is rejected), exchanges the code with the PKCE
-// verifier, verifies the ID token (issuer, audience, expiry, signature via
-// go-oidc) and its nonce, enforces tenant membership, deletes any pre-existing
-// session cookie (fixation), and issues a fresh rotated session ID.
+// CallbackHandler completes the flow. It opens the sealed login cookie
+// (single use — a consumed code or a replayed/expired cookie is rejected),
+// binds the callback's state parameter to the sealed state, exchanges the
+// code with the sealed PKCE verifier, verifies the ID token (issuer,
+// audience, expiry, signature via go-oidc) and its nonce, enforces tenant
+// membership, deletes any pre-existing session cookie (fixation), and issues
+// a fresh rotated session ID.
 func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -427,32 +445,27 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	a.mu.Lock()
-	pend, ok := a.pendings[state]
-	delete(a.pendings, state) // consume: state is single-use
-	a.mu.Unlock()
-	if !ok || !a.now().Before(pend.expires) {
+	// SEC-03: the state alone must not suffice — the browser that started
+	// this login holds the __Host-tcdi_login cookie carrying the sealed
+	// state, nonce and PKCE verifier. A missing, tampered, expired or
+	// foreign-key cookie fails closed, exactly like an unknown state.
+	var st loginstate.State
+	if c, err := r.Cookie(a.cfg.LoginCookieName); err == nil {
+		st, err = a.cfg.LoginSealer.Open(c.Value, a.now())
+		if err != nil {
+			writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
+			return
+		}
+	} else {
 		writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
 		return
 	}
-	// A pending was consumed, so its browser-binding cookie is dead —
-	// expire it whether or not the exchange succeeds (single use).
-	http.SetCookie(w, a.loginCookie("", -1))
-
-	// SEC-03: the state alone must not suffice — the browser that started
-	// this login holds the __Host-tcdi_login cookie whose hash was stored
-	// with the pending entry. Missing or mismatched proof fails closed.
-	var proofSum [sha256.Size]byte
-	if proof, err := r.Cookie(a.cfg.LoginCookieName); err == nil {
-		proofSum = sha256.Sum256([]byte(proof.Value))
-	}
-	// proofSum is all-zero on a missing cookie — never a real SHA-256 match.
-	if subtle.ConstantTimeCompare(proofSum[:], pend.cookieHash[:]) != 1 {
-		writeError(w, r, CodeUnauthenticated, "login not initiated by this browser")
+	if subtle.ConstantTimeCompare([]byte(st.OAuthState), []byte(state)) != 1 {
+		writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
 		return
 	}
 
-	tok, err := a.oauth2.Exchange(ctx, code, oauth2.VerifierOption(pend.verifier))
+	tok, err := a.oauth2.Exchange(ctx, code, oauth2.VerifierOption(st.Verifier))
 	if err != nil {
 		writeError(w, r, CodeUnauthenticated, "authorization code exchange failed")
 		return
@@ -475,16 +488,22 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, CodeUnauthenticated, "could not parse ID token claims")
 		return
 	}
-	if nonce, _ := claims["nonce"].(string); nonce == "" || nonce != pend.nonce {
+	if nonce, _ := claims["nonce"].(string); nonce == "" || nonce != st.Nonce {
 		writeError(w, r, CodeUnauthenticated, "ID token nonce does not match login request")
 		return
 	}
 
+	// The login state has been fully validated — consume the sealed cookie
+	// so a stale value cannot linger in the jar.
+	http.SetCookie(w, a.loginCookie("", -1))
+
 	principal := Principal{
-		Issuer:   idToken.Issuer,
-		Subject:  idToken.Subject,
-		TenantID: stringClaim(claims, a.cfg.TenantClaim),
-		Groups:   stringsClaim(claims, a.cfg.GroupsClaim),
+		Issuer:      idToken.Issuer,
+		Subject:     idToken.Subject,
+		TenantID:    stringClaim(claims, a.cfg.TenantClaim),
+		Groups:      stringsClaim(claims, a.cfg.GroupsClaim),
+		DisplayName: displayNameClaim(claims),
+		Email:       displayClaim(stringClaim(claims, "email"), maxEmailLen),
 	}
 	if principal.TenantID == "" || !a.tenantAllowed(principal.TenantID) {
 		writeError(w, r, CodeForbidden, "no tenant membership for this account")
@@ -510,7 +529,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	sess := &Session{
 		ID:         mustRandToken(32),
 		Principal:  principal,
-		CSRFToken:  mustRandToken(32),
+		CSRFToken:  "", // derived from the session ID on demand (P1); column stays until v0.3
 		CreatedAt:  a.now(),
 		LastSeenAt: a.now(),
 		ExpiresAt:  a.now().Add(a.cfg.AbsoluteTimeout),
@@ -520,11 +539,24 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
-	http.SetCookie(w, a.csrfCookie(sess.CSRFToken, int(a.cfg.AbsoluteTimeout.Seconds())))
-	if a.cfg.SessionOrigin != "" {
-		http.SetCookie(w, a.sessionOriginCookie(int(a.cfg.AbsoluteTimeout.Seconds())))
+	// Display directory (names for tenant views) is best effort: a failure
+	// is logged and never blocks the login.
+	if a.directory != nil {
+		if err := a.directory.Remember(ctx, principal.TenantID, store.DirectoryEntry{
+			OwnerRef:    principal.Owner(),
+			Subject:     principal.Subject,
+			DisplayName: principal.DisplayName,
+			Email:       principal.Email,
+		}); err != nil {
+			a.log.Warn("principal directory update failed",
+				"request_id", RequestIDFromContext(ctx), "err", err)
+		}
 	}
+
+	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
+	// v0.1 published tcdi_csrf / tcdi_session_origin here; browsers upgraded
+	// from v0.1 must drop them (D17).
+	a.expireLegacyCookies(w)
 	a.log.Info("oidc login succeeded",
 		"request_id", RequestIDFromContext(ctx),
 		"actor", observability.ActorRef(principal.Issuer, principal.Subject),
@@ -541,8 +573,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		_ = a.sessions.Delete(ctx, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
-	http.SetCookie(w, a.csrfCookie("", -1))
-	http.SetCookie(w, a.sessionOriginCookie(-1))
+	a.expireLegacyCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -562,22 +593,9 @@ func (a *Authenticator) sessionCookie(id string, maxAge int) *http.Cookie {
 	}
 }
 
-// csrfCookie carries the CSRF token to portal JS. Not HttpOnly by design; the
-// authoritative copy lives server-side in the session.
-func (a *Authenticator) csrfCookie(token string, maxAge int) *http.Cookie {
-	return &http.Cookie{
-		Name:     a.cfg.CSRFCookieName,
-		Value:    token,
-		Path:     "/",
-		Secure:   *a.cfg.SecureCookies,
-		SameSite: a.cfg.SameSite,
-		MaxAge:   maxAge,
-	}
-}
-
-// loginCookie binds an OIDC login attempt to the initiating browser
-// (SEC-03): a random proof whose SHA-256 is stored with the pending state.
-// __Host- shape: Secure, HttpOnly, Path=/, no Domain.
+// loginCookie carries the AEAD-sealed OIDC login state that binds the
+// attempt to the initiating browser (SEC-03). __Host- shape: Secure,
+// HttpOnly, Path=/, no Domain.
 func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     a.cfg.LoginCookieName,
@@ -590,17 +608,50 @@ func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 	}
 }
 
-// sessionOriginCookie publishes the configured session origin to portal JS
-// (SEC-26): the SPA refuses to POST a launch ticket to any other origin.
-// Not HttpOnly by design; the value is a public origin, not a credential.
-func (a *Authenticator) sessionOriginCookie(maxAge int) *http.Cookie {
-	return &http.Cookie{
-		Name:     a.cfg.SessionOriginCookieName,
-		Value:    a.cfg.SessionOrigin,
-		Path:     "/",
-		Secure:   *a.cfg.SecureCookies,
-		SameSite: a.cfg.SameSite,
-		MaxAge:   maxAge,
+// expireLegacyCookies deletes the two non-__Host- cookies v0.1 published on
+// the portal origin — tcdi_csrf and tcdi_session_origin (D17). Login and
+// logout both send them so browsers upgraded mid-session drop the legacy
+// names regardless of which flow they take.
+func (a *Authenticator) expireLegacyCookies(w http.ResponseWriter) {
+	for _, name := range []string{a.cfg.CSRFCookieName, a.cfg.SessionOriginCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			Secure:   *a.cfg.SecureCookies,
+			SameSite: a.cfg.SameSite,
+			MaxAge:   -1,
+		})
+	}
+}
+
+// inputTouchMinInterval bounds how often desktop input writes to the session
+// store: one slide per principal per minute is enough against a 30-minute
+// idle window, and the bound keeps a busy stream from turning into a write
+// flood.
+const inputTouchMinInterval = time.Minute
+
+// InputHook returns the broker input hook (broker.WithInputHook): each
+// recorded "input" event slides the portal idle timer of the lease's
+// principal — the Principal.Owner() string "issuer|subject" — throttled to
+// one store write per principal per minute. Input never revives a session
+// that already expired; the store's TouchPrincipal WHERE clause excludes
+// sessions outside the idle window (D18).
+func (a *Authenticator) InputHook() func(ctx context.Context, principal string) {
+	var mu sync.Mutex
+	last := map[string]time.Time{}
+	return func(ctx context.Context, principal string) {
+		now := a.now()
+		mu.Lock()
+		if t, ok := last[principal]; ok && now.Sub(t) < inputTouchMinInterval {
+			mu.Unlock()
+			return
+		}
+		last[principal] = now
+		mu.Unlock()
+		if _, err := a.sessions.TouchPrincipal(ctx, principal); err != nil {
+			a.log.Warn("session idle touch failed", "err", err)
+		}
 	}
 }
 
@@ -632,25 +683,6 @@ func (a *Authenticator) groupsAllowed(p Principal) bool {
 	return false
 }
 
-// sweepPendingsLocked drops expired pending logins. Callers hold a.mu and
-// gate the call by pendingSweepEvery — this O(cap) scan never runs per
-// request (SEC-12).
-func (a *Authenticator) sweepPendingsLocked(now time.Time) {
-	for k, p := range a.pendings {
-		if !now.Before(p.expires) {
-			delete(a.pendings, k)
-		}
-	}
-	// Keep the order slice free of consumed/expired states as well.
-	live := a.pendingOrder[:0]
-	for _, s := range a.pendingOrder {
-		if _, ok := a.pendings[s]; ok {
-			live = append(live, s)
-		}
-	}
-	a.pendingOrder = live
-}
-
 func stringClaim(claims map[string]interface{}, name string) string {
 	s, _ := claims[name].(string)
 	return s
@@ -674,6 +706,33 @@ func stringsClaim(claims map[string]interface{}, name string) []string {
 	return nil
 }
 
+// Bounds for display-only identity claims: they are rendered in the portal
+// and stored in the principal directory, so they are trimmed and capped —
+// a hostile or buggy IdP cannot smuggle unbounded strings.
+const (
+	maxDisplayNameLen = 128
+	maxEmailLen       = 254
+)
+
+// displayClaim normalizes a display-only claim value: trimmed, rune-capped
+// at max. The result carries no authorization meaning.
+func displayClaim(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return s
+}
+
+// displayNameClaim picks the caller's display name from the verified ID
+// token: the `name` claim, falling back to `preferred_username`.
+func displayNameClaim(claims map[string]interface{}) string {
+	if n := stringClaim(claims, "name"); n != "" {
+		return displayClaim(n, maxDisplayNameLen)
+	}
+	return displayClaim(stringClaim(claims, "preferred_username"), maxDisplayNameLen)
+}
+
 // sessionKey is the lookup key a store persists for a session ID: hex of
 // SHA-256(id). A store (or dump) read then yields digests, never usable
 // session IDs — same construction the broker uses for tickets (SEC-27).
@@ -683,11 +742,24 @@ func sessionKey(id string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// csrfTokenFor derives the session's synchronizer CSRF token:
+// base64url(HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")). The token is
+// never stored — /v1/me recomputes it for the response and RequireCSRF
+// recomputes it for the compare (P1), so the credential exists only in the
+// cookie's session ID.
+func csrfTokenFor(sessionID string) string {
+	m := hmac.New(sha256.New, []byte(sessionID))
+	m.Write([]byte("tcdi-csrf-v2"))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
 // csrfTokenMAC is the stored credential form of a session's synchronizer
 // CSRF token: hex of HMAC-SHA256 keyed by the raw session ID (which is
 // itself never persisted — stores hold only its digest). A store/dump read
 // therefore reveals neither the token nor a way to compute the MAC
 // (SEC-27). Mirrored by internal/store.sessions.go; keep identical.
+// Since v0.2 sessions persist CSRFToken = "" (P1), this MACs the empty
+// token — the column remains until v0.3 and is no longer consulted.
 func csrfTokenMAC(sessionID, token string) string {
 	m := hmac.New(sha256.New, []byte(sessionID))
 	m.Write([]byte("tcdi-csrf-token\x00"))

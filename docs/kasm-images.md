@@ -9,6 +9,14 @@ it would create an owner-capable VNC account, bake a self-signed cert,
 listen on :6901, and start side services (audio, upload, gamepad, webcam,
 printer, smartcard) that must not exist in a locked-down runtime.
 
+> **Status: preview.** `kasmweb/*` browser images are a preview feature,
+> not a parity alternative to the native images: the bundled engine lags
+> upstream by up to 4 major versions (the tolerated budget in the
+> freshness floor below), so a kasm browser is inherently behind on
+> web-engine security fixes. For browsing untrusted sites use the native
+> `tinycdi-browser` image, which tracks the Debian chromium-security pin.
+> Kasm images exist for the apps/desktops that have no native equivalent.
+
 The adapter is a ~200-line shim delivered **into** the pod, not into the
 image:
 
@@ -158,7 +166,9 @@ its template merges**:
 4. **Engine freshness floor.** The catalog entry's `min-engine-major`
    must be >= the major of `build/browser`'s `CHROMIUM_APT_VERSION`
    minus 4 (~4 upstream release cycles of tolerated lag on Debian/Ubuntu
-   rebuilds), and the installed engine must meet it. The seeded
+   rebuilds), and the installed engine must meet it. This is a blocking
+   CI gate and stays blocking — the ≤4-major lag is the accepted
+   residual risk of the preview, not a target to grow. The seeded
    `kasmweb/chromium` carries Chromium 150 vs the native pin's 154 —
    inside the budget; a stale digest (e.g. the Oct-2025 pin, Chromium
    139) is rejected.
@@ -175,7 +185,10 @@ its template merges**:
    lag security refreshes; `-rolling-daily` is too noisy): resolve the
    tag to a new digest on a schedule — the weekly `kasm-contract` job
    fails when the pinned digest stops passing the scan or the contract —
-   then bump `spec.linux.image` via a PR. On a KasmVNC version bump,
+   then bump `spec.linux.image` via a PR. Cataloged digests follow the
+   same 14-day image-age rule as the runtime train: a pin older than
+   14 days is refreshed to the current rolling-weekly digest even when
+   every gate still passes. On a KasmVNC version bump,
    re-check the healthcheck loopback quirk and the yaml schema keys the
    adapter writes.
 7. **Node profiles.** Browser-family images additionally need the
