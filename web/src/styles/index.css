@@ -1,0 +1,15 @@
+/* Global stylesheet entry: linked from index.html (theme-init.js runs first,
+ * in <head>). The Orbit 2.9 load order is binding
+ * (web/src/design/orbit/README.md): tokens first, application CSS in the
+ * middle, palette-system always last. */
+
+@import "../design/orbit/css/fonts.css";
+@import "../design/orbit/css/tokens.css";
+@import "../design/orbit/css/expressive-tokens.css";
+@import "../design/orbit/css/extended-colors.css";
+@import "../design/orbit/css/companion-palettes.css";
+@import "./tokens.css";      /* --tc-* aliases onto --to-* */
+/* app CSS: T3.2 inserts @import "./base.css" and "../design/design.css" here */
+@import "../design/orbit/css/component-language.css";
+@import "../design/orbit/css/navy-night.css";
+@import "../design/orbit/css/palette-system.css";  /* always last */
