@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -34,6 +33,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway/brokerclient"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
@@ -93,9 +93,7 @@ func (b *Backend) wire(ctx context.Context) error {
 func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
-		if u, err := url.Parse(cfg.SessionOrigin); err == nil && u.Hostname() != "" {
-			audience = u.Hostname()
-		}
+		audience = cfg.SessionDomain
 	}
 	if audience == "" {
 		audience = broker.DefaultGatewayAudience
@@ -383,11 +381,22 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 	if err != nil {
 		return err
 	}
+	dom, err := sessionhost.ParseDomain(cfg.SessionDomain)
+	if err != nil {
+		return fmt.Errorf("gateway init: %w", err)
+	}
+	var controlHosts []string
+	for _, h := range strings.Split(cfg.SessionControlHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			controlHosts = append(controlHosts, h)
+		}
+	}
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
-		PublicOrigin:   cfg.SessionOrigin,
+		SessionDomain:  dom,
 		PortalOrigins:  []string(cfg.PortalOrigins),
-		AllowedHosts:   strings.Split(cfg.SessionAllowedHosts, ","),
+		ControlHosts:   controlHosts,
+		CookieMode:     gateway.CookieMode(cfg.SessionCookieMode),
 		Broker:         bc,
 		Sessions:       sessions,
 		UpstreamCA:     upCA,
@@ -429,7 +438,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		ClientID:       cfg.OIDCClientID,
 		ClientSecret:   cfg.OIDCClientSecret,
 		RedirectURL:    cfg.OIDCRedirectURL,
-		SessionOrigin:  cfg.SessionOrigin,
+		SessionOrigin:  cfg.sessionOrigin(),
 		RequiredGroups: cfg.RequiredGroups,
 		LoginSealer:    sealer,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
@@ -441,7 +450,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView)
 	tplHandler := api.NewTemplateHandler(catalog, tenants)
-	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.SessionOrigin)
+	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.sessionOrigin())
 	dataHandler := api.NewDataHandler(retained, catalog, tenants)
 
 	mux := appMux(authn, wsHandler, tplHandler, connHandler, dataHandler)
