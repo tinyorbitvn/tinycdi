@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TinyCDI soak report",
+  "description": "Output of tests/soak/soak.ts — one file per soak run (soak-report.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run", "thresholds", "sessions", "summary"],
+  "properties": {
+    "version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "dryRun",
+        "startedAt",
+        "endedAt",
+        "durationSeconds",
+        "sessionsRequested",
+        "inputIntervalSeconds",
+        "pollIntervalSeconds"
+      ],
+      "properties": {
+        "tool": { "const": "tinycdi-soak" },
+        "dryRun": { "type": "boolean" },
+        "portalOrigin": {
+          "type": "string",
+          "description": "Origin (scheme://host[:port]) the soak ran against; never carries credentials."
+        },
+        "template": { "type": "string", "description": "Template id or name used for workspaces." },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "durationSeconds": { "type": "number", "minimum": 0 },
+        "sessionsRequested": { "type": "integer", "minimum": 0 },
+        "inputIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 },
+        "pollIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxManualActions", "maxDroppedSessions"],
+      "properties": {
+        "connectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "reconnectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "maxGapMs": { "type": ["number", "null"], "minimum": 0 },
+        "maxManualActions": { "type": "integer", "minimum": 0 },
+        "maxDroppedSessions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspaceId",
+          "connectMs",
+          "reconnectMs",
+          "longestGapMs",
+          "nonConnectedStates",
+          "manualActions",
+          "inputEvents",
+          "dropped"
+        ],
+        "properties": {
+          "workspaceId": { "type": "string" },
+          "workspaceName": { "type": "string" },
+          "connectMs": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Launch click to first connected observation; null if never connected."
+          },
+          "reconnectMs": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Mid-run reload to first connected observation; null if not reloaded or never reconnected."
+          },
+          "longestGapMs": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Longest continuous time observed in a state other than connected, after first connect."
+          },
+          "nonConnectedStates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "startedAt", "durationMs"],
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "enum": ["none", "disconnected", "stale", "error"],
+                  "description": "ConnectionStatus.state; 'error' marks a failed status poll in the harness itself."
+                },
+                "source": { "type": "string", "enum": ["api", "probe"] },
+                "startedAt": { "type": "string", "format": "date-time" },
+                "endedAt": { "type": "string", "format": "date-time" },
+                "durationMs": { "type": "number", "minimum": 0 }
+              }
+            }
+          },
+          "manualActions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Recovery actions outside the automatic flow the harness had to take."
+          },
+          "inputEvents": { "type": "integer", "minimum": 0 },
+          "dropped": {
+            "type": "boolean",
+            "description": "Session was lost and could not be recovered by the harness."
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connectMs",
+        "reconnectMs",
+        "sessionsWithManualActions",
+        "droppedSessions",
+        "pass",
+        "failures"
+      ],
+      "properties": {
+        "connectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          }
+        },
+        "reconnectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          }
+        },
+        "sessionsWithManualActions": { "type": "integer", "minimum": 0 },
+        "droppedSessions": { "type": "integer", "minimum": 0 },
+        "pass": { "type": "boolean" },
+        "failures": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
