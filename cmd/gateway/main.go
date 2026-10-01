@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway/brokerclient"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
 // stringList collects repeated flags and comma-separated values into one
@@ -242,11 +244,26 @@ func main() {
 			strings.FieldsFunc(cfg.tenantAllow, func(r rune) bool { return r == ',' }))
 	}
 
+	// The gateway now serves each workspace on its own host under the
+	// session domain (D9); -public-origin carries the domain as
+	// https://<domain> until the merged backend binary replaces this
+	// command's flags with -session-domain/-session-control-hosts.
+	pubURL, err := url.Parse(cfg.publicOrigin)
+	if err != nil || pubURL.Host == "" {
+		log.Error("public-origin must be an https origin", "value", cfg.publicOrigin)
+		os.Exit(2)
+	}
+	sessionDomain, err := sessionhost.ParseDomain(pubURL.Host)
+	if err != nil {
+		log.Error("public-origin is not a usable session domain", "err", err)
+		os.Exit(2)
+	}
+
 	gw, err := gateway.New(gateway.Config{
 		Identity:       broker.GatewayIdentity{ID: cfg.gatewayID, Audience: cfg.audience},
-		PublicOrigin:   cfg.publicOrigin,
+		SessionDomain:  sessionDomain,
 		PortalOrigins:  []string(cfg.portalOrigins),
-		AllowedHosts:   strings.Split(cfg.allowedHosts, ","),
+		ControlHosts:   strings.Split(cfg.allowedHosts, ","),
 		Broker:         bc,
 		UpstreamCA:     upCA,
 		ControlToken:   cfg.controlToken,
