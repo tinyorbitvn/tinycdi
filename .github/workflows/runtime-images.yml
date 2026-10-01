@@ -78,6 +78,14 @@ concurrency:
   # Publishing is not idempotent per-ref: queue, never cancel mid-push.
   cancel-in-progress: false
 
+# GitHub's default run shell is `bash -e` — no pipefail — so a failing
+# command piped into tee/grep exits 0 and masks a gate failure (KASM-4).
+# `shell: bash` selects `bash --noprofile --norc -eo pipefail` for every
+# run step.
+defaults:
+  run:
+    shell: bash
+
 env:
   IMAGE_NS: ghcr.io/tinyorbitvn
   TRIVY_GATE_SEVERITY: "CRITICAL,HIGH"
