@@ -8,7 +8,6 @@ export default {
   "app.loadError.body": "Reload the page to try again.",
 
   "app.shell.byline": "by TinyOrbit",
-  "app.seed.admin.body": "Tenant administration is not built yet.",
   "app.theme.label": "Theme",
   "app.theme.light": "Light",
   "app.theme.dark": "Dark",
