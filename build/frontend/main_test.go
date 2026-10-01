@@ -35,6 +35,13 @@ import (
 // an index.html and one hashed asset.
 func newTestHandler(t *testing.T, sessionOrigin string) http.Handler {
 	t.Helper()
+	return newTestHandlerBranding(t, sessionOrigin, "")
+}
+
+// newTestHandlerBranding is newTestHandler with a branding directory
+// (-branding-dir) wired in.
+func newTestHandlerBranding(t *testing.T, sessionOrigin, brandingDir string) http.Handler {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "index.html"),
 		[]byte("<html><body>portal</body></html>"), 0o600); err != nil {
@@ -47,7 +54,7 @@ func newTestHandler(t *testing.T, sessionOrigin string) http.Handler {
 		[]byte("console.log(1)"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return newHandler(root, frontendCSP(sessionOrigin))
+	return newHandler(root, brandingDir, frontendCSP(sessionOrigin))
 }
 
 func get(t *testing.T, h http.Handler, method, path string) *http.Response {
@@ -173,6 +180,137 @@ func TestSPARouting(t *testing.T) {
 	}
 	if res := get(t, h, http.MethodGet, "/healthz"); res.StatusCode != http.StatusOK {
 		t.Fatalf("healthz = %d", res.StatusCode)
+	}
+}
+
+// newBrandingDir builds a scratch branding directory holding the three
+// names the chart documents: branding.json, a logo and tokens.css.
+func newBrandingDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"branding.json": `{"productName":"Acme Desktops","logo":"/branding/logo.svg"}`,
+		"logo.svg":      `<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>`,
+		"tokens.css":    `:root{--brand-accent:#123456}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestBrandingDir_ServesFiles: with -branding-dir the directory's regular
+// files answer under /branding/ with the content type of their extension
+// and Cache-Control no-cache — they change at operator cadence, not build
+// cadence, so they must never be cached like the hashed assets.
+func TestBrandingDir_ServesFiles(t *testing.T) {
+	h := newTestHandlerBranding(t, "https://session.test", newBrandingDir(t))
+
+	for _, tc := range []struct {
+		path, ctype, body string
+	}{
+		{"/branding/branding.json", "application/json", `"productName":"Acme Desktops"`},
+		{"/branding/logo.svg", "image/svg+xml", `<svg xmlns=`},
+		{"/branding/tokens.css", "text/css", `--brand-accent`},
+	} {
+		res := get(t, h, http.MethodGet, tc.path)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", tc.path, res.StatusCode)
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, tc.ctype) {
+			t.Fatalf("%s: Content-Type %q, want prefix %q", tc.path, ct, tc.ctype)
+		}
+		if cc := res.Header.Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s: Cache-Control %q, want no-cache", tc.path, cc)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if !strings.Contains(string(body), tc.body) {
+			t.Fatalf("%s: body %q missing %q", tc.path, body, tc.body)
+		}
+	}
+}
+
+// TestBrandingDir_NoTraversal: /branding/ cannot escape its directory —
+// literal "..", percent-encoded "..", an in-path ".." and a symlink
+// pointing outside all answer 404 (never the target file, never the SPA
+// fallback, never a clean-path redirect).
+func TestBrandingDir_NoTraversal(t *testing.T) {
+	dir := newBrandingDir(t)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "evil.svg")); err != nil {
+		t.Fatal(err)
+	}
+	h := newTestHandlerBranding(t, "https://session.test", dir)
+
+	for _, path := range []string{
+		"/branding/../index.html",
+		"/branding/%2e%2e/x",
+		"/branding/sub/../branding.json",
+		"/branding/evil.svg",
+	} {
+		res := get(t, h, http.MethodGet, path)
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", path, res.StatusCode)
+		}
+	}
+}
+
+// TestBrandingDir_NoListing: /branding/ (and /branding) answer 404 — the
+// directory is never listed, even when it exists and holds files.
+func TestBrandingDir_NoListing(t *testing.T) {
+	h := newTestHandlerBranding(t, "https://session.test", newBrandingDir(t))
+	for _, path := range []string{"/branding/", "/branding"} {
+		res := get(t, h, http.MethodGet, path)
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", path, res.StatusCode)
+		}
+	}
+}
+
+// TestBrandingDir_EmptyTokensFallback: index.html always links
+// /branding/tokens.css, so with no -branding-dir — and with the dir set
+// but no tokens.css in it — it answers 200 with an empty text/css body
+// (the console stays clean).
+func TestBrandingDir_EmptyTokensFallback(t *testing.T) {
+	handlers := map[string]http.Handler{
+		"no branding dir":  newTestHandler(t, "https://session.test"),
+		"dir without file": newTestHandlerBranding(t, "https://session.test", t.TempDir()),
+	}
+	for name, h := range handlers {
+		res := get(t, h, http.MethodGet, "/branding/tokens.css")
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", name, res.StatusCode)
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+			t.Fatalf("%s: Content-Type %q, want text/css", name, ct)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if len(body) != 0 {
+			t.Fatalf("%s: body %q, want empty", name, body)
+		}
+	}
+}
+
+// TestBrandingDir_JSONAbsent: without -branding-dir,
+// /branding/branding.json answers 404 — never the SPA fallback, which
+// would hand the app's loadBranding an HTML document.
+func TestBrandingDir_JSONAbsent(t *testing.T) {
+	h := newTestHandler(t, "https://session.test")
+	res := get(t, h, http.MethodGet, "/branding/branding.json")
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d, want 404", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if strings.Contains(string(body), "<html>") {
+		t.Fatalf("body is the SPA fallback, want a plain 404: %q", body)
 	}
 }
 
