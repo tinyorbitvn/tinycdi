@@ -6,15 +6,17 @@
 # runs on the kasm-contract schedule job.
 #
 # Enforces:
-#   1. Every kasmweb/* image ref in tracked files (chart ci values, docs,
-#      this catalog) is digest-pinned (repo@sha256:<64 hex>).
+#   1. Every kasmweb/* image ref in tracked files is digest-pinned
+#      (repo@sha256:<64 hex>).
 #   2. Every such ref appears verbatim in build/kasm-catalog.txt — docs
 #      and examples may only point at cataloged, gated images.
 #   3. Every catalog entry declares engine + min-engine-major, and the
 #      floor is >= major(CHROMIUM_APT_VERSION) - 4 (the documented lag
 #      budget — kasmweb images ride Debian/Ubuntu rebuilds).
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+# KASM_REPO_ROOT exists for the regression test (.github/tests/): the
+# default scan is `git ls-files`, so tests run it against a scratch repo.
+cd "${KASM_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 # Env overrides exist for the regression test (.github/tests/).
 CATALOG="${KASM_CATALOG:-build/kasm-catalog.txt}"
@@ -23,7 +25,16 @@ if [ -n "${KASM_SCAN_FILES:-}" ]; then
   # shellcheck disable=SC2206
   SCAN_FILES=($KASM_SCAN_FILES)
 else
-  SCAN_FILES=(deploy/helm/tinycdi/ci/*.yaml docs/*.md "$CATALOG")
+  # KASM-5: every tracked text file is in scope — an uncataloged
+  # kasmweb/* ref must fail whether it sits in a chart values file, a
+  # nested docs page, or the README, not just ci/*.yaml + docs/*.md.
+  # Excluded: binary blobs and fixtures that plant deliberately
+  # uncataloged refs (.github/tests/, *_test.go, testdata/).
+  mapfile -t SCAN_FILES < <(git ls-files | grep -vE \
+    '(^|/)\.github/tests/|(^|/)testdata/|_test\.go$|\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|xz|bz2|7z|jar|war|woff2?|ttf|otf|eot|so|dll|exe|bin|wasm|pyc)$')
+  # The catalog is itself a scan target; keep it covered even when
+  # KASM_CATALOG points outside the repo (the tests do that).
+  SCAN_FILES+=("$CATALOG")
 fi
 fail=0
 
@@ -88,7 +99,7 @@ check_ref() { # <file> <ref>
 for f in "${SCAN_FILES[@]}"; do
   [ -f "$f" ] || continue
   case "$f" in
-    *.md)
+    *.md|*.markdown|*.rst|*.adoc|NOTICE|SOURCE-OFFER|LICENSE*|COPYING*|CHANGELOG*)
       # Prose may name repos/tags descriptively; only a digest pin is an
       # operational reference, and it must point at a cataloged image.
       while read -r ref; do

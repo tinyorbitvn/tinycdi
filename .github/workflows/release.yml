@@ -133,6 +133,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: false
 
+# GitHub's default run shell is `bash -e` — no pipefail — so a failing
+# command piped into tee/grep exits 0 and silently masks a gate failure
+# (KASM-4). `shell: bash` selects `bash --noprofile --norc -eo pipefail`
+# for every run step.
+defaults:
+  run:
+    shell: bash
+
 env:
   GO_VERSION: "1.26.8"
   IMAGE_NS: ghcr.io/tinyorbitvn

@@ -39,6 +39,14 @@ concurrency:
   # Cancel stale runs on PR updates; let main pushes run to completion.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# GitHub's default run shell is `bash -e` — no pipefail — so a failing
+# command piped into tee/grep exits 0 and silently masks a gate failure
+# (KASM-4: `go test | tee` in kasm-contract). `shell: bash` selects
+# `bash --noprofile --norc -eo pipefail` for every run step.
+defaults:
+  run:
+    shell: bash
+
 env:
   GO_VERSION: "1.26.8"
   NODE_VERSION: "22.23.3"
@@ -279,13 +287,15 @@ jobs:
             schedule|workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           git fetch -q origin "$BASE_REF"
-          PATHS_RE='^(build/kasm-adapter/|build/kasm-catalog'\
-            '|\.github/scripts/(check|scan)-kasm-catalog\.sh'\
-            '|\.github/tests/kasm-catalog\.test\.sh'\
-            '|tests/integration/kasm_adapter_test\.go|internal/runtime/linux/'\
-            '|deploy/helm/tinycdi/ci/example-values\.yaml|docs/kasm-images\.md'\
-            '|\.github/workflows/ci\.yml)'
-          if git diff --name-only "origin/$BASE_REF...HEAD" | grep -qE "$PATHS_RE"; then
+          # One line on purpose: a backslash-continued string keeps the next
+          # line's indentation, which splits the word and runs the rest as a command.
+          PATHS_RE='^(build/kasm-adapter/|build/kasm-catalog|\.github/scripts/(check|scan)-kasm-catalog\.sh|\.github/tests/kasm-catalog\.test\.sh|tests/integration/kasm_adapter_test\.go|internal/runtime/linux/|deploy/helm/tinycdi/ci/example-values\.yaml|docs/kasm-images\.md|\.github/workflows/ci\.yml)'
+          # grep -q short-circuits on the first match and can SIGPIPE the
+          # producer on a large diff — under pipefail that would flip the
+          # gate to "skip". A herestring feeds grep without a pipeline,
+          # so a failing git diff still aborts the step.
+          changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
+          if grep -qE "$PATHS_RE" <<<"$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
