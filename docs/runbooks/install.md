@@ -106,6 +106,34 @@ Also gather:
    `certManager.enabled` for the internal chain. If you use Gateway API
    exposure, the gateway listener terminates browser TLS and must
    re-encrypt/pass through to the HTTPS backends.
+9. **Workspace node pool** — by default (`runtime.placement.
+   allowSharedNodes: false`) every runtime pod, and the node-profile
+   installer DaemonSet, target a dedicated pool: nodes labeled
+   `cdi.tinyorbit.vn/workspace=true` and tainted
+   `cdi.tinyorbit.vn/workspace:NoSchedule`. Label and taint the pool
+   BEFORE workspaces launch:
+
+   ```bash
+   for n in <pool-node-1> <pool-node-2>; do
+     $K label node "$n" cdi.tinyorbit.vn/workspace=true
+     $K taint node "$n" cdi.tinyorbit.vn/workspace:NoSchedule
+   done
+   ```
+
+   Without the label, runtime pods stay Pending forever; without the
+   taint, unrelated workloads keep landing on the pool. Point
+   `runtime.placement.nodeSelector` / `runtime.placement.tolerations` at
+   different values when your pool already exists under another label or
+   taint — but never leave the selector empty (the render fails: a
+   dedicated pool with no selector would schedule nowhere).
+
+   **Shared nodes (opt-out).** `runtime.placement.allowSharedNodes: true`
+   passes no placement flags at all: runtime pods schedule anywhere
+   schedulable, and the install NOTES print a warning. That is the right
+   choice for throwaway kind/dev clusters; in production it gives up
+   node-level isolation — user desktops then share nodes (and their
+   seccomp/AppArmor profile loading, memory pressure and image pulls)
+   with unrelated cluster workloads.
 
 ### Secrets (create BEFORE install — the chart only references names)
 

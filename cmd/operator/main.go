@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -95,6 +98,97 @@ func parseKasmAdapterImage(v string) (string, error) {
 			"(<repo>@sha256:<64 hex>)", v)
 	}
 	return v, nil
+}
+
+// runtimePlacement carries the operator-wide scheduling defaults for
+// runtime pods, parsed from the --runtime-* flags. The linux backend
+// applies them per field when a template sets neither spec.placement nor
+// the legacy node-selector annotation.
+type runtimePlacement struct {
+	nodeSelector map[string]string
+	tolerations  []corev1.Toleration
+	hostUsers    *bool
+}
+
+// runtimePlacementFlags are the raw --runtime-* flag strings; parse()
+// validates them into a runtimePlacement.
+type runtimePlacementFlags struct {
+	nodeSelector string
+	tolerations  string
+	hostUsers    string
+}
+
+// bindRuntimePlacementFlags registers the runtime placement flags on fs.
+// The chart renders them from runtime.placement (dedicated pool by
+// default); an empty flag leaves the backend default unset.
+func bindRuntimePlacementFlags(fs *flag.FlagSet, pf *runtimePlacementFlags) {
+	fs.StringVar(&pf.nodeSelector, "runtime-node-selector", "",
+		"JSON object of node labels every runtime pod selects "+
+			"(e.g. {\"cdi.tinyorbit.vn/workspace\":\"true\"}). Default for "+
+			"spec.placement.nodeSelector — a template may override it.")
+	fs.StringVar(&pf.tolerations, "runtime-tolerations", "",
+		"JSON array of tolerations every runtime pod carries "+
+			"(e.g. [{\"key\":\"cdi.tinyorbit.vn/workspace\",\"operator\":\"Exists\","+
+			"\"effect\":\"NoSchedule\"}]). Default for spec.placement.tolerations.")
+	fs.StringVar(&pf.hostUsers, "runtime-host-users", "",
+		"Default hostUsers for runtime pods: \"true\" or \"false\"; empty "+
+			"leaves pod.spec.hostUsers unset. Default for spec.linux.hostUsers.")
+}
+
+// parse validates the --runtime-* flag strings. Every error names the
+// offending flag — main() exits non-zero on any of them, so a typo can
+// never silently drop placement (a missing selector on a dedicated pool
+// would strand every runtime pod Pending).
+func (pf runtimePlacementFlags) parse() (runtimePlacement, error) {
+	var p runtimePlacement
+	if s := strings.TrimSpace(pf.nodeSelector); s != "" {
+		if err := json.Unmarshal([]byte(s), &p.nodeSelector); err != nil {
+			return p, fmt.Errorf("--runtime-node-selector is not a JSON string map: %w", err)
+		}
+	}
+	if s := strings.TrimSpace(pf.tolerations); s != "" {
+		if err := json.Unmarshal([]byte(s), &p.tolerations); err != nil {
+			return p, fmt.Errorf("--runtime-tolerations is not a JSON array of tolerations: %w", err)
+		}
+		for i, tol := range p.tolerations {
+			if err := validToleration(tol); err != nil {
+				return p, fmt.Errorf("--runtime-tolerations entry %d: %w", i, err)
+			}
+		}
+	}
+	switch s := strings.TrimSpace(pf.hostUsers); s {
+	case "":
+	case "true":
+		v := true
+		p.hostUsers = &v
+	case "false":
+		v := false
+		p.hostUsers = &v
+	default:
+		return p, fmt.Errorf("--runtime-host-users must be \"true\" or \"false\", got %q", pf.hostUsers)
+	}
+	return p, nil
+}
+
+// validToleration rejects the two ways a JSON toleration can silently do
+// the wrong thing: an empty key tolerates every taint under operator
+// Exists (control-plane included), and unenumed operator/effect strings
+// fail only at pod-admission time, per workspace, far from the flag.
+func validToleration(t corev1.Toleration) error {
+	if t.Key == "" {
+		return errors.New("empty key")
+	}
+	switch t.Operator {
+	case "", corev1.TolerationOpExists, corev1.TolerationOpEqual:
+	default:
+		return fmt.Errorf("invalid operator %q", t.Operator)
+	}
+	switch t.Effect {
+	case "", corev1.TaintEffectNoSchedule, corev1.TaintEffectPreferNoSchedule, corev1.TaintEffectNoExecute:
+	default:
+		return fmt.Errorf("invalid effect %q", t.Effect)
+	}
+	return nil
 }
 
 // brokerFlags carries the operator -> internal-broker wiring (ADR 0003):
