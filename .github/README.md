@@ -6,7 +6,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
-| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
+| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images (`backend`, `frontend`, `operator`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 
 ## Supply-chain pipeline shape
@@ -161,7 +161,7 @@ must match a `build/<name>/Dockerfile`). Comment an image out to hold it
 back from a release, e.g. when its gate cannot pass.
 `linux-desktop` builds in its own `desktop` job because `browser` `FROM`s
 its pushed digest; `browser` requires `linux-desktop` in the set.
-`images.yml` on main still builds and scans all seven images.
+`images.yml` on main still builds and scans all six images.
 
 ## Verifying a release
 
@@ -174,20 +174,20 @@ Substitute the real tag/digest.
 
 ```sh
 # Release image signature (keyless, Fulcio + Rekor):
-cosign verify ghcr.io/tinyorbitvn/tinycdi-api@sha256:<digest> \
+cosign verify ghcr.io/tinyorbitvn/tinycdi-backend@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity \
   'https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/vX.Y.Z'
 
 # :main channel image (from images.yml):
-cosign verify ghcr.io/tinyorbitvn/tinycdi-api@sha256:<digest> \
+cosign verify ghcr.io/tinyorbitvn/tinycdi-backend@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity \
   'https://github.com/tinyorbitvn/tinycdi/.github/workflows/images.yml@refs/heads/main'
 
 # Image SBOM attestation (same exact identity):
 cosign verify-attestation --type spdxjson \
-  ghcr.io/tinyorbitvn/tinycdi-api@sha256:<digest> \
+  ghcr.io/tinyorbitvn/tinycdi-backend@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity \
   'https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/vX.Y.Z'
@@ -201,7 +201,7 @@ cosign verify ghcr.io/tinyorbitvn/charts/tinycdi@sha256:<digest> \
 # GitHub build provenance (only when ATTESTATIONS_ENABLED was set).
 # Pin the signing ref — SUPF-7: without it a same-named workflow on ANY
 # ref would satisfy the check.
-gh attestation verify oci://ghcr.io/tinyorbitvn/tinycdi-api:X.Y.Z \
+gh attestation verify oci://ghcr.io/tinyorbitvn/tinycdi-backend:X.Y.Z \
   --repo tinyorbitvn/tinycdi \
   --source-ref refs/tags/vX.Y.Z \
   --signer-workflow 'tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/vX.Y.Z'
@@ -227,14 +227,16 @@ cosign verify-blob --bundle <asset>.sigstore.json <asset> \
   create the tag `gh release create` needs). Real releases come only from
   an admin pushing a `v*.*.*` tag.
 - `-ldflags "-X main.version=<tag>"` stamps binaries; it is a no-op until
-  `cmd/*` export `var version`. Add `var version = "dev"` to `cmd/api`,
-  `cmd/operator`, `cmd/gateway` to light it up.
+  `cmd/*` export `var version`. Add `var version = "dev"` to
+  `cmd/backend` and `cmd/operator` to light it up. The release ships two
+  static binaries: `tinycdi-backend` (public API + session gateway) and
+  `tinycdi-operator`.
 
 ## Images
 
 | Image | Dockerfile | Build context |
 |---|---|---|
-| api, operator, gateway, portal, linux-desktop, browser | `build/<name>/Dockerfile` | repo root (`context: .`) |
+| backend, frontend, operator, linux-desktop, browser, kasm-adapter | `build/<name>/Dockerfile` | repo root (`context: .`) |
 
 `browser` `FROM`s `linux-desktop` (`ARG BASE_IMAGE`). A docker-container
 buildx builder cannot see the daemon's image store, so `linux-desktop`
@@ -244,7 +246,7 @@ exact pushed manifest by digest
 On non-publishing runs it consumes the desktop job's `image-tar` artifact
 via `docker load`. Every Dockerfile is self-contained —
 `docker build -f build/<name>/Dockerfile .` from a clean checkout works
-(the portal image builds the `web/` SPA in-image; the browser image needs
+(the frontend image builds the `web/` SPA in-image; the browser image needs
 a local base or a `BASE_IMAGE` override).
 
 All images carry the standard `org.opencontainers.image.*` labels
