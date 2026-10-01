@@ -12,6 +12,7 @@ import { createPortal } from "react-dom";
 import type { AlertTone } from "./Alert";
 import { cx } from "./cx";
 import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { t as msg } from "../i18n";
 
 export interface ToastOptions {
   title: ReactNode;
@@ -79,7 +80,7 @@ function ToastItem({ entry, onDismiss }: { entry: ToastEntry; onDismiss: (id: nu
           {entry.action.label}
         </button>
       ) : null}
-      <button type="button" className="tc-toast__close" aria-label="Dismiss notification" onClick={() => onDismiss(entry.id)}>
+      <button type="button" className="tc-toast__close" aria-label={msg("common.toast.dismiss")} onClick={() => onDismiss(entry.id)}>
         <IconX size={16} />
       </button>
     </li>
@@ -110,12 +111,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       {createPortal(
         <div className="tc-toaster">
-          <ol className="tc-toaster__list" aria-live="assertive" aria-label="Error notifications">
+          <ol className="tc-toaster__list" aria-live="assertive" aria-label={msg("common.toast.errors")}>
             {assertive.map((t) => (
               <ToastItem key={t.id} entry={t} onDismiss={dismiss} />
             ))}
           </ol>
-          <ol className="tc-toaster__list" aria-live="polite" aria-label="Notifications">
+          <ol className="tc-toaster__list" aria-live="polite" aria-label={msg("common.toast.notifications")}>
             {polite.map((t) => (
               <ToastItem key={t.id} entry={t} onDismiss={dismiss} />
             ))}

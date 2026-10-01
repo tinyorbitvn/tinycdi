@@ -10,7 +10,7 @@ export interface RouteModule {
 }
 
 export interface RouteArea {
-  name: "session" | "admin" | "workspaces";
+  name: "session" | "admin" | "data" | "workspaces";
   owns: (pathname: string) => boolean;
   load: () => Promise<RouteModule>;
 }
@@ -25,6 +25,11 @@ export const ROUTE_AREAS: RouteArea[] = [
     name: "admin",
     owns: (p) => p === "/admin" || p.startsWith("/admin/"),
     load: () => import("../admin/routes"),
+  },
+  {
+    name: "data",
+    owns: (p) => p === "/data" || p.startsWith("/data/"),
+    load: () => import("../data/routes"),
   },
   {
     name: "workspaces",

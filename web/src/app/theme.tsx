@@ -1,7 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-// Theme preference: "light" / "dark" force a theme via <html data-theme>;
-// "system" removes the attribute so prefers-color-scheme decides (tokens.css).
+// Theme preference: "light" / "dark" are forced via <html data-theme>;
+// "system" resolves through prefers-color-scheme. The attribute always
+// carries the resolved theme — the Orbit sheets key dark off
+// [data-theme="dark"] only, so theme-init.js does the same before paint.
 
 export type ThemePreference = "light" | "dark" | "system";
 export const THEME_STORAGE_KEY = "tcdi.theme";
@@ -16,10 +18,8 @@ export function readStoredTheme(): ThemePreference {
   return "system";
 }
 
-export function applyTheme(pref: ThemePreference): void {
-  const root = document.documentElement;
-  if (pref === "system") root.removeAttribute("data-theme");
-  else root.setAttribute("data-theme", pref);
+export function applyTheme(resolved: "light" | "dark"): void {
+  document.documentElement.setAttribute("data-theme", resolved);
 }
 
 function systemPrefersDark(): boolean {
@@ -47,7 +47,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => mq.removeEventListener?.("change", onChange);
   }, []);
 
-  useEffect(() => applyTheme(preference), [preference]);
+  const resolved = preference === "system" ? (systemDark ? "dark" : "light") : preference;
+  useEffect(() => applyTheme(resolved), [resolved]);
 
   const setPreference = useCallback((pref: ThemePreference) => {
     setPref(pref);
@@ -59,12 +60,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<ThemeContextValue>(
-    () => ({
-      preference,
-      resolved: preference === "system" ? (systemDark ? "dark" : "light") : preference,
-      setPreference,
-    }),
-    [preference, systemDark, setPreference],
+    () => ({ preference, resolved, setPreference }),
+    [preference, resolved, setPreference],
   );
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }

@@ -2,6 +2,11 @@
 // T3.2 after T3.3 seeds it; append-only.
 export default {
   "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.dismiss": "Dismiss",
+  "common.toast.dismiss": "Dismiss notification",
+  "common.toast.errors": "Error notifications",
+  "common.toast.notifications": "Notifications",
 
   "errors.banner.fallback": "ERROR",
   "errors.banner.requestId": "(request {id})",

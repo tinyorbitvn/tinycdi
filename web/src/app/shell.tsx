@@ -23,6 +23,7 @@ import {
 import { DEFAULT_BRANDING, loadBranding, type Branding } from "./branding";
 import { isTenantAdmin, useMe, type Me } from "./me";
 import { useTheme, type ThemePreference } from "./theme";
+import { t, type MessageKey } from "../i18n";
 
 // --- branding -------------------------------------------------------------
 
@@ -54,29 +55,29 @@ export function useBranding(): Branding | null {
 
 // --- theme menu ------------------------------------------------------------
 
-const THEME_OPTIONS: { pref: ThemePreference; label: string; icon: ReactNode }[] = [
-  { pref: "light", label: "Light", icon: <IconSun /> },
-  { pref: "dark", label: "Dark", icon: <IconMoon /> },
-  { pref: "system", label: "System", icon: <IconLaptop /> },
+const THEME_OPTIONS: { pref: ThemePreference; label: MessageKey; icon: ReactNode }[] = [
+  { pref: "light", label: "app.theme.light", icon: <IconSun /> },
+  { pref: "dark", label: "app.theme.dark", icon: <IconMoon /> },
+  { pref: "system", label: "app.theme.system", icon: <IconLaptop /> },
 ];
 
 function ThemeMenu() {
   const { preference, resolved, setPreference } = useTheme();
   return (
     <Menu
-      label="Theme"
+      label={t("app.theme.label")}
       align="end"
       trigger={(props) => (
         <IconButton
           {...props}
           size="sm"
-          label="Theme"
+          label={t("app.theme.label")}
           icon={resolved === "dark" ? <IconMoon /> : <IconSun />}
         />
       )}
       items={THEME_OPTIONS.map((o) => ({
         id: o.pref,
-        label: o.label,
+        label: t(o.label),
         icon: preference === o.pref ? <IconCheck /> : o.icon,
         onSelect: () => setPreference(o.pref),
       }))}
@@ -146,16 +147,16 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
     content = <Spinner className="tc-content__loading" />;
   } else if (current === "error") {
     content = (
-      <Alert tone="danger" title="This page could not be loaded">
-        Reload the page to try again.
+      <Alert tone="danger" title={t("app.loadError.title")}>
+        {t("app.loadError.body")}
       </Alert>
     );
   } else if (current === null) {
     content = (
       <EmptyState
-        title="Page not found"
-        description="The address does not match any page in this portal."
-        action={<Link to="/workspaces">Go to workspaces</Link>}
+        title={t("app.notFound.title")}
+        description={t("app.notFound.body", { path: pathname })}
+        action={<Link to="/workspaces">{t("app.notFound.action")}</Link>}
       />
     );
   } else {
@@ -166,9 +167,9 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
     <div className={cx("tc-shell", bleed && "tc-shell--bleed")}>
       <header className="tc-topbar">
         <Link to="/" className="tc-topbar__brand">
-          {logoSrc ? <img className="tc-topbar__mark" src={logoSrc} alt="" /> : null}
+          {logoSrc ? <img className="tc-topbar__mark" src={logoSrc} alt={""} /> : null}
           <span className="tc-topbar__name">{productName}</span>
-          {showByline ? <span className="tc-topbar__byline">by TinyOrbit</span> : null}
+          {showByline ? <span className="tc-topbar__byline">{t("app.shell.byline")}</span> : null}
         </Link>
         <div className="tc-topbar__actions">
           <ThemeMenu />
@@ -177,22 +178,22 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
       </header>
       <div className="tc-shell__body">
         {bleed ? null : (
-          <nav className="tc-sidebar" aria-label="Sections">
+          <nav className="tc-sidebar" aria-label={t("nav.sections")}>
             <ul className="tc-sidebar__list">
               <li>
                 <NavLink to="/workspaces" activePrefixes={["/"]}>
-                  Workspaces
+                  {t("nav.workspaces")}
                 </NavLink>
               </li>
               <li>
-                <NavLink to="/templates">Templates</NavLink>
+                <NavLink to="/templates">{t("nav.templates")}</NavLink>
               </li>
               <li>
-                <NavLink to="/data">Data</NavLink>
+                <NavLink to="/data">{t("nav.data")}</NavLink>
               </li>
               {isTenantAdmin(me) ? (
                 <li>
-                  <NavLink to="/admin">Admin</NavLink>
+                  <NavLink to="/admin">{t("nav.admin")}</NavLink>
                 </li>
               ) : null}
             </ul>

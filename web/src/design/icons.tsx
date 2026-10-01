@@ -1,7 +1,8 @@
 import type { ReactNode, SVGProps } from "react";
 import { cx } from "./cx";
 
-// Small inline SVG icon set (24×24 grid, 2px round strokes, currentColor).
+// Small inline SVG icon set (24×24 grid, 1.75px round strokes — Orbit
+// normalizes Tabler's 2px — currentColor).
 // Decorative by default (aria-hidden); pass `title` to make one meaningful.
 
 export type IconSize = 12 | 14 | 16 | 20 | 24 | 32 | 48;
@@ -22,7 +23,7 @@ function makeIcon(name: string, body: ReactNode) {
         height={size}
         fill="none"
         stroke="currentColor"
-        strokeWidth={2}
+        strokeWidth={1.75}
         strokeLinecap="round"
         strokeLinejoin="round"
         focusable="false"

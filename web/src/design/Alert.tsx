@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { cx } from "./cx";
 import type { Tone } from "./Badge";
 import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { t } from "../i18n";
 
 export type AlertTone = Exclude<Tone, "neutral" | "accent">;
 
@@ -41,7 +42,7 @@ export function Alert({ tone = "info", title, children, actions, onDismiss, clas
       </div>
       {actions ? <div className="tc-alert__actions">{actions}</div> : null}
       {onDismiss ? (
-        <button type="button" className="tc-alert__dismiss" aria-label="Dismiss" onClick={onDismiss}>
+        <button type="button" className="tc-alert__dismiss" aria-label={t("common.dismiss")} onClick={onDismiss}>
           <IconX size={16} />
         </button>
       ) : null}

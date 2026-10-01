@@ -4,6 +4,7 @@ import { Button } from "./Button";
 import { cx } from "./cx";
 import { useFocusTrap } from "./focus";
 import { IconX } from "./icons";
+import { t } from "../i18n";
 import { useDomId } from "./useId";
 
 let openCount = 0;
@@ -97,7 +98,7 @@ function Overlay({
             ) : null}
           </div>
           {dismissible ? (
-            <button type="button" className="tc-overlay__close" aria-label="Close" onClick={onClose}>
+            <button type="button" className="tc-overlay__close" aria-label={t("common.close")} onClick={onClose}>
               <IconX size={20} />
             </button>
           ) : null}

@@ -9,7 +9,8 @@
 @import "../design/orbit/css/extended-colors.css";
 @import "../design/orbit/css/companion-palettes.css";
 @import "./tokens.css";      /* --tc-* aliases onto --to-* */
-/* app CSS: T3.2 inserts @import "./base.css" and "../design/design.css" here */
+@import "./base.css";      /* reset + document defaults (pulls app.css, legacy.css) */
+@import "../design/design.css";
 @import "../design/orbit/css/component-language.css";
 @import "../design/orbit/css/navy-night.css";
 @import "../design/orbit/css/palette-system.css";  /* always last */

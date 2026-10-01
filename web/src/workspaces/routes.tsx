@@ -5,7 +5,7 @@ import { DataPage } from "./DataPage";
 import { WorkspaceDetailPage } from "./WorkspaceDetailPage";
 import { WorkspaceListPage } from "./WorkspaceListPage";
 
-// Stub created by the app shell (c4); owned by the workspaces area — replace
+// Stub created by the app shell (T3.2); owned by the workspaces area — replace
 // freely, keeping the `routes` export.
 export const routes: AppRoute[] = [
   { path: "/", title: "Workspaces", render: () => <WorkspaceListPage /> },

@@ -1,7 +1,8 @@
 import type { AppRoute } from "../app/route-types";
 import { EmptyState, Page } from "../design";
+import { t } from "../i18n";
 
-// Stub created by the app shell (c4); owned by the admin area — replace
+// Stub created by the app shell (T3.2); owned by the admin area — replace
 // freely, keeping the `routes` export.
 export const routes: AppRoute[] = [
   {
@@ -9,8 +10,8 @@ export const routes: AppRoute[] = [
     title: "Admin",
     requires: "tenant-admin",
     render: () => (
-      <Page title="Admin">
-        <EmptyState title="Admin views" description="Tenant administration is not built yet." />
+      <Page title={t("nav.admin")}>
+        <EmptyState title={t("nav.admin")} description={t("app.seed.admin.body")} />
       </Page>
     ),
   },

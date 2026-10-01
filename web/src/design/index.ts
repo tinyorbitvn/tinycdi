@@ -1,5 +1,6 @@
 // TinyCDI design system — import everything from "../design".
-// Global styles (tokens, base, component CSS) are loaded once by main.tsx.
+// Global styles (tokens, base, component CSS) load via styles/index.css,
+// linked from index.html in the binding Orbit load order.
 export { cx } from "./cx";
 export { useDomId } from "./useId";
 export { useFocusTrap, focusableIn } from "./focus";
