@@ -56,8 +56,10 @@ spec:
         - {protocol: TCP, port: {{ .Values.networkPolicy.apiServerPort }}}
 {{- $edge := .Values.networkPolicy.edgeIngress | default "ipBlock" }}
 ---
-# backend: app (:8443) and session (:8444) listeners take traffic from the
-# edge only (see networkPolicy.edgeIngress); the internal mTLS listener
+# backend: app (:8443) and session (:8444, every <label>.<sessionDomain>
+# workspace host) take traffic from the edge only (see
+# networkPolicy.edgeIngress) — plus the in-cluster control surface on
+# :8444 from the release namespace; the internal mTLS listener
 # (:9443) only from the operator. Egress: OIDC issuer, PostgreSQL and the
 # runtime pods in managed namespaces (streaming port); apiserver and DNS
 # come from the shared policies above.
@@ -72,6 +74,16 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     {{- include "tinycdi.edgeIngressRule" (dict "root" $ "ports" (list 8443 8444)) | nindent 4 }}
+    # Session control surface (D9): /healthz and the bearer-gated
+    # /v1/control/* on :8444 answer only on the in-cluster Service names
+    # (-session-control-hosts), never on a workspace host. Pods in the
+    # release namespace (operator, admin/tooling Jobs) may reach it even
+    # when edgeIngressCIDRs is narrowed to the load-balancer range.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}}
+      ports:
+        - {protocol: TCP, port: 8444}
     # internal mTLS listener (ADR 0003): the operator's teardown
     # revoke/drain seam only — the session gateway reaches the broker
     # in-process.

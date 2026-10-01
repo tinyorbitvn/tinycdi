@@ -1,7 +1,10 @@
 {{- if .Values.ingress.enabled }}
-# Portal and session edges on DIFFERENT hosts (enforced by
-# tinycdi.validate). Portal host: /v1 -> backend app listener, everything
-# else -> frontend. Session host: everything -> backend session listener.
+# Portal host and session DOMAIN are disjoint (portalHost may not equal
+# or sit inside sessionDomain — enforced by tinycdi.validate). Portal
+# host: /v1 -> backend app listener, everything else -> frontend.
+# Session edge: ONE wildcard host *.<sessionDomain> covers every
+# workspace's <label>.<sessionDomain> host -> backend session listener
+# (D9); the TLS Secret named below must hold a wildcard certificate.
 # Every backend terminates TLS itself — set backend-protocol / pass-through
 # annotations for your controller via ingress.annotations (e.g. nginx
 # backend-protocol: HTTPS).
@@ -62,7 +65,7 @@ spec:
   ingressClassName: {{ . }}
   {{- end }}
   rules:
-    - host: {{ .Values.sessionHost }}
+    - host: {{ printf "*.%s" .Values.sessionDomain | quote }}
       http:
         paths:
           - path: /
@@ -73,7 +76,9 @@ spec:
                 port: {name: session}
   {{- with .Values.ingress.tls.existingSecret }}
   tls:
-    - hosts: [{{ $.Values.sessionHost }}]
+    # The Secret's certificate must cover the *.<sessionDomain> wildcard
+    # (DNS-01 — HTTP-01 cannot issue wildcards).
+    - hosts: [{{ printf "*.%s" $.Values.sessionDomain | quote }}]
       secretName: {{ . }}
   {{- end }}
 {{- end }}
