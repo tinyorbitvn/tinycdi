@@ -182,6 +182,9 @@ type Broker struct {
 	maxBindingAge time.Duration
 	audience      string
 	creds         CredentialSource
+	// inputHook is invoked with the lease's principal on each recorded
+	// "input" activity event (D18); nil disables it.
+	inputHook func(ctx context.Context, principal string)
 
 	synthOnce  sync.Once
 	synthCreds *synthesizedCredentials
