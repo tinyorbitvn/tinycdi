@@ -19,6 +19,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
@@ -43,10 +44,11 @@ type AuthConfig struct {
 	// the cookie is set without a Domain attribute so the browser scopes it
 	// to the API host exactly). Secure + HttpOnly + SameSite=Lax.
 	SessionCookieName string
-	// LoginCookieName defaults to "__Host-tcdi_login". It binds an in-flight
-	// OIDC login to the initiating browser (SEC-03): LoginHandler sets it,
-	// CallbackHandler requires it. Secure + HttpOnly + SameSite=Lax,
-	// Path=/, Max-Age=PendingTTL (600 s by default).
+	// LoginCookieName defaults to "__Host-tcdi_login". It carries the
+	// AEAD-sealed login state that binds an in-flight OIDC login to the
+	// initiating browser (SEC-03): LoginHandler sets it, CallbackHandler
+	// requires it. Secure + HttpOnly + SameSite=Lax, Path=/,
+	// Max-Age=PendingTTL (600 s by default).
 	LoginCookieName string
 	// SessionOriginCookieName defaults to "tcdi_session_origin" — the v0.1
 	// cookie name. In v0.2 the cookie is never set; login and logout only
@@ -79,13 +81,14 @@ type AuthConfig struct {
 	IdleTimeout     time.Duration
 	AbsoluteTimeout time.Duration
 	// PendingTTL bounds how long a login attempt (state/nonce/PKCE
-	// verifier) stays valid (default 10m).
+	// verifier) stays valid (default 10m). It is sealed into the login
+	// cookie as the State.Expires timestamp and caps the cookie Max-Age.
 	PendingTTL time.Duration
-	// PendingLimit caps the number of concurrently in-flight logins
-	// (default 10_000). When full, the oldest pending entry is evicted —
-	// an unauthenticated flood can displace other pending logins but can
-	// never grow memory or per-request work without bound (SEC-12).
-	PendingLimit int
+
+	// LoginSealer seals in-flight login state into the login cookie so any
+	// replica holding the keys can complete the login — there is no
+	// server-side pending-login state to bound or lose (SEC-12). Required.
+	LoginSealer *loginstate.Sealer
 
 	// TenantClaim / GroupsClaim name the ID-token claims that carry tenant
 	// membership and group membership. Defaults: "tenant_id", "groups".
@@ -136,9 +139,6 @@ func (c *AuthConfig) withDefaults() {
 	}
 	if c.PendingTTL == 0 {
 		c.PendingTTL = 10 * time.Minute
-	}
-	if c.PendingLimit <= 0 {
-		c.PendingLimit = 10_000
 	}
 	if c.TenantClaim == "" {
 		c.TenantClaim = "tenant_id"
@@ -301,18 +301,6 @@ func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-// pendingAuth is a single-use login attempt tracked server-side, keyed by the
-// OAuth state value. Keeping nonce + PKCE verifier server-side (instead of in
-// cookies) means a stolen state value alone is useless; cookieHash (SHA-256
-// of the __Host-tcdi_login cookie value) additionally binds the login to the
-// browser that started it (SEC-03).
-type pendingAuth struct {
-	nonce      string
-	verifier   string
-	cookieHash [sha256.Size]byte
-	expires    time.Time
-}
-
 // Authenticator implements the OIDC login/logout endpoints and exposes the
 // session accessors the middleware needs.
 type Authenticator struct {
@@ -321,19 +309,9 @@ type Authenticator struct {
 	oauth2   oauth2.Config
 	sessions SessionStore
 
-	mu           sync.Mutex
-	pendings     map[string]pendingAuth
-	pendingOrder []string  // insertion order; front is oldest (eviction)
-	pendingSweep time.Time // last expiry sweep; gated by pendingSweepEvery
-
 	log *slog.Logger
 	now func() time.Time
 }
-
-// pendingSweepEvery bounds how often the expired-pending scan may run. It is
-// time-gated (never per request) so an unauthenticated /v1/login flood does
-// not serialize an O(n) scan under a.mu on every call (SEC-12).
-const pendingSweepEvery = time.Minute
 
 // NewAuthenticator runs OIDC discovery on cfg.Issuer and returns a ready
 // Authenticator. Discovery happens once at startup; JWKS keys are fetched and
@@ -350,6 +328,9 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 	}
 	if sessions == nil {
 		return nil, errors.New("api: SessionStore is required")
+	}
+	if cfg.LoginSealer == nil {
+		return nil, errors.New("api: AuthConfig requires LoginSealer")
 	}
 	if log == nil {
 		log = slog.Default()
@@ -369,7 +350,6 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 			Scopes:       cfg.Scopes,
 		},
 		sessions: sessions,
-		pendings: make(map[string]pendingAuth),
 		log:      log,
 		now:      time.Now,
 	}
@@ -384,9 +364,11 @@ func (a *Authenticator) CSRFCookieName() string          { return a.cfg.CSRFCook
 func (a *Authenticator) CSRFHeader() string              { return a.cfg.CSRFHeader }
 
 // LoginHandler starts the authorization-code + PKCE flow: it generates state,
-// nonce, a verifier and a browser-binding login proof, stores them
-// server-side keyed by state, sets the proof as a __Host- login cookie, and
-// redirects to the IdP authorization endpoint.
+// nonce and a PKCE verifier, seals them together with the login's expiry into
+// the __Host- login cookie, and redirects to the IdP authorization endpoint.
+// Keeping the login state in a sealed cookie (instead of process memory)
+// binds the login to the initiating browser (SEC-03) and lets any replica
+// holding the keys complete the flow.
 func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	state, err := randToken(32)
 	if err != nil {
@@ -403,66 +385,43 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInternal, "could not start login")
 		return
 	}
-	proof, err := randToken(32) // browser-binding login cookie value (SEC-03)
+	token, err := a.cfg.LoginSealer.Seal(loginstate.State{
+		OAuthState: state,
+		Nonce:      nonce,
+		Verifier:   verifier,
+		Expires:    a.now().Add(a.cfg.PendingTTL).Unix(),
+	})
 	if err != nil {
 		writeError(w, r, CodeInternal, "could not start login")
 		return
 	}
-
-	now := a.now()
-	a.mu.Lock()
-	if now.Sub(a.pendingSweep) >= pendingSweepEvery {
-		a.sweepPendingsLocked(now)
-		a.pendingSweep = now
-	}
-	a.pendings[state] = pendingAuth{
-		nonce:      nonce,
-		verifier:   verifier,
-		cookieHash: sha256.Sum256([]byte(proof)),
-		expires:    now.Add(a.cfg.PendingTTL),
-	}
-	a.pendingOrder = append(a.pendingOrder, state)
-	// Bound the map (SEC-12): oldest-first eviction once the cap is hit,
-	// then compact the order slice when dead entries dominate.
-	for len(a.pendings) > a.cfg.PendingLimit && len(a.pendingOrder) > 0 {
-		delete(a.pendings, a.pendingOrder[0])
-		a.pendingOrder = a.pendingOrder[1:]
-	}
-	if len(a.pendingOrder) > 2*a.cfg.PendingLimit {
-		live := a.pendingOrder[:0]
-		for _, s := range a.pendingOrder {
-			if _, ok := a.pendings[s]; ok {
-				live = append(live, s)
-			}
-		}
-		a.pendingOrder = live
-	}
-	a.mu.Unlock()
 
 	url := a.oauth2.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce),
 	)
 	// Deliberately log only that a login was initiated — never the state,
-	// nonce, verifier, proof, or the authorization URL carrying them.
+	// nonce, verifier, or the authorization URL carrying them.
 	a.log.Debug("oidc login started", "request_id", RequestIDFromContext(r.Context()))
 	// Max-Age=600 per the SEC-03 spec, and never longer than the pending TTL.
 	maxAge := int(a.cfg.PendingTTL.Seconds())
 	if maxAge > 600 {
 		maxAge = 600
 	}
-	http.SetCookie(w, a.loginCookie(proof, maxAge))
+	http.SetCookie(w, a.loginCookie(token, maxAge))
 	// Any browser that still carries the v0.1 non-__Host- cookies drops them
 	// on its next login (D17).
 	a.expireLegacyCookies(w)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
-// CallbackHandler completes the flow. It consumes the pending state (single
-// use — a replayed state is rejected), exchanges the code with the PKCE
-// verifier, verifies the ID token (issuer, audience, expiry, signature via
-// go-oidc) and its nonce, enforces tenant membership, deletes any pre-existing
-// session cookie (fixation), and issues a fresh rotated session ID.
+// CallbackHandler completes the flow. It opens the sealed login cookie
+// (single use — a consumed code or a replayed/expired cookie is rejected),
+// binds the callback's state parameter to the sealed state, exchanges the
+// code with the sealed PKCE verifier, verifies the ID token (issuer,
+// audience, expiry, signature via go-oidc) and its nonce, enforces tenant
+// membership, deletes any pre-existing session cookie (fixation), and issues
+// a fresh rotated session ID.
 func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -477,32 +436,27 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	a.mu.Lock()
-	pend, ok := a.pendings[state]
-	delete(a.pendings, state) // consume: state is single-use
-	a.mu.Unlock()
-	if !ok || !a.now().Before(pend.expires) {
+	// SEC-03: the state alone must not suffice — the browser that started
+	// this login holds the __Host-tcdi_login cookie carrying the sealed
+	// state, nonce and PKCE verifier. A missing, tampered, expired or
+	// foreign-key cookie fails closed, exactly like an unknown state.
+	var st loginstate.State
+	if c, err := r.Cookie(a.cfg.LoginCookieName); err == nil {
+		st, err = a.cfg.LoginSealer.Open(c.Value, a.now())
+		if err != nil {
+			writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
+			return
+		}
+	} else {
 		writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
 		return
 	}
-	// A pending was consumed, so its browser-binding cookie is dead —
-	// expire it whether or not the exchange succeeds (single use).
-	http.SetCookie(w, a.loginCookie("", -1))
-
-	// SEC-03: the state alone must not suffice — the browser that started
-	// this login holds the __Host-tcdi_login cookie whose hash was stored
-	// with the pending entry. Missing or mismatched proof fails closed.
-	var proofSum [sha256.Size]byte
-	if proof, err := r.Cookie(a.cfg.LoginCookieName); err == nil {
-		proofSum = sha256.Sum256([]byte(proof.Value))
-	}
-	// proofSum is all-zero on a missing cookie — never a real SHA-256 match.
-	if subtle.ConstantTimeCompare(proofSum[:], pend.cookieHash[:]) != 1 {
-		writeError(w, r, CodeUnauthenticated, "login not initiated by this browser")
+	if subtle.ConstantTimeCompare([]byte(st.OAuthState), []byte(state)) != 1 {
+		writeError(w, r, CodeUnauthenticated, "unknown or expired login state")
 		return
 	}
 
-	tok, err := a.oauth2.Exchange(ctx, code, oauth2.VerifierOption(pend.verifier))
+	tok, err := a.oauth2.Exchange(ctx, code, oauth2.VerifierOption(st.Verifier))
 	if err != nil {
 		writeError(w, r, CodeUnauthenticated, "authorization code exchange failed")
 		return
@@ -525,10 +479,14 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, CodeUnauthenticated, "could not parse ID token claims")
 		return
 	}
-	if nonce, _ := claims["nonce"].(string); nonce == "" || nonce != pend.nonce {
+	if nonce, _ := claims["nonce"].(string); nonce == "" || nonce != st.Nonce {
 		writeError(w, r, CodeUnauthenticated, "ID token nonce does not match login request")
 		return
 	}
+
+	// The login state has been fully validated — consume the sealed cookie
+	// so a stale value cannot linger in the jar.
+	http.SetCookie(w, a.loginCookie("", -1))
 
 	principal := Principal{
 		Issuer:   idToken.Issuer,
@@ -610,9 +568,9 @@ func (a *Authenticator) sessionCookie(id string, maxAge int) *http.Cookie {
 	}
 }
 
-// loginCookie binds an OIDC login attempt to the initiating browser
-// (SEC-03): a random proof whose SHA-256 is stored with the pending state.
-// __Host- shape: Secure, HttpOnly, Path=/, no Domain.
+// loginCookie carries the AEAD-sealed OIDC login state that binds the
+// attempt to the initiating browser (SEC-03). __Host- shape: Secure,
+// HttpOnly, Path=/, no Domain.
 func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     a.cfg.LoginCookieName,
@@ -698,25 +656,6 @@ func (a *Authenticator) groupsAllowed(p Principal) bool {
 		}
 	}
 	return false
-}
-
-// sweepPendingsLocked drops expired pending logins. Callers hold a.mu and
-// gate the call by pendingSweepEvery — this O(cap) scan never runs per
-// request (SEC-12).
-func (a *Authenticator) sweepPendingsLocked(now time.Time) {
-	for k, p := range a.pendings {
-		if !now.Before(p.expires) {
-			delete(a.pendings, k)
-		}
-	}
-	// Keep the order slice free of consumed/expired states as well.
-	live := a.pendingOrder[:0]
-	for _, s := range a.pendingOrder {
-		if _, ok := a.pendings[s]; ok {
-			live = append(live, s)
-		}
-	}
-	a.pendingOrder = live
 }
 
 func stringClaim(claims map[string]interface{}, name string) string {

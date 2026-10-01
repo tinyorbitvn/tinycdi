@@ -63,6 +63,7 @@ func newConnStatusEnv(t *testing.T, stater ConnectionStater, ws workspaceGetter)
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
 	}, sessions, logger)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)

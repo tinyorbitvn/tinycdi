@@ -15,9 +15,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
+
+// testLoginKeys is the login-state keyring every test Authenticator shares;
+// cross-replica tests build a second Authenticator from the same keys.
+var testLoginKeys = [][]byte{bytes.Repeat([]byte{0x1a}, 32)}
+
+func testLoginSealer(t *testing.T) *loginstate.Sealer {
+	t.Helper()
+	s, err := loginstate.NewSealer(testLoginKeys...)
+	if err != nil {
+		t.Fatalf("loginstate.NewSealer: %v", err)
+	}
+	return s
+}
 
 type testEnv struct {
 	issuer *oidctest.Issuer
@@ -64,6 +78,7 @@ func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.A
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -87,6 +102,29 @@ func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.A
 	env := &testEnv{issuer: iss, auth: a, store: store, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
 	return env
+}
+
+// spawnReplica builds a second Authenticator over the same fake issuer and
+// the same login-state keyring as e, but with its own session store and HTTP
+// server — a stand-in for another backend replica.
+func (e *testEnv) spawnReplica(t *testing.T) *testEnv {
+	t.Helper()
+	a, err := NewAuthenticator(context.Background(), AuthConfig{
+		Issuer:      e.issuer.URL(),
+		ClientID:    e.issuer.ClientID,
+		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: e.auth.cfg.LoginSealer,
+	}, NewInMemorySessionStore(30*time.Minute), slog.Default())
+	if err != nil {
+		t.Fatalf("replica NewAuthenticator: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return &testEnv{issuer: e.issuer, auth: a, server: srv}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -325,7 +363,8 @@ func TestCallbackRejectsStateReplay(t *testing.T) {
 	if first.StatusCode != http.StatusFound {
 		t.Fatalf("first callback status = %d", first.StatusCode)
 	}
-	// Replay the exact same callback: state is consumed, must reject.
+	// Replay the exact same callback: the code is single-use at the IdP and
+	// the login cookie was expired on first use — must reject.
 	req, _ = http.NewRequest(http.MethodGet, cbPath, nil)
 	req.AddCookie(loginCookie)
 	second, err := client.Do(req)
@@ -575,10 +614,29 @@ func TestNewAuthenticatorRejectsEmptyRequiredGroup(t *testing.T) {
 		Issuer:         iss.URL(),
 		ClientID:       iss.ClientID,
 		RedirectURL:    "https://portal.test/auth/callback",
+		LoginSealer:    testLoginSealer(t),
 		RequiredGroups: []string{"platform-admins", " "},
 	}, NewInMemorySessionStore(time.Minute), nil)
 	if err == nil {
 		t.Fatal("NewAuthenticator accepted a blank RequiredGroups entry")
+	}
+}
+
+// The login sealer is required: without it an Authenticator could not bind
+// in-flight logins to the initiating browser (SEC-03).
+func TestNewAuthenticatorRequiresLoginSealer(t *testing.T) {
+	iss, err := oidctest.NewIssuer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iss.Close()
+	_, err = NewAuthenticator(context.Background(), AuthConfig{
+		Issuer:      iss.URL(),
+		ClientID:    iss.ClientID,
+		RedirectURL: "https://portal.test/auth/callback",
+	}, NewInMemorySessionStore(time.Minute), nil)
+	if err == nil {
+		t.Fatal("NewAuthenticator accepted a config without LoginSealer")
 	}
 }
 
@@ -675,7 +733,7 @@ func (e *testEnv) callbackQueryForLogin(t *testing.T) (string, []*http.Cookie) {
 // SEC-03 regression: a victim browser
 // that never started a login must not be able to complete one — the state
 // is bound to a __Host-tcdi_login cookie only the initiator holds.
-func TestCallbackRequiresLoginCookie(t *testing.T) {
+func TestLogin_MissingCookie(t *testing.T) {
 	env := newTestEnv(t, nil)
 	query, _ := env.callbackQueryForLogin(t)
 
@@ -689,6 +747,117 @@ func TestCallbackRequiresLoginCookie(t *testing.T) {
 	}
 	if findCookie(resp.Cookies(), env.auth.SessionCookieName()) != nil {
 		t.Fatal("session cookie issued to a browser that never started login")
+	}
+}
+
+// The OAuth state the IdP echoes back must equal the state sealed into the
+// login cookie — a callback carrying a different state is rejected even
+// when the cookie itself is authentic.
+func TestLogin_StateMismatch(t *testing.T) {
+	env := newTestEnv(t, nil)
+	query, cookies := env.callbackQueryForLogin(t)
+	loginCookie := findCookie(cookies, env.auth.LoginCookieName())
+	if loginCookie == nil {
+		t.Fatal("login did not set the login cookie")
+	}
+
+	q, err := url.ParseQuery(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Set("state", "a-different-state-value")
+	req, _ := http.NewRequest(http.MethodGet, env.server.URL+"/auth/callback?"+q.Encode(), nil)
+	req.AddCookie(loginCookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("state mismatch: status=%d, want 401", resp.StatusCode)
+	}
+	if findCookie(resp.Cookies(), env.auth.SessionCookieName()) != nil {
+		t.Fatal("session cookie issued on state mismatch")
+	}
+}
+
+// The login TTL is sealed into the cookie itself: once it has passed, the
+// callback rejects the login — no server-side pending entry is required.
+func TestLogin_ExpiredCookie(t *testing.T) {
+	env := newTestEnv(t, func(c *AuthConfig) { c.PendingTTL = time.Minute })
+	fc := &fakeClock{now: time.Now()}
+	env.auth.now = fc.Now
+
+	query, cookies := env.callbackQueryForLogin(t)
+	loginCookie := findCookie(cookies, env.auth.LoginCookieName())
+	if loginCookie == nil {
+		t.Fatal("login did not set the login cookie")
+	}
+
+	fc.Advance(2 * time.Minute) // past the login TTL sealed into the cookie
+	req, _ := http.NewRequest(http.MethodGet, env.server.URL+"/auth/callback?"+query, nil)
+	req.AddCookie(loginCookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired login cookie: status=%d, want 401", resp.StatusCode)
+	}
+}
+
+// D20: in-flight logins live in the sealed cookie, not in process memory —
+// a login started on one replica completes on any replica sharing the keys.
+func TestLogin_CallbackOnOtherReplica(t *testing.T) {
+	envA := newTestEnv(t, nil)
+	envB := envA.spawnReplica(t)
+	client := noRedirectClient()
+
+	resp, err := client.Get(envA.server.URL + "/auth/login")
+	if err != nil {
+		t.Fatalf("GET /auth/login on replica A: %v", err)
+	}
+	loc := resp.Header.Get("Location")
+	loginCookie := findCookie(resp.Cookies(), envA.auth.LoginCookieName())
+	resp.Body.Close()
+	if loginCookie == nil {
+		t.Fatal("replica A did not set the login cookie")
+	}
+
+	resp2, err := client.Get(loc)
+	if err != nil {
+		t.Fatalf("GET authorize: %v", err)
+	}
+	cbLoc := resp2.Header.Get("Location")
+	resp2.Body.Close()
+	cb, err := url.Parse(cbLoc)
+	if err != nil || cb.Query().Get("code") == "" {
+		t.Fatalf("authorize redirect malformed: %q", cbLoc)
+	}
+
+	// The callback lands on replica B carrying the cookie A sealed.
+	req, _ := http.NewRequest(http.MethodGet, envB.server.URL+"/auth/callback?"+cb.Query().Encode(), nil)
+	req.AddCookie(loginCookie)
+	resp3, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET callback on replica B: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusFound {
+		t.Fatalf("callback on replica B: status=%d, want 302", resp3.StatusCode)
+	}
+	if loc := resp3.Header.Get("Location"); loc != "/" {
+		t.Fatalf("post-login redirect = %q, want /", loc)
+	}
+	sess := findCookie(resp3.Cookies(), envB.auth.SessionCookieName())
+	if sess == nil {
+		t.Fatal("replica B did not issue a __Host-tcdi_session cookie")
+	}
+	r := envB.authedGet(t, sess, "/v1/me")
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/me on replica B: status=%d", r.StatusCode)
 	}
 }
 
@@ -725,51 +894,15 @@ func TestLoginCookieAttributes(t *testing.T) {
 	}
 }
 
-// The login cookie is single-use together with the pending state: the
-// callback expires it, so a stale value cannot linger in the jar.
-func TestCallbackExpiresLoginCookie(t *testing.T) {
+// The login cookie is single-use together with the login attempt: a
+// successful callback expires it, so a stale value cannot linger in the jar.
+func TestLogin_CookieClearedAfterUse(t *testing.T) {
 	env := newTestEnv(t, nil)
 	resp, _ := env.login(t)
 	defer resp.Body.Close()
 	c := findCookie(resp.Cookies(), env.auth.LoginCookieName())
 	if c == nil || c.MaxAge >= 0 {
 		t.Fatalf("login cookie not expired on callback: %+v", c)
-	}
-}
-
-// --- SEC-12: the pending-login store must stay bounded --------------------
-
-func TestPendingLoginsAreBounded(t *testing.T) {
-	env := newTestEnv(t, func(c *AuthConfig) { c.PendingLimit = 8 })
-	h := env.server.Config.Handler
-	for i := 0; i < 64; i++ {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
-		if rr.Code != http.StatusFound {
-			t.Fatalf("login %d status=%d", i, rr.Code)
-		}
-	}
-	if n := pendingCount(env.auth); n > 8 {
-		t.Fatalf("pending logins = %d, want <= 8", n)
-	}
-}
-
-// Expired pendings are swept so a burst of abandoned logins cannot hold the
-// whole cap hostage until eviction pressure.
-func TestPendingSweepDropsExpired(t *testing.T) {
-	env := newTestEnv(t, func(c *AuthConfig) { c.PendingLimit = 4 })
-	fc := &fakeClock{now: time.Now()}
-	env.auth.now = fc.Now
-	h := env.server.Config.Handler
-	for i := 0; i < 4; i++ {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
-	}
-	fc.Advance(2 * time.Hour) // past PendingTTL and the sweep interval
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
-	if n := pendingCount(env.auth); n != 1 {
-		t.Fatalf("pendings after sweep = %d, want 1 (only the fresh login)", n)
 	}
 }
 
@@ -791,11 +924,4 @@ func TestLogsNeverContainRawSubject(t *testing.T) {
 	if !strings.Contains(out, want) {
 		t.Fatalf("logs missing pseudonymous actor %q", want)
 	}
-}
-
-// pendingCount reads the pending-login map under its mutex (race-safe).
-func pendingCount(a *Authenticator) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.pendings)
 }

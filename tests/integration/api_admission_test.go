@@ -25,6 +25,7 @@ import (
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -572,7 +573,7 @@ func TestIntentRevisionOrdering(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // pgSessionAdapter adapts store.SessionStore (its own record type) to
-// api.SessionStore. The production wiring lives in cmd/api; this is the
+// api.SessionStore. The production wiring lives in internal/backend; this is the
 // same conversion for tests.
 type pgSessionAdapter struct{ s *store.SessionStore }
 
@@ -609,6 +610,31 @@ func (a *pgSessionAdapter) Get(ctx context.Context, id string) (*api.Session, er
 		LastSeenAt: rec.LastSeenAt,
 		ExpiresAt:  rec.ExpiresAt,
 	}, nil
+}
+
+func (a *pgSessionAdapter) Peek(ctx context.Context, id string) (*api.Session, error) {
+	rec, err := a.s.Peek(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return nil, api.ErrSessionNotFound
+		}
+		return nil, err
+	}
+	return &api.Session{
+		ID: rec.ID,
+		Principal: api.Principal{
+			Issuer: rec.Issuer, Subject: rec.Subject,
+			TenantID: rec.TenantID, Groups: rec.Groups,
+		},
+		CSRFToken:  rec.CSRFToken,
+		CreatedAt:  rec.CreatedAt,
+		LastSeenAt: rec.LastSeenAt,
+		ExpiresAt:  rec.ExpiresAt,
+	}, nil
+}
+
+func (a *pgSessionAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
+	return a.s.TouchPrincipal(ctx, principal)
 }
 
 func (a *pgSessionAdapter) Delete(ctx context.Context, id string) error {
@@ -794,6 +820,16 @@ type httpEnv struct {
 	tenants provisioning.TenantNamespaces
 }
 
+// mustLoginSealer builds the login-state sealer the test Authenticator uses.
+func mustLoginSealer(t *testing.T) *loginstate.Sealer {
+	t.Helper()
+	s, err := loginstate.NewSealer(bytes.Repeat([]byte{0x1a}, 32))
+	if err != nil {
+		t.Fatalf("loginstate.NewSealer: %v", err)
+	}
+	return s
+}
+
 func newHTTPEnv(t *testing.T, db *store.DB, dispatch bool) *httpEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
@@ -807,6 +843,7 @@ func newHTTPEnv(t *testing.T, db *store.DB, dispatch bool) *httpEnv {
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: mustLoginSealer(t),
 	}, sessions, logger)
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)

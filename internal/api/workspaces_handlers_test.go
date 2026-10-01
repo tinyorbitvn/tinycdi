@@ -206,6 +206,7 @@ func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, ten
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
 	}, sessions, logger)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
