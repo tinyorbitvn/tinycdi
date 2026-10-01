@@ -7,7 +7,19 @@ package main
 // frontend (SEC-22 / SEC-23).
 
 import (
+	"bufio"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +27,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // newTestHandler builds the frontend handler over a scratch web root with
@@ -194,6 +208,129 @@ func TestNormalizeSessionOrigin(t *testing.T) {
 			t.Fatalf("normalizeSessionOrigin(%q) = %q, want error", bad, got)
 		}
 	}
+}
+
+// TestHotReload (D21): the frontend terminates TLS through
+// tlsreload.Reloader, so rotating the certificate files changes what a new
+// handshake presents — while a connection opened before the rotation keeps
+// working.
+func TestHotReload(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	writePair(t, cert, key, "first.example")
+
+	srv, reloader, err := newTLSServer("127.0.0.1:0", cert, key,
+		newTestHandler(t, "https://session.test"), tlsreload.WithInterval(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reloader.Run(ctx)
+
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ServeTLS with empty cert/key paths: GetCertificate supplies the pair.
+	go srv.ServeTLS(ln, "", "")
+	defer srv.Close()
+
+	if got := handshakeCN(t, ln.Addr().String()); got != "first.example" {
+		t.Fatalf("initial CN = %q", got)
+	}
+	old, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- test
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+
+	writePair(t, cert, key, "second.example")
+	eventually(t, 2*time.Second, func() bool {
+		return handshakeCN(t, ln.Addr().String()) == "second.example"
+	})
+
+	// The pre-rotation connection must still answer (D21: streams stay up).
+	if _, err := fmt.Fprintf(old, "GET /healthz HTTP/1.1\r\nHost: portal.test\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(old), nil)
+	if err != nil {
+		t.Fatalf("request on the pre-rotation connection: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET /healthz on the pre-rotation connection = %d, want 200", res.StatusCode)
+	}
+}
+
+// handshakeCN dials addr with TLS and returns the CommonName of the leaf
+// certificate the server presents.
+func handshakeCN(t *testing.T, addr string) string {
+	t.Helper()
+	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- test
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.ConnectionState().PeerCertificates[0].Subject.CommonName
+}
+
+// writePair generates a self-signed ECDSA P-256 pair with the given CN and
+// writes both files via temp-file + rename.
+func writePair(t *testing.T, certFile, keyFile, cn string) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRename(t, certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	writeRename(t, keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+}
+
+func writeRename(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// eventually polls cond every 5 ms until it returns true or the deadline
+// passes, then fails the test.
+func eventually(t *testing.T, d time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met before deadline")
 }
 
 // TestServerTimeouts (SEC-23): the frontend listener bounds every phase of

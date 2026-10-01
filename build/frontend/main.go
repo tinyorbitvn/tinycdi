@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -22,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 func envOr(key, def string) string {
@@ -70,9 +73,17 @@ func main() {
 		log.Warn("no session origin configured: CSP blocks the session frame and launch form; sessions will not open")
 	}
 
-	srv := newServer(listen, newHandler(webRoot, frontendCSP(sessionOrigin)))
+	srv, reloader, err := newTLSServer(listen, tlsCert, tlsKey,
+		newHandler(webRoot, frontendCSP(sessionOrigin)), tlsreload.WithLogger(log))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reloader.Run(ctx)
 	log.Info("frontend listening", "addr", listen, "sessionOrigin", sessionOrigin)
-	if err := srv.ListenAndServeTLS(tlsCert, tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("serve", "err", err)
 		os.Exit(1)
 	}
@@ -196,6 +207,23 @@ func serveIndex(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
+}
+
+// newTLSServer builds the frontend listener with certificate hot-reload
+// (D21): the reloader re-reads certFile/keyFile when they change and
+// TLSConfig.GetCertificate hands out the newest pair, so a rotated Secret
+// takes effect on the next handshake without a restart. It also fails
+// startup here if the pair is unusable. Callers run reloader.Run until
+// shutdown; ServeTLS/ListenAndServeTLS are then called with empty
+// cert/key paths.
+func newTLSServer(addr, certFile, keyFile string, h http.Handler, opts ...tlsreload.Option) (*http.Server, *tlsreload.Reloader, error) {
+	r, err := tlsreload.New(certFile, keyFile, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	srv := newServer(addr, h)
+	srv.TLSConfig.GetCertificate = r.GetCertificate
+	return srv, r, nil
 }
 
 // newServer builds the frontend listener (SEC-23): all request phases are
