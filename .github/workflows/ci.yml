@@ -285,12 +285,9 @@ jobs:
             schedule|workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           git fetch -q origin "$BASE_REF"
-          PATHS_RE='^(build/kasm-adapter/|build/kasm-catalog'\
-            '|\.github/scripts/(check|scan)-kasm-catalog\.sh'\
-            '|\.github/tests/kasm-catalog\.test\.sh'\
-            '|tests/integration/kasm_adapter_test\.go|internal/runtime/linux/'\
-            '|deploy/helm/tinycdi/ci/example-values\.yaml|docs/kasm-images\.md'\
-            '|\.github/workflows/ci\.yml)'
+          # One line on purpose: a backslash-continued string keeps the next
+          # line's indentation, which splits the word and runs the rest as a command.
+          PATHS_RE='^(build/kasm-adapter/|build/kasm-catalog|\.github/scripts/(check|scan)-kasm-catalog\.sh|\.github/tests/kasm-catalog\.test\.sh|tests/integration/kasm_adapter_test\.go|internal/runtime/linux/|deploy/helm/tinycdi/ci/example-values\.yaml|docs/kasm-images\.md|\.github/workflows/ci\.yml)'
           # grep -q short-circuits on the first match and can SIGPIPE the
           # producer on a large diff — under pipefail that would flip the
           # gate to "skip". A herestring feeds grep without a pipeline,
