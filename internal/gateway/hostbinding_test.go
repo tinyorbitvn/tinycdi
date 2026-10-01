@@ -86,7 +86,7 @@ func TestHostBinding_LaunchOnOtherHost(t *testing.T) {
 		}
 	}
 	lease := fb.leaseOf(t, "tk-other")
-	if n := fb.revokeCount(lease.ID); n != 1 {
+	if n := fb.leaseRevokeCount(lease.ID); n != 1 {
 		t.Fatalf("RevokeLease called %d times, want exactly 1", n)
 	}
 	for _, a := range audit.auditActions() {
@@ -161,7 +161,7 @@ func TestHostBinding_TwoWorkspacesStayConnected(t *testing.T) {
 		t.Fatalf("proxied A=%d B=%d, want 200/200", respA.StatusCode, respB.StatusCode)
 	}
 	for _, ticket := range []string{"tk-wsa", "tk-wsb"} {
-		if n := fb.revokeCount(fb.leaseOf(t, ticket).ID); n != 0 {
+		if n := fb.leaseRevokeCount(fb.leaseOf(t, ticket).ID); n != 0 {
 			t.Fatalf("lease for %s revoked %d times — B's launch must not touch A", ticket, n)
 		}
 	}

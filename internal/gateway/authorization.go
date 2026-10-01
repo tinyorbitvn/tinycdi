@@ -66,6 +66,13 @@ type session struct {
 	nextID          int
 	conns           map[net.Conn]struct{} // hijacked (upgraded) conns
 	cancels         map[int]context.CancelFunc
+	// streamEpoch is the lease stream epoch this process claimed or last
+	// observed on renew. A renew reporting a newer epoch means another
+	// replica admitted the stream: our conns are fenced (P3).
+	streamEpoch uint64
+	// inflightReports counts activity reports whose broker call has not
+	// returned — Drain waits for the queue to drain and this to reach zero.
+	inflightReports int
 
 	// upgradeInFlight makes stream admission atomic: a second concurrent
 	// upgrade is rejected instead of both surviving the fence. upgradeGen
@@ -85,6 +92,7 @@ func newSession(cookieID string, l broker.Lease, now time.Time) *session {
 		lease:         l,
 		fence:         fenceOf(l),
 		lastRenewOK:   now,
+		streamEpoch:   l.StreamEpoch,
 		done:          make(chan struct{}),
 		events:        make(chan broker.ActivityEventType, activityQueueLen),
 		conns:         map[net.Conn]struct{}{},
@@ -231,16 +239,74 @@ func (s *session) admitUpgrade() (int, bool) {
 	}
 	s.upgradeGen++
 	s.upgradeInFlight = true
+	s.dropStreamsLocked()
+	return s.upgradeGen, true
+}
+
+// dropStreamsLocked closes every open stream conn and cancels the tracked
+// stream request — the local half of both self-takeover fencing and the
+// cross-replica epoch fence. Closed conns stay in the map until their proxy
+// request unwinds: untrack removes a conn only after its disconnect report
+// was queued, so "no conns" means every disconnect is at least enqueued —
+// the invariant Drain waits on. Caller holds s.mu.
+func (s *session) dropStreamsLocked() {
 	for c := range s.conns {
 		c.Close()
 	}
-	s.conns = map[net.Conn]struct{}{}
 	if c, ok := s.cancels[s.streamTrackID]; ok {
 		delete(s.cancels, s.streamTrackID)
 		c()
 	}
 	s.streamTrackID = -1
-	return s.upgradeGen, true
+}
+
+// dropStreams closes this process's stream connections while the session
+// itself stays alive — the renew loop calls it when the lease's stream
+// epoch moved past ours, and Drain calls it to shed every stream.
+func (s *session) dropStreams() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropStreamsLocked()
+}
+
+// streamBusy reports whether a stream admission is in flight or a hijacked
+// conn is still open — Drain is not done until every session is quiet.
+func (s *session) streamBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upgradeInFlight || len(s.conns) > 0
+}
+
+// pendingActivity reports undelivered activity reports: events still in the
+// queue plus reports whose broker call has not returned.
+func (s *session) pendingActivity() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.events) + s.inflightReports
+}
+
+// setStreamEpoch records the stream epoch ClaimStream returned — the fence
+// other replicas will compare their renewed leases against.
+func (s *session) setStreamEpoch(epoch uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if epoch > s.streamEpoch {
+		s.streamEpoch = epoch
+	}
+}
+
+// fenceStreamsFor applies the cross-replica stream fence on each successful
+// renew: a stream epoch newer than the one this process claimed means
+// another replica admitted the stream, so our conns close — the session
+// itself stays alive and keeps renewing.
+func (s *session) fenceStreamsFor(epoch uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if epoch <= s.streamEpoch {
+		return
+	}
+	s.streamEpoch = epoch
+	s.dropStreamsLocked()
 }
 
 // setStreamTrack records which tracked request owns the stream slot.
@@ -418,6 +484,7 @@ func (g *Gateway) renewLoop(s *session) {
 		cancel()
 		if err == nil {
 			s.noteRenewed(l, g.now())
+			s.fenceStreamsFor(l.StreamEpoch)
 			continue
 		}
 		if g.cfg.Metrics != nil {
@@ -456,7 +523,10 @@ func (g *Gateway) killSession(s *session, reason string) {
 	}
 }
 
-// lookupSession resolves the session cookie to a live session.
+// lookupSession resolves the session cookie to a live session. With a
+// session directory configured, a cookie this replica never saw falls back
+// to a digest lookup and rebuilds the session (D19); without one the
+// v0.1 behaviour is unchanged.
 func (g *Gateway) lookupSession(r *http.Request) *session {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c.Value == "" {
@@ -465,8 +535,28 @@ func (g *Gateway) lookupSession(r *http.Request) *session {
 	g.mu.Lock()
 	s := g.sessions[c.Value]
 	g.mu.Unlock()
-	if s == nil || !s.live(g) {
+	if s != nil {
+		if s.live(g) {
+			return s
+		}
 		return nil
 	}
-	return s
+	if g.cfg.Sessions == nil {
+		return nil
+	}
+	return g.rehydrate(r, c.Value)
+}
+
+// claimStream bumps the lease's stream epoch on an admitted upgrade and
+// remembers it on the session: another replica's renew loop then fences
+// whichever process holds the older epoch.
+func (g *Gateway) claimStream(ctx context.Context, s *session) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	epoch, err := g.cfg.Sessions.ClaimStream(ctx, g.cfg.Identity, s.leaseID(), s.fenceSnapshot())
+	cancel()
+	if err != nil {
+		return err
+	}
+	s.setStreamEpoch(epoch)
+	return nil
 }
