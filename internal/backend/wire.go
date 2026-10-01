@@ -34,6 +34,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway/brokerclient"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
@@ -437,14 +438,26 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		return fmt.Errorf("oidc: %w", err)
 	}
 
+	// The session domain is the host[:port] of the normalized session
+	// origin; launch URLs resolve to per-workspace hosts under it (D9).
+	sessionDomain, err := sessionhost.ParseDomain(strings.TrimPrefix(cfg.SessionOrigin, "https://"))
+	if err != nil {
+		return fmt.Errorf("session domain: %w", err)
+	}
+
 	catalog := catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView)
 	tplHandler := api.NewTemplateHandler(catalog, tenants)
-	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.SessionOrigin)
+	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain)
+	meHandler := api.NewMeHandler(sessionDomain.String())
+	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
 	dataHandler := api.NewDataHandler(retained, catalog, tenants)
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, dataHandler)
+	// Desktop input slides the owning user's portal idle timer (D18).
+	broker.WithInputHook(authn.InputHook())(brk)
+
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -453,13 +466,16 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // (launch, control, desktop proxy) is deliberately absent: API routes must
 // not exist on the session listener and vice versa (D7).
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
-	conn *api.ConnectionHandler, data *api.DataHandler) *http.ServeMux {
+	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
+	data *api.DataHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", http.HandlerFunc(authn.LoginHandler))
 	mux.Handle("GET /v1/auth/callback", http.HandlerFunc(authn.CallbackHandler))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
+	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
 	api.MountConnectionRoutes(mux, authn, conn)
+	api.MountConnectionStatusRoutes(mux, authn, connStatus)
 	api.MountDataRoutes(mux, authn, data)
 	return mux
 }
