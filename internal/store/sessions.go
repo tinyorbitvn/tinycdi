@@ -31,9 +31,14 @@ type Session struct {
 	TenantID   string
 	Groups     []string
 	CSRFToken  string
-	CreatedAt  time.Time
-	LastSeenAt time.Time
-	ExpiresAt  time.Time // zero = no absolute expiry
+	// DisplayName and Email are display-only identity copied from the
+	// verified ID token at login (migration 012); they carry no
+	// authorization meaning.
+	DisplayName string
+	Email       string
+	CreatedAt   time.Time
+	LastSeenAt  time.Time
+	ExpiresAt   time.Time // zero = no absolute expiry
 }
 
 // ErrSessionNotFound is returned for unknown or expired session IDs.
@@ -96,17 +101,20 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 	// synchronizer token.
 	_, err = s.db.Pool().Exec(ctx, `
 		INSERT INTO sessions (id, issuer, subject, tenant_id, groups, csrf_token,
-			created_at, last_seen_at, expires_at, epoch)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+			display_name, email, created_at, last_seen_at, expires_at, epoch)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
 			(SELECT value FROM platform_meta WHERE key = 'session_epoch'))
 		ON CONFLICT (id) DO UPDATE SET
 			issuer = EXCLUDED.issuer, subject = EXCLUDED.subject,
 			tenant_id = EXCLUDED.tenant_id, groups = EXCLUDED.groups,
-			csrf_token = EXCLUDED.csrf_token, created_at = EXCLUDED.created_at,
+			csrf_token = EXCLUDED.csrf_token,
+			display_name = EXCLUDED.display_name, email = EXCLUDED.email,
+			created_at = EXCLUDED.created_at,
 			last_seen_at = EXCLUDED.last_seen_at, expires_at = EXCLUDED.expires_at,
 			epoch = EXCLUDED.epoch`,
 		sessionKey(sess.ID), sess.Issuer, sess.Subject, sess.TenantID, groups,
-		csrfTokenMAC(sess.ID, sess.CSRFToken), sess.CreatedAt, sess.LastSeenAt, expires)
+		csrfTokenMAC(sess.ID, sess.CSRFToken), sess.DisplayName, sess.Email,
+		sess.CreatedAt, sess.LastSeenAt, expires)
 	return err
 }
 
@@ -115,7 +123,7 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 // caller looked up (it keys the CSRF MAC).
 const sessionReturning = `
 	RETURNING issuer, subject, tenant_id, groups, csrf_token,
-		created_at, last_seen_at, expires_at`
+		display_name, email, created_at, last_seen_at, expires_at`
 
 // currentEpochSQL resolves the session epoch in the same statement so a
 // rotation takes effect on the very next read — no cached copy can go stale.
@@ -150,7 +158,8 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 			  AND (expires_at IS NULL OR expires_at > now())`+sessionReturning, key)
 	}
 	err := row.Scan(&sess.Issuer, &sess.Subject, &sess.TenantID, &groups,
-		&sess.CSRFToken, &sess.CreatedAt, &sess.LastSeenAt, &expires)
+		&sess.CSRFToken, &sess.DisplayName, &sess.Email,
+		&sess.CreatedAt, &sess.LastSeenAt, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Drop dead sessions opportunistically — including ones a rotated
 		// epoch orphaned.
