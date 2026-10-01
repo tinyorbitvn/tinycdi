@@ -1,0 +1,13 @@
+---
+# yamllint config for .github/workflows (see .github/README.md for usage).
+# Default rules, relaxed only where GitHub-Actions reality demands it:
+#   line-length — full-SHA action pins + version comments run long
+#   truthy      — "on:" is quoted already, but expression booleans abound
+extends: default
+rules:
+  line-length:
+    max: 140
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false

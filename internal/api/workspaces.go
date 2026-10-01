@@ -1,0 +1,480 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+)
+
+// respondJSON serializes v as an application/json response.
+func respondJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// decodeJSON decodes exactly one JSON document from body into v: unknown
+// fields are rejected and trailing data after the first value is an error.
+// The error detail is never echoed to the client (SEC-I7); callers respond
+// with a generic "invalid request body".
+func decodeJSON(body []byte, v any) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return false
+	}
+	var extra any
+	return dec.Decode(&extra) == io.EOF
+}
+
+// TenantResolver maps a verified tenant ID to the Kubernetes namespace
+// holding its Workspace CRs. Unknown tenants are rejected with FORBIDDEN.
+type TenantResolver interface {
+	Namespace(tenantID string) (ns string, ok bool)
+}
+
+// StaticTenantResolver is a config-driven TenantResolver.
+type StaticTenantResolver map[string]string
+
+// Namespace implements TenantResolver.
+func (m StaticTenantResolver) Namespace(tenantID string) (string, bool) {
+	ns, ok := m[tenantID]
+	return ns, ok
+}
+
+// TenantAdminGroup is the verified group claim that widens list/get to the
+// whole tenant instead of the caller's own workspaces.
+const TenantAdminGroup = "tenant-admin"
+
+// TemplateEntry is a catalog entry resolvable to a templateRef.
+type TemplateEntry struct {
+	ID                     string
+	Name                   string // WorkspaceTemplate CR name
+	Description            string
+	Revision               int64
+	Runtime                string
+	Experience             string
+	CPUMillis              int64
+	MemoryMiB              int64
+	StorageGiB             int64
+	IdleTimeoutSeconds     int64
+	DisconnectGraceSeconds int64
+	MaxRunningSeconds      int64
+	DataPolicyDefault      string
+	ClipboardPolicy        string
+	PublishedAt            time.Time
+}
+
+// ErrTemplateNotFound means templateRef does not resolve in the caller's
+// tenant catalog.
+var ErrTemplateNotFound = errors.New("template not found")
+
+// TemplateCatalog resolves and lists templates for a tenant.
+type TemplateCatalog interface {
+	Resolve(ctx context.Context, tenantID, templateID string) (TemplateEntry, error)
+	List(ctx context.Context, tenantID, runtimeFilter, cursor string, limit int) ([]TemplateEntry, string, error)
+}
+
+// workspaceBackend is the provisioning.Service surface the handler needs;
+// an interface so unit tests can run without Postgres.
+type workspaceBackend interface {
+	CreateWorkspace(ctx context.Context, tenantID, idemKey string, req provisioning.CreateRequest, bodyHash []byte) (provisioning.WorkspaceRecord, error)
+	// AttachRetained serves creates carrying retainedDataRef — the same
+	// owner-scoped, claimed transition as POST /v1/data/{id}/attach.
+	AttachRetained(ctx context.Context, tenantID, caller, ownerScope, dataID, idemKey string, req provisioning.AttachRequest, bodyHash []byte) (provisioning.WorkspaceRecord, error)
+	GetWorkspace(ctx context.Context, tenantID, ownerScope, id string) (provisioning.WorkspaceRecord, error)
+	ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase, cursor string, limit int) ([]provisioning.WorkspaceRecord, string, error)
+	SignalWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, kind provisioning.IntentKind, bodyHash []byte) (provisioning.WorkspaceRecord, error)
+}
+
+// WorkspaceHandler implements /v1/workspaces per openapi.yaml.
+type WorkspaceHandler struct {
+	backend    workspaceBackend
+	catalog    TemplateCatalog
+	tenants    TenantResolver
+	statusView StatusView
+	maxBody    int64
+	now        func() time.Time
+}
+
+// NewWorkspaceHandler wires the handler. catalog may be nil when
+// /v1/workspaces create is not served (tests); tenants is required.
+func NewWorkspaceHandler(b workspaceBackend, c TemplateCatalog, t TenantResolver) *WorkspaceHandler {
+	return &WorkspaceHandler{backend: b, catalog: c, tenants: t,
+		maxBody: 64 << 10, now: time.Now}
+}
+
+// MountWorkspaceRoutes registers the workspace/template routes with the
+// authn middleware applied: RequireAuth on reads, RequireAuth+RequireCSRF
+// on writes.
+func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *WorkspaceHandler, th *TemplateHandler) {
+	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
+	unsafe := func(h http.Handler) http.Handler { return authn.RequireAuth(authn.RequireCSRF(h)) }
+	mux.Handle("GET /v1/workspaces", safe(http.HandlerFunc(h.List)))
+	mux.Handle("POST /v1/workspaces", unsafe(http.HandlerFunc(h.Create)))
+	mux.Handle("GET /v1/workspaces/{id}", safe(http.HandlerFunc(h.Get)))
+	mux.Handle("DELETE /v1/workspaces/{id}", unsafe(http.HandlerFunc(h.Delete)))
+	mux.Handle("POST /v1/workspaces/{id}/start", unsafe(http.HandlerFunc(h.Start)))
+	mux.Handle("POST /v1/workspaces/{id}/stop", unsafe(http.HandlerFunc(h.Stop)))
+	if th != nil {
+		mux.Handle("GET /v1/templates", safe(http.HandlerFunc(th.List)))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Public JSON shapes (must match openapi.yaml exactly).
+// ---------------------------------------------------------------------------
+
+type templateSummary struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Revision   int64  `json:"revision"`
+	Runtime    string `json:"runtime"`
+	Experience string `json:"experience"`
+}
+
+type workspaceCondition struct {
+	Type               string    `json:"type"`
+	Status             string    `json:"status"`
+	Reason             string    `json:"reason"`
+	Message            string    `json:"message,omitempty"`
+	LastTransitionTime time.Time `json:"lastTransitionTime"`
+}
+
+// WorkspaceView is the public workspace record (openapi WorkspaceView).
+type WorkspaceView struct {
+	ID              string               `json:"id"`
+	Name            string               `json:"name"`
+	Template        templateSummary      `json:"template"`
+	Phase           string               `json:"phase"`
+	Conditions      []workspaceCondition `json:"conditions"`
+	DesiredState    string               `json:"desiredState"`
+	DataPolicy      string               `json:"dataPolicy"`
+	RetainedDataRef string               `json:"retainedDataRef,omitempty"`
+	FailureReason   string               `json:"failureReason,omitempty"`
+	CreatedAt       time.Time            `json:"createdAt"`
+	UpdatedAt       time.Time            `json:"updatedAt"`
+}
+
+// WorkspaceList is the paginated list response.
+type WorkspaceList struct {
+	Items         []WorkspaceView `json:"items"`
+	NextPageToken string          `json:"nextPageToken,omitempty"`
+}
+
+func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
+	return WorkspaceView{
+		ID:   r.ID,
+		Name: r.Name,
+		Template: templateSummary{
+			ID:         r.Template.ID,
+			Name:       r.Template.Name,
+			Revision:   r.Template.Revision,
+			Runtime:    r.Template.Runtime,
+			Experience: r.Template.Experience,
+		},
+		Phase:           r.Phase,
+		Conditions:      []workspaceCondition{},
+		DesiredState:    r.DesiredState,
+		DataPolicy:      r.DataPolicy,
+		RetainedDataRef: r.RetainedDataRef,
+		FailureReason:   r.FailureReason,
+		CreatedAt:       r.CreatedAt,
+		UpdatedAt:       r.UpdatedAt,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+var (
+	workspaceIDPattern   = regexp.MustCompile(`^ws_[A-Za-z0-9]{8,64}$`)
+	workspaceNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$|^[a-z0-9]$`)
+	templateRefPattern   = regexp.MustCompile(`^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$`)
+	retainedRefPattern   = regexp.MustCompile(`^rd_[A-Za-z0-9]{8,64}$`)
+)
+
+type createWorkspaceRequest struct {
+	Name            string `json:"name"`
+	TemplateRef     string `json:"templateRef"`
+	DesiredState    string `json:"desiredState,omitempty"`
+	DataPolicy      string `json:"dataPolicy,omitempty"`
+	RetainedDataRef string `json:"retainedDataRef,omitempty"`
+}
+
+// ownerScope returns the caller's owner ref, or "" for tenant admins.
+func ownerScope(p Principal) string {
+	if p.InGroup(TenantAdminGroup) {
+		return ""
+	}
+	return p.Owner()
+}
+
+func (h *WorkspaceHandler) principalOrFail(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+	p, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeError(w, r, CodeUnauthenticated, "authentication required")
+		return p, false
+	}
+	if _, ok := h.tenants.Namespace(p.TenantID); !ok {
+		writeError(w, r, CodeForbidden, "tenant is not provisioned")
+		return p, false
+	}
+	return p, true
+}
+
+// List handles GET /v1/workspaces.
+func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	limit := 50
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 200 {
+			writeError(w, r, CodeInvalidRequest, "limit must be 1..200")
+			return
+		}
+		limit = n
+	}
+	phase := q.Get("phase")
+	recs, next, err := h.backend.ListWorkspaces(r.Context(), p.TenantID,
+		ownerScope(p), phase, q.Get("pageToken"), limit)
+	if err != nil {
+		h.writeBackendError(w, r, err)
+		return
+	}
+	out := WorkspaceList{Items: make([]WorkspaceView, 0, len(recs)), NextPageToken: next}
+	for i := range recs {
+		out.Items = append(out.Items, h.viewWithStatus(r.Context(), &recs[i]))
+	}
+	respondJSON(w, out)
+}
+
+// Create handles POST /v1/workspaces.
+func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if len(key) < 8 || len(key) > 128 {
+		writeError(w, r, CodeInvalidRequest, "Idempotency-Key header required (8..128 chars)")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBody))
+	if err != nil {
+		writeError(w, r, CodeInvalidRequest, "unreadable or oversized body")
+		return
+	}
+	var req createWorkspaceRequest
+	if !decodeJSON(body, &req) {
+		writeError(w, r, CodeInvalidRequest, "invalid request body")
+		return
+	}
+	if !workspaceNamePattern.MatchString(req.Name) {
+		writeError(w, r, CodeInvalidRequest, "name must be a DNS-label-style name")
+		return
+	}
+	if !templateRefPattern.MatchString(req.TemplateRef) {
+		writeError(w, r, CodeInvalidRequest, "templateRef must be a tpl_ identifier")
+		return
+	}
+	if req.DesiredState != "" && req.DesiredState != "Running" && req.DesiredState != "Stopped" {
+		writeError(w, r, CodeInvalidRequest, "desiredState must be Running or Stopped")
+		return
+	}
+	if req.DataPolicy != "" && req.DataPolicy != "Ephemeral" && req.DataPolicy != "Retain" {
+		writeError(w, r, CodeInvalidRequest, "dataPolicy must be Ephemeral or Retain")
+		return
+	}
+	if req.RetainedDataRef != "" {
+		if !retainedRefPattern.MatchString(req.RetainedDataRef) {
+			writeError(w, r, CodeInvalidRequest, "retainedDataRef must be an rd_ identifier")
+			return
+		}
+		// An attached disk is retained data by definition; an explicit
+		// Ephemeral policy contradicts the ref.
+		if req.DataPolicy == "Ephemeral" {
+			writeError(w, r, CodeInvalidRequest, "dataPolicy must be Retain when retainedDataRef is set")
+			return
+		}
+	}
+	tpl, err := h.catalog.Resolve(r.Context(), p.TenantID, req.TemplateRef)
+	if err != nil && !errors.Is(err, ErrTemplateNotFound) {
+		h.writeBackendError(w, r, err)
+		return
+	}
+	if err != nil || tpl.ID == "" {
+		writeError(w, r, CodeInvalidTemplate, "unknown template")
+		return
+	}
+	dataPolicy := req.DataPolicy
+	if dataPolicy == "" {
+		dataPolicy = tpl.DataPolicyDefault
+	}
+	tplInfo := provisioning.TemplateInfo{
+		ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
+		Runtime: tpl.Runtime, Experience: tpl.Experience,
+	}
+	vector := provisioning.ResourceVector{
+		RunningSlots: 1,
+		CPUMillis:    tpl.CPUMillis,
+		MemoryBytes:  tpl.MemoryMiB << 20,
+		DiskBytes:    tpl.StorageGiB << 30,
+	}
+	sum := sha256.Sum256(body)
+	var rec provisioning.WorkspaceRecord
+	if req.RetainedDataRef != "" {
+		// SEC-01: retainedDataRef shares the claimed attach path —
+		// owner/tenant-admin scope, state Retained, runtime match and the
+		// atomic Retained->Attaching claim all happen inside the store.
+		rec, err = h.backend.AttachRetained(r.Context(), p.TenantID, p.Owner(), ownerScope(p),
+			req.RetainedDataRef, key, provisioning.AttachRequest{
+				Name:         req.Name,
+				Template:     tplInfo,
+				Vector:       vector,
+				DesiredState: req.DesiredState,
+			}, sum[:])
+	} else {
+		rec, err = h.backend.CreateWorkspace(r.Context(), p.TenantID, key, provisioning.CreateRequest{
+			OwnerIssuer:  p.Issuer,
+			OwnerSubject: p.Subject,
+			Name:         req.Name,
+			Template:     tplInfo,
+			Vector:       vector,
+			DesiredState: req.DesiredState,
+			DataPolicy:   dataPolicy,
+		}, sum[:])
+	}
+	if err != nil {
+		h.writeBackendError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(h.viewWithStatus(r.Context(), &rec))
+}
+
+// Get handles GET /v1/workspaces/{id}.
+func (h *WorkspaceHandler) Get(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !workspaceIDPattern.MatchString(id) {
+		writeError(w, r, CodeInvalidRequest, "bad workspace id")
+		return
+	}
+	rec, err := h.backend.GetWorkspace(r.Context(), p.TenantID, ownerScope(p), id)
+	if err != nil {
+		h.writeBackendError(w, r, err)
+		return
+	}
+	respondJSON(w, h.viewWithStatus(r.Context(), &rec))
+}
+
+// signal shares the start/stop/delete path.
+func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, kind provisioning.IntentKind, keyRequired bool) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !workspaceIDPattern.MatchString(id) {
+		writeError(w, r, CodeInvalidRequest, "bad workspace id")
+		return
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if keyRequired && (len(key) < 8 || len(key) > 128) {
+		writeError(w, r, CodeInvalidRequest, "Idempotency-Key header required (8..128 chars)")
+		return
+	}
+	if key != "" && (len(key) < 8 || len(key) > 128) {
+		writeError(w, r, CodeInvalidRequest, "Idempotency-Key must be 8..128 chars")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBody))
+	if err != nil {
+		writeError(w, r, CodeInvalidRequest, "unreadable or oversized body")
+		return
+	}
+	// Signal endpoints declare no request body; a non-empty one must still
+	// be a single well-formed JSON document (SEC-I7).
+	if len(bytes.TrimSpace(body)) > 0 {
+		var v json.RawMessage
+		if !decodeJSON(body, &v) {
+			writeError(w, r, CodeInvalidRequest, "invalid request body")
+			return
+		}
+	}
+	sum := sha256.Sum256(body)
+	rec, err := h.backend.SignalWorkspace(r.Context(), p.TenantID, p.Owner(), ownerScope(p), id, key, kind, sum[:])
+	if err != nil {
+		h.writeBackendError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if kind == provisioning.IntentDelete {
+		status = http.StatusAccepted
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(h.viewWithStatus(r.Context(), &rec))
+}
+
+// Start handles POST /v1/workspaces/{id}/start.
+func (h *WorkspaceHandler) Start(w http.ResponseWriter, r *http.Request) {
+	h.signal(w, r, provisioning.IntentStart, true)
+}
+
+// Stop handles POST /v1/workspaces/{id}/stop.
+func (h *WorkspaceHandler) Stop(w http.ResponseWriter, r *http.Request) {
+	h.signal(w, r, provisioning.IntentStop, false)
+}
+
+// Delete handles DELETE /v1/workspaces/{id}.
+func (h *WorkspaceHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	h.signal(w, r, provisioning.IntentDelete, false)
+}
+
+// writeBackendError maps provisioning errors onto the stable error model.
+func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, provisioning.ErrWorkspaceNotFound):
+		writeError(w, r, CodeNotFound, "workspace not found")
+	case errors.Is(err, provisioning.ErrRetainedNotFound):
+		writeError(w, r, CodeNotFound, "retained data record not found")
+	case errors.Is(err, provisioning.ErrRetainedState):
+		writeError(w, r, CodeInvalidState, err.Error())
+	case errors.Is(err, provisioning.ErrRuntimeMismatch):
+		writeError(w, r, CodeInvalidTemplate, "template runtime does not match the retained disk")
+	case errors.Is(err, provisioning.ErrBadCursor):
+		writeError(w, r, CodeInvalidRequest, "bad pageToken")
+	case errors.Is(err, provisioning.ErrWorkspaceClosed),
+		errors.Is(err, provisioning.ErrInvalidState):
+		writeError(w, r, CodeInvalidState, err.Error())
+	case provisioning.IsQuotaExceeded(err), errors.Is(err, provisioning.ErrNoQuota):
+		writeError(w, r, CodeQuotaExhausted, "quota exhausted")
+	case provisioning.IsIdempotencyConflict(err):
+		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
+	case errors.Is(err, provisioning.ErrNameTaken):
+		writeError(w, r, CodeInvalidState, "workspace name already in use")
+	case errors.Is(err, provisioning.ErrReservationConflict):
+		writeError(w, r, CodeInvalidState, err.Error())
+	default:
+		writeError(w, r, CodeInternal, "internal error")
+	}
+}

@@ -1,0 +1,508 @@
+# tinycdi — values
+#
+# SECURITY CONTRACT
+#   * Secrets are referenced by NAME only (existingSecret). This file must
+#     never carry passwords, tokens, DSNs or private keys.
+#   * The operator ClusterRole is bound ONLY via RoleBindings inside the
+#     release namespace and managedNamespaces — never cluster-wide.
+#   * SecureCookies cannot be disabled here: no value maps to it.
+#   * The chart never installs KubeVirt/CDI, a Postgres database, a dev
+#     OIDC provider, or any other bundled dependency — Postgres, the IdP,
+#     and TLS material are prerequisites you operate yourself.
+
+global:
+  # Registry prepended to every image.repository (all components and the
+  # seeded-template runtime images). Set e.g. registry.example.com for an
+  # internal mirror; a per-image .registry override wins over this.
+  imageRegistry: ghcr.io
+  # PulledSecrets attached to every platform pod. Entries may be plain
+  # names ("registry-pull") or {name: ...} maps.
+  imagePullSecrets: []
+
+images:
+  # tag defaults to the chart appVersion; digest wins over tag when set.
+  api:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-api
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  operator:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-operator
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  gateway:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-gateway
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  portal:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-portal
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  # Runtime images referenced by seeded WorkspaceTemplates (templates[]
+  # entries using `image: linuxDesktop` / `image: browser`). Runtime images
+  # must be DIGEST-pinned (spec.linux.image requires <repo>@sha256:<64hex>)
+  # — a tag-only runtime image is rejected by the CRD.
+  linuxDesktop:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-linux-desktop
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  browser:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-browser
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+
+# Tenant namespaces the platform manages. The chart creates them with
+# helm.sh/resource-policy=keep (uninstall keeps them and the PVCs inside),
+# labels each with workspaces.cdi.tinyorbit.vn/tenant=<tenant>, installs the
+# default-deny NetworkPolicy baseline, a tinycdi-runtime ServiceAccount
+# (automountServiceAccountToken=false) and the per-namespace RoleBindings.
+managedNamespaces: []
+  # - name: tinycdi-tenant-a
+  #   tenant: tenant-a
+
+# Public entry points. MUST be different registrable hosts: portal cookies,
+# the OIDC redirect and launch URLs are scoped per origin.
+portalHost: portal.example.invalid
+sessionHost: session.example.invalid
+
+oidc:
+  issuer: https://idp.example.invalid/realms/tinycdi
+  clientID: tinycdi-portal
+  # Existing Secret (in the release namespace) with the client secret.
+  existingSecret: tinycdi-oidc-client
+  # Key inside that Secret holding the client secret value.
+  clientSecretKey: client-secret
+  # Defaults to https://<portalHost>/v1/auth/callback when empty.
+  redirectURL: ""
+  # Login gate: when non-empty, the api only lets users in whose ID-token
+  # `groups` claim carries at least one of these names — exact match (the
+  # Keycloak full-path form "/platform-admins" does NOT satisfy
+  # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
+  # login open to every IdP account — tighten this in production.
+  requiredGroups: []
+  # api -> IdP egress. Narrow to the IdP address space when known.
+  egressCIDRs: ["0.0.0.0/0"]
+  port: 443
+
+database:
+  # Existing Secret (in the release namespace) with the PostgreSQL DSN
+  # (postgres://user:pass@host:port/db?...). The api runs embedded
+  # migrations at startup, so the role needs DDL rights on its schema.
+  existingSecret: tinycdi-api-db
+  urlKey: url
+  port: 5432
+  # NetworkPolicy peers the api may reach on database.port, e.g.
+  #   - ipBlock: {cidr: 10.20.30.40/32}
+  # or namespaceSelector/podSelector peers. REQUIRED for api->DB egress:
+  # an EMPTY list fails the render (an empty peer list means "everywhere")
+  # and so does leaving the shipped placeholder below — it matches only
+  # the unroutable 0.0.0.0 host, which silently cuts the api from its
+  # database (CHTR-7). Always set this to your database.
+  allowedPeers:
+    - ipBlock: {cidr: 0.0.0.0/32}   # deny-all placeholder — REPLACE or the render fails
+  # PostgreSQL TLS. The api REFUSES to start on a non-verifying sslmode
+  # (disable/allow/prefer/require) — CHTR-8 — so the chart defaults to
+  # verify-full and refuses weaker modes unless dev.enabled (which also
+  # renders --dev-insecure-db on the api). mode is exported as PGSSLMODE
+  # and caSecret is mounted read-only as PGSSLROOTCERT — pgx honours both
+  # libpq-style env vars for DSN keys the URL omits (an explicit sslmode=
+  # in the DSN still wins, and a non-verifying one makes the api fail
+  # fast). caSecret is OPTIONAL: without it pgx verifies against the
+  # system CA pool — only needed for private-CA databases.
+  tls:
+    mode: verify-full
+    caSecret:
+      name: ""            # e.g. tinycdi-db-ca — needed for private-CA DBs
+      key: ca.crt
+
+api:
+  replicas: 1
+  sessionIdle: 30m
+  # Extra Origins (beyond https://<portalHost>) the api accepts on
+  # cookie-authenticated state-changing requests — Origin allowlist for the
+  # CSRF defence-in-depth check. Full scheme://host[:port] origins only.
+  extraPortalOrigins: []
+  # CN the api's internal mTLS listener requires on the operator client
+  # certificate (workspace revoke/drain routes). Empty = "operator".
+  operatorCN: ""
+  # Internal mTLS broker listener (gateway redeems launch tickets here).
+  internalTLS:
+    existingSecret: tinycdi-api-internal-tls   # keys tls.crt / tls.key
+  clientCA:
+    existingSecret: tinycdi-internal-ca        # key ca.crt
+  # Optional extra trust bundle for outbound calls (e.g. internal IdP CA).
+  extraCA:
+    existingSecret: ""                          # empty disables SSL_CERT_FILE
+    key: ca.crt
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Pod/container securityContext keys MERGE over the hardened defaults
+  # (runAsNonRoot, drop ALL caps, read-only rootfs). Override keys only
+  # when you must — the defaults are what the chart tests assert.
+  podSecurityContext: {}
+  securityContext: {}
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
+  extraArgs: []
+  extraEnv: []
+
+operator:
+  replicas: 1
+  leaderElect: false
+  webhookPort: -1           # -1 disables the webhook server
+  # Operator metrics are not exposed: controller-runtime's secure mode
+  # (HTTPS + authn/authz filter) needs cluster-scoped TokenReview and
+  # SubjectAccessReview RBAC this chart refuses to grant, and plain-HTTP
+  # metrics are banned — the endpoint is pinned off (--metrics-bind-address=0).
+  # CIDRs subtracted from runtime InternetOnly egress (RFC1918, CGNAT,
+  # loopback/metadata, corp ranges).
+  internetExceptCIDRs: []
+  # Cluster CIDRs (pod, Service and node ranges of THIS cluster) — appended
+  # to --internet-except-cidrs. The render FAILS when this is empty while a
+  # seeded template uses networkProfile: InternetOnly (SEC-02).
+  clusterCIDRs: []
+  # Internal broker client (ADR 0003): the teardown finalizer's lease/
+  # stream seams call the api internal mTLS listener with an operator
+  # client certificate (CN=operator unless api.operatorCN overrides —
+  # the only identity the workspace revoke/drain routes accept).
+  brokerClient:
+    enabled: true
+    # Base URL of the api internal listener; defaults to
+    # https://api-internal.<release-namespace>.svc:9443.
+    internalURL: ""
+    # CA bundle verifying the broker listener. Defaults to the same
+    # internal CA the api uses to verify client certs.
+    ca:
+      existingSecret: tinycdi-internal-ca
+      key: ca.crt
+    # Operator mTLS client identity, keys tls.crt / tls.key.
+    mtls:
+      existingSecret: tinycdi-operator-mtls
+  # ENVTEST/DEV ONLY: run with no broker — teardown uses the standalone
+  # no-op seams. Without this the operator fails fast when the broker
+  # client is not wired; never set it in production.
+  devAllowNoBroker: false
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
+  extraArgs: []
+  extraEnv: []
+
+gateway:
+  replicas: 1
+  # Gateway identity reported to the broker (empty = mTLS cert CN).
+  id: ""
+  # Ticket audience; defaults to sessionHost.
+  audience: ""
+  # Extra hostnames added to the Host-header allowlist.
+  extraAllowedHosts: []
+  # Extra origins allowed to POST /v1/launch besides https://<portalHost>
+  # (ADR 0004). Full scheme://host[:port] origins only.
+  extraPortalOrigins: []
+  # Metrics listener, e.g. ":9090"; empty disables.
+  metricsListen: ""
+  service:
+    type: ClusterIP
+    # NodePort/LoadBalancer knobs (only when service.type selects them).
+    nodePort: null
+    loadBalancerIP: ""
+    loadBalancerSourceRanges: []
+    annotations: {}
+  tls:
+    existingSecret: tinycdi-gateway-tls        # keys tls.crt / tls.key
+  mtls:
+    existingSecret: tinycdi-gateway-mtls       # keys tls.crt / tls.key
+  # CA verifying the api internal listener (-broker-ca is REQUIRED by the
+  # binary). Defaults to the same internal CA the api uses to verify
+  # gateway client certs — override when the two differ.
+  trustedCA:
+    existingSecret: tinycdi-internal-ca
+    key: ca.crt
+  # Optional default CA for runtime upstreams.
+  upstreamCA:
+    existingSecret: ""
+    key: ca.crt
+  # /v1/control/* bearer token (operator control surface). Optional — when
+  # unset the control routes stay closed (fail-closed). Mounted as a file
+  # and passed via -control-token-file.
+  controlToken:
+    existingSecret: ""      # e.g. tinycdi-gateway-control-token
+    key: token
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
+  extraArgs: []
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+portal:
+  replicas: 1
+  # Defaults to http://api.<release-namespace>.svc:8080.
+  apiUpstream: ""
+  webRoot: ""               # empty = image default (/srv/web)
+  service:
+    type: ClusterIP
+    nodePort: null
+    loadBalancerIP: ""
+    loadBalancerSourceRanges: []
+    annotations: {}
+  tls:
+    existingSecret: tinycdi-portal-tls         # keys tls.crt / tls.key
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 128Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
+  extraArgs: []
+  extraEnv: []
+
+# cert-manager integration for the internal mTLS chain (gateway/operator
+# -> api broker). When enabled the chart renders Certificate resources
+# that PRODUCE the Secrets named by api.internalTLS.existingSecret,
+# gateway.mtls.existingSecret and operator.brokerClient.mtls.existingSecret
+# — the public-edge certs (portal.tls, gateway.tls) are NOT issued here;
+# point those at real certificates.
+certManager:
+  enabled: false
+  # Signer for the leaf Certificates. Ignored when selfSigned=true.
+  issuerRef:
+    kind: ClusterIssuer       # Issuer | ClusterIssuer
+    name: ""
+  # Bootstrap a self-signed CA inside the release: selfsigned ClusterIssuer
+  # -> CA Certificate (isCA) -> Issuer, then sign the leaf certs with it.
+  selfSigned: false
+  # Secret the bootstrap CA writes (key ca.crt). Point
+  # api.clientCA.existingSecret, gateway.trustedCA.existingSecret and
+  # operator.brokerClient.ca.existingSecret at this name when selfSigned.
+  caSecretName: ""            # default <release>-internal-ca
+  # Subject fields on the issued leaf certificates.
+  duration: 2160h             # 90d
+  renewBefore: 360h           # 15d
+
+# Exposure, option A: Kubernetes Ingress for both public edges.
+# Mutually exclusive with gatewayApi.enabled. Both pods terminate TLS
+# themselves — set backend pass-through annotations via
+# ingress.annotations for L7 ingresses, or expose the Services directly.
+ingress:
+  enabled: false
+  className: ""
+  # Annotations applied to BOTH ingresses.
+  annotations: {}
+    # nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  # Extra annotations per edge.
+  portalAnnotations: {}
+  sessionAnnotations: {}
+  tls:
+    existingSecret: ""      # Secret with the ingress TLS cert (both hosts)
+
+# Exposure, option B: Gateway API HTTPRoutes for both public edges.
+# Mutually exclusive with ingress.enabled. The backend Services speak
+# HTTPS — the Gateway implementation must pass through or re-encrypt to
+# the backend (e.g. Envoy Gateway BackendTLSPolicy); plain HTTP routing to
+# these Services will not work.
+gatewayApi:
+  enabled: false
+  # Gateway listener refs, e.g.
+  #   - {name: shared-gateway, namespace: gateway-system, sectionName: https}
+  parentRefs: []
+  annotations: {}
+
+# Optional Prometheus ServiceMonitor for the gateway metrics endpoint
+# (gateway.metricsListen) — served by the dedicated ClusterIP
+# gateway-metrics Service, never on the public port. The operator exposes
+# no metrics endpoint (see the operator section).
+serviceMonitor:
+  enabled: false
+  labels: {}            # e.g. {release: prometheus} to match your stack
+  interval: ""
+  scrapeTimeout: ""
+  honorLabels: false
+
+networkPolicy:
+  enabled: true
+  # Egress peers for the cluster apiserver (pods labeled
+  # cdi.tinyorbit.vn/needs-apiserver). Kind default service IP is 10.96.0.1;
+  # RKE2/canal commonly uses 10.43.0.1 — set what `kubectl get svc
+  # kubernetes -n default` reports.
+  apiServerPeers:
+    - ipBlock: {cidr: 10.96.0.1/32}
+  apiServerPort: 443
+  # DNS egress peers (CoreDNS). Default matches kube-system kube-dns and
+  # rke2-coredns pods; replace with namespace/ipBlock peers as needed.
+  dnsPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+  # Ingress peers allowed to scrape the gateway metrics endpoint (only
+  # relevant when gateway.metricsListen is set). REQUIRED then — an empty
+  # list fails the render rather than opening metrics to every namespace.
+  prometheusPeers: []
+
+# Default StorageClass annotation applied to seeded templates that do not
+# set workspaces.cdi.tinyorbit.vn/storage-class themselves. Retain-policy PVCs
+# created by the operator use it.
+storageClass: ""
+
+# Node security profiles for browser workspaces — OPTIONAL, default OFF.
+# Browser templates reference Localhost seccomp/AppArmor profiles that must
+# exist on the node BEFORE the pod is created. nodeProfiles.install.enabled
+# renders a per-node installer DaemonSet in a DEDICATED namespace
+# (privileged + hostPID initContainer — the only privileged object in the
+# chart; the long-running verifier is uid 0 with ALL capabilities dropped —
+# the minimum that can still read the host's AppArmor loaded list) writes
+# <kubeletRoot>/seccomp/profiles/chromium-userns.json, installs
+# /etc/apparmor.d/tinycdi-browser on the host and loads it with the host's
+# apparmor_parser (survives reboots). It refuses on nodes without AppArmor
+# or a parser and reports Ready only once both profiles are verified.
+# Rollout race: a browser pod scheduled on a node before its installer pod
+# is Ready fails to start and is retried — watch
+# `kubectl -n <ns> get ds node-profiles`. See README "Node profiles" and
+# deploy/node-profiles/README.md.
+nodeProfiles:
+  install:
+    enabled: false
+    # install = write files + load the AppArmor profile; remove = unload the
+    # profile and delete both files (idempotent — the DaemonSet is then
+    # Ready when every node is clean, and can be disabled afterwards).
+    mode: install
+    # Dedicated namespace for the installer. It is created by the chart
+    # (createNamespace) labelled pod-security.kubernetes.io/enforce=
+    # privileged and carries NO RBAC — nothing in it may write configmaps
+    # or pods. The render refuses the release namespace, a managed
+    # namespace, kube-* and default — the privileged-enforce label must
+    # never land on those (CHTR-2). With createNamespace=false, create the
+    # namespace yourself with that label before install.
+    namespace: tinycdi-node-profiles
+    createNamespace: true
+    image:
+      # Minimal, publicly pullable, digest-pinned (digest wins over tag).
+      # busybox provides nsenter, sha256sum, sed — no other tooling needed.
+      repository: alpine
+      tag: "3.21"
+      digest: sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
+    # Kubelet root dir on the nodes (the Localhost seccomp base). Default
+    # matches upstream kubelet; RKE2/k3s custom --root-dir goes here.
+    # Only <kubeletRoot>/seccomp/profiles is hostPath-mounted — never the
+    # whole kubelet root, which holds every pod's projected secrets.
+    kubeletRoot: /var/lib/kubelet
+    # Placed on all Linux nodes except control-plane by default (a
+    # nodeAffinity excludes node-role.kubernetes.io/control-plane|master);
+    # nodeSelector entries merge over kubernetes.io/os=linux.
+    nodeSelector: {}
+    tolerations: []
+    priorityClassName: ""
+    # Applied to BOTH the privileged install initContainer and the
+    # caps-dropped uid-0 verifier; the defaults are deliberately small.
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+
+# Seed WorkspaceTemplate CRs — the runtime catalog. spec is passed through
+# verbatim (the CRD validates it); spec.linux.image may be omitted and is
+# then resolved from `image:` — either a key into .Values.images
+# ("linuxDesktop", "browser"; global.imageRegistry applies) or a literal
+# digest-pinned reference.
+#
+# Placement/confinement fields map to the annotations the runtime backend
+# honors (only Localhost node profiles are accepted — anything else is
+# ignored (seccomp) or rejected (apparmor)):
+#   seccompProfile:  <name> -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
+#   appArmorProfile: <name> -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
+#   nodeSelector:    {k: v}  -> workspaces.cdi.tinyorbit.vn/node-selector (JSON)
+#   storageClass:    <name>  -> workspaces.cdi.tinyorbit.vn/storage-class
+# The node profiles must be PRE-LOADED on the nodes that run these
+# templates (see README prerequisites). Runtime pod tolerations are not
+# supported by the backend — taint-free nodes or nodeSelector placement.
+templates: []
+  # - name: linuxdesk1
+  #   namespace: tinycdi-tenant-a
+  #   image: linuxDesktop            # resolved from .Values.images; digest required
+  #   storageClass: longhorn
+  #   nodeSelector: {workload: runtime}
+  #   spec:
+  #     revision: "2026-10-a"
+  #     runtime: LinuxContainer
+  #     experience: Desktop
+  #     linux: {}                    # image filled from `image:` above
+  #     resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+  #     bootDeadline: 5m
+  #     networkProfile: Isolated
+  #     clipboardPolicy: Disabled
+  #     lifecycle: {idleTimeout: 30m, disconnectTimeout: 5m, maxDuration: 8h, dataPolicy: Ephemeral}
+  # - name: browser01
+  #   namespace: tinycdi-tenant-a
+  #   image: browser
+  #   seccompProfile: localhost/profiles/chromium-userns.json
+  #   appArmorProfile: tinycdi-browser
+  #   spec: { ... experience: Browser ... }
+
+# Pod Security Standards enforcement labels for the namespaces the chart
+# creates. Platform namespace allows baseline (infra images), managed
+# namespaces run restricted runtime pods. managedEnforce=privileged is
+# refused unless dev.enabled — it would reopen operator→privileged-pod
+# (CHTR-2).
+podSecurity:
+  platformEnforce: baseline
+  managedEnforce: restricted
+
+# Explicit development-mode gate. While false (the only supported value
+# for production), the render FAILS on dev surfaces: operator.devAllowNoBroker;
+# dangerous extraArgs (operator --dev-allow-no-broker /
+# --disable-builtin-egress-excepts / metrics flags, api --dev-insecure-db /
+# --required-groups, gateway --metrics-listen); any
+# podSecurityContext/securityContext override that would weaken the
+# hardened defaults (privileged, allowPrivilegeEscalation, added or
+# replaced capabilities, runAsNonRoot=false, uid/gid/fsGroup 0, writable
+# rootfs, unconfined seccomp, appArmorProfile=Unconfined, seLinuxOptions);
+# hostPath gateway.extraVolumes; a non-verifying database.tls.mode
+# (""/prefer/require/allow/disable); and podSecurity.managedEnforce=
+# privileged. hostUsers=false is a hardening and stays allowed. Never true
+# in a release values file.
+dev:
+  enabled: false

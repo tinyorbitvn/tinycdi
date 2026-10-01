@@ -1,0 +1,27 @@
+apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+kind: WorkspaceTemplate
+metadata:
+  labels:
+    app.kubernetes.io/name: platform
+    app.kubernetes.io/managed-by: kustomize
+  name: workspacetemplate-sample
+spec:
+  revision: "2026-09-a"
+  runtime: LinuxContainer
+  experience: Browser
+  linux:
+    image: registry.local/tinycdi/browser@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    browserPolicy:
+      allowedDomains: ["*.corp.example"]
+  resources:
+    cpu: "2"
+    memory: 4Gi
+    storage: 20Gi
+  bootDeadline: 5m
+  networkProfile: InternetOnly
+  clipboardPolicy: Receive
+  lifecycle:
+    idleTimeout: 30m
+    disconnectTimeout: 10m
+    maxDuration: 8h
+    dataPolicy: Ephemeral

@@ -1,0 +1,169 @@
+# Platform API. Public listener :8080 is plain HTTP behind the portal TLS
+# terminator (same-origin /v1 proxy); :9443 is the internal mTLS broker
+# listener the session gateways redeem launch tickets against.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: api, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: tinycdi
+        cdi.tinyorbit.vn/needs-apiserver: "true"
+      {{- with .Values.api.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: api
+      automountServiceAccountToken: true
+      securityContext:
+        {{- include "tinycdi.podSecurityContext" .Values.api.podSecurityContext | nindent 8 }}
+      {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "tinycdi.image" (dict "image" .Values.images.api "root" $) }}
+          imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.api.pullPolicy }}
+          ports:
+            - {name: public, containerPort: 8080}
+            - {name: internal, containerPort: 9443}
+          args:
+            - -session-idle={{ .Values.api.sessionIdle }}
+            {{- if .Values.oidc.requiredGroups }}
+            - --required-groups={{ join "," .Values.oidc.requiredGroups }}
+            {{- end }}
+            {{- if and .Values.dev.enabled (not (has (printf "%v" .Values.database.tls.mode) (list "verify-ca" "verify-full"))) }}
+            - --dev-insecure-db
+            {{- end }}
+            {{- with .Values.api.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - {name: TCDI_LISTEN, value: ":8080"}
+            - name: TCDI_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.urlKey }}
+            {{- if .Values.database.tls.mode }}
+            # pgx honours the libpq env vars for DSN keys the URL omits —
+            # an explicit sslmode= in the DSN still wins.
+            - {name: PGSSLMODE, value: {{ .Values.database.tls.mode | quote }}}
+            {{- end }}
+            {{- if .Values.database.tls.caSecret.name }}
+            - {name: PGSSLROOTCERT, value: {{ printf "/etc/db-ca/%s" (.Values.database.tls.caSecret.key | default "ca.crt") | quote }}}
+            {{- end }}
+            - {name: TCDI_OIDC_ISSUER, value: {{ .Values.oidc.issuer | quote }}}
+            - {name: TCDI_OIDC_CLIENT_ID, value: {{ .Values.oidc.clientID | quote }}}
+            - name: TCDI_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.clientSecretKey }}
+            {{- $redirect := .Values.oidc.redirectURL | default (printf "https://%s/v1/auth/callback" .Values.portalHost) }}
+            - {name: TCDI_OIDC_REDIRECT_URL, value: {{ $redirect | quote }}}
+            - {name: TCDI_TENANT_NAMESPACES, value: {{ include "tinycdi.tenantNamespaces" . | quote }}}
+            - {name: TCDI_SESSION_ORIGIN, value: {{ printf "https://%s" .Values.sessionHost | quote }}}
+            # Origin allowlist for browser state changes (CSRF defence in
+            # depth): the portal proxies /v1 same-origin, so the portal
+            # origin is always trusted; extras come from extraPortalOrigins.
+            - {name: TCDI_PORTAL_ORIGINS, value: {{ join "," (prepend (.Values.api.extraPortalOrigins | default (list)) (printf "https://%s" .Values.portalHost)) | quote }}}
+            - {name: TCDI_GATEWAY_AUDIENCE, value: {{ .Values.sessionHost | quote }}}
+            {{- if .Values.api.operatorCN }}
+            - {name: TCDI_OPERATOR_CN, value: {{ .Values.api.operatorCN | quote }}}
+            {{- end }}
+            - {name: TCDI_INTERNAL_LISTEN, value: ":9443"}
+            - {name: TCDI_INTERNAL_TLS_CERT, value: "/mtls/tls.crt"}
+            - {name: TCDI_INTERNAL_TLS_KEY, value: "/mtls/tls.key"}
+            - {name: TCDI_INTERNAL_CLIENT_CA, value: "/etc/client-ca/ca.crt"}
+            {{- if .Values.api.extraCA.existingSecret }}
+            - {name: SSL_CERT_FILE, value: "/etc/extra-ca/{{ .Values.api.extraCA.key | default "ca.crt" }}"}
+            {{- end }}
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket: {port: public}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 24
+          securityContext:
+            {{- include "tinycdi.containerSecurityContext" .Values.api.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - {name: mtls, mountPath: /mtls, readOnly: true}
+            - {name: client-ca, mountPath: /etc/client-ca, readOnly: true}
+            {{- if .Values.api.extraCA.existingSecret }}
+            - {name: extra-ca, mountPath: /etc/extra-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.database.tls.caSecret.name }}
+            - {name: db-ca, mountPath: /etc/db-ca, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: mtls
+          secret: {secretName: {{ .Values.api.internalTLS.existingSecret }}}
+        - name: client-ca
+          # SEC-08: project ONLY the CA key — the Secret may also carry
+          # tls.key (the cert-manager CA Secret does).
+          secret:
+            secretName: {{ .Values.api.clientCA.existingSecret }}
+            items: [{key: {{ .Values.api.clientCA.key | default "ca.crt" }}, path: ca.crt}]
+        {{- if .Values.api.extraCA.existingSecret }}
+        - name: extra-ca
+          secret:
+            secretName: {{ .Values.api.extraCA.existingSecret }}
+            items: [{key: {{ .Values.api.extraCA.key | default "ca.crt" }}, path: {{ .Values.api.extraCA.key | default "ca.crt" }}}]
+        {{- end }}
+        {{- if .Values.database.tls.caSecret.name }}
+        - name: db-ca
+          secret:
+            secretName: {{ .Values.database.tls.caSecret.name }}
+            items: [{key: {{ .Values.database.tls.caSecret.key | default "ca.crt" }}, path: {{ .Values.database.tls.caSecret.key | default "ca.crt" }}}]
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: api, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - {name: public, port: 8080, targetPort: public}
+---
+# Internal mTLS listener — gateways only, see the api NetworkPolicy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-internal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: api, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - {name: mtls, port: 9443, targetPort: internal}

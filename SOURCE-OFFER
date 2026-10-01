@@ -1,0 +1,43 @@
+TinyCDI — Written Offer for Corresponding Source (GPL-2.0)
+=========================================================
+
+The TinyCDI runtime container images (linux-desktop, browser)
+redistribute the KasmVNC 1.5.0 server binaries
+(kasmvncserver_bookworm_1.5.0_amd64.deb, sha256
+770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71),
+which are licensed under the GNU General Public License, version 2.0.
+
+Written offer
+-------------
+
+TinyOrbit offers to provide to any third party, for a charge no more
+than the cost of physically performing source distribution (free of
+charge for electronic delivery), a machine-readable copy of the
+complete corresponding source code for the KasmVNC 1.5.0 binaries
+shipped in these images.
+
+The corresponding source — the KasmVNC v1.5.0 source tree including the
+kasmweb/noVNC submodule commit it records, plus the third-party sources
+upstream's build scripts fetch and statically link (xorg-server,
+libjpeg-turbo, libwebp, oneTBB, libcpuid, fmt, libyuv), each pinned by
+sha256/commit — is assembled by hack/kasmvnc-source-bundle.sh in this
+repository and published with each release as
+kasmvnc-1.5.0-corresponding-source.tar.gz together with a .sha256
+checksum file.
+
+To exercise this offer, open an issue at
+https://github.com/tinyorbitvn/tinycdi/issues (security-sensitive
+requests may instead use the repository's GitHub private vulnerability
+reporting channel). No postal address is required.
+
+This offer is valid for at least three years from the date each image
+is published and applies to anyone who received the image.
+
+Debian packages
+---------------
+
+The runtime images are built on Debian 12 (bookworm). Corresponding
+source for the Debian packages they contain is available from the
+Debian archive via deb-src entries for the bookworm suite at
+deb.debian.org; package names and versions are recorded in the image
+SBOMs.

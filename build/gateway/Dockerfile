@@ -1,0 +1,21 @@
+# Session gateway image (cmd/gateway). Build context is the repo root:
+#   docker build -f build/gateway/Dockerfile -t tcdi/gateway .
+ARG BASE_IMAGE=docker.io/library/golang:1.26@sha256:6c2a5538f964f1c82f97ad14988bf05de100d922d159d0e398b54c7b0ca0c6c9
+FROM ${BASE_IMAGE} AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gateway ./cmd/gateway
+RUN GOBIN=/workspace/bin go install github.com/google/go-licenses/v2@v2.0.1 \
+ && /workspace/bin/go-licenses save --save_path=/workspace/licenses --force --ignore github.com/tinyorbitvn/tinycdi ./cmd/gateway
+
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+WORKDIR /
+COPY --from=builder /workspace/gateway .
+COPY --from=builder /workspace/licenses /licenses
+USER 65532:65532
+ENTRYPOINT ["/gateway"]

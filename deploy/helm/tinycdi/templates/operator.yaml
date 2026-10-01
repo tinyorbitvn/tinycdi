@@ -1,0 +1,117 @@
+# Operator (cmd/operator). Its ClusterRole is bound ONLY via RoleBindings
+# in the managed namespaces (rbac.yaml — never the release namespace,
+# SEC-09), so --watch-namespaces pins the informer cache to exactly that
+# allowlist. POD_NAMESPACE (downward API) is the release namespace — the
+# leader-election Lease lives there via its own Role, and the runtime
+# backend uses it as the default --gateway-namespace (SEC-29).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "operator" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: operator, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: tinycdi
+        cdi.tinyorbit.vn/needs-apiserver: "true"
+      {{- with .Values.operator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: operator
+      automountServiceAccountToken: true
+      securityContext:
+        {{- include "tinycdi.podSecurityContext" .Values.operator.podSecurityContext | nindent 8 }}
+      {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: {{ include "tinycdi.image" (dict "image" .Values.images.operator "root" $) }}
+          imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.operator.pullPolicy }}
+          args:
+            - --health-probe-bind-address=:8081
+            # Metrics stay OFF (SEC-33): controller-runtime's secure mode
+            # also enables the authn/authz filter, which needs
+            # cluster-scoped TokenReview/SAR RBAC this chart never grants;
+            # plain-HTTP metrics are not offered either.
+            - --metrics-bind-address=0
+            - --webhook-port={{ .Values.operator.webhookPort }}
+            - --leader-elect={{ .Values.operator.leaderElect }}
+            - --leader-election-namespace={{ .Release.Namespace }}
+            - --watch-namespaces={{ include "tinycdi.watchNamespaces" . }}
+            {{- $except := concat (.Values.operator.internetExceptCIDRs | default (list)) (.Values.operator.clusterCIDRs | default (list)) }}
+            {{- if $except }}
+            - --internet-except-cidrs={{ join "," $except }}
+            {{- end }}
+            {{- if .Values.operator.brokerClient.enabled }}
+            # Internal broker (api mTLS listener): the operator client cert
+            # CN is the only identity the workspace revoke/drain routes
+            # accept (ADR 0003; default CN=operator, api.operatorCN overrides).
+            - --broker-internal-url={{ .Values.operator.brokerClient.internalURL | default (printf "https://api-internal.%s.svc:9443" .Release.Namespace) }}
+            - --broker-ca-file=/etc/broker-ca/{{ .Values.operator.brokerClient.ca.key | default "ca.crt" }}
+            - --broker-client-cert-file=/mtls/tls.crt
+            - --broker-client-key-file=/mtls/tls.key
+            {{- end }}
+            {{- if .Values.operator.devAllowNoBroker }}
+            - --dev-allow-no-broker
+            {{- end }}
+            {{- with .Values.operator.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            {{- with .Values.operator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - {name: probes, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: probes}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            {{- include "tinycdi.containerSecurityContext" .Values.operator.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          {{- if .Values.operator.brokerClient.enabled }}
+          volumeMounts:
+            - {name: broker-ca, mountPath: /etc/broker-ca, readOnly: true}
+            - {name: mtls, mountPath: /mtls, readOnly: true}
+          {{- end }}
+      {{- if .Values.operator.brokerClient.enabled }}
+      volumes:
+        - name: broker-ca
+          secret:
+            secretName: {{ .Values.operator.brokerClient.ca.existingSecret }}
+            # SEC-08: project ONLY the CA key — the Secret may also carry
+            # tls.key (the cert-manager CA Secret does).
+            items: [{key: {{ .Values.operator.brokerClient.ca.key | default "ca.crt" }}, path: {{ .Values.operator.brokerClient.ca.key | default "ca.crt" }}}]
+        - name: mtls
+          secret: {secretName: {{ .Values.operator.brokerClient.mtls.existingSecret }}}
+      {{- end }}

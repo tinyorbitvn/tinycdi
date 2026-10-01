@@ -1,0 +1,35 @@
+{{- if .Values.serviceMonitor.enabled }}
+# ServiceMonitor for the gateway metrics endpoint (gateway.metricsListen)
+# on the dedicated ClusterIP gateway-metrics Service — the operator has no
+# metrics endpoint (SEC-33: secure metrics need cluster-scoped authz RBAC
+# the chart never grants; HTTP is banned). Prometheus Operator must be
+# installed; serviceMonitor.labels selects it.
+{{- if .Values.gateway.metricsListen }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      cdi.tinyorbit.vn/metrics: "true"
+  endpoints:
+    - port: metrics
+      {{- with .Values.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      honorLabels: {{ .Values.serviceMonitor.honorLabels }}
+{{- end }}
+{{- end }}

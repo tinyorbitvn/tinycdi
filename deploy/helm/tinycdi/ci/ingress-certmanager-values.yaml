@@ -1,0 +1,43 @@
+# Ingress exposure + cert-manager issued internal mTLS. The chart renders
+# a self-signed CA chain (ClusterIssuer -> CA Certificate -> Issuer) and
+# three leaf Certificates producing the Secrets the pods mount. The CA
+# Secret is <release>-internal-ca (release name here is "tcdi" in tests);
+# api.clientCA / gateway.trustedCA / operator.brokerClient.ca point at it.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionHost: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi-portal
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-api-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+certManager:
+  enabled: true
+  selfSigned: true            # renders the bootstrap CA chain
+  # caSecretName defaults to <release>-internal-ca
+
+# All three CA-consuming refs point at the cert-manager CA Secret.
+api:
+  clientCA: {existingSecret: tcdi-internal-ca}
+gateway:
+  trustedCA: {existingSecret: tcdi-internal-ca}
+operator:
+  brokerClient:
+    ca: {existingSecret: tcdi-internal-ca, key: ca.crt}
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  tls:
+    existingSecret: tinycdi-ingress-tls

@@ -1,0 +1,25 @@
+# Optional component: nodeProfiles.install — renders the privileged,
+# hostPID node-profile installer DaemonSet (seccomp + AppArmor Localhost
+# profiles for browser workspaces) on all Linux non-control-plane nodes.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionHost: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi-portal
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-api-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+nodeProfiles:
+  install:
+    enabled: true

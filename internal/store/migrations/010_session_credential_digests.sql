@@ -1,0 +1,17 @@
+-- 010_session_credential_digests.sql — SEC-27: sessions must never persist
+-- usable credentials.
+--
+-- From this migration on, sessions.id holds hex(SHA-256(session ID)) — the
+-- same construction tickets use — and csrf_token holds
+-- hex(HMAC-SHA256(key = raw session ID, "tcdi-csrf-token" || token)). The
+-- raw session ID is never stored, so a database or backup read yields only
+-- digests and MACs: neither authenticates to the API, and the MAC key
+-- itself is not recoverable.
+--
+-- Rows written before this migration carry plaintext credentials; hashing
+-- cannot be applied retroactively (the digests are one-way and the old
+-- rows are keyed by raw IDs anyway), so they are invalidated here: every
+-- existing session is dropped and users re-authenticate once. This is the
+-- safe direction — a pre-upgrade session captured in a backup could
+-- otherwise be replayed for up to the absolute session lifetime.
+DELETE FROM sessions;

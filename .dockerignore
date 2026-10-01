@@ -1,0 +1,20 @@
+# Local scratch, tooling and artifacts — never needed inside image builds
+# (every build/<name>/Dockerfile builds with the repo root as context).
+.git
+.gitignore
+work/
+bin/
+**/node_modules/
+**/dist/
+**/test-results/
+**/playwright-report/
+# SEC-45: no env files, key material, kubeconfigs or secret dirs in the
+# build context either — a Dockerfile must never be able to COPY them.
+**/.env*
+!.env.example
+**/secret/
+*.key
+*.pem
+*kubeconfig*
+operator
+Dockerfile.cross

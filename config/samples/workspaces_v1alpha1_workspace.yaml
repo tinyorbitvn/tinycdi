@@ -1,0 +1,17 @@
+apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+kind: Workspace
+metadata:
+  labels:
+    app.kubernetes.io/name: platform
+    app.kubernetes.io/managed-by: kustomize
+  name: workspace-sample
+spec:
+  templateRef:
+    name: workspacetemplate-sample
+  ownerSubject:
+    issuer: "https://idp.example.com"
+    subject: "user-123"
+  desiredState: Running
+  dataPolicy: Ephemeral
+  runtimeGeneration: 1
+  intentRevision: 1

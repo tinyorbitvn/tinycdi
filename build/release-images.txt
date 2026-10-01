@@ -1,0 +1,14 @@
+# release-images.txt — the image set release.yml builds, scans, signs and
+# publishes. One image name per line; # comments and blank lines ignored.
+# The name must match a build/<name>/Dockerfile and an images.<key> block
+# in the helm chart (linux-desktop -> linuxDesktop).
+#
+# images.yml (main CI) is unaffected — it still builds and scans all six
+# images on every push to main.
+api
+operator
+gateway
+portal
+linux-desktop
+# browser requires linux-desktop above (it is the FROM base).
+browser

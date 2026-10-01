@@ -1,0 +1,29 @@
+# Gateway API exposure: one HTTPRoute per public edge (portal -> portal
+# Service, session -> gateway Service), parented on an existing Gateway.
+# The backends speak HTTPS — the Gateway listener must terminate TLS and
+# re-encrypt/pass through (e.g. Envoy Gateway BackendTLSPolicy).
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionHost: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi-portal
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-api-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+gatewayApi:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+      sectionName: https
+  annotations:
+    example.com/route-owner: tinycdi

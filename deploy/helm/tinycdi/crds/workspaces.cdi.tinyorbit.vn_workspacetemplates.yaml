@@ -1,0 +1,271 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: workspacetemplates.workspaces.cdi.tinyorbit.vn
+spec:
+  group: workspaces.cdi.tinyorbit.vn
+  names:
+    kind: WorkspaceTemplate
+    listKind: WorkspaceTemplateList
+    plural: workspacetemplates
+    singular: workspacetemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.runtime
+      name: Runtime
+      type: string
+    - jsonPath: .spec.experience
+      name: Experience
+      type: string
+    - jsonPath: .spec.revision
+      name: Revision
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: WorkspaceTemplate is the Schema for the workspacetemplates API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of WorkspaceTemplate
+            properties:
+              bootDeadline:
+                description: |-
+                  bootDeadline bounds how long a workspace may take to become Ready
+                  before it is failed.
+                type: string
+              clipboardPolicy:
+                description: |-
+                  clipboardPolicy selects clipboard redirection between client and
+                  workspace.
+                enum:
+                - Disabled
+                - Send
+                - Receive
+                - Bidirectional
+                type: string
+              experience:
+                description: experience selects the client experience.
+                enum:
+                - Desktop
+                - Browser
+                type: string
+              lifecycle:
+                description: |-
+                  lifecycle carries the default idle/disconnect/max-duration and data
+                  policy for workspaces from this template.
+                properties:
+                  dataPolicy:
+                    description: |-
+                      dataPolicy is the default data policy for workspaces created from this
+                      template.
+                    enum:
+                    - Ephemeral
+                    - Retain
+                    type: string
+                  disconnectTimeout:
+                    description: |-
+                      disconnectTimeout is the grace period after the last interactive
+                      connection drops before the runtime is stopped.
+                    type: string
+                  idleTimeout:
+                    description: |-
+                      idleTimeout is how long an unused (no input) session may run before the
+                      platform stops it.
+                    type: string
+                  maxDuration:
+                    description: maxDuration is the hard cap on a single Running generation.
+                    type: string
+                required:
+                - dataPolicy
+                - disconnectTimeout
+                - idleTimeout
+                - maxDuration
+                type: object
+              linux:
+                description: |-
+                  linux holds the LinuxContainer configuration. Required iff
+                  runtime=LinuxContainer, forbidden otherwise.
+                properties:
+                  browserPolicy:
+                    description: |-
+                      browserPolicy restricts the in-session browser when experience is
+                      Browser.
+                    properties:
+                      allowedDomains:
+                        description: |-
+                          allowedDomains is the allowlist of DNS domains the session browser may
+                          reach. Empty means the network profile alone decides.
+                        items:
+                          type: string
+                        type: array
+                      deniedDomains:
+                        description: deniedDomains is subtracted from the allowlist.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  command:
+                    description: |-
+                      command is the fixed container command/args chosen by the admin. End
+                      users can never supply or override a container command.
+                    items:
+                      type: string
+                    type: array
+                  image:
+                    description: |-
+                      image is the OCI reference for the runtime image, digest-pinned:
+                      <repo>@sha256:<64 hex>. Tags without a digest are rejected.
+                    minLength: 1
+                    pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$
+                    type: string
+                required:
+                - image
+                type: object
+              networkProfile:
+                description: networkProfile selects the permitted egress profile for
+                  the runtime.
+                enum:
+                - InternetOnly
+                - ClusterOnly
+                - Isolated
+                type: string
+              resources:
+                description: resources is the compute/storage profile for the runtime.
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: cpu request/limit for the runtime.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: memory request/limit for the runtime.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      storage is the size of the per-workspace data volume (Linux home PVC or
+                      Windows boot disk clone).
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - cpu
+                - memory
+                - storage
+                type: object
+              revision:
+                description: |-
+                  revision is an admin-assigned identifier for this immutable template
+                  revision (e.g. "2026-09-a"). Immutable with the rest of spec.
+                minLength: 1
+                type: string
+              runtime:
+                description: runtime selects the runtime kind.
+                enum:
+                - LinuxContainer
+                - WindowsVM
+                type: string
+              windows:
+                description: |-
+                  windows holds the WindowsVM configuration. Required iff
+                  runtime=WindowsVM, forbidden otherwise.
+                properties:
+                  sourceChecksum:
+                    description: |-
+                      sourceChecksum is the content checksum of the sealed source, recorded
+                      by the admin at seal time and used to detect a re-sealed or swapped
+                      source.
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  sourcePVCRef:
+                    description: sourcePVCRef is the sealed, golden-image PVC to clone
+                      per workspace.
+                    properties:
+                      name:
+                        description: name of the sealed source PVC in the template's
+                          namespace.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          namespace must be omitted. The source PVC is always resolved in the
+                          template's own namespace; setting this field is rejected.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - sourceChecksum
+                - sourcePVCRef
+                type: object
+            required:
+            - bootDeadline
+            - clipboardPolicy
+            - experience
+            - lifecycle
+            - networkProfile
+            - resources
+            - revision
+            - runtime
+            type: object
+          status:
+            description: status defines the observed state of WorkspaceTemplate
+            properties:
+              observedGeneration:
+                description: |-
+                  observedGeneration is the latest metadata.generation seen by a
+                  consumer (informational).
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: spec is immutable; publish a new revision object instead
+          rule: self.spec == oldSelf.spec
+        - message: spec.linux is required iff spec.runtime=LinuxContainer, spec.windows
+            iff WindowsVM; the other block is forbidden
+          rule: (self.spec.runtime == 'LinuxContainer' && has(self.spec.linux) &&
+            !has(self.spec.windows)) || (self.spec.runtime == 'WindowsVM' && has(self.spec.windows)
+            && !has(self.spec.linux))
+        - message: spec.windows.sourcePVCRef.namespace must be omitted; the source
+            PVC is always resolved in the template's namespace (cross-namespace references
+            are not allowed)
+          rule: '!has(self.spec.windows) || !has(self.spec.windows.sourcePVCRef) ||
+            !has(self.spec.windows.sourcePVCRef.namespace)'
+    served: true
+    storage: true
+    subresources:
+      status: {}

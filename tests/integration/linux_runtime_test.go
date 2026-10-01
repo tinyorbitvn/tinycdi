@@ -1,0 +1,484 @@
+//go:build integration
+
+// Contract test for the Linux runtime images (design §7).
+//
+// Covers: HTTPS streaming on container port 8443, healthcheck that reports
+// ready only while the X display AND the KasmVNC endpoint answer, mounted
+// Secret credentials (never env/logs), persistent /home/workspace vs
+// ephemeral rootfs, stale in-home credential/config files never overriding
+// the mounted Secret, non-root uid, bounded /dev/shm, and the browser
+// profile launching Chromium with its sandbox engaged (no --no-sandbox;
+// local Docker uses the allowlist seccomp
+// profile in tests/integration/testdata/seccomp-runtime.json in place of
+// the node Localhost seccomp+AppArmor pair).
+//
+// Drives Docker through the CLI (no SDK). Containers/volumes are labelled
+// tcdi.it=w1t2 and prefixed tcdi-it-w1t2-; everything is removed on exit.
+//
+// Run:  go test -tags=integration ./tests/integration -run TestLinuxRuntimeReadinessAndHome -v
+// Requires the images to be built first (see docs/images.md),
+// or set TCDI_IT_BUILD=1 to let the test build missing images.
+
+package integration
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+const (
+	itLabelKey    = "tcdi.it"
+	itLabelValue  = "w1t2"
+	namePrefix    = "tcdi-it-w1t2-"
+	containerPort = "8443"
+	runTimeout    = 120 * time.Second
+)
+
+var (
+	repoRoot    = mustRepoRoot()
+	seccompFile = filepath.Join(repoRoot, "tests", "integration", "testdata", "seccomp-runtime.json")
+
+	desktopImage = envOr("TCDI_IT_DESKTOP_IMAGE", "tcdi/linux-desktop:it")
+	browserImage = envOr("TCDI_IT_BROWSER_IMAGE", "tcdi/browser:it")
+)
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func mustRepoRoot() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	root, err := filepath.Abs(filepath.Join(wd, "..", ".."))
+	if err != nil {
+		panic(err)
+	}
+	return root
+}
+
+func docker(args ...string) (string, error) {
+	cmd := exec.Command("docker", args...)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		return out.String(), fmt.Errorf("%w: %s", err, errb.String())
+	}
+	return out.String(), nil
+}
+
+func dockerOK(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := docker(args...)
+	if err != nil {
+		t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
+	}
+	return out
+}
+
+// requireImage fails (the red state) until the runtime images exist locally.
+// Set TCDI_IT_BUILD=1 to build missing images from build/<name> (repo-root
+// context) instead.
+func requireImage(t *testing.T, image, imageDir string) {
+	t.Helper()
+	if _, err := docker("image", "inspect", image); err == nil {
+		return
+	}
+	if os.Getenv("TCDI_IT_BUILD") != "1" {
+		t.Fatalf("image %s not built; run: docker build -f %s/Dockerfile -t %s . (or set TCDI_IT_BUILD=1)",
+			image, imageDir, image)
+	}
+	t.Logf("building missing image %s from %s/Dockerfile", image, imageDir)
+	dockerOK(t, "build", "-f", filepath.Join(imageDir, "Dockerfile"), "-t", image, repoRoot)
+}
+
+// selfSignedSecret builds a secret dir holding password/username/tls.crt/
+// tls.key - the same file layout the pod Secret volume presents.
+func selfSignedSecret(t *testing.T) (dir, password string) {
+	t.Helper()
+	dir = t.TempDir()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "tcdi-it"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	writeFile(t, filepath.Join(dir, "tls.key"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	password = base64.RawURLEncoding.EncodeToString(raw)
+	writeFile(t, filepath.Join(dir, "password"), []byte(password+"\n"))
+	writeFile(t, filepath.Join(dir, "username"), []byte("kasm_user\n"))
+	return dir, password
+}
+
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runContainer starts a hardened runtime container:
+// non-root image user, all caps dropped, no-new-privileges, the allowlist
+// seccomp profile (local stand-in for the node Localhost pair), bounded /dev/shm,
+// credentials as a read-only file mount, /run/tcdi as ephemeral tmpfs.
+func runContainer(t *testing.T, runID, name, image, secretDir, homeVol string, extraArgs ...string) string {
+	t.Helper()
+	full := namePrefix + runID + "-" + name
+	args := []string{
+		"run", "-d", "--name", full,
+		"--label", itLabelKey + "=" + itLabelValue,
+		"--label", "tcdi.it.run=" + runID,
+		"-p", "127.0.0.1:0:" + containerPort,
+		"-v", secretDir + ":/run/secrets/tcdi:ro",
+		"--tmpfs", "/run/tcdi:rw,exec,uid=1000,gid=1000,mode=700",
+		"--shm-size", "256m",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--security-opt", "seccomp=" + seccompFile,
+	}
+	if homeVol != "" {
+		args = append(args, "-v", homeVol+":/home/workspace")
+	}
+	args = append(args, extraArgs...)
+	args = append(args, image)
+	dockerOK(t, args...)
+	t.Cleanup(func() {
+		docker("rm", "-f", full) //nolint:errcheck
+	})
+	return full
+}
+
+func newVolume(t *testing.T, runID, name string) string {
+	t.Helper()
+	vol := namePrefix + runID + "-" + name
+	dockerOK(t, "volume", "create",
+		"--label", itLabelKey+"="+itLabelValue,
+		"--label", "tcdi.it.run="+runID, vol)
+	t.Cleanup(func() {
+		docker("volume", "rm", "-f", vol) //nolint:errcheck
+	})
+	return vol
+}
+
+func containerState(t *testing.T, name string) (status, health string) {
+	t.Helper()
+	out := dockerOK(t, "inspect", "-f",
+		"{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", name)
+	parts := strings.Fields(strings.TrimSpace(out))
+	if len(parts) == 0 {
+		return "", ""
+	}
+	status = parts[0]
+	if len(parts) > 1 {
+		health = parts[1]
+	}
+	return status, health
+}
+
+func hostPort(t *testing.T, name string) string {
+	t.Helper()
+	out := dockerOK(t, "inspect", "-f",
+		fmt.Sprintf("{{(index (index .NetworkSettings.Ports \"%s/tcp\") 0).HostPort}}", containerPort),
+		name)
+	return strings.TrimSpace(out)
+}
+
+func waitHealthy(t *testing.T, name string) {
+	t.Helper()
+	deadline := time.Now().Add(runTimeout)
+	for time.Now().Before(deadline) {
+		status, health := containerState(t, name)
+		if status != "running" && status != "created" {
+			logs, _ := docker("logs", "--tail", "40", name)
+			t.Fatalf("container %s not running (status=%s):\n%s", name, status, logs)
+		}
+		if health == "healthy" {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	logs, _ := docker("logs", "--tail", "40", name)
+	t.Fatalf("container %s did not become healthy in %s\nlogs:\n%s", name, runTimeout, logs)
+}
+
+func httpsGet(t *testing.T, name, user, password string) (int, error) {
+	t.Helper()
+	port := hostPort(t, name)
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	cl := &http.Client{Transport: tr, Timeout: 8 * time.Second}
+	req, err := http.NewRequest("GET", "https://127.0.0.1:"+port+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user != "" {
+		req.SetBasicAuth(user, password)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+func execIn(t *testing.T, name string, shell string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("docker", "exec", name, "sh", "-c", shell)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		return out.String(), fmt.Errorf("%w: %s", err, errb.String())
+	}
+	return out.String(), nil
+}
+
+func mustExec(t *testing.T, name, shell string) string {
+	t.Helper()
+	out, err := execIn(t, name, shell)
+	if err != nil {
+		t.Fatalf("exec %q in %s: %v", shell, name, err)
+	}
+	return out
+}
+
+// assertNoSecret scans container logs and inspect env for the password.
+func assertNoSecret(t *testing.T, name, password string) {
+	t.Helper()
+	logs, _ := docker("logs", name)
+	if strings.Contains(logs, password) {
+		t.Fatalf("password leaked into container logs of %s", name)
+	}
+	env := dockerOK(t, "inspect", "-f", "{{json .Config.Env}}", name)
+	if strings.Contains(env, password) {
+		t.Fatalf("password leaked into container env of %s", name)
+	}
+	if strings.Contains(env, "PASSWORD") || strings.Contains(env, "passwd") {
+		t.Fatalf("credential-looking env var present on %s: %s", name, env)
+	}
+}
+
+func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
+	if _, err := os.Stat(seccompFile); err != nil {
+		t.Fatalf("runtime seccomp profile missing: %s", seccompFile)
+	}
+	requireImage(t, desktopImage, "build/linux-desktop")
+	requireImage(t, browserImage, "build/browser")
+
+	runBytes := make([]byte, 4)
+	if _, err := rand.Read(runBytes); err != nil {
+		t.Fatal(err)
+	}
+	runID := fmt.Sprintf("%x", runBytes)
+
+	// Belt-and-suspenders cleanup for anything this run leaked.
+	t.Cleanup(func() {
+		out, _ := docker("ps", "-aq", "--filter", "label=tcdi.it.run="+runID)
+		for _, c := range strings.Fields(out) {
+			docker("rm", "-f", c) //nolint:errcheck
+		}
+		vols, _ := docker("volume", "ls", "-q", "--filter", "label=tcdi.it.run="+runID)
+		for _, v := range strings.Fields(vols) {
+			docker("volume", "rm", "-f", v) //nolint:errcheck
+		}
+	})
+
+	t.Run("ReadinessEndpointAndAuth", func(t *testing.T) {
+		secret, password := selfSignedSecret(t)
+		c := runContainer(t, runID, "desktop", desktopImage, secret, "")
+		waitHealthy(t, c)
+
+		// Endpoint answers over TLS; anonymous gets an auth challenge.
+		code, err := httpsGet(t, c, "", "")
+		if err != nil {
+			t.Fatalf("endpoint did not answer over TLS: %v", err)
+		}
+		if code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatalf("anonymous request: got %d, want 401/403", code)
+		}
+		// Mounted-Secret credential authenticates; a wrong password does not.
+		code, err = httpsGet(t, c, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("auth with mounted secret: code=%d err=%v, want 200", code, err)
+		}
+		code, err = httpsGet(t, c, "kasm_user", "definitely-wrong")
+		if err == nil && code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatalf("wrong password accepted: %d", code)
+		}
+
+		// Non-root runtime + bounded shm.
+		if out := strings.TrimSpace(mustExec(t, c, "id -u")); out != "1000" {
+			t.Fatalf("runtime uid = %s, want 1000", out)
+		}
+		shm := dockerOK(t, "inspect", "-f", "{{.HostConfig.ShmSize}}", c)
+		if strings.TrimSpace(shm) != "268435456" {
+			t.Fatalf("ShmSize = %s, want 268435456 (256m bounded mount)", shm)
+		}
+		assertNoSecret(t, c, password)
+	})
+
+	t.Run("DisplayDeathNotReady", func(t *testing.T) {
+		secret, _ := selfSignedSecret(t)
+		c := runContainer(t, runID, "death", desktopImage, secret, "")
+		waitHealthy(t, c)
+
+		// Kill the X server: the healthcheck must flip to not-ready (the
+		// entrypoint exits shortly after, so accept unhealthy or dead).
+		mustExec(t, c, "pkill -x Xvnc")
+		deadline := time.Now().Add(60 * time.Second)
+		for time.Now().Before(deadline) {
+			status, health := containerState(t, c)
+			if status != "running" || health == "unhealthy" {
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+		status, health := containerState(t, c)
+		t.Fatalf("display killed but container still ready: status=%s health=%s", status, health)
+	})
+
+	t.Run("BrowserSandbox", func(t *testing.T) {
+		secret, password := selfSignedSecret(t)
+		c := runContainer(t, runID, "browser", browserImage, secret, "")
+		waitHealthy(t, c)
+
+		// Streaming contract holds on the browser image too.
+		code, err := httpsGet(t, c, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("browser image endpoint auth: code=%d err=%v", code, err)
+		}
+
+		// Poll for a Chromium renderer running as uid 1000 inside a nested
+		// user namespace with a seccomp filter engaged (both sandbox layers).
+		initNS := strings.TrimSpace(mustExec(t, c, "readlink /proc/1/ns/user"))
+		var found bool
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) && !found {
+			out, err := execIn(t, c, "pgrep -f 'chromium.*--type=renderer' || true")
+			if err != nil {
+				t.Fatalf("renderer pgrep: %v", err)
+			}
+			for _, pid := range strings.Fields(out) {
+				status := mustExec(t, c, "cat /proc/"+pid+"/status 2>/dev/null || true")
+				if !strings.Contains(status, "Seccomp:\t2") &&
+					!strings.Contains(status, "Seccomp: 2") {
+					continue
+				}
+				if !strings.Contains(status, "Uid:\t1000\t") &&
+					!strings.Contains(status, "Uid: 1000 ") {
+					continue
+				}
+				ns := strings.TrimSpace(mustExec(t, c, "readlink /proc/"+pid+"/ns/user 2>/dev/null || true"))
+				if ns != "" && ns != initNS {
+					found = true
+					break
+				}
+			}
+			if !found {
+				time.Sleep(3 * time.Second)
+			}
+		}
+		if !found {
+			ps, _ := execIn(t, c, "ps aux | head -40")
+			t.Fatalf("no Chromium renderer with engaged sandbox (nested userns + Seccomp:2, uid 1000) within 90s\nps:\n%s", ps)
+		}
+
+		// No process may carry the sandbox-disable flag. Per-arg exact match
+		// so the probe's own cmdline (which quotes the flag) can't self-match.
+		out := mustExec(t, c, `for p in /proc/[0-9]*/cmdline; do tr '\0' '\n' < "$p" 2>/dev/null | grep -qx -- '--no-sandbox' && echo "$p"; done; true`)
+		if strings.TrimSpace(out) != "" {
+			t.Fatalf("process running with --no-sandbox: %s", out)
+		}
+		assertNoSecret(t, c, password)
+	})
+
+	t.Run("RestartHomeAndStaleCredential", func(t *testing.T) {
+		secret, password := selfSignedSecret(t)
+		home := newVolume(t, runID, "home")
+
+		c1 := runContainer(t, runID, "restart-a", desktopImage, secret, home)
+		waitHealthy(t, c1)
+
+		mustExec(t, c1, "echo persist-me > /home/workspace/marker.txt")
+		mustExec(t, c1, "echo scratch > /tmp/scratch.txt")
+
+		// Plant stale artifacts on the persistent home: a valid-format
+		// kasmpasswd for a DIFFERENT password at ~/.kasmpasswd, and a user
+		// config that would move the endpoint off 8443/TLS and point auth at
+		// the stale file. A correct boot must ignore both.
+		stale := "stale-password-000"
+		mustExec(t, c1, "printf '%s\n' '"+stale+"' > /tmp/wp && rm -f /home/workspace/.kasmpasswd && "+
+			"{ cat /tmp/wp; cat /tmp/wp; } | kasmvncpasswd -u kasm_user -w /home/workspace/.kasmpasswd >/dev/null && rm -f /tmp/wp")
+		mustExec(t, c1, "printf 'network:\n  websocket_port: 9999\n  ssl:\n    require_ssl: false\nserver:\n  advanced:\n    kasm_password_file: /home/workspace/.kasmpasswd\n' > /home/workspace/.vnc/kasmvnc.yaml")
+
+		dockerOK(t, "rm", "-f", c1) // rootfs (and /tmp scratch) dies here
+
+		c2 := runContainer(t, runID, "restart-b", desktopImage, secret, home)
+		waitHealthy(t, c2)
+
+		mustExec(t, c2, "grep -q persist-me /home/workspace/marker.txt")
+		out := mustExec(t, c2, "test -e /tmp/scratch.txt && echo present || echo absent")
+		if strings.TrimSpace(out) != "absent" {
+			t.Fatalf("rootfs scratch survived container recreation")
+		}
+
+		// The mounted Secret still authenticates on 8443 over TLS; the stale
+		// password file on the volume must NOT grant access.
+		code, err := httpsGet(t, c2, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("mounted secret rejected after restart: code=%d err=%v", code, err)
+		}
+		code, err = httpsGet(t, c2, "kasm_user", stale)
+		if err == nil && code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatalf("stale in-home credential accepted: code=%d", code)
+		}
+		assertNoSecret(t, c2, password)
+	})
+}

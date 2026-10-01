@@ -1,0 +1,54 @@
+tinycdi {{ .Chart.Version }} installed into {{ .Release.Namespace }}.
+
+Portal:  https://{{ .Values.portalHost }}
+Session: https://{{ .Values.sessionHost }}   (must differ — enforced at render)
+
+Exposure:
+{{- if .Values.ingress.enabled }}
+  Ingress (class: {{ .Values.ingress.className | default "<default>" }})
+{{- else if .Values.gatewayApi.enabled }}
+  Gateway API HTTPRoutes ({{ len .Values.gatewayApi.parentRefs }} parentRef(s))
+{{- else }}
+  Services only ({{ .Values.portal.service.type }}/{{ .Values.gateway.service.type }})
+  — set ingress.enabled or gatewayApi.enabled, or give the portal/gateway
+  Services a LoadBalancer/NodePort type.
+{{- end }}
+
+Managed namespaces:
+{{- range .Values.managedNamespaces }}
+  - {{ .name }} (tenant: {{ .tenant }})
+{{- else }}
+  NONE — set managedNamespaces or the platform manages nothing.
+{{- end }}
+
+{{- if .Values.certManager.enabled }}
+Internal mTLS: cert-manager Certificates issue the broker chain
+{{- if .Values.certManager.selfSigned }} (self-signed CA bootstrapped){{- end }}.
+{{- end }}
+
+{{- if .Values.oidc.requiredGroups }}
+Login gate: only IdP tokens carrying one of
+  {{ join ", " .Values.oidc.requiredGroups }}
+  in their `groups` claim can log in (exact match — check your IdP's claim
+  format, e.g. Keycloak "/group" vs "group").
+{{- end }}
+
+{{- if .Values.nodeProfiles.install.enabled }}
+Node profiles (mode: {{ .Values.nodeProfiles.install.mode | default "install" }}):
+  DaemonSet 'node-profiles' in the dedicated {{ .Values.nodeProfiles.install.namespace }}
+  namespace installs the browser seccomp/AppArmor Localhost profiles on
+  Linux worker nodes (privileged initContainer + caps-dropped uid-0
+  verifier — uid 0 is required to read the host's AppArmor loaded list).
+  Watch rollout:
+    kubectl -n {{ .Values.nodeProfiles.install.namespace }} get ds node-profiles
+  A browser pod scheduled before its node reports ready fails boot and is
+  retried — gate browser rollouts on DS readiness.
+{{- end }}
+
+Reminder:
+  * CRDs in crds/ are installed/never deleted by Helm. Upgrading CRDs is a
+    manual step — see docs/runbooks/install.md.
+  * All Secrets are referenced by name only; create them BEFORE the pods
+    can start (see install.md "Secrets") unless certManager.enabled covers
+    the internal mTLS Secrets.
+  * `helm uninstall` keeps the managed namespaces, user PVCs and CRDs.

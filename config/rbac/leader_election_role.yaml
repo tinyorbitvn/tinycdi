@@ -1,0 +1,30 @@
+# permissions to do leader election.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: platform
+    app.kubernetes.io/managed-by: kustomize
+  name: leader-election-role
+# leases only — controller-runtime leader election uses the
+# coordination.k8s.io Lease lock; no configmaps grant (SEC-06).
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

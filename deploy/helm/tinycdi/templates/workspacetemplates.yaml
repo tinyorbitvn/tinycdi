@@ -1,0 +1,73 @@
+# Seeded WorkspaceTemplates — the runtime catalog. spec passes through
+# verbatim — the CRD validates it (digest-pinned image, enum fields, ...)
+# and, once created, CEL makes spec immutable. So every distinct rendered
+# content becomes a NEW revision object instead of an in-place mutation:
+# metadata.name is "<name>-<hash8>" where hash8 = sha256 of the rendered
+# spec + effective annotations. A values change renders a new name; helm
+# creates the new revision and deletes the superseded one — upgrades and
+# rollbacks never touch a live template's spec. The catalog-name label
+# ties the revisions of one logical template together: the API resolves
+# tpl_<name> (and lists) to the newest published revision.
+#
+# Per-entry structured fields map to the annotations the runtime backend
+# honors (internal/runtime/linux/backend.go):
+#   image:           key into .Values.images (e.g. "linuxDesktop",
+#                    "browser") or a literal reference; used when
+#                    spec.linux.image is empty. Runtime images must be
+#                    digest-pinned — the CRD rejects tag-only references.
+#   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
+#   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
+#   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
+#   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
+#                    (falls back to the top-level storageClass value)
+#   annotations:     -> extra annotations, verbatim
+{{- range .Values.templates }}
+{{- $tplName := required "templates[].name is required" .name }}
+{{- $ns := required "templates[].namespace must be a managed namespace" .namespace }}
+{{- $spec := required "templates[].spec is required" .spec | deepCopy }}
+{{- $ann := dict }}
+{{- range $k, $v := (default dict .annotations) }}
+{{- $_ := set $ann $k $v }}
+{{- end }}
+{{- $linux := get $spec "linux" | default dict }}
+{{- if and (hasKey $spec "linux") (not (get $linux "image")) }}
+{{- if not .image }}
+{{- fail (printf "templates[%s]: spec.linux.image is required (set spec.linux.image or the `image:` shorthand)" $tplName) }}
+{{- end }}
+{{- $ref := .image }}
+{{- if hasKey $.Values.images $ref }}
+{{- $ref = include "tinycdi.image" (dict "image" (index $.Values.images $ref) "root" $) }}
+{{- end }}
+{{- $_ := set $linux "image" $ref }}
+{{- $_ := set $spec "linux" $linux }}
+{{- end }}
+{{- if .seccompProfile }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" (printf "localhost/%s" (.seccompProfile | trimPrefix "localhost/")) }}
+{{- end }}
+{{- if .appArmorProfile }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/apparmor-profile" (printf "localhost/%s" (.appArmorProfile | trimPrefix "localhost/")) }}
+{{- end }}
+{{- if .nodeSelector }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/node-selector" (toJson .nodeSelector) }}
+{{- end }}
+{{- $sc := .storageClass | default $.Values.storageClass }}
+{{- if and $sc (not (index $ann "workspaces.cdi.tinyorbit.vn/storage-class")) }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/storage-class" $sc }}
+{{- end }}
+{{- $hash := sha256sum (printf "%s\n%s" (toYaml $spec) (toYaml $ann)) | trunc 8 }}
+---
+apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+kind: WorkspaceTemplate
+metadata:
+  name: {{ printf "%s-%s" $tplName $hash | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    workspaces.cdi.tinyorbit.vn/catalog-name: {{ $tplName }}
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}

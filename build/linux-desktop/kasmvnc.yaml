@@ -1,0 +1,82 @@
+# System-wide KasmVNC policy for the workspace runtime image.
+# Loaded before $HOME/.vnc/kasmvnc.yaml - the entrypoint owns that per-user
+# file and rewrites it every boot so a stale file on the persistent home
+# volume can never override this policy.
+# Schema: /usr/share/kasmvnc/kasmvnc_defaults.yaml (KasmVNC 1.5.0).
+desktop:
+  resolution:
+    width: 1280
+    height: 800
+  allow_resize: true
+  pixel_depth: 24
+  gpu:
+    hw3d: false
+
+network:
+  protocol: http
+  interface: 0.0.0.0
+  # Streaming is websocket-only over HTTPS on 8443 (the upstream default
+  # websocket port; there is no HTTP tunnel fallback in KasmVNC 1.5.0).
+  websocket_port: 8443
+  use_ipv4: true
+  use_ipv6: false
+  ssl:
+    pem_certificate: /run/tcdi/tls.crt
+    pem_key: /run/tcdi/tls.key
+    require_ssl: true
+
+command_line:
+  prompt: false
+
+# Clipboard DLP default: both directions off until a per-template clipboard
+# policy is wired (the gateway/template layer owns that policy). Client-side
+# overrides are disabled entirely so the browser cannot re-enable server
+# policy at runtime.
+data_loss_prevention:
+  clipboard:
+    server_to_client:
+      enabled: false
+      primary_clipboard_enabled: false
+    client_to_server:
+      enabled: false
+  logging:
+    # "verbose" logs keypresses and clipboard contents - keep off.
+    level: off
+
+runtime_configuration:
+  allow_client_to_override_kasm_server_settings: false
+  allow_override_standard_vnc_server_settings: false
+
+user_session:
+  new_session_disconnects_existing_exclusive_session: true
+  concurrent_connections_prompt: false
+
+server:
+  http:
+    headers:
+      - Cross-Origin-Embedder-Policy=require-corp
+      - Cross-Origin-Opener-Policy=same-origin
+    httpd_directory: /usr/share/kasmvnc/www
+  advanced:
+    # The real password file lives on the ephemeral /run/tcdi mount; the
+    # entrypoint symlinks $HOME/.kasmpasswd here for the launcher's
+    # "any users configured" check. Auth is Basic-over-HTTPS against this
+    # file; the only account is a write-only (non-owner) user, so the
+    # owner-gated management/API routes (/api/*) deny all requests.
+    kasm_password_file: /run/tcdi/kasmpasswd
+  auto_shutdown:
+    no_user_session_timeout: never
+    active_user_session_timeout: never
+    inactive_user_session_timeout: never
+  # KasmVNC config keys must never be re-settable via container env vars.
+  allow_environment_variables_to_override_config_settings: false
+
+security:
+  brute_force_protection:
+    blacklist_threshold: 5
+    blacklist_timeout: 10
+
+logging:
+  log_writer_name: all
+  log_dest: logfile
+  level: 30

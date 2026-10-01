@@ -1,0 +1,1305 @@
+---
+# release.yml — tag-driven release pipeline.
+#
+# Triggers:
+#   push tag v*.*.*          — full release: publish images (:<ver>, :latest),
+#                              helm chart to oci://ghcr.io/tinyorbitvn/charts,
+#                              GitHub Release with all assets.
+#   workflow_dispatch        — release rehearsal only. `dry_run` (default
+#                              true) builds + scans everything, pushes
+#                              nothing, and uploads the bundle as workflow
+#                              artifacts. dry_run=false is refused in
+#                              `prepare` (SUPF-2): the v* tag ruleset
+#                              grants the Actions app no bypass, so real
+#                              releases are made only by an admin pushing
+#                              the tag.
+#
+# Pipeline shape (SEC-04/SEC-05):
+#   1. build jobs   — docker/build-push-action pushes BY DIGEST ONLY
+#                     (push-by-digest=true, no tags). `packages: write`,
+#                     docker/first-party actions only, registry secrets scoped
+#                     to the login step, `docker logout` at the end. The same
+#                     job generates the SPDX SBOM with sha256-pinned syft —
+#                     publish never consumes scan-job outputs (SUPR-2).
+#   2. scan job     — separate job holding only `packages: read` +
+#                     security-events/actions for SARIF: no secrets, no
+#                     id-token, no attestations. trivy is installed from a
+#                     pinned, sha256-verified tarball (no trivy-action — its
+#                     runtime-downloaded binary is unpinned) and runs with an
+#                     empty --config + the effective --ignorefile generated
+#                     at scan time (expired .trivyignore entries can't leak
+#                     through — SUPR-3/SUPR-8).
+#   3. publish job  — `environment: release` (required reviewers — see
+#                     .github/README.md). First-party actions + pinned
+#                     cosign-installer only; validates every downloaded
+#                     artifact against a strict allowlist, then cosign
+#                     keyless signs + attests the digests (and GitHub
+#                     build-provenance when ATTESTATIONS_ENABLED), pushes +
+#                     signs the helm chart, and only THEN promotes tags with
+#                     `imagetools create` (SUPR-13) + GitHub Release +
+#                     sign-blob bundles. Nothing addressable is public
+#                     before the gate and the approval.
+#
+# Released image set: build/release-images.txt (tracked) — the matrix and
+# the publish allowlist derive from it.
+#
+# Assets attached to the GitHub Release:
+#   tinycdi-{api,operator,gateway}-<ver>-linux-amd64  static binaries
+#   tinycdi-crds-<ver>.yaml                           config/crd/bases bundle
+#   tinycdi-<chartver>.tgz                            helm chart
+#   sbom-<image>.spdx.json                             SPDX SBOM per image
+#   kasmvnc-<ver>-corresponding-source.tar.gz(.sha256) GPL-2.0 source
+#                                                    offer (PUB-2)
+#   sha256sums.txt                                     checksums over the above
+#   <asset>.sigstore.json                              cosign sign-blob bundles
+#
+# Every action is pinned by full commit SHA (version in the trailing
+# comment); downloaded tools are sha256-verified. Tool pins match ci.yml /
+# images.yml (Go 1.26.8, helm v4.1.3, syft 1.52.0, trivy 0.70.0,
+# cosign v3.1.3).
+#
+# Image tags carry the bare semver (v1.2.3 -> :1.2.3) so they match the
+# chart's appVersion; `:latest` is promoted only for non-prereleases. The
+# packaged chart's images.*.digest fields are stamped with the pushed
+# digests (SEC-18).
+#
+# Topology: `browser` FROMs `linux-desktop` (ARG BASE_IMAGE), and the
+# docker-container buildx builder cannot see the daemon's image store.
+# linux-desktop therefore builds first in its own `desktop` job; on real
+# publishes the browser leg consumes the pushed manifest by digest
+# (BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-desktop@sha256:<digest>).
+# In dry_run nothing is pushed, so the browser leg instead consumes the
+# desktop job's image-tar artifact via `docker load`.
+#
+# OCI labels: every image is stamped with org.opencontainers.image.*
+# labels (source, licenses, title, description, version, revision,
+# created) so the GHCR package pages link back to this repository.
+#
+# No shared GHA build cache (SEC-16): release builds do not read or write
+# `type=gha` cache scopes — cache only flows from main-branch CI is a
+# poisoning vector, so builds here are cache-free.
+#
+# Vulnerability gate (SEC-44): TRIVY_GATE_SEVERITY controls which
+# severities WITH AN AVAILABLE FIX fail the release (--ignore-unfixed);
+# unfixed HIGH/CRITICAL findings are listed in the job summary.
+# .trivyignore holds only expiring, approved exceptions — enforced by
+# .github/scripts/check-trivyignore.sh (see .github/README.md).
+#
+# Vulnerability reporting: the trivy SARIF + table reports are always
+# uploaded as workflow artifacts. The SARIF is additionally pushed to
+# GitHub code scanning only on real publishes when the repo variable
+# CODE_SCANNING_ENABLED == 'true' — code scanning is unavailable on
+# private repos without GitHub Advanced Security (see .github/README.md).
+#
+# GitHub build-provenance attestations (actions/attest-build-provenance)
+# only run when the repo variable ATTESTATIONS_ENABLED == 'true':
+# attestation storage on private repos requires an Enterprise plan
+# (SEC-I12). cosign keyless signing works on private repos today, so
+# images/chart/blobs are always signed on publish.
+
+name: release
+
+"on":
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version to stamp on the rehearsal outputs. Tag pushes always
+          use the pushed tag instead.
+        required: false
+        default: "v0.0.0-dryrun"
+      dry_run:
+        description: >-
+          Build + scan everything but skip all pushes and the GitHub
+          Release; outputs arrive as workflow artifacts only. Must stay
+          true — dispatches are rehearsals only (SUPF-2).
+        type: boolean
+        required: false
+        default: true
+      platforms:
+        description: >-
+          Platforms to build on real publishes (comma-separated; dry-run is
+          always linux/amd64). Default linux/amd64; set
+          "linux/amd64,linux/arm64" to opt into arm64.
+        required: false
+        default: "linux/amd64"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.26.8"
+  IMAGE_NS: ghcr.io/tinyorbitvn
+  CHART_OCI: oci://ghcr.io/tinyorbitvn/charts
+  TRIVY_GATE_SEVERITY: "CRITICAL,HIGH"
+  TRIVY_VERSION: "0.70.0"
+  TRIVY_TGZ_SHA256: "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
+  SYFT_VERSION: "1.52.0"
+  SYFT_BIN_SHA256: "15a52d0122953081d16e6695f48055216a4de293bb005948663bb739a63880f9"
+  HELM_VERSION: "v4.1.3"
+  HELM_TGZ_SHA256: "02ce9722d541238f81459938b84cf47df2fdf1187493b4bfb2346754d82a4700"
+  COSIGN_VERSION: "v3.1.3"
+  COSIGN_BIN_SHA256: "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+
+jobs:
+  prepare:
+    name: release metadata
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read  # GHCR already-exists check (SUPR-12)
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      chart_version: ${{ steps.meta.outputs.chart_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+      release_images: ${{ steps.imgset.outputs.release_images }}
+      release_matrix: ${{ steps.imgset.outputs.release_matrix }}
+      desktop_required: ${{ steps.imgset.outputs.desktop_required }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: resolve version / mode
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+            DRY_RUN="$INPUT_DRY_RUN"
+            # SUPF-2: the v* tag ruleset grants no bypass to the Actions
+            # app, so a dispatch can never create the tag `gh release
+            # create` needs — dispatches are rehearsals only. Push the
+            # tag (admin) to make a real release.
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "::error::workflow_dispatch is dry-run only — push tag $VERSION to release"
+              exit 1
+            fi
+          else
+            VERSION="$REF_NAME"
+            DRY_RUN="false"
+          fi
+          export VERSION
+          # SEC-43: full-string anchored regex inside the script — a
+          # line-based grep accepts "v1.2.3\nEVIL=1" and would leak the
+          # extra lines into GITHUB_OUTPUT/GITHUB_ENV.
+          .github/scripts/validate-release-version.sh
+          CHART_VERSION="${VERSION#v}"
+          case "$VERSION" in
+            *-*) PRERELEASE="true" ;;
+            *)   PRERELEASE="false" ;;
+          esac
+          {
+            echo "version=$VERSION"
+            echo "chart_version=$CHART_VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION chart_version=$CHART_VERSION prerelease=$PRERELEASE dry_run=$DRY_RUN"
+
+      - name: read release image set
+        # The released image set is the tracked file build/release-images.txt
+        # linux-desktop builds in the dedicated `desktop` job because the
+        # browser leg FROMs its pushed digest, so it leaves the matrix.
+        id: imgset
+        run: |
+          mapfile -t imgs < <(grep -vE '^[[:space:]]*(#|$)' build/release-images.txt)
+          [ "${#imgs[@]}" -gt 0 ] \
+            || { echo "::error::build/release-images.txt names no images"; exit 1; }
+          for i in "${imgs[@]}"; do
+            [[ "$i" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+              || { echo "::error::release image name '$i' is invalid"; exit 1; }
+            [ -f "build/$i/Dockerfile" ] \
+              || { echo "::error::release image '$i' has no build/$i/Dockerfile"; exit 1; }
+          done
+          if printf '%s\n' "${imgs[@]}" | grep -qx browser \
+            && ! printf '%s\n' "${imgs[@]}" | grep -qx linux-desktop; then
+            echo "::error::browser requires linux-desktop (its FROM base) in build/release-images.txt"
+            exit 1
+          fi
+          {
+            echo "release_images=$(printf '%s\n' "${imgs[@]}" | jq -R . | jq -sc .)"
+            echo "release_matrix=$(printf '%s\n' "${imgs[@]}" \
+              | grep -vx linux-desktop | jq -R . | jq -sc .)"
+            printf '%s\n' "${imgs[@]}" | grep -qx linux-desktop \
+              && echo "desktop_required=true" || echo "desktop_required=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "release images: ${imgs[*]}"
+
+      - name: refuse to overwrite an existing release
+        # SUPR-12: a re-dispatch must fail BEFORE anything is pushed — the
+        # git tag, GHCR image tags (:<chart_version>) and chart version are
+        # immutable once published.
+        if: steps.meta.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHART_VERSION: ${{ steps.meta.outputs.chart_version }}
+        run: |
+          # SUPF-9: existence checks fail CLOSED — only HTTP 404 means
+          # "absent"; any other API error aborts the publish.
+          exists_or_die() { # exists_or_die <endpoint>
+            if gh api "$1" >/dev/null 2>api.err; then
+              return 0
+            fi
+            grep -q 'HTTP 404' api.err && return 1
+            cat api.err
+            echo "::error::cannot query $1 — refusing to continue"
+            exit 1
+          }
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
+            && exists_or_die "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION"; then
+            echo "::error::tag $VERSION already exists"
+            exit 1
+          fi
+          if exists_or_die "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION"; then
+            echo "::error::a GitHub release for $VERSION already exists"
+            exit 1
+          fi
+          org="${GITHUB_REPOSITORY%%/*}"
+          pkgs="$(grep -vE '^[[:space:]]*(#|$)' build/release-images.txt \
+            | sed 's/^/tinycdi-/')"
+          pkgs="$pkgs"$'\n'"charts/tinycdi"
+          while IFS= read -r pkg; do
+            enc="${pkg//\//%2F}"
+            if ! tags="$(gh api --paginate \
+                "orgs/$org/packages/container/$enc/versions?per_page=100" \
+                --jq '.[].metadata.container.tags[]' 2>api.err)"; then
+              grep -q 'HTTP 404' api.err && continue   # package not published yet
+              cat api.err; exit 1                      # fail closed on other errors
+            fi
+            if printf '%s\n' "$tags" | grep -qx "$CHART_VERSION"; then
+              echo "::error::ghcr.io/$org/$pkg:$CHART_VERSION already exists"
+              exit 1
+            fi
+          done <<< "$pkgs"
+
+      - name: verify ref is on main ancestry (publishes only)
+        # SEC-15: a real publish may only tag a commit that is already on
+        # main. Dry-run rehearsals are exempt so feature branches can
+        # rehearse. (Tag pushes of non-main commits fail here too.)
+        if: steps.meta.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # SUPR-11: resolve refs/heads/main to a SHA first — comparing
+          # against the bare name "main" is ambiguous if a tag named `main`
+          # ever exists.
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
+            --jq .object.sha)"
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/${GITHUB_SHA}...${MAIN_SHA}" \
+            --jq .status)"
+          echo "compare ${GITHUB_SHA}...${MAIN_SHA} (main) => $status"
+          case "$status" in
+            identical|ahead) ;;  # GITHUB_SHA is on main (or is its tip)
+            *) echo "::error::${GITHUB_SHA} is not on main ancestry (status: $status) — refusing to publish"
+               exit 1 ;;
+          esac
+
+  desktop:
+    # linux-desktop is the browser image's base: on real publishes the
+    # browser leg consumes this job's pushed manifest by digest; on dry_run
+    # it consumes the image-tar artifact via docker load. The job is
+    # skipped when linux-desktop is not in build/release-images.txt.
+    name: linux-desktop image (browser base)
+    needs: prepare
+    if: needs.prepare.outputs.desktop_required == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write  # push-by-digest to ghcr
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          # SUPR-10: pin the privileged BuildKit image by digest — the
+          # buildx-stable-1 tag is mutable.
+          driver-opts: >-
+            image=moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: login to ghcr.io
+        if: needs.prepare.outputs.dry_run != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: login to base-image mirror (optional — private bases)
+        # SEC-05: registry secrets are scoped to this step only — never job
+        # env. The mirror is generic: vars.BASE_MIRROR_REGISTRY +
+        # BASE_MIRROR_USERNAME/BASE_MIRROR_PASSWORD secrets (.github/README).
+        env:
+          BASE_MIRROR_REGISTRY: ${{ vars.BASE_MIRROR_REGISTRY }}
+          BASE_MIRROR_USERNAME: ${{ secrets.BASE_MIRROR_USERNAME }}
+          BASE_MIRROR_PASSWORD: ${{ secrets.BASE_MIRROR_PASSWORD }}
+        run: |
+          if [ -n "$BASE_MIRROR_REGISTRY" ] && [ -n "$BASE_MIRROR_USERNAME" ] \
+            && [ -n "$BASE_MIRROR_PASSWORD" ]; then
+            printf '%s' "$BASE_MIRROR_PASSWORD" \
+              | docker login "$BASE_MIRROR_REGISTRY" \
+                --username "$BASE_MIRROR_USERNAME" --password-stdin
+          fi
+
+      - name: compute tags + OCI labels
+        run: |
+          REF="$IMAGE_NS/tinycdi-linux-desktop"
+          # PUB-2: this image redistributes KasmVNC (GPL-2.0) + noVNC
+          # (MPL-2.0) — the licenses label is the SPDX expression for the
+          # headline licenses (the SBOM + THIRD_PARTY_LICENSES.md carry the
+          # full Debian inventory) and a pointer label names the
+          # corresponding-source offer attached to this release.
+          KASMVNC_VERSION="$(awk -F= '/^ARG KASMVNC_VERSION=/ {print $2; exit}' \
+            build/linux-desktop/Dockerfile)"
+          SRC_OFFER="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download"
+          SRC_OFFER="$SRC_OFFER/${VERSION}/kasmvnc-${KASMVNC_VERSION}-corresponding-source.tar.gz"
+          {
+            echo "IMAGE_REF=$REF"
+            echo "OCI_LABELS<<__EOF__"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.licenses=MIT AND GPL-2.0-only AND MPL-2.0"
+            echo "org.opencontainers.image.title=tinycdi-linux-desktop"
+            echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux desktop runtime"
+            echo "org.opencontainers.image.version=$VERSION"
+            echo "org.opencontainers.image.revision=$GITHUB_SHA"
+            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "io.tinycdi.kasmvnc-source-offer=$SRC_OFFER"
+            echo "__EOF__"
+          } >> "$GITHUB_ENV"
+
+      - name: build + publish linux-desktop (digest only)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: build/linux-desktop/Dockerfile
+          # dry-run exports a docker tar for the isolated scan job; real
+          # releases honour the optional platforms input (amd64 default)
+          # and push BY DIGEST ONLY — tags are promoted after the gate.
+          platforms: >-
+            ${{ needs.prepare.outputs.dry_run == 'true' && 'linux/amd64'
+                || (inputs.platforms || 'linux/amd64') }}
+          outputs: >-
+            ${{ needs.prepare.outputs.dry_run == 'true'
+                && 'type=docker,dest=/tmp/linux-desktop.tar'
+                || format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF) }}
+          # tags only name the dry-run docker tar; a push-by-digest build
+          # must not carry name:tag refs (buildx rejects tagged refs).
+          tags: >-
+            ${{ needs.prepare.outputs.dry_run == 'true'
+                && format('{0}:{1}', env.IMAGE_REF, env.VERSION) || '' }}
+          labels: ${{ env.OCI_LABELS }}
+          # No cache-from/cache-to: release builds never share the GHA cache
+          # written by main-branch CI (SEC-16).
+
+      - name: record image ref for downstream jobs
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p refs
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "local" > refs/linux-desktop.ref
+          else
+            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-desktop.ref
+          fi
+
+      - name: upload image ref
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-ref-linux-desktop
+          path: refs/linux-desktop.ref
+          retention-days: 5
+
+      - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_BIN_SHA256}  /tmp/syft.tgz" | sha256sum -c -
+          tar -xzf /tmp/syft.tgz -C "$PWD/bin" syft
+
+      - name: syft SBOM (SPDX JSON)
+        # SUPR-2: the SBOM that publish signs is generated HERE, by the job
+        # that pushed the digest — never by the unprivileged scan job.
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          : > /tmp/syft-empty.yaml   # SUPR-8: never load a repo .syft.yaml
+          if [ "$DRY_RUN" = "true" ]; then
+            SRC="docker-archive:/tmp/linux-desktop.tar"
+          else
+            SRC="registry:$IMAGE_REF@$BUILD_DIGEST"
+          fi
+          "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
+            "$SRC" -o spdx-json="sbom-linux-desktop.spdx.json"
+
+      - name: upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-linux-desktop
+          path: sbom-linux-desktop.spdx.json
+          retention-days: 30
+
+      - name: upload image tar (dry-run)
+        if: needs.prepare.outputs.dry_run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-tar-linux-desktop
+          path: /tmp/linux-desktop.tar
+          retention-days: 5
+          compression-level: 0  # image layers are already compressed
+
+      - name: docker logout
+        if: always() && needs.prepare.outputs.dry_run != 'true'
+        # SUPR-9: `docker logout` takes ONE registry — one call each, and
+        # no `|| true` masking a real failure.
+        env:
+          BASE_MIRROR_REGISTRY: ${{ vars.BASE_MIRROR_REGISTRY }}
+        run: |
+          docker logout ghcr.io
+          if [ -n "$BASE_MIRROR_REGISTRY" ]; then
+            docker logout "$BASE_MIRROR_REGISTRY"
+          fi
+
+  images:
+    name: ${{ matrix.image }} image
+    needs: [prepare, desktop]
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.prepare.result == 'success'
+          && (needs.desktop.result == 'success'
+              || needs.desktop.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write  # push-by-digest to ghcr
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.prepare.outputs.release_matrix) }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      IMG_DESCRIPTION: >-
+        ${{ matrix.image == 'api' && 'TinyCDI platform API' ||
+            matrix.image == 'operator' && 'TinyCDI Kubernetes operator' ||
+            matrix.image == 'gateway' && 'TinyCDI session gateway' ||
+            matrix.image == 'portal' && 'TinyCDI web portal' ||
+            matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          # SUPR-10: pin the privileged BuildKit image by digest — the
+          # buildx-stable-1 tag is mutable.
+          driver-opts: >-
+            image=moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: login to ghcr.io
+        if: needs.prepare.outputs.dry_run != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: login to base-image mirror (optional — private bases)
+        # SEC-05: registry secrets are scoped to this step only — never job
+        # env. The mirror is generic: vars.BASE_MIRROR_REGISTRY +
+        # BASE_MIRROR_USERNAME/BASE_MIRROR_PASSWORD secrets (.github/README).
+        env:
+          BASE_MIRROR_REGISTRY: ${{ vars.BASE_MIRROR_REGISTRY }}
+          BASE_MIRROR_USERNAME: ${{ secrets.BASE_MIRROR_USERNAME }}
+          BASE_MIRROR_PASSWORD: ${{ secrets.BASE_MIRROR_PASSWORD }}
+        run: |
+          if [ -n "$BASE_MIRROR_REGISTRY" ] && [ -n "$BASE_MIRROR_USERNAME" ] \
+            && [ -n "$BASE_MIRROR_PASSWORD" ]; then
+            printf '%s' "$BASE_MIRROR_PASSWORD" \
+              | docker login "$BASE_MIRROR_REGISTRY" \
+                --username "$BASE_MIRROR_USERNAME" --password-stdin
+          fi
+
+      - name: compute tags + OCI labels
+        env:
+          IMG: ${{ matrix.image }}
+        run: |
+          REF="$IMAGE_NS/tinycdi-$IMG"
+          # PUB-2: `browser` redistributes KasmVNC (GPL-2.0), noVNC and
+          # Firefox ESR (MPL-2.0) — its licenses label carries the SPDX
+          # expression plus a pointer to the corresponding-source offer
+          # attached to this release. The Go images stay MIT.
+          LIC="MIT"
+          if [ "$IMG" = "browser" ]; then
+            LIC="MIT AND GPL-2.0-only AND MPL-2.0"
+            KASMVNC_VERSION="$(awk -F= '/^ARG KASMVNC_VERSION=/ {print $2; exit}' \
+              build/linux-desktop/Dockerfile)"
+            SRC_OFFER="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download"
+            SRC_OFFER="$SRC_OFFER/${VERSION}/kasmvnc-${KASMVNC_VERSION}-corresponding-source.tar.gz"
+          fi
+          {
+            echo "IMAGE_REF=$REF"
+            echo "OCI_LABELS<<__EOF__"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.licenses=$LIC"
+            echo "org.opencontainers.image.title=tinycdi-$IMG"
+            echo "org.opencontainers.image.description=$IMG_DESCRIPTION"
+            echo "org.opencontainers.image.version=$VERSION"
+            echo "org.opencontainers.image.revision=$GITHUB_SHA"
+            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if [ "$IMG" = "browser" ]; then
+              echo "io.tinycdi.kasmvnc-source-offer=$SRC_OFFER"
+            fi
+            echo "__EOF__"
+          } >> "$GITHUB_ENV"
+
+      - name: browser build wiring (publish — consume desktop digest)
+        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run != 'true'
+        env:
+          DESKTOP_DIGEST: ${{ needs.desktop.outputs.digest }}
+        run: |
+          # The docker-container builder cannot see daemon-local images —
+          # FROM the exact linux-desktop manifest the desktop job pushed.
+          echo "BUILD_ARGS=BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop@$DESKTOP_DIGEST" \
+            >> "$GITHUB_ENV"
+
+      - name: download linux-desktop tar (browser leg, dry_run)
+        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: image-tar-linux-desktop
+          path: /tmp
+
+      - name: build browser (dry_run — daemon builder)
+        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run == 'true'
+        run: |
+          # dry_run pushes nothing: FROM the desktop job's image via docker
+          # load (the docker-container builder cannot see daemon images).
+          docker load --input /tmp/linux-desktop.tar
+          args=(--platform linux/amd64 -f build/browser/Dockerfile
+                --build-arg "BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop:$VERSION")
+          while IFS= read -r lbl; do
+            args+=(--label "$lbl")
+          done <<< "$OCI_LABELS"
+          args+=(-t "$IMAGE_REF:$VERSION")
+          docker build "${args[@]}" .
+          docker save "$IMAGE_REF:$VERSION" -o /tmp/browser.tar
+
+      - name: build + publish ${{ matrix.image }} (digest only)
+        if: matrix.image != 'browser' || needs.prepare.outputs.dry_run != 'true'
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: build/${{ matrix.image }}/Dockerfile
+          # dry-run exports a docker tar for the isolated scan job; real
+          # releases honour the optional platforms input (amd64 default)
+          # and push BY DIGEST ONLY — tags are promoted after the gate.
+          platforms: >-
+            ${{ needs.prepare.outputs.dry_run == 'true' && 'linux/amd64'
+                || (inputs.platforms || 'linux/amd64') }}
+          outputs: >-
+            ${{ needs.prepare.outputs.dry_run == 'true'
+                && format('type=docker,dest=/tmp/{0}.tar', matrix.image)
+                || format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF) }}
+          # tags only name the dry-run docker tar; a push-by-digest build
+          # must not carry name:tag refs (buildx rejects tagged refs).
+          tags: >-
+            ${{ needs.prepare.outputs.dry_run == 'true'
+                && format('{0}:{1}', env.IMAGE_REF, env.VERSION) || '' }}
+          labels: ${{ env.OCI_LABELS }}
+          build-args: ${{ env.BUILD_ARGS }}
+          # No cache-from/cache-to: release builds never share the GHA cache
+          # written by main-branch CI (SEC-16).
+
+      - name: record image ref for downstream jobs
+        env:
+          IMG: ${{ matrix.image }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p refs
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "local" > "refs/$IMG.ref"
+          else
+            echo "$IMAGE_REF@$BUILD_DIGEST" > "refs/$IMG.ref"
+          fi
+
+      - name: upload image ref
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-ref-${{ matrix.image }}
+          path: refs/${{ matrix.image }}.ref
+          retention-days: 5
+
+      - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_BIN_SHA256}  /tmp/syft.tgz" | sha256sum -c -
+          tar -xzf /tmp/syft.tgz -C "$PWD/bin" syft
+
+      - name: syft SBOM (SPDX JSON)
+        # SUPR-2: the SBOM that publish signs is generated HERE, by the job
+        # that pushed the digest — never by the unprivileged scan job.
+        env:
+          IMG: ${{ matrix.image }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          : > /tmp/syft-empty.yaml   # SUPR-8: never load a repo .syft.yaml
+          if [ "$DRY_RUN" = "true" ]; then
+            SRC="docker-archive:/tmp/$IMG.tar"
+          else
+            SRC="registry:$IMAGE_REF@$BUILD_DIGEST"
+          fi
+          "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
+            "$SRC" -o spdx-json="sbom-$IMG.spdx.json"
+
+      - name: upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-${{ matrix.image }}
+          path: sbom-${{ matrix.image }}.spdx.json
+          retention-days: 30
+
+      - name: upload image tar (dry-run)
+        if: needs.prepare.outputs.dry_run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-tar-${{ matrix.image }}
+          path: /tmp/${{ matrix.image }}.tar
+          retention-days: 5
+          compression-level: 0  # image layers are already compressed
+
+      - name: docker logout
+        if: always() && needs.prepare.outputs.dry_run != 'true'
+        # SUPR-9: `docker logout` takes ONE registry — one call each, and
+        # no `|| true` masking a real failure.
+        env:
+          BASE_MIRROR_REGISTRY: ${{ vars.BASE_MIRROR_REGISTRY }}
+        run: |
+          docker logout ghcr.io
+          if [ -n "$BASE_MIRROR_REGISTRY" ]; then
+            docker logout "$BASE_MIRROR_REGISTRY"
+          fi
+
+  scan:
+    # SEC-05: scanners run in a job holding only read permissions — no
+    # packages: write, no id-token, no attestations, no registry secrets.
+    # Its outputs (trivy reports) are never merged into the release bundle
+    # (SUPR-2).
+    name: scan ${{ matrix.image }}
+    needs: [prepare, desktop, images]
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.prepare.result == 'success'
+          && needs.images.result == 'success'
+          && (needs.desktop.result == 'success'
+              || needs.desktop.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read          # pull the pushed digest for scanning
+      security-events: write  # trivy SARIF upload to code scanning
+      actions: read           # upload-sarif fetches the workflow run
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.prepare.outputs.release_images) }}
+    env:
+      IMG: ${{ matrix.image }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      PLATFORMS: >-
+        ${{ needs.prepare.outputs.dry_run == 'true' && 'linux/amd64'
+            || (inputs.platforms || 'linux/amd64') }}
+    steps:
+      - name: download this image's ref
+        # SUPF-1: fetch only this leg's artifact by exact name — a merged
+        # pattern download could be poisoned by a forged artifact.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: image-ref-${{ matrix.image }}
+          path: refs
+
+      - name: resolve scan target
+        run: |
+          REF="$(cat "refs/$IMG.ref")"
+          if [ "$REF" = "local" ]; then
+            echo "SCAN_MODE=tar" >> "$GITHUB_ENV"
+          else
+            echo "SCAN_MODE=registry" >> "$GITHUB_ENV"
+            echo "SCAN_REF=$REF" >> "$GITHUB_ENV"
+          fi
+
+      - name: download image tar (dry-run)
+        if: env.SCAN_MODE == 'tar'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: image-tar-${{ matrix.image }}
+          path: /tmp
+
+      - name: login to ghcr.io (read-only pull for scanning)
+        if: env.SCAN_MODE == 'registry'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install trivy ${{ env.TRIVY_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_TGZ_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C "$PWD/bin" trivy
+          "$PWD/bin/trivy" version
+
+      - name: effective ignorefile + empty tool config
+        # SUPR-3: expiry is enforced AT SCAN TIME — the checker revalidates
+        # .trivyignore here (empty reason/approver, >30d horizon, malformed
+        # IDs all fail) and emits an effective ignorefile that drops expired
+        # entries and pins survivors with trivy's native exp:. SUPR-8: the
+        # empty --config means a committed trivy.yaml can never neuter the
+        # gate (a regression test asserts none exists).
+        run: |
+          .github/scripts/check-trivyignore.sh \
+            --out "$RUNNER_TEMP/trivyignore.effective" .trivyignore
+          : > "$RUNNER_TEMP/trivy-empty.yaml"
+
+      - name: trivy scan + gate per platform (${{ env.TRIVY_GATE_SEVERITY }} with fix available)
+        # SEC-44: --ignore-unfixed keeps unpatchable findings out of the
+        # gate; unfixed HIGH/CRITICALs are listed in the summary below, and
+        # every requested platform is scanned (arm64 included when the
+        # platforms input opts in). Expiring exceptions live in
+        # .trivyignore — enforced at scan time via the effective ignorefile
+        # generated above, not by trusting the checked-in file blindly.
+        # A failing gate still produces all reports before the job fails.
+        run: |
+          gate_rc=0
+          mkdir -p trivy-sarif
+          TCFG=(--config "$RUNNER_TEMP/trivy-empty.yaml"
+                --ignorefile "$RUNNER_TEMP/trivyignore.effective")
+          if [ "$SCAN_MODE" = "tar" ]; then
+            PLAT_LIST=(amd64)
+          else
+            IFS=',' read -ra PLAT_LIST <<< "$PLATFORMS"
+          fi
+          for plat in "${PLAT_LIST[@]}"; do
+            arch="${plat##*/}"
+            if [ "$SCAN_MODE" = "tar" ]; then
+              args=(--input "/tmp/$IMG.tar")
+            else
+              args=(--platform "$plat" "$SCAN_REF")
+            fi
+            "$PWD/bin/trivy" "${TCFG[@]}" image --scanners vuln \
+              --format json -o "trivy-$IMG-$arch.json" "${args[@]}"
+            "$PWD/bin/trivy" "${TCFG[@]}" image --scanners vuln \
+              --severity "$TRIVY_GATE_SEVERITY" --ignore-unfixed \
+              --format table -o "trivy-$IMG-$arch.txt" --exit-code 1 \
+              "${args[@]}" || gate_rc=1
+            "$PWD/bin/trivy" "${TCFG[@]}" convert --format sarif \
+              -o "trivy-sarif/trivy-$IMG-$arch.sarif" "trivy-$IMG-$arch.json"
+          done
+          exit "$gate_rc"
+
+      - name: unfixed HIGH/CRITICAL summary
+        # SUPR-4: report what --ignore-unfixed hides — every unfixed
+        # HIGH/CRITICAL finding, listed per image per platform so the real
+        # exposure is never invisible behind the gate.
+        if: always() && hashFiles(format('trivy-{0}-*.json', matrix.image)) != ''
+        run: |
+          {
+            echo "### trivy — $IMG"
+            echo ""
+            echo "Gate: \`$TRIVY_GATE_SEVERITY\` severities with a fix available."
+            echo ""
+            for f in "trivy-$IMG"-*.json; do
+              arch="${f##*-}"; arch="${arch%.json}"
+              echo "#### platform: $arch"
+              echo ""
+              echo "| vulnerability | package | severity | installed |"
+              echo "|---|---|---|---|"
+              jq -r '[.Results[]?.Vulnerabilities[]?
+                | select((.Severity == "CRITICAL" or .Severity == "HIGH")
+                    and ((.FixedVersion // "") == ""))
+                | {id: .VulnerabilityID, pkg: .PkgName,
+                   sev: .Severity, ver: .InstalledVersion}]
+                | sort_by(.sev, .id)[]
+                | "| \(.id) | \(.pkg) | \(.sev) | \(.ver) |"' "$f"
+              echo ""
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload trivy reports (SARIF + table artifacts)
+        if: always() && hashFiles('trivy-sarif/**') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: trivy-${{ matrix.image }}
+          path: |
+            trivy-sarif/
+            trivy-${{ matrix.image }}-*.txt
+          retention-days: 30
+
+      - name: upload SARIF to code scanning
+        if: >-
+          always()
+          && env.SCAN_MODE == 'registry'
+          && vars.CODE_SCANNING_ENABLED == 'true'
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
+        with:
+          sarif_file: trivy-sarif
+          category: tinycdi-${{ matrix.image }}
+
+  chart:
+    name: helm chart (lint, digest-stamp, package)
+    needs: [prepare, desktop, images]
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.prepare.result == 'success'
+          && needs.images.result == 'success'
+          && (needs.desktop.result == 'success'
+              || needs.desktop.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read  # gh run download of this run's image-ref artifacts
+    env:
+      CHART_VERSION: ${{ needs.prepare.outputs.chart_version }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      RELEASE_IMAGES: ${{ needs.prepare.outputs.release_images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install helm ${{ env.HELM_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/helm.tgz \
+            "https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz"
+          echo "${{ env.HELM_TGZ_SHA256 }}  /tmp/helm.tgz" | sha256sum -c -
+          tar -xzf /tmp/helm.tgz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+          "$PWD/bin/helm" version
+
+      - name: download image digests (exact artifact names)
+        # SUPF-1: fetch each ref by exact artifact name — a merged glob
+        # download lets a forged artifact overwrite a same-named ref file.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p refs
+          mapfile -t imgs < <(jq -r '.[]' <<< "$RELEASE_IMAGES")
+          for img in "${imgs[@]}"; do
+            gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D refs
+          done
+
+      - name: stamp image digests into values
+        # SEC-18: the released chart pins images.*.digest to the exact
+        # manifests this pipeline built (digest wins over tag in the chart
+        # template). Dry-run refs are "local" — left unstamped.
+        if: needs.prepare.outputs.dry_run != 'true'
+        run: .github/scripts/stamp-image-digests.sh deploy/helm/tinycdi/values.yaml refs
+
+      - name: helm lint --strict
+        run: |
+          "$PWD/bin/helm" lint --strict deploy/helm/tinycdi
+          if [ -d deploy/helm/tinycdi/ci ]; then
+            for f in deploy/helm/tinycdi/ci/*.yaml; do
+              echo "== helm lint --strict -f $f"
+              "$PWD/bin/helm" lint --strict deploy/helm/tinycdi -f "$f"
+            done
+          fi
+
+      - name: helm package
+        run: |
+          mkdir -p dist
+          "$PWD/bin/helm" package deploy/helm/tinycdi \
+            --version "$CHART_VERSION" --app-version "$CHART_VERSION" \
+            --destination dist
+          ls -l dist/
+
+      - name: upload chart artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-chart
+          path: dist/*.tgz
+          retention-days: 30
+
+  binaries:
+    name: static binaries + CRDs bundle
+    needs: prepare
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false  # publishing pipeline: no shared cache
+
+      - name: build static linux/amd64 binaries
+        run: |
+          mkdir -p dist
+          for comp in api operator gateway; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+              -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/tinycdi-${comp}-${VERSION}-linux-amd64" "./cmd/${comp}"
+          done
+          # Note: -X main.version is a no-op until the cmd packages export a
+          # `var version` — the stamp is wired so the first version var that
+          # lands lights it up (see .github/README.md).
+
+      - name: CRDs bundle
+        run: |
+          for f in config/crd/bases/*.yaml; do
+            printf -- '---\n'
+            cat "$f"
+          done > "dist/tinycdi-crds-${VERSION}.yaml"
+          grep -c '^kind: CustomResourceDefinition' "dist/tinycdi-crds-${VERSION}.yaml"
+
+      - name: KasmVNC corresponding-source bundle (GPL-2.0 offer)
+        # PUB-2: the linux-desktop/browser images redistribute KasmVNC
+        # under GPL-2.0 — the complete corresponding source tarball and
+        # its sha256 ship as release assets (see NOTICE /
+        # THIRD_PARTY_LICENSES.md). Signed + checksummed like every other
+        # bundle member downstream.
+        if: >-
+          ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
+              || contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
+        run: |
+          hack/kasmvnc-source-bundle.sh dist
+          ls -l dist/kasmvnc-*-corresponding-source.tar.gz*
+
+      - name: upload assets artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-assets
+          path: dist/
+          retention-days: 30
+
+  publish:
+    # The only job that makes content addressable or official. Everything
+    # upstream is digest-only pushes + the isolated scan gate. SUPR-13:
+    # digests are signed and attested BEFORE any tag is promoted, so a
+    # signing failure can never leave unsigned content publicly tagged.
+    name: publish (sign, attest, promote tags, release)
+    needs: [prepare, scan, chart, binaries]
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.prepare.outputs.dry_run != 'true'
+          && needs.scan.result == 'success'
+          && needs.chart.result == 'success'
+          && needs.binaries.result == 'success' }}
+    environment: release  # SEC-15: required reviewers — .github/README.md
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write       # gh release create
+      packages: write       # imagetools retag + helm push + cosign to ghcr
+      id-token: write       # cosign keyless + provenance OIDC
+      attestations: write   # attest-build-provenance (var-gated)
+      actions: read         # gh run download of this run's artifacts (SUPF-1)
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CHART_VERSION: ${{ needs.prepare.outputs.chart_version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      RELEASE_IMAGES: ${{ needs.prepare.outputs.release_images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # SUPR-10: no setup-buildx here — `docker buildx imagetools` only
+      # talks to the registry and needs no privileged BuildKit container.
+
+      - name: install cosign ${{ env.COSIGN_VERSION }} (pinned installer + sha256)
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: verify cosign binary sha256
+        run: echo "${COSIGN_BIN_SHA256}  $(command -v cosign)" | sha256sum -c -
+
+      - name: install helm ${{ env.HELM_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/helm.tgz \
+            "https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz"
+          echo "${{ env.HELM_TGZ_SHA256 }}  /tmp/helm.tgz" | sha256sum -c -
+          tar -xzf /tmp/helm.tgz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+
+      - name: download publish inputs (exact artifact names)
+        # SUPF-1/SUPR-2: each artifact is fetched by its EXACT name into
+        # its own folder via `gh run download` — never a glob download,
+        # which let a forged artifact overwrite a same-named file
+        # mid-merge (artifact-overwrite PoC). Missing or unexpected
+        # artifacts fail closed in the collector below.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p dl
+          mapfile -t imgs < <(jq -r '.[]' <<< "$RELEASE_IMAGES")
+          for img in "${imgs[@]}"; do
+            gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D "dl/image-ref-$img"
+            gh run download "$GITHUB_RUN_ID" -n "sbom-$img" -D "dl/sbom-$img"
+          done
+          gh run download "$GITHUB_RUN_ID" -n release-chart -D dl/release-chart
+          gh run download "$GITHUB_RUN_ID" -n release-assets -D dl/release-assets
+
+      - name: validate publish inputs (strict allowlist)
+        # SUPF-1: every artifact folder must hold exactly its expected
+        # file(s); refs must match ghcr.io/tinyorbitvn/tinycdi-<img>@sha256;
+        # the digests stamped into the packaged chart must equal the refs;
+        # the KasmVNC corresponding-source bundle (PUB-2) must ride along
+        # whenever a GPL runtime image is released. Assembles refs/, sboms/
+        # and bundle/ for the steps below.
+        env:
+          KASMVNC_SRC: >-
+            ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
+                || contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
+        run: .github/scripts/collect-publish-inputs.sh dl "$PWD"
+
+      - name: login to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: cosign sign images (keyless)
+        # SUPR-13: signatures and attestations land on the digests BEFORE
+        # any tag promotion — a failure here leaves nothing addressable.
+        run: |
+          for f in refs/*.ref; do
+            ref="$(tr -d '[:space:]' < "$f")"
+            cosign sign --yes "$ref"
+          done
+
+      - name: cosign attest image SBOMs
+        # SEC-17: the SPDX SBOM is attached to the image as a cosign
+        # attestation pushed to ghcr (works on private repos).
+        run: |
+          for f in refs/*.ref; do
+            name="$(basename "$f" .ref)"
+            ref="$(tr -d '[:space:]' < "$f")"
+            cosign attest --yes --type spdxjson \
+              --predicate "sboms/sbom-$name.spdx.json" "$ref"
+          done
+
+      - name: resolve attestation subjects
+        if: vars.ATTESTATIONS_ENABLED == 'true'
+        id: refs
+        run: |
+          for f in refs/*.ref; do
+            img="$(basename "$f" .ref)"
+            ref="$(tr -d '[:space:]' < "$f")"
+            key="${img//-/_}"
+            echo "name_$key=${ref%@*}" >> "$GITHUB_OUTPUT"
+            echo "digest_$key=${ref#*@}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: attest build provenance — linux-desktop
+        # Requires the repo to be public or on GitHub Enterprise — gated on
+        # the repo variable until then (SEC-I12). Each leg additionally runs
+        # only when the image is in the release set.
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_linux_desktop }}
+          subject-digest: ${{ steps.refs.outputs.digest_linux_desktop }}
+          push-to-registry: true
+
+      - name: attest build provenance — api
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'api') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_api }}
+          subject-digest: ${{ steps.refs.outputs.digest_api }}
+          push-to-registry: true
+
+      - name: attest build provenance — operator
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'operator') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_operator }}
+          subject-digest: ${{ steps.refs.outputs.digest_operator }}
+          push-to-registry: true
+
+      - name: attest build provenance — gateway
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'gateway') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_gateway }}
+          subject-digest: ${{ steps.refs.outputs.digest_gateway }}
+          push-to-registry: true
+
+      - name: attest build provenance — portal
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'portal') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_portal }}
+          subject-digest: ${{ steps.refs.outputs.digest_portal }}
+          push-to-registry: true
+
+      - name: attest build provenance — browser
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_browser }}
+          subject-digest: ${{ steps.refs.outputs.digest_browser }}
+          push-to-registry: true
+
+      - name: push helm chart to OCI + cosign sign
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | "$PWD/bin/helm" registry login ghcr.io \
+              --username "$GHCR_USER" --password-stdin
+          CHART_NAME="$(awk '/^name:/ {print $2; exit}' deploy/helm/tinycdi/Chart.yaml)"
+          shopt -s nullglob
+          pkgs=(bundle/*.tgz)
+          [ "${#pkgs[@]}" -eq 1 ] \
+            || { echo "::error::expected exactly one chart tgz, got ${#pkgs[@]}"; exit 1; }
+          "$PWD/bin/helm" push "${pkgs[0]}" "$CHART_OCI"
+          # SUPR-1: helm 4 writes Pushed:/Digest: to stderr, not stdout —
+          # don't parse streams at all; resolve the digest from the
+          # registry by tag instead.
+          CHART_DIGEST="$(docker buildx imagetools inspect \
+            "ghcr.io/tinyorbitvn/charts/${CHART_NAME}:${CHART_VERSION}" \
+            | awk '/^Digest:/ {print $2; exit}')"
+          if [[ ! "$CHART_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not resolve pushed chart digest from the registry"
+            exit 1
+          fi
+          # SEC-17: sign the pushed chart manifest by digest (keyless).
+          cosign sign --yes "ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}"
+
+      - name: promote image tags (:<ver> + :latest)
+        # SEC-18: tags are the bare chart version (v1.2.3 -> :1.2.3) so they
+        # match appVersion; :latest is promoted only for non-prereleases.
+        # SUPR-13: runs last — the digests are already signed and attested.
+        run: |
+          for f in refs/*.ref; do
+            ref="$(tr -d '[:space:]' < "$f")"
+            base="${ref%@*}"
+            args=(-t "$base:$CHART_VERSION")
+            if [ "$PRERELEASE" != "true" ]; then
+              args+=(-t "$base:latest")
+            fi
+            docker buildx imagetools create "${args[@]}" "$ref"
+          done
+
+      - name: checksums
+        run: |
+          (cd bundle && sha256sum -- *) > bundle/sha256sums.txt
+          cat bundle/sha256sums.txt
+
+      - name: cosign sign-blob all release assets
+        # SEC-17: binaries, CRD bundle, chart tgz, SBOMs and sha256sums.txt
+        # all get a Sigstore bundle shipped alongside the release.
+        run: |
+          for f in bundle/*; do
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
+      - name: upload release bundle artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-bundle-${{ env.VERSION }}
+          path: bundle/
+          retention-days: 90
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          args=(--repo "$GH_REPO"
+                --title "TinyCDI $VERSION"
+                --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Dispatch creates the tag on the dispatched commit — never on
+            # default-branch HEAD (SUP-3).
+            args+=(--target "$GITHUB_SHA")
+          else
+            # Tag push: the tag already exists — fail if it doesn't.
+            args+=(--verify-tag)
+          fi
+          gh release create "$VERSION" bundle/* "${args[@]}"
+
+      - name: docker logout
+        if: always()
+        # SUPR-9: one logout call per registry; failures are not masked.
+        run: docker logout ghcr.io
+
+  dryrun-summary:
+    name: dry-run summary
+    needs: [prepare, scan, chart, binaries]
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.prepare.outputs.dry_run == 'true'
+          && needs.scan.result == 'success'
+          && needs.chart.result == 'success'
+          && needs.binaries.result == 'success' }}
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: summary
+        run: |
+          {
+            echo "### dry-run rehearsal ($VERSION)"
+            echo ""
+            echo "Nothing was pushed or tagged. Would-be release assets are"
+            echo "the \`release-*\` / \`sbom-*\` / \`trivy-*\` artifacts of this run."
+          } >> "$GITHUB_STEP_SUMMARY"

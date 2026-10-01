@@ -1,0 +1,133 @@
+# RBAC — namespace-scoped by construction.
+#
+# The operator ClusterRole (config/rbac/role.yaml verbatim rules) is bound
+# ONLY via RoleBindings in each MANAGED namespace (SEC-09) — never the
+# release namespace (leader election uses its own leases-only Role there)
+# and matching --watch-namespaces on the operator. No ClusterRoleBinding
+# exists anywhere in this chart.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-manager-role
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "operator" "root" $) | nindent 4 }}
+rules:
+# Workspace CRs: spec/status read+write, finalizer management. No create —
+# the platform API owns Workspace creation; the operator only reconciles.
+# Cluster-scoped because workspaces span tenant namespaces; the operator
+# itself only ever touches children it owns (UID-labeled), and never reads
+# Secret values into logs or status.
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces/finalizers"]
+  verbs: ["update"]
+# Templates are read-only for the operator (admins publish them).
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspacetemplates"]
+  verbs: ["get", "list", "watch"]
+# Runtime children the backend converges.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# API role: projects intents onto Workspace CRs and reads templates, only
+# inside tenant namespaces (bound via RoleBindings below). secrets get is
+# the broker credential source (per-workspace runtime secret).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-api-role
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+rules:
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspacetemplates"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+# retained-data flows: attach retargets (patch), the purge sweeper
+# deletes confirmed-Purging volumes, the inventory sync lists
+# retained-labelled PVCs; the sweeper also lists pods to refuse
+# deleting a volume a consumer still binds
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+# Leader election stays inside the release namespace. Leases ONLY —
+# controller-runtime defaults the lock to coordination.k8s.io/leases
+# (resourcelock.LeasesResourceLock; cmd/operator never overrides it), so no
+# configmaps grant exists here (SEC-06: a configmaps write grant is what
+# let the operator SA patch the node-profile installer's scripts).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "operator" "root" $) | nindent 4 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - {kind: ServiceAccount, name: operator, namespace: {{ .Release.Namespace }}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ .Release.Name }}-leader-election}
+# Operator bindings: every managed namespace ONLY (SEC-09). The release
+# namespace gets no manager-role binding — the operator does nothing there
+# (no Workspace CRs can be created there; leader election has its own Role
+# above), and a binding would let it read every platform Secret and create
+# pods next to the api/gateway. --watch-namespaces matches this list.
+{{- range .Values.managedNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operator-manager
+  namespace: {{ .name }}
+subjects:
+  - {kind: ServiceAccount, name: operator, namespace: {{ $.Release.Namespace }}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $.Release.Name }}-manager-role}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-workspaces
+  namespace: {{ .name }}
+subjects:
+  - {kind: ServiceAccount, name: api, namespace: {{ $.Release.Namespace }}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $.Release.Name }}-api-role}
+{{- end }}

@@ -1,0 +1,171 @@
+# Full-featured example for deploy/helm/tinycdi.
+# Secrets are REFERENCED BY NAME ONLY — create them beforehand
+# (docs/runbooks/install.md). Nothing sensitive may live in this file.
+
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionHost: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi-portal
+  # Pre-created Secret holding the OIDC client secret (key: client-secret).
+  existingSecret: tinycdi-oidc-client
+  # Egress to the IdP. Restrict to the IdP's address space where known.
+  egressCIDRs: [0.0.0.0/0]
+  port: 443
+
+database:
+  # Pre-created Secret holding the PostgreSQL DSN (key: url).
+  existingSecret: tinycdi-api-db
+  port: 5432
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+# Company-registry style pull: every repository joined under this registry;
+# per-image .registry would win where set.
+global:
+  imageRegistry: registry.lab.example.net
+  imagePullSecrets:
+    - name: lab-pull-secret
+
+images:
+  api:
+    repository: tinycdi/api
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  operator:
+    repository: tinycdi/operator
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  gateway:
+    repository: tinycdi/gateway
+    digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+  portal:
+    repository: tinycdi/portal
+    digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+  linuxDesktop:
+    repository: tinycdi/linux-desktop
+    digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+  browser:
+    repository: tinycdi/browser
+    digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+
+api:
+  replicas: 2
+  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  podAnnotations: {example.com/team: platform}
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels: {app.kubernetes.io/name: api}
+  internalTLS:
+    existingSecret: tinycdi-api-internal-tls
+  clientCA:
+    existingSecret: tinycdi-extra-ca
+  extraCA:
+    existingSecret: tinycdi-extra-ca
+  extraPortalOrigins:
+    - https://alt.portal.example.net
+
+gateway:
+  metricsListen: ":9090"
+  tls:
+    existingSecret: tinycdi-gateway-tls
+  mtls:
+    existingSecret: tinycdi-gateway-mtls
+  trustedCA:
+    existingSecret: tinycdi-extra-ca
+  # /v1/control/* bearer token (optional — control routes close without it).
+  controlToken:
+    existingSecret: tinycdi-gateway-control-token
+    key: token
+
+portal:
+  tls:
+    existingSecret: tinycdi-portal-tls
+
+operator:
+  internetExceptCIDRs: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+  brokerClient:
+    enabled: true
+    ca:
+      existingSecret: tinycdi-extra-ca
+      key: ca.crt
+    mtls:
+      existingSecret: tinycdi-operator-mtls
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  tls:
+    existingSecret: tinycdi-ingress-tls
+
+serviceMonitor:
+  enabled: true
+  labels: {release: prometheus}
+  interval: 30s
+
+networkPolicy:
+  apiServerPeers:
+    - ipBlock: {cidr: 10.96.0.1/32}
+  apiServerPort: 443
+  prometheusPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: monitoring}
+
+storageClass: longhorn
+
+templates:
+  - name: linuxdesk1
+    namespace: tinycdi-tenant-a
+    image: linuxDesktop          # resolved from .Values.images (digest-pinned)
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Linux Desktop"
+    spec:
+      revision: "2026-10-b"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux: {}                  # image injected from `image:` above
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  - name: browser01
+    namespace: tinycdi-tenant-a
+    image: browser
+    # Per-template Localhost seccomp/AppArmor profiles (node profiles must
+    # be pre-loaded on the nodes — see deploy/node-profiles/README.md).
+    seccompProfile: localhost/profiles/chromium-userns.json
+    appArmorProfile: tinycdi-browser
+    nodeSelector: {workload: runtime}
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser"
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Browser
+      linux: {}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral

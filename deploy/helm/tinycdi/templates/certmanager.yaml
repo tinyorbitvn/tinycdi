@@ -1,0 +1,109 @@
+{{- if .Values.certManager.enabled }}
+# cert-manager integration for the INTERNAL mTLS chain only
+# (gateway/operator -> api broker, ADR 0003). The Certificates below
+# produce the Secrets referenced by api.internalTLS.existingSecret,
+# gateway.mtls.existingSecret and operator.brokerClient.mtls.existingSecret
+# — the pods keep consuming plain secret volumes either way.
+#
+# Public-edge certs (portal.tls, gateway.tls) are NOT issued here: those
+# terminate real browser traffic and should come from your PKI/ACME flow.
+{{- if .Values.certManager.selfSigned }}
+---
+# Bootstrap: self-signed root -> CA Certificate -> CA Issuer. Only enable
+# for closed deployments without an existing internal PKI.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Release.Namespace }}-{{ .Release.Name }}-selfsigned
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-internal-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  secretName: {{ include "tinycdi.internalCASecret" . }}
+  isCA: true
+  commonName: tinycdi-internal-ca
+  duration: {{ .Values.certManager.duration }}
+  renewBefore: {{ .Values.certManager.renewBefore }}
+  issuerRef:
+    kind: ClusterIssuer
+    name: {{ .Release.Namespace }}-{{ .Release.Name }}-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-internal-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ include "tinycdi.internalCASecret" . }}
+{{- end }}
+---
+# api internal broker listener (:9443) server certificate.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-api-internal-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+spec:
+  secretName: {{ .Values.api.internalTLS.existingSecret }}
+  commonName: api-internal.{{ .Release.Namespace }}.svc
+  dnsNames:
+    - api-internal
+    - api-internal.{{ .Release.Namespace }}
+    - api-internal.{{ .Release.Namespace }}.svc
+    - api-internal.{{ .Release.Namespace }}.svc.cluster.local
+  usages: [server auth]
+  duration: {{ .Values.certManager.duration }}
+  renewBefore: {{ .Values.certManager.renewBefore }}
+  issuerRef:
+    {{- include "tinycdi.leafIssuerRef" . | nindent 4 }}
+---
+# gateway broker client certificate (mTLS to the api internal listener).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-gateway-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
+spec:
+  secretName: {{ .Values.gateway.mtls.existingSecret }}
+  commonName: gateway
+  usages: [client auth]
+  duration: {{ .Values.certManager.duration }}
+  renewBefore: {{ .Values.certManager.renewBefore }}
+  issuerRef:
+    {{- include "tinycdi.leafIssuerRef" . | nindent 4 }}
+---
+# operator broker client certificate. The commonName MUST match
+# api.operatorCN (default "operator") — the internal workspace
+# revoke/drain routes accept no other client identity.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-operator-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "operator" "root" $) | nindent 4 }}
+spec:
+  secretName: {{ .Values.operator.brokerClient.mtls.existingSecret }}
+  commonName: {{ .Values.api.operatorCN | default "operator" }}
+  usages: [client auth]
+  duration: {{ .Values.certManager.duration }}
+  renewBefore: {{ .Values.certManager.renewBefore }}
+  issuerRef:
+    {{- include "tinycdi.leafIssuerRef" . | nindent 4 }}
+{{- end }}

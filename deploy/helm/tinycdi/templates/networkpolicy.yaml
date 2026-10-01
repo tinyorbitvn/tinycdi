@@ -1,0 +1,176 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny baseline: nothing talks unless a policy below allows it.
+# Managed namespaces get ONLY the baseline — the operator converges a
+# per-workspace boundary policy for each runtime pod.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- range .Values.managedNamespaces }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .name }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}
+---
+# Cluster DNS for every pod in the release namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml .Values.networkPolicy.dnsPeers | nindent 8 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# Pods that must reach the kube-apiserver (api: CR projection; operator:
+# watches). Peers are values — point them at
+# the kubernetes.default Service IP of YOUR cluster (see install.md).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-apiserver-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {cdi.tinyorbit.vn/needs-apiserver: "true"}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml .Values.networkPolicy.apiServerPeers | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.networkPolicy.apiServerPort }}}
+---
+# api: inbound from portal (:8080) and gateways (:9443 mTLS);
+# egress to the OIDC issuer and PostgreSQL only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: api}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: portal}
+      ports:
+        - {protocol: TCP, port: 8080}
+    # internal mTLS listener (ADR 0003): session gateways + the operator
+    # (workspace revoke/drain teardown seam) only.
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: gateway}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: operator}
+      ports:
+        - {protocol: TCP, port: 9443}
+  egress:
+    - to:
+        {{- range .Values.oidc.egressCIDRs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.oidc.port }}}
+    - to: {{- toYaml .Values.database.allowedPeers | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.database.port }}}
+---
+# portal: public edge. Egress only to the api public listener.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: portal
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: portal}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{ipBlock: {cidr: 0.0.0.0/0}}]
+      ports: [{protocol: TCP, port: 8443}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: api}
+      ports: [{protocol: TCP, port: 8080}]
+---
+# gateway: public session edge; egress to api (:9443 ticket resolution)
+# and to runtime pods in managed namespaces on the streaming port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: gateway}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{ipBlock: {cidr: 0.0.0.0/0}}]
+      ports: [{protocol: TCP, port: 8443}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: api}
+      ports: [{protocol: TCP, port: 9443}]
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+      ports: [{protocol: TCP, port: 8443}]
+---
+# operator: reaches the api internal mTLS listener for the teardown
+# finalizer's revoke/drain seam (ADR 0003). apiserver + DNS egress come
+# from the shared policies above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: operator}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: api}
+      ports: [{protocol: TCP, port: 9443}]
+{{- if .Values.gateway.metricsListen }}
+---
+# Metrics scraping: the declared Prometheus peers may reach the gateway
+# metrics port — scoped to gateway pods (never podSelector {}, SEC-33) on
+# the dedicated gateway-metrics Service port. prometheusPeers empty fails
+# the render (SEC-32, see tinycdi.validate).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: gateway}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml .Values.networkPolicy.prometheusPeers | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.gateway.metricsListen | trimPrefix ":" | int }}}
+{{- end }}
+{{- end }}

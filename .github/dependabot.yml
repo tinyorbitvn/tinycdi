@@ -1,0 +1,21 @@
+---
+# Dependabot — keeps the supply-chain pins fresh (SEC-19).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories:
+      - "/build/*/"
+    schedule:
+      interval: weekly

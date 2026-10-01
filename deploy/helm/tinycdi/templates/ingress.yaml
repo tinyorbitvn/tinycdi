@@ -1,0 +1,69 @@
+{{- if .Values.ingress.enabled }}
+# Portal and session edges on DIFFERENT hosts (enforced by
+# tinycdi.validate). Both pods terminate TLS themselves —
+# set backend pass-through annotations via ingress.annotations for L7
+# ingresses, or expose the Services directly (service.type LoadBalancer).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "portal" "root" $) | nindent 4 }}
+  {{- $ann := merge .Values.ingress.portalAnnotations .Values.ingress.annotations }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.portalHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: portal
+                port: {name: https}
+  {{- with .Values.ingress.tls.existingSecret }}
+  tls:
+    - hosts: [{{ $.Values.portalHost }}]
+      secretName: {{ . }}
+  {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: session
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
+  {{- $sann := merge .Values.ingress.sessionAnnotations .Values.ingress.annotations }}
+  {{- with $sann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.sessionHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port: {name: https}
+  {{- with .Values.ingress.tls.existingSecret }}
+  tls:
+    - hosts: [{{ $.Values.sessionHost }}]
+      secretName: {{ . }}
+  {{- end }}
+{{- end }}

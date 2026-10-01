@@ -1,0 +1,21 @@
+# Smallest install: required values only. No ingress, no seeded
+# templates, no cert-manager — exercises the ghcr.io/tinyorbitvn/*
+# defaults with tag = chart appVersion.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionHost: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi-portal
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-api-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}

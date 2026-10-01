@@ -1,0 +1,42 @@
+# Local tools, experiments, execution ledger and secrets
+/work/
+/.superpowers/
+# SEC-45: secrets must never land in the working tree — env files, key
+# material and kubeconfigs are ignored at any depth.
+.env*
+!.env.example
+secret/
+*.key
+*.pem
+*kubeconfig*
+*.qcow2
+*.vhd
+*.vhdx
+*.iso
+
+# Local tool binaries + envtest assets (Makefile targets install here)
+/bin/
+
+# Go artifacts
+*.test
+*.out
+go.work
+Dockerfile.cross
+
+# editor and IDE paraphernalia
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Node artifacts (web/ has its own .gitignore for dist/test output)
+node_modules/
+
+# Local build outputs and scratch state (never committed)
+/licenses/
+/operator
+/gateway
+/portal
+/.omo/
+/.debug-journal.md

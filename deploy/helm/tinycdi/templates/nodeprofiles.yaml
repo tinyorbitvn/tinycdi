@@ -1,0 +1,216 @@
+{{- if .Values.nodeProfiles.install.enabled }}
+{{- $np := .Values.nodeProfiles.install }}
+{{- $ns := $np.namespace }}
+{{- $content := printf "%s\n%s\n%s\n%s" (.Files.Get "files/node-profiles/seccomp/chromium-userns.json") (.Files.Get "files/node-profiles/apparmor/tinycdi-browser") (.Files.Get "files/node-profiles/installer/install.sh") (.Files.Get "files/node-profiles/installer/verify.sh") }}
+{{- $hash := $content | sha256sum }}
+# Node-profile installer — OPTIONAL (nodeProfiles.install.enabled). A
+# DaemonSet in a DEDICATED namespace (nodeProfiles.install.namespace —
+# NEVER the release namespace, which stays baseline/restricted) that
+# installs the browser Localhost node profiles on every matched node:
+#   <kubeletRoot>/seccomp/profiles/chromium-userns.json  (temp+rename, sha256;
+#     only that directory is mounted — NOT the whole kubelet root)
+#   /etc/apparmor.d/tinycdi-browser  (rendered daemon-peer placeholder,
+#     loaded via the HOST's apparmor_parser through nsenter -t 1 -m —
+#     survives reboots)
+#
+# SEC-06 hardening:
+#   * own namespace labelled PSS enforce=privileged, carrying NO RBAC —
+#     nothing in it can write ConfigMaps or Pods;
+#   * the privileged work happens in an initContainer (install.sh,
+#     NODE_PROFILES_ONESHOT=1) that exits; the long-running container is a
+#     least-privilege verifier (uid 0 with an EMPTY capability set, no
+#     privilege escalation, read-only rootfs and read-only host mounts —
+#     CHTR-1: apparmorfs gates the loaded-profiles file on euid==0, so a
+#     non-root reader can never see it, caps or not);
+#   * the scripts/profiles ship in an immutable ConfigMap whose name
+#     carries a content hash — a tampered ConfigMap can never silently
+#     change what a running pod executes;
+#   * no SA token anywhere (automountServiceAccountToken=false on the SA
+#     AND the pod); root fs is read-only; node writes happen only through
+#     the two writable hostPath mounts of the initContainer.
+# Readiness (verify.sh, exec'd in the verifier) is true only while the host
+# actually carries both profiles — `kubectl -n <ns> get ds node-profiles`
+# is the rollout gate for browser workspaces (README "Node profiles").
+{{- if $np.createNamespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-profiles
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "node-profiles" "root" $) | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-profiles-{{ $hash | trunc 8 }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "node-profiles" "root" $) | nindent 4 }}
+immutable: true
+data:
+  # Byte-identical copies of deploy/node-profiles/* (asserted by the chart
+  # test) plus the installer/verifier scripts they mount at /profiles.
+  chromium-userns.json: |
+    {{- .Files.Get "files/node-profiles/seccomp/chromium-userns.json" | nindent 4 }}
+  tinycdi-browser: |
+    {{- .Files.Get "files/node-profiles/apparmor/tinycdi-browser" | nindent 4 }}
+  install.sh: |
+    {{- .Files.Get "files/node-profiles/installer/install.sh" | nindent 4 }}
+  verify.sh: |
+    {{- .Files.Get "files/node-profiles/installer/verify.sh" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-profiles
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "node-profiles" "root" $) | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: node-profiles, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-profiles
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: tinycdi
+      annotations:
+        # Rolls the pods whenever any shipped profile/script changes —
+        # each pod re-runs the (idempotent) installer on start.
+        checksum/node-profiles: {{ $hash }}
+    spec:
+      serviceAccountName: node-profiles
+      automountServiceAccountToken: false
+      hostPID: true                      # install: containerd AppArmor-label discovery + nsenter target
+      terminationGracePeriodSeconds: 5
+      {{- if $np.priorityClassName }}
+      priorityClassName: {{ $np.priorityClassName }}
+      {{- end }}
+      # All Linux nodes except control-plane; values.nodeSelector merges
+      # over the os=linux floor, tolerations are entirely user-owned.
+      nodeSelector:
+        {{- toYaml (mergeOverwrite (dict "kubernetes.io/os" "linux") ($np.nodeSelector | default dict)) | nindent 8 }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+                  - {key: node-role.kubernetes.io/master, operator: DoesNotExist}
+      {{- with $np.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
+      # The privileged part: writes the two host files and loads the
+      # AppArmor profile with the host parser, then exits (one-shot).
+      initContainers:
+        - name: install
+          {{- if $np.image.digest }}
+          image: {{ $np.image.repository }}@{{ $np.image.digest }}
+          {{- else }}
+          image: {{ $np.image.repository }}:{{ $np.image.tag }}
+          {{- end }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/profiles/install.sh"]
+          env:
+            - name: NODE_PROFILES_MODE
+              value: {{ $np.mode | default "install" | quote }}
+            - name: NODE_PROFILES_ONESHOT
+              value: "1"
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml ($np.resources | default dict) | nindent 12 }}
+          volumeMounts:
+            - {name: profiles, mountPath: /profiles, readOnly: true}
+            - {name: host-seccomp, mountPath: /host/seccomp-profiles}
+            - {name: host-apparmor, mountPath: /host/apparmor.d}
+            - {name: status, mountPath: /run/node-profiles}
+      # The long-running part: a least-privilege VERIFIER. Re-verifies the
+      # installed state over read-only mounts — the AppArmor loaded list
+      # via the host's mounted securityfs (no nsenter). It runs as uid 0
+      # because apparmorfs serves .../apparmor/profiles only to root
+      # (CHTR-1); ALL capabilities are dropped and privilege escalation is
+      # off, so the uid buys exactly one read — and readiness is the
+      # rollout gate.
+      containers:
+        - name: verify
+          {{- if $np.image.digest }}
+          image: {{ $np.image.repository }}@{{ $np.image.digest }}
+          {{- else }}
+          image: {{ $np.image.repository }}:{{ $np.image.tag }}
+          {{- end }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep infinity & wait; done"]
+          env:
+            - name: NODE_PROFILES_MODE
+              value: {{ $np.mode | default "install" | quote }}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            # Direct mode: the verifier reads the bind-mounted host files
+            # instead of nsenter-ing into PID 1's mount namespace.
+            - {name: NODE_PROFILES_NSENTER, value: ""}
+            - {name: NODE_PROFILES_SECCOMP_DIR, value: "/host/seccomp-profiles"}
+            - {name: NODE_PROFILES_AA_SYSFS, value: "/host-securityfs/apparmor/profiles"}
+          readinessProbe:
+            exec: {command: ["/bin/sh", "/profiles/verify.sh"]}
+            initialDelaySeconds: 2
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            # uid 0 is REQUIRED (CHTR-1): apparmorfs's loaded-profiles file
+            # is 0444 yet readable only by root — a non-root verifier can
+            # never report Ready and remove-mode would read EACCES as
+            # "absent". With every capability dropped, no privilege
+            # escalation and a read-only rootfs + mounts, uid 0 here is a
+            # read-only observer, not a writer.
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            {{- toYaml ($np.resources | default dict) | nindent 12 }}
+          volumeMounts:
+            - {name: profiles, mountPath: /profiles, readOnly: true}
+            - {name: host-seccomp, mountPath: /host/seccomp-profiles, readOnly: true}
+            - {name: host-securityfs, mountPath: /host-securityfs, readOnly: true}
+      volumes:
+        - name: profiles
+          configMap: {name: node-profiles-{{ $hash | trunc 8 }}, defaultMode: 0755}
+        # Least privilege: mount ONLY the Localhost seccomp dir — never the
+        # whole kubelet root, which holds every pod's projected secrets.
+        - name: host-seccomp
+          hostPath: {path: {{ $np.kubeletRoot | trimSuffix "/" }}/seccomp/profiles, type: DirectoryOrCreate}
+        - name: host-apparmor
+          hostPath: {path: /etc/apparmor.d, type: DirectoryOrCreate}
+        # Read-only host securityfs (a separate filesystem — a plain /sys
+        # bind does not carry it) so the verifier can read the AppArmor
+        # loaded-profiles list. The mount point dir exists even when
+        # securityfs is not mounted; the verifier then reports "no
+        # AppArmor profiles file" instead of Ready.
+        - name: host-securityfs
+          hostPath: {path: /sys/kernel/security, type: Directory}
+        - name: status
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,1174 @@
+openapi: 3.1.0
+info:
+  title: tinycdi Workspace Platform — Public API
+  version: "0.1.0"
+  summary: |
+    Public HTTP API of the tinycdi workspace platform (portal origin).
+  description: |
+    This API is the only interface end users and the portal talk to. It is served
+    on the **portal origin**; interactive desktop traffic runs on a separate
+    **session origin** reached only through the launch flow described under
+    `POST /v1/workspaces/{workspaceId}/connections`.
+
+    ## Multi-tenancy and authorization
+
+    - Authentication is an OIDC-backed session cookie. The verified principal
+      (issuer + subject + tenant) is the sole source of ownership: requests never
+      carry an owner field and the server never trusts client-supplied identity.
+    - Every resource is scoped to the caller's tenant. Regular users see only
+      resources they own; tenant administrators see the tenant scope.
+      Cross-tenant access returns `404 NOT_FOUND` (the resource is not
+      distinguishable from non-existent), never a leak of existence.
+    - Authorization to act on a workspace (view, start, stop, delete, connect,
+      attach, purge) requires ownership or tenant-admin role; otherwise
+      `403 FORBIDDEN` / `404 NOT_FOUND`.
+    - End users never write Kubernetes custom resources. The API translates
+      accepted intents into `Workspace` CRs through its own service account via a
+      transactional outbox (see ADR 0002); Kubernetes RBAC denies direct CR
+      writes by end users.
+
+    ## Idempotency
+
+    Mutating operations that allocate resources (`POST /v1/workspaces`,
+    `POST /v1/workspaces/{id}/start`, `POST /v1/data/{id}/attach`) require an
+    `Idempotency-Key` header. Retrying with the same key and an identical
+    request body returns the originally recorded result; the same key with a
+    different body returns `409 IDEMPOTENCY_CONFLICT`. Keys are scoped to the
+    authenticated principal and expire after 24 hours.
+
+    ## Errors
+
+    Every `4xx`/`5xx` response has the `Error` body
+    `{code, message, retryable, requestId}`. `code` is a stable enum value
+    clients may switch on; `message` is human-readable and not part of the
+    contract; `retryable` tells whether retrying the same request may succeed
+    without further user action; `requestId` correlates with server logs/audit.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+  contact:
+    name: tinycdi platform team
+
+servers:
+  - url: "https://{portalHost}"
+    description: Portal origin (API + UI). Desktop traffic uses a separate session origin.
+    variables:
+      portalHost:
+        default: portal.example.invalid
+        description: Registrable domain serving the portal and this API.
+
+security:
+  - sessionCookie: []
+
+tags:
+  - name: workspaces
+    description: Workspace lifecycle — catalog-driven desktops owned by the caller.
+  - name: templates
+    description: Workspace template catalog published by administrators.
+  - name: data
+    description: Retained data disks — inventory, attach and purge.
+
+paths:
+  /v1/workspaces:
+    get:
+      operationId: listWorkspaces
+      summary: List workspaces visible to the caller
+      description: |
+        Returns workspaces owned by the caller; tenant administrators see all
+        workspaces in their tenant. Results are ordered by creation time
+        (ascending) and paginated with an opaque cursor.
+      tags: [workspaces]
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageToken"
+        - name: phase
+          in: query
+          description: Filter by lifecycle phase.
+          required: false
+          schema:
+            $ref: "#/components/schemas/WorkspacePhase"
+      responses:
+        "200":
+          description: Page of workspaces.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createWorkspace
+      summary: Create a workspace
+      description: |
+        Accepts a create intent and returns the workspace record. The caller
+        becomes the owner; there is intentionally **no owner field** in the
+        request — ownership is derived from the verified principal.
+
+        Creation reserves quota and records the intent in a single transaction;
+        the runtime is provisioned asynchronously. `desiredState` defaults to
+        `Stopped`; pass `Running` to provision immediately.
+
+        `retainedDataRef` optionally attaches a retained disk owned by the
+        caller (equivalent to `POST /v1/data/{id}/attach`); the retained record
+        must be in state `Retained` and is claimed exclusively.
+
+        Idempotent: same `Idempotency-Key` + same body returns the recorded
+        workspace; same key + different body returns `409 IDEMPOTENCY_CONFLICT`.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkspaceRequest"
+      responses:
+        "201":
+          description: Workspace created (or replayed idempotent result).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/workspaces/{workspaceId}:
+    get:
+      operationId: getWorkspace
+      summary: Get a workspace
+      description: Returns the caller-visible view of one workspace.
+      tags: [workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: The workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteWorkspace
+      summary: Delete a workspace
+      description: |
+        Requests deletion. The workspace moves to `Terminating`: access is
+        revoked, leases are drained, the runtime is stopped, retained-data
+        handling runs, then the record is removed. Deletion is asynchronous and
+        idempotent — repeating the call while `Terminating` returns the current
+        view, not an error.
+
+        For `dataPolicy: Retain` the disk is moved to the retained inventory
+        (`/v1/data`); for `Ephemeral` it is destroyed.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+      responses:
+        "202":
+          description: Deletion accepted; workspace is terminating.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/workspaces/{workspaceId}/start:
+    post:
+      operationId: startWorkspace
+      summary: Start a workspace
+      description: |
+        Sets `desiredState: Running` and provisions the runtime
+        asynchronously. Requires phase `Stopped` or `Failed` (retry after
+        failure); any other phase returns `409 INVALID_STATE`. Repeating start
+        with the same `Idempotency-Key` returns the recorded result; a new key
+        while already `Running`/`Ready` is a no-op returning the current view.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      responses:
+        "200":
+          description: Start accepted; workspace view after the intent was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/workspaces/{workspaceId}/stop:
+    post:
+      operationId: stopWorkspace
+      summary: Stop a workspace
+      description: |
+        Sets `desiredState: Stopped`. Open connections are revoked and the
+        runtime is shut down; persistent data follows `dataPolicy`. Stop is
+        idempotent: stopping a `Stopped`/`Stopping` workspace returns the
+        current view.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+      responses:
+        "200":
+          description: Stop accepted; workspace view after the intent was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/workspaces/{workspaceId}/connections:
+    post:
+      operationId: createConnection
+      summary: Issue a launch ticket for an interactive session
+      description: |
+        Issues a short-lived (60 s), single-use opaque **launch ticket** and a
+        `launchUrl` on the **session origin**. The browser opens the session by
+        POSTing the ticket to `launchUrl` (form POST on the session host); the
+        gateway redeems it atomically through the broker and sets a host-only
+        `Secure`/`HttpOnly`/`SameSite` session cookie, then redirects to a clean
+        URL. The ticket never travels in a query string and is never logged; the
+        server stores only its hash.
+
+        Requirements: the workspace must be in phase `Ready` with
+        `desiredState: Running`, otherwise `409 INVALID_STATE`. At most one
+        interactive connection is authorized per workspace: if a live lease
+        exists and `takeover` is not set, the call fails with
+        `409 CONNECTION_IN_USE`. With `takeover: true` the previous session is
+        revoked and fenced **before** the new ticket becomes usable.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConnectionRequest"
+      responses:
+        "201":
+          description: Launch ticket issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LaunchTicket"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/templates:
+    get:
+      operationId: listTemplates
+      summary: List the workspace template catalog
+      description: |
+        Returns templates published to the caller's tenant. Template revisions
+        are immutable; the `revision` field identifies the exact content the
+        workspace will run.
+      tags: [templates]
+      parameters:
+        - name: runtime
+          in: query
+          description: Filter by runtime kind.
+          required: false
+          schema:
+            $ref: "#/components/schemas/RuntimeKind"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Page of templates.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/data:
+    get:
+      operationId: listRetainedData
+      summary: List retained data disks visible to the caller
+      description: |
+        Returns retained-disk records owned by the caller (tenant
+        administrators see the tenant scope). Each record carries a fresh
+        `purgeConfirmationNonce` required by `POST /v1/data/{dataId}/purge`.
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Page of retained data records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetainedDataList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/data/{dataId}/attach:
+    post:
+      operationId: attachRetainedData
+      summary: Attach a retained disk to a new workspace
+      description: |
+        Creates a **new workspace** whose disk is the retained record. The
+        record must be in state `Retained` and is claimed exclusively: the
+        transition `Retained → Attaching → Attached` is a conditional update in
+        the same transaction as the quota reservation and outbox intent, so
+        attach and purge mutually exclude each other and a disk has at most one
+        consumer at a time. If the new workspace is deleted before the attach
+        completes, the disk returns to `Retained`; it is never garbage-collected
+        with the old workspace.
+
+        The resulting workspace is a new runtime identity: new
+        `runtimeGeneration` and enrollment token, and the old workspace's
+        credentials are invalidated on first boot via re-enrollment.
+
+        Only the owner recorded on the retained record (or a tenant admin) may
+        attach. Idempotent via `Idempotency-Key`.
+      tags: [data]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/DataId"
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachDataRequest"
+      responses:
+        "201":
+          description: Workspace created from the retained disk.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/data/{dataId}/purge:
+    post:
+      operationId: purgeRetainedData
+      summary: Irreversibly destroy a retained disk
+      description: |
+        Schedules destruction of a retained disk. Requires the
+        `confirmationNonce` from the caller's latest read of the record
+        (`GET /v1/data`) — the nonce is short-lived, single-use and bound to the
+        record, principal and record state, so replaying an old nonce fails with
+        `400 INVALID_REQUEST`.
+
+        Only records in state `Retained` can be purged: `Attaching`/`Attached`
+        disks return `409 INVALID_STATE` (detach/delete the consuming workspace
+        first), and a concurrent attach wins or loses the race atomically —
+        never both. Purge is asynchronous; the record reports `Purging` until
+        the disk is actually deleted, and storage quota stays reserved until
+        then.
+      tags: [data]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/DataId"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PurgeDataRequest"
+      responses:
+        "202":
+          description: Purge accepted; record is now `Purging`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetainedDataView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: tcdi_session
+      description: |
+        OIDC-backed session cookie issued by the portal login flow
+        (`Secure`, `HttpOnly`, `SameSite=Strict` on the portal origin).
+        Required on every endpoint.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: |
+        CSRF token obtained from the session bootstrap payload and echoed on
+        every mutating request. Combined with `SameSite=Strict` cookies this
+        blocks cross-site request forgery; a missing or mismatched token
+        returns `403 CSRF_FAILED`. Required on all non-GET operations.
+
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      description: Server-generated workspace identifier.
+      schema:
+        type: string
+        pattern: "^ws_[A-Za-z0-9]{8,64}$"
+        example: ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E
+    DataId:
+      name: dataId
+      in: path
+      required: true
+      description: Server-generated retained-data record identifier.
+      schema:
+        type: string
+        pattern: "^rd_[A-Za-z0-9]{8,64}$"
+        example: rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated unique key (recommended: UUIDv4/ULID). Same key + same
+        request body replays the recorded result; same key + different body
+        returns `409 IDEMPOTENCY_CONFLICT`. Scoped to the principal; retained
+        for 24 h.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        example: "9f3b2c44-3d7a-4b1e-9c2d-1f8a0b6c5d4e"
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional dedup key honored the same way as on create; the operation is
+        naturally idempotent without it.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum items per page (default 50, max 200).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PageToken:
+      name: pageToken
+      in: query
+      required: false
+      description: Opaque cursor from a previous response's `nextPageToken`.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: |
+        The request is malformed or violates the contract — `INVALID_REQUEST`
+        (bad JSON, unknown field, missing confirmation nonce, invalid cursor).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing, expired or invalid session — `UNAUTHENTICATED`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: |
+        Authenticated but not allowed — `FORBIDDEN` for authorization failures,
+        `CSRF_FAILED` for a missing/mismatched CSRF token on a mutation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: |
+        Resource does not exist or is not visible to the caller's tenant —
+        `NOT_FOUND`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        State or idempotency conflict — `IDEMPOTENCY_CONFLICT` (key reused with
+        a different body), `INVALID_STATE` (operation not valid in the current
+        phase/record state), `CONNECTION_IN_USE` (a live interactive lease
+        exists and `takeover` was not set), or `QUOTA_EXHAUSTED` (tenant/user
+        quota has no headroom).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: |
+        Semantically invalid reference — `INVALID_TEMPLATE` (templateRef is
+        unknown, unpublished, not permitted for this tenant, or incompatible
+        with the retained disk's runtime).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Rate limit exceeded — `RATE_LIMITED`. Honor `Retry-After`.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unexpected server error — `INTERNAL`. Safe to retry.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: |
+        Transient dependency failure — `UNAVAILABLE` (store/broker
+        unreachable). Safe to retry with backoff.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    ErrorCode:
+      type: string
+      description: |
+        Stable machine-readable error code. Values and their `retryable`
+        semantics:
+
+        | code | HTTP | retryable | meaning |
+        |---|---|---|---|
+        | `UNAUTHENTICATED` | 401 | false | no/expired session; re-login |
+        | `CSRF_FAILED` | 403 | false | missing/mismatched CSRF token; refresh session bootstrap |
+        | `FORBIDDEN` | 403 | false | principal lacks permission on this resource |
+        | `NOT_FOUND` | 404 | false | resource absent or outside caller's tenant |
+        | `INVALID_REQUEST` | 400 | false | malformed body/params; fix the request |
+        | `INVALID_TEMPLATE` | 422 | false | templateRef unknown, unpublished or disallowed |
+        | `INVALID_STATE` | 409 | true | phase/record state forbids the op now; retry once it settles to a compatible state |
+        | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
+        | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota |
+        | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
+        | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
+        | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
+        | `INTERNAL` | 500 | true | unexpected server failure; safe to retry |
+
+        Clients must treat unknown codes as `INTERNAL` (retryable: true).
+      enum:
+        - UNAUTHENTICATED
+        - CSRF_FAILED
+        - FORBIDDEN
+        - NOT_FOUND
+        - INVALID_REQUEST
+        - INVALID_TEMPLATE
+        - INVALID_STATE
+        - IDEMPOTENCY_CONFLICT
+        - QUOTA_EXHAUSTED
+        - CONNECTION_IN_USE
+        - RATE_LIMITED
+        - UNAVAILABLE
+        - INTERNAL
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable, requestId]
+      description: Uniform error body returned for every 4xx/5xx response.
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: Human-readable detail; not part of the contract.
+          example: "workspace ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E is not in a startable phase"
+        retryable:
+          type: boolean
+          description: |
+            Whether retrying the same request may succeed without user action
+            (see the `ErrorCode` table for per-code semantics).
+        requestId:
+          type: string
+          description: Server-generated request ID for support/log correlation.
+          example: req_01J4ZA1X0YJ8H6K0Q3MW1N5B2P
+
+    WorkspacePhase:
+      type: string
+      description: |
+        Lifecycle phase — a summary; `conditions` carry the operational detail.
+        `Ready` requires the runtime to be actually connectable (display +
+        streaming endpoint checked), not merely scheduled.
+      enum: [Pending, Provisioning, Ready, Stopping, Stopped, Failed, Terminating]
+
+    DesiredState:
+      type: string
+      description: User intent for the runtime.
+      enum: [Running, Stopped]
+
+    DataPolicy:
+      type: string
+      description: |
+        `Ephemeral` destroys disk data on stop/delete; `Retain` keeps the
+        persistent volume across stop and moves it to the retained inventory on
+        delete.
+      enum: [Ephemeral, Retain]
+
+    RuntimeKind:
+      type: string
+      enum: [LinuxContainer, WindowsVM]
+
+    ExperienceKind:
+      type: string
+      enum: [Desktop, Browser]
+
+    ConditionType:
+      type: string
+      enum: [Admitted, StorageReady, RuntimeReady, ConnectionReady, Degraded]
+
+    ConditionStatus:
+      type: string
+      enum: ["True", "False", "Unknown"]
+
+    WorkspaceCondition:
+      type: object
+      additionalProperties: false
+      required: [type, status, reason, lastTransitionTime]
+      description: |
+        Summary of a Kubernetes-style condition projected for UI use. `reason`
+        is a machine-readable CamelCase string; `message` is optional detail.
+      properties:
+        type:
+          $ref: "#/components/schemas/ConditionType"
+        status:
+          $ref: "#/components/schemas/ConditionStatus"
+        reason:
+          type: string
+          example: BootDeadlineExceeded
+        message:
+          type: string
+          description: Optional human-readable detail; not part of the contract.
+        lastTransitionTime:
+          type: string
+          format: date-time
+
+    TemplateSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, revision, runtime, experience]
+      description: Immutable template+revision the workspace was created from.
+      properties:
+        id:
+          type: string
+          pattern: "^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$"
+          example: tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M
+        name:
+          type: string
+          example: linux-firefox-desktop
+        revision:
+          type: integer
+          description: Immutable template revision number.
+          example: 7
+        runtime:
+          $ref: "#/components/schemas/RuntimeKind"
+        experience:
+          $ref: "#/components/schemas/ExperienceKind"
+
+    WorkspaceView:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - template
+        - phase
+        - conditions
+        - desiredState
+        - dataPolicy
+        - createdAt
+        - updatedAt
+      description: |
+        Public view of a workspace. It deliberately omits control-plane
+        internals: no runtime credentials (never serialized), no Kubernetes
+        names/UIDs, and no `runtimeGeneration`/`runtimeUID` fencing values —
+        the UI only needs `phase` + `conditions` to decide connectability.
+      properties:
+        id:
+          type: string
+          pattern: "^ws_[A-Za-z0-9]{8,64}$"
+          example: ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E
+        name:
+          type: string
+          description: Caller-assigned display name; unique per owner.
+          example: research-desktop
+        template:
+          $ref: "#/components/schemas/TemplateSummary"
+        phase:
+          $ref: "#/components/schemas/WorkspacePhase"
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceCondition"
+          description: Current condition summary (may be empty while Pending).
+        desiredState:
+          $ref: "#/components/schemas/DesiredState"
+        dataPolicy:
+          $ref: "#/components/schemas/DataPolicy"
+        retainedDataRef:
+          type: string
+          pattern: "^rd_[A-Za-z0-9]{8,64}$"
+          description: Present when the workspace consumes a retained disk.
+        failureReason:
+          type: string
+          description: Short machine-readable cause when `phase` is `Failed`.
+          example: BootDeadlineExceeded
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateWorkspaceRequest:
+      type: object
+      additionalProperties: false
+      required: [name, templateRef]
+      description: |
+        Create intent. There is no owner field — ownership comes from the
+        verified principal. `templateRef`, `dataPolicy` and `retainedDataRef`
+        are immutable after creation (change requires a replacement workspace).
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$|^[a-z0-9]$"
+          description: DNS-label-style display name, unique per owner.
+          example: research-desktop
+        templateRef:
+          type: string
+          pattern: "^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$"
+          description: Template to instantiate (always the latest published revision unless the ID itself is revision-pinned by the catalog).
+          example: tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M
+        desiredState:
+          $ref: "#/components/schemas/DesiredState"
+          description: Defaults to `Stopped`; `Running` provisions immediately.
+        dataPolicy:
+          $ref: "#/components/schemas/DataPolicy"
+          description: Defaults to the template's lifecycle default.
+        retainedDataRef:
+          type: string
+          pattern: "^rd_[A-Za-z0-9]{8,64}$"
+          description: |
+            Retained disk to attach to the new workspace. The record must be
+            `Retained` and owned by the caller; mutually exclusive claims are
+            enforced server-side.
+
+    WorkspaceList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceView"
+        nextPageToken:
+          type: string
+          description: Cursor for the next page; absent when the list is exhausted.
+
+    CreateConnectionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        takeover:
+          type: boolean
+          default: false
+          description: |
+            When true and a live interactive lease exists, it is revoked and
+            fenced before the new ticket becomes usable. When false a live
+            lease yields `409 CONNECTION_IN_USE`.
+
+    LaunchTicket:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, ticket, launchUrl, expiresAt]
+      description: |
+        One-time launch material for an interactive session. `ticket` is opaque,
+        lives 60 s, is consumed on first redemption attempt (even if expired),
+        and is stored server-side only as a hash. It is delivered in this
+        response body only — the browser POSTs it to `launchUrl` on the session
+        origin; it must never appear in a URL query string.
+      properties:
+        workspaceId:
+          type: string
+          pattern: "^ws_[A-Za-z0-9]{8,64}$"
+        ticket:
+          type: string
+          minLength: 32
+          description: Opaque single-use ticket (base64url, ~256 bits of entropy).
+          example: "tkt_e3B0cmFuZG9tLWJ5dGVzLW9ubHk_0123abcd"
+        launchUrl:
+          type: string
+          format: uri
+          description: |
+            Absolute URL on the **session origin** (a different registrable
+            domain than the portal). The browser POSTs the ticket here; the
+            gateway redeems it and redirects to a clean URL after setting the
+            host-only session cookie.
+          example: "https://session.example.invalid/v1/launch"
+        expiresAt:
+          type: string
+          format: date-time
+          description: Ticket expiry (issued + 60 s).
+
+    TemplateView:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - revision
+        - runtime
+        - experience
+        - resources
+        - lifecycleDefaults
+        - dataPolicyDefault
+        - clipboardPolicy
+        - publishedAt
+      description: |
+        Catalog entry. Revisions are immutable; end users can never supply raw
+        PodSpecs, container commands or arbitrary VM manifests — only the
+        profiles declared here.
+      properties:
+        id:
+          type: string
+          pattern: "^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$"
+        name:
+          type: string
+          example: linux-firefox-desktop
+        description:
+          type: string
+        revision:
+          type: integer
+          description: Immutable published revision.
+        runtime:
+          $ref: "#/components/schemas/RuntimeKind"
+        experience:
+          $ref: "#/components/schemas/ExperienceKind"
+        resources:
+          type: object
+          additionalProperties: false
+          required: [cpuMillicores, memoryMib, storageGib]
+          properties:
+            cpuMillicores:
+              type: integer
+              minimum: 1
+              example: 4000
+            memoryMib:
+              type: integer
+              minimum: 128
+              example: 8192
+            storageGib:
+              type: integer
+              minimum: 1
+              example: 20
+        lifecycleDefaults:
+          type: object
+          additionalProperties: false
+          required: [idleTimeoutSeconds, disconnectGraceSeconds, maxRunningSeconds]
+          properties:
+            idleTimeoutSeconds:
+              type: integer
+              description: Stop after this much input idle time (default 1800).
+              example: 1800
+            disconnectGraceSeconds:
+              type: integer
+              description: Stop after this long with no connected session (default 600).
+              example: 600
+            maxRunningSeconds:
+              type: integer
+              description: Hard cap on a running incarnation (default 28800).
+              example: 28800
+        dataPolicyDefault:
+          $ref: "#/components/schemas/DataPolicy"
+        clipboardPolicy:
+          type: string
+          enum: [Disabled, Enabled]
+          description: Server-side enforced per template.
+        publishedAt:
+          type: string
+          format: date-time
+
+    TemplateList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateView"
+        nextPageToken:
+          type: string
+
+    RetainedDataState:
+      type: string
+      description: |
+        `Retained → Attaching → Attached` and `Retained → Purging → Purged`.
+        Transitions are conditional updates in the same transaction as quota
+        reservation and the outbox intent, so attach and purge exclude each
+        other.
+      enum: [Retained, Attaching, Attached, Purging, Purged]
+
+    RetainedDataView:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - state
+        - sizeGib
+        - runtime
+        - sourceWorkspaceName
+        - retainedAt
+        - purgeConfirmationNonce
+      properties:
+        id:
+          type: string
+          pattern: "^rd_[A-Za-z0-9]{8,64}$"
+        state:
+          $ref: "#/components/schemas/RetainedDataState"
+        sizeGib:
+          type: integer
+          minimum: 1
+          example: 20
+        runtime:
+          $ref: "#/components/schemas/RuntimeKind"
+          description: Runtime family of the disk, to constrain attach templates.
+        sourceWorkspaceName:
+          type: string
+          description: Display name of the workspace the disk was retained from.
+          example: research-desktop
+        consumingWorkspaceId:
+          type: string
+          pattern: "^ws_[A-Za-z0-9]{8,64}$"
+          description: Present while `Attaching`/`Attached` — the workspace consuming the disk.
+        retainedAt:
+          type: string
+          format: date-time
+          description: When the disk entered the retained inventory.
+        purgeConfirmationNonce:
+          type: string
+          description: |
+            Short-lived, single-use nonce bound to this record, the caller's
+            principal and the current record state. Echo it in
+            `POST /v1/data/{id}/purge` to confirm destruction; a fresh nonce is
+            issued on every read.
+
+    RetainedDataList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetainedDataView"
+        nextPageToken:
+          type: string
+
+    AttachDataRequest:
+      type: object
+      additionalProperties: false
+      required: [name, templateRef]
+      description: |
+        Attach intent — equivalent to `POST /v1/workspaces` with
+        `retainedDataRef`. `dataPolicy` of the new workspace is `Retain` by
+        definition; the template's runtime must match the disk's runtime.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$|^[a-z0-9]$"
+          example: restored-desktop
+        templateRef:
+          type: string
+          pattern: "^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$"
+        desiredState:
+          $ref: "#/components/schemas/DesiredState"
+
+    PurgeDataRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmationNonce]
+      properties:
+        confirmationNonce:
+          type: string
+          minLength: 8
+          description: Value of `purgeConfirmationNonce` from the latest read of the record.

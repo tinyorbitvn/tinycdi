@@ -1,0 +1,19 @@
+# .trivyignore — expiring vulnerability-scan exceptions (SEC-44 policy).
+#
+# Gate semantics: the pipeline fails on TRIVY_GATE_SEVERITY findings that
+# have an available fix (--ignore-unfixed keeps unpatchable OS noise out of
+# the gate; unfixed HIGH/CRITICAL findings are listed in the job summary).
+# Entries here suppress a finding in EVERY report — gate and SARIF alike —
+# so each one must carry all three comment fields immediately above it and
+# is enforced by .github/scripts/check-trivyignore.sh (runs in ci.yml and
+# inside the scan jobs themselves):
+#
+#   # reason:   <why the finding is accepted / mitigation>
+#   # approver: <github handle>
+#   # expires:  YYYY-MM-DD   (≤ 30 days ahead)
+#
+# Exceptions expire: a past `expires:` fails the check, and the scan jobs
+# run trivy against a generated effective ignorefile that drops expired
+# entries and pins each survivor with trivy's native `exp:` — expiry is
+# enforced at scan time, not just in the lint job. Re-approve with a new
+# date instead of deleting history when an exception is still needed.

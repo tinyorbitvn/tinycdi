@@ -1,0 +1,308 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: workspaces.workspaces.cdi.tinyorbit.vn
+spec:
+  group: workspaces.cdi.tinyorbit.vn
+  names:
+    kind: Workspace
+    listKind: WorkspaceList
+    plural: workspaces
+    singular: workspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.desiredState
+      name: Desired
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.runtimeGeneration
+      name: RuntimeGen
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Workspace is the Schema for the workspaces API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Workspace
+            properties:
+              dataPolicy:
+                description: |-
+                  dataPolicy selects whether workspace data is destroyed (Ephemeral) or
+                  moved to the retained inventory (Retain) when the workspace is deleted.
+                enum:
+                - Ephemeral
+                - Retain
+                type: string
+              desiredState:
+                description: 'desiredState is the user/platform intent: Running or
+                  Stopped.'
+                enum:
+                - Running
+                - Stopped
+                type: string
+              intentRevision:
+                description: |-
+                  intentRevision serializes every lifecycle intent (create, start, stop,
+                  delete, attach, purge) of this workspace. The API increments it in the
+                  same transaction as the workspace record. The operator drops any
+                  observed intentRevision <= status.lastAppliedIntentRevision.
+                format: int64
+                minimum: 1
+                type: integer
+              ownerSubject:
+                description: ownerSubject is the immutable OIDC identity of the workspace
+                  owner.
+                properties:
+                  issuer:
+                    description: issuer is the OIDC issuer URL (the `iss` claim).
+                    minLength: 1
+                    type: string
+                  subject:
+                    description: subject is the OIDC subject (the `sub` claim).
+                    minLength: 1
+                    type: string
+                required:
+                - issuer
+                - subject
+                type: object
+              runtimeGeneration:
+                description: |-
+                  runtimeGeneration is a monotonically increasing number scoped to this
+                  workspace's UID. The API assigns a new value (in spec, inside the same
+                  outbox transaction as the intent record) every time an intent is
+                  accepted that moves the runtime to Running: create-with-Running or
+                  start-from-Stopped. Stop/Delete fence the current generation; the next
+                  start is issued a new one. It may be 0 only while the workspace has
+                  never been asked to run.
+                format: int64
+                minimum: 0
+                type: integer
+              templateRef:
+                description: templateRef is the immutable WorkspaceTemplate this workspace
+                  runs from.
+                properties:
+                  name:
+                    description: name of the WorkspaceTemplate in the same namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - dataPolicy
+            - desiredState
+            - intentRevision
+            - ownerSubject
+            - runtimeGeneration
+            - templateRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec.templateRef is immutable
+              rule: self.templateRef == oldSelf.templateRef
+            - message: spec.ownerSubject is immutable
+              rule: self.ownerSubject == oldSelf.ownerSubject
+            - message: spec.dataPolicy is immutable
+              rule: self.dataPolicy == oldSelf.dataPolicy
+            - message: spec.runtimeGeneration must not decrease
+              rule: self.runtimeGeneration >= oldSelf.runtimeGeneration
+            - message: spec.intentRevision must not decrease
+              rule: self.intentRevision >= oldSelf.intentRevision
+            - message: spec.runtimeGeneration must be >= 1 when spec.desiredState
+                is Running
+              rule: self.desiredState != 'Running' || self.runtimeGeneration >= 1
+          status:
+            description: status defines the observed state of Workspace
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the Workspace resource.
+                  Condition types: Admitted, StorageReady, RuntimeReady, ConnectionReady,
+                  Degraded.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dataRefs:
+                description: |-
+                  dataRefs lists the volumes belonging to this workspace (home PVC,
+                  retained disk attachment, Windows boot disk).
+                items:
+                  description: |-
+                    DataReference records a data volume the workspace uses or retains. Persistent
+                    volumes never carry an ownerReference to the Workspace; these refs are the
+                    platform's bookkeeping for retention and purge.
+                  properties:
+                    name:
+                      description: name of the referenced object (e.g. PersistentVolumeClaim
+                        name).
+                      minLength: 1
+                      type: string
+                    role:
+                      description: role of the referenced volume.
+                      enum:
+                      - Home
+                      - Boot
+                      - Scratch
+                      - Retained
+                      type: string
+                  required:
+                  - name
+                  - role
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - role
+                x-kubernetes-list-type: map
+              lastAppliedIntentRevision:
+                description: |-
+                  lastAppliedIntentRevision is the highest spec.intentRevision the
+                  operator has applied. Lower revisions are ignored.
+                format: int64
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the latest metadata.generation the operator has
+                  reconciled.
+                format: int64
+                type: integer
+              observedRuntimeGeneration:
+                description: |-
+                  observedRuntimeGeneration is the spec.runtimeGeneration the reported
+                  runtime incarnation belongs to.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  phase summarizes the lifecycle position. Condition reasons carry the
+                  actionable detail.
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Stopping
+                - Stopped
+                - Failed
+                - Terminating
+                type: string
+              runtimeUID:
+                description: |-
+                  runtimeUID is the UID of the current runtime incarnation (Pod for
+                  LinuxContainer, VMI for WindowsVM) belonging to
+                  observedRuntimeGeneration. A generation may contain several
+                  incarnations; a crash/reschedule produces a new runtimeUID which
+                  automatically fences tickets, leases and activity bound to the old one.
+                type: string
+              serviceRef:
+                description: |-
+                  serviceRef is the internal Service fronting the runtime, set when the
+                  runtime exists. Not a connect endpoint for clients.
+                properties:
+                  name:
+                    description: name of the Service in the workspace's namespace.
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port on the Service that serves the streaming endpoint.
+                    format: int32
+                    type: integer
+                required:
+                - name
+                type: object
+              startedAt:
+                description: startedAt is when the current runtime generation became
+                  Ready.
+                format: date-time
+                type: string
+              stoppedAt:
+                description: stoppedAt is when the runtime last reached Stopped.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
