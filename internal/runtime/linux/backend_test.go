@@ -15,6 +15,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,9 +84,16 @@ func testTemplate(annotations map[string]string) *workspacesv1alpha1.WorkspaceTe
 // keyed/labeled by its UID).
 func ensurePodSpec(t *testing.T, annotations map[string]string) *corev1.Pod {
 	t.Helper()
+	return ensurePodSpecFor(t, testTemplate(annotations), Options{})
+}
+
+// ensurePodSpecFor is ensurePodSpec with an explicit template and backend
+// options — the placement tests vary both axes.
+func ensurePodSpecFor(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate, opts Options) *corev1.Pod {
+	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
-	if _, err := New(c, Options{}).Ensure(context.Background(), ws, testTemplate(annotations)); err != nil {
+	if _, err := New(c, opts).Ensure(context.Background(), ws, tpl); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	pod := &corev1.Pod{}
@@ -167,4 +175,150 @@ func TestAppArmorProfileRejected(t *testing.T) {
 			}
 		}
 	}
+}
+
+// --- spec.placement (D24) ---------------------------------------------------
+//
+// Placement precedence is per field: the typed template field wins, then the
+// legacy node-selector annotation (nodeSelector only — it predates the typed
+// field and stays for one release), then the operator's Options defaults.
+// A field the template sets REPLACES the default; it is never merged.
+
+var poolToleration = corev1.Toleration{
+	Key:      "cdi.tinyorbit.vn/workspace",
+	Operator: corev1.TolerationOpEqual,
+	Value:    "true",
+	Effect:   corev1.TaintEffectNoSchedule,
+}
+
+func defaultPlacementOptions() Options {
+	return Options{DefaultPlacement: workspacesv1alpha1.PlacementSpec{
+		NodeSelector: map[string]string{"pool": "default"},
+		Tolerations: []corev1.Toleration{{
+			Key:      "default-taint",
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoExecute,
+		}},
+		RuntimeClassName: ptr("default-rc"),
+	}}
+}
+
+func TestBuildPod_PlacementFromTemplate(t *testing.T) {
+	tpl := testTemplate(nil)
+	tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		NodeSelector:     map[string]string{"workload": "runtime"},
+		Tolerations:      []corev1.Toleration{poolToleration},
+		RuntimeClassName: ptr("gvisor"),
+	}
+	pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
+	if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "runtime"}) {
+		t.Fatalf("nodeSelector = %v, want template value", pod.Spec.NodeSelector)
+	}
+	if !reflect.DeepEqual(pod.Spec.Tolerations, []corev1.Toleration{poolToleration}) {
+		t.Fatalf("tolerations = %v, want template value", pod.Spec.Tolerations)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
+		t.Fatalf("runtimeClassName = %v, want gvisor", pod.Spec.RuntimeClassName)
+	}
+}
+
+func TestBuildPod_PlacementDefaults(t *testing.T) {
+	pod := ensurePodSpecFor(t, testTemplate(nil), defaultPlacementOptions())
+	if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"pool": "default"}) {
+		t.Fatalf("nodeSelector = %v, want operator default", pod.Spec.NodeSelector)
+	}
+	if len(pod.Spec.Tolerations) != 1 || pod.Spec.Tolerations[0].Key != "default-taint" {
+		t.Fatalf("tolerations = %v, want operator default", pod.Spec.Tolerations)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "default-rc" {
+		t.Fatalf("runtimeClassName = %v, want default-rc", pod.Spec.RuntimeClassName)
+	}
+}
+
+func TestBuildPod_PerFieldFallback(t *testing.T) {
+	tpl := testTemplate(nil)
+	tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		RuntimeClassName: ptr("gvisor"),
+	}
+	pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
+		t.Fatalf("runtimeClassName = %v, want gvisor", pod.Spec.RuntimeClassName)
+	}
+	if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"pool": "default"}) {
+		t.Fatalf("nodeSelector = %v, want operator default kept", pod.Spec.NodeSelector)
+	}
+	if len(pod.Spec.Tolerations) != 1 || pod.Spec.Tolerations[0].Key != "default-taint" {
+		t.Fatalf("tolerations = %v, want operator default kept", pod.Spec.Tolerations)
+	}
+}
+
+func TestBuildPod_LegacyAnnotationStillWorks(t *testing.T) {
+	// Annotation alone — it must beat the operator default but lose to the
+	// typed spec field (D24: one release of overlap).
+	t.Run("annotation wins over default", func(t *testing.T) {
+		tpl := testTemplate(map[string]string{
+			AnnotationNodeSelector: `{"workload":"annotated"}`,
+		})
+		pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
+		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "annotated"}) {
+			t.Fatalf("nodeSelector = %v, want annotation value", pod.Spec.NodeSelector)
+		}
+	})
+	t.Run("spec field wins over annotation", func(t *testing.T) {
+		tpl := testTemplate(map[string]string{
+			AnnotationNodeSelector: `{"workload":"annotated"}`,
+		})
+		tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+			NodeSelector: map[string]string{"workload": "typed"},
+		}
+		pod := ensurePodSpecFor(t, tpl, Options{})
+		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "typed"}) {
+			t.Fatalf("nodeSelector = %v, want spec.placement value", pod.Spec.NodeSelector)
+		}
+	})
+	t.Run("spec placement without selector still honors annotation", func(t *testing.T) {
+		// The template sets only runtimeClassName — nodeSelector falls
+		// through to the legacy annotation.
+		tpl := testTemplate(map[string]string{
+			AnnotationNodeSelector: `{"workload":"annotated"}`,
+		})
+		tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+			RuntimeClassName: ptr("gvisor"),
+		}
+		pod := ensurePodSpecFor(t, tpl, Options{})
+		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "annotated"}) {
+			t.Fatalf("nodeSelector = %v, want annotation value", pod.Spec.NodeSelector)
+		}
+	})
+}
+
+func TestBuildPod_HostUsers(t *testing.T) {
+	t.Run("template hostUsers=false lands on the pod", func(t *testing.T) {
+		tpl := testTemplate(nil)
+		tpl.Spec.Linux.HostUsers = ptr(false)
+		pod := ensurePodSpecFor(t, tpl, Options{})
+		if pod.Spec.HostUsers == nil || *pod.Spec.HostUsers != false {
+			t.Fatalf("hostUsers = %v, want false", pod.Spec.HostUsers)
+		}
+	})
+	t.Run("unset stays nil without a default", func(t *testing.T) {
+		pod := ensurePodSpecFor(t, testTemplate(nil), Options{})
+		if pod.Spec.HostUsers != nil {
+			t.Fatalf("hostUsers = %v, want nil", *pod.Spec.HostUsers)
+		}
+	})
+	t.Run("operator default applies when template is silent", func(t *testing.T) {
+		pod := ensurePodSpecFor(t, testTemplate(nil), Options{DefaultHostUsers: ptr(false)})
+		if pod.Spec.HostUsers == nil || *pod.Spec.HostUsers != false {
+			t.Fatalf("hostUsers = %v, want false", pod.Spec.HostUsers)
+		}
+	})
+	t.Run("template wins over operator default", func(t *testing.T) {
+		tpl := testTemplate(nil)
+		tpl.Spec.Linux.HostUsers = ptr(true)
+		pod := ensurePodSpecFor(t, tpl, Options{DefaultHostUsers: ptr(false)})
+		if pod.Spec.HostUsers == nil || *pod.Spec.HostUsers != true {
+			t.Fatalf("hostUsers = %v, want true", pod.Spec.HostUsers)
+		}
+	})
 }

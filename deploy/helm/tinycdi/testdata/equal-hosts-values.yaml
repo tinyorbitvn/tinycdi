@@ -1,18 +1,19 @@
-# Invalid: portal and session share one registrable host. The chart must
-# refuse to render (cookies/CSRF are scoped per host; see design doc).
+# Invalid: portalHost equals the session domain — the *.<sessionDomain>
+# wildcard route would capture portal traffic. The chart must refuse to
+# render (cookies/CSRF are scoped per host; see design doc).
 managedNamespaces:
   - name: tinycdi-tenant-a
     tenant: tenant-a
 
 portalHost: portal.lab.example.net
-sessionHost: portal.lab.example.net
+sessionDomain: portal.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   existingSecret: tinycdi-oidc-client
 
 database:
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   allowedPeers:
     - ipBlock: {cidr: 10.20.30.40/32}

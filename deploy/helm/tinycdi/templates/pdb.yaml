@@ -1,8 +1,17 @@
-# Optional PodDisruptionBudgets, one per component with
-# <component>.podDisruptionBudget.enabled=true.
-{{- range $component := list "api" "operator" "gateway" "portal" }}
+# Optional PodDisruptionBudgets, one per component. backend and frontend
+# use <component>.pdb, operator keeps <component>.podDisruptionBudget.
+# The PDB renders when the block's `enabled` is true, or — when no
+# `enabled` key is present — when a sizing key (minAvailable /
+# maxUnavailable) is set; the shipped backend.pdb={minAvailable:1} is
+# therefore ON by default (D22) and frontend.pdb stays off.
+{{- range $component := list "backend" "operator" "frontend" }}
 {{- $cfg := index $.Values $component }}
-{{- if and $cfg.podDisruptionBudget $cfg.podDisruptionBudget.enabled }}
+{{- $pdb := default dict ($cfg.pdb | default $cfg.podDisruptionBudget) }}
+{{- $enabled := or (not (empty $pdb.minAvailable)) (not (empty $pdb.maxUnavailable)) }}
+{{- if hasKey $pdb "enabled" }}
+{{- $enabled = $pdb.enabled }}
+{{- end }}
+{{- if $enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -14,10 +23,10 @@ metadata:
 spec:
   selector:
     matchLabels: {app.kubernetes.io/name: {{ $component }}, app.kubernetes.io/instance: {{ $.Release.Name }}}
-  {{- if $cfg.podDisruptionBudget.maxUnavailable }}
-  maxUnavailable: {{ $cfg.podDisruptionBudget.maxUnavailable }}
+  {{- if $pdb.maxUnavailable }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
   {{- else }}
-  minAvailable: {{ $cfg.podDisruptionBudget.minAvailable | default 1 }}
+  minAvailable: {{ $pdb.minAvailable | default 1 }}
   {{- end }}
 {{- end }}
 {{- end }}

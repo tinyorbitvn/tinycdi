@@ -66,6 +66,11 @@ Pinned inputs (`docs/compatibility.md`):
   `--security-opt seccomp=tests/integration/testdata/seccomp-runtime.json`.
   `firefox-esr` is the measured fallback (`TCDI_BROWSER=firefox`) with
   reduced isolation (seccomp-bpf only, no userns layer).
+- Pod placement is set by the template's typed `spec.placement` fields
+  (`nodeSelector`, `tolerations`, `runtimeClassName`) and `spec.linux.hostUsers`.
+  The `workspaces.cdi.tinyorbit.vn/node-selector` template annotation is
+  **deprecated**: it is honored for one release and loses to
+  `spec.placement.nodeSelector` when both are set.
 
 ## Build
 
