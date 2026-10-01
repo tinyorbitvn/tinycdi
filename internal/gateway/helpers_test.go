@@ -24,11 +24,14 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 )
 
-const testHost = "session.test"           // Host header tests present
-const testOrigin = "https://session.test" // == PublicOrigin
+const testHost = "session.test"                 // Host header tests present
+const testOrigin = "https://session.test"       // == PublicOrigin
+const testRenewInterval = 25 * time.Millisecond // RenewInterval newGateway uses
 
 // fakeBroker is a scripted broker.BrokerClient: tickets map to the lease a
-// redeem would mint; renewErr/resolveErr inject broker-side failures.
+// redeem would mint; renewErr/resolveErr inject broker-side failures. It
+// also plays the gateway.SessionDirectory: two test gateways sharing one
+// fakeBroker stand for two replicas of the same deployment.
 type fakeBroker struct {
 	mu        sync.Mutex
 	leases    map[string]broker.Lease // ticket token -> lease to mint
@@ -40,6 +43,15 @@ type fakeBroker struct {
 	actLease  []string               // lease IDs parallel to activity
 	actErr    error                  // injected ReportActivity failure
 	upstream  *httptest.Server       // default runtime upstream scripted per lease
+
+	// SessionDirectory stand-in: digests bind cookie digests to lease IDs,
+	// epochs is the per-lease stream epoch ClaimStream increments.
+	digests map[broker.SessionDigest]string
+	epochs  map[string]uint64
+	bindErr error          // injected BindSession failure
+	renewBy map[string]int // renew calls per gateway identity
+	lookupN int            // LeaseBySession calls
+	revokeN int            // RevokeLease calls
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -50,6 +62,9 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		renewErr:  map[string]error{},
 		resolveT:  map[string]broker.Target{},
 		revokedAt: map[string]bool{},
+		digests:   map[broker.SessionDigest]string{},
+		epochs:    map[string]uint64{},
+		renewBy:   map[string]int{},
 		upstream:  httptest.NewTLSServer(http.HandlerFunc(fakeUpstream)),
 	}
 	t.Cleanup(fb.upstream.Close)
@@ -151,15 +166,17 @@ func (f *fakeBroker) RedeemTicket(_ context.Context, gw broker.GatewayIdentity, 
 	return l, nil
 }
 
-func (f *fakeBroker) RenewLease(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence) (broker.Lease, error) {
+func (f *fakeBroker) RenewLease(_ context.Context, gw broker.GatewayIdentity, leaseID string, _ broker.Fence) (broker.Lease, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.renewBy[gw.ID]++
 	if err := f.renewErr[leaseID]; err != nil {
 		return broker.Lease{}, err
 	}
 	for _, l := range f.leases {
 		if l.ID == leaseID {
 			l.ExpiresAt = time.Now().Add(broker.LeaseTTL)
+			l.StreamEpoch = f.epochs[leaseID]
 			return l, nil
 		}
 	}
@@ -181,8 +198,92 @@ func (f *fakeBroker) ResolveTarget(_ context.Context, _ broker.GatewayIdentity, 
 func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.revokeN++
 	f.renewErr[leaseID] = broker.ErrRevoked
 	return nil
+}
+
+// BindSession records the digest binding launch established. A second
+// digest for the same lease is refused like the real directory.
+func (f *fakeBroker) BindSession(_ context.Context, _ broker.GatewayIdentity, leaseID string, d broker.SessionDigest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bindErr != nil {
+		return f.bindErr
+	}
+	if cur, ok := f.digests[d]; ok && cur != leaseID {
+		return broker.ErrDenied
+	}
+	for other, id := range f.digests {
+		if id == leaseID && other != d {
+			return broker.ErrDenied
+		}
+	}
+	f.digests[d] = leaseID
+	return nil
+}
+
+// LeaseBySession resolves a cookie digest to its scripted lease, applying
+// the same liveness view RenewLease has (a revoked/failed lease is dead).
+func (f *fakeBroker) LeaseBySession(_ context.Context, _ broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lookupN++
+	leaseID, ok := f.digests[d]
+	if !ok {
+		return broker.Lease{}, broker.ErrLeaseInvalid
+	}
+	if err := f.renewErr[leaseID]; err != nil {
+		return broker.Lease{}, err
+	}
+	for _, l := range f.leases {
+		if l.ID == leaseID {
+			l.StreamEpoch = f.epochs[leaseID]
+			return l, nil
+		}
+	}
+	return broker.Lease{}, broker.ErrLeaseInvalid
+}
+
+// ClaimStream bumps the lease's stream epoch so the replica holding the
+// previous stream sees it on its next renew.
+func (f *fakeBroker) ClaimStream(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.renewErr[leaseID]; err != nil {
+		return 0, err
+	}
+	f.epochs[leaseID]++
+	return f.epochs[leaseID], nil
+}
+
+// renewCount reports how many RenewLease calls arrived under gateway ID
+// gwID — how tests tell which replica is renewing a shared lease.
+func (f *fakeBroker) renewCount(gwID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renewBy[gwID]
+}
+
+// lookupCount reports the LeaseBySession call count.
+func (f *fakeBroker) lookupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookupN
+}
+
+// revokeCount reports the RevokeLease call count.
+func (f *fakeBroker) revokeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revokeN
+}
+
+// setBindErr makes BindSession fail (directory unavailable at launch).
+func (f *fakeBroker) setBindErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bindErr = err
 }
 
 func (f *fakeBroker) ReportActivity(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ev broker.ActivityEvent) error {
@@ -232,13 +333,21 @@ func (f *fakeBroker) leaseOf(t *testing.T, ticket string) broker.Lease {
 // newGateway builds the gateway handler on an httptest server.
 func newGateway(t *testing.T, fb *fakeBroker, mutate func(*gateway.Config)) *httptest.Server {
 	t.Helper()
+	_, srv := newGatewayHandle(t, fb, mutate)
+	return srv
+}
+
+// newGatewayHandle is newGateway but also returns the *gateway.Gateway, so
+// tests can drive lifecycle methods (Drain) directly.
+func newGatewayHandle(t *testing.T, fb *fakeBroker, mutate func(*gateway.Config)) (*gateway.Gateway, *httptest.Server) {
+	t.Helper()
 	cfg := gateway.Config{
 		Identity:       broker.GatewayIdentity{ID: "gw-test", Audience: "session.example.dev"},
 		PublicOrigin:   testOrigin,
 		AllowedHosts:   []string{testHost},
 		Broker:         fb,
 		ControlToken:   "control-test-token",
-		RenewInterval:  25 * time.Millisecond, // fast cadence so revoke tests don't sleep
+		RenewInterval:  testRenewInterval, // fast cadence so revoke tests don't sleep
 		RevokeDeadline: 150 * time.Millisecond,
 		Now:            time.Now,
 	}
@@ -251,7 +360,18 @@ func newGateway(t *testing.T, fb *fakeBroker, mutate func(*gateway.Config)) *htt
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv
+	return h, srv
+}
+
+// newReplica builds a gateway wired to the shared session directory under
+// its own (recorded) identity — one replica of the deployment. A distinct
+// ID is how the fake attributes renews; real replicas share one identity.
+func newReplica(t *testing.T, fb *fakeBroker, id string) (*gateway.Gateway, *httptest.Server) {
+	t.Helper()
+	return newGatewayHandle(t, fb, func(c *gateway.Config) {
+		c.Identity = broker.GatewayIdentity{ID: id, Audience: "session.example.dev"}
+		c.Sessions = fb
+	})
 }
 
 // doLaunch POSTs the ticket to /v1/launch with the given header tweaks and
