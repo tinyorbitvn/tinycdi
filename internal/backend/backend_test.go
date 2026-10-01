@@ -40,6 +40,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -307,6 +308,13 @@ func (fakeWorkspaceGetter) GetWorkspace(context.Context, string, string, string)
 	return provisioning.WorkspaceRecord{}, provisioning.ErrWorkspaceNotFound
 }
 
+// fakeQuotaSource satisfies api.QuotaSource for route-table tests.
+type fakeQuotaSource struct{}
+
+func (fakeQuotaSource) Report(context.Context, string) (store.QuotaReport, error) {
+	return store.QuotaReport{}, nil
+}
+
 // testAppHandler builds the production app-listener handler (mux +
 // middleware) with the real OIDC discovery path against the fake issuer.
 func testAppHandler(t *testing.T) http.Handler {
@@ -340,7 +348,8 @@ func testAppHandler(t *testing.T) http.Handler {
 	me := api.NewMeHandler(sdom.String())
 	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data)
+	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota)
 	b := &Backend{log: testLog()}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})

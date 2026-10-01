@@ -67,6 +67,8 @@ tags:
     description: Workspace template catalog published by administrators.
   - name: data
     description: Retained data disks — inventory, attach and purge.
+  - name: admin
+    description: Tenant administration — quota and usage views.
   - name: session
     description: Session bootstrap — identity, CSRF token and session domain.
 
@@ -111,6 +113,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/PageToken"
+        - $ref: "#/components/parameters/ListScope"
         - name: phase
           in: query
           description: Filter by lifecycle phase.
@@ -128,6 +131,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -333,6 +338,41 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/workspaces/{workspaceId}/events:
+    get:
+      operationId: listWorkspaceEvents
+      summary: Curated workspace lifecycle events
+      description: |
+        Returns the workspace's events, newest first: the API's own recorded
+        lifecycle steps (create/start/stop/delete intents) and curated
+        condition transitions. Messages are fixed catalog strings — raw
+        Kubernetes or operator error text is never forwarded, so event text
+        never contains node names, image references or other platform
+        internals. Visibility is exactly the workspace read's: a foreign or
+        unknown id is a `404`.
+      tags: [workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Workspace events, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceEventList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/workspaces/{workspaceId}/connections:
     post:
       operationId: createConnection
@@ -467,6 +507,34 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/quota:
+    get:
+      operationId: getQuota
+      summary: Tenant quota and usage snapshot
+      description: |
+        Returns the tenant's configured quota limits and current usage in
+        display units (CPU in millicores, memory in MiB, storage in GiB),
+        plus a per-user usage breakdown. Tenant administrators see every
+        user in `users`; other principals see only their own row.
+      tags: [admin]
+      responses:
+        "200":
+          description: Quota snapshot for the caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -479,6 +547,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/PageToken"
+        - $ref: "#/components/parameters/ListScope"
       responses:
         "200":
           description: Page of retained data records.
@@ -490,6 +559,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -691,6 +762,18 @@ components:
       description: Opaque cursor from a previous response's `nextPageToken`.
       schema:
         type: string
+    ListScope:
+      name: scope
+      in: query
+      required: false
+      description: |
+        `mine` restricts the list to the caller's own rows (also for tenant
+        administrators); `tenant` widens it to the whole tenant and requires
+        the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+        caller's natural scope (admins see the tenant, users their own rows).
+      schema:
+        type: string
+        enum: [mine, tenant]
 
   responses:
     BadRequest:
@@ -912,12 +995,28 @@ components:
         experience:
           $ref: "#/components/schemas/ExperienceKind"
 
+    Owner:
+      type: object
+      additionalProperties: false
+      required: [subject, displayName]
+      description: |
+        Public identity of a resource owner. `subject` is the bare OIDC `sub`;
+        `displayName` is the name the principal directory last saw at login,
+        falling back to `subject`. Display data only — never an authorization
+        input.
+      properties:
+        subject:
+          type: string
+        displayName:
+          type: string
+
     WorkspaceView:
       type: object
       additionalProperties: false
       required:
         - id
         - name
+        - owner
         - template
         - phase
         - conditions
@@ -939,6 +1038,8 @@ components:
           type: string
           description: Caller-assigned display name; unique per owner.
           example: research-desktop
+        owner:
+          $ref: "#/components/schemas/Owner"
         template:
           $ref: "#/components/schemas/TemplateSummary"
         phase:
@@ -966,6 +1067,120 @@ components:
         updatedAt:
           type: string
           format: date-time
+        imageBuiltAt:
+          type: string
+          format: date-time
+          description: |
+            Build timestamp of the runtime image, resolved through the
+            workspace's template (its
+            workspaces.cdi.tinyorbit.vn/image-built-at annotation). Absent
+            when the template is gone or carries no parseable annotation.
+        imageStale:
+          type: boolean
+          description: |
+            True when the runtime image is older than the backend's
+            -image-stale-after threshold (default 336h). Advisory only —
+            a stale image never blocks a Start in v0.2.
+
+    WorkspaceEvent:
+      type: object
+      additionalProperties: false
+      required: [type, reason, message]
+      description: |
+        One curated workspace event. `message` is a fixed catalog string —
+        raw Kubernetes or operator error text is never forwarded.
+      properties:
+        type:
+          type: string
+          enum: [Normal, Warning]
+        reason:
+          type: string
+          description: Short machine-readable reason token.
+          example: StartRequested
+        message:
+          type: string
+          description: Human-readable, curated event text.
+          example: Starting the workspace was requested.
+        count:
+          type: integer
+          minimum: 1
+        firstTimestamp:
+          type: string
+          format: date-time
+        lastTimestamp:
+          type: string
+          format: date-time
+
+    WorkspaceEventList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceEvent"
+          description: Events, newest first.
+
+    QuotaAmounts:
+      type: object
+      additionalProperties: false
+      required:
+        [workspaces, runningWorkspaces, cpuMillicores, memoryMib, storageGib]
+      description: Resource vector in display units.
+      properties:
+        workspaces:
+          type: integer
+          description: Active (not deleted) workspace count.
+        runningWorkspaces:
+          type: integer
+          description: Reserved running slots.
+        cpuMillicores:
+          type: integer
+          description: CPU in millicores.
+        memoryMib:
+          type: integer
+          description: Memory in MiB.
+        storageGib:
+          type: integer
+          description: Storage in GiB.
+
+    UserUsage:
+      type: object
+      additionalProperties: false
+      required: [subject, displayName, usage]
+      description: One tenant member's usage share.
+      properties:
+        subject:
+          type: string
+          description: Bare OIDC subject of the user.
+        displayName:
+          type: string
+          description: Name from the principal directory; falls back to `subject`.
+        usage:
+          $ref: "#/components/schemas/QuotaAmounts"
+
+    QuotaView:
+      type: object
+      additionalProperties: false
+      required: [tenant, limits, usage, users]
+      description: |
+        Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
+        per-user limit store. `users` lists every tenant member for tenant
+        administrators and only the caller for regular users.
+      properties:
+        tenant:
+          type: string
+        limits:
+          $ref: "#/components/schemas/QuotaAmounts"
+        usage:
+          $ref: "#/components/schemas/QuotaAmounts"
+        userLimits:
+          $ref: "#/components/schemas/QuotaAmounts"
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserUsage"
 
     CreateWorkspaceRequest:
       type: object
@@ -1029,7 +1244,10 @@ components:
           description: Subject claim of the verified identity.
         displayName:
           type: string
-          description: Display name; equals `subject` until the principal directory lands.
+          description: |
+            Display name captured from the verified ID token at login
+            (`name`, else `preferred_username`) and served from the principal
+            directory; falls back to `subject` when unknown.
         email:
           type: string
           description: Email claim when the identity provider supplies one.
@@ -1132,6 +1350,7 @@ components:
         - lifecycleDefaults
         - dataPolicyDefault
         - clipboardPolicy
+        - networkProfile
         - publishedAt
       description: |
         Catalog entry. Revisions are immutable; end users can never supply raw
@@ -1193,9 +1412,31 @@ components:
           type: string
           enum: [Disabled, Enabled]
           description: Server-side enforced per template.
+        networkProfile:
+          type: string
+          enum: [InternetOnly, ClusterOnly, Isolated]
+          description: |
+            Runtime egress policy of the WorkspaceTemplate CRD —
+            `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
+            in-cluster destinations, `Isolated` denies all egress except
+            cluster DNS.
         publishedAt:
           type: string
           format: date-time
+        imageBuiltAt:
+          type: string
+          format: date-time
+          description: |
+            Build timestamp of the runtime image (the template's
+            workspaces.cdi.tinyorbit.vn/image-built-at annotation, rendered
+            from images.<key>.builtAt or the seeded entry's imageBuiltAt).
+            Absent when the template carries no parseable annotation.
+        imageStale:
+          type: boolean
+          description: |
+            True when the runtime image is older than the backend's
+            -image-stale-after threshold (default 336h). Advisory only —
+            a stale image never blocks a Start in v0.2.
 
     TemplateList:
       type: object
@@ -1224,6 +1465,7 @@ components:
       required:
         - id
         - state
+        - owner
         - sizeGib
         - runtime
         - sourceWorkspaceName
@@ -1235,6 +1477,8 @@ components:
           pattern: "^rd_[A-Za-z0-9]{8,64}$"
         state:
           $ref: "#/components/schemas/RetainedDataState"
+        owner:
+          $ref: "#/components/schemas/Owner"
         sizeGib:
           type: integer
           minimum: 1

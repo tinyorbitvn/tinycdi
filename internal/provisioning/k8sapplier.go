@@ -225,6 +225,9 @@ type TemplateCatalogEntry struct {
 	ClipboardPolicy   string
 	NetworkProfile    string
 	PublishedAt       time.Time
+	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339
+	// when well formed); empty when the template carries no annotation.
+	ImageBuiltAt string
 }
 
 // K8sTemplateCatalog resolves/list templates from WorkspaceTemplate CRs in
@@ -245,6 +248,12 @@ func NewK8sTemplateCatalog(c client.Client, tenants TenantNamespaces) *K8sTempla
 // resolves the stable public id tpl_<name> to the newest published
 // revision and lists one entry per catalog name.
 const LabelCatalogName = "workspaces.cdi.tinyorbit.vn/catalog-name"
+
+// AnnotationImageBuiltAt carries the runtime image's build timestamp
+// (RFC 3339) on a WorkspaceTemplate — rendered from images.<key>.builtAt
+// or the seeded entry's imageBuiltAt. The API surfaces it as the
+// imageBuiltAt/imageStale view fields; it is advisory only (D28).
+const AnnotationImageBuiltAt = "workspaces.cdi.tinyorbit.vn/image-built-at"
 
 // TemplateCRName converts a public template ID to its CR name; ok=false
 // when id lacks the tpl_ prefix.
@@ -370,6 +379,7 @@ func templateEntry(t *workspacev1alpha1.WorkspaceTemplate) TemplateCatalogEntry 
 	e.DataPolicyDefault = string(t.Spec.Lifecycle.DataPolicy)
 	e.ClipboardPolicy = string(t.Spec.ClipboardPolicy)
 	e.NetworkProfile = string(t.Spec.NetworkProfile)
+	e.ImageBuiltAt = t.Annotations[AnnotationImageBuiltAt]
 	return e
 }
 

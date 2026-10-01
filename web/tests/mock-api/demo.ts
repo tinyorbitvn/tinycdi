@@ -15,6 +15,9 @@ import {
   type WorkspaceFixture,
 } from "./fixtures.ts";
 
+// Demo records belong to the demo principal (same identity admin.ts ME uses).
+const DEMO_OWNER = { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" };
+
 export const DEMO_TEMPLATES: TemplateFixture[] = [
   {
     id: "tpl_01J4ZE2K8VQW5R7T3N9P1M6X4D",
@@ -73,6 +76,7 @@ function at(conditions: ConditionFixture[], time: string): ConditionFixture[] {
 export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH1A2B3C4D5E6F7G8H9J0K",
+    owner: DEMO_OWNER,
     name: "design-review",
     template: summary(TEMPLATE_LINUX),
     phase: "Ready",
@@ -84,6 +88,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   },
   {
     id: "ws_01J4ZH2B3C4D5E6F7G8H9J0K1M",
+    owner: DEMO_OWNER,
     name: "quick-browse",
     template: summary(TEMPLATE_BROWSER),
     phase: "Ready",
@@ -95,6 +100,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   },
   {
     id: "ws_01J4ZH3C4D5E6F7G8H9J0K1M2N",
+    owner: DEMO_OWNER,
     name: "kernel-dev",
     template: summary(DEV),
     phase: "Provisioning",
@@ -116,6 +122,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   },
   {
     id: "ws_01J4ZH4D5E6F7G8H9J0K1M2N3P",
+    owner: DEMO_OWNER,
     name: "finance-office",
     template: summary(WIN),
     phase: "Failed",
@@ -145,6 +152,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   },
   {
     id: "ws_01J4ZH5E6F7G8H9J0K1M2N3P4Q",
+    owner: DEMO_OWNER,
     name: "build-agent",
     template: summary(DEV),
     phase: "Stopping",
@@ -203,6 +211,7 @@ export const DEMO_EVENTS: Record<string, WorkspaceEventFixture[]> = {
 export const DEMO_RETAINED: RetainedFixture[] = [
   {
     id: "rd_01J4ZJ1K2L3M4N5P6Q7R8S9T0V",
+    owner: DEMO_OWNER,
     state: "Retained",
     sizeGib: 64,
     runtime: "WindowsVM",
@@ -212,6 +221,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
   },
   {
     id: "rd_01J4ZJ2L3M4N5P6Q7R8S9T0V1W",
+    owner: DEMO_OWNER,
     state: "Retained",
     sizeGib: 50,
     runtime: "LinuxContainer",

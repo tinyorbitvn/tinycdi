@@ -57,13 +57,14 @@ export const TEMPLATE_BROWSER: TemplateFixture = {
   },
   dataPolicyDefault: "Ephemeral",
   clipboardPolicy: "Disabled",
-  networkProfile: "InternetOnly",
+  networkProfile: "Isolated",
   publishedAt: "2026-09-01T00:00:00Z",
 };
 
 export const WORKSPACE_STOPPED: WorkspaceFixture = {
   id: "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E",
   name: "research-desktop",
+  owner: { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" },
   template: {
     id: TEMPLATE_LINUX.id,
     name: TEMPLATE_LINUX.name,
@@ -96,6 +97,7 @@ export const WORKSPACE_STOPPED: WorkspaceFixture = {
 export const RETAINED_DISK: RetainedFixture = {
   id: "rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A",
   state: "Retained",
+  owner: { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" },
   sizeGib: 20,
   runtime: "LinuxContainer",
   sourceWorkspaceName: "old-desktop",
