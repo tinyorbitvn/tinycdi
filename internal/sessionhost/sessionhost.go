@@ -1,37 +1,34 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-// Package sessionhost maps platform workspace IDs to the per-workspace
-// hosts of the session domain (design §3.2, D9). Each workspace is served
-// on "<label>.<sessionDomain>" where the label is a deterministic
-// lower-case DNS label derived from the workspace ID, so the edge needs
-// only one wildcard route and one wildcard certificate.
+// Package sessionhost maps platform workspace IDs ("ws_<suffix>") to the
+// per-workspace hosts ("ws-<suffix>.<sessionDomain>") the session listener
+// serves, and matches incoming Host headers back to workspace IDs.
 package sessionhost
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 )
 
-// labelPrefix/labelSep tie the host label to the platform workspace ID
-// form "ws_<suffix>" — the same mapping provisioning.WorkspaceCRName uses
-// ('_' is not valid in a DNS label).
 const (
 	idPrefix    = "ws_"
 	labelPrefix = "ws-"
 )
 
-// labelSuffixOK reports whether s is a valid workspace-ID suffix:
-// [a-z0-9]{8,60}. The 60-char ceiling keeps "ws-"+suffix inside the 63-byte
-// DNS label limit.
-func labelSuffixOK(s string) bool {
+// validSuffix reports whether s matches [a-z0-9]{8,60}. The 60-char cap keeps
+// "ws-"+suffix within the 63-char DNS label limit; only lower case round-trips
+// through DNS.
+func validSuffix(s string) bool {
 	if len(s) < 8 || len(s) > 60 {
 		return false
 	}
-	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
@@ -42,8 +39,8 @@ func labelSuffixOK(s string) bool {
 // ("ws-<suffix>"). The suffix must match [a-z0-9]{8,60}.
 func Label(workspaceID string) (string, error) {
 	suffix, ok := strings.CutPrefix(workspaceID, idPrefix)
-	if !ok || !labelSuffixOK(suffix) {
-		return "", fmt.Errorf("sessionhost: workspace ID %q is not ws_ + [a-z0-9]{8,60}", workspaceID)
+	if !ok || !validSuffix(suffix) {
+		return "", fmt.Errorf("sessionhost: invalid workspace ID %q", workspaceID)
 	}
 	return labelPrefix + suffix, nil
 }
@@ -51,7 +48,7 @@ func Label(workspaceID string) (string, error) {
 // WorkspaceID is the inverse of Label.
 func WorkspaceID(label string) (string, bool) {
 	suffix, ok := strings.CutPrefix(label, labelPrefix)
-	if !ok || !labelSuffixOK(suffix) {
+	if !ok || !validSuffix(suffix) {
 		return "", false
 	}
 	return idPrefix + suffix, true
@@ -59,83 +56,106 @@ func WorkspaceID(label string) (string, bool) {
 
 // Domain is the session domain, optionally with a port.
 type Domain struct {
-	host string // lower-case DNS name, no port
-	port string // "" or a canonical decimal port 1-65535
-}
-
-// dnsLabelOK reports whether l is a valid lower-case DNS label.
-func dnsLabelOK(l string) bool {
-	if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-		return false
-	}
-	for _, r := range l {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-// splitHostPort splits "host[:port]"; the port, when present, must be a
-// non-empty decimal number. A bare host returns port == "".
-func splitHostPort(s string) (host, port string, ok bool) {
-	host = s
-	if i := strings.LastIndex(s, ":"); i >= 0 {
-		host, port = s[:i], s[i+1:]
-		p, err := strconv.Atoi(port)
-		if err != nil || p < 1 || p > 65535 || port != strconv.Itoa(p) {
-			return "", "", false
-		}
-	}
-	return host, port, true
+	raw  string // as configured
+	host string // lower-case DNS domain, without port
+	port int    // 0 when none is configured
 }
 
 // ParseDomain accepts "session.example.com" or "session.example.com:8444".
 // It rejects schemes, paths, wildcards, upper case, empty labels, a
 // trailing dot and IP literals.
 func ParseDomain(s string) (Domain, error) {
-	fail := func() (Domain, error) {
-		return Domain{}, fmt.Errorf("sessionhost: bad session domain %q (want host[:port])", s)
+	hostport := s
+	d := Domain{raw: s}
+	if i := strings.LastIndexByte(hostport, ':'); i >= 0 {
+		p, err := parsePort(hostport[i+1:])
+		if err != nil {
+			return Domain{}, fmt.Errorf("sessionhost: invalid domain %q: %w", s, err)
+		}
+		d.port = p
+		hostport = hostport[:i]
 	}
-	if s == "" || strings.Contains(s, "://") || strings.ContainsAny(s, "/@") ||
-		strings.HasPrefix(s, "*") || s != strings.ToLower(s) {
-		return fail()
+	if err := validDomain(hostport); err != nil {
+		return Domain{}, fmt.Errorf("sessionhost: invalid domain %q: %w", s, err)
 	}
-	host, port, ok := splitHostPort(s)
-	if !ok || host == "" || len(host) > 253 ||
-		strings.HasSuffix(host, ".") || strings.HasPrefix(host, ".") ||
-		net.ParseIP(host) != nil {
-		return fail()
+	d.host = hostport
+	return d, nil
+}
+
+func parsePort(s string) (int, error) {
+	if s == "" {
+		return 0, errors.New("empty port")
 	}
-	for _, l := range strings.Split(host, ".") {
-		if !dnsLabelOK(l) {
-			return fail()
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("port %q is not numeric", s)
 		}
 	}
-	return Domain{host: host, port: port}, nil
+	p, err := strconv.Atoi(s)
+	if err != nil || p < 1 || p > 65535 {
+		return 0, fmt.Errorf("port %q out of range", s)
+	}
+	return p, nil
 }
 
-// String returns the domain as configured: "host" or "host:port".
-func (d Domain) String() string {
-	if d.host == "" {
-		return ""
+func validDomain(host string) error {
+	if host == "" {
+		return errors.New("empty host")
 	}
-	if d.port == "" {
+	if host != strings.ToLower(host) {
+		return errors.New("host must be lower case")
+	}
+	if net.ParseIP(host) != nil {
+		return errors.New("IP literal not allowed")
+	}
+	if len(host) > 253 {
+		return errors.New("host too long")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !validDNSLabel(label) {
+			return fmt.Errorf("bad DNS label %q", label)
+		}
+	}
+	return nil
+}
+
+// validDNSLabel reports whether l is a DNS-1123 label: 1-63 chars of
+// [a-z0-9-] that neither starts nor ends with a hyphen.
+func validDNSLabel(l string) bool {
+	if len(l) == 0 || len(l) > 63 {
+		return false
+	}
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return l[0] != '-' && l[len(l)-1] != '-'
+}
+
+// String returns the domain as configured.
+func (d Domain) String() string {
+	return d.raw
+}
+
+func (d Domain) hostport() string {
+	if d.port == 0 {
 		return d.host
 	}
-	return d.host + ":" + d.port
+	return d.host + ":" + strconv.Itoa(d.port)
 }
 
-// Host returns "<label>.<domain>[:port]" for the workspace.
+// Host returns "ws-<suffix>.<domain>[:port]" for the workspace ID.
 func (d Domain) Host(workspaceID string) (string, error) {
 	l, err := Label(workspaceID)
 	if err != nil {
 		return "", err
 	}
-	return l + "." + d.String(), nil
+	return l + "." + d.hostport(), nil
 }
 
-// Origin returns "https://" + Host(workspaceID).
+// Origin returns "https://" + Host for the workspace ID.
 func (d Domain) Origin(workspaceID string) (string, error) {
 	h, err := d.Host(workspaceID)
 	if err != nil {
@@ -144,32 +164,37 @@ func (d Domain) Origin(workspaceID string) (string, error) {
 	return "https://" + h, nil
 }
 
-// Wildcard returns the wildcard form "*.<domain>[:port]".
+// Wildcard returns "*.<domain>[:port]".
 func (d Domain) Wildcard() string {
-	return "*." + d.String()
+	return "*." + d.hostport()
 }
 
 // Match reports the workspace ID addressed by a request Host header.
 // Exactly one label must precede the domain; the port must equal the
 // configured port (absent or 443 when none is configured).
-func (d Domain) Match(hostport string) (string, bool) {
-	if d.host == "" {
-		return "", false
-	}
-	host, port, ok := splitHostPort(hostport)
-	if !ok {
-		return "", false
-	}
-	switch {
-	case d.port != "":
-		if port != d.port {
+func (d Domain) Match(hostport string) (workspaceID string, ok bool) {
+	host := hostport
+	port := 0
+	hasPort := false
+	if i := strings.LastIndexByte(hostport, ':'); i >= 0 {
+		p, err := parsePort(hostport[i+1:])
+		if err != nil {
 			return "", false
 		}
-	case port != "" && port != "443":
+		host, port, hasPort = hostport[:i], p, true
+		if strings.IndexByte(host, ':') >= 0 {
+			return "", false
+		}
+	}
+	if d.port != 0 {
+		if !hasPort || port != d.port {
+			return "", false
+		}
+	} else if hasPort && port != 443 {
 		return "", false
 	}
-	label, ok := strings.CutSuffix(host, "."+d.host)
-	if !ok || label == "" || strings.Contains(label, ".") {
+	label, found := strings.CutSuffix(host, "."+d.host)
+	if !found || strings.Contains(label, ".") {
 		return "", false
 	}
 	return WorkspaceID(label)
