@@ -39,9 +39,9 @@ const leaseStaleAfter = 20 * time.Second
 func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (ConnectionState, error) {
 	now := b.now()
 	var (
-		expiresAt    time.Time
-		lastRenewed  *time.Time
-		openStreams  int
+		expiresAt   time.Time
+		lastRenewed *time.Time
+		openStreams int
 	)
 	err := b.db.Pool().QueryRow(ctx, `
 		SELECT l.expires_at, l.last_renewed_at,
