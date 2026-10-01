@@ -1265,7 +1265,8 @@ jobs:
             echo "Helm chart: \`oci://${CHART_REF%@*}\` version \`${CHART_VERSION}\` (\`${CHART_REF#*@}\`)."
             echo
             echo '```sh'
-            echo "helm install tinycdi oci://${CHART_REF%@*} --version ${CHART_VERSION} -n tinycdi --create-namespace -f values.yaml"
+            echo "helm install tinycdi oci://${CHART_REF%@*} --version ${CHART_VERSION} \\"
+            echo "  -n tinycdi --create-namespace -f values.yaml"
             echo "cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
             echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${VERSION} \\"
             echo "  <image>@<digest>"
