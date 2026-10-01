@@ -74,11 +74,11 @@ func wsRead(t *testing.T, resp *http.Response, n int, timeout time.Duration) []b
 // round-trip through gateway -> upstream -> back.
 func TestWS_EndToEnd_Echo(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-e2e", "ws-1")
+	fb.scriptTicket("tk-e2e", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-e2e")
+	cookie := launchOK(t, srv, testHost, "tk-e2e")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -97,12 +97,12 @@ func TestWS_EndToEnd_Echo(t *testing.T) {
 // inside the revoke deadline, and the cookie no longer authorizes.
 func TestWS_RevokeClosesStream_EndToEnd(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-e2e-rev", "ws-1")
+	fb.scriptTicket("tk-e2e-rev", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-e2e-rev")
+	cookie := launchOK(t, srv, testHost, "tk-e2e-rev")
 	lease := fb.leaseOf(t, "tk-e2e-rev")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -129,7 +129,7 @@ func TestWS_RevokeClosesStream_EndToEnd(t *testing.T) {
 		t.Fatal("open stream survived revoke past deadline")
 	}
 
-	post := proxied(t, srv, "/", cookie, map[string]string{"Origin": testOrigin})
+	post := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(post)
 	if post.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("post-revoke GET = %d, want 401", post.StatusCode)
@@ -142,17 +142,17 @@ func TestWS_RevokeClosesStream_EndToEnd(t *testing.T) {
 // so the 30 s budget is exercised without sleeping.
 func TestWS_FailClosed_FakeClock(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-e2e-fc", "ws-1")
+	fb.scriptTicket("tk-e2e-fc", testWSUID)
 	clock := &fakeClock{now: time.Now()}
 	srv := newGateway(t, fb, func(c *gateway.Config) {
 		c.Now = clock.Now
 		c.RenewInterval = 10 * time.Millisecond
 		c.RevokeDeadline = 100 * time.Millisecond // stands in for the 30 s budget
 	})
-	cookie := launchOK(t, srv, "tk-e2e-fc")
+	cookie := launchOK(t, srv, testHost, "tk-e2e-fc")
 	lease := fb.leaseOf(t, "tk-e2e-fc")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
