@@ -1,0 +1,93 @@
+// Workspace-area strings: list, detail, create, delete, connect and the
+// template catalog. Owned by T3.5 after T3.3 seeds it; append-only.
+export default {
+  "templates.catalog.title": "Template catalog",
+  "templates.catalog.loading": "Loading catalog…",
+  "templates.catalog.empty": "No templates published.",
+  "templates.catalog.revision": "({id} rev {revision})",
+  "templates.catalog.field.runtime": "Runtime",
+  "templates.catalog.field.experience": "Experience",
+  "templates.catalog.field.resources": "Resources",
+  "templates.catalog.resources": "{cpu}m CPU · {memory} MiB · {storage} GiB",
+  "templates.catalog.field.dataPolicy": "Data policy default",
+  "templates.catalog.field.clipboard": "Clipboard",
+  "templates.catalog.create": "Create workspace",
+
+  "workspaces.list.title": "Workspaces",
+  "workspaces.list.loading": "Loading…",
+  "workspaces.list.empty": "No workspaces yet.",
+  "workspaces.list.count": "{n} workspaces",
+  "workspaces.list.col.name": "Name",
+  "workspaces.list.col.template": "Template",
+  "workspaces.list.col.phase": "Phase",
+  "workspaces.list.col.desired": "Desired",
+  "workspaces.list.col.dataPolicy": "Data policy",
+  "workspaces.list.waitingConnection": "(waiting for ConnectionReady)",
+  "workspaces.list.manage": "Manage",
+
+  "workspaces.detail.loading": "Loading workspace…",
+  "workspaces.detail.field.id": "ID",
+  "workspaces.detail.field.template": "Template",
+  "workspaces.detail.template": "{name}@{revision} ({runtime} / {experience})",
+  "workspaces.detail.field.desired": "Desired state",
+  "workspaces.detail.field.dataPolicy": "Data policy",
+  "workspaces.detail.field.failure": "Failure",
+  "workspaces.detail.field.created": "Created",
+  "workspaces.detail.field.updated": "Updated",
+  "workspaces.detail.conditions.title": "Conditions",
+  "workspaces.detail.action.start": "Start",
+  "workspaces.detail.action.starting": "Starting…",
+  "workspaces.detail.action.retryStart": "Retry start",
+  "workspaces.detail.action.stop": "Stop",
+  "workspaces.detail.action.stopping": "Stopping…",
+  "workspaces.detail.connectStatus": "connect status",
+  "workspaces.detail.connectUnavailable": "Connect unavailable: {reason}",
+  "workspaces.detail.blocker.stopped": "desired state is Stopped",
+  "workspaces.detail.blocker.connectionReady":
+    "ConnectionReady={status} ({reason})",
+  "workspaces.detail.blocker.noConnection":
+    "no ConnectionReady condition reported yet",
+
+  "workspaces.conditions.label": "conditions",
+  "workspaces.conditions.empty": "No conditions reported yet.",
+  "workspaces.conditions.col.type": "Type",
+  "workspaces.conditions.col.status": "Status",
+  "workspaces.conditions.col.reason": "Reason",
+  "workspaces.conditions.col.message": "Message",
+  "workspaces.conditions.col.since": "Since",
+
+  "workspaces.create.title": "New workspace",
+  "workspaces.create.loading": "Loading templates…",
+  "workspaces.create.nameLabel": "Name",
+  "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.templateLabel": "Template",
+  "workspaces.create.templatePlaceholder": "Select a template",
+  "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",
+  "workspaces.create.dataPolicyLabel": "Data policy",
+  "workspaces.create.dataPolicyDefault": "Template default",
+  "workspaces.create.dataPolicyDefaultNamed": "Template default ({policy})",
+  "workspaces.create.dataPolicyRetain": "Retain — keep disk on stop/delete",
+  "workspaces.create.dataPolicyEphemeral":
+    "Ephemeral — destroy data on stop/delete",
+  "workspaces.create.startNow": "Start immediately",
+  "workspaces.create.submit": "Create workspace",
+  "workspaces.create.submitting": "Creating…",
+
+  "workspaces.delete.action": "Delete",
+  "workspaces.delete.label": "delete workspace",
+  "workspaces.delete.confirm":
+    "Delete {name}? Access is revoked and the runtime is removed.",
+  "workspaces.delete.dataRetain":
+    "Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that).",
+  "workspaces.delete.dataEphemeral":
+    "Its data is Ephemeral and will be destroyed.",
+  "workspaces.delete.confirmButton": "Confirm delete",
+  "workspaces.delete.confirming": "Deleting…",
+
+  "workspaces.connect.action": "Connect",
+  "workspaces.connect.connecting": "Connecting…",
+  "workspaces.connect.inUse.label": "session in use",
+  "workspaces.connect.inUse.body":
+    "Another session is already connected to this workspace. Taking over disconnects it.",
+  "workspaces.connect.inUse.takeover": "Take over session",
+} as const;

@@ -33,10 +33,42 @@ for (const name of prod) {
   );
 }
 
+// Vendored assets: the Orbit System 2.9 stylesheets, the WOFF2 font subsets
+// and the Tabler icon set ship in the bundle but are not npm dependencies.
+// Their license texts live in src/design/orbit/LICENSES/ (provenance and
+// SHA-256 in src/design/orbit/README.md).
+const vendored = [
+  "---\nTinyOrbit Orbit System 2.9 stylesheets (src/design/orbit/css/)\n" +
+    "License: TinyOrbit design-system asset; ships with this project.\n",
+];
+const licensesDir = join(root, "src/design/orbit/LICENSES");
+const VENDORED_COMPONENT = {
+  "manrope-LICENSE.txt":
+    "Manrope Variable font, WOFF2 subsets (src/design/orbit/fonts/manrope-*.woff2)\n" +
+    "Source: @fontsource-variable/manrope 5.3.0\nLicense: OFL-1.1",
+  "jetbrains-LICENSE.txt":
+    "JetBrains Mono font, WOFF2 subsets (src/design/orbit/fonts/jetbrains-mono-*.woff2)\n" +
+    "Source: @fontsource/jetbrains-mono 5.3.0\nLicense: OFL-1.1",
+  "LICENSE-Tabler.txt":
+    "Tabler Icons 3.48.0 outline set (@tabler/icons), vendored as inline SVG components\n" +
+    "License: MIT",
+};
+if (existsSync(licensesDir)) {
+  for (const f of readdirSync(licensesDir).sort()) {
+    const text = readFileSync(join(licensesDir, f), "utf8").trim();
+    vendored.push(`---\n${VENDORED_COMPONENT[f] ?? f}\n\n${text}\n`);
+  }
+}
+
 const header =
   "TinyCDI portal (tinycdi-portal) — third-party licenses\n" +
   `Generated at build time from package-lock.json (production dependencies only).\n` +
-  `The portal itself is MIT-licensed; ${prod.length} production packages ship in dist/.\n`;
+  `The portal itself is MIT-licensed; ${prod.length} production packages ship in dist/.\n` +
+  "The TinyOrbit name, wordmark and mark are trademarks of TinyOrbit and are not\n" +
+  "covered by the MIT licence (see TRADEMARKS.md at the repository root).\n";
 
-writeFileSync(join(root, "dist", "THIRD_PARTY_LICENSES.txt"), header + "\n" + blocks.join("\n"));
+writeFileSync(
+  join(root, "dist", "THIRD_PARTY_LICENSES.txt"),
+  header + "\n" + blocks.join("\n") + "\nVendored assets\n" + vendored.join("\n"),
+);
 console.log(`wrote dist/THIRD_PARTY_LICENSES.txt (${prod.length} packages)`);
