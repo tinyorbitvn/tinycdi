@@ -28,13 +28,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // newTestHandler builds the frontend handler over a scratch web root with
-// an index.html and one hashed asset.
-func newTestHandler(t *testing.T, sessionOrigin string) http.Handler {
+// an index.html and one hashed asset. sessionDomain is the raw
+// -session-domain value (host[:port]); empty means unconfigured.
+func newTestHandler(t *testing.T, sessionDomain string) http.Handler {
 	t.Helper()
+	var domain *sessionhost.Domain
+	if sessionDomain != "" {
+		d, err := sessionhost.ParseDomain(sessionDomain)
+		if err != nil {
+			t.Fatalf("ParseDomain(%q): %v", sessionDomain, err)
+		}
+		domain = &d
+	}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "index.html"),
 		[]byte("<html><body>portal</body></html>"), 0o600); err != nil {
@@ -47,7 +57,7 @@ func newTestHandler(t *testing.T, sessionOrigin string) http.Handler {
 		[]byte("console.log(1)"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return newHandler(root, frontendCSP(sessionOrigin))
+	return newHandler(root, frontendCSP(domain))
 }
 
 func get(t *testing.T, h http.Handler, method, path string) *http.Response {
@@ -59,11 +69,12 @@ func get(t *testing.T, h http.Handler, method, path string) *http.Response {
 
 // TestSecurityHeaders (SEC-22): every frontend response — SPA, SPA
 // fallback, assets, health and errors alike — carries the CSP (portal never
-// framed; session origin allowed as frame-src and form-action), nosniff,
-// Referrer-Policy strict-origin and HSTS. The CSP is sized to the vite
-// build output (external module script + stylesheet only, no inline code).
+// framed; the session-domain wildcard allowed as frame-src and form-action),
+// COOP same-origin, nosniff, Referrer-Policy strict-origin and HSTS. The
+// CSP is sized to the vite build output (external module script +
+// stylesheet only, no inline code).
 func TestSecurityHeaders(t *testing.T) {
-	h := newTestHandler(t, "https://session.test")
+	h := newTestHandler(t, "session.test")
 
 	for _, path := range []string{"/", "/workspaces", "/workspaces/ws-1/session",
 		"/assets/app-abc123.js", "/assets/missing.js", "/healthz", "/v1/workspaces"} {
@@ -73,8 +84,8 @@ func TestSecurityHeaders(t *testing.T) {
 		for _, want := range []string{
 			"default-src 'self'", "frame-ancestors 'none'",
 			"object-src 'none'", "base-uri 'none'",
-			"frame-src https://session.test",
-			"form-action 'self' https://session.test",
+			"frame-src https://*.session.test",
+			"form-action 'self' https://*.session.test",
 		} {
 			if !strings.Contains(csp, want) {
 				t.Fatalf("%s: CSP %q missing %q", path, csp, want)
@@ -105,18 +116,69 @@ func TestSecurityHeaders(t *testing.T) {
 }
 
 // TestFrontendCSP: the in-portal session view submits the launch form to
-// the session origin targeted at an iframe, so the session origin must be
-// in both form-action and frame-src — and nothing else may be. With no
-// session origin both collapse (fail closed).
+// <label>.<sessionDomain> targeted at an iframe, so the wildcard session
+// origin must be in both form-action and frame-src — and nothing else may
+// be. With no session domain both collapse (fail closed).
 func TestFrontendCSP(t *testing.T) {
 	const base = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
-	if got, want := frontendCSP(""), base+"; frame-src 'none'; form-action 'self'"; got != want {
-		t.Fatalf("frontendCSP(\"\") = %q, want %q", got, want)
+	if got, want := frontendCSP(nil), base+"; frame-src 'none'; form-action 'self'"; got != want {
+		t.Fatalf("frontendCSP(nil) = %q, want %q", got, want)
 	}
-	for _, origin := range []string{"https://session.example.dev", "https://session.example.dev:8443"} {
-		want := base + "; frame-src " + origin + "; form-action 'self' " + origin
-		if got := frontendCSP(origin); got != want {
-			t.Fatalf("frontendCSP(%q) = %q, want %q", origin, got, want)
+	for _, domain := range []string{"session.example.dev", "session.example.dev:8443"} {
+		d, err := sessionhost.ParseDomain(domain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := base + "; frame-src https://" + d.Wildcard() + "; form-action 'self' https://" + d.Wildcard()
+		if got := frontendCSP(&d); got != want {
+			t.Fatalf("frontendCSP(%q) = %q, want %q", domain, got, want)
+		}
+	}
+}
+
+// TestFrontendCSP_WildcardSessionDomain (D9/D14): every workspace lives on
+// its own host under the session domain, so the portal CSP allows the
+// whole wildcard — frame-src and form-action both name
+// https://*.<sessionDomain>. A configured port is kept in both.
+func TestFrontendCSP_WildcardSessionDomain(t *testing.T) {
+	d, err := sessionhost.ParseDomain("session.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csp := frontendCSP(&d)
+	for _, want := range []string{
+		"frame-src https://*.session.example.com",
+		"form-action 'self' https://*.session.example.com",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("CSP %q missing %q", csp, want)
+		}
+	}
+
+	dp, err := sessionhost.ParseDomain("session.example.com:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csp = frontendCSP(&dp)
+	for _, want := range []string{
+		"frame-src https://*.session.example.com:8443",
+		"form-action 'self' https://*.session.example.com:8443",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("CSP %q missing %q", csp, want)
+		}
+	}
+}
+
+// TestFrontendHeaders_COOP (D14): the portal is a cross-origin opener for
+// the session frame, so every response — SPA routes and hashed assets
+// alike — carries Cross-Origin-Opener-Policy: same-origin.
+func TestFrontendHeaders_COOP(t *testing.T) {
+	h := newTestHandler(t, "session.example.com")
+	for _, path := range []string{"/", "/assets/app-abc123.js"} {
+		res := get(t, h, http.MethodGet, path)
+		if got := res.Header.Get("Cross-Origin-Opener-Policy"); got != "same-origin" {
+			t.Fatalf("%s: Cross-Origin-Opener-Policy = %q, want same-origin", path, got)
 		}
 	}
 }
@@ -126,7 +188,7 @@ func TestFrontendCSP(t *testing.T) {
 // plain 404, never the SPA's index.html (which an API client would choke
 // on as a 200).
 func TestNoAPIProxy(t *testing.T) {
-	h := newTestHandler(t, "https://session.test")
+	h := newTestHandler(t, "session.test")
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		res := get(t, h, method, "/v1/workspaces")
 		if res.StatusCode != http.StatusNotFound {
@@ -143,7 +205,7 @@ func TestNoAPIProxy(t *testing.T) {
 // assets are served with long-lived caching, missing assets 404 and
 // non-GET methods are refused.
 func TestSPARouting(t *testing.T) {
-	h := newTestHandler(t, "https://session.test")
+	h := newTestHandler(t, "session.test")
 
 	for _, path := range []string{"/", "/workspaces", "/workspaces/ws-1/session", "/index.html", "/admin/templates"} {
 		res := get(t, h, http.MethodGet, path)
@@ -176,36 +238,36 @@ func TestSPARouting(t *testing.T) {
 	}
 }
 
-// TestNormalizeSessionOrigin: same rule the backend applies to
-// -session-origin (SEC-26) — a bare https origin, no path/query/fragment/
-// userinfo — serialized the way a browser serializes URL.origin.
-func TestNormalizeSessionOrigin(t *testing.T) {
+// TestSessionDomainParsing: -session-domain is validated by
+// sessionhost.ParseDomain — a bare lower-case DNS domain with an optional
+// port, never a wildcard, scheme, path or IP literal. The domain goes into
+// the CSP via Wildcard(), so anything that could inject a directive or
+// name a different host is a config error (SEC-26).
+func TestSessionDomainParsing(t *testing.T) {
 	ok := map[string]string{
-		"https://session.example.dev":      "https://session.example.dev",
-		"https://SESSION.Example.Dev:8443": "https://session.example.dev:8443",
-		"https://session.example.dev:443":  "https://session.example.dev",
+		"session.example.dev":      "*.session.example.dev",
+		"session.example.dev:8443": "*.session.example.dev:8443",
 	}
 	for in, want := range ok {
-		got, err := normalizeSessionOrigin(in)
-		if err != nil || got != want {
-			t.Fatalf("normalizeSessionOrigin(%q) = %q, %v; want %q", in, got, err, want)
+		d, err := sessionhost.ParseDomain(in)
+		if err != nil || d.Wildcard() != want {
+			t.Fatalf("ParseDomain(%q).Wildcard() = %q, %v; want %q", in, d.Wildcard(), err, want)
 		}
 	}
 
 	for _, bad := range []string{
-		"http://session.example.dev",       // plaintext must not carry tickets
-		"javascript:alert(1)",              // non-http scheme
-		"session.example.dev",              // missing scheme
-		"https://session.example.dev/",     // path not allowed
-		"https://session.example.dev/app",  // path not allowed
-		"https://session.example.dev/?x=1", // query not allowed
-		"https://session.example.dev#frag", // fragment not allowed
-		"https://user@session.example.dev", // userinfo not allowed
-		"https://user:pw@session.example.dev",
-		"https://a.example.dev; script-src *", // CSP injection
+		"https://session.example.dev", // schemes not allowed
+		"session.example.dev/app",     // path not allowed
+		"*.session.example.dev",       // the wildcard is derived, not configured
+		"SESSION.Example.Dev",         // DNS labels are lower case
+		"session.example.dev.",        // trailing dot
+		"10.0.0.1",                    // IP literal
+		"session.example.dev:99999",   // port out of range
+		"*.example.dev; script-src *", // CSP injection
+		"example.dev' frame-src *",    // CSP injection
 	} {
-		if got, err := normalizeSessionOrigin(bad); err == nil {
-			t.Fatalf("normalizeSessionOrigin(%q) = %q, want error", bad, got)
+		if d, err := sessionhost.ParseDomain(bad); err == nil {
+			t.Fatalf("ParseDomain(%q) = %q, want error", bad, d.Wildcard())
 		}
 	}
 }
@@ -220,7 +282,7 @@ func TestHotReload(t *testing.T) {
 	writePair(t, cert, key, "first.example")
 
 	srv, reloader, err := newTLSServer("127.0.0.1:0", cert, key,
-		newTestHandler(t, "https://session.test"), tlsreload.WithInterval(10*time.Millisecond))
+		newTestHandler(t, "session.test"), tlsreload.WithInterval(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
