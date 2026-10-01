@@ -22,10 +22,35 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
-const testHost = "session.test"           // Host header tests present
-const testOrigin = "https://session.test" // == PublicOrigin
+const (
+	testDomain = "session.test" // the session domain tests run under
+	// testWSUID/testHost are the default workspace's platform ID and its
+	// per-workspace session host; testWSUID2/testHost2 are a second
+	// workspace for host-binding tests.
+	testWSUID   = "ws_0000000a"
+	testHost    = "ws-0000000a." + testDomain
+	testOrigin  = "https://" + testHost // the workspace's own session origin
+	testWSUID2  = "ws_0000000b"
+	testHost2   = "ws-0000000b." + testDomain
+	testOrigin2 = "https://" + testHost2
+	// testControlHost is the in-cluster Service name /v1/control/* and
+	// /healthz answer on.
+	testControlHost = "backend.tinycdi.svc"
+)
+
+var testSessionDomain = mustParseDomain(testDomain)
+
+func mustParseDomain(s string) sessionhost.Domain {
+	d, err := sessionhost.ParseDomain(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
 
 // fakeBroker is a scripted broker.BrokerClient: tickets map to the lease a
 // redeem would mint; renewErr/resolveErr inject broker-side failures.
@@ -36,6 +61,7 @@ type fakeBroker struct {
 	renewErr  map[string]error
 	resolveT  map[string]broker.Target
 	revokedAt map[string]bool
+	revokes   map[string]int         // lease ID -> RevokeLease call count
 	activity  []broker.ActivityEvent // recorded ReportActivity types, in order
 	actLease  []string               // lease IDs parallel to activity
 	actErr    error                  // injected ReportActivity failure
@@ -50,6 +76,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		renewErr:  map[string]error{},
 		resolveT:  map[string]broker.Target{},
 		revokedAt: map[string]bool{},
+		revokes:   map[string]int{},
 		upstream:  httptest.NewTLSServer(http.HandlerFunc(fakeUpstream)),
 	}
 	t.Cleanup(fb.upstream.Close)
@@ -59,6 +86,8 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 // scriptTicket makes ticket redeemable into a lease for wsUID and resolves
 // the lease's target to the fake broker's TLS upstream.
 func (f *fakeBroker) scriptTicket(ticket, wsUID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	l := broker.Lease{
@@ -182,7 +211,16 @@ func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewErr[leaseID] = broker.ErrRevoked
+	f.revokes[leaseID]++
 	return nil
+}
+
+// revokeCount reports how many times RevokeLease ran for the lease — the
+// host-mismatch tests pin exactly one call.
+func (f *fakeBroker) revokeCount(leaseID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revokes[leaseID]
 }
 
 func (f *fakeBroker) ReportActivity(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ev broker.ActivityEvent) error {
@@ -229,13 +267,39 @@ func (f *fakeBroker) leaseOf(t *testing.T, ticket string) broker.Lease {
 	return l
 }
 
-// newGateway builds the gateway handler on an httptest server.
+// auditRecorder captures every audit event the gateway emits.
+type auditRecorder struct {
+	mu     sync.Mutex
+	events []observability.AuditEvent
+}
+
+func (a *auditRecorder) WriteAudit(_ context.Context, e observability.AuditEvent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, e)
+	return nil
+}
+
+// auditActions returns the recorded action names in order.
+func (a *auditRecorder) auditActions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, len(a.events))
+	for i, e := range a.events {
+		out[i] = e.Action
+	}
+	return out
+}
+
+// newGateway builds the gateway handler on an httptest server. The session
+// domain defaults to testDomain and /v1/control/* + /healthz answer only on
+// testControlHost.
 func newGateway(t *testing.T, fb *fakeBroker, mutate func(*gateway.Config)) *httptest.Server {
 	t.Helper()
 	cfg := gateway.Config{
-		Identity:       broker.GatewayIdentity{ID: "gw-test", Audience: "session.example.dev"},
-		PublicOrigin:   testOrigin,
-		AllowedHosts:   []string{testHost},
+		Identity:       broker.GatewayIdentity{ID: "gw-test", Audience: testDomain},
+		SessionDomain:  testSessionDomain,
+		ControlHosts:   []string{testControlHost},
 		Broker:         fb,
 		ControlToken:   "control-test-token",
 		RenewInterval:  25 * time.Millisecond, // fast cadence so revoke tests don't sleep
@@ -254,9 +318,10 @@ func newGateway(t *testing.T, fb *fakeBroker, mutate func(*gateway.Config)) *htt
 	return srv
 }
 
-// doLaunch POSTs the ticket to /v1/launch with the given header tweaks and
-// returns the response without following the redirect.
-func doLaunch(t *testing.T, srv *httptest.Server, ticket string, hdr map[string]string) *http.Response {
+// doLaunch POSTs the ticket to /v1/launch on the given request Host with
+// the given header tweaks and returns the response without following the
+// redirect.
+func doLaunch(t *testing.T, srv *httptest.Server, host, ticket string, hdr map[string]string) *http.Response {
 	t.Helper()
 	form := url.Values{gateway.TicketField: {ticket}}
 	req, err := http.NewRequest(http.MethodPost, srv.URL+gateway.LaunchPath, strings.NewReader(form.Encode()))
@@ -264,12 +329,8 @@ func doLaunch(t *testing.T, srv *httptest.Server, ticket string, hdr map[string]
 		t.Fatalf("build launch request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Host = testHost
+	req.Host = host
 	for k, v := range hdr {
-		if strings.EqualFold(k, "Host") {
-			req.Host = v
-			continue
-		}
 		req.Header.Set(k, v)
 	}
 	resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
@@ -279,11 +340,12 @@ func doLaunch(t *testing.T, srv *httptest.Server, ticket string, hdr map[string]
 	return resp
 }
 
-// launchOK performs a valid launch and returns the session cookie value.
-func launchOK(t *testing.T, srv *httptest.Server, ticket string) string {
+// launchOK performs a valid launch on host and returns the session cookie
+// value.
+func launchOK(t *testing.T, srv *httptest.Server, host, ticket string) string {
 	t.Helper()
-	resp := doLaunch(t, srv, ticket, map[string]string{
-		"Origin":         testOrigin,
+	resp := doLaunch(t, srv, host, ticket, map[string]string{
+		"Origin":         "https://" + host,
 		"Sec-Fetch-Site": "same-origin",
 	})
 	defer resp.Body.Close()
@@ -300,22 +362,19 @@ func launchOK(t *testing.T, srv *httptest.Server, ticket string) string {
 	return ""
 }
 
-// proxied does a GET through the gateway with a session cookie and headers.
-func proxied(t *testing.T, srv *httptest.Server, path, cookie string, hdr map[string]string) *http.Response {
+// proxied does a GET through the gateway on the given request Host with a
+// session cookie and headers.
+func proxied(t *testing.T, srv *httptest.Server, host, path, cookie string, hdr map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 	if err != nil {
 		t.Fatalf("build proxy request: %v", err)
 	}
-	req.Host = testHost
+	req.Host = host
 	if cookie != "" {
 		req.Header.Set("Cookie", gateway.SessionCookieName+"="+cookie)
 	}
 	for k, v := range hdr {
-		if strings.EqualFold(k, "Host") {
-			req.Host = v
-			continue
-		}
 		req.Header.Set(k, v)
 	}
 	resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
@@ -331,15 +390,15 @@ func drain(resp *http.Response) {
 	resp.Body.Close()
 }
 
-// upgrade performs a raw WebSocket upgrade request, returning the response;
-// on 101 the body is the live socket.
-func upgrade(t *testing.T, srv *httptest.Server, path, cookie string, hdr map[string]string) *http.Response {
+// upgrade performs a raw WebSocket upgrade request on the given request
+// Host, returning the response; on 101 the body is the live socket.
+func upgrade(t *testing.T, srv *httptest.Server, host, path, cookie string, hdr map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 	if err != nil {
 		t.Fatalf("build upgrade request: %v", err)
 	}
-	req.Host = testHost
+	req.Host = host
 	req.Header.Set("Connection", "upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
