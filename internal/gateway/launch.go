@@ -3,11 +3,14 @@ package gateway
 // Launch endpoint contract (design §6.3, ADR 0001, origin policy ADR 0004):
 //
 //   POST /v1/launch carries the opaque ticket in the request BODY — never in
-//   the query string. The handler validates Host (allowlist), Origin and
-//   Sec-Fetch-Site, redeems the ticket atomically through the broker, sets
-//   the host-only Secure/HttpOnly/SameSite=Lax session cookie and returns
-//   303 to a clean URL. A launch that fails validation must NOT consume
-//   the ticket.
+//   the query string. The handler runs on a per-workspace session host
+//   (ServeHTTP matched Host under the session domain), validates Origin and
+//   Sec-Fetch-Site, redeems the ticket atomically through the broker,
+//   verifies the lease's workspace matches the host's, sets the host-only
+//   Secure/HttpOnly session cookie (SameSite=Lax, or SameSite=None;
+//   Partitioned in partitioned cookie mode) and returns 303 to a clean URL.
+//   A launch that fails validation must NOT consume the ticket; a redeemed
+//   lease on the wrong host is revoked instead.
 //
 //   Origin policy: the portal lives on a different registrable domain, so
 //   the designed launch POST arrives CROSS-SITE with Origin=<portal
@@ -23,7 +26,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,10 +55,11 @@ type launchRequest struct {
 
 // launchOriginOK reports whether the request's Origin may redeem a launch
 // ticket: an exact (scheme+host+port, default ports normalized) match of a
-// configured portal origin, or the gateway's own public origin seen on this
-// request's authority. The portal allowlist applies ONLY to the launch
-// POST — WebSocket upgrades and desktop routes keep the strict
-// Origin == public origin rule (originOK).
+// configured portal origin, or this request's own workspace origin —
+// https:// + the request Host, which ServeHTTP already matched against the
+// session domain (ADR 0004). The portal allowlist applies ONLY to the
+// launch POST — WebSocket upgrades and desktop routes keep the strict
+// Origin == own workspace origin rule (originOK).
 func (g *Gateway) launchOriginOK(o, reqHost string) bool {
 	u, ok := parseOrigin(o)
 	if !ok {
@@ -67,14 +70,7 @@ func (g *Gateway) launchOriginOK(o, reqHost string) bool {
 			return true
 		}
 	}
-	// Public-origin leg keeps the old triple-match shape: the Origin's
-	// authority must equal this request's authority (hostOK already
-	// allowlisted it) AND the configured public origin.
-	h, _, err := net.SplitHostPort(reqHost)
-	if err != nil {
-		h = reqHost
-	}
-	return u.Hostname() == h && originsEqual(u, g.pubOrigin)
+	return originsEqual(u, &url.URL{Scheme: "https", Host: reqHost})
 }
 
 // parseOrigin parses a serialized Origin header value: scheme://host[:port]
@@ -126,15 +122,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// handleLaunch redeems a launch ticket: POST body ticket=<opaque> ->
-// broker.RedeemTicket -> __Host- cookie -> 303 clean URL. Validation order is
-// security-significant: every check runs BEFORE redemption so a rejected
-// launch never consumes the ticket.
-func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request) {
-	if !g.hostOK(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_host"})
-		return
-	}
+// handleLaunch redeems a launch ticket on a workspace host (wsID is the
+// workspace the request Host names): POST body ticket=<opaque> ->
+// broker.RedeemTicket -> host binding -> __Host- cookie -> 303 clean URL.
+// Validation order is security-significant: every check runs BEFORE
+// redemption so a rejected launch never consumes the ticket.
+func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID string) {
 	// Launch origin policy (ADR 0004): the portal↔session POST is
 	// cross-site by design, so CSRF/session-fixation resistance comes from
 	// the one-use ticket bound to the requesting user plus the configured
@@ -195,6 +188,20 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Host binding (D11): the lease must belong to the workspace this host
+	// names. A mismatch redeems-then-revokes — the minted lease is burned
+	// so it cannot be replayed on the right host later — but never sets a
+	// cookie. The host gate in ServeHTTP already ran, so this can only
+	// fire when the ticket was minted for a different workspace.
+	if lease.WorkspaceUID != wsID {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		_ = g.cfg.Broker.RevokeLease(ctx, lease.ID)
+		cancel()
+		g.audit(r, "launch.host_mismatch", lease.WorkspaceUID, observability.OutcomeDenied, "host_mismatch")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host_mismatch"})
+		return
+	}
+
 	s := newSession(randToken(32), lease, g.now())
 	// With a session directory the digest must be bound before the cookie
 	// leaves the process — an unbound cookie would die with this replica.
@@ -232,20 +239,37 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	go g.activitySender(s)
 	g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeSuccess, "")
 
-	// SameSite=Lax, never Strict: the launch POST is cross-site by design
-	// (portal and session are different sites), and a Strict cookie is not
-	// sent on the 303 top-level redirect that follows it — the desktop
-	// would load "unauthorized" (launch regression).
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, g.sessionCookie(s.id))
+	w.Header().Set("Location", CleanPath)
+	w.WriteHeader(http.StatusSeeOther)
+}
+
+// sessionCookie builds the host-only (__Host-, no Domain, Path=/) Secure
+// HttpOnly session cookie for the configured CookieMode (D10, D16).
+//
+// Lax, never Strict: the launch POST may arrive cross-site, and a Strict
+// cookie is not sent on the 303 redirect that follows it — the desktop
+// would load "unauthorized" (launch regression). Lax reaches the session
+// origin inside the portal's iframe only when both are the same site.
+//
+// Partitioned: SameSite=None so the cookie is sent inside a cross-site
+// portal iframe, and Partitioned (CHIPS) so the browser keys it to the
+// embedding top-level site — another site framing the session origin never
+// sees it.
+func (g *Gateway) sessionCookie(id string) *http.Cookie {
+	c := &http.Cookie{
 		Name:     SessionCookieName,
-		Value:    s.id,
+		Value:    id,
 		Path:     "/",
 		Secure:   true,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-	})
-	w.Header().Set("Location", CleanPath)
-	w.WriteHeader(http.StatusSeeOther)
+	}
+	if g.cfg.CookieMode == CookieModePartitioned {
+		c.SameSite = http.SameSiteNoneMode
+		c.Partitioned = true
+	}
+	return c
 }
 
 // audit emits one structured audit event. Tickets, cookie values and
