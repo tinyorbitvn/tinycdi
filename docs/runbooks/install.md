@@ -13,8 +13,10 @@ same resolution order `deploy/helm/chart_test.go` uses).
 
 ## What the chart installs
 
-- `api`, `operator`, `gateway`, `portal` Deployments + Services in the
-  release namespace (recommend `tinycdi-system`).
+- `backend` (public API + session gateway + in-process broker — one
+  binary, listeners :8443 app / :8444 session / :9443 internal mTLS),
+  `frontend` (static portal SPA server) and `operator` Deployments +
+  Services in the release namespace (recommend `tinycdi-system`).
 - Managed (tenant) namespaces from `managedNamespaces`, with
   `helm.sh/resource-policy: keep`, the tenant label
   `workspaces.cdi.tinyorbit.vn/tenant=<tenant>` and a `restricted` PSS
@@ -27,17 +29,18 @@ same resolution order `deploy/helm/chart_test.go` uses).
   `--watch-namespaces=<managed ns>` so its informer cache matches the RBAC
   allowlist exactly (no Secrets/Pods grant in the platform namespace).
 - NetworkPolicy baseline: default-deny (Ingress+Egress) in the release and
-  every managed namespace; DNS, apiserver, api/portal/gateway allow rules
-  (including the operator↔api :9443 broker rule), plus a gateway-pod-scoped
-  metrics-scrape rule when `gateway.metricsListen` is set — that also
+  every managed namespace; DNS, apiserver, backend/frontend allow rules
+  (including the operator→backend :9443 broker rule), plus a
+  backend-pod-scoped metrics-scrape rule when `backend.metrics.enabled`
+  is set — that also
   requires `networkPolicy.prometheusPeers` (empty peer lists fail the
   render; `database.allowedPeers` and `oidc.egressCIDRs` are likewise
   mandatory when `networkPolicy.enabled`, and `allowedPeers` must not be
   the shipped `0.0.0.0/32` deny-all placeholder).
-- Optional exposure: `ingress.enabled` (one Ingress per host) **or**
-  `gatewayApi.enabled` (one HTTPRoute per host) — mutually exclusive,
-  enforced at render. Otherwise expose the `portal`/`gateway` Services
-  directly (`service.type`).
+- Optional exposure: `ingress.enabled` (portal Ingress + ONE wildcard
+  session Ingress for `*.<sessionDomain>`) **or** `gatewayApi.enabled`
+  (portal HTTPRoute + wildcard session HTTPRoute) — mutually exclusive,
+  enforced at render.
 - Optional cert-manager Certificates for the internal mTLS chain
   (`certManager.enabled`).
 - Optional seeded `WorkspaceTemplate` CRs (digest-pinned images; per
@@ -65,12 +68,27 @@ $K auth can-i create customresourcedefinitions.apiextensions.k8s.io
 
 Also gather:
 
-1. **Two public hostnames** — `portal.<dom>` and `session.<dom>`, different
-   registrable hosts, DNS pointing at your ingress/LB.
+1. **A portal host and a session domain** — `portal.<dom>` plus a
+   `session.<dom>` *domain*: every workspace session is served on its own
+   `<label>.<sessionDomain>` host, so you need a **wildcard DNS record
+   and a wildcard certificate for `*.<sessionDomain>`** (HTTP-01 cannot
+   issue wildcards; use DNS-01). `portalHost` must differ from
+   `sessionDomain` and must not sit inside it — the `*.<sessionDomain>`
+   wildcard route would capture portal traffic (render-time guard).
+   Two layouts:
+   - **same-site (default, `lax`)**: portal and session domain under one
+     registrable domain, e.g. `portal.example.com` +
+     `sessionDomain: session.example.com`. Session cookies are
+     `SameSite=Lax`; `backend.sessionCookieMode: lax`.
+   - **cross-site (`partitioned`)**: portal and session domain on
+     different registrable domains, e.g. `portal.example.com` +
+     `sessionDomain: vdi.example.net`. Session cookies are
+     `SameSite=None; Secure; Partitioned` (CHIPS); set
+     `backend.sessionCookieMode: partitioned`.
 2. **OIDC client** at your IdP: redirect URL
    `https://<portalHost>/v1/auth/callback`.
 3. **PostgreSQL** reachable from the cluster; a DSN for a role with DDL
-   rights on its schema (the api runs embedded migrations at startup).
+   rights on its schema (the backend runs embedded migrations at startup).
    The chart does NOT bundle Postgres. Enforce TLS on the DSN with
    `database.tls.mode` (exported as `PGSSLMODE`; `verify-full`
    recommended) plus `database.tls.caSecret` (mounted read-only as
@@ -81,8 +99,8 @@ Also gather:
    `$K -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}'`
    (kind: `10.96.0.1`, RKE2/canal: usually `10.43.0.1`) →
    `networkPolicy.apiServerPeers`/`apiServerPort`.
-5. **Images** — default `ghcr.io/tinyorbitvn/tinycdi-{api,operator,
-   gateway,portal,linux-desktop,browser}` tagged with the chart
+5. **Images** — default `ghcr.io/tinyorbitvn/tinycdi-{backend,operator,
+   frontend,linux-desktop,browser}` tagged with the chart
    appVersion. To pull from a mirror registry set
    `global.imageRegistry: registry.example.com` (optionally per-image
    `registry`/`repository` overrides) plus `global.imagePullSecrets`.
@@ -103,9 +121,12 @@ Also gather:
    `deploy/node-profiles/README.md`).
 8. **TLS material** for the portal and session edges plus the internal
    mTLS chain — either pre-created Secrets (table below) or
-   `certManager.enabled` for the internal chain. If you use Gateway API
-   exposure, the gateway listener terminates browser TLS and must
-   re-encrypt/pass through to the HTTPS backends.
+   `certManager.enabled` for the internal chain. The session edge cert
+   (`backend.tls.session`, and the ingress TLS Secret when
+   `ingress.enabled`) MUST be a wildcard covering `*.<sessionDomain>` —
+   cert-manager can only issue it through a DNS-01 solver. If you use
+   Gateway API exposure, the gateway listener terminates browser TLS and
+   must re-encrypt/pass through to the HTTPS backends.
 9. **Workspace node pool** — by default (`runtime.placement.
    allowSharedNodes: false`) every runtime pod, and the node-profile
    installer DaemonSet, target a dedicated pool: nodes labeled
@@ -141,17 +162,18 @@ All in the release namespace unless noted:
 
 | Secret | Keys | Used by |
 |---|---|---|
-| `tinycdi-api-db` | `url` = Postgres DSN | api (`TCDI_DATABASE_URL`) |
-| `tinycdi-oidc-client` | `client-secret` | api (`TCDI_OIDC_CLIENT_SECRET`) |
-| `tinycdi-api-internal-tls` | `tls.crt`, `tls.key` | api internal mTLS listener (or `certManager.enabled`) |
-| `tinycdi-internal-ca` | `ca.crt` | internal mTLS CA: api verifies client certs (`api.clientCA`), gateway verifies the broker cert (`gateway.trustedCA`), operator verifies it (`operator.brokerClient.ca`); split values if the two differ. With `certManager.selfSigned` the CA Secret is `<release>-internal-ca` |
-| `tinycdi-gateway-tls` | `tls.crt`, `tls.key` | gateway public TLS |
-| `tinycdi-gateway-mtls` | `tls.crt`, `tls.key` | gateway client cert to the broker (or `certManager.enabled`) |
-| `tinycdi-operator-mtls` | `tls.crt`, `tls.key` | operator client cert to the broker — **CN must be `operator`** (or `api.operatorCN`): the only identity the internal workspace revoke/drain routes accept (ADR 0003). `certManager.enabled` issues it with the right CN |
-| `tinycdi-portal-tls` | `tls.crt`, `tls.key` | portal TLS |
-| `tinycdi-gateway-control-token` | `token` | gateway control endpoints — **optional**; set `gateway.controlToken.existingSecret` (key `token`). Without it the `/v1/control/*` routes stay closed (fail-closed) |
-| `tinycdi-extra-ca` | `ca.crt` | optional: api outbound CA (`api.extraCA`), gateway broker CA (`gateway.trustedCA`), upstream CA |
-| `tinycdi-ingress-tls` | `tls.crt`, `tls.key` | optional: ingress TLS when `ingress.enabled` |
+| `tinycdi-backend-db` | `url` = Postgres DSN | backend (`TCDI_DATABASE_URL`) |
+| `tinycdi-oidc-client` | `client-secret` | backend (`TCDI_OIDC_CLIENT_SECRET`) |
+| `tinycdi-backend-app-tls` | `tls.crt`, `tls.key` | backend app listener :8443 — certificate for `portalHost` |
+| `tinycdi-backend-session-tls` | `tls.crt`, `tls.key` | backend session listener :8444 — **wildcard certificate covering `*.<sessionDomain>`** (DNS-01) |
+| `tinycdi-backend-internal-tls` | `tls.crt`, `tls.key` | backend internal mTLS listener :9443 (or `certManager.enabled`) |
+| `tinycdi-backend-login-keys` | `current` (+ `previous` while rotating), 32 bytes each | backend `-login-key-file` — seals the `__Host-tcdi_login` cookie (or `backend.loginKeys.generate`) |
+| `tinycdi-internal-ca` | `ca.crt` | internal mTLS CA: backend verifies client certs (`backend.clientCA`), operator verifies the broker cert (`operator.brokerClient.ca`). With `certManager.selfSigned` the CA Secret is `<release>-internal-ca` |
+| `tinycdi-operator-mtls` | `tls.crt`, `tls.key` | operator client cert to the broker — **CN must be `operator`** (or `backend.operatorCN`): the only identity the internal workspace revoke/drain routes accept (ADR 0003). `certManager.enabled` issues it with the right CN |
+| `tinycdi-frontend-tls` | `tls.crt`, `tls.key` | frontend TLS |
+| `tinycdi-backend-control-token` | `token` | backend session control endpoints — **optional**; set `backend.controlToken.existingSecret` (key `token`). Without it the `/v1/control/*` routes stay closed (fail-closed); they answer only on the in-cluster control hosts |
+| `tinycdi-extra-ca` | `ca.crt` | optional: backend outbound CA (`backend.extraCA`), runtime upstream CA (`backend.upstreamCA`), DB CA (`database.tls.caSecret`) |
+| `tinycdi-ingress-tls` | `tls.crt`, `tls.key` | optional: ingress TLS when `ingress.enabled` — must cover `portalHost` **and** `*.<sessionDomain>` |
 
 Create them with `kubectl create secret tls/generic` from local files
 kept outside version control — never put values in the values file or
@@ -161,7 +183,7 @@ commit them.
 
 ```bash
 cp deploy/helm/tinycdi/ci/example-values.yaml my-values.yaml
-# edit: portalHost/sessionHost, managedNamespaces, oidc, database,
+# edit: portalHost/sessionDomain, managedNamespaces, oidc, database,
 # images digests, networkPolicy.apiServerPeers, storageClass, templates
 
 # dry-run render first (no cluster access needed):

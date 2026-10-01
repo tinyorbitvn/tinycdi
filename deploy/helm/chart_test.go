@@ -1113,20 +1113,23 @@ func TestBackendPortalOrigin(t *testing.T) {
 	}
 }
 
-// TestFrontendSessionOrigin: the frontend must receive the session origin
-// derived from sessionHost — the SPA opens sessions by POSTing a
-// cross-origin launch form to https://<sessionHost>, and the portal CSP
-// form-action blocks every launch unless that origin is configured
+// TestFrontendSessionDomain: the frontend must receive the session domain
+// — the SPA opens sessions by POSTing a launch form to a workspace's own
+// <label>.<sessionDomain> host, and the portal CSP frame-src/form-action
+// allow https://*.<sessionDomain> only when the domain is configured
 // (launch regression).
-func TestFrontendSessionOrigin(t *testing.T) {
+func TestFrontendSessionDomain(t *testing.T) {
 	for _, vf := range []string{"example-values.yaml", "minimal-values.yaml"} {
 		dep := deployment(render(t, vf), "frontend")
 		if dep == nil {
 			t.Fatalf("%s: no frontend Deployment rendered", vf)
 		}
 		args := strings.Join(firstContainerArgs(dep), "\n")
-		if !strings.Contains(args, "-session-origin=https://session.lab.example.net") {
-			t.Errorf("%s: frontend args missing -session-origin=https://session.lab.example.net\nargs:\n%s", vf, args)
+		if !strings.Contains(args, "-session-domain=session.lab.example.net") {
+			t.Errorf("%s: frontend args missing -session-domain=session.lab.example.net\nargs:\n%s", vf, args)
+		}
+		if strings.Contains(args, "-session-origin") {
+			t.Errorf("%s: frontend args carry removed flag -session-origin\nargs:\n%s", vf, args)
 		}
 	}
 }

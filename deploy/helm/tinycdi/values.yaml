@@ -79,10 +79,15 @@ managedNamespaces: []
   # - name: tinycdi-tenant-a
   #   tenant: tenant-a
 
-# Public entry points. MUST be different registrable hosts: portal cookies,
-# the OIDC redirect and launch URLs are scoped per origin.
+# Public entry points. Every workspace session is served on its own
+# <label>.<sessionDomain> host (D9): the edge carries ONE wildcard route
+# for *.<sessionDomain> and needs a wildcard DNS record plus a wildcard
+# TLS certificate (HTTP-01 cannot issue wildcards — use DNS-01).
+# portalHost must differ from sessionDomain and must NOT sit inside it —
+# the wildcard route would capture portal traffic (portal cookies, the
+# OIDC redirect and launch URLs are origin-scoped).
 portalHost: portal.example.invalid
-sessionHost: session.example.invalid
+sessionDomain: session.example.invalid
 
 oidc:
   issuer: https://idp.example.invalid/realms/tinycdi
@@ -136,7 +141,8 @@ database:
 
 # Backend (cmd/backend): the public API and the session gateway in ONE
 # Deployment — one TLS listener per role (app :8443 for portalHost /v1,
-# session :8444 for sessionHost, internal mTLS :9443 for the operator)
+# session :8444 for every <label>.<sessionDomain> host, internal mTLS
+# :9443 for the operator)
 # plus an optional metrics listener on its own ClusterIP Service.
 backend:
   # D22: two replicas with rollingUpdate maxUnavailable=0 and a PDB —
@@ -146,7 +152,7 @@ backend:
   # directory is shared across replicas — never a per-pod name.
   gatewayID: tinycdi-backend
   sessionIdle: 30m
-  # Session-cookie mode: "lax" (portal and session host on the same
+  # Session-cookie mode: "lax" (portal and session domain on the same
   # registrable domain) or "partitioned" (SameSite=None;Secure;Partitioned
   # — for cross-site deployments).
   sessionCookieMode: lax
@@ -162,7 +168,7 @@ backend:
   # One certificate per listener — the listeners never share TLS material.
   tls:
     app:      {existingSecret: tinycdi-backend-app-tls}      # keys tls.crt / tls.key
-    session:  {existingSecret: tinycdi-backend-session-tls}
+    session:  {existingSecret: tinycdi-backend-session-tls}  # MUST cover *.<sessionDomain> (wildcard cert)
     internal: {existingSecret: tinycdi-backend-internal-tls}
   # CA bundle the internal mTLS listener verifies client certs against
   # (the operator's broker client cert).
@@ -191,9 +197,13 @@ backend:
   # session listener also sends them as frame-ancestors). Full
   # scheme://host[:port] origins only.
   extraPortalOrigins: []
-  # Extra hostnames added to the session listener's Host-header allowlist.
-  extraAllowedHosts: []
-  # Ticket audience; defaults to sessionHost.
+  # Extra Hosts allowed on the session listener's in-cluster control
+  # surface (/healthz and bearer-gated /v1/control/*) — on TOP of the
+  # backend[.<ns>[.svc[.cluster.local]]] Service names, which are always
+  # allowed. Workspace hosts are <label>.<sessionDomain> and never serve
+  # the control routes.
+  controlHosts: []
+  # Ticket audience; defaults to sessionDomain.
   audience: ""
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
   # Service, never on the public Service (SEC-33).
