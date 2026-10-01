@@ -1,0 +1,139 @@
+---
+# runtime-freshness.yml — daily runtime-image freshness gate (D27/D28).
+#
+#   chromium-pin — reruns the bookworm-security apt-pin check; when a
+#                  newer chromium exists it bumps CHROMIUM_APT_VERSION
+#                  (build/browser/Dockerfile + the docs pins) on a chore
+#                  branch and opens a pin-bump PR. Merging it triggers the
+#                  runtime-images train. Formerly ci.yml's weekly
+#                  `browser-freshness` job — daily now, per the SLO.
+#   image-age    — fails when the newest runtime-* GitHub Release is
+#                  older than the 14-day SLO: the train publishes on every
+#                  runtime-image change and weekly, so a gap means the
+#                  train is broken, not that nothing needed rebuilding.
+#
+# Every action is pinned by full commit SHA (version in the trailing
+# comment); permissions are minimal per job.
+
+name: runtime-freshness
+
+"on":
+  schedule:
+    - cron: "11 3 * * *"  # daily freshness check (D27/D28)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  chromium-pin:
+    name: chromium freshness → pin-bump PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write        # push the pin-bump branch
+      pull-requests: write   # gh pr create
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: check chromium freshness
+        # SUPR-4: the check fails when bookworm-security offers a newer
+        # chromium than the pin; the newer version is parsed out of its
+        # output so the bump below reuses the one lookup.
+        id: check
+        run: |
+          set +e
+          out="$(.github/scripts/check-chromium-freshness.sh 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          new=""
+          if [ "$rc" -ne 0 ]; then
+            new="$(printf '%s\n' "$out" \
+              | sed -n 's/.*bookworm-security offers \([^ ;]*\).*/\1/p' \
+              | tail -1)"
+          fi
+          echo "new_version=$new" >> "$GITHUB_OUTPUT"
+          # rc==0 -> pin current; a failure with no parseable offer is a
+          # real error (network/index breakage), not a stale pin.
+          if [ "$rc" -ne 0 ] && [ -z "$new" ]; then
+            echo "::error::freshness check failed without a version to bump to"
+            exit 1
+          fi
+
+      - name: bump the pin on a chore branch
+        # Idempotent: an already-open PR for this version ends the run.
+        id: bump
+        if: steps.check.outputs.new_version != ''
+        env:
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # git refs reject '~' (Debian revision separator) — fold it.
+          BRANCH="chore/chromium-pin-$(tr '~' '_' <<< "$NEW_VERSION")"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          existing="$(gh pr list --state open --head "$BRANCH" \
+            --json number --jq 'length')"
+          if [ "$existing" != "0" ]; then
+            echo "an open PR already tracks $BRANCH — nothing to do"
+            echo "bump_pr=exists" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          .github/scripts/bump-chromium-pin.sh "$NEW_VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A closed-but-unmerged bump branch may still exist remotely;
+          # fetch it so --force-with-lease has the lease, then re-push the
+          # fresh bump cut from current main.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch -q origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          fi
+          git switch -c "$BRANCH"
+          git add build/browser/Dockerfile docs/images.md docs/compatibility.md
+          git commit -m "build(browser): bump chromium apt pin to $NEW_VERSION"
+          gh auth setup-git
+          git push --force-with-lease -u origin "$BRANCH"
+
+      - name: open the pin-bump PR
+        if: >-
+          steps.check.outputs.new_version != ''
+          && steps.bump.outputs.bump_pr != 'exists'
+        env:
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create --base main --head "$BRANCH" \
+            --title "build(browser): bump chromium pin to $NEW_VERSION" \
+            --body-file /dev/stdin <<EOF
+          bookworm-security offers chromium $NEW_VERSION; the pinned
+          build is older (SUPR-4 freshness signal).
+
+          Bumps \`CHROMIUM_APT_VERSION\` in \`build/browser/Dockerfile\`
+          and the doc pins in \`docs/images.md\` / \`docs/compatibility.md\`.
+          Merging triggers the runtime-images train, which rebuilds,
+          scans, signs and publishes the runtime images and refreshes
+          \`runtime-images.json\` on the daily \`runtime-*\` release.
+
+          Opened by the runtime-freshness workflow.
+          EOF
+
+  image-age:
+    # D28: no published runtime image older than 14 days. Fails the
+    # workflow (visible red signal) when the newest runtime-* release
+    # breaches the SLO — including "no runtime release exists yet".
+    name: runtime release age (14-day SLO)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: newest runtime-* release age
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/check-runtime-image-age.sh
