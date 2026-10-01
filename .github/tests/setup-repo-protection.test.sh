@@ -65,6 +65,9 @@ case "$endpoint" in
     [ "$mode" = "partial" ] && reply '{}'
     [ "$mode" = "converged" ] && reply '{"url":"x","required_status_checks":{"strict":true,"contexts":["workflow lint (actionlint + yamllint + zizmor)","go vet + test -race (envtest)","integration (postgres service + envtest)","portal ui (npm ci, tsc, vitest, build)","chart (helm lint --strict + chart tests)","govulncheck (Go vuln scan)","dependency review (PRs)","workflow policy tests (.github)"],"checks":[]},"enforce_admins":{"enabled":true},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"required_approving_review_count":0},"required_linear_history":{"enabled":false},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"lock_branch":{"enabled":false},"allow_fork_syncing":{"enabled":false}}'
     notfound ;;
+  repos/test/repo/vulnerability-alerts)
+    [ "$mode" = "converged" ] && reply ''
+    notfound ;;
   repos/test/repo/private-vulnerability-reporting)
     [ "$mode" = "converged" ] && reply '{"enabled":true}'
     reply '{"enabled":false}' ;;
@@ -112,6 +115,7 @@ absent "$WORK/clean.out" 'chromium apt-pin freshness' "network freshness check m
 
 # PUB-10: security features enabled.
 chk "$WORK/clean.out" 'WOULD: gh api -X PUT repos/test/repo/private-vulnerability-reporting' "PVR not planned"
+chk "$WORK/clean.out" 'WOULD: gh api -X PUT repos/test/repo/vulnerability-alerts' "Dependabot alerts not planned"
 chk "$WORK/clean.out" 'WOULD: gh api -X PATCH repos/test/repo' "security_and_analysis PATCH not planned"
 chk "$WORK/clean.out" '"secret_scanning_push_protection"' "push protection not in PATCH body"
 chk "$WORK/clean.out" 'WOULD: gh api -X POST repos/test/repo/actions/variables' "variables not planned"

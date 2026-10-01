@@ -272,6 +272,14 @@ else
   doit "enable private vulnerability reporting" -- \
     -X PUT "repos/$REPO/private-vulnerability-reporting"
 fi
+# Dependabot alerts (turns on the dependency graph that ci.yml's
+# dependency-review job needs). GET answers 204 when on, 404 when off.
+if gh api "repos/$REPO/vulnerability-alerts" >/dev/null 2>&1; then
+  note "ok: Dependabot alerts / dependency graph already enabled"
+else
+  doit "enable Dependabot alerts (dependency graph)" -- \
+    -X PUT "repos/$REPO/vulnerability-alerts"
+fi
 # Secret scanning + push protection via security_and_analysis.
 sa="$(jq -c '.security_and_analysis // {}' <<< "$repo_json")"
 if [ "$(jq -r '.secret_scanning.status // "disabled"' <<< "$sa")" = "enabled" ] \
