@@ -67,8 +67,38 @@ tags:
     description: Workspace template catalog published by administrators.
   - name: data
     description: Retained data disks — inventory, attach and purge.
+  - name: session
+    description: Session bootstrap — identity, CSRF token and session domain.
 
 paths:
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: Session bootstrap payload
+      description: |
+        Returns the verified identity of the caller, its roles, the CSRF token
+        to echo in the `X-CSRF-Token` header on every mutating request, and the
+        session domain under which per-workspace session hosts live
+        (`ws-<suffix>.<sessionDomain>`). The CSRF token is derived from the
+        session ID server-side and is never stored; it is only valid for the
+        session that fetched it.
+      tags: [session]
+      responses:
+        "200":
+          description: Identity bootstrap for the portal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/workspaces:
     get:
       operationId: listWorkspaces
@@ -309,7 +339,8 @@ paths:
       summary: Issue a launch ticket for an interactive session
       description: |
         Issues a short-lived (60 s), single-use opaque **launch ticket** and a
-        `launchUrl` on the **session origin**. The browser opens the session by
+        `launchUrl` on the workspace's own session host
+        (`https://ws-<suffix>.<sessionDomain>/v1/launch`). The browser opens the session by
         POSTing the ticket to `launchUrl` (form POST on the session host); the
         gateway redeems it atomically through the broker and sets a host-only
         `Secure`/`HttpOnly`/`SameSite` session cookie, then redirects to a clean
@@ -317,7 +348,9 @@ paths:
         server stores only its hash.
 
         Requirements: the workspace must be in phase `Ready` with
-        `desiredState: Running`, otherwise `409 INVALID_STATE`. At most one
+        `desiredState: Running`, otherwise `409 INVALID_STATE`. A workspace ID
+        that cannot map to a session host also answers `409 INVALID_STATE`.
+        At most one
         interactive connection is authorized per workspace: if a live lease
         exists and `takeover` is not set, the call fails with
         `409 CONNECTION_IN_USE`. With `takeover: true` the previous session is
@@ -351,6 +384,46 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/workspaces/{workspaceId}/connection:
+    get:
+      operationId: getConnectionStatus
+      summary: Connection state of the workspace's interactive session
+      description: |
+        Reports whether an interactive desktop session for this workspace is
+        connected: `none` (no live lease), `connected` (open stream on a fresh
+        lease), `disconnected` (live lease, no stream), or `stale` (lease not
+        renewed within the freshness window).
+
+        This is a **passive** endpoint: it authenticates the caller but does
+        not slide the portal idle timer, so the portal may poll it on an
+        interval without keeping an unattended session alive. Ownership rules
+        match `GET /v1/workspaces/{workspaceId}` — a workspace the caller
+        cannot see answers `404`.
+      tags: [workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Connection state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -552,7 +625,7 @@ components:
       in: header
       name: X-CSRF-Token
       description: |
-        CSRF token obtained from the session bootstrap payload and echoed on
+        CSRF token obtained from `GET /v1/me` and echoed on
         every mutating request. Combined with `SameSite=Strict` cookies this
         blocks cross-site request forgery; a missing or mismatched token
         returns `403 CSRF_FAILED`. Required on all non-GET operations.
@@ -942,6 +1015,63 @@ components:
           type: string
           description: Cursor for the next page; absent when the list is exhausted.
 
+    Me:
+      type: object
+      additionalProperties: false
+      required: [subject, displayName, tenant, roles, csrfToken, sessionDomain]
+      description: |
+        Session bootstrap payload returned by `GET /v1/me`: the verified
+        identity, the caller's roles, the CSRF token to echo on mutations, and
+        the session domain under which per-workspace session hosts live.
+      properties:
+        subject:
+          type: string
+          description: Subject claim of the verified identity.
+        displayName:
+          type: string
+          description: Display name; equals `subject` until the principal directory lands.
+        email:
+          type: string
+          description: Email claim when the identity provider supplies one.
+        tenant:
+          type: string
+          description: Tenant the principal belongs to.
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [user, tenant-admin]
+          description: "`user` for every authenticated principal; `tenant-admin` when the principal carries the tenant-admin group."
+        csrfToken:
+          type: string
+          description: |
+            Session-bound CSRF token — echo it in the `X-CSRF-Token` header on
+            every mutating request. Derived from the session ID; never stored
+            server-side and only valid for this session.
+        sessionDomain:
+          type: string
+          description: "host[:port] under which workspace session hosts live"
+
+    ConnectionStatus:
+      type: object
+      additionalProperties: false
+      required: [state, leaseActive]
+      description: |
+        Passive connection state of a workspace's interactive session.
+        `none`: no live lease. `connected`: open stream on a fresh lease.
+        `disconnected`: live lease with no open stream. `stale`: the lease has
+        not been renewed within the freshness window.
+      properties:
+        state:
+          type: string
+          enum: [none, connected, disconnected, stale]
+        leaseActive:
+          type: boolean
+        lastRenewedAt:
+          type: string
+          format: date-time
+          description: Last lease renewal observed by the broker; absent when no live lease exists.
+
     CreateConnectionRequest:
       type: object
       additionalProperties: false
@@ -977,11 +1107,13 @@ components:
           type: string
           format: uri
           description: |
-            Absolute URL on the **session origin** (a different registrable
-            domain than the portal). The browser POSTs the ticket here; the
+            Absolute URL on the workspace's own session host —
+            `https://ws-<suffix>.<sessionDomain>/v1/launch` where `<suffix>`
+            is the workspace ID suffix (see `GET /v1/me` for the configured
+            session domain). The browser POSTs the ticket here; the
             gateway redeems it and redirects to a clean URL after setting the
             host-only session cookie.
-          example: "https://session.example.invalid/v1/launch"
+          example: "https://ws-01j4z8kq2m9xnbv3t7yh0r6d5e.session.example.invalid/v1/launch"
         expiresAt:
           type: string
           format: date-time
