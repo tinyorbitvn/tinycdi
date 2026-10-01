@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { unwrap, getSessionOrigin } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -91,24 +92,27 @@ export function ConnectButton({
         disabled={disabled || busy}
         onClick={() => void connect(false)}
       >
-        {busy ? "Connecting…" : "Connect"}
+        {busy
+          ? t("workspaces.connect.connecting")
+          : t("workspaces.connect.action")}
       </button>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {inUse ? (
-        <div role="dialog" aria-label="session in use" className="dialog">
-          <p>
-            Another session is already connected to this workspace. Taking over
-            disconnects it.
-          </p>
+        <div
+          role="dialog"
+          aria-label={t("workspaces.connect.inUse.label")}
+          className="dialog"
+        >
+          <p>{t("workspaces.connect.inUse.body")}</p>
           <button
             type="button"
             disabled={busy}
             onClick={() => void connect(true)}
           >
-            Take over session
+            {t("workspaces.connect.inUse.takeover")}
           </button>
           <button type="button" disabled={busy} onClick={() => setInUse(false)}>
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       ) : null}
