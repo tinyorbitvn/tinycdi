@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { components } from "../api/generated/schema";
 
 export type WorkspaceView = components["schemas"]["WorkspaceView"];
@@ -15,12 +16,17 @@ export function isConnectable(ws: WorkspaceView): boolean {
 
 export function blockingCondition(ws: WorkspaceView): string | null {
   if (ws.phase !== "Ready") return null;
-  if (ws.desiredState !== "Running") return "desired state is Stopped";
+  if (ws.desiredState !== "Running") {
+    return t("workspaces.detail.blocker.stopped");
+  }
   const conn = ws.conditions.find((c) => c.type === "ConnectionReady");
   if (conn?.status !== "True") {
     return conn
-      ? `ConnectionReady=${conn.status} (${conn.reason})`
-      : "no ConnectionReady condition reported yet";
+      ? t("workspaces.detail.blocker.connectionReady", {
+          status: conn.status,
+          reason: conn.reason,
+        })
+      : t("workspaces.detail.blocker.noConnection");
   }
   return null;
 }

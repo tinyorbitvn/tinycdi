@@ -1,4 +1,5 @@
 import { usePathname } from "./lib/router";
+import { t } from "./i18n";
 import { AuthGate } from "./auth/AuthGate";
 import { CatalogPage } from "./workspaces/CatalogPage";
 import { WorkspaceListPage } from "./workspaces/WorkspaceListPage";
@@ -24,8 +25,8 @@ export function App() {
   } else {
     page = (
       <main>
-        <h1>Not found</h1>
-        <p>No page for {path}.</p>
+        <h1>{t("app.notFound.title")}</h1>
+        <p>{t("app.notFound.body", { path })}</p>
       </main>
     );
   }

@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { WorkspaceView } from "./helpers";
 
 export function PhaseBadge({ phase }: { phase: WorkspaceView["phase"] }) {
@@ -6,17 +7,17 @@ export function PhaseBadge({ phase }: { phase: WorkspaceView["phase"] }) {
 
 export function ConditionsTable({ workspace }: { workspace: WorkspaceView }) {
   if (workspace.conditions.length === 0) {
-    return <p>No conditions reported yet.</p>;
+    return <p>{t("workspaces.conditions.empty")}</p>;
   }
   return (
-    <table aria-label="conditions">
+    <table aria-label={t("workspaces.conditions.label")}>
       <thead>
         <tr>
-          <th>Type</th>
-          <th>Status</th>
-          <th>Reason</th>
-          <th>Message</th>
-          <th>Since</th>
+          <th>{t("workspaces.conditions.col.type")}</th>
+          <th>{t("workspaces.conditions.col.status")}</th>
+          <th>{t("workspaces.conditions.col.reason")}</th>
+          <th>{t("workspaces.conditions.col.message")}</th>
+          <th>{t("workspaces.conditions.col.since")}</th>
         </tr>
       </thead>
       <tbody>

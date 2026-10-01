@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { Link } from "../lib/router";
@@ -26,35 +27,35 @@ export function WorkspaceListPage({ pollIntervalMs = 2000 }: { pollIntervalMs?: 
       }
     }
     void load();
-    const t = setInterval(() => void load(), pollIntervalMs);
+    const timer = setInterval(() => void load(), pollIntervalMs);
     return () => {
       cancelled = true;
-      clearInterval(t);
+      clearInterval(timer);
     };
   }, [api, pollIntervalMs]);
 
   return (
     <main>
-      <h1>Workspaces</h1>
+      <h1>{t("workspaces.list.title")}</h1>
       <nav>
-        <Link to="/workspaces/new">New workspace</Link> ·{" "}
-        <Link to="/templates">Template catalog</Link> ·{" "}
-        <Link to="/data">Retained data</Link>
+        <Link to="/workspaces/new">{t("nav.newWorkspace")}</Link> ·{" "}
+        <Link to="/templates">{t("nav.templates")}</Link> ·{" "}
+        <Link to="/data">{t("nav.data")}</Link>
       </nav>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {!workspaces ? (
-        <p aria-busy="true">Loading…</p>
+        <p aria-busy="true">{t("workspaces.list.loading")}</p>
       ) : workspaces.length === 0 ? (
-        <p>No workspaces yet.</p>
+        <p>{t("workspaces.list.empty")}</p>
       ) : (
-        <table aria-label="workspaces">
+        <table aria-label={t("workspaces.list.count", { n: workspaces.length })}>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Template</th>
-              <th>Phase</th>
-              <th>Desired</th>
-              <th>Data policy</th>
+              <th>{t("workspaces.list.col.name")}</th>
+              <th>{t("workspaces.list.col.template")}</th>
+              <th>{t("workspaces.list.col.phase")}</th>
+              <th>{t("workspaces.list.col.desired")}</th>
+              <th>{t("workspaces.list.col.dataPolicy")}</th>
               <th></th>
             </tr>
           </thead>
@@ -70,13 +71,13 @@ export function WorkspaceListPage({ pollIntervalMs = 2000 }: { pollIntervalMs?: 
                 <td>
                   <PhaseBadge phase={w.phase} />
                   {isConnectable(w) ? null : w.phase === "Ready" ? (
-                    <small> (waiting for ConnectionReady)</small>
+                    <small> {t("workspaces.list.waitingConnection")}</small>
                   ) : null}
                 </td>
                 <td>{w.desiredState}</td>
                 <td>{w.dataPolicy}</td>
                 <td>
-                  <Link to={`/workspaces/${w.id}`}>Manage</Link>
+                  <Link to={`/workspaces/${w.id}`}>{t("workspaces.list.manage")}</Link>
                 </td>
               </tr>
             ))}
