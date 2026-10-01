@@ -38,9 +38,7 @@ export function WorkspaceListPage({ pollIntervalMs = 2000 }: { pollIntervalMs?: 
     <main>
       <h1>{t("workspaces.list.title")}</h1>
       <nav>
-        <Link to="/workspaces/new">{t("nav.newWorkspace")}</Link> ·{" "}
-        <Link to="/templates">{t("nav.templates")}</Link> ·{" "}
-        <Link to="/data">{t("nav.data")}</Link>
+        <Link to="/workspaces/new">{t("nav.newWorkspace")}</Link>
       </nav>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {!workspaces ? (
