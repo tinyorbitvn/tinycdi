@@ -263,17 +263,6 @@ jobs:
           .github/scripts/check-kasm-catalog.sh
           .github/scripts/check-trivyignore.sh build/kasm-catalog.trivyignore
 
-  browser-freshness:
-    # SUPR-4: fails once bookworm-security offers a chromium newer than the
-    # pinned CHROMIUM_APT_VERSION, so the engine pin cannot go stale quietly.
-    name: chromium apt-pin freshness
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - run: .github/scripts/check-chromium-freshness.sh
-
   kasm-contract:
     # KASM-4/KASM-5: the docker-emulated pod contract test plus the
     # heavyweight catalog scan (trivy gate + browser-engine freshness).

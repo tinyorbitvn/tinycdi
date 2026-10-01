@@ -1,6 +1,6 @@
 # GitHub Actions — TinyCDI CI/CD
 
-Three workflows, all with every action pinned by full commit SHA (version in
+Five workflows, all with every action pinned by full commit SHA (version in
 the trailing comment) and every downloaded tool sha256-verified.
 
 | Workflow | Trigger | Purpose |
@@ -8,11 +8,13 @@ the trailing comment) and every downloaded tool sha256-verified.
 | `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
 | `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images (`backend`, `frontend`, `operator`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
+| `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-chromium-freshness.sh`; when bookworm-security offers a newer chromium, `bump-chromium-pin.sh` repins `build/browser/Dockerfile` + the doc pins and a pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
+| `runtime-images.yml` | push to `main` touching `build/{linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-desktop + browser → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
 
-Both publishing workflows split publish rights from scanner execution
-(SEC-04/SEC-05):
+The publishing workflows (`images.yml`, `release.yml`, `runtime-images.yml`)
+split publish rights from scanner execution (SEC-04/SEC-05):
 
 1. **build** jobs (`packages: write`) run only checkout + docker actions:
    `docker buildx build --output type=registry,push-by-digest=true` pushes the
@@ -75,10 +77,12 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   Consequence: `release.yml` `workflow_dispatch` is **dry-run only** —
   a real release is made by an admin pushing the `v*.*.*` tag.
 - **Branch protection on `main`** — required status checks = every ci.yml
-  job except `chromium apt-pin freshness` and `kasm adapter contract +
-  catalog scan` (network-dependent, must not gate merges; the latter's
-  fast catalog policy leg still runs inside the required workflow-policy
-  job), strict (up-to-date) mode, enforce admins, dismiss stale
+  job except `kasm adapter contract + catalog scan` (network-dependent,
+  must not gate merges; its fast catalog policy leg still runs inside
+  the required workflow-policy job). The chromium freshness check is
+  equally non-gating — it now lives in `runtime-freshness.yml` (daily)
+  rather than ci.yml, so it never appears as a required check at all.
+  Strict (up-to-date) mode, enforce admins, dismiss stale
   reviews, conversation resolution required, no force-push/delete.
   `required_approving_review_count` is 0 while the repo has a single
   maintainer — raise it when a second maintainer joins.
@@ -149,9 +153,51 @@ run with `--config` pointing at an empty file so a committed
 asserts none exists).
 
 The browser image carries a second gate:
-`.github/scripts/check-chromium-freshness.sh` fails CI once Debian
-bookworm-security publishes a chromium newer than the pinned
-`CHROMIUM_APT_VERSION` — the signal to bump the pin and rebuild.
+`.github/scripts/check-chromium-freshness.sh` (runtime-freshness.yml,
+daily) fails once Debian bookworm-security publishes a chromium newer
+than the pinned `CHROMIUM_APT_VERSION` — and the same run opens the
+pin-bump PR via `bump-chromium-pin.sh`.
+
+## Runtime image release train (D27/D28)
+
+`runtime-images.yml` publishes the runtime images (`linux-desktop`,
+`browser`) on their own cadence — every main push touching
+`build/linux-desktop/**` or `build/browser/**`, weekly, and on
+`workflow_dispatch` — independent of control-plane `v*.*.*` releases.
+Promoted digests get the `rt-YYYYMMDD.N` tag (`N` = run number); the
+train never promotes `main`/`latest` and never builds control-plane
+images. Each publish writes **`runtime-images.json`** and attaches it to
+the GitHub Release **`runtime-YYYY.MM.DD`** (re-uploaded when more than
+one train runs in a day):
+
+```json
+{
+  "builtAt": "2026-10-20T03:10:00Z",
+  "images": [
+    {"name": "linux-desktop", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-desktop",
+     "digest": "sha256:…", "tag": "rt-20261020.1"},
+    {"name": "browser", "ref": "ghcr.io/tinyorbitvn/tinycdi-browser",
+     "digest": "sha256:…", "tag": "rt-20261020.1", "chromium": "154.0.8037.92"}
+  ]
+}
+```
+
+Chart values stay GitOps-owned (P7): deployments bump
+`images.*.digest`/`images.*.builtAt` from the manifest — the train
+mutates nothing downstream. `runtime-freshness.yml`'s `image-age` job
+fails daily when the newest `runtime-*` release is older than 14 days;
+the SLO and the `kasmweb/*` allowlist rule are in
+`docs/security/vulnerability-policy.md` §5.
+
+Train images verify like `:main`-channel images, with the
+`runtime-images.yml` signer identity:
+
+```sh
+cosign verify ghcr.io/tinyorbitvn/tinycdi-browser:rt-<date>.<n> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity \
+  'https://github.com/tinyorbitvn/tinycdi/.github/workflows/runtime-images.yml@refs/heads/main'
+```
 
 ## Released image set
 

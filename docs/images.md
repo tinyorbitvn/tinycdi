@@ -49,6 +49,21 @@ Pinned inputs (`docs/compatibility.md`):
 - Chromium: `154.0.8037.92-1~deb12u1` (apt pin — repin on Debian security updates)
 - Firefox ESR (fallback): `140.16.0esr-1~deb12u1`
 
+## Published runtime images (release train)
+
+Runtime images ship on their own release train (`.github/workflows/
+runtime-images.yml`), decoupled from control-plane `v*.*.*` releases:
+every main push touching `build/linux-desktop/**` or `build/browser/**`,
+weekly, and on dispatch. Signed digests are promoted to
+`ghcr.io/tinyorbitvn/tinycdi-{linux-desktop,browser}:rt-YYYYMMDD.N` and
+the manifest `runtime-images.json` is attached to the GitHub Release
+`runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
+the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
+from that manifest — values are GitOps-owned and never written back by
+the train. `runtime-freshness.yml` keeps the chromium pin current (daily
+check + auto PR) and fails when the newest `runtime-*` release is older
+than 14 days (`docs/security/vulnerability-policy.md` §5).
+
 ## Runtime contract
 
 - HTTPS streaming endpoint on container port **8443** (websocket transport
