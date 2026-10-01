@@ -1272,7 +1272,8 @@ jobs:
             echo "  <image>@<digest>"
             echo '```'
             echo
-            echo "All images, the chart and every asset below are signed with Sigstore (keyless); \`images.txt\` lists the pinned references."
+            echo "All images, the chart and every asset below are signed with Sigstore"
+            echo "(keyless); \`images.txt\` lists the pinned references."
             echo
           } >> notes.md
           cat bundle/images.txt
