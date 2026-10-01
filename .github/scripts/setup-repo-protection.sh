@@ -176,8 +176,20 @@ rs_id="$(get "repos/$REPO/rulesets" \
   | jq -r '.[] | select(.name == "release-tags") | .id' | head -1)" || rc=$?
 [ "$rc" -gt 1 ] && exit 1
 if [ -n "$rs_id" ]; then
-  doit_body "sync tag ruleset release-tags (id=$rs_id) to canonical body" PUT \
-    "repos/$REPO/rulesets/$rs_id" "$TMP/ruleset.json"
+  rc=0; live_rs="$(get "repos/$REPO/rulesets/$rs_id")" || rc=$?
+  [ "$rc" -ne 0 ] && exit 1
+  # Compare only the fields we manage; the API adds ids, links and timestamps.
+  rs_norm='{name, target, enforcement,
+    bypass_actors: [.bypass_actors[]? | {actor_id, actor_type, bypass_mode}],
+    conditions: {ref_name: {include: (.conditions.ref_name.include // [] | sort),
+                            exclude: (.conditions.ref_name.exclude // [] | sort)}},
+    rules: [.rules[]? | {type}] | sort_by(.type)}'
+  if [ "$(jq -S "$rs_norm" <<< "$live_rs")" = "$(jq -S "$rs_norm" "$TMP/ruleset.json")" ]; then
+    note "ok: ruleset release-tags matches the canonical body"
+  else
+    doit_body "sync tag ruleset release-tags (id=$rs_id) to canonical body" PUT \
+      "repos/$REPO/rulesets/$rs_id" "$TMP/ruleset.json"
+  fi
 else
   doit_body "create tag ruleset release-tags" POST \
     "repos/$REPO/rulesets" "$TMP/ruleset.json"
@@ -218,11 +230,33 @@ cat > "$TMP/protection.json" <<'EOF'
   "allow_fork_syncing": false
 }
 EOF
-rc=0; get "repos/$REPO/branches/main/protection" >/dev/null || rc=$?
+rc=0; live_bp="$(get "repos/$REPO/branches/main/protection")" || rc=$?
 [ "$rc" -eq 2 ] && exit 1
 if [ "$rc" -eq 0 ]; then
-  doit_body "update main branch protection to canonical body" PUT \
-    "repos/$REPO/branches/main/protection" "$TMP/protection.json"
+  # GET returns {enabled: bool} wrappers and extra keys; map it onto the
+  # PUT body's shape before comparing.
+  bp_live='{
+    required_status_checks: {strict: (.required_status_checks.strict // false),
+                             contexts: (.required_status_checks.contexts // [] | sort)},
+    enforce_admins: (.enforce_admins.enabled // false),
+    required_pull_request_reviews: (if .required_pull_request_reviews then
+      {dismiss_stale_reviews: (.required_pull_request_reviews.dismiss_stale_reviews // false),
+       required_approving_review_count: (.required_pull_request_reviews.required_approving_review_count // 0)}
+      else null end),
+    restrictions: (.restrictions // null),
+    required_linear_history: (.required_linear_history.enabled // false),
+    allow_force_pushes: (.allow_force_pushes.enabled // false),
+    allow_deletions: (.allow_deletions.enabled // false),
+    block_creations: (.block_creations.enabled // false),
+    required_conversation_resolution: (.required_conversation_resolution.enabled // false),
+    lock_branch: (.lock_branch.enabled // false),
+    allow_fork_syncing: (.allow_fork_syncing.enabled // false)}'
+  if [ "$(jq -S "$bp_live" <<< "$live_bp")" = "$(jq -S '.required_status_checks.contexts |= sort' "$TMP/protection.json")" ]; then
+    note "ok: main branch protection matches the canonical body"
+  else
+    doit_body "update main branch protection to canonical body" PUT \
+      "repos/$REPO/branches/main/protection" "$TMP/protection.json"
+  fi
 else
   doit_body "create main branch protection (required checks = all ci jobs)" PUT \
     "repos/$REPO/branches/main/protection" "$TMP/protection.json"
@@ -230,10 +264,22 @@ fi
 
 # --- 4. security features (PUB-10) -------------------------------------------
 echo "== security features"
-# Private vulnerability reporting: the repo object does not expose its
-# state and PUT is idempotent (204 on re-enable) — plan it always.
-doit "enable private vulnerability reporting" -- \
-  -X PUT "repos/$REPO/private-vulnerability-reporting"
+rc=0; pvr="$(get "repos/$REPO/private-vulnerability-reporting")" || rc=$?
+[ "$rc" -eq 2 ] && exit 1
+if [ "$rc" -eq 0 ] && [ "$(jq -r '.enabled // false' <<< "$pvr")" = "true" ]; then
+  note "ok: private vulnerability reporting already enabled"
+else
+  doit "enable private vulnerability reporting" -- \
+    -X PUT "repos/$REPO/private-vulnerability-reporting"
+fi
+# Dependabot alerts (turns on the dependency graph that ci.yml's
+# dependency-review job needs). GET answers 204 when on, 404 when off.
+if gh api "repos/$REPO/vulnerability-alerts" >/dev/null 2>&1; then
+  note "ok: Dependabot alerts / dependency graph already enabled"
+else
+  doit "enable Dependabot alerts (dependency graph)" -- \
+    -X PUT "repos/$REPO/vulnerability-alerts"
+fi
 # Secret scanning + push protection via security_and_analysis.
 sa="$(jq -c '.security_and_analysis // {}' <<< "$repo_json")"
 if [ "$(jq -r '.secret_scanning.status // "disabled"' <<< "$sa")" = "enabled" ] \
