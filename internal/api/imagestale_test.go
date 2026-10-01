@@ -188,7 +188,7 @@ func TestWorkspaceView_ImageStaleFromTemplate(t *testing.T) {
 		return provisioning.WorkspaceRecord{
 			ID: id, TenantID: "tenant-a", Owner: owner,
 			OwnerIssuer: env.issuer.URL(), OwnerSub: env.issuer.Subject,
-			Name:    "w-" + id[3:],
+			Name: "w-" + id[3:],
 			Template: provisioning.TemplateInfo{
 				ID: tplID, Name: strings.TrimPrefix(tplID, "tpl_"), Revision: 2,
 				Runtime: "LinuxContainer", Experience: "Desktop",

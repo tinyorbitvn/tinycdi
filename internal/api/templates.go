@@ -122,12 +122,12 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		builtAt, stale := imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(), "template", e.ID)
 		out.Items = append(out.Items, templateView{
-			ID:          e.ID,
-			Name:        e.Name,
-			Description: e.Description,
-			Revision:    e.Revision,
-			Runtime:     e.Runtime,
-			Experience:  e.Experience,
+			ID:           e.ID,
+			Name:         e.Name,
+			Description:  e.Description,
+			Revision:     e.Revision,
+			Runtime:      e.Runtime,
+			Experience:   e.Experience,
 			ImageBuiltAt: builtAt,
 			ImageStale:   stale,
 			Resources: templateResources{
