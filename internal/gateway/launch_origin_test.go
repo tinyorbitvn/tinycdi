@@ -25,10 +25,10 @@ func withPortalOrigin(origins ...string) func(*gateway.Config) {
 // form POST is cross-site by design (design §6) and must redeem.
 func TestLaunch_PortalOriginCrossSite(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-xs", "ws-1")
+	fb.scriptTicket("tk-xs", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-xs", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-xs", map[string]string{
 		"Origin":         testPortalOrigin,
 		"Sec-Fetch-Site": "cross-site",
 	})
@@ -42,10 +42,10 @@ func TestLaunch_PortalOriginCrossSite(t *testing.T) {
 // portal and session share a registrable domain) must also redeem.
 func TestLaunch_PortalOriginSameSite(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-ss", "ws-1")
+	fb.scriptTicket("tk-ss", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-ss", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-ss", map[string]string{
 		"Origin":         testPortalOrigin,
 		"Sec-Fetch-Site": "same-site",
 	})
@@ -59,10 +59,10 @@ func TestLaunch_PortalOriginSameSite(t *testing.T) {
 // gateway's own public origin (same-origin tooling) keeps working.
 func TestLaunch_SessionOriginStillAllowed(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-so", "ws-1")
+	fb.scriptTicket("tk-so", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-so", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-so", map[string]string{
 		"Origin":         testOrigin,
 		"Sec-Fetch-Site": "same-origin",
 	})
@@ -77,10 +77,10 @@ func TestLaunch_SessionOriginStillAllowed(t *testing.T) {
 // ticket — it must still redeem with a valid Origin afterwards.
 func TestLaunch_UnknownOriginRejected_NoConsume(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-unk", "ws-1")
+	fb.scriptTicket("tk-unk", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-unk", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-unk", map[string]string{
 		"Origin":         "https://portal.test.evil.example",
 		"Sec-Fetch-Site": "cross-site",
 	})
@@ -91,7 +91,7 @@ func TestLaunch_UnknownOriginRejected_NoConsume(t *testing.T) {
 	if fb.wasRedeemed("tk-unk") {
 		t.Fatal("rejected launch consumed the ticket")
 	}
-	ok := doLaunch(t, srv, "tk-unk", map[string]string{"Origin": testPortalOrigin})
+	ok := doLaunch(t, srv, testHost, "tk-unk", map[string]string{"Origin": testPortalOrigin})
 	defer drain(ok)
 	if ok.StatusCode != http.StatusSeeOther {
 		t.Fatalf("ticket burned by rejected launch — redeem = %d, want 303", ok.StatusCode)
@@ -114,8 +114,8 @@ func TestLaunch_FetchSiteWithoutOrigin(t *testing.T) {
 		{"null origin", "cross-site", map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "null"}},
 	} {
 		ticket := "tk-" + tc.name
-		fb.scriptTicket(ticket, "ws-1")
-		resp := doLaunch(t, srv, ticket, tc.headers)
+		fb.scriptTicket(ticket, testWSUID)
+		resp := doLaunch(t, srv, testHost, ticket, tc.headers)
 		drain(resp)
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s: launch = %d, want 403", tc.name, resp.StatusCode)
@@ -130,10 +130,10 @@ func TestLaunch_FetchSiteWithoutOrigin(t *testing.T) {
 // context) is not attributable — reject.
 func TestLaunch_NullOriginAlone(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-null", "ws-1")
+	fb.scriptTicket("tk-null", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-null", map[string]string{"Origin": "null"})
+	resp := doLaunch(t, srv, testHost, "tk-null", map[string]string{"Origin": "null"})
 	drain(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("null-origin launch = %d, want 403", resp.StatusCode)
@@ -148,10 +148,10 @@ func TestLaunch_NullOriginAlone(t *testing.T) {
 // allowed — the one-use ticket is still required.
 func TestLaunch_NoBrowserHeaders(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-cli", "ws-1")
+	fb.scriptTicket("tk-cli", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
 
-	resp := doLaunch(t, srv, "tk-cli", nil)
+	resp := doLaunch(t, srv, testHost, "tk-cli", nil)
 	defer drain(resp)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("headerless launch = %d, want 303 (non-browser clients allowed)", resp.StatusCode)
@@ -163,11 +163,11 @@ func TestLaunch_NoBrowserHeaders(t *testing.T) {
 // public origin.
 func TestUpgrade_PortalOriginRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-ws", "ws-1")
+	fb.scriptTicket("tk-ws", testWSUID)
 	srv := newGateway(t, fb, withPortalOrigin(testPortalOrigin))
-	cookie := launchOK(t, srv, "tk-ws")
+	cookie := launchOK(t, srv, testHost, "tk-ws")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testPortalOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testPortalOrigin})
 	defer drain(resp)
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		t.Fatal("upgrade with portal Origin got 101 — WS must require the session origin")

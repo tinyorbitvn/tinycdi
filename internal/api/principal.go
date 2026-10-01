@@ -1,6 +1,11 @@
 package api
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/tinyorbitvn/tinycdi/internal/store"
+)
 
 // Principal is the verified caller identity for the public API. Every field is
 // populated exclusively from a validated OIDC ID token (carried by the
@@ -17,6 +22,11 @@ type Principal struct {
 	TenantID string
 	// Groups is the verified group-membership claim list (GroupsClaim).
 	Groups []string
+	// DisplayName and Email are display-only identity from the verified ID
+	// token (name / preferred_username / email claims). They carry no
+	// authorization meaning and must never be used for ownership.
+	DisplayName string
+	Email       string
 }
 
 // Owner returns the canonical, immutable owner reference for resources
@@ -64,4 +74,81 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 func SessionFromContext(ctx context.Context) (*Session, bool) {
 	s, ok := ctx.Value(ctxKeySession).(*Session)
 	return s, ok
+}
+
+// ---------------------------------------------------------------------------
+// Principal directory — display identity for tenant views (migration 012).
+// ---------------------------------------------------------------------------
+
+// Owner is the public identity block carried by workspace and retained-data
+// views (openapi Owner). Subject is the bare OIDC sub; DisplayName is the
+// name the principal directory last saw at login, falling back to Subject.
+type Owner struct {
+	Subject     string `json:"subject"`
+	DisplayName string `json:"displayName"`
+}
+
+// Directory persists and resolves display identities for owner references
+// (issuer|sub). Display data only — never an authorization input. The
+// Postgres implementation is store.PrincipalDirectory.
+type Directory interface {
+	// Remember upserts the caller's display identity after a login.
+	Remember(ctx context.Context, tenantID string, e store.DirectoryEntry) error
+	// Lookup returns the known entries for ownerRefs within tenantID.
+	Lookup(ctx context.Context, tenantID string, ownerRefs []string) (map[string]store.DirectoryEntry, error)
+}
+
+// NewDirectory wraps the Postgres principal directory (migration 012).
+func NewDirectory(db *store.DB) Directory { return store.NewPrincipalDirectory(db) }
+
+// ownerFallback is the public Owner for a reference the directory does not
+// know: subject used as its own display name.
+func ownerFallback(ownerRef string) Owner {
+	sub := ownerRefSubject(ownerRef)
+	return Owner{Subject: sub, DisplayName: sub}
+}
+
+// resolveOwner resolves one owner reference — convenience for single-record
+// responses (resolveOwners batches list pages).
+func resolveOwner(ctx context.Context, d Directory, tenantID, ownerRef string) Owner {
+	return resolveOwners(ctx, d, tenantID, []string{ownerRef})[ownerRef]
+}
+
+// ownerRefSubject extracts the bare subject from an issuer|sub owner
+// reference; a ref without a separator is returned whole.
+func ownerRefSubject(ownerRef string) string {
+	if _, sub, ok := strings.Cut(ownerRef, "|"); ok {
+		return sub
+	}
+	return ownerRef
+}
+
+// resolveOwners builds the public Owner block per owner reference. The
+// directory fills display names; owners the directory does not know fall
+// back to their subject. A nil directory or a lookup failure degrades to
+// subject-only — display data must never break a read.
+func resolveOwners(ctx context.Context, d Directory, tenantID string, ownerRefs []string) map[string]Owner {
+	out := make(map[string]Owner, len(ownerRefs))
+	for _, ref := range ownerRefs {
+		sub := ownerRefSubject(ref)
+		out[ref] = Owner{Subject: sub, DisplayName: sub}
+	}
+	if d == nil || len(ownerRefs) == 0 {
+		return out
+	}
+	entries, err := d.Lookup(ctx, tenantID, ownerRefs)
+	if err != nil {
+		return out
+	}
+	for ref, e := range entries {
+		o := out[ref]
+		if e.Subject != "" {
+			o.Subject = e.Subject
+		}
+		if e.DisplayName != "" {
+			o.DisplayName = e.DisplayName
+		}
+		out[ref] = o
+	}
+	return out
 }
