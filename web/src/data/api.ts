@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useApi, type ApiClient } from "../api/context";
-import { unwrap } from "../api/client";
+import { useApi } from "../api/context";
+import { unwrap, type ApiClient } from "../api/client";
 import type { components } from "../api/generated/schema";
 
 // Data-area API surface. `owner` on records and the `?scope=mine|tenant`

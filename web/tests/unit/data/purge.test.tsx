@@ -4,7 +4,7 @@ import { DataListPage } from "../../../src/data/DataListPage";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
 import { RETAINED_DISK } from "../../mock-api/fixtures.ts";
 
-async function openPurge(api: ReturnType<typeof createMockApi>) {
+async function openPurge() {
   const table = await screen.findByRole("table", { name: /retained/i });
   const row = within(table)
     .getAllByRole("row")
@@ -19,7 +19,7 @@ describe("data purge", () => {
     loginCookies();
     renderWithApi(<DataListPage />, api);
 
-    const dialog = await openPurge(api);
+    const dialog = await openPurge();
     const confirm = within(dialog).getByRole("button", {
       name: /purge permanently/i,
     });
@@ -38,7 +38,7 @@ describe("data purge", () => {
     loginCookies();
     renderWithApi(<DataListPage />, api);
 
-    const dialog = await openPurge(api);
+    const dialog = await openPurge();
     const input = within(dialog).getByLabelText(/confirm/i);
     fireEvent.change(input, { target: { value: RETAINED_DISK.id } });
     const confirm = within(dialog).getByRole("button", {
@@ -62,7 +62,7 @@ describe("data purge", () => {
     loginCookies();
     renderWithApi(<DataListPage />, api);
 
-    const dialog = await openPurge(api);
+    const dialog = await openPurge();
     const input = within(dialog).getByLabelText(/confirm/i);
     fireEvent.change(input, { target: { value: RETAINED_DISK.id } });
     const confirm = within(dialog).getByRole("button", {

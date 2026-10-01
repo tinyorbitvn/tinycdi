@@ -64,11 +64,19 @@ describe("data list", () => {
     const table = await screen.findByRole("table", { name: /retained/i });
     const rows = within(table).getAllByRole("row").slice(1); // skip header
 
-    for (const row of rows) {
-      const isRetained = row.textContent?.includes("ws-retained");
-      const attach = within(row).queryByRole("button", { name: /attach/i });
-      const purge = within(row).queryByRole("button", { name: /purge/i });
-      if (isRetained) {
+    // RETAINED_DISK (the default seed) is also Retained; assert per record.
+    const cases: [source: string, expectActions: boolean][] = [
+      ["ws-retained", true],
+      ["ws-attaching", false],
+      ["ws-attached", false],
+      ["ws-purging", false],
+    ];
+    for (const [source, expectActions] of cases) {
+      const row = rows.find((r) => r.textContent?.includes(source));
+      expect(row, `row for ${source}`).toBeTruthy();
+      const attach = within(row!).queryByRole("button", { name: /attach/i });
+      const purge = within(row!).queryByRole("button", { name: /purge/i });
+      if (expectActions) {
         expect(attach).toBeInTheDocument();
         expect(purge).toBeInTheDocument();
       } else {

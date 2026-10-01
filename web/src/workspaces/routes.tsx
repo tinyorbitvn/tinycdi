@@ -1,7 +1,6 @@
 import type { AppRoute } from "../app/route-types";
 import { CatalogPage } from "./CatalogPage";
 import { CreateWorkspacePage } from "./CreateWorkspacePage";
-import { DataPage } from "./DataPage";
 import { WorkspaceDetailPage } from "./WorkspaceDetailPage";
 import { WorkspaceListPage } from "./WorkspaceListPage";
 
@@ -17,5 +16,4 @@ export const routes: AppRoute[] = [
     render: (p) => <WorkspaceDetailPage workspaceId={p.id!} />,
   },
   { path: "/templates", title: "Templates", render: () => <CatalogPage /> },
-  { path: "/data", title: "Data", render: () => <DataPage /> },
 ];

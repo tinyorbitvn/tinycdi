@@ -4,6 +4,7 @@
 // stopping, failed, stopped with retained data, and an ephemeral browser.
 // Tests never load these — they seed exactly what they assert on.
 
+import { ME } from "./admin.ts";
 import {
   READY_CONDITIONS,
   TEMPLATE_BROWSER,
@@ -74,6 +75,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH1A2B3C4D5E6F7G8H9J0K",
     name: "design-review",
+    owner: ME,
     template: summary(TEMPLATE_LINUX),
     phase: "Ready",
     desiredState: "Running",
@@ -85,6 +87,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH2B3C4D5E6F7G8H9J0K1M",
     name: "quick-browse",
+    owner: ME,
     template: summary(TEMPLATE_BROWSER),
     phase: "Ready",
     desiredState: "Running",
@@ -96,6 +99,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH3C4D5E6F7G8H9J0K1M2N",
     name: "kernel-dev",
+    owner: ME,
     template: summary(DEV),
     phase: "Provisioning",
     desiredState: "Running",
@@ -117,6 +121,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH4D5E6F7G8H9J0K1M2N3P",
     name: "finance-office",
+    owner: ME,
     template: summary(WIN),
     phase: "Failed",
     desiredState: "Running",
@@ -146,6 +151,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH5E6F7G8H9J0K1M2N3P4Q",
     name: "build-agent",
+    owner: ME,
     template: summary(DEV),
     phase: "Stopping",
     desiredState: "Stopped",
@@ -204,6 +210,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
   {
     id: "rd_01J4ZJ1K2L3M4N5P6Q7R8S9T0V",
     state: "Retained",
+    owner: ME,
     sizeGib: 64,
     runtime: "WindowsVM",
     sourceWorkspaceName: "q3-reporting",
@@ -213,6 +220,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
   {
     id: "rd_01J4ZJ2L3M4N5P6Q7R8S9T0V1W",
     state: "Retained",
+    owner: ME,
     sizeGib: 50,
     runtime: "LinuxContainer",
     sourceWorkspaceName: "thesis-workstation",
