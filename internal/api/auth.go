@@ -21,6 +21,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // AuthConfig configures the OIDC authorization-code + PKCE login flow and the
@@ -50,20 +51,18 @@ type AuthConfig struct {
 	// requires it. Secure + HttpOnly + SameSite=Lax, Path=/,
 	// Max-Age=PendingTTL (600 s by default).
 	LoginCookieName string
-	// SessionOriginCookieName defaults to "tcdi_session_origin". It is
-	// intentionally NOT HttpOnly: portal JS reads it to pin the origin a
-	// launch ticket may be POSTed to (SEC-26). Empty SessionOrigin disables
-	// the cookie.
+	// SessionOriginCookieName defaults to "tcdi_session_origin" — the v0.1
+	// cookie name. In v0.2 the cookie is never set; login and logout only
+	// send a deletion (Max-Age=0) for it so upgraded browsers drop it (D17).
 	SessionOriginCookieName string
-	// SessionOrigin is the public session origin (https://host[:port]) the
-	// SPA is allowed to POST launch tickets to. When set, the login callback
-	// publishes it to the browser in SessionOriginCookieName.
+	// SessionOrigin is retained for configuration compatibility only —
+	// v0.2 derives the session origin per workspace from the session domain
+	// and never publishes it in a cookie.
 	SessionOrigin string
-	// CSRFCookieName defaults to "tcdi_csrf". It is intentionally NOT
-	// HttpOnly: portal JS reads it and echoes the value in the CSRF header.
-	// The value is also stored server-side in the session and the middleware
-	// compares against the session copy (synchronizer pattern), so the
-	// cookie alone proves nothing.
+	// CSRFCookieName defaults to "tcdi_csrf" — the v0.1 cookie name. In v0.2
+	// the CSRF token is derived from the session ID (P1) and returned by
+	// GET /v1/me; this cookie is never set, only deleted on login/logout so
+	// upgraded browsers drop it.
 	CSRFCookieName string
 	// CSRFHeader is the header the CSRF middleware reads.
 	// Defaults to "X-CSRF-Token".
@@ -162,10 +161,9 @@ func (c *AuthConfig) withDefaults() {
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID while the
 // session is in flight, but stores persist it only as a SHA-256 digest.
-// CSRFToken is the raw synchronizer token before Save; a Session returned by
-// SessionStore.Get carries csrfTokenMAC(ID, rawToken) instead — the raw token
-// is never recoverable from a store read and RequireCSRF MACs the presented
-// token before comparing.
+// CSRFToken is written as "" — since v0.2 the synchronizer token is derived
+// from the session ID (csrfTokenFor, P1) and never stored; the column stays
+// until v0.3.
 type Session struct {
 	ID        string
 	Principal Principal
@@ -189,6 +187,15 @@ type SessionStore interface {
 	// Get returns the session and slides its idle deadline. Expired or
 	// unknown IDs return ErrSessionNotFound.
 	Get(ctx context.Context, id string) (*Session, error)
+	// Peek returns the session without writing last_seen_at — the read
+	// passive endpoints use so polling never extends the idle window (P4).
+	// Expired or unknown IDs return ErrSessionNotFound.
+	Peek(ctx context.Context, id string) (*Session, error)
+	// TouchPrincipal slides last_seen_at for the principal's sessions that
+	// are still inside the idle window and before their absolute expiry
+	// (D18). principal is the "issuer|subject" owner string. Returns the
+	// number of sessions touched.
+	TouchPrincipal(ctx context.Context, principal string) (int64, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -225,26 +232,67 @@ func (s *InMemorySessionStore) Save(_ context.Context, sess *Session) error {
 	return nil
 }
 
-func (s *InMemorySessionStore) Get(_ context.Context, id string) (*Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := sessionKey(id)
+// peekLocked returns the live session or nil — no last_seen_at write. The
+// caller holds s.mu; expired sessions are dropped opportunistically.
+func (s *InMemorySessionStore) peekLocked(key string, now time.Time) *Session {
 	sess, ok := s.sessions[key]
 	if !ok {
-		return nil, ErrSessionNotFound
+		return nil
 	}
-	now := s.now()
 	if !sess.ExpiresAt.IsZero() && !now.Before(sess.ExpiresAt) {
 		delete(s.sessions, key)
-		return nil, ErrSessionNotFound
+		return nil
 	}
 	if s.idle > 0 && now.Sub(sess.LastSeenAt) >= s.idle {
 		delete(s.sessions, key)
+		return nil
+	}
+	return sess
+}
+
+func (s *InMemorySessionStore) Get(_ context.Context, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.peekLocked(sessionKey(id), s.now())
+	if sess == nil {
 		return nil, ErrSessionNotFound
 	}
-	sess.LastSeenAt = now
+	sess.LastSeenAt = s.now()
 	cp := *sess
 	return &cp, nil
+}
+
+// Peek returns the session without writing last_seen_at (P4).
+func (s *InMemorySessionStore) Peek(_ context.Context, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.peekLocked(sessionKey(id), s.now())
+	if sess == nil {
+		return nil, ErrSessionNotFound
+	}
+	cp := *sess
+	return &cp, nil
+}
+
+// TouchPrincipal slides last_seen_at for the principal's live sessions —
+// those still inside the idle window and before their absolute expiry
+// (D18). principal is the "issuer|subject" owner string.
+func (s *InMemorySessionStore) TouchPrincipal(_ context.Context, principal string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	now := s.now()
+	for key, sess := range s.sessions {
+		if sess.Principal.Owner() != principal {
+			continue
+		}
+		if s.peekLocked(key, now) == nil {
+			continue // expired sessions stay dead — input never revives them
+		}
+		sess.LastSeenAt = now
+		n++
+	}
+	return n, nil
 }
 
 func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
@@ -257,10 +305,11 @@ func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
 // Authenticator implements the OIDC login/logout endpoints and exposes the
 // session accessors the middleware needs.
 type Authenticator struct {
-	cfg      *AuthConfig
-	verifier *oidc.IDTokenVerifier
-	oauth2   oauth2.Config
-	sessions SessionStore
+	cfg       *AuthConfig
+	verifier  *oidc.IDTokenVerifier
+	oauth2    oauth2.Config
+	sessions  SessionStore
+	directory Directory
 
 	log *slog.Logger
 	now func() time.Time
@@ -307,6 +356,13 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 		now:      time.Now,
 	}
 	return a, nil
+}
+
+// WithDirectory attaches the principal directory that logins upsert
+// (display names for tenant views — best effort, never authz input).
+func (a *Authenticator) WithDirectory(d Directory) *Authenticator {
+	a.directory = d
+	return a
 }
 
 func (a *Authenticator) SessionStore() SessionStore      { return a.sessions }
@@ -362,6 +418,9 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		maxAge = 600
 	}
 	http.SetCookie(w, a.loginCookie(token, maxAge))
+	// Any browser that still carries the v0.1 non-__Host- cookies drops them
+	// on its next login (D17).
+	a.expireLegacyCookies(w)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
@@ -439,10 +498,12 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	http.SetCookie(w, a.loginCookie("", -1))
 
 	principal := Principal{
-		Issuer:   idToken.Issuer,
-		Subject:  idToken.Subject,
-		TenantID: stringClaim(claims, a.cfg.TenantClaim),
-		Groups:   stringsClaim(claims, a.cfg.GroupsClaim),
+		Issuer:      idToken.Issuer,
+		Subject:     idToken.Subject,
+		TenantID:    stringClaim(claims, a.cfg.TenantClaim),
+		Groups:      stringsClaim(claims, a.cfg.GroupsClaim),
+		DisplayName: displayNameClaim(claims),
+		Email:       displayClaim(stringClaim(claims, "email"), maxEmailLen),
 	}
 	if principal.TenantID == "" || !a.tenantAllowed(principal.TenantID) {
 		writeError(w, r, CodeForbidden, "no tenant membership for this account")
@@ -468,7 +529,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	sess := &Session{
 		ID:         mustRandToken(32),
 		Principal:  principal,
-		CSRFToken:  mustRandToken(32),
+		CSRFToken:  "", // derived from the session ID on demand (P1); column stays until v0.3
 		CreatedAt:  a.now(),
 		LastSeenAt: a.now(),
 		ExpiresAt:  a.now().Add(a.cfg.AbsoluteTimeout),
@@ -478,11 +539,24 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
-	http.SetCookie(w, a.csrfCookie(sess.CSRFToken, int(a.cfg.AbsoluteTimeout.Seconds())))
-	if a.cfg.SessionOrigin != "" {
-		http.SetCookie(w, a.sessionOriginCookie(int(a.cfg.AbsoluteTimeout.Seconds())))
+	// Display directory (names for tenant views) is best effort: a failure
+	// is logged and never blocks the login.
+	if a.directory != nil {
+		if err := a.directory.Remember(ctx, principal.TenantID, store.DirectoryEntry{
+			OwnerRef:    principal.Owner(),
+			Subject:     principal.Subject,
+			DisplayName: principal.DisplayName,
+			Email:       principal.Email,
+		}); err != nil {
+			a.log.Warn("principal directory update failed",
+				"request_id", RequestIDFromContext(ctx), "err", err)
+		}
 	}
+
+	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
+	// v0.1 published tcdi_csrf / tcdi_session_origin here; browsers upgraded
+	// from v0.1 must drop them (D17).
+	a.expireLegacyCookies(w)
 	a.log.Info("oidc login succeeded",
 		"request_id", RequestIDFromContext(ctx),
 		"actor", observability.ActorRef(principal.Issuer, principal.Subject),
@@ -499,8 +573,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		_ = a.sessions.Delete(ctx, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
-	http.SetCookie(w, a.csrfCookie("", -1))
-	http.SetCookie(w, a.sessionOriginCookie(-1))
+	a.expireLegacyCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -515,19 +588,6 @@ func (a *Authenticator) sessionCookie(id string, maxAge int) *http.Cookie {
 		Path:     "/",
 		Secure:   *a.cfg.SecureCookies,
 		HttpOnly: true,
-		SameSite: a.cfg.SameSite,
-		MaxAge:   maxAge,
-	}
-}
-
-// csrfCookie carries the CSRF token to portal JS. Not HttpOnly by design; the
-// authoritative copy lives server-side in the session.
-func (a *Authenticator) csrfCookie(token string, maxAge int) *http.Cookie {
-	return &http.Cookie{
-		Name:     a.cfg.CSRFCookieName,
-		Value:    token,
-		Path:     "/",
-		Secure:   *a.cfg.SecureCookies,
 		SameSite: a.cfg.SameSite,
 		MaxAge:   maxAge,
 	}
@@ -548,17 +608,50 @@ func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 	}
 }
 
-// sessionOriginCookie publishes the configured session origin to portal JS
-// (SEC-26): the SPA refuses to POST a launch ticket to any other origin.
-// Not HttpOnly by design; the value is a public origin, not a credential.
-func (a *Authenticator) sessionOriginCookie(maxAge int) *http.Cookie {
-	return &http.Cookie{
-		Name:     a.cfg.SessionOriginCookieName,
-		Value:    a.cfg.SessionOrigin,
-		Path:     "/",
-		Secure:   *a.cfg.SecureCookies,
-		SameSite: a.cfg.SameSite,
-		MaxAge:   maxAge,
+// expireLegacyCookies deletes the two non-__Host- cookies v0.1 published on
+// the portal origin — tcdi_csrf and tcdi_session_origin (D17). Login and
+// logout both send them so browsers upgraded mid-session drop the legacy
+// names regardless of which flow they take.
+func (a *Authenticator) expireLegacyCookies(w http.ResponseWriter) {
+	for _, name := range []string{a.cfg.CSRFCookieName, a.cfg.SessionOriginCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			Secure:   *a.cfg.SecureCookies,
+			SameSite: a.cfg.SameSite,
+			MaxAge:   -1,
+		})
+	}
+}
+
+// inputTouchMinInterval bounds how often desktop input writes to the session
+// store: one slide per principal per minute is enough against a 30-minute
+// idle window, and the bound keeps a busy stream from turning into a write
+// flood.
+const inputTouchMinInterval = time.Minute
+
+// InputHook returns the broker input hook (broker.WithInputHook): each
+// recorded "input" event slides the portal idle timer of the lease's
+// principal — the Principal.Owner() string "issuer|subject" — throttled to
+// one store write per principal per minute. Input never revives a session
+// that already expired; the store's TouchPrincipal WHERE clause excludes
+// sessions outside the idle window (D18).
+func (a *Authenticator) InputHook() func(ctx context.Context, principal string) {
+	var mu sync.Mutex
+	last := map[string]time.Time{}
+	return func(ctx context.Context, principal string) {
+		now := a.now()
+		mu.Lock()
+		if t, ok := last[principal]; ok && now.Sub(t) < inputTouchMinInterval {
+			mu.Unlock()
+			return
+		}
+		last[principal] = now
+		mu.Unlock()
+		if _, err := a.sessions.TouchPrincipal(ctx, principal); err != nil {
+			a.log.Warn("session idle touch failed", "err", err)
+		}
 	}
 }
 
@@ -613,6 +706,33 @@ func stringsClaim(claims map[string]interface{}, name string) []string {
 	return nil
 }
 
+// Bounds for display-only identity claims: they are rendered in the portal
+// and stored in the principal directory, so they are trimmed and capped —
+// a hostile or buggy IdP cannot smuggle unbounded strings.
+const (
+	maxDisplayNameLen = 128
+	maxEmailLen       = 254
+)
+
+// displayClaim normalizes a display-only claim value: trimmed, rune-capped
+// at max. The result carries no authorization meaning.
+func displayClaim(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return s
+}
+
+// displayNameClaim picks the caller's display name from the verified ID
+// token: the `name` claim, falling back to `preferred_username`.
+func displayNameClaim(claims map[string]interface{}) string {
+	if n := stringClaim(claims, "name"); n != "" {
+		return displayClaim(n, maxDisplayNameLen)
+	}
+	return displayClaim(stringClaim(claims, "preferred_username"), maxDisplayNameLen)
+}
+
 // sessionKey is the lookup key a store persists for a session ID: hex of
 // SHA-256(id). A store (or dump) read then yields digests, never usable
 // session IDs — same construction the broker uses for tickets (SEC-27).
@@ -622,11 +742,24 @@ func sessionKey(id string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// csrfTokenFor derives the session's synchronizer CSRF token:
+// base64url(HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")). The token is
+// never stored — /v1/me recomputes it for the response and RequireCSRF
+// recomputes it for the compare (P1), so the credential exists only in the
+// cookie's session ID.
+func csrfTokenFor(sessionID string) string {
+	m := hmac.New(sha256.New, []byte(sessionID))
+	m.Write([]byte("tcdi-csrf-v2"))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
 // csrfTokenMAC is the stored credential form of a session's synchronizer
 // CSRF token: hex of HMAC-SHA256 keyed by the raw session ID (which is
 // itself never persisted — stores hold only its digest). A store/dump read
 // therefore reveals neither the token nor a way to compute the MAC
 // (SEC-27). Mirrored by internal/store.sessions.go; keep identical.
+// Since v0.2 sessions persist CSRFToken = "" (P1), this MACs the empty
+// token — the column remains until v0.3 and is no longer consulted.
 func csrfTokenMAC(sessionID, token string) string {
 	m := hmac.New(sha256.New, []byte(sessionID))
 	m.Write([]byte("tcdi-csrf-token\x00"))

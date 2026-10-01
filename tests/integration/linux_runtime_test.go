@@ -90,6 +90,21 @@ func docker(args ...string) (string, error) {
 	return out.String(), nil
 }
 
+// dockerCombined runs docker with stdout and stderr merged into one
+// buffer — for diagnostics only. `docker logs` prints the container's
+// stderr on the CLI's stderr, so docker() alone would silently drop the
+// entrypoint's failure message.
+func dockerCombined(args ...string) string {
+	cmd := exec.Command("docker", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(&out, "(docker %s failed: %v)", strings.Join(args, " "), err)
+	}
+	return out.String()
+}
+
 func dockerOK(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := docker(args...)
@@ -153,6 +168,20 @@ func selfSignedSecret(t *testing.T) (dir, password string) {
 	password = base64.RawURLEncoding.EncodeToString(raw)
 	writeFile(t, filepath.Join(dir, "password"), []byte(password+"\n"))
 	writeFile(t, filepath.Join(dir, "username"), []byte("kasm_user\n"))
+	// A pod Secret volume is root-owned 0755/0644 (defaultMode): the
+	// runtime uid can traverse and read it no matter which uid launched
+	// the container. Mirror that — the test user's uid differs across
+	// environments (uid 1000 workstations vs the uid-1001 CI runner) and
+	// the host defaults (0700 dir, 0600 files) would make the mount
+	// unreadable inside the uid-1000 container.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"tls.crt", "tls.key", "password", "username"} {
+		if err := os.Chmod(filepath.Join(dir, f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return dir, password
 }
 
@@ -161,6 +190,26 @@ func writeFile(t *testing.T, path string, data []byte) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// containerRunArgs records each container's docker run argv so a dead
+// container's diagnostics can show exactly how it was launched.
+var containerRunArgs = map[string]string{}
+
+// deadContainerDiag dumps everything useful about a container that is not
+// running: the docker run argv it was launched with, its State object
+// (exit code, OOM, runtime error), and the tail of its logs with both
+// streams merged (see dockerCombined).
+func deadContainerDiag(t *testing.T, name string) string {
+	t.Helper()
+	var b strings.Builder
+	if args, ok := containerRunArgs[name]; ok {
+		fmt.Fprintf(&b, "docker %s\n", args)
+	}
+	fmt.Fprintf(&b, "state: %s\n",
+		strings.TrimSpace(dockerCombined("inspect", "-f", "{{json .State}}", name)))
+	fmt.Fprintf(&b, "logs (stdout+stderr):\n%s", dockerCombined("logs", "--tail", "80", name))
+	return b.String()
 }
 
 // runContainer starts a hardened runtime container:
@@ -187,6 +236,7 @@ func runContainer(t *testing.T, runID, name, image, secretDir, homeVol string, e
 	}
 	args = append(args, extraArgs...)
 	args = append(args, image)
+	containerRunArgs[full] = strings.Join(args, " ")
 	dockerOK(t, args...)
 	t.Cleanup(func() {
 		docker("rm", "-f", full) //nolint:errcheck
@@ -235,16 +285,14 @@ func waitHealthy(t *testing.T, name string) {
 	for time.Now().Before(deadline) {
 		status, health := containerState(t, name)
 		if status != "running" && status != "created" {
-			logs, _ := docker("logs", "--tail", "40", name)
-			t.Fatalf("container %s not running (status=%s):\n%s", name, status, logs)
+			t.Fatalf("container %s not running (status=%s):\n%s", name, status, deadContainerDiag(t, name))
 		}
 		if health == "healthy" {
 			return
 		}
 		time.Sleep(2 * time.Second)
 	}
-	logs, _ := docker("logs", "--tail", "40", name)
-	t.Fatalf("container %s did not become healthy in %s\nlogs:\n%s", name, runTimeout, logs)
+	t.Fatalf("container %s did not become healthy in %s\n%s", name, runTimeout, deadContainerDiag(t, name))
 }
 
 func httpsGet(t *testing.T, name, user, password string) (int, error) {
@@ -292,7 +340,7 @@ func mustExec(t *testing.T, name, shell string) string {
 // assertNoSecret scans container logs and inspect env for the password.
 func assertNoSecret(t *testing.T, name, password string) {
 	t.Helper()
-	logs, _ := docker("logs", name)
+	logs := dockerCombined("logs", name)
 	if strings.Contains(logs, password) {
 		t.Fatalf("password leaked into container logs of %s", name)
 	}

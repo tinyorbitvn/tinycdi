@@ -40,6 +40,32 @@ func TestKasmAdapterFlagAbsentByDefault(t *testing.T) {
 	}
 }
 
+// TestKasmAdapterOffByDefault: under every non-kasm ci values file the
+// kasm path is entirely off — no --kasm-adapter-image flag on the
+// operator and no seeded WorkspaceTemplate with spec.linux.adapter=kasm.
+// Kasm support is strictly opt-in (KASM-2 risk acceptance: the operator
+// must set both the digest pin and a seeded template). Bare values.yaml
+// is not covered here on purpose — it fails closed on the
+// database.allowedPeers placeholder by design (chart_hardening_test.go).
+func TestKasmAdapterOffByDefault(t *testing.T) {
+	for _, vf := range []string{"minimal-values.yaml", "security-values.yaml",
+		"node-profiles-values.yaml", "template-revision-values.yaml"} {
+		docs := render(t, vf)
+		args := strings.Join(firstContainerArgs(deployment(docs, "operator")), "\n")
+		if strings.Contains(args, "--kasm-adapter-image") {
+			t.Errorf("%s: --kasm-adapter-image must not render without kasmAdapter.image.digest\nargs:\n%s", vf, args)
+		}
+		for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+			spec, _ := d["spec"].(map[string]any)
+			linux, _ := spec["linux"].(map[string]any)
+			if linux["adapter"] == "kasm" {
+				name, _ := meta(d)
+				t.Errorf("%s: seeds kasm template %q — kasm must be opt-in", vf, name)
+			}
+		}
+	}
+}
+
 // TestKasmAdapterFlagGlobalRegistry: the adapter image resolves through
 // the same registry machinery as every other image — global.imageRegistry
 // prefixes the repository.

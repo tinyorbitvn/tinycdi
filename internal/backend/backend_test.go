@@ -38,6 +38,9 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -261,6 +264,7 @@ func TestRouteIsolation_SessionListener(t *testing.T) {
 	for _, path := range []string{
 		"/v1/workspaces", "/v1/templates", "/v1/data",
 		"/v1/login", "/v1/auth/callback",
+		"/v1/me", "/v1/workspaces/ws_abc12345/connection",
 	} {
 		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 		if err != nil {
@@ -289,6 +293,28 @@ func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool) 
 	return api.IssuedTicket{}, &api.Error{Code: api.CodeNotFound, Message: "no ticket in tests"}
 }
 
+// fakeConnStater satisfies api.ConnectionStater for route-table tests.
+type fakeConnStater struct{}
+
+func (fakeConnStater) ConnectionState(context.Context, string) (api.ConnectionStatus, *api.Error) {
+	return api.ConnectionStatus{State: "none"}, nil
+}
+
+// fakeWorkspaceGetter satisfies the ownership-check surface of the
+// connection-status handler for route-table tests.
+type fakeWorkspaceGetter struct{}
+
+func (fakeWorkspaceGetter) GetWorkspace(context.Context, string, string, string) (provisioning.WorkspaceRecord, error) {
+	return provisioning.WorkspaceRecord{}, provisioning.ErrWorkspaceNotFound
+}
+
+// fakeQuotaSource satisfies api.QuotaSource for route-table tests.
+type fakeQuotaSource struct{}
+
+func (fakeQuotaSource) Report(context.Context, string) (store.QuotaReport, error) {
+	return store.QuotaReport{}, nil
+}
+
 // testAppHandler builds the production app-listener handler (mux +
 // middleware) with the real OIDC discovery path against the fake issuer.
 func testAppHandler(t *testing.T) http.Handler {
@@ -312,11 +338,18 @@ func testAppHandler(t *testing.T) http.Handler {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	tenants := api.StaticTenantResolver{}
+	sdom, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
 	ws := api.NewWorkspaceHandler(nil, nil, tenants)
 	tpl := api.NewTemplateHandler(nil, tenants)
-	conn := api.NewConnectionHandler(fakeConnIssuer{}, tenants, "https://session.example.test")
+	conn := api.NewConnectionHandler(fakeConnIssuer{}, tenants, sdom)
+	me := api.NewMeHandler(sdom.String())
+	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
-	mux := appMux(authn, ws, tpl, conn, data)
+	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota)
 	b := &Backend{log: testLog()}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})

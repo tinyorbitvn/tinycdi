@@ -148,6 +148,7 @@ var _ RetainedDataStore = (*provisioning.RetainedStore)(nil)
 type retainedDataView struct {
 	ID                     string    `json:"id"`
 	State                  string    `json:"state"`
+	Owner                  Owner     `json:"owner"`
 	SizeGiB                int64     `json:"sizeGib"`
 	Runtime                string    `json:"runtime"`
 	SourceWorkspaceName    string    `json:"sourceWorkspaceName"`
@@ -166,6 +167,7 @@ func recordToRetainedView(r *RetainedRecord) retainedDataView {
 	return retainedDataView{
 		ID:                     r.ID,
 		State:                  string(r.State),
+		Owner:                  ownerFallback(r.Owner),
 		SizeGiB:                (r.SizeBytes + (1 << 30) - 1) / (1 << 30),
 		Runtime:                r.Runtime,
 		SourceWorkspaceName:    r.SourceWorkspaceName,
@@ -193,11 +195,12 @@ type purgeDataRequest struct {
 
 // DataHandler implements /v1/data per openapi.yaml.
 type DataHandler struct {
-	data    RetainedDataStore
-	catalog TemplateCatalog
-	tenants TenantResolver
-	maxBody int64
-	now     func() time.Time
+	data      RetainedDataStore
+	catalog   TemplateCatalog
+	tenants   TenantResolver
+	directory Directory
+	maxBody   int64
+	now       func() time.Time
 }
 
 // NewDataHandler wires the handler. catalog resolves the attach
@@ -205,6 +208,13 @@ type DataHandler struct {
 func NewDataHandler(d RetainedDataStore, c TemplateCatalog, t TenantResolver) *DataHandler {
 	return &DataHandler{data: d, catalog: c, tenants: t,
 		maxBody: 64 << 10, now: time.Now}
+}
+
+// WithDirectory attaches the principal directory that fills owner display
+// names on views. Nil falls back to bare subjects.
+func (h *DataHandler) WithDirectory(d Directory) *DataHandler {
+	h.directory = d
+	return h
 }
 
 // MountDataRoutes registers the retained-data routes: RequireAuth on the
@@ -247,15 +257,26 @@ func (h *DataHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	scope, ok := listScope(w, r, p)
+	if !ok {
+		return
+	}
 	recs, next, err := h.data.ListRetained(r.Context(), p.TenantID,
-		p.Owner(), ownerScope(p), r.URL.Query().Get("pageToken"), limit)
+		p.Owner(), scope, r.URL.Query().Get("pageToken"), limit)
 	if err != nil {
 		h.writeDataError(w, r, err)
 		return
 	}
+	refs := make([]string, 0, len(recs))
+	for i := range recs {
+		refs = append(refs, recs[i].Owner)
+	}
+	owners := resolveOwners(r.Context(), h.directory, p.TenantID, refs)
 	out := retainedDataList{Items: make([]retainedDataView, 0, len(recs)), NextPageToken: next}
 	for i := range recs {
-		out.Items = append(out.Items, recordToRetainedView(&recs[i]))
+		v := recordToRetainedView(&recs[i])
+		v.Owner = owners[recs[i].Owner]
+		out.Items = append(out.Items, v)
 	}
 	respondJSON(w, out)
 }
@@ -328,7 +349,9 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(recordToView(&rec))
+	v := recordToView(&rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // Purge handles POST /v1/data/{dataId}/purge.
@@ -370,7 +393,9 @@ func (h *DataHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(recordToRetainedView(&rec))
+	v := recordToRetainedView(&rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // writeDataError maps retained-store errors onto the stable error model.
