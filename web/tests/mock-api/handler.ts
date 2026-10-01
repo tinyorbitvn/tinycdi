@@ -10,7 +10,6 @@
 // type-stripping runs this file directly, and vitest imports it unchanged.
 
 import {
-  CSRF_COOKIE,
   CSRF_HEADER,
   CSRF_TOKEN_VALUE,
   SESSION_COOKIE,

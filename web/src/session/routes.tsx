@@ -1,5 +1,13 @@
 import type { AppRoute } from "../app/route-types";
+import { SessionPage } from "./SessionPage";
 
-// Stub created by the app shell (T3.2); owned by the session area — replace
-// freely, keeping the `routes` export.
-export const routes: AppRoute[] = [];
+// The in-portal session view: full-height ("bleed") under the shell's top
+// bar, so the desktop gets every pixel the portal can spare.
+export const routes: AppRoute[] = [
+  {
+    path: "/workspaces/:id/session",
+    title: "Session",
+    layout: "bleed",
+    render: (p) => <SessionPage key={p.id} workspaceId={p.id!} />,
+  },
+];

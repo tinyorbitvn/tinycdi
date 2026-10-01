@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { setCsrfToken } from "../api/client";
 
-// Signed-in principal from GET /v1/me. Until the backend ships the endpoint
-// (404) the shell runs on a stub principal with no roles, so admin nav stays
-// hidden. Swap the raw fetch for the generated client once /v1/me is in
-// internal/api/openapi.yaml.
+// Signed-in principal from GET /v1/me (D17): the bootstrap payload carries
+// the session-bound CSRF token (P1) and the session domain launch URLs are
+// built under. Until the backend ships the endpoint (404) the shell runs on
+// a stub principal with no roles, so admin nav stays hidden.
 
 export const TENANT_ADMIN_ROLE = "tenant-admin";
 
@@ -13,6 +14,10 @@ export interface Me {
   email?: string;
   tenant: string;
   roles: string[];
+  /** Synchronizer token echoed as X-CSRF-Token on mutations (P1). */
+  csrfToken?: string;
+  /** host[:port] under which per-workspace session hosts live (D9). */
+  sessionDomain?: string;
   /** True when /v1/me is not available yet and this is a placeholder. */
   stub?: boolean;
 }
@@ -41,12 +46,16 @@ export function parseMe(body: unknown): Me {
     "";
   const subject = str(b.subject) ?? str(b.sub) ?? "";
   const email = str(b.email);
+  const csrfToken = str(b.csrfToken);
+  const sessionDomain = str(b.sessionDomain);
   return {
     subject,
     displayName: str(b.displayName) ?? str(b.name) ?? email ?? (subject || "Signed in"),
     ...(email ? { email } : {}),
     tenant,
     roles: Array.isArray(b.roles) ? b.roles.filter((r): r is string => typeof r === "string") : [],
+    ...(csrfToken ? { csrfToken } : {}),
+    ...(sessionDomain ? { sessionDomain } : {}),
   };
 }
 
@@ -75,7 +84,13 @@ export function MeProvider({
   useEffect(() => {
     let cancelled = false;
     load().then(
-      (me) => !cancelled && setState({ status: "ready", me }),
+      (me) => {
+        if (cancelled) return;
+        // The API client reads the token from module state, not from a
+        // cookie (D17) — install what /v1/me published.
+        setCsrfToken(me.csrfToken);
+        setState({ status: "ready", me });
+      },
       (e: unknown) =>
         !cancelled && setState({ status: "error", me: null, error: e instanceof Error ? e.message : String(e) }),
     );

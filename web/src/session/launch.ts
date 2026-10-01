@@ -44,31 +44,49 @@ export const SESSION_FRAME_SANDBOX =
 /** Permissions delegated to the session frame (clipboard + fullscreen). */
 export const SESSION_FRAME_ALLOW = "clipboard-read; clipboard-write; fullscreen";
 
+/** sessionDomain naming a loopback listener (mock e2e / dev harness). */
+function isLoopbackDomain(sessionDomain: string): boolean {
+  const host = sessionDomain.split(":")[0] ?? "";
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "[::1]"
+  );
+}
+
 // SEC-26/D9: the ticket is bearer-equivalent, so its destination is pinned
 // to the workspace's own host under the session domain /v1/me published.
-// A launchUrl on any other origin — a foreign domain, another workspace's
-// host, a sub-label — is refused rather than submitted.
+// A launchUrl on any other host — a foreign domain, another workspace's
+// host, a sub-label — is refused rather than submitted. The real backend
+// always emits https (sessionhost.Domain.Origin); http launch URLs are
+// accepted only on loopback session domains, where the contract mock and
+// the e2e harness listen without TLS.
 export function assertLaunchTarget(
   ticket: LaunchTicket,
   workspaceId: string,
   sessionDomain: string,
 ): string {
-  let origin: string;
+  let url: URL;
   try {
-    origin = new URL(ticket.launchUrl).origin;
+    url = new URL(ticket.launchUrl);
   } catch {
     throw new Error("malformed launchUrl in connection response");
   }
   if (sessionDomain === "") {
     throw new Error("no session domain configured; refusing to launch");
   }
-  const expected = sessionOrigin(workspaceId, sessionDomain);
-  if (origin !== expected) {
+  const expectedHost = `${sessionLabel(workspaceId)}.${sessionDomain}`;
+  const schemeOK =
+    url.protocol === "https:" ||
+    (url.protocol === "http:" && isLoopbackDomain(sessionDomain));
+  if (url.host !== expectedHost || !schemeOK) {
     throw new Error(
-      `refusing to POST launch ticket to ${origin}: expected ${expected}`,
+      `refusing to POST launch ticket to ${url.origin}: expected ${sessionOrigin(workspaceId, sessionDomain)}`,
     );
   }
-  return expected;
+  return url.origin;
 }
 
 /**

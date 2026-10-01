@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createApi, setCsrfToken } from "../../../src/api/client";
 import { ApiProvider } from "../../../src/api/context";
-import { MeProvider } from "../../../src/app/me";
+import { MeProvider, type Me } from "../../../src/app/me";
 import { SessionPage } from "../../../src/session/SessionPage";
 import {
   SESSION_FRAME_ALLOW,
@@ -10,9 +10,22 @@ import {
   sessionFrameName,
   TICKET_FIELD,
 } from "../../../src/session/launch";
-import { createSessionMockApi, ME } from "../../mock-api/session.ts";
+import { createMockApi, CSRF_TOKEN_VALUE } from "../../mock-api/handler.ts";
 import { loginCookies, stubFetch } from "../helpers";
 import { readyWorkspace } from "../../mock-api/fixtures.ts";
+
+const SESSION_DOMAIN = "session.example.com";
+
+// The principal /v1/me returns on the portal: identity plus the
+// session-bound CSRF token and the session domain (P1/D17).
+const ME: Me = {
+  subject: "user-01J4ZDADA",
+  displayName: "Ada Lovelace",
+  tenant: "acme",
+  roles: ["user"],
+  csrfToken: CSRF_TOKEN_VALUE,
+  sessionDomain: SESSION_DOMAIN,
+};
 
 function watchFormSubmits() {
   const submitted: HTMLFormElement[] = [];
@@ -24,12 +37,17 @@ function watchFormSubmits() {
   return submitted;
 }
 
+// The mock publishes https://session.example.com as its session origin so
+// launch URLs come out as https://ws-<label>.session.example.com/v1/launch.
+function newApi() {
+  return createMockApi({ sessionOrigin: `https://${SESSION_DOMAIN}` });
+}
+
 function setupPage(workspaceOverrides: Parameters<typeof readyWorkspace>[0] = {}) {
   const ws = readyWorkspace(workspaceOverrides);
-  const api = createSessionMockApi();
+  const api = newApi();
   api.state.workspaces.set(ws.id, ws);
   loginCookies();
-  setCsrfToken(ME.csrfToken);
   const client = createApi(stubFetch(api));
   const utils = render(
     <ApiProvider client={client}>
@@ -63,7 +81,7 @@ describe("SessionPage", () => {
     await waitFor(() => expect(submitted).toHaveLength(1));
     expect(submitted[0].target).toBe(sessionFrameName(ws.id));
     expect(submitted[0].action).toBe(
-      `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.session.example.com/v1/launch`,
+      `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}/v1/launch`,
     );
     const input = submitted[0].querySelector(
       `input[name="${TICKET_FIELD}"]`,
@@ -73,12 +91,11 @@ describe("SessionPage", () => {
 
   it("offers takeover when the workspace is already connected", async () => {
     const ws = readyWorkspace();
-    const api = createSessionMockApi();
+    const api = newApi();
     api.state.workspaces.set(ws.id, ws);
     api.state.leases.set(ws.id, "lease_existing");
     const submitted = watchFormSubmits();
     loginCookies();
-    setCsrfToken(ME.csrfToken);
     const client = createApi(stubFetch(api));
     render(
       <ApiProvider client={client}>

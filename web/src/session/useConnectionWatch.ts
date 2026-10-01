@@ -56,7 +56,7 @@ export interface ConnectionWatchOptions {
   /** Mint a launch ticket (POST /v1/workspaces/{id}/connections). */
   requestTicket: () => Promise<LaunchTicket>;
   onEvent: (ev: WatchEvent) => void;
-  pollIntervalMs?: number;
+  pollIntervalMs?: number | undefined;
 }
 
 export function useConnectionWatch(options: ConnectionWatchOptions): void {

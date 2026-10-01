@@ -9,7 +9,7 @@ import {
   SESSION_ORIGIN_COOKIE,
   type MockRequest,
 } from "../mock-api/handler.ts";
-import { createApi } from "../../src/api/client";
+import { createApi, setCsrfToken } from "../../src/api/client";
 import { ApiProvider } from "../../src/api/context";
 
 export {
@@ -62,8 +62,9 @@ export function stubFetch(api = createMockApi()): typeof fetch {
 
 export function loginCookies(): void {
   document.cookie = `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; path=/`;
-  document.cookie = `${CSRF_COOKIE}=${CSRF_TOKEN_VALUE}; path=/`;
-  document.cookie = `${SESSION_ORIGIN_COOKIE}=${MOCK_SESSION_ORIGIN}; path=/`;
+  // v0.2 (P1/D17): the CSRF token and session domain come from GET /v1/me
+  // after login — model that bootstrap by installing the published token.
+  setCsrfToken(CSRF_TOKEN_VALUE);
 }
 
 export function clearCookies(): void {
