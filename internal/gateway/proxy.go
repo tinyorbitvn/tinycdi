@@ -73,6 +73,13 @@ type Config struct {
 	AllowedHosts []string
 	// Broker is required.
 	Broker BrokerClient
+	// Sessions is the optional session directory (design §3.6, P6): when
+	// set, launch binds the cookie digest to the lease, a cookie this
+	// replica never saw rehydrates its session from the store, and stream
+	// admission claims the lease's stream epoch so a newer claim on any
+	// replica fences this process's stream. Nil keeps v0.1 single-process
+	// session semantics.
+	Sessions SessionDirectory
 	// UpstreamCA is the fallback trust root for runtime upstream TLS when a
 	// resolved Target carries no TLSCA; verification is never skipped.
 	UpstreamCA *x509.CertPool
@@ -107,10 +114,12 @@ type Gateway struct {
 	csp           string // Content-Security-Policy pinned on every response
 
 	mu          sync.Mutex
-	sessions    map[string]*session // cookie value -> session
-	byLease     map[string]*session // lease ID -> session
-	byWorkspace map[string]*session // workspace UID -> session (takeover fence)
-	done        chan struct{}       // closed by Close
+	sessions    map[string]*session                     // cookie value -> session
+	byLease     map[string]*session                     // lease ID -> session
+	byWorkspace map[string]*session                     // workspace UID -> session (takeover fence)
+	inflight    map[broker.SessionDigest]*rehydrateCall // digest -> shared lookup
+	draining    bool                                    // set by Drain: refuse new upgrades
+	done        chan struct{}                           // closed by Close
 	closeOnce   sync.Once
 }
 
@@ -144,6 +153,7 @@ func New(cfg Config) (*Gateway, error) {
 		sessions:    map[string]*session{},
 		byLease:     map[string]*session{},
 		byWorkspace: map[string]*session{},
+		inflight:    map[broker.SessionDigest]*rehydrateCall{},
 		done:        make(chan struct{}),
 		csp:         sessionCSP(pub.Host),
 	}
@@ -370,6 +380,10 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	var gen int
 	if isUpgrade(r) {
+		if g.isDraining() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+			return
+		}
 		if !g.originOK(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_origin"})
 			return
@@ -383,6 +397,20 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 		// newer upgrade, the defer is a no-op and cannot clear the
 		// successor's admission.
 		defer s.endUpgrade(gen)
+		// With a session directory the lease's stream epoch is the
+		// cross-replica fence: claiming it here makes the previous
+		// replica's renew loop drop its copy of this stream (P3).
+		if g.cfg.Sessions != nil {
+			if err := g.claimStream(r.Context(), s); err != nil {
+				if terminalBrokerErr(err) {
+					g.killSession(s, "claim_"+leaseFailureReason(err))
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+				return
+			}
+		}
 	}
 	if err := g.ensureTarget(r.Context(), s); err != nil {
 		if terminalBrokerErr(err) {
@@ -429,13 +457,15 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 		s.setStreamTrack(tid)
 	}
 	defer func() {
-		s.untrack(tid, captured)
 		if captured != nil {
 			// The interactive stream closed — start the disconnect grace
 			// window server-side. The FIFO queue keeps this ordered behind
 			// any earlier connected report and ahead of a later reconnect.
+			// Enqueued BEFORE untrack drops the conn so Drain can trust
+			// "no open conns" to mean "disconnect already queued".
 			s.enqueueActivity(broker.ActivityDisconnect)
 		}
+		s.untrack(tid, captured)
 	}()
 	g.proxy.ServeHTTP(hw, r.WithContext(context.WithValue(ctx, ctxKeySession, s)))
 }

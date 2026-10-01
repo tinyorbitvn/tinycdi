@@ -1,5 +1,5 @@
 # Security exercise set: DB TLS (PGSSLMODE/PGSSLROOTCERT), declared
-# cluster CIDRs with a seeded InternetOnly template, gateway metrics on the
+# cluster CIDRs with a seeded InternetOnly template, backend metrics on the
 # dedicated scrape path, and ingress edge TLS.
 managedNamespaces:
   - name: tinycdi-tenant-a
@@ -10,13 +10,13 @@ sessionHost: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   existingSecret: tinycdi-oidc-client
   egressCIDRs: [10.30.0.0/16]
   port: 443
 
 database:
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   port: 5432
   allowedPeers:
     - ipBlock: {cidr: 10.20.30.40/32}
@@ -30,18 +30,20 @@ operator:
   # This cluster's pod/service/node ranges — required for InternetOnly.
   clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16, 192.168.0.0/16]
 
-gateway:
-  metricsListen: ":9090"
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+  metrics:
+    enabled: true
   tls:
-    existingSecret: tinycdi-gateway-tls
-  mtls:
-    existingSecret: tinycdi-gateway-mtls
-  trustedCA:
+    session: {existingSecret: tinycdi-backend-session-tls}
+    internal: {existingSecret: tinycdi-backend-internal-tls}
+  clientCA:
     existingSecret: tinycdi-extra-ca
 
-portal:
+frontend:
   tls:
-    existingSecret: tinycdi-portal-tls
+    existingSecret: tinycdi-frontend-tls
 
 ingress:
   enabled: true

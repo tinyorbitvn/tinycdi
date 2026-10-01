@@ -1,16 +1,18 @@
 {{- if .Values.ingress.enabled }}
 # Portal and session edges on DIFFERENT hosts (enforced by
-# tinycdi.validate). Both pods terminate TLS themselves —
-# set backend pass-through annotations via ingress.annotations for L7
-# ingresses, or expose the Services directly (service.type LoadBalancer).
+# tinycdi.validate). Portal host: /v1 -> backend app listener, everything
+# else -> frontend. Session host: everything -> backend session listener.
+# Every backend terminates TLS itself — set backend-protocol / pass-through
+# annotations for your controller via ingress.annotations (e.g. nginx
+# backend-protocol: HTTPS).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: portal
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "portal" "root" $) | nindent 4 }}
-  {{- $ann := merge .Values.ingress.portalAnnotations .Values.ingress.annotations }}
+    {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
+  {{- $ann := merge (deepCopy .Values.ingress.portalAnnotations) .Values.ingress.annotations }}
   {{- with $ann }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -23,11 +25,19 @@ spec:
     - host: {{ .Values.portalHost }}
       http:
         paths:
+          # Prefix matching is per path element: /v1 matches /v1 and
+          # /v1/..., never /v1x.
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port: {name: app}
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: portal
+                name: frontend
                 port: {name: https}
   {{- with .Values.ingress.tls.existingSecret }}
   tls:
@@ -41,8 +51,8 @@ metadata:
   name: session
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
-  {{- $sann := merge .Values.ingress.sessionAnnotations .Values.ingress.annotations }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+  {{- $sann := merge (deepCopy .Values.ingress.sessionAnnotations) .Values.ingress.annotations }}
   {{- with $sann }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -59,8 +69,8 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: gateway
-                port: {name: https}
+                name: backend
+                port: {name: session}
   {{- with .Values.ingress.tls.existingSecret }}
   tls:
     - hosts: [{{ $.Values.sessionHost }}]
