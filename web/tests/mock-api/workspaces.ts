@@ -19,6 +19,7 @@ import {
   TEMPLATE_BROWSER,
   TEMPLATE_LINUX,
   makeWorkspace,
+  readyWorkspace,
   type ConditionFixture,
   type WorkspaceFixture,
 } from "./fixtures.ts";
@@ -237,6 +238,17 @@ export function workspacesArea(ctx: MockContext): MockArea {
       return ok(200, { invalid: [...state.invalidTemplates] });
     }
     const wsm = p.match(/^\/_control\/workspaces\/([^/]+)(\/events)?$/);
+    if (wsm && req.method === "PUT" && !wsm[2]) {
+      // Upsert a fixture under a caller-chosen id — the real-binary e2e
+      // seeds workspaces whose ids must satisfy sessionhost.Label, which
+      // the generated ids (upper-case suffix) would not.
+      const ws = readyWorkspace({
+        ...(req.body as Partial<WorkspaceFixture> | undefined),
+        id: wsm[1],
+      });
+      state.workspaces.set(ws.id, ws);
+      return ok(200, ws);
+    }
     if (wsm && req.method === "POST") {
       const ws = state.workspaces.get(wsm[1]);
       if (!ws) return err(404, "NOT_FOUND", "no such workspace", false);

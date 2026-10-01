@@ -1,19 +1,17 @@
 import { defineConfig, devices } from "@playwright/test";
-import { PORTAL_ORIGIN } from "./tests-portal/harness.ts";
+import { PORTAL_ORIGIN, type HarnessMode } from "./tests-portal/harness.ts";
 
-// Portal-CSP harness — serves the BUILT SPA through the real Go
-// frontend binary (build/frontend) with its real security headers, behind
-// an edge shim that routes /v1 to the contract mock like the production
-// Ingress; the mock's session listener plays ws-<label>.<sessionDomain>
-// hosts on a second local HTTPS origin (see tests-portal/serve.ts). The
-// mock's /v1/launch enforces the real gateway's ADR-0004 origin gate
-// against the portal origin, so this suite also catches a
-// Referrer-Policy regression that nulls the launch POST's Origin. Needs
-// a Go toolchain and openssl.
-export default defineConfig({
+// Real-binary e2e harness — serve.ts builds ./cmd/backend and
+// ./build/frontend into web/.e2e-bin and runs the real frontend plus the
+// real backend session listener in split mode against a fake broker (mTLS)
+// and a fake KasmVNC upstream. Two projects exercise both cookie modes
+// (D16): the lax project keeps portal and session on tcdi.localhost, the
+// partitioned project serves sessions from tcdi-other.localhost.
+// Needs a Go toolchain and openssl.
+export default defineConfig<{ harnessMode: HarnessMode }>({
   testDir: "./tests-portal",
   testMatch: "**/*.spec.ts",
-  timeout: 30_000,
+  timeout: 60_000,
   workers: 1,
   retries: 0,
   reporter: [["list"]],
@@ -22,13 +20,22 @@ export default defineConfig({
     ignoreHTTPSErrors: true, // self-signed cert minted by tests-portal/serve.ts
     trace: "retain-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "lax",
+      use: { ...devices["Desktop Chrome"], harnessMode: "lax" },
+    },
+    {
+      name: "partitioned",
+      use: { ...devices["Desktop Chrome"], harnessMode: "partitioned" },
+    },
+  ],
   webServer: {
     command:
       "node --disable-warning=ExperimentalWarning tests-portal/serve.ts",
-    url: `${PORTAL_ORIGIN}/healthz`,
+    url: "http://127.0.0.1:4176/healthz",
     ignoreHTTPSErrors: true,
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 300_000,
   },
 });

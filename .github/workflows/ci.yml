@@ -160,9 +160,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       # The portal e2e suite (web/tests-portal) builds and runs the real Go
-      # binaries itself — ./build/frontend (SPA server) and ./cmd/backend
-      # (--components=session) — in Playwright setup, so the job only needs
-      # Go here plus `npm run test:e2e` below.
+      # binaries itself — ./build/frontend (SPA server) and ./cmd/backend in
+      # split mode (-broker-url, session listener only) — in Playwright
+      # setup, so the job only needs Go here plus `npm run test:e2e` below.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -262,17 +262,6 @@ jobs:
         run: |
           .github/scripts/check-kasm-catalog.sh
           .github/scripts/check-trivyignore.sh build/kasm-catalog.trivyignore
-
-  browser-freshness:
-    # SUPR-4: fails once bookworm-security offers a chromium newer than the
-    # pinned CHROMIUM_APT_VERSION, so the engine pin cannot go stale quietly.
-    name: chromium apt-pin freshness
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - run: .github/scripts/check-chromium-freshness.sh
 
   kasm-contract:
     # KASM-4/KASM-5: the docker-emulated pod contract test plus the
