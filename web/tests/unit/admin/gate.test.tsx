@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { failNextGet, makeAdmin } from "./helpers";
 import { routes } from "../../../src/admin/routes";
@@ -25,17 +25,18 @@ describe("admin: hidden for users", () => {
     // /v1/me confirms the role is absent; the layout redirects rather than
     // rendering any tenant data.
     await screen.findByText("Tenant administrators only");
-    expect(window.location.pathname).toBe("/workspaces");
+    await waitFor(() => expect(window.location.pathname).toBe("/workspaces"));
   });
 
   it("renders the page for a tenant admin", async () => {
     const api = createMockApi({ areas: [adminArea] });
     loginCookies();
     makeAdmin(api);
+    window.history.replaceState({}, "", "/admin/quota");
     renderWithApi(<QuotaPage />, api);
 
     await screen.findByRole("heading", { name: "Quota" });
-    expect(window.location.pathname).not.toBe("/workspaces");
+    expect(window.location.pathname).toBe("/admin/quota");
   });
 });
 

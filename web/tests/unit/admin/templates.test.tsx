@@ -33,10 +33,9 @@ describe("templates: stale image column", () => {
     const linuxRow = within(table)
       .getByRole("rowheader", { name: /linux-firefox-desktop/ })
       .closest("tr")!;
-    expect(within(linuxRow).getByRole("time")).toHaveAttribute(
-      "dateTime",
-      "2026-09-10T00:00:00Z",
-    );
+    // The row has two <time> elements (image build date and published date);
+    // the image column's carries the build timestamp.
+    expect(linuxRow.querySelector('time[dateTime="2026-09-10T00:00:00Z"]')).not.toBeNull();
     expect(within(linuxRow).getByText("Stale")).toBeInTheDocument();
 
     const browserRow = within(table)

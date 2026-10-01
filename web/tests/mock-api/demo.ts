@@ -15,6 +15,9 @@ import {
   type WorkspaceFixture,
 } from "./fixtures.ts";
 
+// Demo records belong to the demo principal (the mock's /v1/me subject).
+const DEMO_OWNER = { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" };
+
 export const DEMO_TEMPLATES: TemplateFixture[] = [
   {
     id: "tpl_01J4ZE2K8VQW5R7T3N9P1M6X4D",
@@ -74,6 +77,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH1A2B3C4D5E6F7G8H9J0K",
     name: "design-review",
+    owner: DEMO_OWNER,
     template: summary(TEMPLATE_LINUX),
     phase: "Ready",
     desiredState: "Running",
@@ -85,6 +89,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH2B3C4D5E6F7G8H9J0K1M",
     name: "quick-browse",
+    owner: DEMO_OWNER,
     template: summary(TEMPLATE_BROWSER),
     phase: "Ready",
     desiredState: "Running",
@@ -96,6 +101,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH3C4D5E6F7G8H9J0K1M2N",
     name: "kernel-dev",
+    owner: DEMO_OWNER,
     template: summary(DEV),
     phase: "Provisioning",
     desiredState: "Running",
@@ -117,6 +123,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH4D5E6F7G8H9J0K1M2N3P",
     name: "finance-office",
+    owner: DEMO_OWNER,
     template: summary(WIN),
     phase: "Failed",
     desiredState: "Running",
@@ -146,6 +153,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH5E6F7G8H9J0K1M2N3P4Q",
     name: "build-agent",
+    owner: DEMO_OWNER,
     template: summary(DEV),
     phase: "Stopping",
     desiredState: "Stopped",
@@ -204,6 +212,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
   {
     id: "rd_01J4ZJ1K2L3M4N5P6Q7R8S9T0V",
     state: "Retained",
+    owner: DEMO_OWNER,
     sizeGib: 64,
     runtime: "WindowsVM",
     sourceWorkspaceName: "q3-reporting",
@@ -213,6 +222,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
   {
     id: "rd_01J4ZJ2L3M4N5P6Q7R8S9T0V1W",
     state: "Retained",
+    owner: DEMO_OWNER,
     sizeGib: 50,
     runtime: "LinuxContainer",
     sourceWorkspaceName: "thesis-workstation",
