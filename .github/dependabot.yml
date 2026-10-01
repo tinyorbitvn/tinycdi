@@ -14,6 +14,11 @@ updates:
     directory: "/web"
     schedule:
       interval: weekly
+    ignore:
+      # openapi-typescript (7.13.x) still peers typescript ^5 and needs the
+      # classic compiler API; drop this once it supports TypeScript 7.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directories:
       - "/build/*/"

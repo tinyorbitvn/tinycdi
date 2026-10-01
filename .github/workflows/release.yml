@@ -871,7 +871,7 @@ jobs:
           always()
           && env.SCAN_MODE == 'registry'
           && vars.CODE_SCANNING_ENABLED == 'true'
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           sarif_file: trivy-sarif
           category: tinycdi-${{ matrix.image }}
@@ -1193,6 +1193,7 @@ jobs:
           push-to-registry: true
 
       - name: push helm chart to OCI + cosign sign
+        id: chart
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -1218,6 +1219,7 @@ jobs:
           fi
           # SEC-17: sign the pushed chart manifest by digest (keyless).
           cosign sign --yes "ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}"
+          echo "ref=ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: promote image tags (:<ver> + :latest)
         # SEC-18: tags are the bare chart version (v1.2.3 -> :1.2.3) so they
@@ -1233,6 +1235,48 @@ jobs:
             fi
             docker buildx imagetools create "${args[@]}" "$ref"
           done
+
+      - name: container image manifest + release notes
+        # The images live in GHCR, not in the release assets: list every
+        # released image and the chart by digest, as a signed asset and at
+        # the top of the release notes.
+        env:
+          CHART_REF: ${{ steps.chart.outputs.ref }}
+        run: |
+          [[ "$CHART_REF" =~ ^ghcr\.io/tinyorbitvn/charts/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] \
+            || { echo "::error::unexpected chart ref '$CHART_REF'"; exit 1; }
+          : > bundle/images.txt
+          {
+            echo "## Container images"
+            echo
+            echo "| Image | Tag | Digest |"
+            echo "|---|---|---|"
+          } > notes.md
+          for f in refs/*.ref; do
+            ref="$(tr -d '[:space:]' < "$f")"
+            base="${ref%@*}"; digest="${ref#*@}"
+            echo "${base}:${CHART_VERSION}@${digest}" >> bundle/images.txt
+            echo "| \`${base}\` | \`${CHART_VERSION}\` | \`${digest}\` |" >> notes.md
+          done
+          echo "$CHART_REF" >> bundle/images.txt
+          sort -o bundle/images.txt bundle/images.txt
+          {
+            echo
+            echo "Helm chart: \`oci://${CHART_REF%@*}\` version \`${CHART_VERSION}\` (\`${CHART_REF#*@}\`)."
+            echo
+            echo '```sh'
+            echo "helm install tinycdi oci://${CHART_REF%@*} --version ${CHART_VERSION} \\"
+            echo "  -n tinycdi --create-namespace -f values.yaml"
+            echo "cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${VERSION} \\"
+            echo "  <image>@<digest>"
+            echo '```'
+            echo
+            echo "All images, the chart and every asset below are signed with Sigstore"
+            echo "(keyless); \`images.txt\` lists the pinned references."
+            echo
+          } >> notes.md
+          cat bundle/images.txt
 
       - name: checksums
         run: |
@@ -1263,6 +1307,7 @@ jobs:
         run: |
           args=(--repo "$GH_REPO"
                 --title "TinyCDI $VERSION"
+                --notes-file notes.md
                 --generate-notes)
           if [ "$PRERELEASE" = "true" ]; then
             args+=(--prerelease)
