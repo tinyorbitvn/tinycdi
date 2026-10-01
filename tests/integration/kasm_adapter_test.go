@@ -572,8 +572,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 			}
 			time.Sleep(2 * time.Second)
 		}
-		logs, _ := docker("logs", "--tail", "30", c)
-		t.Fatalf("container still running after payload exit — the desktop session must die with the browser\nlogs:\n%s", logs)
+		t.Fatalf("container still running after payload exit — the desktop session must die with the browser\nlogs:\n%s", dockerCombined("logs", "--tail", "30", c))
 	})
 
 	t.Run("RestartHomeAndStaleCredential", func(t *testing.T) {
@@ -634,14 +633,12 @@ func waitHealthyTimeout(t *testing.T, name string, timeout time.Duration) {
 	for time.Now().Before(deadline) {
 		status, health := containerState(t, name)
 		if status != "running" && status != "created" {
-			logs, _ := docker("logs", "--tail", "40", name)
-			t.Fatalf("container %s not running (status=%s):\n%s", name, status, logs)
+			t.Fatalf("container %s not running (status=%s):\n%s", name, status, deadContainerDiag(t, name))
 		}
 		if health == "healthy" {
 			return
 		}
 		time.Sleep(2 * time.Second)
 	}
-	logs, _ := docker("logs", "--tail", "40", name)
-	t.Fatalf("container %s did not become healthy in %s\nlogs:\n%s", name, timeout, logs)
+	t.Fatalf("container %s did not become healthy in %s\n%s", name, timeout, deadContainerDiag(t, name))
 }

@@ -21,9 +21,9 @@ global:
 
 images:
   # tag defaults to the chart appVersion; digest wins over tag when set.
-  api:
+  backend:
     registry: ""
-    repository: tinyorbitvn/tinycdi-api
+    repository: tinyorbitvn/tinycdi-backend
     tag: ""
     digest: ""
     pullPolicy: ""
@@ -33,15 +33,9 @@ images:
     tag: ""
     digest: ""
     pullPolicy: ""
-  gateway:
+  frontend:
     registry: ""
-    repository: tinyorbitvn/tinycdi-gateway
-    tag: ""
-    digest: ""
-    pullPolicy: ""
-  portal:
-    registry: ""
-    repository: tinyorbitvn/tinycdi-portal
+    repository: tinyorbitvn/tinycdi-frontend
     tag: ""
     digest: ""
     pullPolicy: ""
@@ -99,46 +93,46 @@ sessionHost: session.example.invalid
 
 oidc:
   issuer: https://idp.example.invalid/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   # Existing Secret (in the release namespace) with the client secret.
   existingSecret: tinycdi-oidc-client
   # Key inside that Secret holding the client secret value.
   clientSecretKey: client-secret
   # Defaults to https://<portalHost>/v1/auth/callback when empty.
   redirectURL: ""
-  # Login gate: when non-empty, the api only lets users in whose ID-token
+  # Login gate: when non-empty, the backend only lets users in whose ID-token
   # `groups` claim carries at least one of these names — exact match (the
   # Keycloak full-path form "/platform-admins" does NOT satisfy
   # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
   # login open to every IdP account — tighten this in production.
   requiredGroups: []
-  # api -> IdP egress. Narrow to the IdP address space when known.
+  # backend -> IdP egress. Narrow to the IdP address space when known.
   egressCIDRs: ["0.0.0.0/0"]
   port: 443
 
 database:
   # Existing Secret (in the release namespace) with the PostgreSQL DSN
-  # (postgres://user:pass@host:port/db?...). The api runs embedded
+  # (postgres://user:pass@host:port/db?...). The backend runs embedded
   # migrations at startup, so the role needs DDL rights on its schema.
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   urlKey: url
   port: 5432
-  # NetworkPolicy peers the api may reach on database.port, e.g.
+  # NetworkPolicy peers the backend may reach on database.port, e.g.
   #   - ipBlock: {cidr: 10.20.30.40/32}
-  # or namespaceSelector/podSelector peers. REQUIRED for api->DB egress:
+  # or namespaceSelector/podSelector peers. REQUIRED for backend->DB egress:
   # an EMPTY list fails the render (an empty peer list means "everywhere")
   # and so does leaving the shipped placeholder below — it matches only
-  # the unroutable 0.0.0.0 host, which silently cuts the api from its
+  # the unroutable 0.0.0.0 host, which silently cuts the backend from its
   # database (CHTR-7). Always set this to your database.
   allowedPeers:
     - ipBlock: {cidr: 0.0.0.0/32}   # deny-all placeholder — REPLACE or the render fails
-  # PostgreSQL TLS. The api REFUSES to start on a non-verifying sslmode
+  # PostgreSQL TLS. The backend REFUSES to start on a non-verifying sslmode
   # (disable/allow/prefer/require) — CHTR-8 — so the chart defaults to
   # verify-full and refuses weaker modes unless dev.enabled (which also
-  # renders --dev-insecure-db on the api). mode is exported as PGSSLMODE
+  # renders --dev-insecure-db on the backend). mode is exported as PGSSLMODE
   # and caSecret is mounted read-only as PGSSLROOTCERT — pgx honours both
   # libpq-style env vars for DSN keys the URL omits (an explicit sslmode=
-  # in the DSN still wins, and a non-verifying one makes the api fail
+  # in the DSN still wins, and a non-verifying one makes the backend fail
   # fast). caSecret is OPTIONAL: without it pgx verifies against the
   # system CA pool — only needed for private-CA databases.
   tls:
@@ -147,25 +141,81 @@ database:
       name: ""            # e.g. tinycdi-db-ca — needed for private-CA DBs
       key: ca.crt
 
-api:
-  replicas: 1
+# Backend (cmd/backend): the public API and the session gateway in ONE
+# Deployment — one TLS listener per role (app :8443 for portalHost /v1,
+# session :8444 for sessionHost, internal mTLS :9443 for the operator)
+# plus an optional metrics listener on its own ClusterIP Service.
+backend:
+  # D22: two replicas with rollingUpdate maxUnavailable=0 and a PDB —
+  # sessions survive a rolling restart and a single pod loss.
+  replicas: 2
+  # ONE gateway identity for the whole Deployment (D19/D22): the lease
+  # directory is shared across replicas — never a per-pod name.
+  gatewayID: tinycdi-backend
   sessionIdle: 30m
-  # Extra Origins (beyond https://<portalHost>) the api accepts on
-  # cookie-authenticated state-changing requests — Origin allowlist for the
-  # CSRF defence-in-depth check. Full scheme://host[:port] origins only.
-  extraPortalOrigins: []
-  # CN the api's internal mTLS listener requires on the operator client
-  # certificate (workspace revoke/drain routes). Empty = "operator".
-  operatorCN: ""
-  # Internal mTLS broker listener (gateway redeems launch tickets here).
-  internalTLS:
-    existingSecret: tinycdi-api-internal-tls   # keys tls.crt / tls.key
+  # Session-cookie mode: "lax" (portal and session host on the same
+  # registrable domain) or "partitioned" (SameSite=None;Secure;Partitioned
+  # — for cross-site deployments).
+  sessionCookieMode: lax
+  # AEAD keys sealing the __Host-tcdi_login cookie (D20 — a login started
+  # on one replica completes on another). REQUIRED — set existingSecret to
+  # a Secret with keys "current" (and optional "previous" during
+  # rotation), 32 bytes each, or set generate: true and the chart creates
+  # <release>-backend-login-keys once via lookup (kept across upgrades;
+  # not for GitOps — helm template cannot see the cluster).
+  loginKeys:
+    existingSecret: ""
+    generate: false
+  # One certificate per listener — the listeners never share TLS material.
+  tls:
+    app:      {existingSecret: tinycdi-backend-app-tls}      # keys tls.crt / tls.key
+    session:  {existingSecret: tinycdi-backend-session-tls}
+    internal: {existingSecret: tinycdi-backend-internal-tls}
+  # CA bundle the internal mTLS listener verifies client certs against
+  # (the operator's broker client cert).
   clientCA:
     existingSecret: tinycdi-internal-ca        # key ca.crt
+    key: ca.crt
+  # CN the internal mTLS listener requires on the operator client
+  # certificate (workspace revoke/drain routes). Empty = "operator".
+  operatorCN: ""
   # Optional extra trust bundle for outbound calls (e.g. internal IdP CA).
   extraCA:
     existingSecret: ""                          # empty disables SSL_CERT_FILE
     key: ca.crt
+  # Optional default CA for runtime upstreams.
+  upstreamCA:
+    existingSecret: ""
+    key: ca.crt
+  # /v1/control/* bearer token. Optional — when unset the control routes
+  # stay closed (fail-closed). Mounted as a file via -control-token-file.
+  controlToken:
+    existingSecret: ""      # e.g. tinycdi-backend-control-token
+    key: token
+  # Extra Origins (beyond https://<portalHost>) the app listener accepts
+  # on cookie-authenticated state-changing requests and the session
+  # listener on launch POSTs (CSRF + ADR 0004 Origin allowlists; the
+  # session listener also sends them as frame-ancestors). Full
+  # scheme://host[:port] origins only.
+  extraPortalOrigins: []
+  # Extra hostnames added to the session listener's Host-header allowlist.
+  extraAllowedHosts: []
+  # Ticket audience; defaults to sessionHost.
+  audience: ""
+  # Metrics listener — served on the dedicated ClusterIP backend-metrics
+  # Service, never on the public Service (SEC-33).
+  # networkPolicy.prometheusPeers must be set when enabled.
+  metrics:
+    enabled: false
+    port: 9090
+  service:
+    annotations: {}
+  # PodDisruptionBudget — ON by default (D22): minAvailable 1 keeps a
+  # replica serving through voluntary disruption. A pdb block with a
+  # sizing key renders; enabled: false removes it.
+  pdb:
+    minAvailable: 1
+    maxUnavailable: null
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: "1", memory: 256Mi}
@@ -178,12 +228,10 @@ api:
   # when you must — the defaults are what the chart tests assert.
   podSecurityContext: {}
   securityContext: {}
-  podDisruptionBudget:
-    enabled: false
-    minAvailable: 1
-    maxUnavailable: null
   extraArgs: []
   extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
 operator:
   replicas: 1
@@ -201,16 +249,16 @@ operator:
   # seeded template uses networkProfile: InternetOnly (SEC-02).
   clusterCIDRs: []
   # Internal broker client (ADR 0003): the teardown finalizer's lease/
-  # stream seams call the api internal mTLS listener with an operator
-  # client certificate (CN=operator unless api.operatorCN overrides —
+  # stream seams call the backend internal mTLS listener with an operator
+  # client certificate (CN=operator unless backend.operatorCN overrides —
   # the only identity the workspace revoke/drain routes accept).
   brokerClient:
     enabled: true
-    # Base URL of the api internal listener; defaults to
-    # https://api-internal.<release-namespace>.svc:9443.
+    # Base URL of the backend internal listener; defaults to
+    # https://backend.<release-namespace>.svc:9443.
     internalURL: ""
     # CA bundle verifying the broker listener. Defaults to the same
-    # internal CA the api uses to verify client certs.
+    # internal CA the backend uses to verify client certs.
     ca:
       existingSecret: tinycdi-internal-ca
       key: ca.crt
@@ -237,77 +285,21 @@ operator:
   extraArgs: []
   extraEnv: []
 
-gateway:
-  replicas: 1
-  # Gateway identity reported to the broker (empty = mTLS cert CN).
-  id: ""
-  # Ticket audience; defaults to sessionHost.
-  audience: ""
-  # Extra hostnames added to the Host-header allowlist.
-  extraAllowedHosts: []
-  # Extra origins allowed to POST /v1/launch besides https://<portalHost>
-  # (ADR 0004). Full scheme://host[:port] origins only.
-  extraPortalOrigins: []
-  # Metrics listener, e.g. ":9090"; empty disables.
-  metricsListen: ""
-  service:
-    type: ClusterIP
-    # NodePort/LoadBalancer knobs (only when service.type selects them).
-    nodePort: null
-    loadBalancerIP: ""
-    loadBalancerSourceRanges: []
-    annotations: {}
+# Frontend (build/frontend): serves the built portal SPA over TLS with
+# the portal security headers. Static files only — the edge routes
+# portalHost /v1 to the backend app listener, everything else here.
+frontend:
+  replicas: 2
   tls:
-    existingSecret: tinycdi-gateway-tls        # keys tls.crt / tls.key
-  mtls:
-    existingSecret: tinycdi-gateway-mtls       # keys tls.crt / tls.key
-  # CA verifying the api internal listener (-broker-ca is REQUIRED by the
-  # binary). Defaults to the same internal CA the api uses to verify
-  # gateway client certs — override when the two differ.
-  trustedCA:
-    existingSecret: tinycdi-internal-ca
-    key: ca.crt
-  # Optional default CA for runtime upstreams.
-  upstreamCA:
-    existingSecret: ""
-    key: ca.crt
-  # /v1/control/* bearer token (operator control surface). Optional — when
-  # unset the control routes stay closed (fail-closed). Mounted as a file
-  # and passed via -control-token-file.
-  controlToken:
-    existingSecret: ""      # e.g. tinycdi-gateway-control-token
-    key: token
-  resources:
-    requests: {cpu: 50m, memory: 64Mi}
-    limits: {cpu: "1", memory: 256Mi}
-  podAnnotations: {}
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  podSecurityContext: {}
-  securityContext: {}
-  podDisruptionBudget:
+    existingSecret: tinycdi-frontend-tls       # keys tls.crt / tls.key
+  webRoot: ""               # empty = image default (/srv/web)
+  service:
+    annotations: {}
+  # PodDisruptionBudget — off by default; enabled: true renders one.
+  pdb:
     enabled: false
     minAvailable: 1
     maxUnavailable: null
-  extraArgs: []
-  extraEnv: []
-  extraVolumes: []
-  extraVolumeMounts: []
-
-portal:
-  replicas: 1
-  # Defaults to http://api.<release-namespace>.svc:8080.
-  apiUpstream: ""
-  webRoot: ""               # empty = image default (/srv/web)
-  service:
-    type: ClusterIP
-    nodePort: null
-    loadBalancerIP: ""
-    loadBalancerSourceRanges: []
-    annotations: {}
-  tls:
-    existingSecret: tinycdi-portal-tls         # keys tls.crt / tls.key
   resources:
     requests: {cpu: 20m, memory: 32Mi}
     limits: {cpu: 500m, memory: 128Mi}
@@ -317,19 +309,16 @@ portal:
   affinity: {}
   podSecurityContext: {}
   securityContext: {}
-  podDisruptionBudget:
-    enabled: false
-    minAvailable: 1
-    maxUnavailable: null
   extraArgs: []
   extraEnv: []
 
-# cert-manager integration for the internal mTLS chain (gateway/operator
-# -> api broker). When enabled the chart renders Certificate resources
-# that PRODUCE the Secrets named by api.internalTLS.existingSecret,
-# gateway.mtls.existingSecret and operator.brokerClient.mtls.existingSecret
-# — the public-edge certs (portal.tls, gateway.tls) are NOT issued here;
-# point those at real certificates.
+# cert-manager integration for the internal mTLS chain (operator
+# -> backend broker, ADR 0003). When enabled the chart renders
+# Certificate resources that PRODUCE the Secrets named by
+# backend.tls.internal.existingSecret and
+# operator.brokerClient.mtls.existingSecret — the public-edge certs
+# (backend.tls.app, backend.tls.session, frontend.tls) are NOT issued
+# here; point those at real certificates.
 certManager:
   enabled: false
   # Signer for the leaf Certificates. Ignored when selfSigned=true.
@@ -340,7 +329,7 @@ certManager:
   # -> CA Certificate (isCA) -> Issuer, then sign the leaf certs with it.
   selfSigned: false
   # Secret the bootstrap CA writes (key ca.crt). Point
-  # api.clientCA.existingSecret, gateway.trustedCA.existingSecret and
+  # backend.clientCA.existingSecret and
   # operator.brokerClient.ca.existingSecret at this name when selfSigned.
   caSecretName: ""            # default <release>-internal-ca
   # Subject fields on the issued leaf certificates.
@@ -375,9 +364,9 @@ gatewayApi:
   parentRefs: []
   annotations: {}
 
-# Optional Prometheus ServiceMonitor for the gateway metrics endpoint
-# (gateway.metricsListen) — served by the dedicated ClusterIP
-# gateway-metrics Service, never on the public port. The operator exposes
+# Optional Prometheus ServiceMonitor for the backend metrics endpoint
+# (backend.metrics) — served by the dedicated ClusterIP
+# backend-metrics Service, never on the public port. The operator exposes
 # no metrics endpoint (see the operator section).
 serviceMonitor:
   enabled: false
@@ -400,10 +389,20 @@ networkPolicy:
   dnsPeers:
     - namespaceSelector:
         matchLabels: {kubernetes.io/metadata.name: kube-system}
-  # Ingress peers allowed to scrape the gateway metrics endpoint (only
-  # relevant when gateway.metricsListen is set). REQUIRED then — an empty
-  # list fails the render rather than opening metrics to every namespace.
+  # Ingress peers allowed to scrape the backend metrics endpoint (only
+  # relevant when backend.metrics.enabled is set). REQUIRED then — an
+  # empty list fails the render rather than opening metrics to every
+  # namespace.
   prometheusPeers: []
+  # How edge (Ingress/Gateway) traffic may reach the public listeners —
+  # backend :8443 (app) and :8444 (session), frontend :8443:
+  #   ipBlock: the edgeIngressCIDRs peers below (REQUIRED — an empty list
+  #            fails closed rather than admitting every source)
+  #   any:     every source, the TLS ports only
+  #   cilium:  no NetworkPolicy peers — the *-edge-ingress
+  #            CiliumNetworkPolicies admit the ingress fabric instead
+  edgeIngress: ipBlock
+  edgeIngressCIDRs: ["0.0.0.0/0"]   # everywhere — narrow to the LB range
 
 # Default StorageClass annotation applied to seeded templates that do not
 # set workspaces.cdi.tinyorbit.vn/storage-class themselves. Retain-policy PVCs
@@ -520,13 +519,14 @@ podSecurity:
 # Explicit development-mode gate. While false (the only supported value
 # for production), the render FAILS on dev surfaces: operator.devAllowNoBroker;
 # dangerous extraArgs (operator --dev-allow-no-broker /
-# --disable-builtin-egress-excepts / metrics flags, api --dev-insecure-db /
-# --required-groups, gateway --metrics-listen); any
+# --disable-builtin-egress-excepts / metrics flags, backend
+# --dev-insecure-db / --required-groups / --metrics-listen / the
+# split-mode broker client flags); any
 # podSecurityContext/securityContext override that would weaken the
 # hardened defaults (privileged, allowPrivilegeEscalation, added or
 # replaced capabilities, runAsNonRoot=false, uid/gid/fsGroup 0, writable
 # rootfs, unconfined seccomp, appArmorProfile=Unconfined, seLinuxOptions);
-# hostPath gateway.extraVolumes; a non-verifying database.tls.mode
+# hostPath backend.extraVolumes; a non-verifying database.tls.mode
 # (""/prefer/require/allow/disable); and podSecurity.managedEnforce=
 # privileged. hostUsers=false is a hardening and stays allowed. Never true
 # in a release values file.

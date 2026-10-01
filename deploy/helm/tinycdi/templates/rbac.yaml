@@ -48,15 +48,15 @@ rules:
   resources: ["networkpolicies"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
-# API role: projects intents onto Workspace CRs and reads templates, only
+# Backend role (public API): projects intents onto Workspace CRs and reads templates, only
 # inside tenant namespaces (bound via RoleBindings below). secrets get is
 # the broker credential source (per-workspace runtime secret).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Release.Name }}-api-role
+  name: {{ .Release.Name }}-backend-role
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
 rules:
 - apiGroups: ["workspaces.cdi.tinyorbit.vn"]
   resources: ["workspaces"]
@@ -110,7 +110,7 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ .Release.Nam
 # namespace gets no manager-role binding — the operator does nothing there
 # (no Workspace CRs can be created there; leader election has its own Role
 # above), and a binding would let it read every platform Secret and create
-# pods next to the api/gateway. --watch-namespaces matches this list.
+# pods next to the backend. --watch-namespaces matches this list.
 {{- range .Values.managedNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -125,9 +125,9 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $.Rel
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: api-workspaces
+  name: backend-workspaces
   namespace: {{ .name }}
 subjects:
-  - {kind: ServiceAccount, name: api, namespace: {{ $.Release.Namespace }}}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $.Release.Name }}-api-role}
+  - {kind: ServiceAccount, name: backend, namespace: {{ $.Release.Namespace }}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $.Release.Name }}-backend-role}
 {{- end }}
