@@ -1,187 +1,193 @@
-// v0.2 session surface of the contract mock: GET /v1/me carrying the
-// derived CSRF token and the session domain (P1/D17), the passive
-// GET /v1/workspaces/{id}/connection endpoint (P4), and per-workspace
-// launch URLs on ws-<label>.<sessionDomain> (D9).
+// Session area of the contract mock (v0.2): the session-origin routes
+// /v1/launch (ticket redeem with the gateway's ADR-0004 origin gate) and the
+// cookie-gated /desktop/*, plus the portal-side session surface:
+// GET /v1/workspaces/{id}/connection (the passive poll endpoint, P4) and the
+// per-workspace launchUrl the connections endpoint answers (D9).
 //
-// Wraps createMockApi: the underlying handler still performs the portal
-// auth check and all v0.1 routes; this module layers the G2 contract on
-// top. CSRF moves from a JS-readable cookie to the token published by
-// /v1/me, so mutations delegate to the inner handler with a matching
-// tcdi_csrf cookie injected — the inner check passes whenever this
-// layer's newer check already did.
+// Contract notes:
+// - /v1/me fields (csrfToken, sessionDomain) are added by the admin area
+//   from ctx.sessionDomain and core.CSRF_TOKEN_VALUE — /v1/me stays where
+//   the principal state lives.
+// - The CSRF check in handler.ts compares X-CSRF-Token against the token
+//   /v1/me publishes; the v0.1 tcdi_csrf / tcdi_session_origin cookies are
+//   gone (D17).
+// - launchUrl is https://ws-<label>.<sessionDomain>/v1/launch like the real
+//   backend; on a loopback session domain the mock keeps its listener's
+//   scheme so browser e2e can reach it.
 
 import {
-  createMockApi,
-  CSRF_COOKIE,
-  CSRF_HEADER,
-  SESSION_COOKIE,
+  CSRF_TOKEN_VALUE,
+  err,
+  gwErr,
+  ok,
+  originsEqual,
+  parseCookies,
+  parseOriginValue,
+  type MockArea,
+  type MockContext,
   type MockRequest,
   type MockResponse,
-} from "./handler.ts";
+} from "./core.ts";
 
-/** Default session domain the mock's /v1/me publishes. */
-export const SESSION_DOMAIN = "session.example.com";
+export { sessionHostLabel, sessionLaunchUrl } from "./core.ts";
 
-/** CSRF token the mock's /v1/me publishes until rotated via setCsrfToken. */
-export const ME_CSRF_TOKEN = "csrf-01J4ZD9000MOCK";
-
-export interface MockMe {
-  subject: string;
-  displayName: string;
-  email?: string;
-  tenant: string;
-  roles: string[];
-  csrfToken: string;
-  sessionDomain: string;
-}
-
-export const ME: MockMe = {
-  subject: "user-01J4ZD",
-  displayName: "Ada Example",
-  email: "ada@example.com",
-  tenant: "tenant-01",
-  roles: ["user"],
-  csrfToken: ME_CSRF_TOKEN,
-  sessionDomain: SESSION_DOMAIN,
-};
-
-export type ConnectionStateValue = "none" | "connected" | "disconnected" | "stale";
-
+/** GET /v1/workspaces/{id}/connection body (openapi.yaml ConnectionStatus). */
 export interface MockConnectionStatus {
-  state: ConnectionStateValue;
+  state: "none" | "connected" | "disconnected" | "stale";
   leaseActive: boolean;
   lastRenewedAt?: string;
 }
 
-function parseCookies(header: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const part of String(header ?? "").split(";")) {
-    const idx = part.indexOf("=");
-    if (idx > 0) out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
-  }
-  return out;
-}
-
-function json(status: number, body: unknown): MockResponse {
-  return { status, headers: { "content-type": "application/json" }, body };
-}
-
-function apiErr(status: number, code: string, message: string): MockResponse {
-  return json(status, { code, message, retryable: false, requestId: "req_mock" });
-}
-
-/** ws_<suffix> -> ws-<suffix>, the mapping internal/sessionhost.Label pins. */
-export function sessionHostLabel(workspaceId: string): string {
-  return workspaceId.replaceAll("_", "-").toLowerCase();
-}
-
-export interface SessionMockApi {
-  handle: (req: MockRequest) => MockResponse;
-  state: ReturnType<typeof createMockApi>["state"];
-  reset: () => void;
-  sessionDomain: string;
-  /** Rotate the published CSRF token (simulates a session refresh). */
-  setCsrfToken: (token: string) => void;
+export interface SessionAreaState {
+  /** Test scripting for /v1/workspaces/{id}/connection (P4). */
   connection: {
-    /** Script the /connection response for a workspace. */
-    set: (workspaceId: string, status: MockConnectionStatus) => void;
-    clear: (workspaceId: string) => void;
+    set(workspaceId: string, status: MockConnectionStatus): void;
+    clear(workspaceId: string): void;
   };
+  /** The token /v1/me publishes and the composer enforces on mutations. */
+  csrfToken: string;
+  sessionDomain: string;
 }
 
-export function createSessionMockApi(
-  opts: { sessionDomain?: string; csrfToken?: string; me?: Partial<MockMe> } = {},
-): SessionMockApi {
-  const sessionDomain = opts.sessionDomain ?? SESSION_DOMAIN;
-  let csrfToken = opts.csrfToken ?? ME_CSRF_TOKEN;
-  const inner = createMockApi();
+export function sessionArea(ctx: MockContext): MockArea {
+  const { state } = ctx;
   const scripted = new Map<string, MockConnectionStatus>();
 
-  function meBody(): MockMe {
-    return { ...ME, csrfToken, sessionDomain, ...(opts.me ?? {}) };
+  // launchOriginOK is the gateway's launchOriginOK (ADR 0004): the Origin
+  // must exactly match a configured portal origin, or the session origin
+  // itself on the request's authority (the public-origin leg).
+  function launchOriginOK(req: MockRequest): boolean {
+    const o = parseOriginValue(req.headers["origin"]);
+    if (!o) return false;
+    if (ctx.portalOrigins.some((p) => originsEqual(o, p))) return true;
+    const host = req.headers["host"] ?? "";
+    const reqHostname = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+    return o.hostname === reqHostname && originsEqual(o, ctx.sessionOriginUrl);
   }
 
-  function authenticated(req: MockRequest): boolean {
-    return parseCookies(req.headers.cookie)[SESSION_COOKIE] !== undefined;
-  }
-
-  function me(req: MockRequest): MockResponse {
-    if (!authenticated(req)) return apiErr(401, "UNAUTHENTICATED", "no session");
-    return json(200, meBody());
-  }
-
-  // Passive endpoint: authenticates but must never slide the idle timer.
-  // The mock has no clock, so "passive" only means the route exists and is
-  // scriptable here.
-  function connection(req: MockRequest, workspaceId: string): MockResponse {
-    if (!authenticated(req)) return apiErr(401, "UNAUTHENTICATED", "no session");
-    if (!inner.state.workspaces.has(workspaceId)) {
-      return apiErr(404, "NOT_FOUND", "workspace not found");
+  function launch(req: MockRequest): MockResponse {
+    state.launchRequests.push({ headers: req.headers, rawBody: req.rawBody ?? "" });
+    // Fetch-metadata/Origin gate, same order as the real gateway: it runs
+    // before the method and ticket checks, so a rejected launch never
+    // consumes the ticket. A browser labels the launch POST with
+    // Sec-Fetch-Site; then an absent or "null" Origin (what the portal's
+    // old Referrer-Policy: no-referrer produced) is bad_origin.
+    // A request with neither header is a non-browser client and stays
+    // allowed; a present Origin is always checked.
+    const sfs = req.headers["sec-fetch-site"];
+    const origin = req.headers["origin"];
+    if (sfs) {
+      if (sfs !== "same-origin" && sfs !== "same-site" && sfs !== "cross-site") {
+        return gwErr(403, "bad_fetch_site");
+      }
+      if (!origin || origin === "null" || !launchOriginOK(req)) {
+        return gwErr(403, "bad_origin");
+      }
+    } else if (origin && !launchOriginOK(req)) {
+      return gwErr(403, "bad_origin");
     }
-    const fixed = scripted.get(workspaceId);
-    if (fixed) return json(200, fixed);
-    const leaseActive = inner.state.leases.has(workspaceId);
-    return json(200, {
+    if (req.method !== "POST") return err(404, "NOT_FOUND", "method not allowed", false);
+    const params = new URLSearchParams(req.rawBody ?? "");
+    const ticket = params.get("ticket") ?? "";
+    const rec = state.tickets.get(ticket);
+    if (!rec || rec.used || rec.expiresAt < ctx.now()) {
+      return err(403, "FORBIDDEN", "ticket invalid, expired or already redeemed", false);
+    }
+    rec.used = true;
+    return {
+      status: 302,
+      headers: {
+        location: `/desktop/${rec.workspaceId}`,
+        // SameSite=Lax like the real gateway (internal/gateway/launch.go):
+        // the launch POST is cross-site by design, so a Strict cookie
+        // would never be sent on this redirect chain.
+        "set-cookie": `tcdi_desktop=${ctx.nextId("dsk_")}; Path=/; HttpOnly; Secure; SameSite=Lax`,
+      },
+      body: "",
+    };
+  }
+
+  function desktop(req: MockRequest): MockResponse {
+    if (req.method !== "GET") return err(404, "NOT_FOUND", "method not allowed", false);
+    // Cookie-gated like the real gateway: without the session cookie the
+    // desktop is unauthorized — this is what proves the browser sent the
+    // cookie on the cross-site POST→302 redirect chain.
+    if (!parseCookies(req.headers["cookie"])["tcdi_desktop"]) {
+      return { status: 401, headers: { "content-type": "text/plain" }, body: "unauthorized" };
+    }
+    const id = req.path.split("/").pop();
+    return {
+      status: 200,
+      headers: { "content-type": "text/html" },
+      body: `<html><body><h1>desktop session ${id}</h1></body></html>`,
+    };
+  }
+
+  function publicRoutes(req: MockRequest): MockResponse | undefined {
+    if (req.path === "/v1/launch") return launch(req);
+    if (req.path.startsWith("/desktop/")) return desktop(req);
+    return undefined;
+  }
+
+  // GET /v1/workspaces/{id}/connection — passive (never slides the idle
+  // timer server-side; a mock has no clock). Visibility matches
+  // GET /v1/workspaces/{id}: an unknown workspace is 404.
+  function connection(req: MockRequest): MockResponse | undefined {
+    const m = req.path.match(/^\/v1\/workspaces\/([^/]+)\/connection$/);
+    if (!m || req.method !== "GET") return undefined;
+    if (!state.workspaces.get(m[1])) {
+      return err(404, "NOT_FOUND", "workspace not found", false);
+    }
+    const fixed = scripted.get(m[1]);
+    if (fixed) return ok(200, fixed);
+    const leaseActive = state.leases.has(m[1]);
+    return ok(200, {
       state: leaseActive ? "connected" : "none",
       leaseActive,
-      lastRenewedAt: new Date().toISOString(),
+      lastRenewedAt: ctx.nowIso(),
     });
   }
 
-  function handle(req: MockRequest): MockResponse {
-    if (req.path === "/v1/me" && req.method === "GET") return me(req);
-    const connMatch = req.path.match(/^\/v1\/workspaces\/([^/]+)\/connection$/);
-    if (connMatch && req.method === "GET") return connection(req, connMatch[1]);
-    if (!req.path.startsWith("/v1/")) return inner.handle(req);
-
-    // v0.2 CSRF contract: the token comes from /v1/me, no cookie exists.
-    if (!authenticated(req)) return apiErr(401, "UNAUTHENTICATED", "no session");
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      if (req.headers[CSRF_HEADER] !== csrfToken) {
-        return apiErr(403, "CSRF_FAILED", "missing or mismatched CSRF token");
-      }
-      // Satisfy the wrapped handler's legacy cookie-vs-header check.
-      req = {
-        ...req,
-        headers: {
-          ...req.headers,
-          cookie: `${req.headers.cookie ?? ""}; ${CSRF_COOKIE}=${csrfToken}`,
-        },
-      };
-    }
-    const resp = inner.handle(req);
-    const connPost = req.path.match(/^\/v1\/workspaces\/([^/]+)\/connections$/);
-    if (
-      connPost &&
-      req.method === "POST" &&
-      resp.status === 201 &&
-      typeof resp.body === "object" &&
-      resp.body !== null
-    ) {
-      // Per-workspace launch URL (D9): https://ws-<label>.<sessionDomain>/v1/launch
-      const host = `${sessionHostLabel(connPost[1])}.${sessionDomain}`;
-      return {
-        ...resp,
-        body: { ...(resp.body as Record<string, unknown>), launchUrl: `https://${host}/v1/launch` },
-      };
-    }
-    return resp;
+  function api(req: MockRequest): MockResponse | undefined {
+    return connection(req);
   }
 
-  return {
-    handle,
-    state: inner.state,
-    reset: () => {
-      scripted.clear();
-      inner.reset();
-    },
-    sessionDomain,
-    setCsrfToken: (token) => {
-      csrfToken = token;
-    },
-    connection: {
-      set: (workspaceId, status) => scripted.set(workspaceId, status),
-      clear: (workspaceId) => scripted.delete(workspaceId),
-    },
+  function control(req: MockRequest): MockResponse | undefined {
+    if (req.path === "/_control/launchRequests" && req.method === "GET") {
+      return { status: 200, headers: { "content-type": "application/json" }, body: { requests: state.launchRequests } };
+    }
+    // POST /_control/session/connection {workspaceId, state?, leaseActive?,
+    // lastRenewedAt?} — script the poll response; a missing/absent "state"
+    // clears the override. GET lists the scripted entries.
+    if (req.path === "/_control/session/connection") {
+      if (req.method === "GET") {
+        return ok(200, { scripted: Object.fromEntries(scripted) });
+      }
+      if (req.method === "POST") {
+        const id = String(req.body?.workspaceId ?? "");
+        if (req.body?.state === undefined) {
+          scripted.delete(id);
+          return ok(200, { cleared: id });
+        }
+        scripted.set(id, {
+          state: req.body.state as MockConnectionStatus["state"],
+          leaseActive: req.body.leaseActive === true,
+          ...(typeof req.body?.lastRenewedAt === "string"
+            ? { lastRenewedAt: req.body.lastRenewedAt }
+            : {}),
+        });
+        return ok(200, { scripted: id });
+      }
+      return err(404, "NOT_FOUND", "no control route", false);
+    }
+    return undefined;
+  }
+
+  const sessionState: SessionAreaState = {
+    connection: { set: (id, s) => scripted.set(id, s), clear: (id) => scripted.delete(id) },
+    csrfToken: CSRF_TOKEN_VALUE,
+    sessionDomain: ctx.sessionDomain,
   };
+
+  return { name: "session", public: publicRoutes, api, control, state: sessionState };
 }
