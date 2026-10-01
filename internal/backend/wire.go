@@ -694,5 +694,6 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		ClipboardPolicy:        e.ClipboardPolicy,
 		NetworkProfile:         e.NetworkProfile,
 		PublishedAt:            e.PublishedAt,
+		ImageBuiltAt:           e.ImageBuiltAt,
 	}
 }
