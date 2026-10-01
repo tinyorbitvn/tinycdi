@@ -149,14 +149,9 @@ func (b *Backend) Run(ctx context.Context) error {
 	// 2. Drain the session gateway: close every open stream and report
 	//    disconnect for each, without revoking leases — the same cookie
 	//    reconnects on another replica.
-	// TODO(T1.3 merge): call b.gw.Drain directly once Gateway.Drain exists.
 	if b.gw != nil {
 		drainCtx, dcancel := context.WithTimeout(context.Background(), shutdownBudget)
-		if d, ok := any(b.gw).(interface{ Drain(context.Context) }); ok {
-			d.Drain(drainCtx)
-		} else {
-			b.gw.Close() // kills sessions; conn teardown reports disconnect
-		}
+		b.gw.Drain(drainCtx)
 		dcancel()
 	}
 

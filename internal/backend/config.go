@@ -252,7 +252,10 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["login-key-file"] {
-		_ = c.LoginKeyFiles.Set(envOr(getenv, "TCDI_LOGIN_KEY_FILE", ""))
+		// TCDI_LOGIN_KEY_FILES is the legacy plural the interim cmd/api used.
+		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
+			_ = c.LoginKeyFiles.Set(v)
+		}
 	}
 
 	// Env-only secrets.

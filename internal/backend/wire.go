@@ -27,6 +27,7 @@ import (
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
@@ -69,6 +70,27 @@ func (b *Backend) wire(ctx context.Context) error {
 
 	// The gateway identity and ticket audience are shared by the session
 	// listener and the internal broker API.
+	id, err := resolveGatewayIdentity(cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.SplitMode() {
+		if err := b.wireSplit(cfg, metrics, id); err != nil {
+			return err
+		}
+	} else {
+		if err := b.wireMerged(ctx, cfg, id, metrics); err != nil {
+			return err
+		}
+	}
+	return b.bind(cfg)
+}
+
+// resolveGatewayIdentity derives the session-gateway identity: -gateway-id
+// wins; merged mode defaults to the shared "backend" identity so every
+// replica owns the same leases; split mode falls back to the client
+// certificate's Subject CN (the v0.1 behaviour).
+func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
 		if u, err := url.Parse(cfg.SessionOrigin); err == nil && u.Hostname() != "" {
@@ -79,35 +101,35 @@ func (b *Backend) wire(ctx context.Context) error {
 		audience = broker.DefaultGatewayAudience
 	}
 	gwID := cfg.GatewayID
-	if cfg.SplitMode() {
-		if gwID == "" {
+	if gwID == "" {
+		if cfg.SplitMode() {
 			id, err := gatewayCN(cfg.MTLSCert)
 			if err != nil {
-				return fmt.Errorf("gateway id from client cert: %w", err)
+				return broker.GatewayIdentity{}, fmt.Errorf("gateway id from client cert: %w", err)
 			}
 			if id == "" {
-				return errors.New("client cert has no Subject CN; pass -gateway-id")
+				return broker.GatewayIdentity{}, errors.New("client cert has no Subject CN; pass -gateway-id")
 			}
 			gwID = id
-		}
-		if err := b.wireSplit(cfg, metrics, gwID, audience); err != nil {
-			return err
-		}
-	} else {
-		if gwID == "" {
+		} else {
 			gwID = defaultMergedGatewayID
 		}
-		if err := b.wireMerged(ctx, cfg, gwID, audience, metrics); err != nil {
-			return err
-		}
 	}
-	return b.bind(cfg)
+	return broker.GatewayIdentity{ID: gwID, Audience: audience}, nil
+}
+
+// localGateway builds the pinned-identity in-process broker client the
+// merged session gateway drives — as BrokerClient and as the session
+// directory (P3). The operator CN is reserved so it can never act as a
+// gateway.
+func (b *Backend) localGateway(brk *broker.Broker, id broker.GatewayIdentity) (*broker.LocalGateway, error) {
+	return broker.NewLocalGateway(brk, id, b.cfg.OperatorCN)
 }
 
 // wireMerged builds the full control-plane stack: Postgres, Kubernetes
 // client and informer cache, provisioning services, broker, OIDC
 // authenticator and the in-process session gateway.
-func (b *Backend) wireMerged(ctx context.Context, cfg Config, gwID, audience string, metrics *observability.Metrics) error {
+func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayIdentity, metrics *observability.Metrics) error {
 	log := b.log
 
 	db, err := store.Open(ctx, cfg.DatabaseURL)
@@ -269,7 +291,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, gwID, audience str
 	})
 
 	brk := broker.New(db, bindings,
-		broker.WithGatewayAudience(audience),
+		broker.WithGatewayAudience(id.Audience),
 		broker.WithCredentialSource(broker.NewK8sCredentialSource(kc, tenants)))
 
 	// Expiry planner (design §8): periodically evaluate running workspaces
@@ -307,17 +329,21 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, gwID, audience str
 		tlsCfg.GetCertificate = rel.GetCertificate
 		b.internalTLSCfg = tlsCfg
 		b.internalHandler = httpapi.NewHandler(httpapi.Config{
-			Broker: brk, Audience: audience, OperatorCN: cfg.OperatorCN, Logger: log,
+			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log,
 		})
 	} else {
 		log.Warn("internal broker api disabled (-internal-listen unset); remote gateways cannot redeem tickets")
 	}
 
-	// Session gateway over the in-process broker.
+	// Session gateway over the in-process broker: the LocalGateway pins the
+	// identity, applies the lease-id bounds the old mTLS hop enforced, and
+	// doubles as the session directory (cookie→lease rehydration, P3/P6).
 	if cfg.SessionListen != "" {
-		// TODO(T1.2/T1.3 merge): use broker.NewLocalGateway(brk, id,
-		// cfg.OperatorCN) and pass it as Config.Broker and Config.Sessions.
-		if err := b.newGateway(cfg, brk, gwID, audience, metrics); err != nil {
+		lg, err := b.localGateway(brk, id)
+		if err != nil {
+			return err
+		}
+		if err := b.newGateway(cfg, lg, id, metrics, lg); err != nil {
 			return err
 		}
 	}
@@ -335,7 +361,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, gwID, audience str
 // broker over mTLS. No DB, OIDC or Kubernetes wiring exists in this mode
 // (decisions-2 item 1 option A), so the gateway's session directory stays
 // nil (P6).
-func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, gwID, audience string) error {
+func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, id broker.GatewayIdentity) error {
 	bc, err := brokerclient.New(brokerclient.Config{
 		BaseURL:  cfg.BrokerURL,
 		CertFile: cfg.MTLSCert,
@@ -345,21 +371,25 @@ func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, gwID, au
 	if err != nil {
 		return fmt.Errorf("broker client: %w", err)
 	}
-	return b.newGateway(cfg, bc, gwID, audience, metrics)
+	// P6: split/test mode has no session directory — sessions live in this
+	// process, exactly as in v0.1.
+	return b.newGateway(cfg, bc, id, metrics, nil)
 }
 
 // newGateway builds the session gateway handler and records it for Drain.
-func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, gwID, audience string, metrics *observability.Metrics) error {
+// sessions is the optional session directory (nil in split mode).
+func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.GatewayIdentity, metrics *observability.Metrics, sessions gateway.SessionDirectory) error {
 	upCA, err := upstreamCAPool(cfg.UpstreamCA)
 	if err != nil {
 		return err
 	}
 	gw, err := gateway.New(gateway.Config{
-		Identity:       broker.GatewayIdentity{ID: gwID, Audience: audience},
+		Identity:       id,
 		PublicOrigin:   cfg.SessionOrigin,
 		PortalOrigins:  []string(cfg.PortalOrigins),
 		AllowedHosts:   strings.Split(cfg.SessionAllowedHosts, ","),
 		Broker:         bc,
+		Sessions:       sessions,
 		UpstreamCA:     upCA,
 		ControlToken:   cfg.ControlToken,
 		RenewInterval:  cfg.RenewInterval,
@@ -383,9 +413,17 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	svc *provisioning.Service, statusView *api.K8sStatusView, kc client.Client,
 	tenants provisioning.TenantNamespaces, retained *provisioning.RetainedStore, brk *broker.Broker) error {
 
-	// TODO(T1.4 merge): load sealing keys via loginstate.LoadKeyFiles(
-	// cfg.LoginKeyFiles) + loginstate.NewSealer and pass the result as
-	// AuthConfig.LoginSealer.
+	// Pending OIDC logins ride in an AEAD-sealed cookie (D20): the first
+	// key file seals, every configured key opens, so a login can start on
+	// one replica and finish on another.
+	keys, err := loginstate.LoadKeyFiles(cfg.LoginKeyFiles)
+	if err != nil {
+		return fmt.Errorf("login key files: %w", err)
+	}
+	sealer, err := loginstate.NewSealer(keys...)
+	if err != nil {
+		return fmt.Errorf("login key files: %w", err)
+	}
 	authn, err := api.NewAuthenticator(ctx, api.AuthConfig{
 		Issuer:         cfg.OIDCIssuer,
 		ClientID:       cfg.OIDCClientID,
@@ -393,6 +431,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		RedirectURL:    cfg.OIDCRedirectURL,
 		SessionOrigin:  cfg.SessionOrigin,
 		RequiredGroups: cfg.RequiredGroups,
+		LoginSealer:    sealer,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
 	if err != nil {
 		return fmt.Errorf("oidc: %w", err)

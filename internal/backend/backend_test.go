@@ -17,6 +17,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
@@ -235,7 +237,7 @@ func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.H
 		RevokeDeadline:      150 * time.Millisecond,
 		ControlToken:        "control-test-token",
 	}
-	if err := b.newGateway(cfg, bc, "gw-test", "session.test", nil); err != nil {
+	if err := b.newGateway(cfg, bc, broker.GatewayIdentity{ID: "gw-test", Audience: "session.test"}, nil, nil); err != nil {
 		t.Fatalf("newGateway: %v", err)
 	}
 	t.Cleanup(func() { b.gw.Close() })
@@ -295,11 +297,16 @@ func testAppHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("oidctest issuer: %v", err)
 	}
+	sealer, err := loginstate.NewSealer(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("loginstate sealer: %v", err)
+	}
 	authn, err := api.NewAuthenticator(context.Background(), api.AuthConfig{
 		Issuer:        iss.URL(),
 		ClientID:      "tinycdi",
 		RedirectURL:   "https://portal.example.test/auth/callback",
 		SessionOrigin: "https://session.example.test",
+		LoginSealer:   sealer,
 	}, api.NewInMemorySessionStore(time.Minute), testLog())
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
@@ -702,6 +709,87 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	}
 }
 
+// TestGatewayIDSharedAcrossInstances: two backends with the same
+// -gateway-id share lease ownership — a lease redeemed through one must be
+// renewable by the other (restart-safe sessions need replicas to be
+// interchangeable; a foreign ID still gets ErrDenied).
+func TestGatewayIDSharedAcrossInstances(t *testing.T) {
+	db := newDB(t)
+	src := newFakeBindings()
+	// Production binds the ticket audience to the session-origin host
+	// (resolveGatewayIdentity); the test broker does the same.
+	brk := broker.New(db, src, broker.WithGatewayAudience("session.test"))
+
+	seedWorkspace(t, db, "tenant-a", "iss|alice", "ws-shared-1")
+	src.set(readyBinding("ws-shared-1", "tenant-a", "iss|alice", 1, "rt-1", time.Now()))
+
+	cfg, err := ParseFlags(withArg(
+		withArg(mergedArgs(), "-session-origin", "https://session.test"),
+		"-gateway-id", "gw-shared"), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	b1 := &Backend{cfg: cfg, log: testLog()}
+	b2 := &Backend{cfg: cfg, log: testLog()}
+	id1, err := resolveGatewayIdentity(b1.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := resolveGatewayIdentity(b2.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("identities differ across replicas: %+v vs %+v", id1, id2)
+	}
+	lgA, err := b1.localGateway(brk, id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lgB, err := b2.localGateway(brk, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	tick, err := brk.IssueTicket(ctx,
+		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
+		"ws-shared-1", false)
+	if err != nil {
+		t.Fatalf("issue ticket: %v", err)
+	}
+	lease, err := lgA.RedeemTicket(ctx, broker.GatewayIdentity{}, tick.Token)
+	if err != nil {
+		t.Fatalf("redeem on replica A: %v", err)
+	}
+	fence := broker.Fence{
+		WorkspaceUID:      lease.WorkspaceUID,
+		RuntimeGeneration: lease.RuntimeGeneration,
+		RuntimeUID:        lease.RuntimeUID,
+		FencingVersion:    lease.FencingVersion,
+	}
+	if _, err := lgB.RenewLease(ctx, broker.GatewayIdentity{}, lease.ID, fence); err != nil {
+		t.Fatalf("renew on replica B: %v — a shared -gateway-id must make replicas interchangeable", err)
+	}
+
+	// A different gateway ID remains foreign: same DB, ErrDenied.
+	cfgOther, _ := ParseFlags(withArg(
+		withArg(mergedArgs(), "-session-origin", "https://session.test"),
+		"-gateway-id", "gw-other"), noEnv)
+	b3 := &Backend{cfg: cfgOther, log: testLog()}
+	id3, err := resolveGatewayIdentity(b3.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lgC, err := b3.localGateway(brk, id3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lgC.RenewLease(ctx, broker.GatewayIdentity{}, lease.ID, fence); !errors.Is(err, broker.ErrDenied) {
+		t.Fatalf("renew from a different gateway id = %v, want ErrDenied", err)
+	}
+}
+
 // internalAdapter adapts the gateway-side fakeBrokerClient onto the
 // httpapi.BrokerAPI surface the internal listener exposes.
 type internalAdapter struct{ fb *fakeBrokerClient }
@@ -727,4 +815,3 @@ func (a internalAdapter) RevokeWorkspaceLeases(context.Context, broker.PlatformI
 func (a internalAdapter) DrainStatus(context.Context, broker.PlatformID) (int, bool, error) {
 	return 0, true, nil
 }
-
