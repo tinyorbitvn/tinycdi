@@ -113,7 +113,7 @@ func (e *testEnv) spawnReplica(t *testing.T) *testEnv {
 		Issuer:      e.issuer.URL(),
 		ClientID:    e.issuer.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
-		LoginSealer: e.auth.cfg.LoginSealer,
+		LoginSealer: testLoginSealer(t),
 	}, NewInMemorySessionStore(30*time.Minute), slog.Default())
 	if err != nil {
 		t.Fatalf("replica NewAuthenticator: %v", err)

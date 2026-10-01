@@ -1,3 +1,6 @@
+// Copyright (c) 2026 TinyOrbit
+// SPDX-License-Identifier: MIT
+
 package loginstate_test
 
 import (
