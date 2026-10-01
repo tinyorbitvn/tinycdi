@@ -573,7 +573,7 @@ func TestIntentRevisionOrdering(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // pgSessionAdapter adapts store.SessionStore (its own record type) to
-// api.SessionStore. The production wiring lives in cmd/api; this is the
+// api.SessionStore. The production wiring lives in internal/backend; this is the
 // same conversion for tests.
 type pgSessionAdapter struct{ s *store.SessionStore }
 
