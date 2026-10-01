@@ -18,9 +18,10 @@
 #   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
-#                    (legacy annotation; spec.placement wins when set —
-#                    unset placement fields fall back to the operator
-#                    defaults rendered from runtime.placement)
+#                    DEPRECATED — prefer the typed spec.placement.nodeSelector;
+#                    the spec field wins when both are set, and unset
+#                    placement fields fall back to the operator defaults
+#                    rendered from runtime.placement
 #   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
 #                    (falls back to the top-level storageClass value)
 #   annotations:     -> extra annotations, verbatim

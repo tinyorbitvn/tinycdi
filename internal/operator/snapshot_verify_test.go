@@ -325,3 +325,31 @@ func TestValidateSnapshotSpecKasmAdapter(t *testing.T) {
 		t.Fatalf("valid kasm spec rejected: %v", err)
 	}
 }
+
+// spec.placement is hashed into the snapshot: two template revisions that
+// differ only in placement must not share a specHash — placement is spec
+// (immutable, admin-only), not metadata (D24).
+func TestSnapshot_IncludesPlacement(t *testing.T) {
+	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tpl-place", UID: types.UID("u-place")},
+		Spec:       forgedSpec("tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 8)),
+	}
+	plain, err := snapshotTemplate(tpl)
+	if err != nil {
+		t.Fatalf("snapshotTemplate: %v", err)
+	}
+	placed := tpl.DeepCopy()
+	placed.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		NodeSelector: map[string]string{"workload": "runtime"},
+	}
+	snapPlaced, err := snapshotTemplate(placed)
+	if err != nil {
+		t.Fatalf("snapshotTemplate: %v", err)
+	}
+	if plain.SpecHash == snapPlaced.SpecHash {
+		t.Fatal("specHash unchanged after spec.placement was added — the snapshot no longer covers the full spec")
+	}
+	if err := validateSnapshotSpec(&placed.Spec); err != nil {
+		t.Fatalf("a spec with placement must still satisfy snapshot invariants: %v", err)
+	}
+}
