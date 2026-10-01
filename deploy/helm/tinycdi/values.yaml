@@ -303,6 +303,11 @@ frontend:
   tls:
     existingSecret: tinycdi-frontend-tls       # keys tls.crt / tls.key
   webRoot: ""               # empty = image default (/srv/web)
+  # Optional operator branding: name a ConfigMap with branding.json,
+  # tokens.css and logo files — mounted read-only at /branding and served
+  # at /branding/ (see README "Branding"). Empty = default branding.
+  branding:
+    configMap: ""
   service:
     annotations: {}
   # PodDisruptionBudget — off by default; enabled: true renders one.
