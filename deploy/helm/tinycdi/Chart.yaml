@@ -1,14 +1,14 @@
 apiVersion: v2
 name: tinycdi
 description: |-
-  TinyCDI — Kubernetes-native Linux workspace platform: API, operator,
-  session gateway and portal. Installs namespaced RBAC only (no
-  cluster-wide dependencies such as KubeVirt/CDI), ships the
+  TinyCDI — Kubernetes-native Linux workspace platform: backend (API +
+  session gateway), frontend and operator. Installs namespaced RBAC only
+  (no cluster-wide dependencies such as KubeVirt/CDI), ships the
   workspaces.cdi.tinyorbit.vn CRDs under crds/, and references pre-created
   Secrets by name — it never carries secret values.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 kubeVersion: ">=1.30.0-0"
 keywords:
   - vdi

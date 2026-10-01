@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Session is a server-side OIDC session record. It mirrors the API-layer
@@ -114,8 +115,10 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 // session-ID digest, and Session.ID must keep carrying the raw ID the
 // caller looked up (it keys the CSRF MAC).
 const sessionReturning = `
-	RETURNING issuer, subject, tenant_id, groups, csrf_token,
-		created_at, last_seen_at, expires_at`
+	RETURNING ` + sessionColumns
+
+const sessionColumns = `issuer, subject, tenant_id, groups, csrf_token,
+	created_at, last_seen_at, expires_at`
 
 // currentEpochSQL resolves the session epoch in the same statement so a
 // rotation takes effect on the very next read — no cached copy can go stale.
@@ -128,10 +131,6 @@ const currentEpochSQL = `(SELECT value FROM platform_meta WHERE key = 'session_e
 // server-side against the PRE-update last_seen_at; an interval string
 // keeps the comparison unambiguously typed.
 func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
-	var sess Session
-	var groups []byte
-	var expires *time.Time
-
 	key := sessionKey(id)
 	var row pgx.Row
 	if s.idle > 0 {
@@ -149,11 +148,19 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 			  AND epoch = `+currentEpochSQL+`
 			  AND (expires_at IS NULL OR expires_at > now())`+sessionReturning, key)
 	}
+	return s.scanSession(ctx, row, key, id)
+}
+
+// scanSession materializes the sessionReturning/sessionColumns projection.
+// A no-row read drops dead sessions opportunistically — including ones a
+// rotated epoch orphaned — and reports ErrSessionNotFound.
+func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id string) (*Session, error) {
+	var sess Session
+	var groups []byte
+	var expires *time.Time
 	err := row.Scan(&sess.Issuer, &sess.Subject, &sess.TenantID, &groups,
 		&sess.CSRFToken, &sess.CreatedAt, &sess.LastSeenAt, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Drop dead sessions opportunistically — including ones a rotated
-		// epoch orphaned.
 		if s.idle > 0 {
 			_, _ = s.db.Pool().Exec(ctx, `
 				DELETE FROM sessions WHERE id = $1
@@ -169,10 +176,10 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 		}
 		return nil, ErrSessionNotFound
 	}
-	sess.ID = id // raw ID at the Go boundary; the row key is its digest
 	if err != nil {
 		return nil, fmt.Errorf("session get: %w", err)
 	}
+	sess.ID = id // raw ID at the Go boundary; the row key is its digest
 	if err := json.Unmarshal(groups, &sess.Groups); err != nil {
 		return nil, fmt.Errorf("session groups: %w", err)
 	}
@@ -180,6 +187,63 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 		sess.ExpiresAt = *expires
 	}
 	return &sess, nil
+}
+
+// Peek returns the session without writing last_seen_at — the read passive
+// endpoints use so polling them never extends the idle window (P4, D18).
+// Validity rules are identical to Get: unknown, idle-expired,
+// absolute-expired or stale-epoch sessions report ErrSessionNotFound.
+func (s *SessionStore) Peek(ctx context.Context, id string) (*Session, error) {
+	key := sessionKey(id)
+	var row pgx.Row
+	if s.idle > 0 {
+		row = s.db.Pool().QueryRow(ctx, `
+			SELECT `+sessionColumns+` FROM sessions
+			WHERE id = $1
+			  AND epoch = `+currentEpochSQL+`
+			  AND (expires_at IS NULL OR expires_at > now())
+			  AND last_seen_at > now() - $2::interval`,
+			key, fmt.Sprintf("%dms", s.idle.Milliseconds()))
+	} else {
+		row = s.db.Pool().QueryRow(ctx, `
+			SELECT `+sessionColumns+` FROM sessions
+			WHERE id = $1
+			  AND epoch = `+currentEpochSQL+`
+			  AND (expires_at IS NULL OR expires_at > now())`, key)
+	}
+	return s.scanSession(ctx, row, key, id)
+}
+
+// TouchPrincipal slides last_seen_at for the principal's sessions that are
+// still inside the idle window and before their absolute expiry (D18):
+// desktop input keeps the owning user's portal session alive but can never
+// revive an expired one. principal is the lease's principal_subject —
+// "issuer|subject", the Principal.Owner() string. Returns the row count
+// actually updated.
+func (s *SessionStore) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
+	var (
+		tag pgconn.CommandTag
+		err error
+	)
+	if s.idle > 0 {
+		tag, err = s.db.Pool().Exec(ctx, `
+			UPDATE sessions SET last_seen_at = now()
+			WHERE issuer || '|' || subject = $1
+			  AND epoch = `+currentEpochSQL+`
+			  AND (expires_at IS NULL OR expires_at > now())
+			  AND last_seen_at > now() - $2::interval`,
+			principal, fmt.Sprintf("%dms", s.idle.Milliseconds()))
+	} else {
+		tag, err = s.db.Pool().Exec(ctx, `
+			UPDATE sessions SET last_seen_at = now()
+			WHERE issuer || '|' || subject = $1
+			  AND epoch = `+currentEpochSQL+`
+			  AND (expires_at IS NULL OR expires_at > now())`, principal)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("session touch: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // Delete removes the session; deleting a missing ID is a no-op.

@@ -2,17 +2,17 @@
 # sha256:<64hex> reference and database.existingSecret is empty.
 # `helm template`/`helm lint` must reject this file.
 portalHost: portal.lab.example.net
-sessionHost: session.lab.example.net
+sessionDomain: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   existingSecret: tinycdi-oidc-client
 
 database:
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
 
 images:
   api:
-    repository: tinyorbitvn/tinycdi-api
+    repository: legacy/api
     digest: not-a-sha256-digest

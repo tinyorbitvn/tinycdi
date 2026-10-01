@@ -12,6 +12,9 @@
 //   - KubeVirt/CDI (or any other cluster-wide dependency) is never rendered,
 //   - the default values render with NO dev components (no Postgres, no
 //     dev-OIDC, no dev-allow-no-broker),
+//   - the control plane is exactly three Deployments (backend, frontend,
+//     operator); the removed api/gateway/portal values fail with a
+//     migration hint,
 //   - portal and session hosts are different registrable hosts; the render
 //     FAILS when they are equal,
 //   - values.schema.json rejects malformed values,
@@ -25,6 +28,7 @@ package chart_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -232,14 +236,13 @@ func TestDefaultsRenderWithoutDevComponents(t *testing.T) {
 		}
 	}
 	deps := selectDocs(docs, "Deployment")
-	if len(deps) != 4 {
-		t.Fatalf("expected exactly 4 Deployments by default, got %d", len(deps))
+	if len(deps) != 3 {
+		t.Fatalf("expected exactly 3 Deployments by default, got %d", len(deps))
 	}
 	for _, want := range []struct{ dep, img string }{
-		{"api", "ghcr.io/tinyorbitvn/tinycdi-api:0.1.0"},
-		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:0.1.0"},
-		{"gateway", "ghcr.io/tinyorbitvn/tinycdi-gateway:0.1.0"},
-		{"portal", "ghcr.io/tinyorbitvn/tinycdi-portal:0.1.0"},
+		{"backend", "ghcr.io/tinyorbitvn/tinycdi-backend:0.2.0"},
+		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:0.2.0"},
+		{"frontend", "ghcr.io/tinyorbitvn/tinycdi-frontend:0.2.0"},
 	} {
 		d := deployment(docs, want.dep)
 		if d == nil {
@@ -302,15 +305,16 @@ func TestExposureToggles(t *testing.T) {
 
 // TestCertManagerToggle: no Certificate objects by default; with
 // certManager.enabled+selfSigned the render carries the bootstrap CA chain
-// plus three leaf Certificates writing into the configured secret names.
+// plus two leaf Certificates (backend internal listener, operator client)
+// writing into the configured secret names.
 func TestCertManagerToggle(t *testing.T) {
 	if n := len(selectDocs(render(t, "minimal-values.yaml"), "Certificate")); n != 0 {
 		t.Errorf("default render must not contain Certificates, got %d", n)
 	}
 	docs := render(t, "ingress-certmanager-values.yaml")
 	certs := selectDocs(docs, "Certificate")
-	if len(certs) != 4 { // internal CA + api-internal + gateway-mtls + operator-mtls
-		t.Fatalf("expected 4 Certificates with certManager.selfSigned, got %d", len(certs))
+	if len(certs) != 3 { // internal CA + backend-internal + operator-mtls
+		t.Fatalf("expected 3 Certificates with certManager.selfSigned, got %d", len(certs))
 	}
 	secrets := map[string]bool{}
 	var operatorCN string
@@ -326,8 +330,7 @@ func TestCertManagerToggle(t *testing.T) {
 	}
 	for _, want := range []string{
 		"tcdi-internal-ca",
-		"tinycdi-api-internal-tls",
-		"tinycdi-gateway-mtls",
+		"tinycdi-backend-internal-tls",
 		"tinycdi-operator-mtls",
 	} {
 		if !secrets[want] {
@@ -347,8 +350,8 @@ func TestCertManagerToggle(t *testing.T) {
 		"--set", "certManager.enabled=true",
 		"--set", "certManager.issuerRef.name=corp-issuer")
 	certs = selectDocs(docs, "Certificate")
-	if len(certs) != 3 {
-		t.Fatalf("issuerRef render: expected 3 leaf Certificates, got %d", len(certs))
+	if len(certs) != 2 {
+		t.Fatalf("issuerRef render: expected 2 leaf Certificates, got %d", len(certs))
 	}
 	if len(selectDocs(docs, "Issuer"))+len(selectDocs(docs, "ClusterIssuer")) != 0 {
 		t.Error("issuerRef render must not bootstrap an Issuer/ClusterIssuer")
@@ -368,16 +371,16 @@ func TestImageRegistryOverride(t *testing.T) {
 	docs := renderArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
 		"--set", "global.imageRegistry=registry.example.com",
-		"--set", "images.portal.registry=portal-mirror.example.net")
+		"--set", "images.frontend.registry=frontend-mirror.example.net")
 	depImg := map[string]string{}
-	for _, name := range []string{"api", "operator", "gateway", "portal"} {
+	for _, name := range []string{"backend", "operator", "frontend"} {
 		depImg[name] = firstContainerImage(deployment(docs, name))
 	}
-	if depImg["api"] != "registry.example.com/tinyorbitvn/tinycdi-api:0.1.0" {
-		t.Errorf("global registry override failed: api image %q", depImg["api"])
+	if depImg["backend"] != "registry.example.com/tinyorbitvn/tinycdi-backend:0.2.0" {
+		t.Errorf("global registry override failed: backend image %q", depImg["backend"])
 	}
-	if depImg["portal"] != "portal-mirror.example.net/tinyorbitvn/tinycdi-portal:0.1.0" {
-		t.Errorf("per-image registry must win over global: portal image %q", depImg["portal"])
+	if depImg["frontend"] != "frontend-mirror.example.net/tinyorbitvn/tinycdi-frontend:0.2.0" {
+		t.Errorf("per-image registry must win over global: frontend image %q", depImg["frontend"])
 	}
 }
 
@@ -386,10 +389,9 @@ func TestImageRegistryOverride(t *testing.T) {
 func TestImageDigestPinning(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	want := map[string]string{
-		"api":      "registry.lab.example.net/tinycdi/api@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"backend":  "registry.lab.example.net/tinycdi/backend@sha256:1111111111111111111111111111111111111111111111111111111111111111",
 		"operator": "registry.lab.example.net/tinycdi/operator@sha256:2222222222222222222222222222222222222222222222222222222222222222",
-		"gateway":  "registry.lab.example.net/tinycdi/gateway@sha256:3333333333333333333333333333333333333333333333333333333333333333",
-		"portal":   "registry.lab.example.net/tinycdi/portal@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+		"frontend": "registry.lab.example.net/tinycdi/frontend@sha256:4444444444444444444444444444444444444444444444444444444444444444",
 	}
 	for name, img := range want {
 		if got := firstContainerImage(deployment(docs, name)); got != img {
@@ -587,38 +589,38 @@ func TestDefaultDenyNetworkPolicyEverywhere(t *testing.T) {
 	}
 }
 
-func TestGatewayEgressToRuntimeNamespaces(t *testing.T) {
+func TestBackendEgressToRuntimeNamespaces(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	for _, d := range selectDocs(docs, "NetworkPolicy") {
 		name, ns := meta(d)
-		if name != "gateway" || ns != "tcdi-system" {
+		if name != "backend" || ns != "tcdi-system" {
 			continue
 		}
 		spec, _ := d["spec"].(map[string]any)
 		raw, _ := yaml.Marshal(spec["egress"])
 		if !strings.Contains(string(raw), "workspaces.cdi.tinyorbit.vn/tenant") {
-			t.Errorf("gateway NetworkPolicy lacks egress to tenant namespaces (namespaceSelector on workspaces.cdi.tinyorbit.vn/tenant)")
+			t.Errorf("backend NetworkPolicy lacks egress to tenant namespaces (namespaceSelector on workspaces.cdi.tinyorbit.vn/tenant)")
 		}
 		return
 	}
-	t.Error("no gateway NetworkPolicy in tcdi-system")
+	t.Error("no backend NetworkPolicy in tcdi-system")
 }
 
-// TestAPIBrokerReachableFromOperator: the teardown finalizer's broker
-// client (revoke/drain, ADR 0003) dials the api internal mTLS listener on
-// :9443. On an enforcing CNI both directions need a rule — api ingress must
-// accept operator pods and an operator egress policy must select api on
-// 9443 only (least privilege). Defect I-9: without these the finalizer
-// stalls at CleanupRetry "broker unreachable".
-func TestAPIBrokerReachableFromOperator(t *testing.T) {
+// TestBackendBrokerReachableFromOperator: the teardown finalizer's broker
+// client (revoke/drain, ADR 0003) dials the backend internal mTLS listener
+// on :9443. On an enforcing CNI both directions need a rule — backend
+// ingress must accept operator pods and an operator egress policy must
+// select backend on 9443 only (least privilege). Defect I-9: without these
+// the finalizer stalls at CleanupRetry "broker unreachable".
+func TestBackendBrokerReachableFromOperator(t *testing.T) {
 	for _, vf := range lintValues {
 		docs := render(t, vf)
 
-		// api ingress: operator pods allowed on the internal port only.
+		// backend ingress: operator pods allowed on the internal port only.
 		apiFound := false
 		for _, d := range selectDocs(docs, "NetworkPolicy") {
 			name, ns := meta(d)
-			if name != "api" || ns != "tcdi-system" {
+			if name != "backend" || ns != "tcdi-system" {
 				continue
 			}
 			spec, _ := d["spec"].(map[string]any)
@@ -645,11 +647,11 @@ func TestAPIBrokerReachableFromOperator(t *testing.T) {
 			}
 		}
 		if !apiFound {
-			t.Errorf("%s: api NetworkPolicy must allow ingress from operator pods on :9443 (broker revoke/drain)", vf)
+			t.Errorf("%s: backend NetworkPolicy must allow ingress from operator pods on :9443 (broker revoke/drain)", vf)
 		}
 
-		// operator egress: a dedicated policy selecting api pods on 9443 and
-		// nothing else.
+		// operator egress: a dedicated policy selecting backend pods on 9443
+		// and nothing else.
 		opFound := false
 		for _, d := range selectDocs(docs, "NetworkPolicy") {
 			name, ns := meta(d)
@@ -670,7 +672,7 @@ func TestAPIBrokerReachableFromOperator(t *testing.T) {
 					pm, _ := peer.(map[string]any)
 					psel, _ := pm["podSelector"].(map[string]any)
 					plbls, _ := psel["matchLabels"].(map[string]any)
-					if plbls["app.kubernetes.io/name"] == "api" {
+					if plbls["app.kubernetes.io/name"] == "backend" {
 						hasAPI = true
 					}
 				}
@@ -686,7 +688,7 @@ func TestAPIBrokerReachableFromOperator(t *testing.T) {
 			}
 		}
 		if !opFound {
-			t.Errorf("%s: no operator NetworkPolicy allowing egress to api pods on :9443", vf)
+			t.Errorf("%s: no operator NetworkPolicy allowing egress to backend pods on :9443", vf)
 		}
 	}
 }
@@ -695,8 +697,8 @@ func TestEveryContainerHardened(t *testing.T) {
 	for _, vf := range lintValues {
 		docs := render(t, vf)
 		deps := selectDocs(docs, "Deployment")
-		if len(deps) < 4 {
-			t.Fatalf("%s: expected >=4 Deployments (api/operator/gateway/portal), got %d", vf, len(deps))
+		if len(deps) < 3 {
+			t.Fatalf("%s: expected >=3 Deployments (backend/operator/frontend), got %d", vf, len(deps))
 		}
 		for _, d := range deps {
 			name, _ := meta(d)
@@ -805,7 +807,7 @@ func TestSecretsReferencedByName(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	raw, _ := yaml.Marshal(docs)
 	s := string(raw)
-	for _, want := range []string{"tinycdi-api-db", "tinycdi-oidc-client", "tinycdi-gateway-tls", "tinycdi-portal-tls"} {
+	for _, want := range []string{"tinycdi-backend-db", "tinycdi-oidc-client", "tinycdi-backend-app-tls", "tinycdi-backend-session-tls", "tinycdi-backend-internal-tls", "tinycdi-frontend-tls", "tinycdi-backend-login-keys"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("rendered chart must reference existing secret %q", want)
 		}
@@ -813,19 +815,19 @@ func TestSecretsReferencedByName(t *testing.T) {
 }
 
 // TestServiceMonitor: serviceMonitor.enabled renders a monitor only for
-// the gateway metrics endpoint (SEC-33: the operator has no metrics
+// the backend metrics endpoint (SEC-33: the operator has no metrics
 // endpoint — its secure mode needs cluster-scoped TokenReview/SAR RBAC the
 // chart never grants, so operator metrics are OFF) on the dedicated
-// non-public gateway-metrics Service.
+// non-public backend-metrics Service.
 func TestServiceMonitor(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	mons := selectDocs(docs, "ServiceMonitor")
 	if len(mons) != 1 {
-		t.Fatalf("expected 1 ServiceMonitor (gateway metrics only), got %d", len(mons))
+		t.Fatalf("expected 1 ServiceMonitor (backend metrics only), got %d", len(mons))
 	}
 	name, _ := meta(mons[0])
-	if name != "gateway" {
-		t.Errorf("expected the gateway ServiceMonitor, got %q", name)
+	if name != "backend" {
+		t.Errorf("expected the backend ServiceMonitor, got %q", name)
 	}
 	svcFound := false
 	for _, d := range selectDocs(docs, "Service") {
@@ -833,16 +835,16 @@ func TestServiceMonitor(t *testing.T) {
 		if name == "operator-metrics" {
 			t.Error("operator-metrics Service must not exist — operator metrics are disabled")
 		}
-		if name == "gateway-metrics" {
+		if name == "backend-metrics" {
 			svcFound = true
 			spec, _ := d["spec"].(map[string]any)
 			if spec["type"] != "ClusterIP" {
-				t.Errorf("gateway-metrics Service must be ClusterIP (never the public port), got %v", spec["type"])
+				t.Errorf("backend-metrics Service must be ClusterIP (never the public port), got %v", spec["type"])
 			}
 		}
 	}
 	if !svcFound {
-		t.Error("gateway-metrics Service missing although gateway.metricsListen is set")
+		t.Error("backend-metrics Service missing although backend.metrics.enabled is set")
 	}
 	// No monitors when metrics are off even if serviceMonitor.enabled.
 	docs = renderArgs(t,
@@ -853,27 +855,28 @@ func TestServiceMonitor(t *testing.T) {
 	}
 }
 
-// TestMetricsNotOnPublicGatewayService: SEC-33 — the public gateway
-// Service must expose only :443/https; a metricsListen port is served by
-// the separate ClusterIP gateway-metrics Service, scraped only by the
-// declared prometheusPeers through a gateway-pod-scoped NetworkPolicy.
-func TestMetricsNotOnPublicGatewayService(t *testing.T) {
+// TestMetricsNotOnPublicBackendService: SEC-33 — the public backend
+// Service must expose only the app/session/internal listeners; the metrics
+// port is served by the separate ClusterIP backend-metrics Service,
+// scraped only by the declared prometheusPeers through a
+// backend-pod-scoped NetworkPolicy.
+func TestMetricsNotOnPublicBackendService(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	for _, d := range selectDocs(docs, "Service") {
 		name, _ := meta(d)
-		if name != "gateway" {
+		if name != "backend" {
 			continue
 		}
 		spec, _ := d["spec"].(map[string]any)
 		for _, p := range toSlice(spec["ports"]) {
 			pm, _ := p.(map[string]any)
 			if pm["name"] == "metrics" {
-				t.Errorf("public gateway Service must not expose the metrics port, got %v", pm)
+				t.Errorf("public backend Service must not expose the metrics port, got %v", pm)
 			}
 		}
 	}
-	// the scrape NetworkPolicy must select gateway pods — never {} (which
-	// would also cover api/operator/portal pods).
+	// the scrape NetworkPolicy must select backend pods — never {} (which
+	// would also cover frontend/operator pods).
 	found := false
 	for _, d := range selectDocs(docs, "NetworkPolicy") {
 		name, ns := meta(d)
@@ -887,8 +890,8 @@ func TestMetricsNotOnPublicGatewayService(t *testing.T) {
 			t.Error("allow-metrics-scrape podSelector must not be empty (SEC-33)")
 		}
 		ml, _ := sel["matchLabels"].(map[string]any)
-		if ml["app.kubernetes.io/name"] != "gateway" {
-			t.Errorf("allow-metrics-scrape must select gateway pods, got %v", sel)
+		if ml["app.kubernetes.io/name"] != "backend" {
+			t.Errorf("allow-metrics-scrape must select backend pods, got %v", sel)
 		}
 		raw, _ := yaml.Marshal(spec)
 		if !strings.Contains(string(raw), "kubernetes.io/metadata.name: monitoring") {
@@ -896,17 +899,17 @@ func TestMetricsNotOnPublicGatewayService(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("no allow-metrics-scrape NetworkPolicy although gateway.metricsListen is set")
+		t.Error("no allow-metrics-scrape NetworkPolicy although backend.metrics.enabled is set")
 	}
 }
 
-// TestMetricsEmptyPeersFailClosed: SEC-32 — enabling gateway metrics with
+// TestMetricsEmptyPeersFailClosed: SEC-32 — enabling backend metrics with
 // an empty prometheusPeers list would open scraping to every namespace;
 // the render must fail instead.
 func TestMetricsEmptyPeersFailClosed(t *testing.T) {
 	out := renderErrArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-		"--set", "gateway.metricsListen=:9090",
+		"--set", "backend.metrics.enabled=true",
 		"--set", "networkPolicy.prometheusPeers=null")
 	if !strings.Contains(out, "prometheusPeers") {
 		t.Errorf("empty prometheusPeers with metrics enabled should fail mentioning prometheusPeers, got: %s", out)
@@ -932,22 +935,46 @@ func TestNetworkPolicyEmptyPeersFailClosed(t *testing.T) {
 	}
 }
 
-// TestPDBToggle: podDisruptionBudget.enabled renders a PDB selecting the
-// component pods.
+// TestPDBToggle: backend.pdb is ON by default (D22 — two replicas need
+// minAvailable during voluntary disruption); frontend.pdb renders when
+// enabled, operator keeps podDisruptionBudget.
 func TestPDBToggle(t *testing.T) {
-	docs := render(t, "example-values.yaml")
+	docs := render(t, "minimal-values.yaml")
 	pdbs := selectDocs(docs, "PodDisruptionBudget")
-	if len(pdbs) != 1 {
-		t.Fatalf("expected 1 PDB (api), got %d", len(pdbs))
+	byName := map[string]doc{}
+	for _, p := range pdbs {
+		name, _ := meta(p)
+		byName[name] = p
 	}
-	spec, _ := pdbs[0]["spec"].(map[string]any)
+	bp, ok := byName["backend"]
+	if !ok {
+		t.Fatal("no backend PDB rendered by default (D22)")
+	}
+	spec, _ := bp["spec"].(map[string]any)
 	sel, _ := spec["selector"].(map[string]any)
 	ml, _ := sel["matchLabels"].(map[string]any)
-	if ml["app.kubernetes.io/name"] != "api" {
-		t.Errorf("PDB must select api pods, got %v", ml)
+	if ml["app.kubernetes.io/name"] != "backend" {
+		t.Errorf("backend PDB must select backend pods, got %v", ml)
 	}
 	if spec["minAvailable"] != 1 {
-		t.Errorf("PDB minAvailable = %v, want 1", spec["minAvailable"])
+		t.Errorf("backend PDB minAvailable = %v, want 1", spec["minAvailable"])
+	}
+	// maxUnavailable wins when set.
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "frontend.pdb.enabled=true", "--set", "frontend.pdb.maxUnavailable=1")
+	var fp doc
+	for _, p := range selectDocs(docs, "PodDisruptionBudget") {
+		if n, _ := meta(p); n == "frontend" {
+			fp = p
+		}
+	}
+	if fp == nil {
+		t.Fatal("frontend.pdb.enabled did not render a frontend PDB")
+	}
+	fspec, _ := fp["spec"].(map[string]any)
+	if fspec["maxUnavailable"] != 1 {
+		t.Errorf("frontend PDB maxUnavailable = %v, want 1", fspec["maxUnavailable"])
 	}
 }
 
@@ -1023,7 +1050,7 @@ func TestOperatorBrokerClientWired(t *testing.T) {
 		}
 		args := strings.Join(firstContainerArgs(dep), "\n")
 		for _, want := range []string{
-			"--broker-internal-url=https://api-internal.tcdi-system.svc:9443",
+			"--broker-internal-url=https://backend.tcdi-system.svc:9443",
 			"--broker-ca-file=/etc/broker-ca/",
 			"--broker-client-cert-file=/mtls/tls.crt",
 			"--broker-client-key-file=/mtls/tls.key",
@@ -1047,59 +1074,62 @@ func TestOperatorBrokerClientWired(t *testing.T) {
 	}
 }
 
-// TestGatewayControlToken: the structured gateway.controlToken value mounts
+// TestBackendControlToken: the structured backend.controlToken value mounts
 // the token secret and passes -control-token-file; without it (minimal
 // values) no control flag is rendered and the routes stay closed.
-func TestGatewayControlToken(t *testing.T) {
-	dep := deployment(render(t, "example-values.yaml"), "gateway")
+func TestBackendControlToken(t *testing.T) {
+	dep := deployment(render(t, "example-values.yaml"), "backend")
 	if dep == nil {
-		t.Fatal("no gateway Deployment rendered")
+		t.Fatal("no backend Deployment rendered")
 	}
 	args := strings.Join(firstContainerArgs(dep), "\n")
 	if !strings.Contains(args, "-control-token-file=/control/token") {
-		t.Errorf("gateway args missing -control-token-file=/control/token\nargs:\n%s", args)
+		t.Errorf("backend args missing -control-token-file=/control/token\nargs:\n%s", args)
 	}
-	if !secretNames(dep)["tinycdi-gateway-control-token"] {
-		t.Error("gateway pod missing volume for secret tinycdi-gateway-control-token")
+	if !secretNames(dep)["tinycdi-backend-control-token"] {
+		t.Error("backend pod missing volume for secret tinycdi-backend-control-token")
 	}
 
-	dep = deployment(render(t, "minimal-values.yaml"), "gateway")
+	dep = deployment(render(t, "minimal-values.yaml"), "backend")
 	args = strings.Join(firstContainerArgs(dep), "\n")
 	if strings.Contains(args, "control-token") {
 		t.Errorf("minimal render must not configure a control token (routes stay closed)\nargs:\n%s", args)
 	}
 }
 
-// TestGatewayPortalOrigin: the gateway must receive the portal origin
-// derived from portalHost (ADR 0004) — without it every browser launch
-// POST is rejected as cross-origin.
-func TestGatewayPortalOrigin(t *testing.T) {
+// TestBackendPortalOrigin: the session listener must receive the portal
+// origin derived from portalHost (ADR 0004) — without it every browser
+// launch POST is rejected as cross-origin.
+func TestBackendPortalOrigin(t *testing.T) {
 	for _, vf := range []string{"example-values.yaml", "minimal-values.yaml"} {
-		dep := deployment(render(t, vf), "gateway")
+		dep := deployment(render(t, vf), "backend")
 		if dep == nil {
-			t.Fatalf("%s: no gateway Deployment rendered", vf)
+			t.Fatalf("%s: no backend Deployment rendered", vf)
 		}
 		args := strings.Join(firstContainerArgs(dep), "\n")
 		if !strings.Contains(args, "-portal-origin=https://portal.lab.example.net") {
-			t.Errorf("%s: gateway args missing -portal-origin=https://portal.lab.example.net\nargs:\n%s", vf, args)
+			t.Errorf("%s: backend args missing -portal-origin=https://portal.lab.example.net\nargs:\n%s", vf, args)
 		}
 	}
 }
 
-// TestPortalSessionOrigin: the portal must receive the session origin
-// derived from sessionHost — the SPA opens sessions by POSTing a
-// cross-origin launch form to https://<sessionHost>, and the portal CSP
-// form-action blocks every launch unless that origin is configured
+// TestFrontendSessionDomain: the frontend must receive the session domain
+// — the SPA opens sessions by POSTing a launch form to a workspace's own
+// <label>.<sessionDomain> host, and the portal CSP frame-src/form-action
+// allow https://*.<sessionDomain> only when the domain is configured
 // (launch regression).
-func TestPortalSessionOrigin(t *testing.T) {
+func TestFrontendSessionDomain(t *testing.T) {
 	for _, vf := range []string{"example-values.yaml", "minimal-values.yaml"} {
-		dep := deployment(render(t, vf), "portal")
+		dep := deployment(render(t, vf), "frontend")
 		if dep == nil {
-			t.Fatalf("%s: no portal Deployment rendered", vf)
+			t.Fatalf("%s: no frontend Deployment rendered", vf)
 		}
 		args := strings.Join(firstContainerArgs(dep), "\n")
-		if !strings.Contains(args, "-session-origin=https://session.lab.example.net") {
-			t.Errorf("%s: portal args missing -session-origin=https://session.lab.example.net\nargs:\n%s", vf, args)
+		if !strings.Contains(args, "-session-domain=session.lab.example.net") {
+			t.Errorf("%s: frontend args missing -session-domain=session.lab.example.net\nargs:\n%s", vf, args)
+		}
+		if strings.Contains(args, "-session-origin") {
+			t.Errorf("%s: frontend args carry removed flag -session-origin\nargs:\n%s", vf, args)
 		}
 	}
 }
@@ -1127,24 +1157,30 @@ func firstContainerEnv(d doc) map[string]string {
 	return out
 }
 
-// TestAPIPortalOriginAllowlist: the api must get its Origin allowlist
-// (TCDI_PORTAL_ORIGINS) derived from portalHost — the portal terminates TLS
-// and proxies /v1 same-origin, so every legitimate browser Origin is
-// https://<portalHost>. example-values adds one extraPortalOrigins entry.
-func TestAPIPortalOriginAllowlist(t *testing.T) {
+// TestBackendPortalOriginAllowlist: the backend must get its portal Origin
+// allowlist (-portal-origin, repeatable) derived from portalHost — the
+// edge routes /v1 to the app listener, so every legitimate browser Origin
+// is https://<portalHost>. example-values adds one extraPortalOrigins
+// entry.
+func TestBackendPortalOriginAllowlist(t *testing.T) {
 	for _, vf := range []string{"example-values.yaml", "minimal-values.yaml"} {
-		dep := deployment(render(t, vf), "api")
+		dep := deployment(render(t, vf), "backend")
 		if dep == nil {
-			t.Fatalf("%s: no api Deployment rendered", vf)
+			t.Fatalf("%s: no backend Deployment rendered", vf)
 		}
-		got := firstContainerEnv(dep)["TCDI_PORTAL_ORIGINS"]
-		if !strings.HasPrefix(got, "https://portal.lab.example.net") {
-			t.Errorf("%s: api TCDI_PORTAL_ORIGINS missing https://portal.lab.example.net (got %q)", vf, got)
+		found := false
+		for _, a := range firstContainerArgs(dep) {
+			if a == "-portal-origin=https://portal.lab.example.net" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: backend args missing -portal-origin=https://portal.lab.example.net\nargs:\n%s", vf, strings.Join(firstContainerArgs(dep), "\n"))
 		}
 	}
-	env := firstContainerEnv(deployment(render(t, "example-values.yaml"), "api"))
-	if !strings.Contains(env["TCDI_PORTAL_ORIGINS"], "https://alt.portal.example.net") {
-		t.Errorf("example render: extraPortalOrigins entry missing (got %q)", env["TCDI_PORTAL_ORIGINS"])
+	args := strings.Join(firstContainerArgs(deployment(render(t, "example-values.yaml"), "backend")), "\n")
+	if !strings.Contains(args, "-portal-origin=https://alt.portal.example.net") {
+		t.Errorf("example render: extraPortalOrigins entry missing\nargs:\n%s", args)
 	}
 }
 
@@ -1753,15 +1789,18 @@ func secretVolumes(d doc) map[string]map[string]any {
 func TestCAVolumesProjectOnlyCACrt(t *testing.T) {
 	for _, vf := range []string{"example-values.yaml", "ingress-certmanager-values.yaml"} {
 		docs := render(t, vf)
-		for _, depName := range []string{"api", "operator", "gateway"} {
+		for _, depName := range []string{"backend", "operator", "frontend"} {
 			dep := deployment(docs, depName)
 			if dep == nil {
 				t.Fatalf("%s: no %s Deployment", vf, depName)
 			}
 			for volName, sec := range secretVolumes(dep) {
-				switch volName {
-				case "tls", "mtls", "control-token":
-					// leaf cert/token Secrets legitimately carry their key
+				switch {
+				case volName == "tls" || strings.HasPrefix(volName, "tls-") ||
+					volName == "mtls" || volName == "control-token" ||
+					volName == "login-keys":
+					// leaf cert, token and login-key Secrets legitimately
+					// carry their private material
 					continue
 				}
 				items := toSlice(sec["items"])
@@ -1780,21 +1819,21 @@ func TestCAVolumesProjectOnlyCACrt(t *testing.T) {
 	}
 }
 
-// TestGatewayServiceAccountLockedDown: SEC-34 — the gateway never calls
-// the apiserver (no client-go usage), so its SA token is not automounted
-// (SA AND pod) and the pod must not carry the cdi.tinyorbit.vn/needs-apiserver
-// egress label.
-func TestGatewayServiceAccountLockedDown(t *testing.T) {
+// TestFrontendServiceAccountLockedDown: SEC-34 — the frontend never calls
+// the apiserver (static SPA server), so its SA token is not automounted
+// (SA AND pod) and the pod must not carry the
+// cdi.tinyorbit.vn/needs-apiserver egress label.
+func TestFrontendServiceAccountLockedDown(t *testing.T) {
 	for _, vf := range lintValues {
 		docs := render(t, vf)
 		for _, d := range selectDocs(docs, "ServiceAccount") {
-			if n, _ := meta(d); n == "gateway" {
+			if n, _ := meta(d); n == "frontend" {
 				if v, ok := d["automountServiceAccountToken"].(bool); !ok || v {
-					t.Errorf("%s: gateway SA automountServiceAccountToken must be false, got %v", vf, d["automountServiceAccountToken"])
+					t.Errorf("%s: frontend SA automountServiceAccountToken must be false, got %v", vf, d["automountServiceAccountToken"])
 				}
 			}
 		}
-		dep := deployment(docs, "gateway")
+		dep := deployment(docs, "frontend")
 		if dep == nil {
 			continue
 		}
@@ -1802,11 +1841,32 @@ func TestGatewayServiceAccountLockedDown(t *testing.T) {
 		tpl, _ := spec["template"].(map[string]any)
 		podSpec, _ := tpl["spec"].(map[string]any)
 		if v, ok := podSpec["automountServiceAccountToken"].(bool); !ok || v {
-			t.Errorf("%s: gateway pod automountServiceAccountToken must be false, got %v", vf, podSpec["automountServiceAccountToken"])
+			t.Errorf("%s: frontend pod automountServiceAccountToken must be false, got %v", vf, podSpec["automountServiceAccountToken"])
 		}
 		lbls, _ := tpl["metadata"].(map[string]any)["labels"].(map[string]any)
 		if _, ok := lbls["cdi.tinyorbit.vn/needs-apiserver"]; ok {
-			t.Errorf("%s: gateway pod must not carry cdi.tinyorbit.vn/needs-apiserver — it never calls the apiserver", vf)
+			t.Errorf("%s: frontend pod must not carry cdi.tinyorbit.vn/needs-apiserver — it never calls the apiserver", vf)
+		}
+	}
+}
+
+// TestBackendPodLabels: SEC-29 — the backend pod must keep
+// workspaces.cdi.tinyorbit.vn/role=gateway (the operator's per-workspace
+// NetworkPolicy selects it for runtime ingress) and
+// cdi.tinyorbit.vn/needs-apiserver (the merged binary projects Workspace
+// CRs and reads templates — the apiserver egress policy matches on it).
+func TestBackendPodLabels(t *testing.T) {
+	for _, vf := range lintValues {
+		dep := deployment(render(t, vf), "backend")
+		if dep == nil {
+			continue
+		}
+		lbls, _ := dep["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["labels"].(map[string]any)
+		if lbls["workspaces.cdi.tinyorbit.vn/role"] != "gateway" {
+			t.Errorf("%s: backend pod must carry workspaces.cdi.tinyorbit.vn/role=gateway (SEC-29 runtime ingress selector), got %v", vf, lbls)
+		}
+		if lbls["cdi.tinyorbit.vn/needs-apiserver"] != "true" {
+			t.Errorf("%s: backend pod must carry cdi.tinyorbit.vn/needs-apiserver=true (it projects CRs), got %v", vf, lbls)
 		}
 	}
 }
@@ -1905,7 +1965,7 @@ func TestSchemaHardening(t *testing.T) {
 	// http:// extra portal origin rejected.
 	out = renderErrArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-		"--set", "api.extraPortalOrigins[0]=http://alt.portal.example.net")
+		"--set", "backend.extraPortalOrigins[0]=http://alt.portal.example.net")
 	if !strings.Contains(out, "extraPortalOrigins") && !strings.Contains(out, "https") {
 		t.Errorf("http:// extraPortalOrigins entry must be rejected, got: %s", out)
 	}
@@ -1919,13 +1979,13 @@ func TestSchemaHardening(t *testing.T) {
 	// privileged/securityContext overrides are gated behind dev.enabled.
 	out = renderErrArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-		"--set", "gateway.securityContext.privileged=true")
+		"--set", "backend.securityContext.privileged=true")
 	if !strings.Contains(out, "securityContext") {
 		t.Errorf("privileged securityContext override without dev.enabled must fail, got: %s", out)
 	}
 	out = renderErrArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-		"--set", "api.podSecurityContext.runAsNonRoot=false")
+		"--set", "backend.podSecurityContext.runAsNonRoot=false")
 	if !strings.Contains(out, "podSecurityContext") {
 		t.Errorf("runAsNonRoot=false override without dev.enabled must fail, got: %s", out)
 	}
@@ -1971,7 +2031,7 @@ func TestInternetOnlyRequiresClusterCIDRs(t *testing.T) {
 // TestPGConnHonoursSSEnv in pgx_env_test.go).
 func TestDatabaseTLSWiring(t *testing.T) {
 	docs := render(t, "security-values.yaml")
-	dep := deployment(docs, "api")
+	dep := deployment(docs, "backend")
 	env := firstContainerEnv(dep)
 	if env["PGSSLMODE"] != "verify-full" {
 		t.Errorf("PGSSLMODE = %q, want verify-full", env["PGSSLMODE"])
@@ -1982,17 +2042,17 @@ func TestDatabaseTLSWiring(t *testing.T) {
 	secs := secretVolumes(dep)
 	ca, ok := secs["db-ca"]
 	if !ok || ca["secretName"] != "tinycdi-db-ca" {
-		t.Errorf("api pod missing db-ca volume for tinycdi-db-ca, got %v", secs)
+		t.Errorf("backend pod missing db-ca volume for tinycdi-db-ca, got %v", secs)
 	}
 	items := toSlice(ca["items"])
 	if len(items) != 1 {
 		t.Errorf("db-ca volume must project only the configured key, got %v", items)
 	}
 	// CHTR-8: the mode default is verify-full — always exported as
-	// PGSSLMODE (the api refuses non-verifying sslmodes at startup). No
+	// PGSSLMODE (the backend refuses non-verifying sslmodes at startup). No
 	// db-ca volume without database.tls.caSecret.name (pgx verifies against
 	// the system CA pool then).
-	dep = deployment(render(t, "minimal-values.yaml"), "api")
+	dep = deployment(render(t, "minimal-values.yaml"), "backend")
 	env = firstContainerEnv(dep)
 	if env["PGSSLMODE"] != "verify-full" {
 		t.Errorf("default PGSSLMODE = %q, want verify-full", env["PGSSLMODE"])
@@ -2102,4 +2162,593 @@ func TestNodeProfilesInstallerDockerProof(t *testing.T) {
 		t.Fatalf("installer proof failed: %v\n%s", err, out)
 	}
 	t.Logf("installer proof output:\n%s", out)
+}
+
+// renderNotes renders templates/NOTES.txt via a client-side dry-run
+// install (helm template does not emit NOTES) and returns the text after
+// the "NOTES:" marker.
+func renderNotes(t *testing.T, extra ...string) string {
+	t.Helper()
+	args := []string{"install", "tcdi", "./tinycdi",
+		"--namespace", "tcdi-system", "--dry-run=client"}
+	args = append(args, extra...)
+	out, err := exec.Command(helmBin(t), args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm install --dry-run=client %v: %v\n%s", args, err, out)
+	}
+	s := string(out)
+	i := strings.Index(s, "\nNOTES:")
+	if i < 0 {
+		t.Fatalf("no NOTES section in dry-run output\n%s", s)
+	}
+	return s[i:]
+}
+
+// T4.2/D25: by default the operator gets the dedicated-pool placement
+// flags and the node-profile DaemonSet targets the same pool (label AND
+// taint) so the profiles land where runtime pods can schedule.
+func TestRuntimePlacementDefault(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=false",
+		"--set", "nodeProfiles.install.enabled=true")
+
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	var selArg, tolArg string
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-node-selector=") {
+			selArg = a
+		}
+		if strings.HasPrefix(a, "--runtime-tolerations=") {
+			tolArg = a
+		}
+	}
+	wantSel := `--runtime-node-selector={"cdi.tinyorbit.vn/workspace":"true"}`
+	if selArg != wantSel {
+		t.Errorf("operator selector arg = %q, want %q", selArg, wantSel)
+	}
+	for _, want := range []string{`"cdi.tinyorbit.vn/workspace"`, `"NoSchedule"`} {
+		if !strings.Contains(tolArg, want) {
+			t.Errorf("operator tolerations arg = %q, want it to contain %s", tolArg, want)
+		}
+	}
+
+	ds := daemonSet(docs, "node-profiles")
+	if ds == nil {
+		t.Fatal("no node-profiles DaemonSet rendered")
+	}
+	podSpec := dsPodSpec(ds)
+	ns, _ := podSpec["nodeSelector"].(map[string]any)
+	if ns["cdi.tinyorbit.vn/workspace"] != "true" {
+		t.Errorf("node-profiles nodeSelector = %v, want the pool label", ns)
+	}
+	foundTol := false
+	for _, tv := range toSlice(podSpec["tolerations"]) {
+		tm, _ := tv.(map[string]any)
+		if tm["key"] == "cdi.tinyorbit.vn/workspace" && tm["effect"] == "NoSchedule" {
+			foundTol = true
+		}
+	}
+	if !foundTol {
+		t.Errorf("node-profiles tolerations = %v, want the pool toleration", podSpec["tolerations"])
+	}
+}
+
+// allowSharedNodes: true passes NO placement flags to the operator and
+// the install NOTES carry the shared-node warning.
+func TestAllowSharedNodes(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=true",
+		"--set", "nodeProfiles.install.enabled=true")
+
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	for _, a := range firstContainerArgs(op) {
+		// --runtime-host-users is NOT a placement flag — it renders
+		// independently (default false) even on shared nodes.
+		for _, p := range []string{
+			"--runtime-node-selector=", "--runtime-tolerations=",
+		} {
+			if strings.HasPrefix(a, p) {
+				t.Errorf("allowSharedNodes must pass no placement flags, got %q", a)
+			}
+		}
+	}
+	podSpec := dsPodSpec(daemonSet(docs, "node-profiles"))
+	ns, _ := podSpec["nodeSelector"].(map[string]any)
+	if _, ok := ns["cdi.tinyorbit.vn/workspace"]; ok {
+		t.Errorf("shared nodes: node-profiles must not select the pool label, got %v", ns)
+	}
+
+	notes := renderNotes(t, "-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=true")
+	if !strings.Contains(notes, "allowSharedNodes") {
+		t.Errorf("NOTES must warn about shared-node scheduling, got:\n%s", notes)
+	}
+}
+
+// A dedicated pool with an empty nodeSelector would leave every runtime
+// pod Pending forever — the render must refuse it.
+func TestDedicatedPoolRequiresSelector(t *testing.T) {
+	errOut := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=false",
+		"--set-json", `runtime.placement.nodeSelector=null`)
+	if !strings.Contains(errOut, "runtime.placement.nodeSelector") {
+		t.Fatalf("render error must name runtime.placement.nodeSelector, got:\n%s", errOut)
+	}
+}
+
+// T4.2/D26: runtime.hostUsers defaults to false — the operator gets
+// --runtime-host-users=false so runtime pods run in their own user
+// namespace (verified on the reference environment, T4.3). Setting the
+// value to null renders NO flag, leaving pod.spec.hostUsers unset.
+func TestRuntimeHostUsersDefault(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"))
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	found := false
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			found = true
+			if a != "--runtime-host-users=false" {
+				t.Errorf("operator hostUsers arg = %q, want --runtime-host-users=false", a)
+			}
+		}
+	}
+	if !found {
+		t.Error("operator must get --runtime-host-users=false by default")
+	}
+
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set-json", `runtime.hostUsers=null`)
+	op = deployment(docs, "operator")
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			t.Errorf("runtime.hostUsers=null must render no host-users flag, got %q", a)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T1.7 — the 0.2.0 control plane: backend (API + session gateway + broker
+// in one Deployment, D6/D7) and frontend (static SPA server) replace the
+// api, gateway and portal components.
+// ---------------------------------------------------------------------------
+
+// TestControlPlaneIsThreeDeployments: D6 — the release namespace carries
+// exactly three control-plane Deployments: backend, frontend, operator.
+func TestControlPlaneIsThreeDeployments(t *testing.T) {
+	for _, vf := range lintValues {
+		docs := render(t, vf)
+		got := map[string]bool{}
+		for _, d := range selectDocs(docs, "Deployment") {
+			name, ns := meta(d)
+			if ns == "tcdi-system" {
+				got[name] = true
+			}
+		}
+		for _, want := range []string{"backend", "frontend", "operator"} {
+			if !got[want] {
+				t.Errorf("%s: missing control-plane Deployment %q", vf, want)
+			}
+			delete(got, want)
+		}
+		for name := range got {
+			t.Errorf("%s: unexpected control-plane Deployment %q", vf, name)
+		}
+	}
+}
+
+// TestBackendDefaults: D22 — the backend Deployment ships restart-safe
+// defaults: 2 replicas, rollingUpdate maxUnavailable 0 / maxSurge 1, a PDB
+// with minAvailable 1 and preferred (P8 — never required, single-node
+// clusters must still schedule) pod anti-affinity on
+// kubernetes.io/hostname, plus a 30 s termination grace period for
+// Gateway.Drain.
+func TestBackendDefaults(t *testing.T) {
+	docs := render(t, "minimal-values.yaml")
+	dep := deployment(docs, "backend")
+	if dep == nil {
+		t.Fatal("no backend Deployment rendered")
+	}
+	spec, _ := dep["spec"].(map[string]any)
+	if spec["replicas"] != 2 {
+		t.Errorf("backend replicas = %v, want 2 (D22)", spec["replicas"])
+	}
+	strategy, _ := spec["strategy"].(map[string]any)
+	ru, _ := strategy["rollingUpdate"].(map[string]any)
+	if ru["maxUnavailable"] != 0 {
+		t.Errorf("backend rollingUpdate.maxUnavailable = %v, want 0 (D22)", ru["maxUnavailable"])
+	}
+	if ru["maxSurge"] != 1 {
+		t.Errorf("backend rollingUpdate.maxSurge = %v, want 1 (D22)", ru["maxSurge"])
+	}
+	tpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tpl["spec"].(map[string]any)
+	if podSpec["terminationGracePeriodSeconds"] != 30 {
+		t.Errorf("backend terminationGracePeriodSeconds = %v, want 30 (Gateway.Drain budget)", podSpec["terminationGracePeriodSeconds"])
+	}
+	aff, _ := podSpec["affinity"].(map[string]any)
+	paa, _ := aff["podAntiAffinity"].(map[string]any)
+	preferred := toSlice(paa["preferredDuringSchedulingIgnoredDuringExecution"])
+	if len(preferred) == 0 {
+		t.Fatal("backend must carry preferred pod anti-affinity (D22/P8)")
+	}
+	pat, _ := preferred[0].(map[string]any)["podAffinityTerm"].(map[string]any)
+	if pat["topologyKey"] != "kubernetes.io/hostname" {
+		t.Errorf("backend anti-affinity topologyKey = %v, want kubernetes.io/hostname", pat["topologyKey"])
+	}
+	if len(toSlice(paa["requiredDuringSchedulingIgnoredDuringExecution"])) != 0 {
+		t.Error("backend anti-affinity must be preferred, not required (P8 — required strands the second replica on single-node clusters)")
+	}
+	// the matching PDB.
+	var pdb doc
+	for _, d := range selectDocs(docs, "PodDisruptionBudget") {
+		if n, _ := meta(d); n == "backend" {
+			pdb = d
+		}
+	}
+	if pdb == nil {
+		t.Fatal("no backend PodDisruptionBudget rendered by default (D22)")
+	}
+	pspec, _ := pdb["spec"].(map[string]any)
+	if pspec["minAvailable"] != 1 {
+		t.Errorf("backend PDB minAvailable = %v, want 1", pspec["minAvailable"])
+	}
+}
+
+// TestBackendGatewayIDIsStatic: every backend pod in the Deployment shares
+// ONE gateway identity — -gateway-id is a literal from
+// backend.gatewayID (default tinycdi-backend), never a downward-API pod
+// name (a per-pod identity would split the lease directory across
+// replicas).
+func TestBackendGatewayIDIsStatic(t *testing.T) {
+	dep := deployment(render(t, "minimal-values.yaml"), "backend")
+	if dep == nil {
+		t.Fatal("no backend Deployment rendered")
+	}
+	found := false
+	for _, a := range firstContainerArgs(dep) {
+		if !strings.HasPrefix(a, "-gateway-id=") {
+			continue
+		}
+		found = true
+		if a != "-gateway-id=tinycdi-backend" {
+			t.Errorf("default -gateway-id = %q, want -gateway-id=tinycdi-backend", a)
+		}
+		if strings.Contains(a, "$(") {
+			t.Errorf("-gateway-id must be a literal, not a downward-API reference: %q", a)
+		}
+	}
+	if !found {
+		t.Error("backend args missing -gateway-id")
+	}
+	// and no env indirection (e.g. GATEWAY_ID via fieldRef metadata.name).
+	for _, e := range toSlice(firstContainer(dep)["env"]) {
+		em, _ := e.(map[string]any)
+		vf, _ := em["valueFrom"].(map[string]any)
+		if fr, ok := vf["fieldRef"].(map[string]any); ok && fr["fieldPath"] == "metadata.name" {
+			t.Errorf("backend pod must not feed metadata.name into env %v — the gateway identity is shared, not per-pod", em["name"])
+		}
+	}
+	// the value is configurable.
+	dep = deployment(renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.gatewayID=fleet-a"), "backend")
+	found = false
+	for _, a := range firstContainerArgs(dep) {
+		if a == "-gateway-id=fleet-a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("backend.gatewayID=fleet-a did not reach -gateway-id")
+	}
+}
+
+// TestLoginKeysRequired: the app listener seals OIDC login state with an
+// AEAD key (D20) — the render must fail when neither
+// backend.loginKeys.existingSecret nor .generate is set, naming
+// backend.loginKeys. generate=true renders the chart-managed Secret
+// instead (lookup-preserved across upgrades).
+func TestLoginKeysRequired(t *testing.T) {
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.loginKeys.existingSecret=")
+	if !strings.Contains(out, "backend.loginKeys") {
+		t.Errorf("missing login keys must fail mentioning backend.loginKeys, got: %s", out)
+	}
+	// existingSecret mode: the secret mounts at /login-keys and the flag
+	// points at the current key.
+	docs := render(t, "minimal-values.yaml")
+	dep := deployment(docs, "backend")
+	args := strings.Join(firstContainerArgs(dep), "\n")
+	if !strings.Contains(args, "-login-key-file=/login-keys/current") {
+		t.Errorf("backend args missing -login-key-file=/login-keys/current\nargs:\n%s", args)
+	}
+	if !secretNames(dep)["tinycdi-backend-login-keys"] {
+		t.Errorf("backend pod missing the login-keys volume for tinycdi-backend-login-keys (secrets %v)", secretNames(dep))
+	}
+	// generate mode: the chart produces the Secret once via lookup.
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.loginKeys.existingSecret=",
+		"--set", "backend.loginKeys.generate=true")
+	genFound := false
+	for _, d := range selectDocs(docs, "Secret") {
+		name, _ := meta(d)
+		if !strings.HasSuffix(name, "-backend-login-keys") {
+			continue
+		}
+		genFound = true
+		data, _ := d["data"].(map[string]any)
+		if cur, _ := data["current"].(string); len(cur) == 0 {
+			t.Errorf("generated login-keys Secret must carry a 'current' key, got %v", data)
+		}
+	}
+	if !genFound {
+		t.Error("backend.loginKeys.generate=true must render a *-backend-login-keys Secret")
+	}
+}
+
+// TestRemovedValuesFail: chart 0.2.0 dropped the api, gateway and portal
+// components — setting any of their values must fail the render with a
+// migration hint pointing at backend. / frontend. (D6; the schema keeps
+// the old keys valid so the hint can fire instead of a bare schema error.)
+func TestRemovedValuesFail(t *testing.T) {
+	for _, tc := range []struct{ set, want string }{
+		{"api.replicas=1", "backend."},
+		{"gateway.replicas=1", "backend."},
+		{"portal.replicas=1", "frontend."},
+		{"images.api.repository=x/y", "backend."},
+		{"images.gateway.repository=x/y", "backend."},
+		{"images.portal.repository=x/y", "frontend."},
+	} {
+		out := renderErrArgs(t,
+			"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+			"--set", tc.set)
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("--set %s must fail with a migration hint containing %q, got: %s", tc.set, tc.want, out)
+		}
+	}
+}
+
+// TestRoutes: both exposure modes carry the same three edge routes —
+// portal host /v1 -> backend:8443 (app listener), portal host / ->
+// frontend:8443, session host -> backend:8444 (session listener).
+func TestRoutes(t *testing.T) {
+	ruleBackends := func(d doc) []struct {
+		path, svc string
+		port      any
+	} {
+		var out []struct {
+			path, svc string
+			port      any
+		}
+		spec, _ := d["spec"].(map[string]any)
+		for _, r := range toSlice(spec["rules"]) {
+			rm, _ := r.(map[string]any)
+			// HTTPRoute shape.
+			for _, br := range toSlice(rm["backendRefs"]) {
+				bm, _ := br.(map[string]any)
+				path := ""
+				for _, m := range toSlice(rm["matches"]) {
+					mm, _ := m.(map[string]any)
+					p, _ := mm["path"].(map[string]any)
+					path, _ = p["value"].(string)
+				}
+				svc, _ := bm["name"].(string)
+				out = append(out, struct {
+					path, svc string
+					port      any
+				}{path, svc, bm["port"]})
+			}
+		}
+		// Ingress shape.
+		for _, r := range toSlice(spec["rules"]) {
+			rm, _ := r.(map[string]any)
+			http, _ := rm["http"].(map[string]any)
+			for _, p := range toSlice(http["paths"]) {
+				pm, _ := p.(map[string]any)
+				backend, _ := pm["backend"].(map[string]any)
+				svc, _ := backend["service"].(map[string]any)
+				name, _ := svc["name"].(string)
+				port := svc["port"].(map[string]any)
+				pv := port["number"]
+				if pv == nil {
+					pv = port["name"]
+				}
+				path, _ := pm["path"].(string)
+				out = append(out, struct {
+					path, svc string
+					port      any
+				}{path, name, pv})
+			}
+		}
+		return out
+	}
+	byName := func(docs []doc, kind string) map[string]doc {
+		out := map[string]doc{}
+		for _, d := range selectDocs(docs, kind) {
+			n, _ := meta(d)
+			out[n] = d
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		label, vf, kind string
+	}{
+		{"HTTPRoute", "gateway-api-values.yaml", "HTTPRoute"},
+		{"Ingress", "ingress-certmanager-values.yaml", "Ingress"},
+	} {
+		docs := render(t, tc.vf)
+		routes := byName(docs, tc.kind)
+		portal, ok := routes["portal"]
+		if !ok {
+			t.Fatalf("%s: no portal route rendered", tc.kind)
+		}
+		session, ok := routes["session"]
+		if !ok {
+			t.Fatalf("%s: no session route rendered", tc.kind)
+		}
+		var v1OK, rootOK, sessOK bool
+		for _, r := range ruleBackends(portal) {
+			if r.path == "/v1" && r.svc == "backend" && fmt.Sprintf("%v", r.port) == "8443" || r.path == "/v1" && r.svc == "backend" && r.port == "app" {
+				v1OK = true
+			}
+			if r.path == "/" && r.svc == "frontend" && (fmt.Sprintf("%v", r.port) == "8443" || r.port == "https") {
+				rootOK = true
+			}
+		}
+		for _, r := range ruleBackends(session) {
+			if r.svc == "backend" && (fmt.Sprintf("%v", r.port) == "8444" || r.port == "session") {
+				sessOK = true
+			}
+		}
+		if !v1OK {
+			t.Errorf("%s portal route: /v1 must go to backend:8443 (app), got %+v", tc.kind, ruleBackends(portal))
+		}
+		if !rootOK {
+			t.Errorf("%s portal route: / must go to frontend:8443, got %+v", tc.kind, ruleBackends(portal))
+		}
+		if !sessOK {
+			t.Errorf("%s session route: must go to backend:8444 (session), got %+v", tc.kind, ruleBackends(session))
+		}
+	}
+}
+
+// TestNetworkPolicyBackendPorts: the edge may reach backend :8443 (app)
+// and :8444 (session) only; the internal mTLS listener :9443 is reachable
+// from operator pods alone; metrics (when enabled) are scraped on the
+// backend-metrics port through prometheusPeers.
+func TestNetworkPolicyBackendPorts(t *testing.T) {
+	docs := render(t, "example-values.yaml")
+	var np doc
+	for _, d := range selectDocs(docs, "NetworkPolicy") {
+		if n, ns := meta(d); n == "backend" && ns == "tcdi-system" {
+			np = d
+		}
+	}
+	if np == nil {
+		t.Fatal("no backend NetworkPolicy rendered")
+	}
+	spec, _ := np["spec"].(map[string]any)
+	ingress := toSlice(spec["ingress"])
+
+	// Collect: which (peerKind, ports) rules exist.
+	edgePorts := map[int]bool{}
+	operatorPorts := map[int]bool{}
+	for _, r := range ingress {
+		rm, _ := r.(map[string]any)
+		var ports []int
+		for _, p := range toSlice(rm["ports"]) {
+			pm, _ := p.(map[string]any)
+			if n, ok := pm["port"].(int); ok {
+				ports = append(ports, n)
+			}
+			if f, ok := pm["port"].(float64); ok {
+				ports = append(ports, int(f))
+			}
+		}
+		from := toSlice(rm["from"])
+		if len(from) == 0 {
+			// edgeIngress=any: no peers — every source, these ports only.
+			for _, p := range ports {
+				edgePorts[p] = true
+			}
+			continue
+		}
+		for _, peer := range from {
+			pm, _ := peer.(map[string]any)
+			if _, ok := pm["ipBlock"]; ok {
+				for _, p := range ports {
+					edgePorts[p] = true
+				}
+			}
+			sel, _ := pm["podSelector"].(map[string]any)
+			lbls, _ := sel["matchLabels"].(map[string]any)
+			if lbls["app.kubernetes.io/name"] == "operator" {
+				for _, p := range ports {
+					operatorPorts[p] = true
+				}
+			}
+		}
+	}
+	if !edgePorts[8443] || !edgePorts[8444] {
+		t.Errorf("edge must reach backend :8443 and :8444, edge-visible ports were %v", edgePorts)
+	}
+	if edgePorts[9443] {
+		t.Error("internal listener :9443 must NOT be reachable from the edge")
+	}
+	if !operatorPorts[9443] || len(operatorPorts) != 1 {
+		t.Errorf("only the operator may reach :9443, operator-reachable ports were %v", operatorPorts)
+	}
+
+	// metrics: example-values enables backend.metrics — the scrape policy
+	// must target the metrics port on backend pods only.
+	var mp doc
+	for _, d := range selectDocs(docs, "NetworkPolicy") {
+		if n, _ := meta(d); n == "allow-metrics-scrape" {
+			mp = d
+		}
+	}
+	if mp == nil {
+		t.Fatal("no allow-metrics-scrape NetworkPolicy with backend.metrics.enabled")
+	}
+	mspec, _ := mp["spec"].(map[string]any)
+	raw, _ := yaml.Marshal(mspec)
+	if !strings.Contains(string(raw), "9090") {
+		t.Errorf("metrics scrape policy must open the backend.metrics port 9090, got:\n%s", raw)
+	}
+}
+
+// TestNetworkPolicyEdgeIngressModes: networkPolicy.edgeIngress selects how
+// edge traffic reaches the public listeners — "any" (no peers, the public
+// default), "ipBlock" (requires edgeIngressCIDRs) and "cilium"
+// (CiliumNetworkPolicy entities; Cilium's ingress envoy runs host-side).
+func TestNetworkPolicyEdgeIngressModes(t *testing.T) {
+	// ipBlock without CIDRs fails closed (an empty peer list admits
+	// everything).
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "networkPolicy.edgeIngress=ipBlock",
+		"--set", "networkPolicy.edgeIngressCIDRs=null")
+	if !strings.Contains(out, "edgeIngressCIDRs") {
+		t.Errorf("edgeIngress=ipBlock with no CIDRs must fail mentioning edgeIngressCIDRs, got: %s", out)
+	}
+	// an unknown mode fails.
+	out = renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "networkPolicy.edgeIngress=bogus")
+	if !strings.Contains(out, "edgeIngress") {
+		t.Errorf("unknown edgeIngress mode must fail, got: %s", out)
+	}
+	// ipBlock renders the CIDR peers on both public listeners.
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "networkPolicy.edgeIngress=ipBlock",
+		"--set", "networkPolicy.edgeIngressCIDRs[0]=10.0.0.0/8")
+	raw, _ := yaml.Marshal(selectDocs(docs, "NetworkPolicy"))
+	if !strings.Contains(string(raw), "10.0.0.0/8") {
+		t.Errorf("edgeIngress=ipBlock must render edgeIngressCIDRs peers, got:\n%s", raw)
+	}
+	// cilium renders the CiliumNetworkPolicy pair instead of CIDR peers.
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "networkPolicy.edgeIngress=cilium")
+	cnp := selectDocs(docs, "CiliumNetworkPolicy")
+	if len(cnp) != 2 {
+		t.Errorf("edgeIngress=cilium must render 2 CiliumNetworkPolicies (backend+frontend), got %d", len(cnp))
+	}
 }

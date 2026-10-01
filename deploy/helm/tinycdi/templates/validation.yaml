@@ -1,1 +1,10 @@
 {{- include "tinycdi.validate" . -}}
+{{- /* Dedicated pool needs a selector: allowSharedNodes=false with an
+       empty nodeSelector would leave every runtime pod Pending forever —
+       refuse the render instead of shipping a stranded install. */ -}}
+{{- $placement := (default dict (default dict .Values.runtime).placement) -}}
+{{- if not ($placement.allowSharedNodes | default false) -}}
+{{- if not ($placement.nodeSelector | default dict) -}}
+{{- fail "runtime.placement.nodeSelector must not be empty when runtime.placement.allowSharedNodes is false — either name the dedicated-pool label (install.md \"Workspace node pool\") or set runtime.placement.allowSharedNodes: true (dev/kind only)" -}}
+{{- end -}}
+{{- end -}}

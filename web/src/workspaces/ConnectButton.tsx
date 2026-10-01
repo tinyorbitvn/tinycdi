@@ -1,52 +1,31 @@
 import { useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
-import { unwrap, getSessionOrigin } from "../api/client";
+import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
+import { useMe } from "../app/me";
+import { launchInNewTab } from "../session/launch";
 import type { components } from "../api/generated/schema";
 import type { WorkspaceView } from "./helpers";
 import { ErrorBanner } from "./ErrorBanner";
 
 type LaunchTicket = components["schemas"]["LaunchTicket"];
 
-// Form field name carrying the ticket in the POST body to the session origin.
-// Never a query parameter: the ticket must not appear in URLs, history,
-// referers or logs (ADR 0001/0002).
-export const TICKET_FIELD = "ticket";
-
-// Opens the desktop session by POSTing the launch ticket to the session
-// origin in a new tab. The ticket lives only in this form's POST body — it is
-// never written to a URL, history entry, or web storage.
+// Opens the desktop session by POSTing the launch ticket to the
+// workspace's own session host in a new tab (v0.2, D9). The ticket lives
+// only in this form's POST body — it is never written to a URL, history
+// entry, or web storage.
 //
 // SEC-26: the ticket is bearer-equivalent, so its destination is pinned to
-// the session origin the API published in the login cookie. A launchUrl on
-// any other origin — or an absent configured origin — is refused rather
+// the session domain /v1/me published (see assertLaunchTarget). A launchUrl
+// on any other host — or an absent configured domain — is refused rather
 // than submitted.
-export function launchSession(ticket: LaunchTicket) {
-  let origin: string;
-  try {
-    origin = new URL(ticket.launchUrl).origin;
-  } catch {
-    throw new Error("malformed launchUrl in connection response");
-  }
-  const expected = getSessionOrigin();
-  if (expected === undefined || origin !== expected) {
-    throw new Error(
-      `refusing to POST launch ticket to ${origin}: not the configured session origin`,
-    );
-  }
-  const form = document.createElement("form");
-  form.method = "POST";
-  form.action = ticket.launchUrl;
-  form.target = "_blank";
-  form.rel = "noopener";
-  const input = document.createElement("input");
-  input.type = "hidden";
-  input.name = TICKET_FIELD;
-  input.value = ticket.ticket;
-  form.append(input);
-  document.body.append(form);
-  form.submit();
-  form.remove();
+export function launchSession(
+  ticket: LaunchTicket,
+  workspaceId: string,
+  sessionDomain: string,
+) {
+  launchInNewTab(ticket, workspaceId, sessionDomain);
 }
 
 export function ConnectButton({
@@ -57,6 +36,7 @@ export function ConnectButton({
   disabled?: boolean;
 }) {
   const api = useApi();
+  const { me } = useMe();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [inUse, setInUse] = useState(false);
@@ -72,7 +52,7 @@ export function ConnectButton({
         }),
       );
       setInUse(false);
-      launchSession(ticket);
+      launchSession(ticket, workspace.id, me?.sessionDomain ?? "");
     } catch (e) {
       if (isPortalApiError(e) && e.code === "CONNECTION_IN_USE") {
         setInUse(true);
@@ -88,27 +68,30 @@ export function ConnectButton({
     <span className="connect-flow">
       <button
         type="button"
-        disabled={disabled || busy}
+        disabled={disabled || busy || me === null}
         onClick={() => void connect(false)}
       >
-        {busy ? "Connecting…" : "Connect"}
+        {busy
+          ? t("workspaces.connect.connecting")
+          : t("workspaces.connect.action")}
       </button>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {inUse ? (
-        <div role="dialog" aria-label="session in use" className="dialog">
-          <p>
-            Another session is already connected to this workspace. Taking over
-            disconnects it.
-          </p>
+        <div
+          role="dialog"
+          aria-label={t("workspaces.connect.inUse.label")}
+          className="dialog"
+        >
+          <p>{t("workspaces.connect.inUse.body")}</p>
           <button
             type="button"
             disabled={busy}
             onClick={() => void connect(true)}
           >
-            Take over session
+            {t("workspaces.connect.inUse.takeover")}
           </button>
           <button type="button" disabled={busy} onClick={() => setInUse(false)}>
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       ) : null}

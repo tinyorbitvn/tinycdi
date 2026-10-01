@@ -1,0 +1,101 @@
+# Frontend (build/frontend): serves the built portal SPA over TLS with the
+# portal security headers. Static files only — it does not proxy /v1; the
+# edge routes portalHost /v1/ to the backend app listener. No apiserver
+# access — its ServiceAccount has automountServiceAccountToken=false.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: tinycdi
+      {{- with .Values.frontend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: frontend
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "tinycdi.podSecurityContext" .Values.frontend.podSecurityContext | nindent 8 }}
+      {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "tinycdi.image" (dict "image" .Values.images.frontend "root" $) }}
+          imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.frontend.pullPolicy }}
+          args:
+            - -listen=:8443
+            # The SPA shows sessions in an iframe on each workspace's own
+            # <label>.<sessionDomain> host and launches them with a form
+            # POST there — the CSP frame-src and form-action get the
+            # https://*.<sessionDomain> wildcard or every session is
+            # CSP-blocked (D14).
+            - -session-domain={{ .Values.sessionDomain }}
+            - -tls-cert=/tls/tls.crt
+            - -tls-key=/tls/tls.key
+            {{- if .Values.frontend.webRoot }}
+            - -web-root={{ .Values.frontend.webRoot }}
+            {{- end }}
+            {{- with .Values.frontend.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.frontend.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            {{- include "tinycdi.containerSecurityContext" .Values.frontend.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: {{ .Values.frontend.tls.existingSecret }}}
+---
+# ClusterIP only — the edge (Ingress / Gateway API) routes portalHost
+# everything-but-/v1/ here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
+  {{- with .Values.frontend.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - {name: https, port: 8443, targetPort: https}

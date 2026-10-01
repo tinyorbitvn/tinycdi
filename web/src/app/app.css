@@ -1,0 +1,141 @@
+/* App shell: top bar (brand, theme, user), section sidebar, content area.
+ * Loaded by styles/base.css; tokens come from styles/tokens.css (--tc-*). */
+
+.tc-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---------- top bar ---------- */
+.tc-topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--tc-z-topbar);
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-4);
+  height: var(--tc-topbar-height, 76px);
+  padding: 0 var(--tc-space-6);
+  background: var(--tc-color-surface);
+  border-bottom: 1px solid var(--tc-color-border);
+}
+
+.tc-topbar__brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--tc-space-2);
+  min-width: 0;
+  color: var(--tc-color-text);
+  text-decoration: none;
+  border-radius: var(--tc-radius-sm);
+}
+
+.tc-topbar__mark {
+  align-self: center;
+  width: 28px;
+  height: 28px;
+}
+
+.tc-topbar__name {
+  font-size: var(--tc-text-lg);
+  font-weight: var(--tc-weight-bold);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.tc-topbar__byline {
+  font-size: var(--tc-text-sm);
+  color: var(--tc-color-text-subtle);
+  white-space: nowrap;
+}
+
+.tc-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-3);
+  margin-left: auto;
+}
+
+.tc-topbar__user {
+  font-size: var(--tc-text-sm);
+  color: var(--tc-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16rem;
+}
+
+/* ---------- body: sidebar + content ---------- */
+.tc-shell__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.tc-sidebar {
+  flex: none;
+  width: var(--sidebar-width, 244px);
+  padding: var(--tc-space-4) var(--tc-space-3);
+  background: var(--tc-color-bg-subtle);
+  border-right: 1px solid var(--tc-color-border);
+}
+
+.tc-sidebar__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tc-sidebar a {
+  display: flex;
+  align-items: center;
+  min-height: var(--tc-control-height-sm);
+  padding: var(--tc-space-2) var(--tc-space-3);
+  border-radius: var(--tc-radius-md);
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+  font-weight: var(--tc-weight-medium);
+  text-decoration: none;
+  transition:
+    background-color var(--tc-duration-fast) var(--tc-ease),
+    color var(--tc-duration-fast) var(--tc-ease);
+}
+
+.tc-sidebar a:hover {
+  background: var(--tc-color-surface-sunken);
+  color: var(--tc-color-text);
+}
+
+.tc-sidebar a.is-active {
+  background: var(--tc-color-accent-subtle);
+  color: var(--tc-color-accent-text);
+  font-weight: var(--tc-weight-semibold);
+}
+
+.tc-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.tc-content--bleed {
+  display: flex;
+  flex-direction: column;
+}
+
+.tc-content__loading {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--tc-space-16);
+}
+
+/* Small screens: collapse the sidebar; sections remain reachable via routes. */
+@media (max-width: 48rem) {
+  .tc-sidebar {
+    display: none;
+  }
+}
