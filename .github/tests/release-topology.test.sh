@@ -156,6 +156,67 @@ if printf '%s\n' "$active_imgs" | grep -qx 'browser' \
   fails=1
 fi
 
+# v0.2 three-component platform: backend (public API + session gateway in
+# one binary), frontend (static SPA server) and operator. The removed
+# api/gateway/portal images and commands must not linger anywhere in the
+# pipeline, and every image list must agree with build/release-images.txt.
+for want in backend frontend operator; do
+  printf '%s\n' "$active_imgs" | grep -qx "$want" \
+    || { echo "FAIL: $want must be in the release set"; fails=1; }
+done
+for gone in api gateway portal; do
+  printf '%s\n' "$active_imgs" | grep -qx "$gone" \
+    && { echo "FAIL: removed image '$gone' is still in the release set"; fails=1; }
+  for f in "$REL" "$IMG" "$ROOT/.github/scripts/"*.sh; do
+    grep -qE "tinycdi-$gone\b|'$gone'|\b$gone\.ref|cmd/$gone\b|build/$gone/" "$f" \
+      && { echo "FAIL: removed component '$gone' referenced in ${f#"$ROOT"/}"; fails=1; }
+  done
+done
+for i in $active_imgs; do
+  [ -f "$ROOT/build/$i/Dockerfile" ] \
+    || { echo "FAIL: release image '$i' has no build/$i/Dockerfile"; fails=1; }
+  # Every release image gets its own (var-gated) provenance attestation.
+  grep -qE "attest build provenance — $i\$" "$REL" \
+    || { echo "FAIL: release: no provenance attestation step for '$i'"; fails=1; }
+done
+# images.yml: build matrix (+ the dedicated desktop job) == scan matrix ==
+# promote download/validate lists == the release set.
+want_set="$(printf '%s\n' "$active_imgs" | sort | xargs)"
+build_set="$( { grep -E '^        image: \[' "$IMG" | head -1 | tr -d '[] ' \
+  | sed 's/^image://' | tr ',' '\n'; echo linux-desktop; } | sort | xargs)"
+scan_set="$(grep -E '^        image: \[' "$IMG" | sed -n 2p | tr -d '[] ' \
+  | sed 's/^image://' | tr ',' '\n' | sort | xargs)"
+[ "$build_set" = "$want_set" ] \
+  || { echo "FAIL: images: build matrix + desktop [$build_set] != release set [$want_set]"; fails=1; }
+[ "$scan_set" = "$want_set" ] \
+  || { echo "FAIL: images: scan matrix [$scan_set] != release set [$want_set]"; fails=1; }
+while IFS= read -r line; do
+  got="$(sed -E 's/.*(for img in|refs)[[:space:]]*//; s/; do.*//' <<< "$line" \
+    | tr ' ' '\n' | grep -v '^\\$' | grep . | sort | xargs)"
+  [ "$got" = "$want_set" ] \
+    || { echo "FAIL: images: promote list [$got] != release set [$want_set]"; fails=1; }
+done < <(grep -E 'for img in linux-desktop|validate-image-refs\.sh refs' -A1 "$IMG" \
+  | grep -E 'for img in|^ +linux-desktop ')
+# release.yml binaries: exactly the Go commands that ship.
+bins="$(grep -E '^ +for comp in ' "$REL" | sed -E 's/.*for comp in //; s/; do//' | tr ' ' '\n' | sort | xargs)"
+[ "$bins" = "backend operator" ] \
+  || { echo "FAIL: release: static binaries [$bins] != [backend operator]"; fails=1; }
+for c in $bins; do
+  [ -d "$ROOT/cmd/$c" ] || { echo "FAIL: release binary '$c' has no cmd/$c"; fails=1; }
+done
+# Chart values carry a digest-stamping path per release image (SEC-18
+# stamp): images.<key> for component/runtime images, kasmAdapter.image for
+# the adapter init image — mirror of collect-publish-inputs.sh path_for.
+VALS="$ROOT/deploy/helm/tinycdi/values.yaml"
+for i in $active_imgs; do
+  sec=images; key="$i"
+  [ "$i" = "linux-desktop" ] && key=linuxDesktop
+  if [ "$i" = "kasm-adapter" ]; then sec=kasmAdapter; key=image; fi
+  awk -v s="$sec" -v k="$key" \
+    '/^[^ #]/ {in_s = ($0 ~ ("^" s ":"))} in_s && $0 ~ "^  " k ":" {f=1} END {exit !f}' "$VALS" \
+    || { echo "FAIL: chart values lack $sec.$key for release image '$i'"; fails=1; }
+done
+
 # SUPR-7: the lint job pins a pathspec compatible with yamllint>=1.38.
 chk "ci: compatible pathspec pin" "$CI" 'pathspec==1\.'
 chk_absent "ci: conflicting pathspec pin" "$CI" 'pathspec==0\.12'

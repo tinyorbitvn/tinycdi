@@ -97,12 +97,19 @@ func (s *session) enqueueActivity(t broker.ActivityEventType) {
 
 // reportActivity posts one activity event to the broker, bounded by ctx
 // and at most 5 s. Called only by activitySender/flushActivity, so
-// per-session ordering is preserved on the wire.
+// per-session ordering is preserved on the wire. inflightReports lets
+// Drain know a dequeued disconnect has actually reached the broker.
 func (g *Gateway) reportActivity(ctx context.Context, s *session, t broker.ActivityEventType) {
+	s.mu.Lock()
+	s.inflightReports++
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	err := g.cfg.Broker.ReportActivity(ctx, g.cfg.Identity, s.leaseID(),
 		s.fenceSnapshot(), broker.ActivityEvent{Type: t})
 	cancel()
+	s.mu.Lock()
+	s.inflightReports--
+	s.mu.Unlock()
 	if err != nil && g.cfg.Logger != nil {
 		g.cfg.Logger.Debug("activity report failed", "type", string(t), "err", err)
 	}

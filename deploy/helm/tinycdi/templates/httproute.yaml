@@ -1,7 +1,9 @@
 {{- if .Values.gatewayApi.enabled }}
-# Gateway API exposure for both public edges. Both backends speak HTTPS —
-# the Gateway listener must terminate TLS and re-encrypt/pass through to
-# the backend (e.g. Envoy Gateway BackendTLSPolicy targeting the Service);
+# Gateway API exposure for both public edges. Portal host: /v1 -> backend
+# app listener, everything else -> frontend. Session host: everything ->
+# backend session listener. Every backend speaks HTTPS — the Gateway
+# listener must terminate TLS and re-encrypt to the backend (e.g. a
+# BackendTLSPolicy per Service, or your implementation's equivalent);
 # plain HTTP forwarding to these Services will not work.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -9,7 +11,7 @@ metadata:
   name: portal
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "portal" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
   {{- with .Values.gatewayApi.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -19,9 +21,18 @@ spec:
     {{- toYaml .Values.gatewayApi.parentRefs | nindent 4 }}
   hostnames: [{{ .Values.portalHost | quote }}]
   rules:
-    - backendRefs:
-        - name: portal
-          port: 443
+    # PathPrefix matches per path element: /v1 matches /v1 and /v1/...,
+    # never /v1x. The longest prefix wins, so /v1 beats / below.
+    - matches:
+        - path: {type: PathPrefix, value: /v1}
+      backendRefs:
+        - name: backend
+          port: 8443
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - name: frontend
+          port: 8443
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -29,7 +40,7 @@ metadata:
   name: session
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
   {{- with .Values.gatewayApi.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -40,6 +51,6 @@ spec:
   hostnames: [{{ .Values.sessionHost | quote }}]
   rules:
     - backendRefs:
-        - name: gateway
-          port: 443
+        - name: backend
+          port: 8444
 {{- end }}

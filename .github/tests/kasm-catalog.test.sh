@@ -73,6 +73,58 @@ reject "unknown engine"
 mk "kasmweb/ubuntu-noble-desktop@$DIGEST  none  0" "image: kasmweb/ubuntu-noble-desktop@$DIGEST" ""
 accept "engine=none desktop entry"
 
+# -- default scan coverage (KASM-5) --------------------------------------
+# The default scan is `git ls-files` — an uncataloged ref must fail no
+# matter where it is planted. These cases run the script against a
+# scratch repo via KASM_REPO_ROOT with no KASM_SCAN_FILES override, so
+# the real file discovery is what gets exercised.
+BADDIGEST="sha256:$(printf 'b%.0s' $(seq 64))"
+BADREF="kasmweb/firefox@$BADDIGEST"
+SCRATCH="$D/repo"
+mkdir -p "$SCRATCH/deploy/helm/tinycdi" "$SCRATCH/docs/nested/deep" \
+  "$SCRATCH/.github/tests" "$SCRATCH/pkg/testdata"
+git -C "$SCRATCH" init -q
+
+scratch() { # scratch <ok|fail> <desc>
+  local want="$1" desc="$2"
+  git -C "$SCRATCH" add -A
+  if KASM_REPO_ROOT="$SCRATCH" KASM_CATALOG="$D/cat" \
+     KASM_CHROMIUM_DOCKERFILE="$D/Dockerfile" \
+     bash "$CHK" >/dev/null 2>&1; then
+    [ "$want" = ok ] || { echo "FAIL: $desc should be rejected"; fails=1; }
+  else
+    [ "$want" = fail ] || { echo "FAIL: $desc should be accepted"; fails=1; }
+  fi
+}
+
+mk "$ENTRY" "" ""
+printf 'spec:\n  image: kasmweb/chromium@%s\n' "$DIGEST" \
+  > "$SCRATCH/deploy/helm/tinycdi/values.yaml"
+printf 'upstream vendored the kasmweb/noVNC submodule\n' > "$SCRATCH/NOTICE"
+# Fixtures plant bad refs on purpose — they are excluded from the scan.
+printf 'kasmweb/chromium:latest\n' > "$SCRATCH/.github/tests/fixture.sh"
+printf 'const img = "kasmweb/chromium:1.0"\n' > "$SCRATCH/pkg/x_test.go"
+printf 'image: kasmweb/chromium:1.0\n' > "$SCRATCH/pkg/testdata/v.yaml"
+scratch ok "cataloged digest in a nested values file; fixtures + NOTICE ignored"
+
+# MF-2 probe 1: uncataloged digest in the chart values file.
+printf 'spec:\n  image: %s\n' "$BADREF" \
+  > "$SCRATCH/deploy/helm/tinycdi/values.yaml"
+scratch fail "uncataloged digest in deploy/helm/tinycdi/values.yaml"
+
+# MF-2 probe 2: uncataloged digest in a nested docs page (docs/**, not
+# just docs/*.md).
+printf 'spec:\n  image: kasmweb/chromium@%s\n' "$DIGEST" \
+  > "$SCRATCH/deploy/helm/tinycdi/values.yaml"
+printf 'pin this: %s\n' "$BADREF" > "$SCRATCH/docs/nested/deep/guide.md"
+scratch fail "uncataloged digest in a nested docs file"
+
+# An untracked file is outside the gate by definition (the gate covers
+# tracked files) — fixture files stay tracked and stay excluded.
+git -C "$SCRATCH" rm -q --cached "docs/nested/deep/guide.md" >/dev/null 2>&1 || true
+rm -f "$SCRATCH/docs/nested/deep/guide.md"
+scratch ok "cleaned scratch repo passes again"
+
 # real repo catalog passes its own gate when scanned directly.
 if ! (cd "$ROOT" && bash .github/scripts/check-kasm-catalog.sh) >/dev/null 2>&1; then
   echo "FAIL: repo catalog failed its own check"; fails=1

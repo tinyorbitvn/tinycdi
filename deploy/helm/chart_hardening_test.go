@@ -262,16 +262,17 @@ func TestHardeningDevGateBypasses(t *testing.T) {
 		{"operator disable builtin egress excepts", []string{"operator.extraArgs[0]=--disable-builtin-egress-excepts"}},
 		{"operator metrics re-enabled", []string{"operator.extraArgs[0]=--metrics-bind-address=:8443"}},
 		{"operator metrics-secure flag", []string{"operator.extraArgs[0]=--metrics-secure=false"}},
-		{"api dev-insecure-db flag", []string{"api.extraArgs[0]=--dev-insecure-db"}},
-		{"api required-groups override", []string{"api.extraArgs[0]=--required-groups=other"}},
-		{"gateway metrics-listen bypass", []string{"gateway.extraArgs[0]=--metrics-listen=:9090"}},
-		{"capabilities.drop replaced", []string{"gateway.securityContext.capabilities.drop[0]=NET_RAW"}},
-		{"capabilities.add", []string{"api.securityContext.capabilities.add[0]=SYS_ADMIN"}},
-		{"appArmorProfile Unconfined", []string{"api.securityContext.appArmorProfile.type=Unconfined"}},
-		{"seLinuxOptions", []string{"api.securityContext.seLinuxOptions.type=spc_t"}},
-		{"fsGroup 0", []string{"api.podSecurityContext.fsGroup=0"}},
-		{"supplementalGroups 0", []string{"api.podSecurityContext.supplementalGroups[0]=0"}},
-		{"hostPath extraVolume", []string{"gateway.extraVolumes[0].name=host", "gateway.extraVolumes[0].hostPath.path=/"}},
+		{"backend dev-insecure-db flag", []string{"backend.extraArgs[0]=--dev-insecure-db"}},
+		{"backend required-groups override", []string{"backend.extraArgs[0]=--required-groups=other"}},
+		{"backend metrics-listen bypass", []string{"backend.extraArgs[0]=--metrics-listen=:9090"}},
+		{"backend split-mode broker-url bypass", []string{"backend.extraArgs[0]=--broker-url=https://broker.example.net:9443"}},
+		{"capabilities.drop replaced", []string{"backend.securityContext.capabilities.drop[0]=NET_RAW"}},
+		{"capabilities.add", []string{"backend.securityContext.capabilities.add[0]=SYS_ADMIN"}},
+		{"appArmorProfile Unconfined", []string{"backend.securityContext.appArmorProfile.type=Unconfined"}},
+		{"seLinuxOptions", []string{"backend.securityContext.seLinuxOptions.type=spc_t"}},
+		{"fsGroup 0", []string{"backend.podSecurityContext.fsGroup=0"}},
+		{"supplementalGroups 0", []string{"backend.podSecurityContext.supplementalGroups[0]=0"}},
+		{"hostPath extraVolume", []string{"backend.extraVolumes[0].name=host", "backend.extraVolumes[0].hostPath.path=/"}},
 		{"db tls disable", []string{"database.tls.mode=disable"}},
 		{"db tls allow", []string{"database.tls.mode=allow"}},
 		{"db tls prefer", []string{"database.tls.mode=prefer"}},
@@ -292,22 +293,23 @@ func TestHardeningDevGateBypasses(t *testing.T) {
 		renderArgs(t, devSets...)
 	}
 	// hostUsers=false is a hardening, not a bypass — always allowed.
-	renderArgs(t, "-f", vf, "--set", "api.podSecurityContext.hostUsers=false")
+	renderArgs(t, "-f", vf, "--set", "backend.podSecurityContext.hostUsers=false")
 	// a benign extraArg passes.
-	renderArgs(t, "-f", vf, "--set", "api.extraArgs[0]=--expiry-interval=45s")
+	renderArgs(t, "-f", vf, "--set", "backend.extraArgs[0]=--expiry-interval=45s")
 	// verifying sslmodes need no dev gate.
 	for _, m := range []string{"verify-ca", "verify-full"} {
 		renderArgs(t, "-f", vf, "--set", "database.tls.mode="+m)
 	}
 }
 
-// TestHardeningDatabaseTLSGate: CHTR-8 chart/api consistency — the mode default
-// is verify-full (always exported as PGSSLMODE), only verify-ca/verify-full
-// render without dev.enabled, and a dev-gated insecure mode renders the
-// --dev-insecure-db flag the api needs to start.
+// TestHardeningDatabaseTLSGate: CHTR-8 chart/backend consistency — the mode
+// default is verify-full (always exported as PGSSLMODE), only
+// verify-ca/verify-full render without dev.enabled, and a dev-gated
+// insecure mode renders the --dev-insecure-db flag the backend needs to
+// start.
 func TestHardeningDatabaseTLSGate(t *testing.T) {
 	vf := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
-	dep := deployment(render(t, "minimal-values.yaml"), "api")
+	dep := deployment(render(t, "minimal-values.yaml"), "backend")
 	env := firstContainerEnv(dep)
 	if env["PGSSLMODE"] != "verify-full" {
 		t.Errorf("default PGSSLMODE = %q, want verify-full", env["PGSSLMODE"])
@@ -316,10 +318,10 @@ func TestHardeningDatabaseTLSGate(t *testing.T) {
 	if strings.Contains(args, "dev-insecure-db") {
 		t.Errorf("default render must not carry --dev-insecure-db\nargs:\n%s", args)
 	}
-	// dev + insecure mode renders the api escape hatch.
+	// dev + insecure mode renders the backend escape hatch.
 	docs := renderArgs(t, "-f", vf,
 		"--set", "dev.enabled=true", "--set", "database.tls.mode=disable")
-	dep = deployment(docs, "api")
+	dep = deployment(docs, "backend")
 	args = strings.Join(firstContainerArgs(dep), "\n")
 	if !strings.Contains(args, "--dev-insecure-db") {
 		t.Errorf("dev+insecure mode must render --dev-insecure-db\nargs:\n%s", args)
@@ -331,7 +333,7 @@ func TestHardeningDatabaseTLSGate(t *testing.T) {
 	// dev + a verifying mode does not need the flag.
 	docs = renderArgs(t, "-f", vf,
 		"--set", "dev.enabled=true", "--set", "database.tls.mode=verify-ca")
-	if strings.Contains(strings.Join(firstContainerArgs(deployment(docs, "api")), "\n"), "dev-insecure-db") {
+	if strings.Contains(strings.Join(firstContainerArgs(deployment(docs, "backend")), "\n"), "dev-insecure-db") {
 		t.Error("dev.enabled with a verifying mode must not render --dev-insecure-db")
 	}
 }
@@ -375,13 +377,13 @@ func TestHardeningDatabasePeersPlaceholder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// oidc.requiredGroups -> api --required-groups (login gate).
+// oidc.requiredGroups -> backend --required-groups (login gate).
 // ---------------------------------------------------------------------------
 
 func TestHardeningOIDCRequiredGroups(t *testing.T) {
 	vf := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
 	// unset by default — no flag rendered.
-	dep := deployment(render(t, "minimal-values.yaml"), "api")
+	dep := deployment(render(t, "minimal-values.yaml"), "backend")
 	for _, a := range firstContainerArgs(dep) {
 		if strings.Contains(a, "required-groups") {
 			t.Errorf("no --required-groups flag should render with empty oidc.requiredGroups, got %q", a)
@@ -391,7 +393,7 @@ func TestHardeningOIDCRequiredGroups(t *testing.T) {
 	docs := renderArgs(t, "-f", vf,
 		"--set", "oidc.requiredGroups[0]=tenant-admin",
 		"--set", "oidc.requiredGroups[1]=ops")
-	args := firstContainerArgs(deployment(docs, "api"))
+	args := firstContainerArgs(deployment(docs, "backend"))
 	found := false
 	for _, a := range args {
 		if a == "--required-groups=tenant-admin,ops" {
@@ -399,7 +401,7 @@ func TestHardeningOIDCRequiredGroups(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("api args missing --required-groups=tenant-admin,ops\nargs:\n%s", strings.Join(args, "\n"))
+		t.Errorf("backend args missing --required-groups=tenant-admin,ops\nargs:\n%s", strings.Join(args, "\n"))
 	}
 	// a comma inside a group name would break the CSV — schema rejects it.
 	out := renderErrArgs(t, "-f", vf, "--set", `oidc.requiredGroups[0]=a\,b`)
