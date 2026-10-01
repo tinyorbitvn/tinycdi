@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -54,10 +55,10 @@ export function AuthGate({
   if (error) {
     return (
       <main>
-        <p role="alert">Could not reach the workspace API: {error}</p>
+        <p role="alert">{t("auth.gate.apiUnreachable", { error })}</p>
       </main>
     );
   }
-  if (!ready) return <main aria-busy="true">Checking session…</main>;
+  if (!ready) return <main aria-busy="true">{t("auth.gate.checking")}</main>;
   return <>{children}</>;
 }

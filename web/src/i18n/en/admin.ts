@@ -2,7 +2,7 @@
 // keys follow the `area.screen.element` convention. Copy states what
 // happened and the next step; no emoji (D33).
 
-export const admin = {
+export default {
   // Section nav and access gate.
   "admin.nav.ariaLabel": "Admin sections",
   "admin.nav.overview": "Overview",
@@ -158,4 +158,4 @@ export const admin = {
   "admin.unit.mib": "{n} MiB",
   "admin.unit.gib": "{n} GiB",
   "admin.unit.tib": "{n} TiB",
-};
+} as const;

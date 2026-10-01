@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import type { WorkspaceView } from "./helpers";
@@ -42,16 +43,19 @@ export function DeleteWorkspaceButton({
   return (
     <span>
       <button type="button" className="danger" onClick={() => setConfirming(true)}>
-        Delete
+        {t("workspaces.delete.action")}
       </button>
       {confirming ? (
-        <div role="dialog" aria-label="delete workspace" className="dialog">
+        <div
+          role="dialog"
+          aria-label={t("workspaces.delete.label")}
+          className="dialog"
+        >
           <p>
-            Delete <strong>{workspace.name}</strong>? Access is revoked and the
-            runtime is removed.
+            {t("workspaces.delete.confirm", { name: workspace.name })}{" "}
             {workspace.dataPolicy === "Retain"
-              ? " Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that)."
-              : " Its data is Ephemeral and will be destroyed."}
+              ? t("workspaces.delete.dataRetain")
+              : t("workspaces.delete.dataEphemeral")}
           </p>
           <ErrorBanner error={error} onDismiss={() => setError(null)} />
           <button
@@ -60,10 +64,12 @@ export function DeleteWorkspaceButton({
             disabled={busy}
             onClick={() => void doDelete()}
           >
-            {busy ? "Deleting…" : "Confirm delete"}
+            {busy
+              ? t("workspaces.delete.confirming")
+              : t("workspaces.delete.confirmButton")}
           </button>
           <button type="button" disabled={busy} onClick={() => setConfirming(false)}>
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       ) : null}
