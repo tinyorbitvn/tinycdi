@@ -1,5 +1,5 @@
 ---
-# images.yml — build, scan and publish the seven TinyCDI images to GHCR.
+# images.yml — build, scan and publish the six TinyCDI images to GHCR.
 #
 # Triggered on every push to main (tags sha-<short> + main) and manually via
 # workflow_dispatch (optional `platforms` input to opt into arm64 — the
@@ -285,13 +285,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [api, operator, gateway, portal, browser, kasm-adapter]
+        image: [backend, frontend, operator, browser, kasm-adapter]
     env:
       IMG_DESCRIPTION: >-
-        ${{ matrix.image == 'api' && 'TinyCDI platform API' ||
+        ${{ matrix.image == 'backend' && 'TinyCDI backend (public API + session gateway)' ||
+            matrix.image == 'frontend' && 'TinyCDI web frontend (portal SPA)' ||
             matrix.image == 'operator' && 'TinyCDI Kubernetes operator' ||
-            matrix.image == 'gateway' && 'TinyCDI session gateway' ||
-            matrix.image == 'portal' && 'TinyCDI web portal' ||
             matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' ||
             matrix.image == 'kasm-adapter' && 'TinyCDI Kasm workspace adapter (initContainer)' }}
     steps:
@@ -495,7 +494,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [linux-desktop, api, operator, gateway, portal, browser, kasm-adapter]
+        image: [linux-desktop, backend, frontend, operator, browser, kasm-adapter]
     env:
       IMG: ${{ matrix.image }}
       PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
@@ -683,7 +682,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p refs sboms
-          for img in linux-desktop api operator gateway portal browser kasm-adapter; do
+          for img in linux-desktop backend frontend operator browser kasm-adapter; do
             gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D refs
             gh run download "$GITHUB_RUN_ID" -n "sbom-$img" -D sboms
           done
@@ -693,8 +692,8 @@ jobs:
         # for this repo — anything else fails before signing/promoting.
         run: |
           .github/scripts/validate-image-refs.sh refs \
-            linux-desktop api operator gateway portal browser kasm-adapter
-          for img in linux-desktop api operator gateway portal browser kasm-adapter; do
+            linux-desktop backend frontend operator browser kasm-adapter
+          for img in linux-desktop backend frontend operator browser kasm-adapter; do
             f="sboms/sbom-$img.spdx.json"
             [ -s "$f" ] || { echo "::error::missing SBOM for '$img'"; exit 1; }
             jq -e . "$f" >/dev/null \
