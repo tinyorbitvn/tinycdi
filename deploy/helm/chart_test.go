@@ -807,7 +807,7 @@ func TestSecretsReferencedByName(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	raw, _ := yaml.Marshal(docs)
 	s := string(raw)
-	for _, want := range []string{"tinycdi-api-db", "tinycdi-oidc-client", "tinycdi-backend-app-tls", "tinycdi-backend-session-tls", "tinycdi-backend-internal-tls", "tinycdi-frontend-tls", "tinycdi-backend-login-keys"} {
+	for _, want := range []string{"tinycdi-backend-db", "tinycdi-oidc-client", "tinycdi-backend-app-tls", "tinycdi-backend-session-tls", "tinycdi-backend-internal-tls", "tinycdi-frontend-tls", "tinycdi-backend-login-keys"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("rendered chart must reference existing secret %q", want)
 		}
