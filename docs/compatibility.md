@@ -66,3 +66,16 @@ containerd 2.x, Cilium 1.20, and
    before capacity commitments.
 6. **Fixture != product** — session-scoped lease is proven; binding to
    (workspaceUID, runtimeGeneration, runtimeUID) is the locked contract.
+
+## `hostUsers: false` verification (D26 / R1)
+
+Verified 2026-10-02 on the reference environment (Kubernetes
+v1.37.0+rke2r1, worker kernel 6.8.0-139-generic, containerd 2.3.4): all
+three runtime cases passed with `hostUsers: false` — the desktop image
+with a Retain home PVC on `ceph-block` (files survive pod delete/recreate
+with `workspace:workspace` ownership via idmapped mounts), the browser
+image with the Localhost seccomp + AppArmor node profiles (Chromium
+renderers run with a nested user namespace and `Seccomp: 2`), and a
+`kasmweb/chromium` catalog image behind the injected adapter. This is the
+authoritative R1 result: the `hostUsers: false` default (D26) is cleared
+to ship once the `WorkspaceTemplate.hostUsers` field (D24) exists.
