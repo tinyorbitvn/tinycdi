@@ -4,18 +4,52 @@ export default {
   "templates.catalog.title": "Template catalog",
   "templates.catalog.loading": "Loading catalog…",
   "templates.catalog.empty": "No templates published.",
-  "templates.catalog.revision": "({id} rev {revision})",
   "templates.catalog.field.runtime": "Runtime",
   "templates.catalog.field.experience": "Experience",
   "templates.catalog.field.resources": "Resources",
-  "templates.catalog.resources": "{cpu}m CPU · {memory} MiB · {storage} GiB",
   "templates.catalog.field.dataPolicy": "Data policy default",
   "templates.catalog.field.clipboard": "Clipboard",
+  "templates.catalog.field.network": "Network",
+  "templates.catalog.field.idleTimeout": "Idle timeout",
   "templates.catalog.create": "Create workspace",
+  "templates.catalog.stale.badge": "Stale image",
+  "templates.catalog.stale.hint":
+    "The runtime image was built {date} — older than the freshness window. The workspace still starts; ask an administrator about a refresh.",
+
+  "templates.runtime.linuxContainer": "Linux container",
+  "templates.runtime.windowsVm": "Windows VM",
+  "templates.experience.desktop": "Desktop",
+  "templates.experience.browser": "Browser",
+  "templates.network.internetOnly.label": "Internet only",
+  "templates.network.internetOnly.description": "full Internet egress",
+  "templates.network.clusterOnly.label": "Cluster only",
+  "templates.network.clusterOnly.description": "in-cluster destinations only",
+  "templates.network.isolated.label": "Isolated",
+  "templates.network.isolated.description": "no egress except cluster DNS",
+  "templates.dataPolicy.retain.label": "Retain",
+  "templates.dataPolicy.retain.description":
+    "the disk is kept when the workspace stops or is deleted",
+  "templates.dataPolicy.ephemeral.label": "Ephemeral",
+  "templates.dataPolicy.ephemeral.description":
+    "the disk is destroyed when the workspace stops or is deleted",
+  "templates.clipboard.enabled": "Enabled",
+  "templates.clipboard.disabled": "Disabled",
+  "templates.format.cpu": "{n} vCPU",
+  "templates.format.gib": "{n} GiB",
+  "templates.format.mib": "{n} MiB",
+  "templates.format.resources": "{cpu} · {memory} RAM · {storage} disk",
+  "templates.format.duration.none": "No timeout",
+  "templates.format.duration.m": "{m} min",
+  "templates.format.duration.h": "{h} h",
+  "templates.format.duration.hm": "{h} h {m} min",
 
   "workspaces.list.title": "Workspaces",
   "workspaces.list.loading": "Loading…",
   "workspaces.list.empty": "No workspaces yet.",
+  "workspaces.list.emptyBody":
+    "Workspaces are created from a template — a desktop or app that opens in your browser.",
+  "workspaces.list.emptyCta": "Browse the template catalog",
+  "workspaces.list.label": "workspaces",
   "workspaces.list.count": "{n} workspaces",
   "workspaces.list.col.name": "Name",
   "workspaces.list.col.template": "Template",
@@ -25,9 +59,20 @@ export default {
   "workspaces.list.waitingConnection": "(waiting for ConnectionReady)",
   "workspaces.list.manage": "Manage",
 
+  "workspaces.phase.pending": "Queued",
+  "workspaces.phase.provisioning": "Starting",
+  "workspaces.phase.ready": "Ready",
+  "workspaces.phase.stopping": "Stopping",
+  "workspaces.phase.stopped": "Stopped",
+  "workspaces.phase.failed": "Failed",
+  "workspaces.phase.terminating": "Deleting",
+
   "workspaces.detail.loading": "Loading workspace…",
   "workspaces.detail.field.id": "ID",
   "workspaces.detail.field.template": "Template",
+  "workspaces.detail.field.owner": "Owner",
+  "workspaces.detail.field.networkProfile": "Network profile",
+  "workspaces.detail.field.imageBuilt": "Image built",
   "workspaces.detail.template": "{name}@{revision} ({runtime} / {experience})",
   "workspaces.detail.field.desired": "Desired state",
   "workspaces.detail.field.dataPolicy": "Data policy",
@@ -47,6 +92,16 @@ export default {
     "ConnectionReady={status} ({reason})",
   "workspaces.detail.blocker.noConnection":
     "no ConnectionReady condition reported yet",
+  "workspaces.detail.stale.badge": "Stale image",
+  "workspaces.detail.stale.body":
+    "The runtime image was built {date} — older than the freshness window. The workspace still runs; ask an administrator about a refresh.",
+  "workspaces.detail.stale.bodyUnknown":
+    "The runtime image is older than the freshness window (build date unknown). The workspace still runs; ask an administrator about a refresh.",
+  "workspaces.detail.events.title": "Events",
+  "workspaces.detail.events.empty": "No events recorded yet.",
+  "workspaces.detail.events.count": "×{n}",
+  "workspaces.detail.events.type.normal": "Normal",
+  "workspaces.detail.events.type.warning": "Warning",
 
   "workspaces.conditions.label": "conditions",
   "workspaces.conditions.empty": "No conditions reported yet.",
@@ -70,11 +125,15 @@ export default {
   "workspaces.create.dataPolicyEphemeral":
     "Ephemeral — destroy data on stop/delete",
   "workspaces.create.startNow": "Start immediately",
+  "workspaces.create.network": "Network profile: {profile}",
+  "workspaces.create.ephemeral.title": "Data is not kept",
+  "workspaces.create.ephemeral.body":
+    "This template is Ephemeral: stopping or deleting the workspace destroys the disk. Pick Retain above if you need to keep it.",
   "workspaces.create.submit": "Create workspace",
   "workspaces.create.submitting": "Creating…",
 
   "workspaces.delete.action": "Delete",
-  "workspaces.delete.label": "delete workspace",
+  "workspaces.delete.title": "Delete {name}?",
   "workspaces.delete.confirm":
     "Delete {name}? Access is revoked and the runtime is removed.",
   "workspaces.delete.dataRetain":
@@ -85,9 +144,4 @@ export default {
   "workspaces.delete.confirming": "Deleting…",
 
   "workspaces.connect.action": "Connect",
-  "workspaces.connect.connecting": "Connecting…",
-  "workspaces.connect.inUse.label": "session in use",
-  "workspaces.connect.inUse.body":
-    "Another session is already connected to this workspace. Taking over disconnects it.",
-  "workspaces.connect.inUse.takeover": "Take over session",
 } as const;

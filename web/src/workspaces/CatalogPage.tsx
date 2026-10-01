@@ -1,86 +1,97 @@
-import { useEffect, useState } from "react";
+import { Alert, Badge, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Spinner } from "../design";
+import { IconGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
-import { useApi } from "../api/context";
-import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { Link } from "../lib/router";
-import type { TemplateView } from "./helpers";
+import { useTemplates } from "../templates/useTemplates";
+import { TemplateIcon } from "../templates/TemplateIcon";
+import {
+  clipboardPolicyLabel,
+  dataPolicyLabel,
+  experienceLabel,
+  formatDate,
+  formatDuration,
+  formatResources,
+  networkProfileLabel,
+  runtimeLabel,
+} from "../templates/format";
+import type { TemplateView } from "../templates/types";
 import { ErrorBanner } from "./ErrorBanner";
 
-export function CatalogPage() {
-  const api = useApi();
-  const [templates, setTemplates] = useState<TemplateView[] | null>(null);
-  const [error, setError] = useState<unknown>(null);
+/** Warning badge for a template whose runtime image is stale. */
+function StaleBadge() {
+  return <Badge tone="warning">{t("templates.catalog.stale.badge")}</Badge>;
+}
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = unwrap(await api.GET("/v1/templates", {}));
-        if (!cancelled) setTemplates(res.items);
-      } catch (e) {
-        if (!cancelled) setError(e);
+export function TemplateCard({ template }: { template: TemplateView }) {
+  const details = [
+    { term: t("templates.catalog.field.runtime"), detail: runtimeLabel(template.runtime) },
+    { term: t("templates.catalog.field.experience"), detail: experienceLabel(template.experience) },
+    { term: t("templates.catalog.field.resources"), detail: formatResources(template.resources) },
+    {
+      term: t("templates.catalog.field.dataPolicy"),
+      detail: dataPolicyLabel(template.dataPolicyDefault),
+    },
+    { term: t("templates.catalog.field.clipboard"), detail: clipboardPolicyLabel(template.clipboardPolicy) },
+    ...(template.networkProfile
+      ? [{ term: t("templates.catalog.field.network"), detail: networkProfileLabel(template.networkProfile) }]
+      : []),
+    {
+      term: t("templates.catalog.field.idleTimeout"),
+      detail: formatDuration(template.lifecycleDefaults.idleTimeoutSeconds),
+    },
+  ];
+  return (
+    <Card
+      as="article"
+      headingLevel={3}
+      title={
+        <>
+          <TemplateIcon runtime={template.runtime} experience={template.experience} /> {template.name}
+        </>
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+      description={template.description}
+      actions={template.imageStale === true ? <StaleBadge /> : undefined}
+      footer={
+        <Link to={`/workspaces/new?template=${template.id}`} className={buttonClass("primary", "sm")}>
+          <IconPlus size={16} /> {t("templates.catalog.create")}
+        </Link>
+      }
+    >
+      {template.imageStale === true ? (
+        <Alert tone="warning">
+          {template.imageBuiltAt
+            ? t("templates.catalog.stale.hint", { date: formatDate(template.imageBuiltAt) })
+            : t("templates.catalog.stale.badge")}
+        </Alert>
+      ) : null}
+      <DescriptionList items={details} />
+    </Card>
+  );
+}
 
-  if (error) {
-    if (isPortalApiError(error) && error.code === "UNAUTHENTICATED") {
-      window.location.assign("/v1/login");
-      return null;
-    }
-    return (
-      <main>
-        <ErrorBanner error={error} onDismiss={() => setError(null)} />
-      </main>
-    );
-  }
-  if (!templates) {
-    return <main aria-busy="true">{t("templates.catalog.loading")}</main>;
+export function CatalogPage() {
+  const list = useTemplates();
+
+  if (isPortalApiError(list.error) && list.error.code === "UNAUTHENTICATED") {
+    window.location.assign("/v1/login");
+    return null;
   }
 
   return (
-    <main>
-      <h1>{t("templates.catalog.title")}</h1>
-      {templates.length === 0 ? <p>{t("templates.catalog.empty")}</p> : null}
-      <ul className="catalog">
-        {templates.map((tpl) => (
-          <li key={`${tpl.id}@${tpl.revision}`}>
-            <strong>{tpl.name}</strong>{" "}
-            <small>
-              {t("templates.catalog.revision", {
-                id: tpl.id,
-                revision: tpl.revision,
-              })}
-            </small>
-            {tpl.description ? <p>{tpl.description}</p> : null}
-            <dl>
-              <dt>{t("templates.catalog.field.runtime")}</dt>
-              <dd>{tpl.runtime}</dd>
-              <dt>{t("templates.catalog.field.experience")}</dt>
-              <dd>{tpl.experience}</dd>
-              <dt>{t("templates.catalog.field.resources")}</dt>
-              <dd>
-                {t("templates.catalog.resources", {
-                  cpu: tpl.resources.cpuMillicores,
-                  memory: tpl.resources.memoryMib,
-                  storage: tpl.resources.storageGib,
-                })}
-              </dd>
-              <dt>{t("templates.catalog.field.dataPolicy")}</dt>
-              <dd>{tpl.dataPolicyDefault}</dd>
-              <dt>{t("templates.catalog.field.clipboard")}</dt>
-              <dd>{tpl.clipboardPolicy}</dd>
-            </dl>
-            <Link to={`/workspaces/new?template=${tpl.id}`}>
-              {t("templates.catalog.create")}
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </main>
+    <Page title={t("templates.catalog.title")}>
+      <ErrorBanner error={list.error} onRetry={() => void list.refresh()} onDismiss={list.clearError} />
+      {list.loading && !list.data ? (
+        <Spinner label={t("templates.catalog.loading")} />
+      ) : (list.data ?? []).length === 0 ? (
+        <EmptyState icon={<IconGrid size={24} />} title={t("templates.catalog.empty")} />
+      ) : (
+        <Grid min="md">
+          {(list.data ?? []).map((tpl) => (
+            <TemplateCard key={`${tpl.id}@${tpl.revision}`} template={tpl} />
+          ))}
+        </Grid>
+      )}
+    </Page>
   );
 }

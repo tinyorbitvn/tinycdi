@@ -1,21 +1,28 @@
 import type { AppRoute } from "../app/route-types";
+import { t } from "../i18n";
 import { CatalogPage } from "./CatalogPage";
 import { CreateWorkspacePage } from "./CreateWorkspacePage";
 import { DataPage } from "./DataPage";
 import { WorkspaceDetailPage } from "./WorkspaceDetailPage";
 import { WorkspaceListPage } from "./WorkspaceListPage";
 
-// Stub created by the app shell (T3.2); owned by the workspaces area — replace
-// freely, keeping the `routes` export.
+// Workspace area routes (app-shell contract: web/src/app/route-types.ts).
+// The /workspaces/:id/session path is claimed by the session area ahead of
+// this catch-all area, so it must not appear here. The /data route is
+// transitional — the data area (separate module) removes it.
 export const routes: AppRoute[] = [
-  { path: "/", title: "Workspaces", render: () => <WorkspaceListPage /> },
-  { path: "/workspaces", title: "Workspaces", render: () => <WorkspaceListPage /> },
-  { path: "/workspaces/new", title: "New workspace", render: () => <CreateWorkspacePage /> },
+  { path: "/", title: t("workspaces.list.title"), render: () => <WorkspaceListPage /> },
+  { path: "/workspaces", title: t("workspaces.list.title"), render: () => <WorkspaceListPage /> },
+  {
+    path: "/workspaces/new",
+    title: t("workspaces.create.title"),
+    render: () => <CreateWorkspacePage />,
+  },
   {
     path: "/workspaces/:id",
-    title: "Workspace",
+    title: t("workspaces.list.title"),
     render: (p) => <WorkspaceDetailPage workspaceId={p.id!} />,
   },
-  { path: "/templates", title: "Templates", render: () => <CatalogPage /> },
-  { path: "/data", title: "Data", render: () => <DataPage /> },
+  { path: "/templates", title: t("templates.catalog.title"), render: () => <CatalogPage /> },
+  { path: "/data", title: t("data.list.title"), render: () => <DataPage /> },
 ];

@@ -1,3 +1,4 @@
+import { Alert, Button } from "../design";
 import { t, type MessageKey } from "../i18n";
 import { isPortalApiError, type ErrorCode, type PortalApiError } from "../api/errors";
 
@@ -36,27 +37,27 @@ export function ErrorBanner({
   const apiErr = isPortalApiError(error) ? error : null;
   const detail = error instanceof Error ? error.message : String(error);
   return (
-    <div role="alert" className="error-banner">
-      <strong>{apiErr ? apiErr.code : t("errors.banner.fallback")}</strong>{" "}
-      <span>{apiErr ? guidance(apiErr) : detail}</span>
-      {apiErr?.message ? <small> {apiErr.message}</small> : null}
-      {apiErr?.requestId ? (
-        <small> {t("errors.banner.requestId", { id: apiErr.requestId })}</small>
-      ) : null}
-      {onRetry && apiErr?.retryable ? (
-        <button type="button" onClick={onRetry}>
-          {t("errors.banner.retry")}
-        </button>
-      ) : null}
-      {onDismiss ? (
-        <button
-          type="button"
-          aria-label={t("errors.banner.dismiss")}
-          onClick={onDismiss}
-        >
-          ×
-        </button>
-      ) : null}
-    </div>
+    <Alert
+      tone="danger"
+      title={apiErr ? apiErr.code : t("errors.banner.fallback")}
+      actions={
+        <>
+          {onRetry && (!apiErr || apiErr.retryable) ? (
+            <Button size="sm" variant="secondary" onClick={onRetry}>
+              {t("errors.banner.retry")}
+            </Button>
+          ) : null}
+          {onDismiss ? (
+            <Button size="sm" variant="secondary" onClick={onDismiss}>
+              {t("errors.banner.dismiss")}
+            </Button>
+          ) : null}
+        </>
+      }
+    >
+      {apiErr ? guidance(apiErr) : detail}
+      {apiErr?.message ? ` ${apiErr.message}` : null}
+      {apiErr?.requestId ? ` ${t("errors.banner.requestId", { id: apiErr.requestId })}` : null}
+    </Alert>
   );
 }
