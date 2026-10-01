@@ -1,6 +1,29 @@
 # Thiết kế nền tảng workspace trên Kubernetes
 > **English note:** this document is in Vietnamese — it is the original design/ADR kept for reference. Current platform state is described by `README.md`, `docs/images.md`, `docs/compatibility.md` and `docs/runbooks/`.
 
+## Current components (English summary)
+
+- **Portal** (`web/` + `build/portal`): React SPA served with the API on one
+  origin; session launches open the gateway origin.
+- **API** (`cmd/api`, `internal/api`): public REST surface (`/v1`),
+  identity/OIDC, quotas, workspace CRUD, retained-data inventory.
+- **Broker** (`internal/broker`): connection tickets (opaque, single-use,
+  TTL-bound), leases, revocation, activity.
+- **Gateway** (`cmd/gateway`, `internal/gateway`): session edge — ticket
+  redemption, launch-origin policy, authenticated reverse proxy to the
+  runtime's streaming endpoint.
+- **Operator** (`cmd/operator`, `internal/operator`): reconciles `Workspace`
+  / `WorkspaceTemplate` CRDs (`api/`), provisions runtime pods, enforces
+  per-workspace NetworkPolicy, runs the teardown finalizer.
+- **Runtime images** (`build/linux-desktop`, `build/browser`): non-root
+  KasmVNC desktop on Debian bookworm, HTTPS endpoint on :8443, credentials
+  via mounted secrets.
+
+Design decisions live in the ADRs under `docs/adr/`; pinned
+dependency/toolchain versions are in `docs/compatibility.md`. Build, test
+and repo-layout documentation is in `docs/development.md`.
+
+---
 
 Ngày: 2026-09-29. Trạng thái: đã triển khai cho Linux MVP — đây là tài liệu thiết kế gốc, giữ để tham chiếu; trạng thái hiện tại xem README.md, docs/images.md và docs/compatibility.md.
 
