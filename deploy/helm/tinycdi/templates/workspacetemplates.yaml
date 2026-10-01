@@ -18,6 +18,8 @@
 #   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
+#                    DEPRECATED — prefer the typed spec.placement.nodeSelector;
+#                    the spec field wins when both are set
 #   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
 #                    (falls back to the top-level storageClass value)
 #   annotations:     -> extra annotations, verbatim
