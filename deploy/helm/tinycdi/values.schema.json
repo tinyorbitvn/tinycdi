@@ -161,6 +161,13 @@
         "replicas": {"type": "integer", "minimum": 0},
         "tls": {"$ref": "#/$defs/secretRefRequired"},
         "webRoot": {"type": "string"},
+        "branding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configMap": {"type": "string"}
+          }
+        },
         "service": {
           "type": "object",
           "additionalProperties": false,

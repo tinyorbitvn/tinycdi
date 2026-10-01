@@ -41,6 +41,7 @@ func main() {
 		tlsCert       string
 		tlsKey        string
 		sessionDomain string
+		brandingDir   string
 	)
 	flag.StringVar(&listen, "listen", envOr("TCDI_FRONTEND_LISTEN", ":8443"), "HTTPS listen address")
 	flag.StringVar(&webRoot, "web-root", envOr("TCDI_FRONTEND_WEB_ROOT", "/srv/web"), "directory with the built SPA assets")
@@ -49,6 +50,8 @@ func main() {
 	flag.StringVar(&sessionDomain, "session-domain", envOr("TCDI_SESSION_DOMAIN", ""),
 		"public session domain (host[:port]) — every workspace session is served on its own "+
 			"<label>.<session-domain> host; the wildcard https://*.<session-domain> is added to CSP frame-src and form-action")
+	flag.StringVar(&brandingDir, "branding-dir", envOr("TCDI_FRONTEND_BRANDING_DIR", ""),
+		"optional directory with branding overrides (branding.json, tokens.css, logo files) served at /branding/")
 	flag.Parse()
 
 	if tlsCert == "" || tlsKey == "" {
@@ -76,7 +79,7 @@ func main() {
 	}
 
 	srv, reloader, err := newTLSServer(listen, tlsCert, tlsKey,
-		newHandler(webRoot, frontendCSP(domain)), tlsreload.WithLogger(log))
+		newHandler(webRoot, brandingDir, frontendCSP(domain)), tlsreload.WithLogger(log))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(2)
@@ -139,8 +142,9 @@ func securityHeaders(csp string, next http.Handler) http.Handler {
 }
 
 // newHandler builds the frontend mux: the built SPA with the security
-// headers applied to all of it.
-func newHandler(webRoot, csp string) http.Handler {
+// headers applied to all of it, plus the optional branding directory at
+// /branding/ (same origin, so the CSP is unchanged).
+func newHandler(webRoot, brandingDir, csp string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -178,7 +182,97 @@ func newHandler(webRoot, csp string) http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		serveIndex(w, r, filepath.Join(webRoot, "index.html"))
 	})
-	return securityHeaders(csp, mux)
+	// /branding/ is intercepted on the raw request path, ahead of the mux:
+	// ServeMux canonicalises ".."-bearing paths with a redirect, but the
+	// branding contract answers them 404.
+	return securityHeaders(csp, branding(brandingDir, mux))
+}
+
+// branding routes requests under /branding/ to the branding-directory
+// handler and passes everything else through.
+func branding(dir string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/branding" || strings.HasPrefix(r.URL.Path, "/branding/") {
+			serveBranding(dir, w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// serveBranding serves regular files from the branding directory
+// (-branding-dir / TCDI_FRONTEND_BRANDING_DIR; the chart mounts a
+// ConfigMap there). GET/HEAD only, no directory listing, Cache-Control
+// no-cache. Escapes are impossible: ".." segments are rejected outright,
+// and a file is served only when its fully-resolved path stays inside the
+// resolved branding dir — a ConfigMap mount makes every key a symlink
+// into ..data, so containment is checked after EvalSymlinks, which also
+// defeats symlinks pointing outside.
+//
+// tokens.css is special: index.html always links it, so when the dir or
+// the file is absent it answers 200 with an empty text/css body — the
+// console stays clean. Every other absent name, including branding.json
+// without -branding-dir, answers 404 (never the SPA fallback, which would
+// hand the app's loadBranding an HTML document).
+func serveBranding(dir string, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name, under := strings.CutPrefix(r.URL.Path, "/branding/")
+	if !under || name == "" || hasDotDotSegment(name) {
+		http.NotFound(w, r) // /branding, the bare listing, or traversal
+		return
+	}
+	full := ""
+	if dir != "" {
+		if root, err := filepath.EvalSymlinks(dir); err == nil {
+			if resolved, err := filepath.EvalSymlinks(filepath.Join(dir, name)); err == nil &&
+				strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+				if st, err := os.Stat(resolved); err == nil && st.Mode().IsRegular() {
+					full = resolved
+				}
+			}
+		}
+	}
+	if full == "" {
+		if name == "tokens.css" {
+			w.Header().Set("Content-Type", "text/css")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(full) // #nosec G304 -- resolved path proven inside -branding-dir above
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	// ServeContent (not ServeFile): the request URL is the branding path,
+	// not the file's, so no "/index.html" redirect or second ".." check
+	// can trigger.
+	http.ServeContent(w, r, filepath.Base(full), st.ModTime(), f)
+}
+
+// hasDotDotSegment reports whether p contains a literal ".." path segment
+// (the URL path is already percent-decoded, so %2e%2e lands here as "..").
+func hasDotDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // serveIndex writes index.html without http.ServeFile's redirect of

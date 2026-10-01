@@ -2,6 +2,7 @@
 # portal security headers. Static files only — it does not proxy /v1; the
 # edge routes portalHost /v1/ to the backend app listener. No apiserver
 # access — its ServiceAccount has automountServiceAccountToken=false.
+{{- $brandingCM := get (default dict .Values.frontend.branding) "configMap" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,6 +59,9 @@ spec:
             {{- if .Values.frontend.webRoot }}
             - -web-root={{ .Values.frontend.webRoot }}
             {{- end }}
+            {{- if $brandingCM }}
+            - -branding-dir=/branding
+            {{- end }}
             {{- with .Values.frontend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -77,9 +81,16 @@ spec:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
           volumeMounts:
             - {name: tls, mountPath: /tls, readOnly: true}
+            {{- if $brandingCM }}
+            - {name: branding, mountPath: /branding, readOnly: true}
+            {{- end }}
       volumes:
         - name: tls
           secret: {secretName: {{ .Values.frontend.tls.existingSecret }}}
+        {{- if $brandingCM }}
+        - name: branding
+          configMap: {name: {{ $brandingCM }}}
+        {{- end }}
 ---
 # ClusterIP only — the edge (Ingress / Gateway API) routes portalHost
 # everything-but-/v1/ here.
