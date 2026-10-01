@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -37,33 +38,46 @@ export function CatalogPage() {
       </main>
     );
   }
-  if (!templates) return <main aria-busy="true">Loading catalog…</main>;
+  if (!templates) {
+    return <main aria-busy="true">{t("templates.catalog.loading")}</main>;
+  }
 
   return (
     <main>
-      <h1>Template catalog</h1>
-      {templates.length === 0 ? <p>No templates published.</p> : null}
+      <h1>{t("templates.catalog.title")}</h1>
+      {templates.length === 0 ? <p>{t("templates.catalog.empty")}</p> : null}
       <ul className="catalog">
-        {templates.map((t) => (
-          <li key={`${t.id}@${t.revision}`}>
-            <strong>{t.name}</strong> <small>({t.id} rev {t.revision})</small>
-            {t.description ? <p>{t.description}</p> : null}
+        {templates.map((tpl) => (
+          <li key={`${tpl.id}@${tpl.revision}`}>
+            <strong>{tpl.name}</strong>{" "}
+            <small>
+              {t("templates.catalog.revision", {
+                id: tpl.id,
+                revision: tpl.revision,
+              })}
+            </small>
+            {tpl.description ? <p>{tpl.description}</p> : null}
             <dl>
-              <dt>Runtime</dt>
-              <dd>{t.runtime}</dd>
-              <dt>Experience</dt>
-              <dd>{t.experience}</dd>
-              <dt>Resources</dt>
+              <dt>{t("templates.catalog.field.runtime")}</dt>
+              <dd>{tpl.runtime}</dd>
+              <dt>{t("templates.catalog.field.experience")}</dt>
+              <dd>{tpl.experience}</dd>
+              <dt>{t("templates.catalog.field.resources")}</dt>
               <dd>
-                {t.resources.cpuMillicores}m CPU · {t.resources.memoryMib} MiB ·{" "}
-                {t.resources.storageGib} GiB
+                {t("templates.catalog.resources", {
+                  cpu: tpl.resources.cpuMillicores,
+                  memory: tpl.resources.memoryMib,
+                  storage: tpl.resources.storageGib,
+                })}
               </dd>
-              <dt>Data policy default</dt>
-              <dd>{t.dataPolicyDefault}</dd>
-              <dt>Clipboard</dt>
-              <dd>{t.clipboardPolicy}</dd>
+              <dt>{t("templates.catalog.field.dataPolicy")}</dt>
+              <dd>{tpl.dataPolicyDefault}</dd>
+              <dt>{t("templates.catalog.field.clipboard")}</dt>
+              <dd>{tpl.clipboardPolicy}</dd>
             </dl>
-            <Link to={`/workspaces/new?template=${t.id}`}>Create workspace</Link>
+            <Link to={`/workspaces/new?template=${tpl.id}`}>
+              {t("templates.catalog.create")}
+            </Link>
           </li>
         ))}
       </ul>

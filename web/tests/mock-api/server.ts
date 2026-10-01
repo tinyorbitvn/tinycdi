@@ -11,6 +11,11 @@
 // (ADR 0004). Default is the vite dev origin the playwright.config.ts
 // suite launches from; tests-portal/serve.ts overrides it with the real
 // portal binary's https origin. An empty list fails closed.
+//
+// MOCK_DEMO=1 seeds a realistic demo tenant (tests/mock-api/demo.ts) and
+// lets a toy controller advance transitional phases on a timer — use it
+// for the dev server (`MOCK_DEMO=1 npm run mock-api` + `npm run dev`).
+// Off by default: the e2e suites drive every transition via /_control.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -30,7 +35,18 @@ const portalOrigins = (process.env.MOCK_PORTAL_ORIGINS ?? "http://127.0.0.1:4173
   .map((s) => s.trim())
   .filter((s) => s !== "");
 
-const api = createMockApi({ sessionOrigin, portalOrigins });
+// The session domain the mock publishes via /v1/me and builds launch URLs
+// under (v0.2: ws-<label>.<sessionDomain>). Default `localhost:<port>` so
+// browsers resolve ws-<label>.localhost to the mock's loopback listener.
+const sessionDomain =
+  process.env.MOCK_SESSION_DOMAIN ?? `localhost:${SESSION_PORT}`;
+
+const api = createMockApi({
+  sessionOrigin,
+  sessionDomain,
+  portalOrigins,
+  demo: process.env.MOCK_DEMO === "1",
+});
 
 function toHeaders(h: http.IncomingHttpHeaders): Record<string, string> {
   const out: Record<string, string> = {};

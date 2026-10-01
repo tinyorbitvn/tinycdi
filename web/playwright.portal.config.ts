@@ -2,12 +2,14 @@ import { defineConfig, devices } from "@playwright/test";
 import { PORTAL_ORIGIN } from "./tests-portal/harness.ts";
 
 // Portal-CSP harness — serves the BUILT SPA through the real Go
-// frontend binary (build/frontend) with its real security headers, backed by
-// the contract mock on a second local HTTPS origin as the session host
-// (see tests-portal/serve.ts). The mock's /v1/launch enforces the real
-// gateway's ADR-0004 origin gate against the portal origin, so
-// this suite also catches a Referrer-Policy regression that nulls the
-// launch POST's Origin. Needs a Go toolchain and openssl.
+// frontend binary (build/frontend) with its real security headers, behind
+// an edge shim that routes /v1 to the contract mock like the production
+// Ingress; the mock's session listener plays ws-<label>.<sessionDomain>
+// hosts on a second local HTTPS origin (see tests-portal/serve.ts). The
+// mock's /v1/launch enforces the real gateway's ADR-0004 origin gate
+// against the portal origin, so this suite also catches a
+// Referrer-Policy regression that nulls the launch POST's Origin. Needs
+// a Go toolchain and openssl.
 export default defineConfig({
   testDir: "./tests-portal",
   testMatch: "**/*.spec.ts",

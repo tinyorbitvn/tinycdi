@@ -1,0 +1,74 @@
+/* Companion composition palettes. Original brand and status tokens remain unchanged. */
+:root {
+  --to-ocean-50:#F7F8FA;
+  --to-ocean-100:#EBEDF1;
+  --to-ocean-200:#D1D6E0;
+  --to-ocean-300:#ADB6C8;
+  --to-ocean-400:#8592AD;
+  --to-ocean-500:#5C6D92;
+  --to-ocean-600:#384D7A;
+  --to-ocean-700:#1A3265;
+  --to-ocean-800:#001B54;
+  --to-ocean-900:#001542;
+  --to-ocean-950:#000E2C;
+  --to-ocean-surface:var(--to-ocean-50);
+  --to-ocean-ink:var(--to-ocean-800);
+  --to-ocean-border:var(--to-ocean-200);
+  --to-ocean-solid:var(--to-ocean-800);
+  --to-ocean-on-solid:#FFFFFF;
+  --to-ocean-gradient:linear-gradient(135deg, #001B54 0%, #000E2C 100%);
+  --to-violet-deep-50:#F8F7FA;
+  --to-violet-deep-100:#EDEBF1;
+  --to-violet-deep-200:#D6D1E0;
+  --to-violet-deep-300:#B6ADC8;
+  --to-violet-deep-400:#9285AD;
+  --to-violet-deep-500:#6E5C92;
+  --to-violet-deep-600:#4E387A;
+  --to-violet-deep-700:#331A65;
+  --to-violet-deep-800:#1C0054;
+  --to-violet-deep-900:#160042;
+  --to-violet-deep-950:#0F002C;
+  --to-violet-deep-surface:var(--to-violet-deep-50);
+  --to-violet-deep-ink:var(--to-violet-deep-800);
+  --to-violet-deep-border:var(--to-violet-deep-200);
+  --to-violet-deep-solid:var(--to-violet-deep-800);
+  --to-violet-deep-on-solid:#FFFFFF;
+  --to-violet-deep-gradient:linear-gradient(135deg, #1C0054 0%, #0F002C 100%);
+  --to-electric-50:#F7F7FC;
+  --to-electric-100:#EBEBF6;
+  --to-electric-200:#D1D1EB;
+  --to-electric-300:#ADADDB;
+  --to-electric-400:#8585CA;
+  --to-electric-500:#5C5CB8;
+  --to-electric-600:#3838A8;
+  --to-electric-700:#1A1A9B;
+  --to-electric-800:#000090;
+  --to-electric-900:#000070;
+  --to-electric-950:#00004B;
+  --to-electric-surface:var(--to-electric-50);
+  --to-electric-ink:var(--to-electric-800);
+  --to-electric-border:var(--to-electric-200);
+  --to-electric-solid:var(--to-electric-800);
+  --to-electric-on-solid:#FFFFFF;
+  --to-electric-gradient:linear-gradient(135deg, #000090 0%, #00004B 100%);
+}
+[data-theme="dark"] {
+  --to-ocean-surface:var(--to-ocean-950);
+  --to-ocean-ink:var(--to-ocean-200);
+  --to-ocean-border:var(--to-ocean-600);
+  --to-ocean-solid:var(--to-ocean-300);
+  --to-ocean-on-solid:var(--to-ocean-950);
+  --to-violet-deep-surface:var(--to-violet-deep-950);
+  --to-violet-deep-ink:var(--to-violet-deep-200);
+  --to-violet-deep-border:var(--to-violet-deep-600);
+  --to-violet-deep-solid:var(--to-violet-deep-300);
+  --to-violet-deep-on-solid:var(--to-violet-deep-950);
+  --to-electric-surface:var(--to-electric-950);
+  --to-electric-ink:var(--to-electric-200);
+  --to-electric-border:var(--to-electric-600);
+  --to-electric-solid:var(--to-electric-300);
+  --to-electric-on-solid:var(--to-electric-950);
+}
+[data-tone="ocean"]{--tone-surface:var(--to-ocean-surface);--tone-ink:var(--to-ocean-ink);--tone-border:var(--to-ocean-border);--tone-solid:var(--to-ocean-solid);--tone-on-solid:var(--to-ocean-on-solid);--tone-marker:var(--to-ocean-800);--tone-gradient:var(--to-ocean-gradient);}
+[data-tone="violet-deep"]{--tone-surface:var(--to-violet-deep-surface);--tone-ink:var(--to-violet-deep-ink);--tone-border:var(--to-violet-deep-border);--tone-solid:var(--to-violet-deep-solid);--tone-on-solid:var(--to-violet-deep-on-solid);--tone-marker:var(--to-violet-deep-800);--tone-gradient:var(--to-violet-deep-gradient);}
+[data-tone="electric"]{--tone-surface:var(--to-electric-surface);--tone-ink:var(--to-electric-ink);--tone-border:var(--to-electric-border);--tone-solid:var(--to-electric-solid);--tone-on-solid:var(--to-electric-on-solid);--tone-marker:var(--to-electric-800);--tone-gradient:var(--to-electric-gradient);}

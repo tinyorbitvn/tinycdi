@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -30,7 +31,7 @@ export function CreateWorkspacePage() {
         if (!cancelled) {
           setTemplates(res.items);
           const preset = new URLSearchParams(window.location.search).get("template");
-          if (preset && res.items.some((t) => t.id === preset)) setTemplateRef(preset);
+          if (preset && res.items.some((tpl) => tpl.id === preset)) setTemplateRef(preset);
         }
       } catch (e) {
         if (!cancelled) setLoadError(e);
@@ -41,7 +42,7 @@ export function CreateWorkspacePage() {
     };
   }, [api]);
 
-  const selected = templates?.find((t) => t.id === templateRef);
+  const selected = templates?.find((tpl) => tpl.id === templateRef);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -85,25 +86,25 @@ export function CreateWorkspacePage() {
 
   return (
     <main>
-      <h1>New workspace</h1>
+      <h1>{t("workspaces.create.title")}</h1>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {!templates ? (
-        <p aria-busy="true">Loading templates…</p>
+        <p aria-busy="true">{t("workspaces.create.loading")}</p>
       ) : (
         <form onSubmit={(e) => void submit(e)}>
           <label>
-            Name
+            {t("workspaces.create.nameLabel")}
             <input
               name="name"
               required
               pattern="[a-z0-9][a-z0-9\-]{0,126}[a-z0-9]|[a-z0-9]"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="research-desktop"
+              placeholder={t("workspaces.create.namePlaceholder")}
             />
           </label>
           <label>
-            Template
+            {t("workspaces.create.templateLabel")}
             <select
               name="template"
               required
@@ -111,27 +112,39 @@ export function CreateWorkspacePage() {
               onChange={(e) => setTemplateRef(e.target.value)}
             >
               <option value="" disabled>
-                Select a template
+                {t("workspaces.create.templatePlaceholder")}
               </option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} (rev {t.revision}, {t.runtime})
+              {templates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>
+                  {t("workspaces.create.templateOption", {
+                    name: tpl.name,
+                    revision: tpl.revision,
+                    runtime: tpl.runtime,
+                  })}
                 </option>
               ))}
             </select>
           </label>
           <label>
-            Data policy
+            {t("workspaces.create.dataPolicyLabel")}
             <select
               name="dataPolicy"
               value={dataPolicy}
               onChange={(e) => setDataPolicy(e.target.value as DataPolicy)}
             >
               <option value="">
-                Template default{selected ? ` (${selected.dataPolicyDefault})` : ""}
+                {selected
+                  ? t("workspaces.create.dataPolicyDefaultNamed", {
+                      policy: selected.dataPolicyDefault,
+                    })
+                  : t("workspaces.create.dataPolicyDefault")}
               </option>
-              <option value="Retain">Retain — keep disk on stop/delete</option>
-              <option value="Ephemeral">Ephemeral — destroy data on stop/delete</option>
+              <option value="Retain">
+                {t("workspaces.create.dataPolicyRetain")}
+              </option>
+              <option value="Ephemeral">
+                {t("workspaces.create.dataPolicyEphemeral")}
+              </option>
             </select>
           </label>
           <label>
@@ -140,15 +153,17 @@ export function CreateWorkspacePage() {
               checked={startNow}
               onChange={(e) => setStartNow(e.target.checked)}
             />
-            Start immediately
+            {t("workspaces.create.startNow")}
           </label>
           <button type="submit" disabled={busy || !name.trim() || !templateRef}>
-            {busy ? "Creating…" : "Create workspace"}
+            {busy
+              ? t("workspaces.create.submitting")
+              : t("workspaces.create.submit")}
           </button>
         </form>
       )}
       <p>
-        <Link to="/">← All workspaces</Link>
+        <Link to="/">{t("nav.allWorkspaces")}</Link>
       </p>
     </main>
   );
