@@ -160,9 +160,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       # The portal e2e suite (web/tests-portal) builds and runs the real Go
-      # binaries itself — ./build/frontend (SPA server) and ./cmd/backend
-      # (--components=session) — in Playwright setup, so the job only needs
-      # Go here plus `npm run test:e2e` below.
+      # binaries itself — ./build/frontend (SPA server) and ./cmd/backend in
+      # split mode (-broker-url, session listener only) — in Playwright
+      # setup, so the job only needs Go here plus `npm run test:e2e` below.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}

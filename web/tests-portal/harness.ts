@@ -74,6 +74,15 @@ export function workspaceOrigin(mode: HarnessMode, workspaceId: string): string 
 // Marker text every fake-desktop page serves (tests-portal/serve.ts).
 export const DESKTOP_MARKER = "desktop session";
 
+// Unbuffered debug sink — Playwright batches test stdout until the test
+// ends, which hides timing. TCDI_E2E_DEBUG=1 writes to this file instead.
+import { appendFileSync } from "node:fs";
+const DBG_ON = process.env.TCDI_E2E_DEBUG === "1";
+const DBG_FILE = process.env.TCDI_E2E_DEBUG_FILE ?? "/tmp/t26-e2e-debug.log";
+function dbg(msg: string) {
+  if (DBG_ON) appendFileSync(DBG_FILE, `${new Date().toISOString()} ${msg}\n`);
+}
+
 // Extend the base test with a per-project harnessMode option; projects in
 // playwright.portal.config.ts set it through `use`.
 export const test = base.extend<{ harnessMode: HarnessMode }>({
@@ -112,23 +121,33 @@ export async function resetState(request: APIRequestContext, mode: HarnessMode) 
 // id must be a valid sessionhost label base ("ws_" + [a-z0-9]{8,60}) — the
 // real gateway derives the session host label from it.
 export async function seedReadyWorkspace(request: APIRequestContext, id: string) {
-  const res = await request.post(`${MOCK_API}/_control/workspaces/${id}`, {
+  const res = await request.put(`${MOCK_API}/_control/workspaces/${id}`, {
     data: { phase: "Ready", desiredState: "Running", conditions: READY_CONDITIONS },
   });
   expect(res.ok(), `seed workspace ${id}`).toBeTruthy();
 }
 
 // setConnectionStatus scripts the mock's GET /v1/workspaces/{id}/connection
-// answer (T2.5's scriptable endpoint) for the reconnect spec.
+// answer (the session area's scriptable endpoint) for the reconnect spec.
 export async function setConnectionStatus(
   request: APIRequestContext,
   workspaceId: string,
   status: { state: string; leaseActive: boolean },
 ) {
-  const res = await request.post(`${MOCK_API}/_control/workspaces/${workspaceId}/connection`, {
-    data: status,
+  const res = await request.post(`${MOCK_API}/_control/session/connection`, {
+    data: { workspaceId, ...status },
   });
   expect(res.ok(), "script /connection status").toBeTruthy();
+}
+
+// clearLease drops the mock's lease record for the workspace — the broker-
+// side half of "the session is gone" in the reconnect spec (with it still
+// present, the relaunch ticket mint would 409 CONNECTION_IN_USE).
+export async function clearLease(request: APIRequestContext, workspaceId: string) {
+  const res = await request.post(`${MOCK_API}/_control/lease`, {
+    data: { workspaceId, active: false },
+  });
+  expect(res.ok(), "clear mock lease").toBeTruthy();
 }
 
 export async function setDesktopBehaviour(
@@ -163,37 +182,50 @@ export function sessionFrame(page: Page, origin: string): Frame | undefined {
 }
 
 // waitForDesktopFrame polls until a frame on `origin` serves the fake
-// desktop marker. Along the way it clicks the two buttons the session view
-// may legitimately show — "Connect" if the view waits for a click, and
-// "Take over session" when a live lease answers CONNECTION_IN_USE.
+// desktop marker. The session view auto-launches, so the only button it may
+// legitimately need is "Take over session" when a live lease answers
+// CONNECTION_IN_USE. Clicks are rate-limited: a click mid-launch restarts
+// the frame navigation, so eager polling must never fire faster than a
+// launch can settle.
 export async function waitForDesktopFrame(
   page: Page,
   origin: string,
   timeoutMs = 30_000,
 ): Promise<Frame> {
+  // A frame mid-navigation (the launch POST -> 303 -> document swap) can
+  // leave locator/evaluate calls pending for far longer than our poll
+  // cadence — race every probe against a hard deadline so the loop always
+  // keeps moving.
+  const probeFrame = (f: Frame) =>
+    Promise.race([
+      f.evaluate(
+        (m) => (document.body?.innerText ?? "").includes(m),
+        DESKTOP_MARKER,
+      ),
+      new Promise<boolean>((res) => setTimeout(() => res(false), 2_500)),
+    ]).catch(() => false);
+
   const deadline = Date.now() + timeoutMs;
+  let lastClick = 0;
   for (;;) {
     const frame = sessionFrame(page, origin);
     if (frame) {
-      try {
-        await frame
-          .locator("h1")
-          .filter({ hasText: DESKTOP_MARKER })
-          .waitFor({ timeout: 2_000 });
-        return frame;
-      } catch {
-        /* loaded something else — keep waiting */
-      }
+      if (await probeFrame(frame)) return frame;
+      dbg(`frame ${frame.url()} not ready`);
+    } else {
+      dbg(`no frame on ${origin}; frames=${JSON.stringify(page.frames().map((f) => f.url()))}`);
     }
-    for (const name of ["Take over session", "Reconnect", "Connect"]) {
-      const b = page.getByRole("button", { name, exact: true }).first();
-      if (await b.isEnabled().catch(() => false)) {
-        await b.click();
-        break;
+    // count() is non-waiting — isEnabled()/isVisible() would block the poll
+    // loop waiting for the button to appear.
+    if (Date.now() - lastClick > 4_000) {
+      const b = page.getByRole("button", { name: "Take over session", exact: true }).first();
+      if ((await b.count().catch(() => 0)) > 0) {
+        await b.click({ timeout: 2_000 }).catch(() => {});
+        lastClick = Date.now();
       }
     }
     if (Date.now() > deadline) break;
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(300);
   }
   const frame = sessionFrame(page, origin);
   expect(frame, `session frame on ${origin}`).toBeTruthy();
@@ -209,7 +241,25 @@ export async function openSession(
   workspaceId: string,
 ): Promise<Frame> {
   const origin = workspaceOrigin(mode, workspaceId);
+  if (DBG_ON) {
+    page.on("console", (m) => {
+      if (m.type() === "error" || m.type() === "warning")
+        dbg(`[console.${m.type()}] ${m.text().slice(0, 200)}`);
+    });
+    page.on("pageerror", (e) => dbg(`[pageerror] ${String(e).slice(0, 200)}`));
+    page.on("requestfailed", (r) =>
+      dbg(`[reqfail] ${r.url()} ${r.failure()?.errorText}`));
+    page.on("response", (r) => {
+      if (r.status() >= 400) dbg(`[http ${r.status()}] ${r.url()}`);
+    });
+    page.on("request", (r) => {
+      const u = r.url();
+      if (u.includes("session.tcdi") || u.includes("/connections"))
+        dbg(`[req ${r.method()}] ${u}`);
+    });
+  }
   await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}/session`);
+  dbg(`openSession: page loaded ${page.url()}`);
   return waitForDesktopFrame(page, origin);
 }
 

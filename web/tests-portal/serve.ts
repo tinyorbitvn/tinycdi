@@ -342,7 +342,9 @@ const broker = https.createServer(
       if (req.method === "POST" && req.url === "/internal/v1/broker/redeem") {
         const t = brokerState.tickets.get(body.ticket ?? "");
         if (!t || t.used) {
-          apiErr(res, 401, "FORBIDDEN", "ticket invalid, expired or already redeemed");
+          // Same (status, code) the real broker emits for a dead ticket —
+          // the client maps it to broker.ErrTicketInvalid.
+          apiErr(res, 401, "UNAUTHENTICATED", "ticket invalid, expired or already redeemed");
           return;
         }
         t.used = true;
@@ -386,7 +388,8 @@ const broker = https.createServer(
             JSON.stringify({
               upstreamURL: `https://127.0.0.1:${UPSTREAM_PORT}`,
               tlsServerName: "upstream.tcdi.localhost",
-              caPEM: cert.toString("utf8"),
+              // Contract: caPEM is a []byte on the wire (base64 of the PEM).
+              caPEM: cert.toString("base64"),
               username: UPSTREAM_USER,
               password: UPSTREAM_PASS,
               protocol: "kasmvnc",
@@ -436,6 +439,30 @@ const sessionDomain = () => SESSION_DOMAINS[activeMode];
 
 const CONN_RE = /^\/v1\/workspaces\/([^/]+)\/connections$/;
 
+// The contract mock names its portal cookie "tcdi_session"; the real API
+// ships "__Host-tcdi_session" (D17). The edge presents the real name to
+// the browser — Secure added, Path=/ already, no Domain — and translates
+// it back on the way in, so the cookie surface this suite observes is the
+// production one.
+const MOCK_COOKIE = "tcdi_session";
+const HOST_COOKIE = "__Host-tcdi_session";
+
+function inboundCookie(header: string | undefined): string | undefined {
+  if (header === undefined) return undefined;
+  return header.replaceAll(`${HOST_COOKIE}=`, `${MOCK_COOKIE}=`);
+}
+
+function rewriteSetCookie(h: http.IncomingHttpHeaders): void {
+  const sc = h["set-cookie"];
+  if (!sc) return;
+  const list = Array.isArray(sc) ? sc : [sc];
+  h["set-cookie"] = list.map((c) =>
+    c.startsWith(`${MOCK_COOKIE}=`)
+      ? `${HOST_COOKIE}${c.slice(MOCK_COOKIE.length)}; Secure`
+      : c,
+  );
+}
+
 function pipeUpstream(
   target: { protocol: "http:" | "https:"; port: number },
   req: http.IncomingMessage,
@@ -476,12 +503,23 @@ function handleApi(req: http.IncomingMessage, res: http.ServerResponse) {
         port: MOCK_API_PORT,
         path: req.url,
         method: req.method,
-        headers: { ...req.headers, host: `127.0.0.1:${MOCK_API_PORT}`, "content-length": raw.length },
+        headers: (() => {
+          const h = {
+            ...req.headers,
+            host: `127.0.0.1:${MOCK_API_PORT}`,
+            "content-length": String(raw.length),
+          };
+          const c = inboundCookie(req.headers.cookie);
+          if (c === undefined) delete h.cookie;
+          else h.cookie = c;
+          return h;
+        })(),
       },
       (upRes) => {
         const connMatch = req.method === "POST" ? req.url?.match(CONN_RE) : null;
         const isMe = req.method === "GET" && (req.url === "/v1/me" || req.url?.startsWith("/v1/me?"));
         if (!connMatch && !isMe) {
+          rewriteSetCookie(upRes.headers);
           res.writeHead(upRes.statusCode ?? 502, upRes.headers);
           upRes.pipe(res);
           return;
@@ -508,7 +546,8 @@ function handleApi(req: http.IncomingMessage, res: http.ServerResponse) {
           } catch {
             /* pass the body through untouched */
           }
-          const headers = { ...upRes.headers } as Record<string, string | string[]>;
+          const headers = { ...upRes.headers } as http.IncomingHttpHeaders;
+          rewriteSetCookie(headers);
           delete headers["content-length"];
           delete headers["transfer-encoding"];
           headers["content-length"] = String(out.length);

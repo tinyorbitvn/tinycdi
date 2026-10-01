@@ -43,10 +43,13 @@ test("foreign frame", async ({ page, context, request, harnessMode }) => {
     .poll(() => refusals.join("\n"), { timeout: 15_000 })
     .toMatch(/frame-ancestors/i);
 
-  // And no usable session document ever rendered inside the foreign frame.
+  // And no usable session document ever rendered inside the foreign frame
+  // — a refused frame shows the browser's error page, which has no h1 at
+  // all, so assert on the body text rather than a missing element.
   const framed = evil.frames().filter((f) => f !== evil.mainFrame());
   for (const f of framed) {
-    await expect(f.locator("h1")).not.toContainText(DESKTOP_MARKER);
+    const body = await f.locator("body").innerText().catch(() => "");
+    expect(body).not.toContain(DESKTOP_MARKER);
   }
 });
 

@@ -1,5 +1,6 @@
 import {
   DESKTOP_MARKER,
+  clearLease,
   expect,
   login,
   openSession,
@@ -39,6 +40,9 @@ test("backend restart mid-session relaunches the frame", async ({
 
   // The broker still holds the lease row shape the API reports: from the
   // portal's view the session died with the backend, the lease is gone.
+  // Drop the mock's lease record too, or the relaunch ticket mint would
+  // answer 409 CONNECTION_IN_USE.
+  await clearLease(request, WS_A);
   await setConnectionStatus(request, WS_A, { state: "disconnected", leaseActive: false });
 
   // Within 15 s and without a click the session view must have re-launched:
