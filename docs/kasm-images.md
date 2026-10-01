@@ -17,17 +17,31 @@ initContainers:
 - name: tcdi-adapter-init
   image: <kasmAdapter.image — digest-pinned, operator flag>
   command: ["/install-adapter"]     # writes the adapter scripts into the shared volume
+  resources: {requests: {cpu: 10m, memory: 32Mi, ephemeral-storage: 16Mi},
+              limits:   {cpu: 10m, memory: 32Mi, ephemeral-storage: 16Mi}}
+  securityContext: {readOnlyRootFilesystem: true, …hardened baseline…}
   volumeMounts: [{name: tcdi-adapter, mountPath: /opt/tcdi}]
 containers:
 - name: desktop
   image: kasmweb/<app>@sha256:…     # spec.linux.image — digest pin enforced by the CRD
   command: ["/opt/tcdi/entrypoint.sh"]
+  securityContext: {readOnlyRootFilesystem: true, …same baseline…}
   env:
   - {name: HOME, value: /home/workspace}
   - {name: TCDI_SESSION_CMD, value: "<spec.linux.sessionCmd>"}   # only when set
   - {name: VNC_PW, value: ""}       # neutralize the image's baked-in defaults
   - {name: VNC_VIEW_ONLY_PW, value: ""}
-  volumeMounts: + {name: tcdi-adapter, mountPath: /opt/tcdi, readOnly: true}
+  volumeMounts:
+  - {name: tcdi-adapter, mountPath: /opt/tcdi, readOnly: true}
+  # sandbox-preserving shim over every Chromium-family wrapper path
+  # (Kasm's /usr/bin/chromium etc. hardcode --no-sandbox):
+  - {name: tcdi-adapter, mountPath: /usr/bin/chromium, subPath: browser-shim.sh, readOnly: true}
+  - {name: tcdi-adapter, mountPath: /usr/bin/chromium-browser, subPath: browser-shim.sh, readOnly: true}
+  - {name: tcdi-adapter, mountPath: /usr/bin/google-chrome, subPath: browser-shim.sh, readOnly: true}
+  - # … full list: AdapterBrowserWrappers in internal/runtime/linux/backend.go
+  # managed Chromium policy (warnings on, devtools/extension-installs off):
+  - {name: tcdi-adapter, mountPath: /etc/chromium/policies/managed/zz-tcdi.json, subPath: chromium-policy.json, readOnly: true}
+  - # … full list: AdapterPolicyTargets in internal/runtime/linux/backend.go
 volumes: + {name: tcdi-adapter, emptyDir: {}}
 ```
 
@@ -41,7 +55,7 @@ no-new-privs, seccomp/AppArmor), Service and NetworkPolicy.
 
 The adapter image (`build/kasm-adapter/`, published as
 `tinycdi-kasm-adapter`) contains a static `install-adapter` copier that
-writes three scripts into the shared volume:
+writes the adapter files into the shared volume:
 
 - `entrypoint.sh` — same contract as `build/linux-desktop/entrypoint.sh`:
   reads credentials/TLS from the mounted Secret files, stages them on the
@@ -57,8 +71,27 @@ writes three scripts into the shared volume:
   0.0.0.0 -sslOnly` and supervises Xvnc.
 - `healthcheck.sh` — readiness gate: `xdpyinfo` on :1 AND an HTTPS answer
   on :8443 (tolerant of KasmVNC 1.4.x's loopback blacklist quirk).
-- `xstartup.sh` — starts the WM (`startxfce4`, present in all kasm
-  desktop/app images) plus `$TCDI_SESSION_CMD` when set.
+- `xstartup.sh` — with `sessionCmd` set, starts ONLY a window manager
+  (`xfwm4`, falling back to `openbox`/`startxfce4`) plus the payload —
+  no desktop icons, panel launchers or app menu survive as unsandboxed
+  relaunch surfaces — and when the payload exits the display is torn
+  down (the container exits and restarts into a fresh session, same
+  lifecycle as the native browser image). Without `sessionCmd`, the
+  image's XFCE session runs.
+- `browser-shim.sh` — bind-mounted read-only (subPath) over every
+  Chromium-family wrapper path (`/usr/bin/chromium`,
+  `/usr/bin/google-chrome`, `/usr/bin/microsoft-edge`, … —
+  `AdapterBrowserWrappers`). Every relaunch path — desktop icon, menu,
+  `gtk-launch`, `xdg-open`, `x-www-browser`/`sensible-browser` — execs
+  the REAL binary with `--no-sandbox`/`--disable-*-sandbox`/
+  `--single-process` stripped. Unreachable to unmount for the session
+  user (ro mount, no CAP_SYS_ADMIN). It resolves the real binary from
+  `/run/tcdi/browser-bin` (the sessionCmd payload binary, written by
+  entrypoint.sh) or a built-in candidate list.
+- `chromium-policy.json` — managed policy mounted into each engine's
+  policy dir (`AdapterPolicyTargets`, filename `zz-tcdi.json` so it
+  sorts last): re-enables the `--no-sandbox` warning bar, Safe Browsing
+  standard, disables DevTools, extension installs, incognito, sync.
 
 Notable deltas vs the tcdi/* images (all proven on
 `kasmweb/chromium:1.18.0` and `kasmweb/ubuntu-noble-desktop:1.18.0`):
@@ -72,12 +105,31 @@ Notable deltas vs the tcdi/* images (all proven on
   `$HOME/.vnc/kasmvnc.yaml` rewritten each boot — it merges after /etc
   and wins for every key we set.
 - Kasm images ship dormant upload/audio/gamepad/webcam/printer/smartcard
-  binaries — under the adapter the only listening socket is :8443, but
-  the binaries remain in the filesystem.
+  binaries — under the adapter the only listening sockets are :8443/tcp
+  and Xvnc's UDP transport on :8443/udp (KasmVNC 1.4.x cannot disable it —
+  `network.udp.port` accepts only `auto`|int and 0 resolves to the
+  websocket port; the TCP-only NetworkPolicy is the control, same
+  residual as the native images), but the binaries remain in the
+  filesystem.
+- **Rootfs is read-only** (`readOnlyRootFilesystem: true` on the desktop
+  and init containers): the kasmweb images ship world-writable policy
+  files and a uid-1000-writable dir inside the served web root
+  (`/usr/share/kasmvnc/www/Downloads`); the ro rootfs kills both, plus
+  any in-image tampering. All session writes land on mounts (home,
+  `/run/tcdi`, `/tmp`, `/dev/shm`).
 - `VNC_PW`/`VNC_VIEW_ONLY_PW` are baked into the image env; the pod
   neutralizes them to empty.
 
 ## Onboarding checklist for a new kasm image
+
+The catalog is `build/kasm-catalog.txt` — every `kasmweb/*` image
+referenced anywhere in tracked files (chart ci values, docs, examples)
+must appear there, digest-pinned, with an engine + freshness floor.
+`.github/scripts/check-kasm-catalog.sh` enforces that in every PR; the
+heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy gate + engine
+extraction) and the adapter contract test run in the `kasm-contract`
+ci.yml job — weekly, on dispatch, on main pushes, and on PRs touching
+the adapter/catalog surface.
 
 Every `kasmweb/<app>` added to the catalog must clear this list **before
 its template merges**:
@@ -93,25 +145,40 @@ its template merges**:
    (`spec.linux.sessionCmd` → `TCDI_SESSION_CMD`). For full-desktop
    images it may stay empty (XFCE session). Printable ASCII, ≤512 chars
    (CRD-enforced).
-3. **trivy gate.** Scan the digest-pinned image with the release-gate
-   flags (`--severity CRITICAL,HIGH --ignore-unfixed`). Images that fail
-   the gate are not catalog entries — e.g. `kasmweb/ubuntu-noble-desktop`
-   carries hundreds of fixable HIGH/CRITICAL findings today.
-4. **Contract test.** Run the adapter contract suite against the image:
+3. **trivy gate.** `scan-kasm-catalog.sh` scans the digest-pinned image
+   with the release-gate flags (`--severity CRITICAL,HIGH
+   --ignore-unfixed`) plus the catalog-scoped
+   `build/kasm-catalog.trivyignore` (same SEC-44 expiry rules; dormant-
+   path exceptions only). Images that fail are not catalog entries —
+   e.g. `kasmweb/ubuntu-noble-desktop` carries hundreds of fixable
+   HIGH/CRITICAL findings today and is listed **unsupported** in the
+   catalog. NOTE: trivy's OS-package view does NOT cover the bundled
+   browser engine reliably (a Debian chromium inside an Ubuntu base
+   reports 0 vulns) — the freshness floor below is the engine gate.
+4. **Engine freshness floor.** The catalog entry's `min-engine-major`
+   must be >= the major of `build/browser`'s `CHROMIUM_APT_VERSION`
+   minus 4 (~4 upstream release cycles of tolerated lag on Debian/Ubuntu
+   rebuilds), and the installed engine must meet it. The seeded
+   `kasmweb/chromium` carries Chromium 150 vs the native pin's 154 —
+   inside the budget; a stale digest (e.g. the Oct-2025 pin, Chromium
+   139) is rejected.
+5. **Contract test.** Run the adapter contract suite against the image:
    `TCDI_IT_KASM_IMAGE=<repo>@sha256:<digest> go test -tags=integration
    ./tests/integration -run TestKasmAdapterChromium` — it proves the
    auth/TLS/401 surface, the write-only user (owner-gated `/api/*` → 401),
-   uid 1000 + sandboxed renderers, and home persistence. For
-   browser-family images the renderer probe additionally proves the
-   wrapper bypass (no `--no-sandbox` process may exist).
-5. **Digest tracking.** Catalog entries pin `kasmweb/<app>@sha256:…`.
+   uid 1000, EVERY renderer sandboxed (nested userns + stacked seccomp
+   filters — assertions fail on a single unsandboxed renderer), relaunch
+   through the wrapper paths staying sandboxed, session teardown on
+   payload exit, ro rootfs, and home persistence.
+6. **Digest tracking.** Catalog entries pin `kasmweb/<app>@sha256:…`.
    Track the upstream `X.Y.Z-rolling-weekly` tags (frozen `X.Y.Z` releases
    lag security refreshes; `-rolling-daily` is too noisy): resolve the
-   tag to a new digest on a schedule, re-run the trivy gate + contract
-   test in CI, then bump `spec.linux.image` via a PR. On a KasmVNC
-   version bump, re-check the healthcheck loopback quirk and the yaml
-   schema keys the adapter writes.
-6. **Node profiles.** Browser-family images additionally need the
+   tag to a new digest on a schedule — the weekly `kasm-contract` job
+   fails when the pinned digest stops passing the scan or the contract —
+   then bump `spec.linux.image` via a PR. On a KasmVNC version bump,
+   re-check the healthcheck loopback quirk and the yaml schema keys the
+   adapter writes.
+7. **Node profiles.** Browser-family images additionally need the
    Localhost seccomp + AppArmor pair on the nodes
    (`nodeProfiles.install` / `deploy/node-profiles/`) for the in-session
    sandbox — same prerequisite as the tcdi browser image.

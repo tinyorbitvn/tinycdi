@@ -1,0 +1,10 @@
+{
+  "CommandLineFlagSecurityWarningsEnabled": true,
+  "SafeBrowsingProtectionLevel": 1,
+  "DeveloperToolsAvailability": 1,
+  "ExtensionInstallBlocklist": ["*"],
+  "IncognitoModeAvailability": 1,
+  "MetricsReportingEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true
+}

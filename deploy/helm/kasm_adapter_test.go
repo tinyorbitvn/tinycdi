@@ -102,8 +102,8 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 		t.Errorf("spec.linux.adapter = %v, want kasm", linux["adapter"])
 	}
 	if img, _ := linux["image"].(string); img !=
-		"kasmweb/chromium@sha256:1d7dfc6c6a756dcd78a4d8bcbcae538bf0da7fb7fd5deec3721e9d2b459fe79c" {
-		t.Errorf("spec.linux.image = %q, want the digest-pinned kasmweb/chromium ref", img)
+		"kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0" {
+		t.Errorf("spec.linux.image = %q, want the cataloged digest-pinned kasmweb/chromium ref", img)
 	}
 	if cmd, _ := linux["sessionCmd"].(string); cmd !=
 		"/usr/bin/chromium-orig --start-maximized https://start.lab.example.net" {

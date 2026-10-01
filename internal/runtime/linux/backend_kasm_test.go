@@ -74,6 +74,7 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	sc := init.SecurityContext
 	if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
 		sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot ||
+		sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem ||
 		len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" ||
 		sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
 		sc.AppArmorProfile == nil || sc.AppArmorProfile.Type != corev1.AppArmorProfileTypeRuntimeDefault {
@@ -82,6 +83,17 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != adapterVolName ||
 		init.VolumeMounts[0].MountPath != adapterDir || init.VolumeMounts[0].ReadOnly {
 		t.Errorf("init mounts = %+v, want rw mount of %s at %s", init.VolumeMounts, adapterVolName, adapterDir)
+	}
+	// KASM-3: requests=limits on cpu/memory/ephemeral-storage so a
+	// ResourceQuota-governed namespace admits the pod.
+	for _, res := range []corev1.ResourceName{
+		corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage,
+	} {
+		req, rok := init.Resources.Requests[res]
+		lim, lok := init.Resources.Limits[res]
+		if !rok || !lok || req.IsZero() || req.Cmp(lim) != 0 {
+			t.Errorf("init %s: requests=%v limits=%v, want equal non-zero pair", res, req, lim)
+		}
 	}
 
 	// Desktop container: adapter entrypoint, env contract, ro mount.
@@ -101,12 +113,64 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	}
 	var mount *corev1.VolumeMount
 	for i := range ctr.VolumeMounts {
-		if ctr.VolumeMounts[i].Name == adapterVolName {
+		if ctr.VolumeMounts[i].Name == adapterVolName && ctr.VolumeMounts[i].SubPath == "" {
 			mount = &ctr.VolumeMounts[i]
 		}
 	}
 	if mount == nil || !mount.ReadOnly || mount.MountPath != adapterDir {
 		t.Fatalf("adapter mount missing/not read-only at %s: %+v", adapterDir, ctr.VolumeMounts)
+	}
+
+	// KASM-6/7: the kasmweb rootfs is world-writable in places that matter
+	// (managed policy files, the served web root) — the whole rootfs is
+	// read-only; writes only land on the mounted volumes.
+	if ctr.SecurityContext.ReadOnlyRootFilesystem == nil ||
+		!*ctr.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("kasm desktop must run with readOnlyRootFilesystem")
+	}
+
+	// KASM-1: the sandbox-preserving shim is bind-mounted read-only over
+	// every Chromium-family wrapper path (Kasm's --no-sandbox launchers).
+	shimMounts := map[string]bool{}
+	policyMounts := map[string]bool{}
+	for _, m := range ctr.VolumeMounts {
+		if m.Name != adapterVolName {
+			continue
+		}
+		if m.SubPath == adapterShimSubPath {
+			if !m.ReadOnly {
+				t.Errorf("shim mount %s must be read-only", m.MountPath)
+			}
+			shimMounts[m.MountPath] = true
+		}
+		if m.SubPath == adapterPolicySubPath {
+			if !m.ReadOnly {
+				t.Errorf("policy mount %s must be read-only", m.MountPath)
+			}
+			policyMounts[m.MountPath] = true
+		}
+	}
+	for _, wp := range AdapterBrowserWrappers {
+		if !shimMounts[wp] {
+			t.Errorf("no shim mount over wrapper %s", wp)
+		}
+	}
+	if !shimMounts["/usr/bin/chromium"] {
+		t.Error("the image's primary --no-sandbox wrapper /usr/bin/chromium must be shimmed")
+	}
+	for _, pp := range AdapterPolicyTargets {
+		if !policyMounts[pp] {
+			t.Errorf("no managed-policy mount at %s", pp)
+		}
+	}
+	// The shim must never shadow the real binary it execs — that would loop.
+	for _, wp := range AdapterBrowserWrappers {
+		for _, real := range []string{"/usr/bin/chromium-orig", "/usr/lib/chromium/chromium",
+			"/opt/google/chrome/google-chrome", "/opt/microsoft/msedge/microsoft-edge"} {
+			if wp == real {
+				t.Fatalf("wrapper list must not contain the real binary %s", real)
+			}
+		}
 	}
 
 	// The shared emptyDir volume exists exactly once.

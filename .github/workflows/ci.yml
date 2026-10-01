@@ -231,6 +231,13 @@ jobs:
           done
       - name: .trivyignore expiry policy
         run: .github/scripts/check-trivyignore.sh
+      - name: kasm catalog policy (KASM-2/KASM-5)
+        # Every kasmweb/* ref in ci values/docs must be a digest-pinned
+        # catalog entry whose engine floor meets the documented minimum;
+        # the catalog's own trivyignore follows the same expiry policy.
+        run: |
+          .github/scripts/check-kasm-catalog.sh
+          .github/scripts/check-trivyignore.sh build/kasm-catalog.trivyignore
 
   browser-freshness:
     # SUPR-4: fails once bookworm-security offers a chromium newer than the
@@ -242,6 +249,81 @@ jobs:
         with:
           persist-credentials: false
       - run: .github/scripts/check-chromium-freshness.sh
+
+  kasm-contract:
+    # KASM-4/KASM-5: the docker-emulated pod contract test plus the
+    # heavyweight catalog scan (trivy gate + browser-engine freshness).
+    # ~2 GB image pull and ~10 min runtime — too heavy for every PR, so it
+    # runs weekly, on workflow_dispatch, on main pushes, and on PRs that
+    # touch the adapter/catalog surface (the gate step skips the rest in
+    # ~15 s on unrelated PRs). The always-on unit-level guard is the
+    # kasm-catalog check in workflow-policy.
+    name: kasm adapter contract + catalog scan
+    runs-on: ubuntu-24.04
+    env:
+      TRIVY_VERSION: "0.70.0"
+      TRIVY_TGZ_SHA256: "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gate on kasm-relevant changes
+        id: gate
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          case "${{ github.event_name }}" in
+            schedule|workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          git fetch -q origin "$BASE_REF"
+          PATHS_RE='^(build/kasm-adapter/|build/kasm-catalog'\
+            '|\.github/scripts/(check|scan)-kasm-catalog\.sh'\
+            '|\.github/tests/kasm-catalog\.test\.sh'\
+            '|tests/integration/kasm_adapter_test\.go|internal/runtime/linux/'\
+            '|deploy/helm/tinycdi/ci/example-values\.yaml|docs/kasm-images\.md'\
+            '|\.github/workflows/ci\.yml)'
+          if git diff --name-only "origin/$BASE_REF...HEAD" | grep -qE "$PATHS_RE"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        if: steps.gate.outputs.run == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build adapter image (tcdi/kasm-adapter:it)
+        if: steps.gate.outputs.run == 'true'
+        run: docker build -f build/kasm-adapter/Dockerfile -t tcdi/kasm-adapter:it .
+      - name: install trivy ${{ env.TRIVY_VERSION }} (sha256-verified)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          curl -fsSL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${{ env.TRIVY_TGZ_SHA256 }}  /tmp/trivy.tgz" | sha256sum -c -
+          mkdir -p "$PWD/bin"
+          tar -xzf /tmp/trivy.tgz -C "$PWD/bin" trivy
+          "$PWD/bin/trivy" version
+      - name: catalog scan (trivy gate + engine freshness floor)
+        if: steps.gate.outputs.run == 'true'
+        run: PATH="$PWD/bin:$PATH" .github/scripts/scan-kasm-catalog.sh
+      - name: adapter contract test (per cataloged image)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          while read -r ref _; do
+            case "$ref" in ''|\#*) continue;; esac
+            out="$(mktemp)"
+            TCDI_IT_KASM_IMAGE="$ref" \
+              go test -tags=integration -count=1 -timeout 20m -v \
+              ./tests/integration -run TestKasmAdapterChromium | tee "$out"
+            # A SKIP here is silent gate loss — the disk-floor and env
+            # guards inside the test must never skip it in CI.
+            if grep -q -- '--- SKIP: TestKasmAdapterChromium' "$out"; then
+              echo "::error::contract test skipped for $ref — gate lost"
+              exit 1
+            fi
+          done < build/kasm-catalog.txt
 
   actionlint:
     name: workflow lint (actionlint + yamllint + zizmor)

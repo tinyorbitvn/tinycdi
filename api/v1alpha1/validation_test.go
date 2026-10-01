@@ -296,6 +296,17 @@ func TestWorkspaceTemplateCreateValidation(t *testing.T) {
 			}),
 		},
 		{
+			// KASM-5: the digest pin applies to kasm images too — a
+			// tag-only kasmweb ref must not be admissible.
+			name: "reject kasm adapter with tag-only image",
+			obj: mutate(linuxTemplate("tpl-rej-kasmtag"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["image"] = "kasmweb/chromium:1.18.0"
+			}),
+			wantErr: "sha256",
+		},
+		{
 			name: "reject unsupported adapter",
 			obj: mutate(linuxTemplate("tpl-rej-adapter"), func(s map[string]interface{}) {
 				live(s, "linux")["adapter"] = "docker"

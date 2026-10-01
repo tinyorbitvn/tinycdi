@@ -13,9 +13,13 @@
 #      release.yml workflow_dispatch is dry-run only — a real release is
 #      made by an admin pushing the tag.
 #   3. Branch protection on `main` — required status checks = every ci.yml
-#      job EXCEPT the network-dependent chromium freshness job
-#      (SUPF-4: it polls Debian security feeds and must not gate merges),
-#      enforce admins, dismiss stale reviews. Single maintainer:
+#      job EXCEPT the network-dependent ones (SUPF-4): the chromium
+#      apt-pin freshness job (polls Debian security feeds) and the
+#      kasm-contract job (pulls a ~2 GB Docker Hub image; the weekly
+#      schedule + PR path gate still cover it — and a tag-only or
+#      uncataloged kasm ref is already blocked by the required
+#      workflow-policy job via check-kasm-catalog.sh). Enforce admins,
+#      dismiss stale reviews. Single maintainer:
 #      required_approving_review_count is 0 — raise it (and drop the
 #      admin-only bus factor) once a second maintainer exists.
 #   4. Private vulnerability reporting + secret scanning with push

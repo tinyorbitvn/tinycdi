@@ -25,6 +25,12 @@ var healthcheck []byte
 //go:embed xstartup.sh
 var xstartup []byte
 
+//go:embed browser-shim.sh
+var browserShim []byte
+
+//go:embed chromium-policy.json
+var chromiumPolicy []byte
+
 func main() {
 	dir := os.Getenv("TCDI_ADAPTER_DIR")
 	if dir == "" {
@@ -36,14 +42,17 @@ func main() {
 	scripts := []struct {
 		name string
 		data []byte
+		mode os.FileMode
 	}{
-		{"entrypoint.sh", entrypoint},
-		{"healthcheck.sh", healthcheck},
-		{"xstartup.sh", xstartup},
+		{"entrypoint.sh", entrypoint, 0o755},
+		{"healthcheck.sh", healthcheck, 0o755},
+		{"xstartup.sh", xstartup, 0o755},
+		{"browser-shim.sh", browserShim, 0o755},
+		{"chromium-policy.json", chromiumPolicy, 0o644},
 	}
 	for _, s := range scripts {
 		p := filepath.Join(dir, s.name)
-		if err := os.WriteFile(p, s.data, 0o755); err != nil {
+		if err := os.WriteFile(p, s.data, s.mode); err != nil {
 			fatal("write %s: %v", p, err)
 		}
 	}

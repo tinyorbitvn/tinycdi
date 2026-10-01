@@ -198,7 +198,9 @@ A seeded kasm template sets `spec.linux.adapter: kasm`, an optional
 it MUST point past the image's `--no-sandbox` wrapper at the real
 binary), and the runtime `image:` as a literal digest-pinned
 `kasmweb/<app>@sha256:…` reference (it is pulled by the nodes straight
-from Docker Hub — never mirrored/republished). `ci/example-values.yaml`
+from Docker Hub — never mirrored/republished). The digest must be a
+`build/kasm-catalog.txt` entry — CI enforces the catalog (digest pin,
+trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
 ships a complete `kasmweb/chromium` example.
 
 ### Node-profile installer (`nodeProfiles.install`) — default OFF

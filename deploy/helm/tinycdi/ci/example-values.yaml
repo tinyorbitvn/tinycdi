@@ -182,11 +182,15 @@ templates:
   # Hub path — NOT resolved through .Values.images), sessionCmd points
   # past the image's --no-sandbox chromium wrapper at the real binary,
   # and the same Localhost seccomp/AppArmor node profiles the tcdi
-  # browser template uses apply (must be pre-loaded on the nodes).
+  # browser template uses apply (must be pre-loaded on the nodes). The
+  # digest must stay a build/kasm-catalog.txt entry — the catalog gate
+  # (trivy + browser-engine freshness floor) applies
+  # (.github/scripts/check-kasm-catalog.sh).
   - name: kasm-chromium
     namespace: tinycdi-tenant-a
-    # kasmweb/chromium:1.18.0 (amd64) — re-resolve on -rolling-weekly bumps.
-    image: kasmweb/chromium@sha256:1d7dfc6c6a756dcd78a4d8bcbcae538bf0da7fb7fd5deec3721e9d2b459fe79c
+    # kasmweb/chromium:1.18.0-rolling-weekly @ 2026-09-29 — re-resolve on
+    # weekly bumps; Chromium 150.0.7871.100, KasmVNC 1.4.x.
+    image: kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0
     seccompProfile: localhost/profiles/chromium-userns.json
     appArmorProfile: tinycdi-browser
     annotations:

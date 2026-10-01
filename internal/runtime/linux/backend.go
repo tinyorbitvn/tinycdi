@@ -125,7 +125,56 @@ const (
 	adapterEntrypoint = "/opt/tcdi/entrypoint.sh"
 	adapterInitName   = "tcdi-adapter-init"
 	adapterInstaller  = "/install-adapter"
+
+	// KASM-1: the adapter volume also carries browser-shim.sh, bind-mounted
+	// read-only (subPath) over every Chromium-family wrapper path the
+	// kasmweb/* images ship. Those wrappers hardcode --no-sandbox; every
+	// relaunch surface (desktop icon, menu, xdg-open, the x-www-browser /
+	// sensible-browser alternatives chain) lands on one of them. The shim
+	// execs the real binary with sandbox-killing flags stripped. subPath
+	// targets that don't exist in a given image are created by the
+	// kubelet, so one list covers the whole Chromium family.
+	adapterShimSubPath = "browser-shim.sh"
+
+	// KASM-8: chromium-policy.json is mounted (subPath, read-only) into
+	// each engine's managed-policy directory. It sorts last
+	// alphabetically so it overrides the image's permissive files
+	// (CommandLineFlagSecurityWarningsEnabled=false, unrestricted
+	// DevTools/extensions, Safe Browsing off).
+	adapterPolicySubPath = "chromium-policy.json"
 )
+
+// AdapterBrowserWrappers are the Chromium-family launcher paths the shim
+// is mounted over. Only WRAPPER paths belong here — never the real
+// binary (the shim execs it; shadowing it would loop).
+var AdapterBrowserWrappers = []string{
+	"/usr/bin/chromium",
+	"/usr/bin/chromium-browser",
+	"/usr/bin/chromium-browser-stable",
+	"/usr/bin/google-chrome",
+	"/usr/bin/google-chrome-stable",
+	"/usr/bin/microsoft-edge",
+	"/usr/bin/microsoft-edge-stable",
+	"/usr/bin/brave-browser",
+	"/usr/bin/brave-browser-stable",
+	"/usr/bin/vivaldi",
+	"/usr/bin/vivaldi-stable",
+	"/usr/bin/opera",
+	// Kasm replaces /usr/bin/x-www-browser with a real --no-sandbox
+	// wrapper script (it is NOT the usual alternatives symlink); the
+	// x-www-browser entry under /etc/alternatives points at
+	// /usr/bin/chromium, already covered.
+	"/usr/bin/x-www-browser",
+}
+
+// AdapterPolicyTargets are the managed-policy destinations per engine
+// (debian chromium, google-chrome, msedge). Missing parents are created
+// by the kubelet; engines without the dir simply ignore the file.
+var AdapterPolicyTargets = []string{
+	"/etc/chromium/policies/managed/zz-tcdi.json",
+	"/etc/opt/chrome/policies/managed/zz-tcdi.json",
+	"/etc/opt/edge/policies/managed/zz-tcdi.json",
+}
 
 // CRUID is a Workspace CR's metadata.uid — the identity every runtime
 // child object name (and every child workspace-uid label value) derives
@@ -826,6 +875,31 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		}
 		ctr.VolumeMounts = append(ctr.VolumeMounts,
 			corev1.VolumeMount{Name: adapterVolName, MountPath: adapterDir, ReadOnly: true})
+		// KASM-1: shadow every Chromium-family wrapper with the read-only
+		// sandbox-preserving shim (see AdapterBrowserWrappers).
+		for _, wp := range AdapterBrowserWrappers {
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{
+				Name:      adapterVolName,
+				MountPath: wp,
+				SubPath:   adapterShimSubPath,
+				ReadOnly:  true,
+			})
+		}
+		// KASM-8: managed Chromium policy over each engine's policy dir.
+		for _, pp := range AdapterPolicyTargets {
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{
+				Name:      adapterVolName,
+				MountPath: pp,
+				SubPath:   adapterPolicySubPath,
+				ReadOnly:  true,
+			})
+		}
+		// KASM-6/7: the kasmweb rootfs ships world-writable policy files and
+		// a uid-1000-writable dir inside the served web root
+		// (/usr/share/kasmvnc/www/Downloads → symlink-following reads). All
+		// legitimate writes already land on mounts (home volume, /run/tcdi,
+		// /tmp, /dev/shm, /opt/tcdi), so the rest of the rootfs is read-only.
+		ctr.SecurityContext.ReadOnlyRootFilesystem = ptr(true)
 	}
 
 	pod := &corev1.Pod{
@@ -881,12 +955,30 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 			Name:    adapterInitName,
 			Image:   kasmAdapterImage,
 			Command: []string{adapterInstaller},
+			// KASM-3: requests=limits so ResourceQuota-governed namespaces
+			// admit the pod (quota admission checks initContainers too).
+			// The copier is a ~5 MB static binary — the budget is tight on
+			// purpose.
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("10m"),
+					corev1.ResourceMemory:           resource.MustParse("32Mi"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("16Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("10m"),
+					corev1.ResourceMemory:           resource.MustParse("32Mi"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("16Mi"),
+				},
+			},
 			SecurityContext: &corev1.SecurityContext{
 				AllowPrivilegeEscalation: ptr(false),
 				RunAsNonRoot:             ptr(true),
-				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				AppArmorProfile:          &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+				// The copier only writes the mounted adapter volume.
+				ReadOnlyRootFilesystem: ptr(true),
+				Capabilities:           &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				AppArmorProfile:        &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: adapterVolName, MountPath: adapterDir},
