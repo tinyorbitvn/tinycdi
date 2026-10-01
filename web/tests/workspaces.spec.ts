@@ -7,6 +7,7 @@ import { test, expect, type Page, type APIRequestContext } from "@playwright/tes
 const MOCK = "http://127.0.0.1:4310";
 const SEED_WS = "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E";
 const TEMPLATE_ID = "tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M";
+const RETAINED_ID = "rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A";
 
 const READY_CONDITIONS = [
   { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-09-30T10:00:00Z" },
@@ -158,12 +159,15 @@ test("Delete workspace vs Purge retained disk", async ({ page }) => {
 
   // Purge is a separate, typed-confirmation flow on the retained-data page.
   await page.getByRole("link", { name: "Retained data" }).click();
-  await page.getByRole("button", { name: "Purge" }).click();
-  const purgeDialog = page.getByRole("dialog", { name: "purge retained disk" });
+  await page
+    .getByRole("row", { name: new RegExp(RETAINED_ID) })
+    .getByRole("button", { name: "Purge" })
+    .click();
+  const purgeDialog = page.getByRole("alertdialog");
   const confirm = purgeDialog.getByRole("button", { name: "Purge permanently" });
-  await purgeDialog.locator('input[name="purge-confirm"]').fill("wrong-name");
+  await purgeDialog.getByLabel(/confirm/i).fill("wrong-id");
   await expect(confirm).toBeDisabled();
-  await purgeDialog.locator('input[name="purge-confirm"]').fill("old-desktop");
+  await purgeDialog.getByLabel(/confirm/i).fill(RETAINED_ID);
   await expect(confirm).toBeEnabled();
   await confirm.click();
   await expect(page.getByRole("table", { name: "retained data" })).toContainText("Purging");
