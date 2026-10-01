@@ -115,6 +115,16 @@ const (
 	runtimeDir     = "/run/tcdi"
 	homeDir        = "/home/workspace"
 	shmDir         = "/dev/shm"
+
+	// Adapter contract (adapter=kasm, docs/kasm-images.md): the operator's
+	// --kasm-adapter-image runs as an initContainer whose /install-adapter
+	// writes the adapter scripts into the shared adapterDir emptyDir; the
+	// desktop container mounts it read-only and runs adapterEntrypoint.
+	adapterVolName    = "tcdi-adapter"
+	adapterDir        = "/opt/tcdi"
+	adapterEntrypoint = "/opt/tcdi/entrypoint.sh"
+	adapterInitName   = "tcdi-adapter-init"
+	adapterInstaller  = "/install-adapter"
 )
 
 // CRUID is a Workspace CR's metadata.uid — the identity every runtime
@@ -194,6 +204,14 @@ type Options struct {
 	// namespace gateway still works, but a labeled pod anywhere else is
 	// never admitted. cmd/operator defaults it to POD_NAMESPACE.
 	GatewayNamespace string
+
+	// KasmAdapterImage is the digest-pinned image reference for the
+	// adapter initContainer used by templates with spec.linux.adapter=kasm
+	// (docs/kasm-images.md). It comes from operator configuration
+	// (--kasm-adapter-image), never from the template. Empty means kasm
+	// templates are rejected (ErrTemplateRejected) — the adapter can never
+	// fall back to a mutable or caller-chosen image.
+	KasmAdapterImage string
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -274,6 +292,13 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 	appArmor, err := resolveAppArmorProfile(tpl)
 	if err != nil {
 		return runtime.Observation{}, err
+	}
+	if tpl.Spec.Linux != nil && tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm &&
+		b.opts.KasmAdapterImage == "" {
+		// The adapter is delivered by the operator-configured init image;
+		// without it the pod cannot satisfy the runtime contract, so the
+		// template is rejected before ANY child object is created.
+		return runtime.Observation{}, &templateRejectedError{reason: "spec.linux.adapter=kasm requires the operator's --kasm-adapter-image (digest-pinned adapter init image)"}
 	}
 	if _, err := b.ensureSecret(ctx, ws); err != nil {
 		return runtime.Observation{}, err
@@ -586,7 +611,7 @@ func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspac
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
 	switch {
 	case apierrors.IsNotFound(err):
-		pod = buildPod(ws, tpl, appArmor)
+		pod = buildPod(ws, tpl, appArmor, b.opts.KasmAdapterImage)
 		if err := controllerutil.SetControllerReference(ws, pod, b.client.Scheme()); err != nil {
 			return err
 		}
@@ -692,7 +717,7 @@ func validAppArmorProfileName(name string) bool {
 	return true
 }
 
-func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile) *corev1.Pod {
+func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, kasmAdapterImage string) *corev1.Pod {
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
@@ -777,6 +802,32 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		ctr.Command = tpl.Spec.Linux.Command
 	}
 
+	kasm := tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm
+	if kasm {
+		// Approach A (docs/kasm-images.md): the UNMODIFIED kasmweb/* image's
+		// own startup is bypassed — the adapter scripts (delivered into the
+		// tcdi-adapter emptyDir by the initContainer below) drive
+		// kasmvncserver directly. spec.linux.command is already forbidden
+		// with adapter=kasm by CEL; the entrypoint override wins regardless.
+		ctr.Command = []string{adapterEntrypoint}
+		// The kasm images bake VNC_PW/VNC_VIEW_ONLY_PW defaults into their
+		// image env (Kasm's own startup consumes them); the adapter never
+		// reads them — neutralize the defaults for hygiene. HOME points at
+		// the mounted workspace volume (the image's native home is
+		// /home/kasm-user).
+		ctr.Env = append(ctr.Env,
+			corev1.EnvVar{Name: "HOME", Value: homeDir},
+			corev1.EnvVar{Name: "VNC_PW", Value: ""},
+			corev1.EnvVar{Name: "VNC_VIEW_ONLY_PW", Value: ""},
+		)
+		if tpl.Spec.Linux.SessionCmd != "" {
+			ctr.Env = append(ctr.Env,
+				corev1.EnvVar{Name: "TCDI_SESSION_CMD", Value: tpl.Spec.Linux.SessionCmd})
+		}
+		ctr.VolumeMounts = append(ctr.VolumeMounts,
+			corev1.VolumeMount{Name: adapterVolName, MountPath: adapterDir, ReadOnly: true})
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      PodName(uid),
@@ -820,6 +871,31 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 				home,
 			},
 		},
+	}
+	if kasm {
+		// The adapter initContainer copies the adapter scripts into the
+		// shared emptyDir — the only mutation the foreign image gets. Its
+		// confinement mirrors the desktop's minus the browser's Localhost
+		// profiles (a static copier needs only RuntimeDefault).
+		pod.Spec.InitContainers = []corev1.Container{{
+			Name:    adapterInitName,
+			Image:   kasmAdapterImage,
+			Command: []string{adapterInstaller},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: ptr(false),
+				RunAsNonRoot:             ptr(true),
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				AppArmorProfile:          &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: adapterVolName, MountPath: adapterDir},
+			},
+		}}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name:         adapterVolName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
 	}
 	if raw := tpl.Annotations[AnnotationNodeSelector]; raw != "" {
 		var sel map[string]string

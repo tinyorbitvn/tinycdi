@@ -6,7 +6,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated) |
-| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
+| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 
 ## Supply-chain pipeline shape
@@ -159,7 +159,7 @@ must match a `build/<name>/Dockerfile`). Comment an image out to hold it
 back from a release, e.g. when its gate cannot pass.
 `linux-desktop` builds in its own `desktop` job because `browser` `FROM`s
 its pushed digest; `browser` requires `linux-desktop` in the set.
-`images.yml` on main still builds and scans all six images.
+`images.yml` on main still builds and scans all seven images.
 
 ## Verifying a release
 

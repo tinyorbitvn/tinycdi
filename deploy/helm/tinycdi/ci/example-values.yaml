@@ -54,6 +54,14 @@ images:
     repository: tinycdi/browser
     digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
 
+# Adapter init image for spec.linux.adapter=kasm templates — must be
+# digest-pinned or the render fails while a kasm template is seeded
+# (and the operator flag only ever renders a digest ref).
+kasmAdapter:
+  image:
+    repository: tinycdi/kasm-adapter
+    digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
+
 api:
   replicas: 2
   podDisruptionBudget: {enabled: true, minAvailable: 1}
@@ -160,6 +168,36 @@ templates:
       runtime: LinuxContainer
       experience: Browser
       linux: {}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  # Approach A (docs/kasm-images.md): an UNMODIFIED kasmweb/* image behind
+  # the injected adapter. The image ref is a literal digest pin (Docker
+  # Hub path — NOT resolved through .Values.images), sessionCmd points
+  # past the image's --no-sandbox chromium wrapper at the real binary,
+  # and the same Localhost seccomp/AppArmor node profiles the tcdi
+  # browser template uses apply (must be pre-loaded on the nodes).
+  - name: kasm-chromium
+    namespace: tinycdi-tenant-a
+    # kasmweb/chromium:1.18.0 (amd64) — re-resolve on -rolling-weekly bumps.
+    image: kasmweb/chromium@sha256:1d7dfc6c6a756dcd78a4d8bcbcae538bf0da7fb7fd5deec3721e9d2b459fe79c
+    seccompProfile: localhost/profiles/chromium-userns.json
+    appArmorProfile: tinycdi-browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Kasm Chromium"
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        adapter: kasm
+        sessionCmd: "/usr/bin/chromium-orig --start-maximized https://start.lab.example.net"
       resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
       bootDeadline: 5m
       networkProfile: Isolated

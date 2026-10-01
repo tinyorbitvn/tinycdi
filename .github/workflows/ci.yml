@@ -114,12 +114,13 @@ jobs:
           KUBEBUILDER_ASSETS="$(./bin/setup-envtest use \
             ${{ env.ENVTEST_K8S_VERSION }} --bin-dir "$PWD/bin" -p path)" \
             go test -tags=integration -race -count=1 \
-            -skip '^TestLinuxRuntimeReadinessAndHome$' \
+            -skip '^TestLinuxRuntimeReadinessAndHome$|^TestKasmAdapter' \
             ./tests/integration/...
-          # -skip: TestLinuxRuntimeReadinessAndHome needs the built runtime
-          # images (tcdi/linux-desktop:it + tcdi/browser:it) — an image-bound
-          # suite, not routine CI. Everything else runs on envtest + the
-          # suite's own docker-provisioned postgres.
+          # -skip: TestLinuxRuntimeReadinessAndHome and TestKasmAdapter* need
+          # the built runtime/adapter images (tcdi/linux-desktop:it,
+          # tcdi/browser:it, a pulled kasmweb/* image) — image-bound suites,
+          # not routine CI. Everything else runs on envtest + the suite's
+          # own docker-provisioned postgres.
 
   web:
     name: portal ui (npm ci, tsc, vitest, build)

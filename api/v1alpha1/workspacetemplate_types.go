@@ -25,6 +25,9 @@ type BrowserPolicy struct {
 
 // LinuxRuntimeSpec configures a LinuxContainer template. The image is pinned
 // by digest; a tag-only reference is rejected because it is mutable.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.sessionCmd) || self.adapter == 'kasm'",message="sessionCmd is only valid with adapter=kasm"
+// +kubebuilder:validation:XValidation:rule="self.adapter != 'kasm' || !has(self.command) || size(self.command) == 0",message="command must be empty with adapter=kasm; the adapter supplies the container command"
 type LinuxRuntimeSpec struct {
 	// image is the OCI reference for the runtime image, digest-pinned:
 	// <repo>@sha256:<64 hex>. Tags without a digest are rejected.
@@ -34,9 +37,29 @@ type LinuxRuntimeSpec struct {
 	Image string `json:"image"`
 
 	// command is the fixed container command/args chosen by the admin. End
-	// users can never supply or override a container command.
+	// users can never supply or override a container command. Forbidden with
+	// adapter=kasm — the adapter supplies the container command.
 	// +optional
 	Command []string `json:"command,omitempty"`
+
+	// adapter selects an injected runtime adapter for the image: "kasm"
+	// runs UNMODIFIED kasmweb/* workspace images behind the adapter scripts
+	// the operator delivers via an initContainer (docs/kasm-images.md).
+	// Requires the operator to be configured with --kasm-adapter-image;
+	// empty keeps the image's own entrypoint contract (the tcdi/* images).
+	// +optional
+	// +kubebuilder:default=""
+	Adapter RuntimeAdapter `json:"adapter,omitempty"`
+
+	// sessionCmd is the session payload command the adapter runs inside the
+	// desktop session (exported to the runtime as TCDI_SESSION_CMD). For
+	// Chromium-family kasmweb images it MUST point past the image's
+	// --no-sandbox wrapper scripts at the real binary — per docs/kasm-images.md
+	// every cataloged image needs a wrapper audit. Only valid with
+	// adapter=kasm; empty runs the image's default desktop session.
+	// +optional
+	// +kubebuilder:validation:Pattern="^[ -~]{1,512}$"
+	SessionCmd string `json:"sessionCmd,omitempty"`
 
 	// browserPolicy restricts the in-session browser when experience is
 	// Browser.

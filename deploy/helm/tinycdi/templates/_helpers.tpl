@@ -221,6 +221,23 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if and $internetOnly (not .Values.operator.clusterCIDRs) -}}
 {{- fail "operator.clusterCIDRs is required when a seeded template uses networkProfile=InternetOnly — declare this cluster's pod/service/node CIDRs so runtime egress excludes them" -}}
 {{- end -}}
+{{- /* adapter=kasm templates need the adapter init image pinned — the
+        backend rejects them when the operator has no --kasm-adapter-image,
+        and the flag only renders for a digest-pinned image (a mutable tag
+        would let an image swap change what runs inside every kasm pod). */ -}}
+{{- $kasmSeed := false -}}
+{{- range .Values.templates -}}
+{{- if eq (printf "%v" (get (default dict (get (default dict .spec) "linux")) "adapter")) "kasm" -}}
+{{- $kasmSeed = true -}}
+{{- end -}}
+{{- end -}}
+{{- $kaDigest := (default dict (get (default dict .Values.kasmAdapter) "image")).digest -}}
+{{- if and $kasmSeed (not $kaDigest) -}}
+{{- fail "kasmAdapter.image.digest is required when a seeded template uses spec.linux.adapter=kasm — the adapter init image must be digest-pinned" -}}
+{{- end -}}
+{{- if and (not $kaDigest) (default dict (get (default dict .Values.kasmAdapter) "image")).tag -}}
+{{- fail "kasmAdapter.image.tag without .digest is refused — --kasm-adapter-image accepts digest-pinned refs only" -}}
+{{- end -}}
 {{- /* SEC-36: dev/privileged surfaces are gated behind dev.enabled. */ -}}
 {{- if not .Values.dev.enabled -}}
 {{- if .Values.operator.devAllowNoBroker -}}

@@ -69,6 +69,23 @@ const (
 	NetworkProfileIsolated NetworkProfile = "Isolated"
 )
 
+// RuntimeAdapter selects an injected runtime adapter for a LinuxContainer
+// template: a shim the operator delivers into the pod via an initContainer
+// so a foreign workspace image can satisfy the TinyCDI runtime contract
+// without modification. "" runs the image's own entrypoint (the tcdi/*
+// images); "kasm" runs unmodified kasmweb/* images via build/kasm-adapter
+// (docs/kasm-images.md).
+// +kubebuilder:validation:Enum="";kasm
+type RuntimeAdapter string
+
+const (
+	// AdapterNone runs the image's own entrypoint — the default.
+	AdapterNone RuntimeAdapter = ""
+	// AdapterKasm runs unmodified kasmweb/* workspace images behind the
+	// injected adapter (requires the operator's --kasm-adapter-image).
+	AdapterKasm RuntimeAdapter = "kasm"
+)
+
 // ClipboardPolicy selects clipboard redirection between client and runtime.
 // +kubebuilder:validation:Enum=Disabled;Send;Receive;Bidirectional
 type ClipboardPolicy string
@@ -139,3 +156,11 @@ const (
 // LinuxRuntimeSpec.Image; keep it in sync here for unit-test reuse and
 // documentation.
 const DigestPattern = `^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`
+
+// SessionCmdPattern constrains spec.linux.sessionCmd to a printable-ASCII
+// command line (no control characters, no newlines; 1..512 chars) — the
+// value lands verbatim in the runtime's session environment. The regex is
+// embedded in the generated CRD via a kubebuilder Pattern marker on
+// LinuxRuntimeSpec.SessionCmd; keep it in sync here for the operator's
+// snapshot re-verification.
+const SessionCmdPattern = `^[ -~]{1,512}$`

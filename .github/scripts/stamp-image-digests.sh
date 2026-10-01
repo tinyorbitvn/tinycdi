@@ -14,11 +14,15 @@ set -euo pipefail
 VALUES="$1"
 REFS_DIR="$2"
 
-# image name -> values.yaml key under images:
-key_for() {
+# image name -> "<values.yaml section> <key>" — the digest lands at
+# <section>.<key>.digest (a 2-space key under a top-level section, 4-space
+# digest field). images.* for the component/runtime images; the kasm
+# adapter lives at kasmAdapter.image.
+path_for() {
   case "$1" in
-    linux-desktop) echo linuxDesktop ;;
-    *)             echo "$1" ;;
+    linux-desktop) echo "images linuxDesktop" ;;
+    kasm-adapter)  echo "kasmAdapter image" ;;
+    *)             echo "images $1" ;;
   esac
 }
 
@@ -27,24 +31,24 @@ for f in "$REFS_DIR"/*.ref; do
   ref="$(tr -d '[:space:]' < "$f")"
   [ "$ref" = "local" ] && continue
   digest="${ref##*@}"
-  key="$(key_for "$name")"
+  read -r section key <<< "$(path_for "$name")"
   if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "::error::ref file $f does not contain a sha256 digest ('$ref')"
     exit 1
   fi
-  if ! awk -v key="$key" -v digest="$digest" '
-    /^[^ #]/              { in_images = ($0 ~ /^images:/) }
-    in_images && /^  [a-zA-Z]+:/ { cur = substr($1, 1, length($1) - 1) }
-    in_images && cur == key && /^    digest: / {
+  if ! awk -v section="$section" -v key="$key" -v digest="$digest" '
+    /^[^ #]/              { in_sec = ($0 ~ ("^" section ":")) }
+    in_sec && /^  [a-zA-Z]+:/ { cur = substr($1, 1, length($1) - 1) }
+    in_sec && cur == key && /^    digest: / {
       sub(/digest:.*/, "digest: \"" digest "\""); stamped++
     }
     { print }
     END { if (stamped == 0) exit 42 }
   ' "$VALUES" > "$VALUES.stamped"; then
     rm -f "$VALUES.stamped"
-    echo "::error::no images.$key.digest field found in $VALUES"
+    echo "::error::no $section.$key.digest field found in $VALUES"
     exit 1
   fi
   mv "$VALUES.stamped" "$VALUES"
-  echo "stamped images.$key.digest = $digest"
+  echo "stamped $section.$key.digest = $digest"
 done

@@ -72,6 +72,12 @@ spec:
             - --broker-client-cert-file=/mtls/tls.crt
             - --broker-client-key-file=/mtls/tls.key
             {{- end }}
+            {{- if (default dict (get (default dict .Values.kasmAdapter) "image")).digest }}
+            # Adapter init image for spec.linux.adapter=kasm templates
+            # (docs/kasm-images.md). Rendered ONLY when digest-pinned — the
+            # operator refuses a tag-only ref at startup.
+            - --kasm-adapter-image={{ include "tinycdi.image" (dict "image" .Values.kasmAdapter.image "root" $) }}
+            {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
             {{- end }}
