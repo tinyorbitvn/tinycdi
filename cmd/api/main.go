@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -28,6 +29,7 @@ import (
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -80,6 +82,7 @@ type config struct {
 	sessionIdle      time.Duration
 	kubeconfig       string
 	portalOrigins    stringList // Origin allowlist for browser state changes
+	loginKeyFiles    stringList // 32-byte login-state sealing keys; first seals
 
 	sessionOrigin        string // public session origin (scheme://host[:port])
 	gatewayAudience      string // audience tickets bind to; default = session origin host
@@ -114,6 +117,8 @@ func parseConfig() (config, error) {
 	flag.StringVar(&c.tenantNamespaces, "tenant-namespaces", envOr("TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
 	flag.DurationVar(&c.sessionIdle, "session-idle", 30*time.Minute, "session idle timeout")
 	flag.StringVar(&c.kubeconfig, "kubeconfig", envOr("KUBECONFIG", ""), "kubeconfig path (default: in-cluster)")
+	flag.Var(&c.loginKeyFiles, "login-key-file",
+		"file holding a 32-byte login-state sealing key (repeatable or comma-separated; first file seals, all open; env TCDI_LOGIN_KEY_FILES)")
 	flag.Var(&c.portalOrigins, "portal-origin",
 		"portal Origin allowed to make cookie-authenticated state-changing requests (repeatable or CSV; env TCDI_PORTAL_ORIGINS; default: origin of -oidc-redirect-url)")
 	flag.StringVar(&c.sessionOrigin, "session-origin", envOr("TCDI_SESSION_ORIGIN", "https://session.example.invalid"),
@@ -148,6 +153,9 @@ func parseConfig() (config, error) {
 	flag.Parse()
 	if len(c.portalOrigins) == 0 {
 		_ = c.portalOrigins.Set(envOr("TCDI_PORTAL_ORIGINS", ""))
+	}
+	if len(c.loginKeyFiles) == 0 {
+		_ = c.loginKeyFiles.Set(envOr("TCDI_LOGIN_KEY_FILES", ""))
 	}
 	if len(c.requiredGroups) == 0 {
 		if v := os.Getenv("TCDI_REQUIRED_GROUPS"); v != "" {
@@ -195,6 +203,27 @@ func parseConfig() (config, error) {
 		}
 	}
 	return c, nil
+}
+
+// buildLoginSealer loads the login-state sealing keyring from the configured
+// key files. With none configured this legacy single-replica binary falls
+// back to an ephemeral process key — in-flight logins then die with the
+// process, exactly like the previous in-memory map — and warns so a missing
+// configuration is never silent.
+func buildLoginSealer(files []string, log *slog.Logger) (*loginstate.Sealer, error) {
+	if len(files) == 0 {
+		k := make([]byte, 32)
+		if _, err := rand.Read(k); err != nil {
+			return nil, err
+		}
+		log.Warn("no -login-key-file configured: sealing login state with an ephemeral process key; logins in flight do not survive restart")
+		return loginstate.NewSealer(k)
+	}
+	keys, err := loginstate.LoadKeyFiles(files)
+	if err != nil {
+		return nil, err
+	}
+	return loginstate.NewSealer(keys...)
 }
 
 // normalizeSessionOrigin validates that raw is a bare https origin and
@@ -574,6 +603,11 @@ func main() {
 	expiry := broker.NewExpiryPlanner(brk)
 	go expiry.Run(ctx, broker.NewK8sRunningSource(kcache), cfg.expiryInterval, log)
 
+	loginSealer, err := buildLoginSealer(cfg.loginKeyFiles, log)
+	if err != nil {
+		log.Error("login-state keys", "err", err)
+		os.Exit(1)
+	}
 	authn, err := api.NewAuthenticator(ctx, api.AuthConfig{
 		Issuer:         cfg.oidcIssuer,
 		ClientID:       cfg.oidcClientID,
@@ -581,6 +615,7 @@ func main() {
 		RedirectURL:    cfg.oidcRedirectURL,
 		SessionOrigin:  cfg.sessionOrigin,
 		RequiredGroups: cfg.requiredGroups,
+		LoginSealer:    loginSealer,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.sessionIdle)}, log)
 	if err != nil {
 		log.Error("oidc", "err", err)
