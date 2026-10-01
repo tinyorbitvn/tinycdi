@@ -8,7 +8,6 @@
 // both suites can coexist.
 
 export const PORTAL_PORT = Number(process.env.PORTAL_E2E_PORT ?? 4174);
-export const FRONTEND_PORT = Number(process.env.PORTAL_E2E_FRONTEND_PORT ?? 4175);
 export const API_PORT = Number(process.env.PORTAL_E2E_API_PORT ?? 4320);
 export const SESSION_PORT = Number(process.env.PORTAL_E2E_SESSION_PORT ?? 4312);
 export const PORTAL_ORIGIN = `https://localhost:${PORTAL_PORT}`;

@@ -1,10 +1,8 @@
 // Playwright webServer for the portal-CSP regression spec: serves the
-// BUILT SPA (web/dist) through the REAL Go frontend binary (build/frontend)
-// over HTTPS — real security headers — behind a tiny edge proxy on the
-// portal origin that path-routes /v1 to the contract mock (tests/mock-api)
-// on :4320 (http), exactly like the chart's HTTPRoute sends /v1 to the
-// backend and everything else to the frontend. The mock doubles as the
-// session origin on :4312 (https; the frontend only accepts an https
+// BUILT SPA (web/dist) through the REAL Go portal binary (build/portal) over
+// HTTPS — real security headers, real /v1 reverse proxy — backed by the
+// contract mock (tests/mock-api) as the API on :4320 (http) and as the
+// session origin on :4312 (https; the portal only accepts an https
 // -session-origin).
 //
 // Requires a Go toolchain and openssl on PATH. This process must stay alive
@@ -12,12 +10,12 @@
 // children it spawned.
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import http from "node:http";
 import https from "node:https";
-import { PORTAL_PORT, FRONTEND_PORT, API_PORT, SESSION_PORT, SESSION_ORIGIN, PORTAL_ORIGIN, MOCK_API } from "./harness.ts";
+import { PORTAL_PORT, API_PORT, SESSION_PORT, SESSION_ORIGIN, PORTAL_ORIGIN, MOCK_API } from "./harness.ts";
 
 const WEB_DIR = path.resolve(import.meta.dirname, "..");
 const REPO_ROOT = path.resolve(WEB_DIR, "..");
@@ -78,13 +76,13 @@ async function waitFor(url: string, what: string, timeoutMs = 60_000) {
 //    would test the wrong artifact.
 runSync("npm", ["run", "build"], WEB_DIR, "vite build");
 
-// 2. Real frontend binary.
+// 2. Real portal binary.
 const workDir = mkdtempSync(path.join(tmpdir(), "tcdi-portal-e2e-"));
-const frontendBin = path.join(workDir, "frontend");
-runSync("go", ["build", "-o", frontendBin, "./build/frontend"], REPO_ROOT, "go build ./build/frontend");
+const portalBin = path.join(workDir, "portal");
+runSync("go", ["build", "-o", portalBin, "./build/portal"], REPO_ROOT, "go build ./build/portal");
 
-// 3. Self-signed cert for 127.0.0.1 — used by the edge proxy, the frontend
-//    and the mock session origin (Playwright runs with ignoreHTTPSErrors).
+// 3. Self-signed cert for 127.0.0.1 — used by BOTH the portal and the mock
+//    session origin (Playwright runs with ignoreHTTPSErrors).
 const tlsCert = path.join(workDir, "tls.crt");
 const tlsKey = path.join(workDir, "tls.key");
 runSync(
@@ -123,58 +121,24 @@ spawnLogged(
   "mock api",
 );
 
-// 5. Frontend binary with its real headers — form-action must carry the
-//    session origin for launches to succeed. It has no /v1 proxy (that is
-//    the backend's job in v0.2), so it listens on its own port behind the
-//    edge proxy below.
+// 5. Portal binary with its real headers — form-action must carry the
+//    session origin for launches to succeed.
 spawnLogged(
-  frontendBin,
+  portalBin,
   [
-    `-listen=127.0.0.1:${FRONTEND_PORT}`,
+    `-listen=127.0.0.1:${PORTAL_PORT}`,
     `-web-root=${path.join(WEB_DIR, "dist")}`,
+    `-api-upstream=http://127.0.0.1:${API_PORT}`,
     `-tls-cert=${tlsCert}`,
     `-tls-key=${tlsKey}`,
     `-session-origin=${SESSION_ORIGIN}`,
   ],
   {},
-  "frontend",
+  "portal",
 );
-
-// 6. Edge proxy on the portal origin — the local stand-in for the chart's
-//    HTTPRoute: /v1 goes to the API (the contract mock), everything else to
-//    the frontend. Headers pass through untouched, so the frontend's real
-//    CSP and Referrer-Policy reach the browser.
-const edge = https.createServer(
-  { cert: readFileSync(tlsCert), key: readFileSync(tlsKey) },
-  (req, res) => {
-    const toApi = req.url === "/v1" || (req.url ?? "").startsWith("/v1/");
-    const u = (toApi ? http : https).request(
-      {
-        host: "127.0.0.1",
-        port: toApi ? API_PORT : FRONTEND_PORT,
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        rejectUnauthorized: false,
-      },
-      (ures) => {
-        res.writeHead(ures.statusCode ?? 502, ures.headers);
-        ures.pipe(res);
-      },
-    );
-    u.on("error", () => {
-      if (!res.headersSent) res.writeHead(502);
-      res.end();
-    });
-    req.pipe(u);
-  },
-);
-await new Promise<void>((resolve) => edge.listen(PORTAL_PORT, resolve));
-children.push({ kill: () => edge.close() } as unknown as ChildProcess);
 
 await waitFor(`${MOCK_API}/_control/health`, "mock api");
-await waitFor(`https://127.0.0.1:${FRONTEND_PORT}/healthz`, "frontend");
-await waitFor(`https://127.0.0.1:${PORTAL_PORT}/healthz`, "edge proxy");
+await waitFor(`https://127.0.0.1:${PORTAL_PORT}/healthz`, "portal");
 console.log(
-  `portal e2e harness up: edge https://127.0.0.1:${PORTAL_PORT} -> frontend :${FRONTEND_PORT}, api :${API_PORT}, session ${SESSION_ORIGIN}`,
+  `portal e2e harness up: portal https://127.0.0.1:${PORTAL_PORT} -> api :${API_PORT}, session ${SESSION_ORIGIN}`,
 );
