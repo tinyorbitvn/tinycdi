@@ -4,6 +4,31 @@
  */
 
 export interface paths {
+    "/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session bootstrap payload
+         * @description Returns the verified identity of the caller, its roles, the CSRF token
+         *     to echo in the `X-CSRF-Token` header on every mutating request, and the
+         *     session domain under which per-workspace session hosts live
+         *     (`ws-<suffix>.<sessionDomain>`). The CSRF token is derived from the
+         *     session ID server-side and is never stored; it is only valid for the
+         *     session that fetched it.
+         */
+        get: operations["getMe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces": {
         parameters: {
             query?: never;
@@ -121,6 +146,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workspaces/{workspaceId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Curated workspace lifecycle events
+         * @description Returns the workspace's events, newest first: the API's own recorded
+         *     lifecycle steps (create/start/stop/delete intents) and curated
+         *     condition transitions. Messages are fixed catalog strings — raw
+         *     Kubernetes or operator error text is never forwarded, so event text
+         *     never contains node names, image references or other platform
+         *     internals. Visibility is exactly the workspace read's: a foreign or
+         *     unknown id is a `404`.
+         */
+        get: operations["listWorkspaceEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces/{workspaceId}/connections": {
         parameters: {
             query?: never;
@@ -133,7 +184,8 @@ export interface paths {
         /**
          * Issue a launch ticket for an interactive session
          * @description Issues a short-lived (60 s), single-use opaque **launch ticket** and a
-         *     `launchUrl` on the **session origin**. The browser opens the session by
+         *     `launchUrl` on the workspace's own session host
+         *     (`https://ws-<suffix>.<sessionDomain>/v1/launch`). The browser opens the session by
          *     POSTing the ticket to `launchUrl` (form POST on the session host); the
          *     gateway redeems it atomically through the broker and sets a host-only
          *     `Secure`/`HttpOnly`/`SameSite` session cookie, then redirects to a clean
@@ -141,13 +193,44 @@ export interface paths {
          *     server stores only its hash.
          *
          *     Requirements: the workspace must be in phase `Ready` with
-         *     `desiredState: Running`, otherwise `409 INVALID_STATE`. At most one
+         *     `desiredState: Running`, otherwise `409 INVALID_STATE`. A workspace ID
+         *     that cannot map to a session host also answers `409 INVALID_STATE`.
+         *     At most one
          *     interactive connection is authorized per workspace: if a live lease
          *     exists and `takeover` is not set, the call fails with
          *     `409 CONNECTION_IN_USE`. With `takeover: true` the previous session is
          *     revoked and fenced **before** the new ticket becomes usable.
          */
         post: operations["createConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{workspaceId}/connection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Connection state of the workspace's interactive session
+         * @description Reports whether an interactive desktop session for this workspace is
+         *     connected: `none` (no live lease), `connected` (open stream on a fresh
+         *     lease), `disconnected` (live lease, no stream), or `stale` (lease not
+         *     renewed within the freshness window).
+         *
+         *     This is a **passive** endpoint: it authenticates the caller but does
+         *     not slide the portal idle timer, so the portal may poll it on an
+         *     interval without keeping an unattended session alive. Ownership rules
+         *     match `GET /v1/workspaces/{workspaceId}` — a workspace the caller
+         *     cannot see answers `404`.
+         */
+        get: operations["getConnectionStatus"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -168,6 +251,29 @@ export interface paths {
          *     workspace will run.
          */
         get: operations["listTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant quota and usage snapshot
+         * @description Returns the tenant's configured quota limits and current usage in
+         *     display units (CPU in millicores, memory in MiB, storage in GiB),
+         *     plus a per-user usage breakdown. Tenant administrators see every
+         *     user in `users`; other principals see only their own row.
+         */
+        get: operations["getQuota"];
         put?: never;
         post?: never;
         delete?: never;
@@ -366,6 +472,16 @@ export interface components {
             experience: components["schemas"]["ExperienceKind"];
         };
         /**
+         * @description Public identity of a resource owner. `subject` is the bare OIDC `sub`;
+         *     `displayName` is the name the principal directory last saw at login,
+         *     falling back to `subject`. Display data only — never an authorization
+         *     input.
+         */
+        Owner: {
+            subject: string;
+            displayName: string;
+        };
+        /**
          * @description Public view of a workspace. It deliberately omits control-plane
          *     internals: no runtime credentials (never serialized), no Kubernetes
          *     names/UIDs, and no `runtimeGeneration`/`runtimeUID` fencing values —
@@ -379,6 +495,7 @@ export interface components {
              * @example research-desktop
              */
             name: string;
+            owner: components["schemas"]["Owner"];
             template: components["schemas"]["TemplateSummary"];
             phase: components["schemas"]["WorkspacePhase"];
             /** @description Current condition summary (may be empty while Pending). */
@@ -412,6 +529,66 @@ export interface components {
             imageStale?: boolean;
         };
         /**
+         * @description One curated workspace event. `message` is a fixed catalog string —
+         *     raw Kubernetes or operator error text is never forwarded.
+         */
+        WorkspaceEvent: {
+            /** @enum {string} */
+            type: "Normal" | "Warning";
+            /**
+             * @description Short machine-readable reason token.
+             * @example StartRequested
+             */
+            reason: string;
+            /**
+             * @description Human-readable, curated event text.
+             * @example Starting the workspace was requested.
+             */
+            message: string;
+            count?: number;
+            /** Format: date-time */
+            firstTimestamp?: string;
+            /** Format: date-time */
+            lastTimestamp?: string;
+        };
+        WorkspaceEventList: {
+            /** @description Events, newest first. */
+            items: components["schemas"]["WorkspaceEvent"][];
+        };
+        /** @description Resource vector in display units. */
+        QuotaAmounts: {
+            /** @description Active (not deleted) workspace count. */
+            workspaces: number;
+            /** @description Reserved running slots. */
+            runningWorkspaces: number;
+            /** @description CPU in millicores. */
+            cpuMillicores: number;
+            /** @description Memory in MiB. */
+            memoryMib: number;
+            /** @description Storage in GiB. */
+            storageGib: number;
+        };
+        /** @description One tenant member's usage share. */
+        UserUsage: {
+            /** @description Bare OIDC subject of the user. */
+            subject: string;
+            /** @description Name from the principal directory; falls back to `subject`. */
+            displayName: string;
+            usage: components["schemas"]["QuotaAmounts"];
+        };
+        /**
+         * @description Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
+         *     per-user limit store. `users` lists every tenant member for tenant
+         *     administrators and only the caller for regular users.
+         */
+        QuotaView: {
+            tenant: string;
+            limits: components["schemas"]["QuotaAmounts"];
+            usage: components["schemas"]["QuotaAmounts"];
+            userLimits?: components["schemas"]["QuotaAmounts"];
+            users: components["schemas"]["UserUsage"][];
+        };
+        /**
          * @description Create intent. There is no owner field — ownership comes from the
          *     verified principal. `templateRef`, `dataPolicy` and `retainedDataRef`
          *     are immutable after creation (change requires a replacement workspace).
@@ -443,6 +620,51 @@ export interface components {
             /** @description Cursor for the next page; absent when the list is exhausted. */
             nextPageToken?: string;
         };
+        /**
+         * @description Session bootstrap payload returned by `GET /v1/me`: the verified
+         *     identity, the caller's roles, the CSRF token to echo on mutations, and
+         *     the session domain under which per-workspace session hosts live.
+         */
+        Me: {
+            /** @description Subject claim of the verified identity. */
+            subject: string;
+            /**
+             * @description Display name captured from the verified ID token at login
+             *     (`name`, else `preferred_username`) and served from the principal
+             *     directory; falls back to `subject` when unknown.
+             */
+            displayName: string;
+            /** @description Email claim when the identity provider supplies one. */
+            email?: string;
+            /** @description Tenant the principal belongs to. */
+            tenant: string;
+            /** @description `user` for every authenticated principal; `tenant-admin` when the principal carries the tenant-admin group. */
+            roles: ("user" | "tenant-admin")[];
+            /**
+             * @description Session-bound CSRF token — echo it in the `X-CSRF-Token` header on
+             *     every mutating request. Derived from the session ID; never stored
+             *     server-side and only valid for this session.
+             */
+            csrfToken: string;
+            /** @description host[:port] under which workspace session hosts live */
+            sessionDomain: string;
+        };
+        /**
+         * @description Passive connection state of a workspace's interactive session.
+         *     `none`: no live lease. `connected`: open stream on a fresh lease.
+         *     `disconnected`: live lease with no open stream. `stale`: the lease has
+         *     not been renewed within the freshness window.
+         */
+        ConnectionStatus: {
+            /** @enum {string} */
+            state: "none" | "connected" | "disconnected" | "stale";
+            leaseActive: boolean;
+            /**
+             * Format: date-time
+             * @description Last lease renewal observed by the broker; absent when no live lease exists.
+             */
+            lastRenewedAt?: string;
+        };
         CreateConnectionRequest: {
             /**
              * @description When true and a live interactive lease exists, it is revoked and
@@ -468,11 +690,13 @@ export interface components {
             ticket: string;
             /**
              * Format: uri
-             * @description Absolute URL on the **session origin** (a different registrable
-             *     domain than the portal). The browser POSTs the ticket here; the
+             * @description Absolute URL on the workspace's own session host —
+             *     `https://ws-<suffix>.<sessionDomain>/v1/launch` where `<suffix>`
+             *     is the workspace ID suffix (see `GET /v1/me` for the configured
+             *     session domain). The browser POSTs the ticket here; the
              *     gateway redeems it and redirects to a clean URL after setting the
              *     host-only session cookie.
-             * @example https://session.example.invalid/v1/launch
+             * @example https://ws-01j4z8kq2m9xnbv3t7yh0r6d5e.session.example.invalid/v1/launch
              */
             launchUrl: string;
             /**
@@ -526,6 +750,14 @@ export interface components {
              * @enum {string}
              */
             clipboardPolicy: "Disabled" | "Enabled";
+            /**
+             * @description Runtime egress policy of the WorkspaceTemplate CRD —
+             *     `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
+             *     in-cluster destinations, `Isolated` denies all egress except
+             *     cluster DNS.
+             * @enum {string}
+             */
+            networkProfile: "InternetOnly" | "ClusterOnly" | "Isolated";
             /** Format: date-time */
             publishedAt: string;
             /**
@@ -558,6 +790,7 @@ export interface components {
         RetainedDataView: {
             id: string;
             state: components["schemas"]["RetainedDataState"];
+            owner: components["schemas"]["Owner"];
             /** @example 20 */
             sizeGib: number;
             /** @description Runtime family of the disk, to constrain attach templates. */
@@ -730,6 +963,13 @@ export interface components {
         PageLimit: number;
         /** @description Opaque cursor from a previous response's `nextPageToken`. */
         PageToken: string;
+        /**
+         * @description `mine` restricts the list to the caller's own rows (also for tenant
+         *     administrators); `tenant` widens it to the whole tenant and requires
+         *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+         *     caller's natural scope (admins see the tenant, users their own rows).
+         */
+        ListScope: "mine" | "tenant";
     };
     requestBodies: never;
     headers: never;
@@ -737,6 +977,30 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getMe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Identity bootstrap for the portal. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Me"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     listWorkspaces: {
         parameters: {
             query?: {
@@ -744,6 +1008,13 @@ export interface operations {
                 limit?: components["parameters"]["PageLimit"];
                 /** @description Opaque cursor from a previous response's `nextPageToken`. */
                 pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description `mine` restricts the list to the caller's own rows (also for tenant
+                 *     administrators); `tenant` widens it to the whole tenant and requires
+                 *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+                 *     caller's natural scope (admins see the tenant, users their own rows).
+                 */
+                scope?: components["parameters"]["ListScope"];
                 /** @description Filter by lifecycle phase. */
                 phase?: components["schemas"]["WorkspacePhase"];
             };
@@ -764,6 +1035,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -948,6 +1220,35 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    listWorkspaceEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated workspace identifier. */
+                workspaceId: components["parameters"]["WorkspaceId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace events, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEventList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     createConnection: {
         parameters: {
             query?: never;
@@ -978,6 +1279,36 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getConnectionStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated workspace identifier. */
+                workspaceId: components["parameters"]["WorkspaceId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -1015,6 +1346,31 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    getQuota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quota snapshot for the caller's tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     listRetainedData: {
         parameters: {
             query?: {
@@ -1022,6 +1378,13 @@ export interface operations {
                 limit?: components["parameters"]["PageLimit"];
                 /** @description Opaque cursor from a previous response's `nextPageToken`. */
                 pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description `mine` restricts the list to the caller's own rows (also for tenant
+                 *     administrators); `tenant` widens it to the whole tenant and requires
+                 *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+                 *     caller's natural scope (admins see the tenant, users their own rows).
+                 */
+                scope?: components["parameters"]["ListScope"];
             };
             header?: never;
             path?: never;
@@ -1040,6 +1403,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

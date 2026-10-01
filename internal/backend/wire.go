@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -34,6 +33,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway/brokerclient"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
@@ -93,9 +93,7 @@ func (b *Backend) wire(ctx context.Context) error {
 func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
-		if u, err := url.Parse(cfg.SessionOrigin); err == nil && u.Hostname() != "" {
-			audience = u.Hostname()
-		}
+		audience = cfg.SessionDomain
 	}
 	if audience == "" {
 		audience = broker.DefaultGatewayAudience
@@ -383,11 +381,22 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 	if err != nil {
 		return err
 	}
+	dom, err := sessionhost.ParseDomain(cfg.SessionDomain)
+	if err != nil {
+		return fmt.Errorf("gateway init: %w", err)
+	}
+	var controlHosts []string
+	for _, h := range strings.Split(cfg.SessionControlHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			controlHosts = append(controlHosts, h)
+		}
+	}
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
-		PublicOrigin:   cfg.SessionOrigin,
+		SessionDomain:  dom,
 		PortalOrigins:  []string(cfg.PortalOrigins),
-		AllowedHosts:   strings.Split(cfg.SessionAllowedHosts, ","),
+		ControlHosts:   controlHosts,
+		CookieMode:     gateway.CookieMode(cfg.SessionCookieMode),
 		Broker:         bc,
 		Sessions:       sessions,
 		UpstreamCA:     upCA,
@@ -429,7 +438,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		ClientID:       cfg.OIDCClientID,
 		ClientSecret:   cfg.OIDCClientSecret,
 		RedirectURL:    cfg.OIDCRedirectURL,
-		SessionOrigin:  cfg.SessionOrigin,
+		SessionOrigin:  cfg.sessionOrigin(),
 		RequiredGroups: cfg.RequiredGroups,
 		LoginSealer:    sealer,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
@@ -437,16 +446,37 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		return fmt.Errorf("oidc: %w", err)
 	}
 
+	// The session domain maps workspace IDs to per-workspace launch hosts
+	// (D9) — launch URLs resolve to ws-<suffix>.<SessionDomain>/v1/launch.
+	sessionDomain, err := sessionhost.ParseDomain(cfg.SessionDomain)
+	if err != nil {
+		return fmt.Errorf("session domain: %w", err)
+	}
+
+	// The principal directory (migration 012) carries display names for
+	// tenant views and /v1/me; logins upsert into it (best effort).
+	directory := api.NewDirectory(db)
+	authn.WithDirectory(directory)
+
 	catalog := catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView).
-		WithImageStaleAfter(cfg.ImageStaleAfter)
+		WithImageStaleAfter(cfg.ImageStaleAfter).
+		WithDirectory(directory).
+		WithIntentLog(api.NewIntentLog(svc))
 	tplHandler := api.NewTemplateHandler(catalog, tenants).
 		WithImageStaleAfter(cfg.ImageStaleAfter)
-	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.SessionOrigin)
-	dataHandler := api.NewDataHandler(retained, catalog, tenants)
+	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain)
+	meHandler := api.NewMeHandler(sessionDomain.String())
+	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
+	dataHandler := api.NewDataHandler(retained, catalog, tenants).
+		WithDirectory(directory)
+	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, dataHandler)
+	// Desktop input slides the owning user's portal idle timer (D18).
+	broker.WithInputHook(authn.InputHook())(brk)
+
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -455,14 +485,18 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // (launch, control, desktop proxy) is deliberately absent: API routes must
 // not exist on the session listener and vice versa (D7).
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
-	conn *api.ConnectionHandler, data *api.DataHandler) *http.ServeMux {
+	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
+	data *api.DataHandler, quota *api.QuotaHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", http.HandlerFunc(authn.LoginHandler))
 	mux.Handle("GET /v1/auth/callback", http.HandlerFunc(authn.CallbackHandler))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
+	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
 	api.MountConnectionRoutes(mux, authn, conn)
+	api.MountConnectionStatusRoutes(mux, authn, connStatus)
 	api.MountDataRoutes(mux, authn, data)
+	api.MountQuotaRoutes(mux, authn, quota)
 	return mux
 }
 
@@ -555,16 +589,33 @@ type sessionStoreAdapter struct{ s *store.SessionStore }
 
 func (a sessionStoreAdapter) Save(ctx context.Context, sess *api.Session) error {
 	return a.s.Save(ctx, &store.Session{
-		ID:         sess.ID,
-		Issuer:     sess.Principal.Issuer,
-		Subject:    sess.Principal.Subject,
-		TenantID:   sess.Principal.TenantID,
-		Groups:     sess.Principal.Groups,
-		CSRFToken:  sess.CSRFToken,
-		CreatedAt:  sess.CreatedAt,
-		LastSeenAt: sess.LastSeenAt,
-		ExpiresAt:  sess.ExpiresAt,
+		ID:          sess.ID,
+		Issuer:      sess.Principal.Issuer,
+		Subject:     sess.Principal.Subject,
+		TenantID:    sess.Principal.TenantID,
+		Groups:      sess.Principal.Groups,
+		CSRFToken:   sess.CSRFToken,
+		DisplayName: sess.Principal.DisplayName,
+		Email:       sess.Principal.Email,
+		CreatedAt:   sess.CreatedAt,
+		LastSeenAt:  sess.LastSeenAt,
+		ExpiresAt:   sess.ExpiresAt,
 	})
+}
+
+func storeSessionToAPI(rec *store.Session) *api.Session {
+	return &api.Session{
+		ID: rec.ID,
+		Principal: api.Principal{
+			Issuer: rec.Issuer, Subject: rec.Subject,
+			TenantID: rec.TenantID, Groups: rec.Groups,
+			DisplayName: rec.DisplayName, Email: rec.Email,
+		},
+		CSRFToken:  rec.CSRFToken,
+		CreatedAt:  rec.CreatedAt,
+		LastSeenAt: rec.LastSeenAt,
+		ExpiresAt:  rec.ExpiresAt,
+	}
 }
 
 func (a sessionStoreAdapter) Get(ctx context.Context, id string) (*api.Session, error) {
@@ -575,17 +626,22 @@ func (a sessionStoreAdapter) Get(ctx context.Context, id string) (*api.Session, 
 	if err != nil {
 		return nil, err
 	}
-	return &api.Session{
-		ID: rec.ID,
-		Principal: api.Principal{
-			Issuer: rec.Issuer, Subject: rec.Subject,
-			TenantID: rec.TenantID, Groups: rec.Groups,
-		},
-		CSRFToken:  rec.CSRFToken,
-		CreatedAt:  rec.CreatedAt,
-		LastSeenAt: rec.LastSeenAt,
-		ExpiresAt:  rec.ExpiresAt,
-	}, nil
+	return storeSessionToAPI(rec), nil
+}
+
+func (a sessionStoreAdapter) Peek(ctx context.Context, id string) (*api.Session, error) {
+	rec, err := a.s.Peek(ctx, id)
+	if errors.Is(err, store.ErrSessionNotFound) {
+		return nil, api.ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return storeSessionToAPI(rec), nil
+}
+
+func (a sessionStoreAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
+	return a.s.TouchPrincipal(ctx, principal)
 }
 
 func (a sessionStoreAdapter) Delete(ctx context.Context, id string) error {
@@ -636,6 +692,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		MaxRunningSeconds:      int64(e.MaxRunning / time.Second),
 		DataPolicyDefault:      e.DataPolicyDefault,
 		ClipboardPolicy:        e.ClipboardPolicy,
+		NetworkProfile:         e.NetworkProfile,
 		PublishedAt:            e.PublishedAt,
 	}
 }
