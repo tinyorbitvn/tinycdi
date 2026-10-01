@@ -168,6 +168,10 @@ func (b *Backend) Run(ctx context.Context) error {
 
 // closeAll releases resources acquired by New, in reverse order.
 func (b *Backend) closeAll() {
+	for _, s := range b.servers {
+		_ = s.srv.Close()
+		_ = s.ln.Close()
+	}
 	for i := len(b.closers) - 1; i >= 0; i-- {
 		b.closers[i]()
 	}
