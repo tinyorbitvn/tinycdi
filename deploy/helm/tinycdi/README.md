@@ -190,6 +190,17 @@ objects. It **keeps**:
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
 
+### Runtime pod defaults (`runtime`)
+
+Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.placement` / `spec.linux.hostUsers` overrides them per field.
+
+| Key | Default | Description |
+|---|---|---|
+| `runtime.placement.allowSharedNodes` | `false` | `false` = dedicated workspace pool: the operator gets `--runtime-node-selector`/`--runtime-tolerations` and the node-profile installer DaemonSet targets the same pool. `true` opts out (kind/dev only): no placement flags, runtime pods schedule anywhere, and install NOTES warn — node-level isolation is lost |
+| `runtime.placement.nodeSelector` | `{cdi.tinyorbit.vn/workspace: "true"}` | node labels every runtime pod selects; **must be non-empty** while `allowSharedNodes=false` (render fails otherwise) |
+| `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
+| `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
+
 ### Observability & network
 
 | Key | Default | Description |
@@ -212,7 +223,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (runtime pod placement; tolerations are not supported by the backend) |
+| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (**deprecated** — prefer the typed `spec.placement` block, which also carries `tolerations` and `runtimeClassName`) |
 | `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
 
 ### Kasm workspace images

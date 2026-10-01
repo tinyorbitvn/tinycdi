@@ -402,6 +402,37 @@ networkPolicy:
 # created by the operator use it.
 storageClass: ""
 
+# Runtime pod placement — WHERE workspace pods schedule. The default is a
+# dedicated pool: the operator is passed --runtime-node-selector /
+# --runtime-tolerations so every runtime pod selects nodes labeled
+# cdi.tinyorbit.vn/workspace=true and tolerates the matching NoSchedule
+# taint, and the node-profile installer DaemonSet targets the same pool.
+# Prepare the pool BEFORE workspaces launch — label + taint commands are
+# in docs/runbooks/install.md "Workspace node pool". A template's
+# spec.placement (or the deprecated node-selector annotation) overrides
+# these defaults per field.
+#
+# allowSharedNodes: false with an empty nodeSelector fails the render —
+# a dedicated pool must select at least one label, or every runtime pod
+# would stay Pending.
+#
+# allowSharedNodes: true opts OUT (kind/dev clusters only): no placement
+# flags are passed, runtime pods schedule anywhere, and the install NOTES
+# warn. Shared-node scheduling gives up node-level isolation between user
+# desktops and other workloads — keep the dedicated pool in production.
+runtime:
+  placement:
+    allowSharedNodes: false
+    nodeSelector: {cdi.tinyorbit.vn/workspace: "true"}
+    tolerations:
+      - {key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}
+  # Default pod.spec.hostUsers for runtime pods (--runtime-host-users).
+  # false since v0.2 (verified on the reference environment — see
+  # docs/compatibility.md): runtime pods run in their own user namespace.
+  # null leaves the field unset (the apiserver default — host user
+  # namespace); a template's spec.linux.hostUsers overrides either way.
+  hostUsers: false
+
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must
 # exist on the node BEFORE the pod is created. nodeProfiles.install.enabled
@@ -468,21 +499,27 @@ nodeProfiles:
 #   seccompProfile:  <name> -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: <name> -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   nodeSelector:    {k: v}  -> workspaces.cdi.tinyorbit.vn/node-selector (JSON)
+#                    DEPRECATED — prefer the typed spec.placement.nodeSelector;
+#                    the annotation ships for one release and loses to the
+#                    spec field when both are set
 #   storageClass:    <name>  -> workspaces.cdi.tinyorbit.vn/storage-class
 # The node profiles must be PRE-LOADED on the nodes that run these
-# templates (see README prerequisites). Runtime pod tolerations are not
-# supported by the backend — taint-free nodes or nodeSelector placement.
+# templates (see README prerequisites). Runtime pod placement —
+# nodeSelector, tolerations (max 16) and runtimeClassName — lives in the
+# typed spec.placement block (spec passes through verbatim below).
 templates: []
   # - name: linuxdesk1
   #   namespace: tinycdi-tenant-a
   #   image: linuxDesktop            # resolved from .Values.images; digest required
   #   storageClass: longhorn
-  #   nodeSelector: {workload: runtime}
   #   spec:
   #     revision: "2026-10-a"
   #     runtime: LinuxContainer
   #     experience: Desktop
   #     linux: {}                    # image filled from `image:` above
+  #     placement:
+  #       nodeSelector: {workload: runtime}
+  #       tolerations: [{key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}]
   #     resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
   #     bootDeadline: 5m
   #     networkProfile: Isolated

@@ -2161,6 +2161,162 @@ func TestNodeProfilesInstallerDockerProof(t *testing.T) {
 	t.Logf("installer proof output:\n%s", out)
 }
 
+// renderNotes renders templates/NOTES.txt via a client-side dry-run
+// install (helm template does not emit NOTES) and returns the text after
+// the "NOTES:" marker.
+func renderNotes(t *testing.T, extra ...string) string {
+	t.Helper()
+	args := []string{"install", "tcdi", "./tinycdi",
+		"--namespace", "tcdi-system", "--dry-run=client"}
+	args = append(args, extra...)
+	out, err := exec.Command(helmBin(t), args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm install --dry-run=client %v: %v\n%s", args, err, out)
+	}
+	s := string(out)
+	i := strings.Index(s, "\nNOTES:")
+	if i < 0 {
+		t.Fatalf("no NOTES section in dry-run output\n%s", s)
+	}
+	return s[i:]
+}
+
+// T4.2/D25: by default the operator gets the dedicated-pool placement
+// flags and the node-profile DaemonSet targets the same pool (label AND
+// taint) so the profiles land where runtime pods can schedule.
+func TestRuntimePlacementDefault(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=false",
+		"--set", "nodeProfiles.install.enabled=true")
+
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	var selArg, tolArg string
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-node-selector=") {
+			selArg = a
+		}
+		if strings.HasPrefix(a, "--runtime-tolerations=") {
+			tolArg = a
+		}
+	}
+	wantSel := `--runtime-node-selector={"cdi.tinyorbit.vn/workspace":"true"}`
+	if selArg != wantSel {
+		t.Errorf("operator selector arg = %q, want %q", selArg, wantSel)
+	}
+	for _, want := range []string{`"cdi.tinyorbit.vn/workspace"`, `"NoSchedule"`} {
+		if !strings.Contains(tolArg, want) {
+			t.Errorf("operator tolerations arg = %q, want it to contain %s", tolArg, want)
+		}
+	}
+
+	ds := daemonSet(docs, "node-profiles")
+	if ds == nil {
+		t.Fatal("no node-profiles DaemonSet rendered")
+	}
+	podSpec := dsPodSpec(ds)
+	ns, _ := podSpec["nodeSelector"].(map[string]any)
+	if ns["cdi.tinyorbit.vn/workspace"] != "true" {
+		t.Errorf("node-profiles nodeSelector = %v, want the pool label", ns)
+	}
+	foundTol := false
+	for _, tv := range toSlice(podSpec["tolerations"]) {
+		tm, _ := tv.(map[string]any)
+		if tm["key"] == "cdi.tinyorbit.vn/workspace" && tm["effect"] == "NoSchedule" {
+			foundTol = true
+		}
+	}
+	if !foundTol {
+		t.Errorf("node-profiles tolerations = %v, want the pool toleration", podSpec["tolerations"])
+	}
+}
+
+// allowSharedNodes: true passes NO placement flags to the operator and
+// the install NOTES carry the shared-node warning.
+func TestAllowSharedNodes(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=true",
+		"--set", "nodeProfiles.install.enabled=true")
+
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	for _, a := range firstContainerArgs(op) {
+		// --runtime-host-users is NOT a placement flag — it renders
+		// independently (default false) even on shared nodes.
+		for _, p := range []string{
+			"--runtime-node-selector=", "--runtime-tolerations=",
+		} {
+			if strings.HasPrefix(a, p) {
+				t.Errorf("allowSharedNodes must pass no placement flags, got %q", a)
+			}
+		}
+	}
+	podSpec := dsPodSpec(daemonSet(docs, "node-profiles"))
+	ns, _ := podSpec["nodeSelector"].(map[string]any)
+	if _, ok := ns["cdi.tinyorbit.vn/workspace"]; ok {
+		t.Errorf("shared nodes: node-profiles must not select the pool label, got %v", ns)
+	}
+
+	notes := renderNotes(t, "-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=true")
+	if !strings.Contains(notes, "allowSharedNodes") {
+		t.Errorf("NOTES must warn about shared-node scheduling, got:\n%s", notes)
+	}
+}
+
+// A dedicated pool with an empty nodeSelector would leave every runtime
+// pod Pending forever — the render must refuse it.
+func TestDedicatedPoolRequiresSelector(t *testing.T) {
+	errOut := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "runtime.placement.allowSharedNodes=false",
+		"--set-json", `runtime.placement.nodeSelector=null`)
+	if !strings.Contains(errOut, "runtime.placement.nodeSelector") {
+		t.Fatalf("render error must name runtime.placement.nodeSelector, got:\n%s", errOut)
+	}
+}
+
+// T4.2/D26: runtime.hostUsers defaults to false — the operator gets
+// --runtime-host-users=false so runtime pods run in their own user
+// namespace (verified on the reference environment, T4.3). Setting the
+// value to null renders NO flag, leaving pod.spec.hostUsers unset.
+func TestRuntimeHostUsersDefault(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"))
+	op := deployment(docs, "operator")
+	if op == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	found := false
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			found = true
+			if a != "--runtime-host-users=false" {
+				t.Errorf("operator hostUsers arg = %q, want --runtime-host-users=false", a)
+			}
+		}
+	}
+	if !found {
+		t.Error("operator must get --runtime-host-users=false by default")
+	}
+
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set-json", `runtime.hostUsers=null`)
+	op = deployment(docs, "operator")
+	for _, a := range firstContainerArgs(op) {
+		if strings.HasPrefix(a, "--runtime-host-users=") {
+			t.Errorf("runtime.hostUsers=null must render no host-users flag, got %q", a)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // T1.7 — the 0.2.0 control plane: backend (API + session gateway + broker
 // in one Deployment, D6/D7) and frontend (static SPA server) replace the

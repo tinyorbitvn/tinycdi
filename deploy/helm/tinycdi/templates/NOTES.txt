@@ -23,6 +23,24 @@ Managed namespaces:
   NONE — set managedNamespaces or the platform manages nothing.
 {{- end }}
 
+{{- $placement := (default dict (default dict .Values.runtime).placement) }}
+{{- if $placement.allowSharedNodes }}
+
+Runtime placement: WARNING — runtime.placement.allowSharedNodes=true.
+  Runtime pods schedule on ANY node: user desktops lose node-level
+  isolation and share nodes with unrelated workloads. Intended for
+  kind/dev clusters only — the default dedicated pool is described in
+  install.md "Workspace node pool".
+{{- else }}
+
+Runtime placement: dedicated pool — runtime pods (and the node-profile
+  installer) need nodes labeled
+  {{- range $k, $v := $placement.nodeSelector }} {{ $k }}={{ $v }}{{- end }}
+  and tainted to match runtime.placement.tolerations. Label + taint the
+  pool BEFORE launching workspaces or pods stay Pending — see install.md
+  "Workspace node pool".
+{{- end }}
+
 {{- if .Values.certManager.enabled }}
 Internal mTLS: cert-manager Certificates issue the broker chain
 {{- if .Values.certManager.selfSigned }} (self-signed CA bootstrapped){{- end }}.
