@@ -4,7 +4,7 @@ import { test, expect, type Page } from "@playwright/test";
 // :4310 via the Vite /v1 proxy. The default principal is a regular user; the
 // tenant-admin role is granted through the mock's /_control/admin routes.
 
-const MOCK = "http://127.0.0.1:4310";
+const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 
 async function login(page: Page, returnTo = "/") {
   await page.goto(`/v1/login?returnTo=${encodeURIComponent(returnTo)}`);
