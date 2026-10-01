@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
 // connections.go implements POST /v1/workspaces/{id}/connections
@@ -36,21 +38,21 @@ const LaunchPath = "/v1/launch"
 
 // ConnectionHandler implements POST /v1/workspaces/{id}/connections.
 type ConnectionHandler struct {
-	issuer        ConnectionIssuer
-	tenants       TenantResolver
-	sessionOrigin string
-	maxBody       int64
+	issuer  ConnectionIssuer
+	tenants TenantResolver
+	domain  sessionhost.Domain
+	maxBody int64
 }
 
-// NewConnectionHandler wires the handler. sessionOrigin is the public
-// session origin (different registrable domain than the portal) used to
-// build the absolute launchUrl; issuer and tenants are required.
-func NewConnectionHandler(issuer ConnectionIssuer, tenants TenantResolver, sessionOrigin string) *ConnectionHandler {
+// NewConnectionHandler wires the handler. domain is the session domain the
+// per-workspace launch URL is built under ("ws-<suffix>.<domain>[:port]");
+// issuer and tenants are required.
+func NewConnectionHandler(issuer ConnectionIssuer, tenants TenantResolver, domain sessionhost.Domain) *ConnectionHandler {
 	return &ConnectionHandler{
-		issuer:        issuer,
-		tenants:       tenants,
-		sessionOrigin: sessionOrigin,
-		maxBody:       16 << 10,
+		issuer:  issuer,
+		tenants: tenants,
+		domain:  domain,
+		maxBody: 16 << 10,
 	}
 }
 
@@ -84,8 +86,13 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if !workspaceIDPattern.MatchString(id) {
-		writeError(w, r, CodeInvalidRequest, "bad workspace id")
+	// The launch URL is per-workspace: the session listener serves each
+	// workspace on its own host under the session domain (D9). An ID that
+	// cannot map to a session host is INVALID_STATE — it can never launch.
+	launchBase, err := h.domain.Origin(id)
+	if err != nil {
+		writeError(w, r, CodeInvalidState,
+			"workspace id must have the form ws_<8-60 lowercase alnum suffix>")
 		return
 	}
 	var req createConnectionRequest
@@ -115,7 +122,7 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(launchTicketView{
 		WorkspaceID: tk.WorkspaceID,
 		Ticket:      tk.Token,
-		LaunchURL:   h.sessionOrigin + LaunchPath,
+		LaunchURL:   launchBase + LaunchPath,
 		ExpiresAt:   tk.ExpiresAt,
 	})
 }

@@ -612,6 +612,31 @@ func (a *pgSessionAdapter) Get(ctx context.Context, id string) (*api.Session, er
 	}, nil
 }
 
+func (a *pgSessionAdapter) Peek(ctx context.Context, id string) (*api.Session, error) {
+	rec, err := a.s.Peek(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return nil, api.ErrSessionNotFound
+		}
+		return nil, err
+	}
+	return &api.Session{
+		ID: rec.ID,
+		Principal: api.Principal{
+			Issuer: rec.Issuer, Subject: rec.Subject,
+			TenantID: rec.TenantID, Groups: rec.Groups,
+		},
+		CSRFToken:  rec.CSRFToken,
+		CreatedAt:  rec.CreatedAt,
+		LastSeenAt: rec.LastSeenAt,
+		ExpiresAt:  rec.ExpiresAt,
+	}, nil
+}
+
+func (a *pgSessionAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
+	return a.s.TouchPrincipal(ctx, principal)
+}
+
 func (a *pgSessionAdapter) Delete(ctx context.Context, id string) error {
 	return a.s.Delete(ctx, id)
 }
@@ -830,6 +855,7 @@ func newHTTPEnv(t *testing.T, db *store.DB, dispatch bool) *httpEnv {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(authn.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(authn.CallbackHandler))
+	api.MountMeRoutes(mux, authn, api.NewMeHandler("session.test"))
 	api.MountWorkspaceRoutes(mux, authn, h, th)
 	srv := httptest.NewServer(api.RequestID(api.Audit(logger)(mux)))
 
@@ -887,13 +913,30 @@ func (e *httpEnv) loginUser(t *testing.T, subject, tenant string) (sess, csrf *h
 		if c.Name == e.auth.SessionCookieName() {
 			sess = c
 		}
-		if c.Name == e.auth.CSRFCookieName() {
-			csrf = c
-		}
 	}
-	if sess == nil || csrf == nil {
-		t.Fatalf("login missing cookies")
+	if sess == nil {
+		t.Fatalf("login missing session cookie")
 	}
+	// The CSRF token is derived from the session ID and published by
+	// GET /v1/me (P1) — v0.2 sets no tcdi_csrf cookie.
+	meReq, _ := http.NewRequest(http.MethodGet, e.server.URL+"/v1/me", nil)
+	meReq.AddCookie(sess)
+	meResp, err := client.Do(meReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var me struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+		meResp.Body.Close()
+		t.Fatalf("decode /v1/me: %v", err)
+	}
+	meResp.Body.Close()
+	if me.CSRFToken == "" {
+		t.Fatalf("/v1/me returned no csrfToken (status %d)", meResp.StatusCode)
+	}
+	csrf = &http.Cookie{Name: e.auth.CSRFHeader(), Value: me.CSRFToken}
 	return
 }
 

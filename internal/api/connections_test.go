@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
 // fakeIssuer scripts the broker-facing ticket issuer. It records the
@@ -59,7 +61,11 @@ func newConnectionEnv(t *testing.T, issuer ConnectionIssuer) *testEnv {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	h := NewConnectionHandler(issuer, defaultTenants(), "https://session.example.test")
+	d, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
+	h := NewConnectionHandler(issuer, defaultTenants(), d)
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
@@ -105,8 +111,8 @@ func TestCreateConnection_IssuesTicket(t *testing.T) {
 	if view.Ticket != fi.ticket.Token {
 		t.Fatalf("ticket mismatch: %q", view.Ticket)
 	}
-	if view.LaunchURL != "https://session.example.test/v1/launch" {
-		t.Fatalf("launchUrl=%q, want session-origin /v1/launch", view.LaunchURL)
+	if view.LaunchURL != "https://ws-00000000000000000000000001.session.example.test/v1/launch" {
+		t.Fatalf("launchUrl=%q, want per-workspace host /v1/launch", view.LaunchURL)
 	}
 	if view.ExpiresAt.IsZero() {
 		t.Fatal("expiresAt missing")
@@ -177,8 +183,9 @@ func TestCreateConnection_ConnectionInUse(t *testing.T) {
 	}
 }
 
-// TestCreateConnection_NotFoundAndBadID: unknown workspace -> 404, malformed
-// id -> 400, unknown tenant -> 403.
+// TestCreateConnection_NotFoundAndBadID: unknown workspace -> 404, an id
+// that cannot map to a session host -> 409 INVALID_STATE, unknown tenant
+// -> 403.
 func TestCreateConnection_NotFoundAndBadID(t *testing.T) {
 	fi := &fakeIssuer{err: NewError(CodeNotFound, "workspace not found")}
 	env := newConnectionEnv(t, fi)
@@ -193,9 +200,16 @@ func TestCreateConnection_NotFoundAndBadID(t *testing.T) {
 
 	r = doReq(t, env, sess, csrf, http.MethodPost,
 		"/v1/workspaces/not-an-id/connections", `{}`, nil)
-	r.Body.Close()
-	if r.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad-id status=%d, want 400", r.StatusCode)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("bad-id status=%d, want 409", r.StatusCode)
+	}
+	var e Error
+	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if e.Code != CodeInvalidState {
+		t.Fatalf("bad-id code=%q, want INVALID_STATE", e.Code)
 	}
 	if fi.calls != 1 {
 		t.Fatalf("issuer called %d times; malformed id must not reach it", fi.calls)
@@ -222,5 +236,52 @@ func TestCreateConnection_NoTicketInLogs(t *testing.T) {
 	}
 	if strings.Contains(env.logs.String(), secret) {
 		t.Fatalf("ticket leaked into request log: %s", env.logs.String())
+	}
+}
+
+// TestLaunchURL_PerWorkspaceHost: the launch URL points at the workspace's
+// own session host — ws-<suffix>.<session domain> — and two workspaces get
+// two different hosts (D9).
+func TestLaunchURL_PerWorkspaceHost(t *testing.T) {
+	fi := &fakeIssuer{ticket: IssuedTicket{
+		Token:     "tkt_launch_url_0123456789abcdef",
+		ExpiresAt: time.Now().Add(60 * time.Second).UTC(),
+	}}
+	env := newConnectionEnv(t, fi)
+	sess, csrf := login(t, env, "alice")
+
+	hosts := map[string]bool{}
+	for _, wsID := range []string{"ws_abc12345", "ws_zzz999yy"} {
+		fi.ticket.WorkspaceID = wsID
+		r := doReq(t, env, sess, csrf, http.MethodPost,
+			"/v1/workspaces/"+wsID+"/connections", `{}`, nil)
+		var view struct {
+			LaunchURL string `json:"launchUrl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&view); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		r.Body.Close()
+		if r.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: status=%d, want 201", wsID, r.StatusCode)
+		}
+		u, err := url.Parse(view.LaunchURL)
+		if err != nil {
+			t.Fatalf("%s: launchUrl %q does not parse: %v", wsID, view.LaunchURL, err)
+		}
+		label, err := sessionhost.Label(wsID)
+		if err != nil {
+			t.Fatalf("Label(%q): %v", wsID, err)
+		}
+		if u.Host != label+".session.example.test" {
+			t.Fatalf("%s: launchUrl host = %q, want %s.session.example.test", wsID, u.Host, label)
+		}
+		if u.Scheme != "https" || u.Path != LaunchPath {
+			t.Fatalf("%s: launchUrl = %q, want https://<host>/v1/launch", wsID, view.LaunchURL)
+		}
+		hosts[u.Host] = true
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("two workspaces share a launch host: %v", hosts)
 	}
 }
