@@ -110,7 +110,7 @@ jobs:
         run: |
           gh pr create --base main --head "$BRANCH" \
             --title "build(browser): bump chromium pin to $NEW_VERSION" \
-            --body-file /dev/stdin <<EOF
+            --body-file - <<EOF
           bookworm-security offers chromium $NEW_VERSION; the pinned
           build is older (SUPR-4 freshness signal).
 

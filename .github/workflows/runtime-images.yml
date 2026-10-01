@@ -727,7 +727,7 @@ jobs:
             gh release create "$REL_TAG" runtime-images.json \
               --target "$GITHUB_SHA" \
               --title "Runtime images ${REL_TAG#runtime-}" \
-              --notes-file /dev/stdin <<EOF
+              --notes-file - <<EOF
           Runtime image train publish for ${REL_TAG#runtime-}.
 
           \`runtime-images.json\` pins the signed digests this train
