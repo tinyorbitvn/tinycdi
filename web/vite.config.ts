@@ -5,6 +5,9 @@ import react from "@vitejs/plugin-react";
 // same-origin path. In dev, proxy it to the mock API (tests/mock-api).
 export default defineConfig({
   plugins: [react()],
+  // No inlined assets: fonts, images and scripts stay separate files so the
+  // strict CSP (default-src 'self') never has to allow data: URLs.
+  build: { assetsInlineLimit: 0 },
   server: {
     proxy: {
       "/v1": {

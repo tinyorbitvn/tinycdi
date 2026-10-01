@@ -47,10 +47,12 @@ spec:
           imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.frontend.pullPolicy }}
           args:
             - -listen=:8443
-            # The SPA shows sessions in an iframe on the session host and
-            # launches them with a form POST there — the CSP frame-src and
-            # form-action must name it or every session is CSP-blocked.
-            - -session-origin={{ printf "https://%s" .Values.sessionHost }}
+            # The SPA shows sessions in an iframe on each workspace's own
+            # <label>.<sessionDomain> host and launches them with a form
+            # POST there — the CSP frame-src and form-action get the
+            # https://*.<sessionDomain> wildcard or every session is
+            # CSP-blocked (D14).
+            - -session-domain={{ .Values.sessionDomain }}
             - -tls-cert=/tls/tls.crt
             - -tls-key=/tls/tls.key
             {{- if .Values.frontend.webRoot }}

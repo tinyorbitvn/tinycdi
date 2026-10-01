@@ -337,31 +337,23 @@ func (s *session) streamCount() int {
 // Request validators (ported from the proven fixture)
 // ---------------------------------------------------------------------------
 
-// hostOK enforces the Host-header allowlist on every listener route.
-func (g *Gateway) hostOK(r *http.Request) bool {
+// controlHostOK reports whether the request Host names a configured
+// control host (the in-cluster Service names) — the only hosts where
+// /healthz and /v1/control/* exist.
+func (g *Gateway) controlHostOK(r *http.Request) bool {
 	h, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		h = r.Host
 	}
-	return g.hosts[h]
+	return g.controlHosts[h]
 }
 
-// originMatches reports whether Origin o is exactly the gateway's public
-// https origin as seen on this request's authority.
-func (g *Gateway) originMatches(o, host string) bool {
-	u, err := url.Parse(o)
-	if err != nil {
-		return false
-	}
-	return u.Scheme == "https" && u.Host == host && u.Host == g.pubOrigin.Host
-}
-
+// originOK enforces D12 on WebSocket upgrades: Origin must equal the
+// request's own workspace origin — "https://" + the request Host, which
+// ServeHTTP already matched against the session domain. An absent Origin
+// fails the equality too: browsers always send it on upgrades.
 func (g *Gateway) originOK(r *http.Request) bool {
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return false // browsers always send Origin on WS; reject anonymous upgrades
-	}
-	return g.originMatches(o, r.Host)
+	return r.Header.Get("Origin") == "https://"+r.Host
 }
 
 // headerHasToken reports whether header name contains token in its

@@ -2,7 +2,7 @@
 # sha256:<64hex> reference and database.existingSecret is empty.
 # `helm template`/`helm lint` must reject this file.
 portalHost: portal.lab.example.net
-sessionHost: session.lab.example.net
+sessionDomain: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
