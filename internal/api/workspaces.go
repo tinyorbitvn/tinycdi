@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -71,6 +72,9 @@ type TemplateEntry struct {
 	DataPolicyDefault      string
 	ClipboardPolicy        string
 	PublishedAt            time.Time
+	// ImageBuiltAt is the raw image-built-at annotation value carried by
+	// the resolved WorkspaceTemplate (RFC 3339 when well formed).
+	ImageBuiltAt string
 }
 
 // ErrTemplateNotFound means templateRef does not resolve in the caller's
@@ -102,14 +106,26 @@ type WorkspaceHandler struct {
 	tenants    TenantResolver
 	statusView StatusView
 	maxBody    int64
+	staleAfter time.Duration
 	now        func() time.Time
+	log        *slog.Logger
 }
 
 // NewWorkspaceHandler wires the handler. catalog may be nil when
 // /v1/workspaces create is not served (tests); tenants is required.
 func NewWorkspaceHandler(b workspaceBackend, c TemplateCatalog, t TenantResolver) *WorkspaceHandler {
 	return &WorkspaceHandler{backend: b, catalog: c, tenants: t,
-		maxBody: 64 << 10, now: time.Now}
+		maxBody: 64 << 10, staleAfter: DefaultImageStaleAfter, now: time.Now}
+}
+
+// WithImageStaleAfter sets the age after which a workspace's runtime image
+// reports imageStale (the -image-stale-after flag). Non-positive keeps the
+// default.
+func (h *WorkspaceHandler) WithImageStaleAfter(d time.Duration) *WorkspaceHandler {
+	if d > 0 {
+		h.staleAfter = d
+	}
+	return h
 }
 
 // MountWorkspaceRoutes registers the workspace/template routes with the
@@ -162,6 +178,8 @@ type WorkspaceView struct {
 	FailureReason   string               `json:"failureReason,omitempty"`
 	CreatedAt       time.Time            `json:"createdAt"`
 	UpdatedAt       time.Time            `json:"updatedAt"`
+	ImageBuiltAt    *time.Time           `json:"imageBuiltAt,omitempty"`
+	ImageStale      *bool                `json:"imageStale,omitempty"`
 }
 
 // WorkspaceList is the paginated list response.

@@ -91,6 +91,7 @@ type config struct {
 	expiryInterval       time.Duration
 	retainedSyncInterval time.Duration
 	recoveryInterval     time.Duration
+	imageStaleAfter      time.Duration
 }
 
 func envOr(key, def string) string {
@@ -145,6 +146,14 @@ func parseConfig() (config, error) {
 	}
 	flag.DurationVar(&c.recoveryInterval, "recovery-interval", recoveryDef,
 		"quota/intent recovery pass interval; <=0 runs a single startup pass (env TCDI_RECOVERY_INTERVAL)")
+	staleAfterDef := api.DefaultImageStaleAfter
+	if v := os.Getenv("TCDI_IMAGE_STALE_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			staleAfterDef = d
+		}
+	}
+	flag.DurationVar(&c.imageStaleAfter, "image-stale-after", staleAfterDef,
+		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
 	flag.Parse()
 	if len(c.portalOrigins) == 0 {
 		_ = c.portalOrigins.Set(envOr("TCDI_PORTAL_ORIGINS", ""))
@@ -588,8 +597,10 @@ func main() {
 	}
 
 	wsHandler := api.NewWorkspaceHandler(svc, catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}, tenants).
-		WithStatusView(statusView)
-	tplHandler := api.NewTemplateHandler(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}, tenants)
+		WithStatusView(statusView).
+		WithImageStaleAfter(cfg.imageStaleAfter)
+	tplHandler := api.NewTemplateHandler(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}, tenants).
+		WithImageStaleAfter(cfg.imageStaleAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.sessionOrigin)
 	dataHandler := api.NewDataHandler(retained, catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}, tenants)
 
@@ -701,5 +712,6 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		DataPolicyDefault:      e.DataPolicyDefault,
 		ClipboardPolicy:        e.ClipboardPolicy,
 		PublishedAt:            e.PublishedAt,
+		ImageBuiltAt:           e.ImageBuiltAt,
 	}
 }

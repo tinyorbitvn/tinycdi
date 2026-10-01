@@ -325,5 +325,23 @@ func (h *WorkspaceHandler) viewWithStatus(ctx context.Context, rec *provisioning
 		obs.ObservedAt = h.now()
 	}
 	mergeObservedStatus(&v, rec, obs)
+	h.mergeImageFreshness(ctx, &v, rec)
 	return v
+}
+
+// mergeImageFreshness resolves the workspace's template and fills the
+// optional imageBuiltAt/imageStale view fields. A missing catalog, an
+// unresolvable or deleted template, and a malformed annotation all leave
+// both fields absent — freshness is advisory and never fails the request
+// (D28).
+func (h *WorkspaceHandler) mergeImageFreshness(ctx context.Context, v *WorkspaceView, rec *provisioning.WorkspaceRecord) {
+	if h.catalog == nil {
+		return
+	}
+	e, err := h.catalog.Resolve(ctx, rec.TenantID, rec.Template.ID)
+	if err != nil || e.ID == "" {
+		return
+	}
+	v.ImageBuiltAt, v.ImageStale = imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(),
+		"workspace", rec.ID, "template", rec.Template.ID)
 }

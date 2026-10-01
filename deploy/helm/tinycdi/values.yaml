@@ -49,18 +49,25 @@ images:
   # entries using `image: linuxDesktop` / `image: browser`). Runtime images
   # must be DIGEST-pinned (spec.linux.image requires <repo>@sha256:<64hex>)
   # — a tag-only runtime image is rejected by the CRD.
+  # builtAt is the image build timestamp (RFC 3339) from the runtime
+  # release train's runtime-images.json; it renders as the template's
+  # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
+  # report imageBuiltAt/imageStale on templates and workspaces (warning
+  # only — a stale image never blocks a launch).
   linuxDesktop:
     registry: ""
     repository: tinyorbitvn/tinycdi-linux-desktop
     tag: ""
     digest: ""
     pullPolicy: ""
+    builtAt: ""
   browser:
     registry: ""
     repository: tinyorbitvn/tinycdi-browser
     tag: ""
     digest: ""
     pullPolicy: ""
+    builtAt: ""
 
 # Kasm workspace adapter (spec.linux.adapter=kasm — docs/kasm-images.md):
 # the initContainer image that delivers the adapter scripts into pods of
@@ -462,6 +469,11 @@ nodeProfiles:
 # then resolved from `image:` — either a key into .Values.images
 # ("linuxDesktop", "browser"; global.imageRegistry applies) or a literal
 # digest-pinned reference.
+#
+# Image freshness: `image:` naming an images key renders the
+# workspaces.cdi.tinyorbit.vn/image-built-at annotation from
+# images.<key>.builtAt; a literal `image:` reference (e.g. a digest-pinned
+# kasmweb/* image) takes the template entry's own `imageBuiltAt` (RFC 3339).
 #
 # Placement/confinement fields map to the annotations the runtime backend
 # honors (only Localhost node profiles are accepted — anything else is

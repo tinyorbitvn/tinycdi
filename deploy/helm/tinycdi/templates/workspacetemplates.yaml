@@ -15,6 +15,9 @@
 #                    "browser") or a literal reference; used when
 #                    spec.linux.image is empty. Runtime images must be
 #                    digest-pinned — the CRD rejects tag-only references.
+#   imageBuiltAt:    -> workspaces.cdi.tinyorbit.vn/image-built-at for literal
+#                    image references (entries using an images key take
+#                    images.<key>.builtAt instead)
 #   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
@@ -40,6 +43,13 @@
 {{- end }}
 {{- $_ := set $linux "image" $ref }}
 {{- $_ := set $spec "linux" $linux }}
+{{- end }}
+{{- $builtAt := .imageBuiltAt | default "" }}
+{{- if and .image (hasKey $.Values.images .image) }}
+{{- $builtAt = (index $.Values.images .image).builtAt | default "" }}
+{{- end }}
+{{- if and $builtAt (not (index $ann "workspaces.cdi.tinyorbit.vn/image-built-at")) }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/image-built-at" $builtAt }}
 {{- end }}
 {{- if .seccompProfile }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" (printf "localhost/%s" (.seccompProfile | trimPrefix "localhost/")) }}

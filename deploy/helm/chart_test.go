@@ -1216,6 +1216,35 @@ func TestSeededTemplateImmutableRevisions(t *testing.T) {
 	}
 }
 
+// TestTemplateBuiltAtAnnotation: runtime-image freshness rides the
+// workspaces.cdi.tinyorbit.vn/image-built-at annotation — rendered from
+// images.<key>.builtAt when `image:` names a .Values.images key, and from
+// the template entry's own imageBuiltAt for literal references (kasmweb/*).
+// Unset on both sides renders no annotation.
+func TestTemplateBuiltAtAnnotation(t *testing.T) {
+	docs := renderArgs(t, "-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "images.browser.builtAt=2026-09-20T03:10:00Z",
+		"--set", "templates[2].imageBuiltAt=2026-09-28T12:00:00Z")
+	annByCatalog := map[string]map[string]any{}
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		cn, _ := lbls["workspaces.cdi.tinyorbit.vn/catalog-name"].(string)
+		ann, _ := m["annotations"].(map[string]any)
+		annByCatalog[cn] = ann
+	}
+	const key = "workspaces.cdi.tinyorbit.vn/image-built-at"
+	if got := annByCatalog["browser01"][key]; got != "2026-09-20T03:10:00Z" {
+		t.Errorf("browser01 %s = %v, want images.browser.builtAt", key, got)
+	}
+	if got := annByCatalog["kasm-chromium"][key]; got != "2026-09-28T12:00:00Z" {
+		t.Errorf("kasm-chromium %s = %v, want the entry's own imageBuiltAt", key, got)
+	}
+	if _, ok := annByCatalog["linuxdesk1"][key]; ok {
+		t.Errorf("linuxdesk1: %s must be absent while images.linuxDesktop.builtAt is unset", key)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // nodeProfiles.install — the optional per-node browser-sandbox profile
 // installer (seccomp + AppArmor Localhost profiles).

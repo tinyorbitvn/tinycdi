@@ -314,6 +314,7 @@
           "name": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$"},
           "namespace": {"type": "string", "minLength": 1},
           "image": {"type": "string"},
+          "imageBuiltAt": {"type": "string", "pattern": "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2}))?$"},
           "seccompProfile": {"type": "string"},
           "appArmorProfile": {"type": "string"},
           "nodeSelector": {"type": "object"},
@@ -349,7 +350,8 @@
         "repository": {"type": "string", "minLength": 1},
         "tag": {"type": "string"},
         "digest": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
-        "pullPolicy": {"type": "string", "enum": ["", "Always", "IfNotPresent", "Never"]}
+        "pullPolicy": {"type": "string", "enum": ["", "Always", "IfNotPresent", "Never"]},
+        "builtAt": {"type": "string", "pattern": "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2}))?$"}
       }
     },
     "secretRef": {
