@@ -106,7 +106,7 @@ func (b *Backend) Run(ctx context.Context) error {
 		go r.Run(runCtx)
 	}
 	for _, start := range b.bg {
-		start(runCtx)
+		go start(runCtx)
 	}
 
 	type serveErr struct {
