@@ -4,6 +4,7 @@
 // stopping, failed, stopped with retained data, and an ephemeral browser.
 // Tests never load these — they seed exactly what they assert on.
 
+import { ME } from "./admin.ts";
 import {
   READY_CONDITIONS,
   TEMPLATE_BROWSER,
@@ -78,6 +79,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH1A2B3C4D5E6F7G8H9J0K",
     owner: DEMO_OWNER,
     name: "design-review",
+    owner: ME,
     template: summary(TEMPLATE_LINUX),
     phase: "Ready",
     desiredState: "Running",
@@ -90,6 +92,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH2B3C4D5E6F7G8H9J0K1M",
     owner: DEMO_OWNER,
     name: "quick-browse",
+    owner: ME,
     template: summary(TEMPLATE_BROWSER),
     phase: "Ready",
     desiredState: "Running",
@@ -102,6 +105,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH3C4D5E6F7G8H9J0K1M2N",
     owner: DEMO_OWNER,
     name: "kernel-dev",
+    owner: ME,
     template: summary(DEV),
     phase: "Provisioning",
     desiredState: "Running",
@@ -124,6 +128,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH4D5E6F7G8H9J0K1M2N3P",
     owner: DEMO_OWNER,
     name: "finance-office",
+    owner: ME,
     template: summary(WIN),
     phase: "Failed",
     desiredState: "Running",
@@ -154,6 +159,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH5E6F7G8H9J0K1M2N3P4Q",
     owner: DEMO_OWNER,
     name: "build-agent",
+    owner: ME,
     template: summary(DEV),
     phase: "Stopping",
     desiredState: "Stopped",
@@ -213,6 +219,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
     id: "rd_01J4ZJ1K2L3M4N5P6Q7R8S9T0V",
     owner: DEMO_OWNER,
     state: "Retained",
+    owner: ME,
     sizeGib: 64,
     runtime: "WindowsVM",
     sourceWorkspaceName: "q3-reporting",
@@ -223,6 +230,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
     id: "rd_01J4ZJ2L3M4N5P6Q7R8S9T0V1W",
     owner: DEMO_OWNER,
     state: "Retained",
+    owner: ME,
     sizeGib: 50,
     runtime: "LinuxContainer",
     sourceWorkspaceName: "thesis-workstation",
