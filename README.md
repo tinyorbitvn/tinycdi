@@ -62,6 +62,8 @@ Start from `deploy/helm/tinycdi/ci/example-values.yaml`, then follow the
 full procedure — secrets, TLS, node profiles — in
 [`docs/runbooks/install.md`](docs/runbooks/install.md). Chart reference:
 [`deploy/helm/tinycdi/README.md`](deploy/helm/tinycdi/README.md).
+Unmodified `kasmweb/*` workspace images can also run through the injected
+adapter (`spec.linux.adapter: kasm`) — see [`docs/kasm-images.md`](docs/kasm-images.md).
 
 ## Documentation
 

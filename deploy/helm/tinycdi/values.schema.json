@@ -25,6 +25,14 @@
         "browser": {"$ref": "#/$defs/image"}
       }
     },
+    "kasmAdapter": {
+      "type": "object",
+      "required": ["image"],
+      "additionalProperties": false,
+      "properties": {
+        "image": {"$ref": "#/$defs/image"}
+      }
+    },
     "managedNamespaces": {
       "type": "array",
       "items": {

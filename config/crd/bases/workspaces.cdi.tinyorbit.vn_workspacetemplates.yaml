@@ -110,6 +110,18 @@ spec:
                   linux holds the LinuxContainer configuration. Required iff
                   runtime=LinuxContainer, forbidden otherwise.
                 properties:
+                  adapter:
+                    default: ""
+                    description: |-
+                      adapter selects an injected runtime adapter for the image: "kasm"
+                      runs UNMODIFIED kasmweb/* workspace images behind the adapter scripts
+                      the operator delivers via an initContainer (docs/kasm-images.md).
+                      Requires the operator to be configured with --kasm-adapter-image;
+                      empty keeps the image's own entrypoint contract (the tcdi/* images).
+                    enum:
+                    - ""
+                    - kasm
+                    type: string
                   browserPolicy:
                     description: |-
                       browserPolicy restricts the in-session browser when experience is
@@ -131,7 +143,8 @@ spec:
                   command:
                     description: |-
                       command is the fixed container command/args chosen by the admin. End
-                      users can never supply or override a container command.
+                      users can never supply or override a container command. Forbidden with
+                      adapter=kasm — the adapter supplies the container command.
                     items:
                       type: string
                     type: array
@@ -142,9 +155,26 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$
                     type: string
+                  sessionCmd:
+                    description: |-
+                      sessionCmd is the session payload command the adapter runs inside the
+                      desktop session (exported to the runtime as TCDI_SESSION_CMD). For
+                      Chromium-family kasmweb images it MUST point past the image's
+                      --no-sandbox wrapper scripts at the real binary — per docs/kasm-images.md
+                      every cataloged image needs a wrapper audit. Only valid with
+                      adapter=kasm; empty runs the image's default desktop session.
+                    pattern: ^[ -~]{1,512}$
+                    type: string
                 required:
                 - image
                 type: object
+                x-kubernetes-validations:
+                - message: sessionCmd is only valid with adapter=kasm
+                  rule: '!has(self.sessionCmd) || self.adapter == ''kasm'''
+                - message: command must be empty with adapter=kasm; the adapter supplies
+                    the container command
+                  rule: self.adapter != 'kasm' || !has(self.command) || size(self.command)
+                    == 0
               networkProfile:
                 description: networkProfile selects the permitted egress profile for
                   the runtime.

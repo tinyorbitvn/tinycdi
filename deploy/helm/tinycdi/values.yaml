@@ -62,6 +62,20 @@ images:
     digest: ""
     pullPolicy: ""
 
+# Kasm workspace adapter (spec.linux.adapter=kasm — docs/kasm-images.md):
+# the initContainer image that delivers the adapter scripts into pods of
+# kasm-template workspaces. The operator only gets --kasm-adapter-image
+# when the image is DIGEST-pinned here (kasmAdapter.image.digest); without
+# it the backend rejects adapter=kasm templates, and a seeded kasm
+# template fails the render. Never republish kasmweb/* images — they are
+# pulled by the nodes straight from Docker Hub.
+kasmAdapter:
+  image:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-kasm-adapter
+    tag: ""
+    digest: ""
+
 # Tenant namespaces the platform manages. The chart creates them with
 # helm.sh/resource-policy=keep (uninstall keeps them and the PVCs inside),
 # labels each with workspaces.cdi.tinyorbit.vn/tenant=<tenant>, installs the

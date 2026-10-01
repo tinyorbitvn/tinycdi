@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -73,6 +74,27 @@ func parseExceptCIDRs(csv string) ([]string, error) {
 		out = append(out, p.String())
 	}
 	return out, nil
+}
+
+// kasmAdapterImagePattern enforces a digest-pinned OCI reference — the
+// same shape spec.linux.image requires. The adapter init image is
+// operator-supplied infrastructure; a mutable tag would let an image
+// swap change what runs inside every kasm-template pod.
+var kasmAdapterImagePattern = regexp.MustCompile(workspacesv1alpha1.DigestPattern)
+
+// parseKasmAdapterImage validates --kasm-adapter-image: empty stays empty
+// (adapter=kasm templates are then rejected by the backend); a set value
+// must be digest-pinned.
+func parseKasmAdapterImage(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if !kasmAdapterImagePattern.MatchString(v) {
+		return "", fmt.Errorf("--kasm-adapter-image %q is not a digest-pinned reference "+
+			"(<repo>@sha256:<64 hex>)", v)
+	}
+	return v, nil
 }
 
 // brokerFlags carries the operator -> internal-broker wiring (ADR 0003):
@@ -147,6 +169,7 @@ func main() {
 	var internetExceptCIDRs string
 	var disableBuiltinExcepts bool
 	var gatewayNamespace string
+	var kasmAdapterImage string
 	var watchNamespaces string
 	var leaderElectionNamespace string
 	var bf brokerFlags
@@ -177,6 +200,11 @@ func main() {
 		"Disable the built-in InternetOnly egress excepts (break-glass only: without them "+
 			"workspace users can reach private/loopback/link-local/multicast ranges — "+
 			"on flat CNIs that includes the rest of the cluster).")
+	flag.StringVar(&kasmAdapterImage, "kasm-adapter-image", os.Getenv("TCDI_KASM_ADAPTER_IMAGE"),
+		"Digest-pinned image ref (<repo>@sha256:<64 hex>) of the kasm runtime adapter "+
+			"(tinycdi-kasm-adapter) — the initContainer image injected into pods of "+
+			"templates with spec.linux.adapter=kasm (env TCDI_KASM_ADAPTER_IMAGE). "+
+			"Empty rejects kasm templates.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", os.Getenv("POD_NAMESPACE"),
 		"Namespace the session gateway pods run in; per-workspace NetworkPolicies admit "+
 			"ingress only from pods labeled workspaces.cdi.tinyorbit.vn/role=gateway there "+
@@ -306,6 +334,11 @@ func main() {
 		setupLog.Error(err, "invalid egress except configuration")
 		os.Exit(1)
 	}
+	kasmAdapter, err := parseKasmAdapterImage(kasmAdapterImage)
+	if err != nil {
+		setupLog.Error(err, "invalid kasm adapter image")
+		os.Exit(1)
+	}
 	if gatewayNamespace == "" {
 		setupLog.Info("WARNING: --gateway-namespace unset (POD_NAMESPACE empty); " +
 			"runtime ingress is scoped to each workspace's own namespace — " +
@@ -334,6 +367,7 @@ func main() {
 			InternetExceptCIDRs:         exceptCIDRs,
 			DisableBuiltinEgressExcepts: disableBuiltinExcepts,
 			GatewayNamespace:            gatewayNamespace,
+			KasmAdapterImage:            kasmAdapter,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.

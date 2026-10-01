@@ -281,6 +281,81 @@ func TestWorkspaceTemplateCreateValidation(t *testing.T) {
 			}),
 			wantErr: "Unsupported value",
 		},
+		{
+			name: "accept kasm adapter with sessionCmd",
+			obj: mutate(linuxTemplate("tpl-acc-kasm"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["sessionCmd"] = "/usr/bin/chromium-orig --start-maximized"
+			}),
+		},
+		{
+			name: "accept kasm adapter without sessionCmd",
+			obj: mutate(linuxTemplate("tpl-acc-kasmdesk"), func(s map[string]interface{}) {
+				live(s, "linux")["adapter"] = "kasm"
+			}),
+		},
+		{
+			// KASM-5: the digest pin applies to kasm images too — a
+			// tag-only kasmweb ref must not be admissible.
+			name: "reject kasm adapter with tag-only image",
+			obj: mutate(linuxTemplate("tpl-rej-kasmtag"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["image"] = "kasmweb/chromium:1.18.0"
+			}),
+			wantErr: "sha256",
+		},
+		{
+			name: "reject unsupported adapter",
+			obj: mutate(linuxTemplate("tpl-rej-adapter"), func(s map[string]interface{}) {
+				live(s, "linux")["adapter"] = "docker"
+			}),
+			wantErr: "Unsupported value",
+		},
+		{
+			name: "reject sessionCmd without adapter",
+			obj: mutate(linuxTemplate("tpl-rej-cmd-noadapter"), func(s map[string]interface{}) {
+				live(s, "linux")["sessionCmd"] = "xterm"
+			}),
+			wantErr: "sessionCmd is only valid with adapter=kasm",
+		},
+		{
+			name: "reject sessionCmd with empty adapter",
+			obj: mutate(linuxTemplate("tpl-rej-cmd-emptyadapter"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = ""
+				l["sessionCmd"] = "xterm"
+			}),
+			wantErr: "sessionCmd",
+		},
+		{
+			name: "reject command with kasm adapter",
+			obj: mutate(linuxTemplate("tpl-rej-kasmcmd"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["command"] = []interface{}{"/bin/sh"}
+			}),
+			wantErr: "command must be empty with adapter=kasm",
+		},
+		{
+			name: "reject sessionCmd with newline",
+			obj: mutate(linuxTemplate("tpl-rej-cmd-nl"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["sessionCmd"] = "xterm\nrm -rf /"
+			}),
+			wantErr: "sessionCmd",
+		},
+		{
+			name: "reject oversized sessionCmd",
+			obj: mutate(linuxTemplate("tpl-rej-cmd-big"), func(s map[string]interface{}) {
+				l := live(s, "linux")
+				l["adapter"] = "kasm"
+				l["sessionCmd"] = strings.Repeat("x", 513)
+			}),
+			wantErr: "sessionCmd",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

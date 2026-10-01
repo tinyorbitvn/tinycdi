@@ -660,6 +660,10 @@ func templateSnapshotFor(ws *workspacesv1alpha1.Workspace) (*templateSnapshot, e
 // satisfies and a forged snapshot must re-satisfy (SEC-10).
 var snapshotDigestPattern = regexp.MustCompile(workspacesv1alpha1.DigestPattern)
 
+// snapshotSessionCmdPattern mirrors the Pattern on
+// LinuxRuntimeSpec.SessionCmd (printable ASCII, 1..512 chars).
+var snapshotSessionCmdPattern = regexp.MustCompile(workspacesv1alpha1.SessionCmdPattern)
+
 // verifySnapshot re-establishes trust in a recorded template snapshot
 // before it may drive convergence. The annotation is ordinary metadata —
 // a principal able to write Workspace objects can pre-seed or rewrite it,
@@ -736,6 +740,24 @@ func validateSnapshotSpec(spec *workspacesv1alpha1.WorkspaceTemplateSpec) error 
 		}
 		if !snapshotDigestPattern.MatchString(spec.Linux.Image) {
 			return errors.New("spec.linux.image is not a digest-pinned reference")
+		}
+		// The adapter/sessionCmd invariants are enforced on real templates
+		// by CRD enum + CEL; a forged snapshot must re-satisfy them here.
+		switch spec.Linux.Adapter {
+		case workspacesv1alpha1.AdapterNone, workspacesv1alpha1.AdapterKasm:
+		default:
+			return fmt.Errorf("unknown spec.linux.adapter %q", spec.Linux.Adapter)
+		}
+		if spec.Linux.SessionCmd != "" {
+			if spec.Linux.Adapter != workspacesv1alpha1.AdapterKasm {
+				return errors.New("spec.linux.sessionCmd is only valid with adapter=kasm")
+			}
+			if !snapshotSessionCmdPattern.MatchString(spec.Linux.SessionCmd) {
+				return errors.New("spec.linux.sessionCmd is not printable ASCII within 512 chars")
+			}
+		}
+		if spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm && len(spec.Linux.Command) > 0 {
+			return errors.New("spec.linux.command must be empty with adapter=kasm")
 		}
 	case workspacesv1alpha1.RuntimeWindowsVM:
 		if spec.Windows == nil || spec.Linux != nil {

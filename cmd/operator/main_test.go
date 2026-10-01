@@ -209,3 +209,43 @@ func TestParseExceptCIDRs(t *testing.T) {
 		})
 	}
 }
+
+// --kasm-adapter-image is operator-supplied infrastructure injected into
+// runtime pods: a mutable (tag-only) reference would let an image swap
+// change what runs inside every adapter=kasm workspace, so only a
+// digest-pinned ref is accepted.
+func TestParseKasmAdapterImage(t *testing.T) {
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"empty stays empty", "", "", false},
+		{"whitespace stays empty", "   ", "", false},
+		{"digest-pinned", "ghcr.io/tinyorbitvn/tinycdi-kasm-adapter@sha256:" + digest,
+			"ghcr.io/tinyorbitvn/tinycdi-kasm-adapter@sha256:" + digest, false},
+		{"single-segment repo", "tinycdi-kasm-adapter@sha256:" + digest,
+			"tinycdi-kasm-adapter@sha256:" + digest, false},
+		{"tag only", "ghcr.io/tinyorbitvn/tinycdi-kasm-adapter:1.2.3", "", true},
+		{"truncated digest", "ghcr.io/tinyorbitvn/x@sha256:abc", "", true},
+		{"uppercase repo", "GHCR.io/tinyorbitvn/x@sha256:" + digest, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseKasmAdapterImage(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("input %q must be rejected, got %q", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("input %q: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
