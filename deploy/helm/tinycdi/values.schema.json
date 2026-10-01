@@ -272,6 +272,25 @@
       }
     },
     "storageClass": {"type": "string"},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "placement": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allowSharedNodes": {"type": "boolean"},
+            "nodeSelector": {
+              "type": "object",
+              "additionalProperties": {"type": "string"}
+            },
+            "tolerations": {"type": "array"}
+          }
+        },
+        "hostUsers": {"type": ["boolean", "null"]}
+      }
+    },
     "nodeProfiles": {
       "type": "object",
       "additionalProperties": false,

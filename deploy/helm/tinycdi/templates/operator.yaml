@@ -78,6 +78,18 @@ spec:
             # operator refuses a tag-only ref at startup.
             - --kasm-adapter-image={{ include "tinycdi.image" (dict "image" .Values.kasmAdapter.image "root" $) }}
             {{- end }}
+            {{- $placement := (default dict (default dict .Values.runtime).placement) }}
+            {{- if not ($placement.allowSharedNodes | default false) }}
+            # Dedicated workspace pool (runtime.placement, default): every
+            # runtime pod selects the pool label and tolerates its taint.
+            # validation.yaml refuses allowSharedNodes=false with an empty
+            # selector, so these args always carry a real constraint.
+            - {{ printf "--runtime-node-selector=%s" ($placement.nodeSelector | toJson) | quote }}
+            - {{ printf "--runtime-tolerations=%s" ($placement.tolerations | default list | toJson) | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.runtime.hostUsers) }}
+            - --runtime-host-users={{ .Values.runtime.hostUsers }}
+            {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
             {{- end }}
