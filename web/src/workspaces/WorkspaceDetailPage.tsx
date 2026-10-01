@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { navigate, Link } from "../lib/router";
@@ -39,8 +40,8 @@ export function WorkspaceDetailPage({
 
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), pollIntervalMs);
-    return () => clearInterval(t);
+    const timer = setInterval(() => void refresh(), pollIntervalMs);
+    return () => clearInterval(timer);
   }, [refresh, pollIntervalMs]);
 
   async function act(kind: "start" | "stop") {
@@ -76,7 +77,7 @@ export function WorkspaceDetailPage({
     return (
       <main aria-busy="true">
         <ErrorBanner error={error} onDismiss={() => setError(null)} />
-        {error ? null : "Loading workspace…"}
+        {error ? null : t("workspaces.detail.loading")}
       </main>
     );
   }
@@ -88,37 +89,41 @@ export function WorkspaceDetailPage({
   return (
     <main>
       <p>
-        <Link to="/">← All workspaces</Link>
+        <Link to="/">{t("nav.allWorkspaces")}</Link>
       </p>
       <h1>
         {workspace.name} <PhaseBadge phase={workspace.phase} />
       </h1>
       <ErrorBanner error={error} onRetry={() => void refresh()} onDismiss={() => setError(null)} />
       <dl>
-        <dt>ID</dt>
+        <dt>{t("workspaces.detail.field.id")}</dt>
         <dd>{workspace.id}</dd>
-        <dt>Template</dt>
+        <dt>{t("workspaces.detail.field.template")}</dt>
         <dd>
-          {workspace.template.name}@{workspace.template.revision} (
-          {workspace.template.runtime} / {workspace.template.experience})
+          {t("workspaces.detail.template", {
+            name: workspace.template.name,
+            revision: workspace.template.revision,
+            runtime: workspace.template.runtime,
+            experience: workspace.template.experience,
+          })}
         </dd>
-        <dt>Desired state</dt>
+        <dt>{t("workspaces.detail.field.desired")}</dt>
         <dd>{workspace.desiredState}</dd>
-        <dt>Data policy</dt>
+        <dt>{t("workspaces.detail.field.dataPolicy")}</dt>
         <dd>{workspace.dataPolicy}</dd>
         {workspace.failureReason ? (
           <>
-            <dt>Failure</dt>
+            <dt>{t("workspaces.detail.field.failure")}</dt>
             <dd>{workspace.failureReason}</dd>
           </>
         ) : null}
-        <dt>Created</dt>
+        <dt>{t("workspaces.detail.field.created")}</dt>
         <dd>{new Date(workspace.createdAt).toLocaleString()}</dd>
-        <dt>Updated</dt>
+        <dt>{t("workspaces.detail.field.updated")}</dt>
         <dd>{new Date(workspace.updatedAt).toLocaleString()}</dd>
       </dl>
 
-      <h2>Conditions</h2>
+      <h2>{t("workspaces.detail.conditions.title")}</h2>
       <ConditionsTable workspace={workspace} />
 
       <div className="actions">
@@ -128,7 +133,11 @@ export function WorkspaceDetailPage({
             disabled={busy !== null}
             onClick={() => void act("start")}
           >
-            {busy === "start" ? "Starting…" : workspace.phase === "Failed" ? "Retry start" : "Start"}
+            {busy === "start"
+              ? t("workspaces.detail.action.starting")
+              : workspace.phase === "Failed"
+                ? t("workspaces.detail.action.retryStart")
+                : t("workspaces.detail.action.start")}
           </button>
         ) : null}
         {canStop || workspace.phase === "Ready" || workspace.phase === "Provisioning" ? (
@@ -137,11 +146,17 @@ export function WorkspaceDetailPage({
             disabled={busy !== null || workspace.desiredState === "Stopped"}
             onClick={() => void act("stop")}
           >
-            {busy === "stop" ? "Stopping…" : "Stop"}
+            {busy === "stop"
+              ? t("workspaces.detail.action.stopping")
+              : t("workspaces.detail.action.stop")}
           </button>
         ) : null}
         <ConnectButton workspace={workspace} disabled={!isConnectable(workspace)} />
-        {blocker ? <small aria-label="connect status">Connect unavailable: {blocker}</small> : null}
+        {blocker ? (
+          <small aria-label={t("workspaces.detail.connectStatus")}>
+            {t("workspaces.detail.connectUnavailable", { reason: blocker })}
+          </small>
+        ) : null}
         <DeleteWorkspaceButton
           workspace={workspace}
           onDeleted={() => navigate("/")}

@@ -15,6 +15,11 @@ This product includes third-party software:
 * pgx/v5, yaml.v3 — MIT License.
 * golang.org/x/* — BSD 3-Clause License.
 * React, react-dom, openapi-fetch (portal bundle) — MIT License.
+* Manrope Variable and JetBrains Mono fonts (WOFF2 subsets vendored under
+  web/src/design/orbit/fonts/, from @fontsource-variable/manrope 5.3.0 and
+  @fontsource/jetbrains-mono 5.3.0) — SIL Open Font License, Version 1.1.
+* Tabler Icons 3.48.0 outline set (@tabler/icons, vendored as inline SVG
+  components) — MIT License.
 
 Runtime container images additionally include:
 
@@ -56,3 +61,6 @@ or the KasmVNC/noVNC projects. "KasmVNC", "Kasm", "Chromium", "Chrome"
 and "Firefox" are trademarks of their respective owners and are used
 here only to identify the third-party components this software
 redistributes or interoperates with.
+
+"TinyOrbit", the TinyOrbit wordmark and the TinyOrbit mark are trademarks
+of TinyOrbit and are not covered by the MIT licence — see TRADEMARKS.md.

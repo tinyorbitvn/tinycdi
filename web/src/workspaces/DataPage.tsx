@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { Link } from "../lib/router";
@@ -65,14 +66,20 @@ export function PurgeDialog({
   }
 
   return (
-    <div role="dialog" aria-label="purge retained disk" className="dialog">
+    <div
+      role="dialog"
+      aria-label={t("data.purge.label")}
+      className="dialog"
+    >
       <p>
-        Purging <strong>{record.id}</strong> ({record.sizeGib} GiB from{" "}
-        {record.sourceWorkspaceName}) destroys the disk permanently. Type{" "}
-        <code>{record.sourceWorkspaceName}</code> to confirm.
+        {t("data.purge.warning", {
+          id: record.id,
+          size: record.sizeGib,
+          name: record.sourceWorkspaceName,
+        })}
       </p>
       <label>
-        Confirmation
+        {t("data.purge.confirmLabel")}
         <input
           name="purge-confirm"
           value={typed}
@@ -87,10 +94,10 @@ export function PurgeDialog({
         disabled={!confirmed || busy}
         onClick={() => void purge()}
       >
-        {busy ? "Purging…" : "Purge permanently"}
+        {busy ? t("data.purge.confirming") : t("data.purge.confirm")}
       </button>
       <button type="button" disabled={busy} onClick={onClose}>
-        Cancel
+        {t("common.cancel")}
       </button>
     </div>
   );
@@ -118,26 +125,23 @@ export function DataPage() {
 
   return (
     <main>
-      <h1>Retained data</h1>
-      <p>
-        Disks kept after their workspace was deleted with dataPolicy Retain.
-        Purge destroys a disk permanently — Delete only removes a workspace.
-      </p>
+      <h1>{t("data.list.title")}</h1>
+      <p>{t("data.list.intro")}</p>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       {!items ? (
-        <p aria-busy="true">Loading…</p>
+        <p aria-busy="true">{t("data.list.loading")}</p>
       ) : items.length === 0 ? (
-        <p>No retained disks.</p>
+        <p>{t("data.list.empty")}</p>
       ) : (
-        <table aria-label="retained data">
+        <table aria-label={t("data.list.label")}>
           <thead>
             <tr>
-              <th>ID</th>
-              <th>From workspace</th>
-              <th>Runtime</th>
-              <th>Size</th>
-              <th>State</th>
-              <th>Retained at</th>
+              <th>{t("data.list.col.id")}</th>
+              <th>{t("data.list.col.workspace")}</th>
+              <th>{t("data.list.col.runtime")}</th>
+              <th>{t("data.list.col.size")}</th>
+              <th>{t("data.list.col.state")}</th>
+              <th>{t("data.list.col.retainedAt")}</th>
               <th></th>
             </tr>
           </thead>
@@ -147,7 +151,7 @@ export function DataPage() {
                 <td>{r.id}</td>
                 <td>{r.sourceWorkspaceName}</td>
                 <td>{r.runtime}</td>
-                <td>{r.sizeGib} GiB</td>
+                <td>{t("data.list.size", { size: r.sizeGib })}</td>
                 <td>{r.state}</td>
                 <td>{new Date(r.retainedAt).toLocaleString()}</td>
                 <td>
@@ -157,7 +161,7 @@ export function DataPage() {
                       className="danger"
                       onClick={() => setPurging(r)}
                     >
-                      Purge
+                      {t("data.purge.action")}
                     </button>
                   ) : null}
                 </td>
@@ -177,7 +181,7 @@ export function DataPage() {
         />
       ) : null}
       <p>
-        <Link to="/">← All workspaces</Link>
+        <Link to="/">{t("nav.allWorkspaces")}</Link>
       </p>
     </main>
   );
