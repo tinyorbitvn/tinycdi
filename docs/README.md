@@ -40,6 +40,8 @@
   gateway ↔ broker internal API
 - [adr/0004-launch-origin-policy.md](adr/0004-launch-origin-policy.md) —
   launch origin enforcement
+- [adr/0005-backend-frontend-operator.md](adr/0005-backend-frontend-operator.md) —
+  v0.2 target: three components and per-workspace session hosts (proposed)
 
 ## Elsewhere in the repo
 

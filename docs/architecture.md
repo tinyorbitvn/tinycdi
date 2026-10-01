@@ -1,5 +1,12 @@
 # Thiết kế nền tảng workspace trên Kubernetes
 > **English note:** this document is in Vietnamese — it is the original design/ADR kept for reference. Current platform state is described by `README.md`, `docs/images.md`, `docs/compatibility.md` and `docs/runbooks/`.
+>
+> **v0.2 target architecture:** [ADR 0005](adr/0005-backend-frontend-operator.md)
+> (proposed) supersedes the component split below — three Deployments
+> (`backend`, `frontend`, `operator`), one visible URL, and every
+> workspace session on its own `<label>.<sessionDomain>` host with
+> restart-safe sessions. The component list under "Current components"
+> describes v0.1 and is kept until the v0.2 gates land.
 
 ## Current components (English summary)
 
