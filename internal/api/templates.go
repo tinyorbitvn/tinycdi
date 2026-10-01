@@ -40,6 +40,7 @@ type templateView struct {
 	LifecycleDefaults lifecycleDefaults `json:"lifecycleDefaults"`
 	DataPolicyDefault string            `json:"dataPolicyDefault"`
 	ClipboardPolicy   string            `json:"clipboardPolicy"`
+	NetworkProfile    string            `json:"networkProfile"`
 	PublishedAt       time.Time         `json:"publishedAt"`
 }
 
@@ -95,6 +96,7 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 			},
 			DataPolicyDefault: e.DataPolicyDefault,
 			ClipboardPolicy:   e.ClipboardPolicy,
+			NetworkProfile:    e.NetworkProfile,
 			PublishedAt:       e.PublishedAt,
 		})
 	}

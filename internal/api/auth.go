@@ -20,6 +20,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // AuthConfig configures the OIDC authorization-code + PKCE login flow and the
@@ -269,10 +270,11 @@ type pendingAuth struct {
 // Authenticator implements the OIDC login/logout endpoints and exposes the
 // session accessors the middleware needs.
 type Authenticator struct {
-	cfg      *AuthConfig
-	verifier *oidc.IDTokenVerifier
-	oauth2   oauth2.Config
-	sessions SessionStore
+	cfg       *AuthConfig
+	verifier  *oidc.IDTokenVerifier
+	oauth2    oauth2.Config
+	sessions  SessionStore
+	directory Directory
 
 	mu           sync.Mutex
 	pendings     map[string]pendingAuth
@@ -327,6 +329,13 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 		now:      time.Now,
 	}
 	return a, nil
+}
+
+// WithDirectory attaches the principal directory that logins upsert
+// (display names for tenant views — best effort, never authz input).
+func (a *Authenticator) WithDirectory(d Directory) *Authenticator {
+	a.directory = d
+	return a
 }
 
 func (a *Authenticator) SessionStore() SessionStore      { return a.sessions }
@@ -481,10 +490,12 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	principal := Principal{
-		Issuer:   idToken.Issuer,
-		Subject:  idToken.Subject,
-		TenantID: stringClaim(claims, a.cfg.TenantClaim),
-		Groups:   stringsClaim(claims, a.cfg.GroupsClaim),
+		Issuer:      idToken.Issuer,
+		Subject:     idToken.Subject,
+		TenantID:    stringClaim(claims, a.cfg.TenantClaim),
+		Groups:      stringsClaim(claims, a.cfg.GroupsClaim),
+		DisplayName: displayNameClaim(claims),
+		Email:       displayClaim(stringClaim(claims, "email"), maxEmailLen),
 	}
 	if principal.TenantID == "" || !a.tenantAllowed(principal.TenantID) {
 		writeError(w, r, CodeForbidden, "no tenant membership for this account")
@@ -518,6 +529,20 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	if err := a.sessions.Save(ctx, sess); err != nil {
 		writeError(w, r, CodeInternal, "could not create session")
 		return
+	}
+
+	// Display directory (names for tenant views) is best effort: a failure
+	// is logged and never blocks the login.
+	if a.directory != nil {
+		if err := a.directory.Remember(ctx, principal.TenantID, store.DirectoryEntry{
+			OwnerRef:    principal.Owner(),
+			Subject:     principal.Subject,
+			DisplayName: principal.DisplayName,
+			Email:       principal.Email,
+		}); err != nil {
+			a.log.Warn("principal directory update failed",
+				"request_id", RequestIDFromContext(ctx), "err", err)
+		}
 	}
 
 	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
@@ -672,6 +697,33 @@ func stringsClaim(claims map[string]interface{}, name string) []string {
 		return []string{v}
 	}
 	return nil
+}
+
+// Bounds for display-only identity claims: they are rendered in the portal
+// and stored in the principal directory, so they are trimmed and capped —
+// a hostile or buggy IdP cannot smuggle unbounded strings.
+const (
+	maxDisplayNameLen = 128
+	maxEmailLen       = 254
+)
+
+// displayClaim normalizes a display-only claim value: trimmed, rune-capped
+// at max. The result carries no authorization meaning.
+func displayClaim(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return s
+}
+
+// displayNameClaim picks the caller's display name from the verified ID
+// token: the `name` claim, falling back to `preferred_username`.
+func displayNameClaim(claims map[string]interface{}) string {
+	if n := stringClaim(claims, "name"); n != "" {
+		return displayClaim(n, maxDisplayNameLen)
+	}
+	return displayClaim(stringClaim(claims, "preferred_username"), maxDisplayNameLen)
 }
 
 // sessionKey is the lookup key a store persists for a session ID: hex of
