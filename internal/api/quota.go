@@ -53,16 +53,16 @@ type userUsage struct {
 // quotaView is the tenant quota snapshot (openapi QuotaView). userLimits is
 // omitted: there is no per-user limit store in v0.2.
 type quotaView struct {
-	Tenant string           `json:"tenant"`
-	Limits quotaAmounts     `json:"limits"`
-	Usage  quotaAmounts     `json:"usage"`
-	Users  []userUsage      `json:"users"`
+	Tenant string       `json:"tenant"`
+	Limits quotaAmounts `json:"limits"`
+	Usage  quotaAmounts `json:"usage"`
+	Users  []userUsage  `json:"users"`
 }
 
 // QuotaHandler implements GET /v1/quota per openapi.yaml.
 type QuotaHandler struct {
-	source QuotaSource
-	dir    Directory
+	source  QuotaSource
+	dir     Directory
 	tenants TenantResolver
 }
 

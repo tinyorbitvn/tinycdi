@@ -26,12 +26,12 @@ import (
 // ID, and Get returns that MAC in CSRFToken — the raw token is never
 // recoverable from a store read.
 type Session struct {
-	ID         string
-	Issuer     string
-	Subject    string
-	TenantID   string
-	Groups     []string
-	CSRFToken  string
+	ID        string
+	Issuer    string
+	Subject   string
+	TenantID  string
+	Groups    []string
+	CSRFToken string
 	// DisplayName and Email are display-only identity copied from the
 	// verified ID token at login (migration 012); they carry no
 	// authorization meaning.
