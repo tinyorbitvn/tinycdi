@@ -4,6 +4,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -65,6 +66,41 @@ type LinuxRuntimeSpec struct {
 	// Browser.
 	// +optional
 	BrowserPolicy *BrowserPolicy `json:"browserPolicy,omitempty"`
+
+	// hostUsers sets the pod's hostUsers field: false runs the runtime in a
+	// user namespace so its root is not node root. Unset leaves the pod
+	// field nil — the operator's default applies when configured. Opt-in in
+	// v0.2; it becomes the default only after the R1 spike proves
+	// KasmVNC + the Chromium sandbox + PVC on RKE2 (design §3.7, D26).
+	// +optional
+	HostUsers *bool `json:"hostUsers,omitempty"`
+}
+
+// PlacementSpec controls where runtime pods are scheduled. Admin-only,
+// immutable with the spec. Per field the precedence is: template field →
+// legacy annotation (nodeSelector only — the
+// workspaces.cdi.tinyorbit.vn/node-selector annotation is deprecated and
+// ships for one release) → operator default. A field the template sets
+// REPLACES the default; lists/maps are never merged.
+type PlacementSpec struct {
+	// nodeSelector pins runtime pods to nodes carrying these labels.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations let runtime pods land on tainted nodes (the dedicated
+	// workspace pool). Capped at 16 — a scheduling hint, not a policy
+	// surface.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// runtimeClassName selects the node container runtime handler (e.g.
+	// gvisor). Passed through to pod.spec.runtimeClassName; v0.2 does not
+	// maintain a tested handler matrix (design §3.7).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 }
 
 // WindowsSourcePVCRef names the sealed source PVC the template clones from.
@@ -187,6 +223,11 @@ type WorkspaceTemplateSpec struct {
 	// policy for workspaces from this template.
 	// +required
 	Lifecycle LifecycleDefaults `json:"lifecycle"`
+
+	// placement controls where runtime pods are scheduled: node selector,
+	// tolerations, runtime class. Admin-only and immutable with the spec.
+	// +optional
+	Placement *PlacementSpec `json:"placement,omitempty"`
 }
 
 // WorkspaceTemplateStatus is a minimal status: templates are data objects,

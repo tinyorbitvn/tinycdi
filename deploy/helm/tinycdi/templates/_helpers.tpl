@@ -71,7 +71,7 @@ imagePullSecrets:
 {{- join "," $pairs }}
 {{- end }}
 
-{{/* Comma-separated tenant names for the gateway tenant-allowlist. */}}
+{{/* Comma-separated tenant names for the backend TCDI_TENANT_ALLOWLIST (session gateway). */}}
 {{- define "tinycdi.tenantAllowlist" -}}
 {{- $names := list -}}
 {{- range .Values.managedNamespaces -}}
@@ -105,6 +105,37 @@ this list exactly.
 {{- toYaml (mergeOverwrite (dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL"))) (. | default dict)) }}
 {{- end }}
 
+{{/*
+Edge ingress rule for the public listeners (backend app/session, frontend),
+per networkPolicy.edgeIngress. Called with {root, ports}; renders a list
+item for an `ingress:` list (nothing in cilium mode — a
+CiliumNetworkPolicy admits the edge there, GitHub issue #13).
+  ipBlock: from networkPolicy.edgeIngressCIDRs (default 0.0.0.0/0)
+  any:     no `from` — every source, the TLS ports only
+  cilium:  CiliumNetworkPolicy fromEntities [ingress, host, remote-node]
+*/}}
+{{- define "tinycdi.edgeIngressRule" -}}
+{{- $mode := .root.Values.networkPolicy.edgeIngress | default "ipBlock" -}}
+{{- if eq $mode "ipBlock" }}
+- from:
+    {{- range .root.Values.networkPolicy.edgeIngressCIDRs }}
+    - ipBlock: {cidr: {{ . }}}
+    {{- end }}
+  ports:
+    {{- range .ports }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
+{{- else if eq $mode "any" }}
+# edgeIngress=any: every source, TLS ports only.
+- ports:
+    {{- range .ports }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
+{{- else }}
+# edgeIngress=cilium: see the *-edge-ingress CiliumNetworkPolicy.
+{{- end }}
+{{- end }}
+
 {{/* cert-manager bootstrap CA Secret name. */}}
 {{- define "tinycdi.internalCASecret" -}}
 {{- .Values.certManager.caSecretName | default (printf "%s-internal-ca" .Release.Name) }}
@@ -124,10 +155,17 @@ name: {{ .Values.certManager.issuerRef.name }}
 {{/*
 Install-time invariants. Rendering FAILS when violated:
 
-  - portalHost and sessionHost must resolve to DIFFERENT registrable hosts
-    (portal cookies + OIDC redirect are origin-scoped; sharing a host would
-    let session traffic ride the portal's cookie scope). Compared with
-    scheme/port stripped.
+  - chart 0.2.0 replaced the api/gateway/portal components with backend
+    and frontend: any api.*, gateway.*, portal.* or images.api/gateway/
+    portal value fails with a migration hint (tinycdi.legacyValues).
+    sessionHost (0.1.x) moved to sessionDomain — same hint.
+  - portalHost must differ from sessionDomain and must NOT be inside it:
+    the session edge serves every workspace on <label>.<sessionDomain>
+    through the *.<sessionDomain> wildcard route, and a portalHost in
+    that scope would be captured by the wildcard (portal cookies + OIDC
+    redirect are origin-scoped). Compared with scheme/port stripped.
+  - backend.sessionCookieMode is lax or partitioned; networkPolicy.
+    edgeIngress is ipBlock, cilium or any (ipBlock needs edgeIngressCIDRs).
   - every managedNamespaces entry needs a non-empty name and tenant.
   - ingress.enabled and gatewayApi.enabled are mutually exclusive
     (single public exposure path).
@@ -135,7 +173,7 @@ Install-time invariants. Rendering FAILS when violated:
     bootstraps a CA) or certManager.issuerRef.name pointing at an
     existing Issuer/ClusterIssuer.
   - SEC-32: an EMPTY peer list in a NetworkPolicy rule means "everywhere"
-    — database.allowedPeers, oidc.egressCIDRs and (with gateway metrics
+    — database.allowedPeers, oidc.egressCIDRs and (with backend metrics
     on) networkPolicy.prometheusPeers must never be empty. CHTR-7: the
     shipped 0.0.0.0/32 ipBlock in allowedPeers is a deny-all placeholder —
     it fails the render too.
@@ -152,18 +190,28 @@ Install-time invariants. Rendering FAILS when violated:
     or default — and its image must be pinned.
 */}}
 {{- define "tinycdi.validate" -}}
+{{- include "tinycdi.legacyValues" . -}}
 {{- $portal := .Values.portalHost | default "" | trim -}}
-{{- $session := .Values.sessionHost | default "" | trim -}}
+{{- $session := .Values.sessionDomain | default "" | trim -}}
 {{- if eq $portal "" -}}
 {{- fail "portalHost is required (e.g. portal.example.com)" -}}
 {{- end -}}
 {{- if eq $session "" -}}
-{{- fail "sessionHost is required (e.g. session.example.com)" -}}
+{{- fail "sessionDomain is required (e.g. session.example.com — every workspace session is served on <label>.<sessionDomain>)" -}}
 {{- end -}}
 {{- $ph := regexReplaceAll ":[0-9]+$" (regexReplaceAll "^[a-zA-Z]+://" $portal "") "" | lower -}}
 {{- $sh := regexReplaceAll ":[0-9]+$" (regexReplaceAll "^[a-zA-Z]+://" $session "") "" | lower -}}
-{{- if eq $ph $sh -}}
-{{- fail (printf "portalHost and sessionHost must be DIFFERENT registrable hosts (both resolve to %q)" $ph) -}}
+{{- if or (eq $ph $sh) (hasSuffix (printf ".%s" $sh) $ph) -}}
+{{- fail (printf "portalHost (%[1]q) must differ from sessionDomain and must not be inside it (%[2]q) — the *.%[2]s wildcard route would capture portal traffic" $ph $sh) -}}
+{{- end -}}
+{{- /* backend.extraAllowedHosts fed the removed -session-allowed-hosts:
+        the session Host allowlist is now the session domain itself plus
+        the in-cluster control hosts. */ -}}
+{{- if .Values.backend.extraAllowedHosts -}}
+{{- fail "backend.extraAllowedHosts moved to backend.controlHosts — the session listener serves <label>.<sessionDomain> workspace hosts and answers /healthz + /v1/control/* only on the control hosts (in-cluster Service names)" -}}
+{{- end -}}
+{{- if not (has (printf "%v" .Values.backend.sessionCookieMode) (list "lax" "partitioned")) -}}
+{{- fail (printf "backend.sessionCookieMode must be lax or partitioned (got %q)" (printf "%v" .Values.backend.sessionCookieMode)) -}}
 {{- end -}}
 {{- range .Values.managedNamespaces -}}
 {{- if or (not .name) (not .tenant) -}}
@@ -193,9 +241,22 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if not .Values.oidc.egressCIDRs -}}
 {{- fail "oidc.egressCIDRs must not be empty when networkPolicy.enabled — an empty list opens egress everywhere; set the IdP CIDRs" -}}
 {{- end -}}
-{{- if and .Values.gateway.metricsListen (not .Values.networkPolicy.prometheusPeers) -}}
-{{- fail "networkPolicy.prometheusPeers must not be empty when gateway.metricsListen is set — scope metrics scraping to your monitoring pods" -}}
+{{- if and .Values.backend.metrics.enabled (not .Values.networkPolicy.prometheusPeers) -}}
+{{- fail "networkPolicy.prometheusPeers must not be empty when backend.metrics.enabled — scope metrics scraping to your monitoring pods" -}}
 {{- end -}}
+{{- $edge := .Values.networkPolicy.edgeIngress | default "ipBlock" -}}
+{{- if not (has $edge (list "ipBlock" "cilium" "any")) -}}
+{{- fail (printf "networkPolicy.edgeIngress must be ipBlock, cilium or any (got %q)" $edge) -}}
+{{- end -}}
+{{- if and (eq $edge "ipBlock") (not .Values.networkPolicy.edgeIngressCIDRs) -}}
+{{- fail "networkPolicy.edgeIngressCIDRs must not be empty when edgeIngress=ipBlock — an empty peer list admits everything; use edgeIngress=any to say so explicitly" -}}
+{{- end -}}
+{{- end -}}
+{{- /* D20: the app listener seals OIDC login state into the
+        __Host-tcdi_login cookie with an AEAD key — required so a login
+        started on one replica completes on another. */ -}}
+{{- if not (or .Values.backend.loginKeys.existingSecret .Values.backend.loginKeys.generate) -}}
+{{- fail "backend.loginKeys is required: set existingSecret (a Secret with keys \"current\" and optional \"previous\", 32 bytes each) or generate=true to let the chart create it once" -}}
 {{- end -}}
 {{- /* SEC-35: edge TLS is mandatory. */ -}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.tls.existingSecret) -}}
@@ -245,16 +306,16 @@ Install-time invariants. Rendering FAILS when violated:
 {{- end -}}
 {{- /* CHTR-3: extraArgs must not reopen the surfaces the chart pins closed
         (the operator's dev/no-broker and egress-except flags and its
-        metrics endpoint, the api's DB-TLS escape hatch and login gate,
-        the gateway's chart-managed metrics listener). */ -}}
+        metrics endpoint, the backend's DB-TLS escape hatch, login gate,
+        chart-managed metrics listener and the split/test-mode broker
+        client flags). */ -}}
 {{- include "tinycdi.denyExtraArgs" (dict "component" "operator" "args" .Values.operator.extraArgs "denied" (list "dev-allow-no-broker" "disable-builtin-egress-excepts" "metrics-bind-address" "metrics-secure" "metrics-cert-path" "metrics-cert-name" "metrics-cert-key")) -}}
-{{- include "tinycdi.denyExtraArgs" (dict "component" "api" "args" .Values.api.extraArgs "denied" (list "dev-insecure-db" "required-groups")) -}}
-{{- include "tinycdi.denyExtraArgs" (dict "component" "gateway" "args" .Values.gateway.extraArgs "denied" (list "metrics-listen")) -}}
+{{- include "tinycdi.denyExtraArgs" (dict "component" "backend" "args" .Values.backend.extraArgs "denied" (list "dev-insecure-db" "required-groups" "metrics-listen" "broker-url" "broker-ca" "mtls-cert" "mtls-key")) -}}
 {{- /* A hostPath extraVolume would mount the host filesystem into the
         session edge (CHTR-3). */ -}}
-{{- range $v := (.Values.gateway.extraVolumes | default (list)) -}}
+{{- range $v := (.Values.backend.extraVolumes | default (list)) -}}
 {{- if hasKey (default dict $v) "hostPath" -}}
-{{- fail "gateway.extraVolumes must not use hostPath without dev.enabled=true — it mounts the host filesystem into the session edge" -}}
+{{- fail "backend.extraVolumes must not use hostPath without dev.enabled=true — it mounts the host filesystem into the session edge" -}}
 {{- end -}}
 {{- end -}}
 {{- /* DB TLS: only verifying sslmodes are production values (CHTR-3/8 —
@@ -268,7 +329,7 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if eq (printf "%v" .Values.podSecurity.managedEnforce) "privileged" -}}
 {{- fail "podSecurity.managedEnforce=privileged requires dev.enabled=true — managed namespaces must stay baseline/restricted in production" -}}
 {{- end -}}
-{{- range $c := list "api" "operator" "gateway" "portal" -}}
+{{- range $c := list "backend" "operator" "frontend" -}}
 {{- $cv := default dict (index $.Values $c) -}}
 {{- include "tinycdi.noPrivilegedOverride" (dict "component" $c "sc" (index $cv "securityContext") "kind" "securityContext") -}}
 {{- include "tinycdi.noPrivilegedOverride" (dict "component" $c "sc" (index $cv "podSecurityContext") "kind" "podSecurityContext") -}}
@@ -290,6 +351,35 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if and (not $np.image.digest) (not $np.image.tag) -}}
 {{- fail "nodeProfiles.install.image needs a tag or digest — there is no :latest fallback" -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+0.2.0 migration guard: the api, gateway and portal components were
+replaced by backend (public API + session gateway in one deployment) and
+frontend (static SPA server), and the single sessionHost became the
+sessionDomain wildcard. Old keys are accepted by the schema only so
+this can fail with a pointer to the new key instead of a bare schema error.
+*/}}
+{{- define "tinycdi.legacyValues" -}}
+{{- $hints := dict
+  "api" "api.* moved to backend.* (api.internalTLS -> backend.tls.internal, api.clientCA/extraCA/operatorCN/sessionIdle/extraPortalOrigins -> backend.*)"
+  "gateway" "gateway.* moved to backend.* (gateway.tls -> backend.tls.session, gateway.metricsListen -> backend.metrics, gateway.id -> backend.gatewayID, gateway.mtls/trustedCA removed — the gateway reaches the broker in-process; gateway.service removed — expose the session host through ingress or gatewayApi)"
+  "portal" "portal.* moved to frontend.* (portal.tls -> frontend.tls; portal.apiUpstream removed — the edge routes /v1 to the backend; portal.service removed — expose the portal host through ingress or gatewayApi)" -}}
+{{- $found := list -}}
+{{- range $k := list "api" "gateway" "portal" -}}
+{{- if hasKey $.Values $k -}}{{- $found = append $found (get $hints $k) -}}{{- end -}}
+{{- end -}}
+{{- range $k := list "api" "gateway" "portal" -}}
+{{- if hasKey (default dict $.Values.images) $k -}}
+{{- $found = append $found (printf "images.%s moved to images.%s.*" $k (ternary "frontend" "backend" (eq $k "portal"))) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $.Values "sessionHost" -}}
+{{- $found = append $found "sessionHost moved to sessionDomain (D9) — every workspace session is served on its own <label>.<sessionDomain> host; the edge needs one wildcard route and a wildcard certificate for *.<sessionDomain>" -}}
+{{- end -}}
+{{- if $found -}}
+{{- fail (printf "chart 0.2.0 replaced the api, gateway and portal components with backend and frontend — migrate these values (see the chart README \"Upgrading to 0.2.0\"): %s" (join "; " $found)) -}}
 {{- end -}}
 {{- end }}
 

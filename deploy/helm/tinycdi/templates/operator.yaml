@@ -64,10 +64,11 @@ spec:
             - --internet-except-cidrs={{ join "," $except }}
             {{- end }}
             {{- if .Values.operator.brokerClient.enabled }}
-            # Internal broker (api mTLS listener): the operator client cert
-            # CN is the only identity the workspace revoke/drain routes
-            # accept (ADR 0003; default CN=operator, api.operatorCN overrides).
-            - --broker-internal-url={{ .Values.operator.brokerClient.internalURL | default (printf "https://api-internal.%s.svc:9443" .Release.Namespace) }}
+            # Internal broker (backend mTLS listener): the operator client
+            # cert CN is the only identity the workspace revoke/drain routes
+            # accept (ADR 0003; default CN=operator, backend.operatorCN
+            # overrides).
+            - --broker-internal-url={{ .Values.operator.brokerClient.internalURL | default (printf "https://backend.%s.svc:9443" .Release.Namespace) }}
             - --broker-ca-file=/etc/broker-ca/{{ .Values.operator.brokerClient.ca.key | default "ca.crt" }}
             - --broker-client-cert-file=/mtls/tls.crt
             - --broker-client-key-file=/mtls/tls.key
@@ -77,6 +78,18 @@ spec:
             # (docs/kasm-images.md). Rendered ONLY when digest-pinned — the
             # operator refuses a tag-only ref at startup.
             - --kasm-adapter-image={{ include "tinycdi.image" (dict "image" .Values.kasmAdapter.image "root" $) }}
+            {{- end }}
+            {{- $placement := (default dict (default dict .Values.runtime).placement) }}
+            {{- if not ($placement.allowSharedNodes | default false) }}
+            # Dedicated workspace pool (runtime.placement, default): every
+            # runtime pod selects the pool label and tolerates its taint.
+            # validation.yaml refuses allowSharedNodes=false with an empty
+            # selector, so these args always carry a real constraint.
+            - {{ printf "--runtime-node-selector=%s" ($placement.nodeSelector | toJson) | quote }}
+            - {{ printf "--runtime-tolerations=%s" ($placement.tolerations | default list | toJson) | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.runtime.hostUsers) }}
+            - --runtime-host-users={{ .Values.runtime.hostUsers }}
             {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
