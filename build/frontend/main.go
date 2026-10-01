@@ -18,12 +18,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
@@ -40,41 +40,43 @@ func main() {
 		webRoot       string
 		tlsCert       string
 		tlsKey        string
-		sessionOrigin string
+		sessionDomain string
 	)
 	flag.StringVar(&listen, "listen", envOr("TCDI_FRONTEND_LISTEN", ":8443"), "HTTPS listen address")
 	flag.StringVar(&webRoot, "web-root", envOr("TCDI_FRONTEND_WEB_ROOT", "/srv/web"), "directory with the built SPA assets")
 	flag.StringVar(&tlsCert, "tls-cert", envOr("TCDI_FRONTEND_TLS_CERT", ""), "TLS cert file (required)")
 	flag.StringVar(&tlsKey, "tls-key", envOr("TCDI_FRONTEND_TLS_KEY", ""), "TLS key file (required)")
-	flag.StringVar(&sessionOrigin, "session-origin", envOr("TCDI_SESSION_ORIGIN", ""),
-		"public session origin (https://host[:port]) the in-portal session iframe loads and the launch form POSTs to; "+
-			"added to CSP frame-src and form-action")
+	flag.StringVar(&sessionDomain, "session-domain", envOr("TCDI_SESSION_DOMAIN", ""),
+		"public session domain (host[:port]) — every workspace session is served on its own "+
+			"<label>.<session-domain> host; the wildcard https://*.<session-domain> is added to CSP frame-src and form-action")
 	flag.Parse()
 
 	if tlsCert == "" || tlsKey == "" {
 		fmt.Fprintln(os.Stderr, "config: -tls-cert and -tls-key are required")
 		os.Exit(2)
 	}
-	// The session origin goes verbatim into the CSP, so it must be a bare
-	// https origin — anything else (http:, a path, userinfo) is a config
-	// error, not a degraded startup.
-	if sessionOrigin != "" {
-		so, err := normalizeSessionOrigin(sessionOrigin)
+	// The session domain goes into the CSP as its wildcard, so it must be a
+	// bare lower-case DNS domain with an optional port — anything else (a
+	// scheme, a path, a wildcard, upper case) is a config error, not a
+	// degraded startup.
+	var domain *sessionhost.Domain
+	if sessionDomain != "" {
+		d, err := sessionhost.ParseDomain(sessionDomain)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "config:", err)
 			os.Exit(2)
 		}
-		sessionOrigin = so
+		domain = &d
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if sessionOrigin == "" {
+	if domain == nil {
 		// Fail closed: frame-src 'none' and form-action 'self', so sessions
-		// are CSP-blocked until the session origin is configured.
-		log.Warn("no session origin configured: CSP blocks the session frame and launch form; sessions will not open")
+		// are CSP-blocked until the session domain is configured.
+		log.Warn("no session domain configured: CSP blocks the session frame and launch form; sessions will not open")
 	}
 
 	srv, reloader, err := newTLSServer(listen, tlsCert, tlsKey,
-		newHandler(webRoot, frontendCSP(sessionOrigin)), tlsreload.WithLogger(log))
+		newHandler(webRoot, frontendCSP(domain)), tlsreload.WithLogger(log))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(2)
@@ -82,7 +84,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go reloader.Run(ctx)
-	log.Info("frontend listening", "addr", listen, "sessionOrigin", sessionOrigin)
+	log.Info("frontend listening", "addr", listen, "sessionDomain", sessionDomain)
 	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("serve", "err", err)
 		os.Exit(1)
@@ -94,55 +96,42 @@ func main() {
 // unsafe is needed. The portal itself is never framed (frame-ancestors).
 const cspBase = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
 
-// frontendCSP returns the portal CSP for the configured session origin.
+// frontendCSP returns the portal CSP for the configured session domain.
 //
 // The SPA shows a session inside the portal: it submits a form POST
-// carrying the launch ticket to the session origin, targeted at an iframe
-// that then stays on the session origin for the stream. So the session
-// origin must be allowed by both form-action (the POST) and frame-src (the
-// iframe navigation). sessionOrigin is a normalized bare https origin;
-// empty fails closed — frame-src 'none', form-action 'self'.
-func frontendCSP(sessionOrigin string) string {
-	if sessionOrigin == "" {
+// carrying the launch ticket to <label>.<sessionDomain>, targeted at an
+// iframe that then stays on that workspace's own host for the stream. So
+// the whole session-domain wildcard must be allowed by both form-action
+// (the POST) and frame-src (the iframe navigation) — https://*.<domain>
+// keeps the configured port when one is set. nil fails closed — frame-src
+// 'none', form-action 'self'.
+func frontendCSP(domain *sessionhost.Domain) string {
+	if domain == nil {
 		return cspBase + "; frame-src 'none'; form-action 'self'"
 	}
-	return cspBase + "; frame-src " + sessionOrigin + "; form-action 'self' " + sessionOrigin
-}
-
-// normalizeSessionOrigin validates that raw is a bare https origin and
-// returns its normalized form: scheme://lowercased-host[:non-default-port]
-// — the same rule the backend applies to -session-origin (SEC-26).
-func normalizeSessionOrigin(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
-		return "", fmt.Errorf("bad session-origin %q (want https://host[:port])", raw)
-	}
-	host := strings.ToLower(u.Host)
-	if u.Port() == "443" {
-		host = strings.TrimSuffix(host, ":443")
-	}
-	return "https://" + host, nil
+	origin := "https://" + domain.Wildcard()
+	return cspBase + "; frame-src " + origin + "; form-action 'self' " + origin
 }
 
 // securityHeaders pins the browser policy on every frontend response
-// (SEC-22): strict CSP, framing of the portal denied, nosniff,
-// Referrer-Policy and HSTS.
+// (SEC-22, D14): strict CSP, framing of the portal denied, COOP
+// same-origin, nosniff, Referrer-Policy and HSTS.
 //
 // Referrer-Policy must be strict-origin (or strict-origin-when-cross-origin),
 // never no-referrer/same-origin: the SPA launches a desktop with a
-// cross-site form POST to the session origin, and the browser derives that
-// POST's Origin header from the effective referrer — a policy that
-// suppresses the referrer makes it send Origin: null, which the gateway's
-// launch gate rejects as bad_origin (ADR 0004). strict-origin keeps
-// the privacy property: cross-site requests leak only the bare origin,
-// never the path or query.
+// cross-site form POST to the workspace's session host, and the browser
+// derives that POST's Origin header from the effective referrer — a policy
+// that suppresses the referrer makes it send Origin: null, which the
+// gateway's launch gate rejects as bad_origin (ADR 0004). strict-origin
+// keeps the privacy property: cross-site requests leak only the bare
+// origin, never the path or query.
 func securityHeaders(csp string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Referrer-Policy", "strict-origin")
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		next.ServeHTTP(w, r)

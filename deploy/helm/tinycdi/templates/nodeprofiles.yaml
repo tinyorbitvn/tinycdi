@@ -1,6 +1,17 @@
 {{- if .Values.nodeProfiles.install.enabled }}
 {{- $np := .Values.nodeProfiles.install }}
 {{- $ns := $np.namespace }}
+{{- /* D25: the installer targets the same pool runtime pods do — with a
+         dedicated pool (runtime.placement.allowSharedNodes=false) its
+         selector merges OVER nodeProfiles.install.nodeSelector and its
+         tolerations are appended. */ -}}
+{{- $placement := (default dict (default dict .Values.runtime).placement) -}}
+{{- $poolSel := dict -}}
+{{- $poolTol := list -}}
+{{- if not ($placement.allowSharedNodes | default false) -}}
+{{- $poolSel = $placement.nodeSelector | default dict -}}
+{{- $poolTol = $placement.tolerations | default list -}}
+{{- end }}
 {{- $content := printf "%s\n%s\n%s\n%s" (.Files.Get "files/node-profiles/seccomp/chromium-userns.json") (.Files.Get "files/node-profiles/apparmor/tinycdi-browser") (.Files.Get "files/node-profiles/installer/install.sh") (.Files.Get "files/node-profiles/installer/verify.sh") }}
 {{- $hash := $content | sha256sum }}
 # Node-profile installer — OPTIONAL (nodeProfiles.install.enabled). A
@@ -102,9 +113,11 @@ spec:
       priorityClassName: {{ $np.priorityClassName }}
       {{- end }}
       # All Linux nodes except control-plane; values.nodeSelector merges
-      # over the os=linux floor, tolerations are entirely user-owned.
+      # over the os=linux floor and the dedicated runtime pool's selector
+      # (when set) merges over both — a key conflict can only hide a pool
+      # node from the profiles that must reach it.
       nodeSelector:
-        {{- toYaml (mergeOverwrite (dict "kubernetes.io/os" "linux") ($np.nodeSelector | default dict)) | nindent 8 }}
+        {{- toYaml (mergeOverwrite (dict "kubernetes.io/os" "linux") ($np.nodeSelector | default dict) $poolSel) | nindent 8 }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -112,7 +125,7 @@ spec:
               - matchExpressions:
                   - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
                   - {key: node-role.kubernetes.io/master, operator: DoesNotExist}
-      {{- with $np.tolerations }}
+      {{- with (concat ($np.tolerations | default list) $poolTol) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

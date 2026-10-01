@@ -158,10 +158,12 @@ Install-time invariants. Rendering FAILS when violated:
   - chart 0.2.0 replaced the api/gateway/portal components with backend
     and frontend: any api.*, gateway.*, portal.* or images.api/gateway/
     portal value fails with a migration hint (tinycdi.legacyValues).
-  - portalHost and sessionHost must be DIFFERENT hosts (portal cookies +
-    OIDC redirect are origin-scoped; sharing a host would let session
-    traffic ride the portal's cookie scope and serve session content from
-    the portal origin). Compared with scheme/port stripped.
+    sessionHost (0.1.x) moved to sessionDomain — same hint.
+  - portalHost must differ from sessionDomain and must NOT be inside it:
+    the session edge serves every workspace on <label>.<sessionDomain>
+    through the *.<sessionDomain> wildcard route, and a portalHost in
+    that scope would be captured by the wildcard (portal cookies + OIDC
+    redirect are origin-scoped). Compared with scheme/port stripped.
   - backend.sessionCookieMode is lax or partitioned; networkPolicy.
     edgeIngress is ipBlock, cilium or any (ipBlock needs edgeIngressCIDRs).
   - every managedNamespaces entry needs a non-empty name and tenant.
@@ -190,17 +192,23 @@ Install-time invariants. Rendering FAILS when violated:
 {{- define "tinycdi.validate" -}}
 {{- include "tinycdi.legacyValues" . -}}
 {{- $portal := .Values.portalHost | default "" | trim -}}
-{{- $session := .Values.sessionHost | default "" | trim -}}
+{{- $session := .Values.sessionDomain | default "" | trim -}}
 {{- if eq $portal "" -}}
 {{- fail "portalHost is required (e.g. portal.example.com)" -}}
 {{- end -}}
 {{- if eq $session "" -}}
-{{- fail "sessionHost is required (e.g. session.example.com)" -}}
+{{- fail "sessionDomain is required (e.g. session.example.com — every workspace session is served on <label>.<sessionDomain>)" -}}
 {{- end -}}
 {{- $ph := regexReplaceAll ":[0-9]+$" (regexReplaceAll "^[a-zA-Z]+://" $portal "") "" | lower -}}
 {{- $sh := regexReplaceAll ":[0-9]+$" (regexReplaceAll "^[a-zA-Z]+://" $session "") "" | lower -}}
-{{- if eq $ph $sh -}}
-{{- fail (printf "portalHost and sessionHost must be DIFFERENT hosts (both resolve to %q)" $ph) -}}
+{{- if or (eq $ph $sh) (hasSuffix (printf ".%s" $sh) $ph) -}}
+{{- fail (printf "portalHost (%[1]q) must differ from sessionDomain and must not be inside it (%[2]q) — the *.%[2]s wildcard route would capture portal traffic" $ph $sh) -}}
+{{- end -}}
+{{- /* backend.extraAllowedHosts fed the removed -session-allowed-hosts:
+        the session Host allowlist is now the session domain itself plus
+        the in-cluster control hosts. */ -}}
+{{- if .Values.backend.extraAllowedHosts -}}
+{{- fail "backend.extraAllowedHosts moved to backend.controlHosts — the session listener serves <label>.<sessionDomain> workspace hosts and answers /healthz + /v1/control/* only on the control hosts (in-cluster Service names)" -}}
 {{- end -}}
 {{- if not (has (printf "%v" .Values.backend.sessionCookieMode) (list "lax" "partitioned")) -}}
 {{- fail (printf "backend.sessionCookieMode must be lax or partitioned (got %q)" (printf "%v" .Values.backend.sessionCookieMode)) -}}
@@ -349,7 +357,8 @@ Install-time invariants. Rendering FAILS when violated:
 {{/*
 0.2.0 migration guard: the api, gateway and portal components were
 replaced by backend (public API + session gateway in one deployment) and
-frontend (static SPA server). Old keys are accepted by the schema only so
+frontend (static SPA server), and the single sessionHost became the
+sessionDomain wildcard. Old keys are accepted by the schema only so
 this can fail with a pointer to the new key instead of a bare schema error.
 */}}
 {{- define "tinycdi.legacyValues" -}}
@@ -365,6 +374,9 @@ this can fail with a pointer to the new key instead of a bare schema error.
 {{- if hasKey (default dict $.Values.images) $k -}}
 {{- $found = append $found (printf "images.%s moved to images.%s.*" $k (ternary "frontend" "backend" (eq $k "portal"))) -}}
 {{- end -}}
+{{- end -}}
+{{- if hasKey $.Values "sessionHost" -}}
+{{- $found = append $found "sessionHost moved to sessionDomain (D9) — every workspace session is served on its own <label>.<sessionDomain> host; the edge needs one wildcard route and a wildcard certificate for *.<sessionDomain>" -}}
 {{- end -}}
 {{- if $found -}}
 {{- fail (printf "chart 0.2.0 replaced the api, gateway and portal components with backend and frontend — migrate these values (see the chart README \"Upgrading to 0.2.0\"): %s" (join "; " $found)) -}}

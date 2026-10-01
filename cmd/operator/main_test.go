@@ -8,9 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -249,3 +252,130 @@ func TestParseKasmAdapterImage(t *testing.T) {
 		})
 	}
 }
+
+// The --runtime-* flags carry the operator-wide runtime pod placement
+// defaults (the chart's runtime.placement values). Valid JSON must parse
+// into the placement the linux backend receives; invalid JSON must make
+// the operator exit non-zero and name the offending flag — a silently
+// dropped selector on a dedicated pool would strand every pod Pending.
+func TestOperatorFlags_Placement(t *testing.T) {
+	// Helper-process pattern: re-exec the test binary so the real exit
+	// code is observable — main() turns a parse error into os.Exit(1),
+	// which cannot be invoked in-process.
+	if os.Getenv("TCDI_TEST_PLACEMENT_HELPER") == "1" {
+		var pf runtimePlacementFlags
+		fs := flag.NewFlagSet("operator", flag.ContinueOnError)
+		bindRuntimePlacementFlags(fs, &pf)
+		if err := fs.Parse(flag.Args()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if _, err := pf.parse(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	t.Run("valid JSON parses", func(t *testing.T) {
+		var pf runtimePlacementFlags
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		bindRuntimePlacementFlags(fs, &pf)
+		err := fs.Parse([]string{
+			`--runtime-node-selector={"cdi.tinyorbit.vn/workspace":"true"}`,
+			`--runtime-tolerations=[{"key":"cdi.tinyorbit.vn/workspace","operator":"Exists","effect":"NoSchedule"}]`,
+			"--runtime-host-users=false",
+		})
+		if err != nil {
+			t.Fatalf("flag parse: %v", err)
+		}
+		p, err := pf.parse()
+		if err != nil {
+			t.Fatalf("valid flags rejected: %v", err)
+		}
+		if got := p.nodeSelector["cdi.tinyorbit.vn/workspace"]; got != "true" {
+			t.Fatalf("nodeSelector[cdi.tinyorbit.vn/workspace] = %q, want true", got)
+		}
+		if len(p.tolerations) != 1 {
+			t.Fatalf("tolerations = %v, want 1 entry", p.tolerations)
+		}
+		tol := p.tolerations[0]
+		if tol.Key != "cdi.tinyorbit.vn/workspace" || tol.Operator != "Exists" || tol.Effect != "NoSchedule" {
+			t.Fatalf("toleration = %+v", tol)
+		}
+		if p.hostUsers == nil || *p.hostUsers != false {
+			t.Fatalf("hostUsers = %v, want *false", p.hostUsers)
+		}
+	})
+
+	t.Run("empty flags leave defaults unset", func(t *testing.T) {
+		p, err := (runtimePlacementFlags{}).parse()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.nodeSelector != nil || p.tolerations != nil || p.hostUsers != nil {
+			t.Fatalf("empty flags must yield empty placement, got %+v", p)
+		}
+	})
+
+	t.Run("hostUsers values", func(t *testing.T) {
+		for _, tc := range []struct {
+			in   string
+			want *bool
+		}{
+			{"", nil},
+			{"true", ptr(true)},
+			{"false", ptr(false)},
+		} {
+			p, err := (runtimePlacementFlags{hostUsers: tc.in}).parse()
+			if err != nil {
+				t.Fatalf("hostUsers=%q: %v", tc.in, err)
+			}
+			if (p.hostUsers == nil) != (tc.want == nil) ||
+				(p.hostUsers != nil && *p.hostUsers != *tc.want) {
+				t.Fatalf("hostUsers=%q parsed %v, want %v", tc.in, p.hostUsers, tc.want)
+			}
+		}
+	})
+
+	// Invalid input: the operator process exits non-zero and the message
+	// names the flag (helper-process re-exec).
+	t.Run("invalid input exits non-zero naming the flag", func(t *testing.T) {
+		for _, args := range [][]string{
+			{`--runtime-node-selector=[not-an-object`},
+			{`--runtime-node-selector={"a":1}`},               // non-string value
+			{`--runtime-tolerations={"not":"array"}`},          // not an array
+			{`--runtime-tolerations=[{"operator":"Exists"}]`},  // empty key tolerates all
+			{`--runtime-tolerations=[{"key":"k","operator":"Sometimes"}]`},
+			{`--runtime-tolerations=[{"key":"k","effect":"Never"}]`},
+			{"--runtime-host-users=maybe"},
+		} {
+			cmd := exec.Command(os.Args[0],
+				"-test.run=^TestOperatorFlags_Placement$", "--")
+			cmd.Args = append(cmd.Args, args...)
+			cmd.Env = append(os.Environ(), "TCDI_TEST_PLACEMENT_HELPER=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("args %v: expected non-zero exit, got 0\n%s", args, out)
+			}
+			wantFlag := "--" + strings.SplitN(strings.TrimPrefix(args[0], "--"), "=", 2)[0]
+			if !strings.Contains(string(out), wantFlag) {
+				t.Fatalf("args %v: output must name %s, got\n%s", args, wantFlag, out)
+			}
+		}
+	})
+
+	t.Run("valid input exits zero", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0],
+			"-test.run=^TestOperatorFlags_Placement$", "--",
+			`--runtime-node-selector={"pool":"ws"}`,
+			`--runtime-tolerations=[{"key":"pool","operator":"Equal","value":"ws","effect":"NoExecute"}]`)
+		cmd.Env = append(os.Environ(), "TCDI_TEST_PLACEMENT_HELPER=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("valid flags must exit 0: %v\n%s", err, out)
+		}
+	})
+}
+
+func ptr[T any](v T) *T { return &v }

@@ -7,6 +7,10 @@
 #
 # Public-edge certs (backend.tls.app, backend.tls.session, frontend.tls)
 # are NOT issued here: point them at certificates from your PKI/ACME flow.
+# backend.tls.session must be a WILDCARD certificate covering
+# *.<sessionDomain> — every workspace session is served on its own
+# <label>.<sessionDomain> host (D9). Wildcards need DNS-01; HTTP-01
+# cannot issue them.
 {{- if .Values.certManager.selfSigned }}
 ---
 # Bootstrap: self-signed root -> CA Certificate -> CA Issuer. Only enable

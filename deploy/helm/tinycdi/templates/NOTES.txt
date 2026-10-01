@@ -1,7 +1,9 @@
 tinycdi {{ .Chart.Version }} installed into {{ .Release.Namespace }}.
 
-Portal:  https://{{ .Values.portalHost }}
-Session: https://{{ .Values.sessionHost }}   (must differ — enforced at render)
+Portal:   https://{{ .Values.portalHost }}
+Sessions: https://*.{{ .Values.sessionDomain }}   (one host per workspace;
+          portalHost must not equal or sit inside sessionDomain — enforced
+          at render; needs a wildcard DNS record + certificate)
 
 Exposure:
 {{- if .Values.ingress.enabled }}
@@ -19,6 +21,24 @@ Managed namespaces:
   - {{ .name }} (tenant: {{ .tenant }})
 {{- else }}
   NONE — set managedNamespaces or the platform manages nothing.
+{{- end }}
+
+{{- $placement := (default dict (default dict .Values.runtime).placement) }}
+{{- if $placement.allowSharedNodes }}
+
+Runtime placement: WARNING — runtime.placement.allowSharedNodes=true.
+  Runtime pods schedule on ANY node: user desktops lose node-level
+  isolation and share nodes with unrelated workloads. Intended for
+  kind/dev clusters only — the default dedicated pool is described in
+  install.md "Workspace node pool".
+{{- else }}
+
+Runtime placement: dedicated pool — runtime pods (and the node-profile
+  installer) need nodes labeled
+  {{- range $k, $v := $placement.nodeSelector }} {{ $k }}={{ $v }}{{- end }}
+  and tainted to match runtime.placement.tolerations. Label + taint the
+  pool BEFORE launching workspaces or pods stay Pending — see install.md
+  "Workspace node pool".
 {{- end }}
 
 {{- if .Values.certManager.enabled }}
