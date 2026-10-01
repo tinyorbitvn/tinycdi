@@ -260,12 +260,20 @@ func doReq(t *testing.T, env *testEnv, sess, csrf *http.Cookie, method, path, bo
 	return resp
 }
 
+// login drives a full OIDC round trip for subject and returns the session
+// cookie plus a cookie-shaped carrier for the session's CSRF token. Since
+// v0.2 the token is derived from the session ID (P1) — portal JS reads it
+// from GET /v1/me — so the helper derives the same value without a request.
 func login(t *testing.T, env *testEnv, subject string) (*http.Cookie, *http.Cookie) {
 	t.Helper()
 	env.issuer.Subject = subject
 	resp, cookies := env.login(t)
 	resp.Body.Close()
-	return findCookie(cookies, env.auth.SessionCookieName()), findCookie(cookies, env.auth.CSRFCookieName())
+	sess := findCookie(cookies, env.auth.SessionCookieName())
+	if sess == nil {
+		t.Fatal("login set no session cookie")
+	}
+	return sess, &http.Cookie{Name: env.auth.CSRFHeader(), Value: csrfTokenFor(sess.Value)}
 }
 
 func decodeBody[T any](t *testing.T, r *http.Response) T {

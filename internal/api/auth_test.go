@@ -76,7 +76,7 @@ func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.A
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
 	mux.Handle("/auth/logout", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(a.LogoutHandler))))
-	mux.Handle("/v1/me", a.RequireAuth(http.HandlerFunc(meHandler)))
+	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	mux.Handle("/v1/echo-owner", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))
 
 	var h http.Handler = mux
@@ -92,13 +92,6 @@ func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.A
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func meHandler(w http.ResponseWriter, r *http.Request) {
-	p, _ := PrincipalFromContext(r.Context())
-	writeJSON(w, map[string]any{
-		"issuer": p.Issuer, "subject": p.Subject, "tenant": p.TenantID, "owner": p.Owner(),
-	})
 }
 
 func echoOwnerHandler(w http.ResponseWriter, r *http.Request) {
@@ -228,9 +221,10 @@ func TestOIDCLoginFlowSucceeds(t *testing.T) {
 	if sess.Path != "/" {
 		t.Fatalf("session cookie Path = %q, want /", sess.Path)
 	}
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
-	if csrf == nil || csrf.HttpOnly {
-		t.Fatal("CSRF cookie must exist and be JS-readable (not HttpOnly)")
+	// v0.2 publishes no CSRF cookie: the token is derived from the session
+	// ID and read from GET /v1/me (P1, D17). The v0.1 name is deleted.
+	if csrf := findCookie(cookies, env.auth.CSRFCookieName()); csrf != nil && csrf.MaxAge > 0 {
+		t.Fatalf("live non-__Host- CSRF cookie set: %q", csrf.Name)
 	}
 
 	resp2 := env.authedGet(t, sess, "/v1/me")
@@ -238,14 +232,12 @@ func TestOIDCLoginFlowSucceeds(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("/v1/me status = %d", resp2.StatusCode)
 	}
-	var me map[string]string
-	_ = json.NewDecoder(resp2.Body).Decode(&me)
-	if me["subject"] != env.issuer.Subject || me["issuer"] != env.issuer.URL() ||
-		me["tenant"] != env.issuer.TenantID {
-		t.Fatalf("principal wrong: %v", me)
+	me := decodeMe(t, resp2)
+	if me.Subject != env.issuer.Subject || me.Tenant != env.issuer.TenantID {
+		t.Fatalf("principal wrong: %+v", me)
 	}
-	if me["owner"] != env.issuer.URL()+"|"+env.issuer.Subject {
-		t.Fatalf("owner not derived from principal: %q", me["owner"])
+	if me.CSRFToken != csrfTokenFor(sess.Value) {
+		t.Fatalf("csrfToken = %q, want the session-derived token", me.CSRFToken)
 	}
 }
 
@@ -595,11 +587,10 @@ func TestLogoutDestroysSession(t *testing.T) {
 	resp, cookies := env.login(t)
 	resp.Body.Close()
 	sess := findCookie(cookies, env.auth.SessionCookieName())
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
 
 	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/auth/logout", nil)
 	req.AddCookie(sess)
-	req.Header.Set(env.auth.CSRFHeader(), csrf.Value)
+	req.Header.Set(env.auth.CSRFHeader(), csrfTokenFor(sess.Value))
 	lr, err := noRedirectClient().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -621,13 +612,12 @@ func TestOwnerDerivedFromPrincipalNotBody(t *testing.T) {
 	resp, cookies := env.login(t)
 	resp.Body.Close()
 	sess := findCookie(cookies, env.auth.SessionCookieName())
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
 
 	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/v1/echo-owner",
 		strings.NewReader(`{"owner":"mallory@evil"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(sess)
-	req.Header.Set(env.auth.CSRFHeader(), csrf.Value)
+	req.Header.Set(env.auth.CSRFHeader(), csrfTokenFor(sess.Value))
 	r, err := noRedirectClient().Do(req)
 	if err != nil {
 		t.Fatal(err)

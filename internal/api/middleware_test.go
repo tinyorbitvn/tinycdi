@@ -56,11 +56,9 @@ func TestCSRFValidTokenAccepted(t *testing.T) {
 	resp, cookies := env.login(t)
 	resp.Body.Close()
 	sess := findCookie(cookies, env.auth.SessionCookieName())
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
-
 	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/v1/echo-owner", strings.NewReader("{}"))
 	req.AddCookie(sess)
-	req.Header.Set(env.auth.CSRFHeader(), csrf.Value)
+	req.Header.Set(env.auth.CSRFHeader(), csrfTokenFor(sess.Value))
 	r, err := noRedirectClient().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +142,7 @@ func TestAuditLogNeverContainsSecrets(t *testing.T) {
 	resp, cookies := env.login(t)
 	resp.Body.Close()
 	sess := findCookie(cookies, env.auth.SessionCookieName())
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
+	csrf := csrfTokenFor(sess.Value) // the derived token is credential-equivalent
 
 	// Drive a request carrying an Authorization bearer and the session
 	// cookie through the audit middleware.
@@ -160,7 +158,7 @@ func TestAuditLogNeverContainsSecrets(t *testing.T) {
 	out := env.logs.String()
 	for _, secret := range []string{
 		sess.Value,
-		csrf.Value,
+		csrf,
 		"ultra-secret-bearer-value-123",
 		env.issuer.LastIDToken(),
 		env.issuer.LastAccessToken(),
@@ -341,7 +339,7 @@ func TestCSRFChainForgedOriginRejected(t *testing.T) {
 	resp, cookies := env.login(t)
 	resp.Body.Close()
 	sess := findCookie(cookies, env.auth.SessionCookieName())
-	csrf := findCookie(cookies, env.auth.CSRFCookieName())
+	csrf := csrfTokenFor(sess.Value)
 
 	srv := httptest.NewServer(RequestID(RequireTrustedOrigin(env.auth.SessionCookieName(), []string{"https://portal.test"})(
 		env.auth.RequireAuth(env.auth.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))))
@@ -349,7 +347,7 @@ func TestCSRFChainForgedOriginRejected(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/echo-owner", strings.NewReader("{}"))
 	req.AddCookie(sess)
-	req.Header.Set(env.auth.CSRFHeader(), csrf.Value)
+	req.Header.Set(env.auth.CSRFHeader(), csrf)
 	req.Header.Set("Origin", "https://evil.example")
 	r, err := noRedirectClient().Do(req)
 	if err != nil {
