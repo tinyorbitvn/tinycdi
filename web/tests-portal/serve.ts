@@ -1,16 +1,19 @@
 // Playwright webServer for the portal-CSP regression spec: serves the
-// BUILT SPA (web/dist) through the REAL Go portal binary (build/portal) over
-// HTTPS — real security headers, real /v1 reverse proxy — backed by the
-// contract mock (tests/mock-api) as the API on :4320 (http) and as the
-// session origin on :4312 (https; the portal only accepts an https
-// -session-origin).
+// BUILT SPA (web/dist) through the REAL Go frontend binary (build/frontend)
+// over HTTPS — real security headers — backed by the contract mock
+// (tests/mock-api) as the API on :4320 (http) and as the session origin on
+// :4312 (https; the frontend only accepts an https -session-origin).
+//
+// The frontend deliberately answers /v1/* with 404 (the edge routes the API
+// to the backend by path), so a tiny TLS front on PORTAL_PORT plays the edge
+// here: /v1/* goes to the mock, everything else to the frontend.
 //
 // Requires a Go toolchain and openssl on PATH. This process must stay alive
 // for the suite; Playwright kills it after the run, and we reap the
 // children it spawned.
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -76,10 +79,10 @@ async function waitFor(url: string, what: string, timeoutMs = 60_000) {
 //    would test the wrong artifact.
 runSync("npm", ["run", "build"], WEB_DIR, "vite build");
 
-// 2. Real portal binary.
+// 2. Real frontend binary.
 const workDir = mkdtempSync(path.join(tmpdir(), "tcdi-portal-e2e-"));
-const portalBin = path.join(workDir, "portal");
-runSync("go", ["build", "-o", portalBin, "./build/portal"], REPO_ROOT, "go build ./build/portal");
+const frontendBin = path.join(workDir, "frontend");
+runSync("go", ["build", "-o", frontendBin, "./build/frontend"], REPO_ROOT, "go build ./build/frontend");
 
 // 3. Self-signed cert for 127.0.0.1 — used by BOTH the portal and the mock
 //    session origin (Playwright runs with ignoreHTTPSErrors).
@@ -121,21 +124,55 @@ spawnLogged(
   "mock api",
 );
 
-// 5. Portal binary with its real headers — form-action must carry the
-//    session origin for launches to succeed.
+// 5. Frontend binary with its real headers — form-action must carry the
+//    session origin for launches to succeed. It binds a loopback port and
+//    the edge shim below publishes PORTAL_PORT.
+const FRONT_PORT = PORTAL_PORT + 1000;
 spawnLogged(
-  portalBin,
+  frontendBin,
   [
-    `-listen=127.0.0.1:${PORTAL_PORT}`,
+    `-listen=127.0.0.1:${FRONT_PORT}`,
     `-web-root=${path.join(WEB_DIR, "dist")}`,
-    `-api-upstream=http://127.0.0.1:${API_PORT}`,
     `-tls-cert=${tlsCert}`,
     `-tls-key=${tlsKey}`,
     `-session-origin=${SESSION_ORIGIN}`,
   ],
   {},
-  "portal",
+  "frontend",
 );
+
+// 6. Edge shim on the portal origin: /v1/* goes to the mock API (the
+//    backend's stand-in), everything else to the frontend — the same
+//    path-based split the production edge applies.
+const edge = https.createServer(
+  { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) },
+  (req, res) => {
+    const isApi = req.url === "/v1" || req.url?.startsWith("/v1/");
+    const upstream = isApi
+      ? { mod: http, port: API_PORT }
+      : { mod: https, port: FRONT_PORT };
+    const preq = upstream.mod.request(
+      {
+        host: "127.0.0.1",
+        port: upstream.port,
+        path: req.url,
+        method: req.method,
+        headers: req.headers,
+        rejectUnauthorized: false,
+      },
+      (pres) => {
+        res.writeHead(pres.statusCode ?? 502, pres.headers);
+        pres.pipe(res);
+      },
+    );
+    preq.on("error", () => {
+      if (!res.headersSent) res.writeHead(502);
+      res.end();
+    });
+    req.pipe(preq);
+  },
+);
+edge.listen(PORTAL_PORT, "127.0.0.1");
 
 await waitFor(`${MOCK_API}/_control/health`, "mock api");
 await waitFor(`https://127.0.0.1:${PORTAL_PORT}/healthz`, "portal");
