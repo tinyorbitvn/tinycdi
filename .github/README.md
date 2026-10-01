@@ -5,8 +5,8 @@ the trailing comment) and every downloaded tool sha256-verified.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated) |
-| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
+| `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
+| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 
 ## Supply-chain pipeline shape
@@ -75,8 +75,10 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   Consequence: `release.yml` `workflow_dispatch` is **dry-run only** —
   a real release is made by an admin pushing the `v*.*.*` tag.
 - **Branch protection on `main`** — required status checks = every ci.yml
-  job except `chromium apt-pin freshness` (network-dependent, must not
-  gate merges), strict (up-to-date) mode, enforce admins, dismiss stale
+  job except `chromium apt-pin freshness` and `kasm adapter contract +
+  catalog scan` (network-dependent, must not gate merges; the latter's
+  fast catalog policy leg still runs inside the required workflow-policy
+  job), strict (up-to-date) mode, enforce admins, dismiss stale
   reviews, conversation resolution required, no force-push/delete.
   `required_approving_review_count` is 0 while the repo has a single
   maintainer — raise it when a second maintainer joins.
@@ -159,7 +161,7 @@ must match a `build/<name>/Dockerfile`). Comment an image out to hold it
 back from a release, e.g. when its gate cannot pass.
 `linux-desktop` builds in its own `desktop` job because `browser` `FROM`s
 its pushed digest; `browser` requires `linux-desktop` in the set.
-`images.yml` on main still builds and scans all six images.
+`images.yml` on main still builds and scans all seven images.
 
 ## Verifying a release
 

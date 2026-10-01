@@ -267,3 +267,61 @@ func TestHonestSnapshotSurvivesTemplateDeletion(t *testing.T) {
 		t.Fatalf("honest snapshot blocked convergence: %v", err)
 	}
 }
+
+// The adapter/sessionCmd CEL rules on LinuxRuntimeSpec are part of the
+// contract a forged snapshot must re-satisfy: a snapshot embedding
+// sessionCmd without adapter=kasm, an unknown adapter value, a command
+// alongside adapter=kasm, or a sessionCmd violating the printable-ASCII
+// pattern must all be rejected.
+func TestForgedSnapshotAdapterInvariantsRejected(t *testing.T) {
+	img := "cr.example/img@sha256:" + fmt.Sprintf("%064x", 7)
+	for _, tc := range []struct {
+		name   string
+		mutate func(spec *workspacesv1alpha1.WorkspaceTemplateSpec)
+	}{
+		{"sessionCmd without adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+			s.Linux.Command = nil
+			s.Linux.SessionCmd = "xterm"
+		}},
+		{"unknown adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+			s.Linux.Command = nil
+			s.Linux.Adapter = "docker"
+		}},
+		{"command with kasm adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+			s.Linux.Adapter = workspacesv1alpha1.AdapterKasm // Command already set by forgedSpec
+		}},
+		{"sessionCmd with newline", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+			s.Linux.Command = nil
+			s.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+			s.Linux.SessionCmd = "xterm\nid"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := forgedSpec(img)
+			tc.mutate(&spec)
+			raw, _ := json.Marshal(spec)
+			sum := sha256.Sum256(raw)
+			ann := forgedSnapshot("does-not-exist", "x", "x",
+				"sha256:"+hex.EncodeToString(sum[:]), spec, nil)
+			ws := forgedWorkspace(ann)
+			c, got := reconcileForged(t, ws)
+			assertSnapshotRejected(t, c, ws, got)
+		})
+	}
+}
+
+// And the same rules do not block an honest kasm snapshot: a valid
+// adapter=kasm + sessionCmd spec verifies and converges (the reconciler's
+// backend here is configured without a kasm adapter image, so convergence
+// itself stops at ErrTemplateRejected — the snapshot verification is the
+// layer under test and it must PASS the spec).
+func TestValidateSnapshotSpecKasmAdapter(t *testing.T) {
+	img := "cr.example/img@sha256:" + fmt.Sprintf("%064x", 7)
+	ok := forgedSpec(img)
+	ok.Linux.Command = nil
+	ok.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	ok.Linux.SessionCmd = "/usr/bin/chromium-orig --start-maximized"
+	if err := validateSnapshotSpec(&ok); err != nil {
+		t.Fatalf("valid kasm spec rejected: %v", err)
+	}
+}

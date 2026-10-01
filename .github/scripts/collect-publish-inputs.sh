@@ -34,12 +34,15 @@ die() { echo "::error::$*"; exit 1; }
 mapfile -t expected < <(jq -r '.[]' <<< "$RELEASE_IMAGES" | sort)
 [ "${#expected[@]}" -gt 0 ] || die "RELEASE_IMAGES is empty"
 
-# image name -> values.yaml key under images: (mirror of
-# stamp-image-digests.sh — keep in sync).
-key_for() {
+# image name -> "<values.yaml section> <key>" (mirror of
+# stamp-image-digests.sh path_for — keep in sync). The chart pins the
+# digest at <section>.<key>.digest: images.* for the component/runtime
+# images, kasmAdapter.image for the adapter init image.
+path_for() {
   case "$1" in
-    linux-desktop) echo linuxDesktop ;;
-    *)             echo "$1" ;;
+    linux-desktop) echo "images linuxDesktop" ;;
+    kasm-adapter)  echo "kasmAdapter image" ;;
+    *)             echo "images $1" ;;
   esac
 }
 
@@ -127,14 +130,14 @@ mapfile -t vpaths < <(tar -tzf "$tgz" | grep -E '^[^/]+/values\.yaml$')
 [ "${#vpaths[@]}" -eq 1 ] || die "chart tgz holds ${#vpaths[@]} values.yaml files"
 tar -xzf "$tgz" -O "${vpaths[0]}" > "$OUT/.chart-values.yaml"
 for img in "${expected[@]}"; do
-  key="$(key_for "$img")"
-  stamped="$(awk -v key="$key" '
-    /^[^ #]/                          { in_images = ($0 ~ /^images:/) }
-    in_images && /^  [a-zA-Z]+:/      { cur = substr($1, 1, length($1) - 1) }
-    in_images && cur == key && /^    digest:/ {
+  read -r section key <<< "$(path_for "$img")"
+  stamped="$(awk -v section="$section" -v key="$key" '
+    /^[^ #]/                          { in_sec = ($0 ~ ("^" section ":")) }
+    in_sec && /^  [a-zA-Z]+:/         { cur = substr($1, 1, length($1) - 1) }
+    in_sec && cur == key && /^    digest:/ {
       gsub(/[" ]/, "", $2); print $2; exit
     }' "$OUT/.chart-values.yaml")"
-  [ -n "$stamped" ] || die "chart values images.$key.digest is unset — digests were not stamped"
+  [ -n "$stamped" ] || die "chart values $section.$key.digest is unset — digests were not stamped"
   ref="$(tr -d '[:space:]' < "$OUT/refs/$img.ref")"
   [ "$stamped" = "${ref#*@}" ] \
     || die "chart images.$key.digest ($stamped) != $img.ref digest (${ref#*@})"

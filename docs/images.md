@@ -2,6 +2,9 @@
 
 Scope: `build/linux-desktop/` and `build/browser/` (design §7, `docs/architecture.md`).
 Local builds are local-only — do NOT push to any registry.
+For running unmodified `kasmweb/*` images behind the injected adapter
+(`spec.linux.adapter: kasm`, `build/kasm-adapter/`), see
+`docs/kasm-images.md`.
 
 ## Images
 

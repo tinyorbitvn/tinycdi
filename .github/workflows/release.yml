@@ -133,6 +133,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: false
 
+# GitHub's default run shell is `bash -e` — no pipefail — so a failing
+# command piped into tee/grep exits 0 and silently masks a gate failure
+# (KASM-4). `shell: bash` selects `bash --noprofile --norc -eo pipefail`
+# for every run step.
+defaults:
+  run:
+    shell: bash
+
 env:
   GO_VERSION: "1.26.8"
   IMAGE_NS: ghcr.io/tinyorbitvn
@@ -504,7 +512,8 @@ jobs:
             matrix.image == 'operator' && 'TinyCDI Kubernetes operator' ||
             matrix.image == 'gateway' && 'TinyCDI session gateway' ||
             matrix.image == 'portal' && 'TinyCDI web portal' ||
-            matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' }}
+            matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' ||
+            matrix.image == 'kasm-adapter' && 'TinyCDI Kasm workspace adapter (initContainer)' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -1190,6 +1199,16 @@ jobs:
         with:
           subject-name: ${{ steps.refs.outputs.name_browser }}
           subject-digest: ${{ steps.refs.outputs.digest_browser }}
+          push-to-registry: true
+
+      - name: attest build provenance — kasm-adapter
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'kasm-adapter') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_kasm_adapter }}
+          subject-digest: ${{ steps.refs.outputs.digest_kasm_adapter }}
           push-to-registry: true
 
       - name: push helm chart to OCI + cosign sign

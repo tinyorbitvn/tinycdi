@@ -179,6 +179,30 @@ revisions. Per entry:
 | `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (runtime pod placement; tolerations are not supported by the backend) |
 | `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
 
+### Kasm workspace images
+
+Templates may run **unmodified `kasmweb/*` workspace images** (the public
+kasmtech/workspaces-images catalog) by setting `spec.linux.adapter: kasm`.
+The operator then injects the TinyCDI adapter into the pod — an
+initContainer (the `tinycdi-kasm-adapter` image) copies the adapter
+scripts into a shared volume and the runtime container starts them
+instead of the image's own Kasm startup; see `docs/kasm-images.md` for
+the adapter contract and the per-image onboarding checklist.
+
+| Key | Default | Description |
+|---|---|---|
+| `kasmAdapter.image.{repository,tag,digest}` | `tinyorbitvn/tinycdi-kasm-adapter` | adapter init image → operator `--kasm-adapter-image`. **Digest is required**: the flag renders only for a digest-pinned ref, a `tag` without `digest` fails the render, and a seeded `adapter: kasm` template without the digest fails the render (the backend would reject the workspaces anyway) |
+
+A seeded kasm template sets `spec.linux.adapter: kasm`, an optional
+`spec.linux.sessionCmd` (the session payload — for Chromium-family images
+it MUST point past the image's `--no-sandbox` wrapper at the real
+binary), and the runtime `image:` as a literal digest-pinned
+`kasmweb/<app>@sha256:…` reference (it is pulled by the nodes straight
+from Docker Hub — never mirrored/republished). The digest must be a
+`build/kasm-catalog.txt` entry — CI enforces the catalog (digest pin,
+trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
+ships a complete `kasmweb/chromium` example.
+
 ### Node-profile installer (`nodeProfiles.install`) — default OFF
 
 | Key | Default | Description |

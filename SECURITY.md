@@ -246,7 +246,9 @@ and an update to this file.
     or privileges. Templates are admin-only, their images are
     digest-pinned and their specs are CEL-immutable. The operator
     re-validates whatever it builds a Pod from.
-    *Enforced:* CRD CEL + `api/v1alpha1/validation_test.go`,
+    *Enforced:* CRD CEL + `api/v1alpha1/validation_test.go` (incl.
+    `adapter` enum, `sessionCmd`-only-with-kasm, `command` forbidden
+    with kasm, digest-pinned image for kasm templates too),
     `TestImageDigestPinning`, `TestForgedSnapshot*`
     (`internal/operator/snapshot_verify_test.go`: hash, digest-only
     image, CEL invariants, live-template match). A snapshot written by a
@@ -328,6 +330,11 @@ and an update to this file.
     `TestNodeProfilesOffByDefault`, `TestNodeProfilesDaemonSet` (privileged
     initContainer only; no RBAC in the installer namespace),
     `TestNodeProfilesInstallerNamespaceGuards`, `TestSchemaHardening`,
+    `TestKasmAdapterPodShape` (kasm pods add the adapter initContainer
+    with requests/limits + `readOnlyRootFilesystem`, the desktop's ro
+    rootfs, and the read-only browser-shim/managed-policy mounts),
+    `TestKasmAdapterInitAdmittedUnderQuota` (envtest: the kasm pod is
+    admitted in a ResourceQuota-governed namespace).
     `TestHardeningInstallerNamespaceGuard` (rejects the release, managed,
     `default` and `kube-*` namespaces), `TestHardeningManagedEnforcePrivilegedGated`,
     `TestHardeningDevGateBypasses` (extraArgs, capability lists, Unconfined,
@@ -529,6 +536,18 @@ and an update to this file.
      `gh attestation verify oci://<image>@sha256:<digest> --owner tinyorbitvn --signer-workflow tinyorbitvn/tinycdi/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z`;
    - follow [upgrade](docs/runbooks/upgrade.md) and diff CRDs before
      applying them.
+   - **kasm workspace images** (`spec.linux.adapter: kasm`): run only
+     `build/kasm-catalog.txt` entries — digest-pinned, trivy-gated and
+     within the browser-engine freshness floor
+     (`.github/scripts/scan-kasm-catalog.sh`, run weekly by the
+     `kasm-contract` CI job). An operator-added kasm template pointing at
+     a non-cataloged image is *at the operator's risk*: run the
+     onboarding checklist in
+     [kasm-images](docs/kasm-images.md) first (wrapper audit, sessionCmd
+     at the real binary, trivy gate, engine floor, contract test). The
+     adapter requires `--kasm-adapter-image` (digest-pinned); a seeded
+     kasm template without it fails the render and the backend rejects
+     the workspace.
 9. **Secret rotation:**
    - rotate the OIDC client secret, the DB credentials and the internal
      certs on a schedule;

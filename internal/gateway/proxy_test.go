@@ -60,7 +60,10 @@ func TestProxy_ManagementPathsDenied(t *testing.T) {
 	srv := newGateway(t, fb, nil)
 	cookie := launchOK(t, srv, "tk-mgmt")
 
-	for _, p := range []string{"/api/get_users", "/api/", "/admin"} {
+	// /Downloads is the kasm images' writable-inside-webroot path (KASM-6);
+	// it must stay off the allowlist even though the runtime rootfs is now
+	// read-only — the gateway is the outer gate.
+	for _, p := range []string{"/api/get_users", "/api/", "/admin", "/Downloads/", "/Downloads"} {
 		resp := proxied(t, srv, p, cookie, map[string]string{"Origin": testOrigin})
 		drain(resp)
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusSwitchingProtocols {
