@@ -458,7 +458,9 @@ func newRestartFixture(t *testing.T) *restartFixture {
 	if _, err := rand.Read(keyBytes); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, loginKey, keyBytes)
+	// Written base64: raw bytes whose edges are ASCII whitespace would be
+	// trimmed below 32 bytes by the loader.
+	writeFile(t, loginKey, []byte(base64.StdEncoding.EncodeToString(keyBytes)))
 
 	up, upCert := fakeRuntimeUpstream(t, restartUpstreamName)
 	upPort := up.Listener.Addr().(*net.TCPAddr).Port
@@ -1193,12 +1195,21 @@ func TestRestart_HardKillExpiresLeaseCleanly(t *testing.T) {
 	eventually(t, "open_streams = 1", 10*time.Second, func() bool {
 		return f.openStreams(t) == 1
 	})
+	leaseID := f.activeLeaseID(t)
+	if leaseID == "" {
+		t.Fatal("no active lease to expire")
+	}
 	unsever := f.severDB(t, "a")
 	defer unsever() // idempotent — also called explicitly below
 
-	// The lease was last renewed just before the sever: give it its TTL
-	// plus margin, without any reconnect in between.
+	// The reaper kills a conn every sweep, but pgx reconnects in the gaps
+	// and a renewal that lands between sweeps still commits. Pin the lease
+	// row FOR UPDATE for the TTL window: every renewal that escapes the
+	// reaper blocks on the lock and is killed in turn — expires_at is
+	// frozen at its pre-sever value.
+	unlock := f.lockLeaseRow(t, leaseID)
 	time.Sleep(broker.LeaseTTL + 3*time.Second)
+	unlock()
 
 	// The same cookie on B must now be refused — and resolving it lazily
 	// marks the lease expired, closing the stream accounting in the same
@@ -1211,6 +1222,33 @@ func TestRestart_HardKillExpiresLeaseCleanly(t *testing.T) {
 
 	unsever()
 	a.stop(t)
+}
+
+// lockLeaseRow holds FOR UPDATE on the lease row inside a fixture
+// transaction; the returned func releases it. A renewal that slips between
+// the connection reaper's sweeps blocks on this lock until the reaper kills
+// its conn — the lease's expiry can no longer slide forward.
+func (f *restartFixture) lockLeaseRow(t *testing.T, leaseID string) (unlock func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := f.db.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	var id string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM connection_lease WHERE id = $1 FOR UPDATE`, leaseID).Scan(&id); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("lock lease row: %v", err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = tx.Rollback(rctx)
+		})
+	}
 }
 
 // severDB terminates every backend connection of the named replica, then
