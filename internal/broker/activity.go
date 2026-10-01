@@ -150,7 +150,16 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 		binding.RuntimeUID != l.RuntimeUID {
 		return ErrStaleBinding
 	}
-	return b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev.Type, now)
+	if err := b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev.Type, now); err != nil {
+		return err
+	}
+	// Desktop input extends the owning user's PORTAL session idle timer
+	// (D18): the hook receives the lease's principal — the "iss|sub" owner
+	// string — after the event is durably recorded.
+	if ev.Type == ActivityInput && b.inputHook != nil {
+		b.inputHook(ctx, l.PrincipalSubject)
+	}
+	return nil
 }
 
 // recordActivity upserts the (workspace, generation) activity row. All
