@@ -54,8 +54,14 @@ func (h *MeHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeUnauthenticated, "authentication required")
 		return
 	}
-	// In G2 displayName equals subject; the principal directory fills it in
-	// later (T3.4). Every authenticated principal carries the "user" role;
+	// displayName/email come from the verified ID token at login (the
+	// principal directory captured the same claims); a principal without
+	// them (older session, IdP without the claims) falls back to subject.
+	displayName := p.DisplayName
+	if displayName == "" {
+		displayName = p.Subject
+	}
+	// Every authenticated principal carries the "user" role;
 	// tenant-admin is added from the verified group claim.
 	roles := []string{"user"}
 	if p.InGroup(TenantAdminGroup) {
@@ -64,7 +70,8 @@ func (h *MeHandler) Get(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	respondJSON(w, meView{
 		Subject:       p.Subject,
-		DisplayName:   p.Subject,
+		DisplayName:   displayName,
+		Email:         p.Email,
 		Tenant:        p.TenantID,
 		Roles:         roles,
 		CSRFToken:     csrfTokenFor(sess.ID),

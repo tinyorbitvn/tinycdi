@@ -83,6 +83,7 @@ func newQuotaEnv(t *testing.T, src QuotaSource, dir Directory, tenants TenantRes
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
 	}, sessions, logger)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)

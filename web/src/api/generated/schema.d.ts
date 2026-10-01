@@ -146,6 +146,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workspaces/{workspaceId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Curated workspace lifecycle events
+         * @description Returns the workspace's events, newest first: the API's own recorded
+         *     lifecycle steps (create/start/stop/delete intents) and curated
+         *     condition transitions. Messages are fixed catalog strings — raw
+         *     Kubernetes or operator error text is never forwarded, so event text
+         *     never contains node names, image references or other platform
+         *     internals. Visibility is exactly the workspace read's: a foreign or
+         *     unknown id is a `404`.
+         */
+        get: operations["listWorkspaceEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces/{workspaceId}/connections": {
         parameters: {
             query?: never;
@@ -225,6 +251,29 @@ export interface paths {
          *     workspace will run.
          */
         get: operations["listTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant quota and usage snapshot
+         * @description Returns the tenant's configured quota limits and current usage in
+         *     display units (CPU in millicores, memory in MiB, storage in GiB),
+         *     plus a per-user usage breakdown. Tenant administrators see every
+         *     user in `users`; other principals see only their own row.
+         */
+        get: operations["getQuota"];
         put?: never;
         post?: never;
         delete?: never;
@@ -423,6 +472,16 @@ export interface components {
             experience: components["schemas"]["ExperienceKind"];
         };
         /**
+         * @description Public identity of a resource owner. `subject` is the bare OIDC `sub`;
+         *     `displayName` is the name the principal directory last saw at login,
+         *     falling back to `subject`. Display data only — never an authorization
+         *     input.
+         */
+        Owner: {
+            subject: string;
+            displayName: string;
+        };
+        /**
          * @description Public view of a workspace. It deliberately omits control-plane
          *     internals: no runtime credentials (never serialized), no Kubernetes
          *     names/UIDs, and no `runtimeGeneration`/`runtimeUID` fencing values —
@@ -436,6 +495,7 @@ export interface components {
              * @example research-desktop
              */
             name: string;
+            owner: components["schemas"]["Owner"];
             template: components["schemas"]["TemplateSummary"];
             phase: components["schemas"]["WorkspacePhase"];
             /** @description Current condition summary (may be empty while Pending). */
@@ -453,6 +513,66 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+        };
+        /**
+         * @description One curated workspace event. `message` is a fixed catalog string —
+         *     raw Kubernetes or operator error text is never forwarded.
+         */
+        WorkspaceEvent: {
+            /** @enum {string} */
+            type: "Normal" | "Warning";
+            /**
+             * @description Short machine-readable reason token.
+             * @example StartRequested
+             */
+            reason: string;
+            /**
+             * @description Human-readable, curated event text.
+             * @example Starting the workspace was requested.
+             */
+            message: string;
+            count?: number;
+            /** Format: date-time */
+            firstTimestamp?: string;
+            /** Format: date-time */
+            lastTimestamp?: string;
+        };
+        WorkspaceEventList: {
+            /** @description Events, newest first. */
+            items: components["schemas"]["WorkspaceEvent"][];
+        };
+        /** @description Resource vector in display units. */
+        QuotaAmounts: {
+            /** @description Active (not deleted) workspace count. */
+            workspaces: number;
+            /** @description Reserved running slots. */
+            runningWorkspaces: number;
+            /** @description CPU in millicores. */
+            cpuMillicores: number;
+            /** @description Memory in MiB. */
+            memoryMib: number;
+            /** @description Storage in GiB. */
+            storageGib: number;
+        };
+        /** @description One tenant member's usage share. */
+        UserUsage: {
+            /** @description Bare OIDC subject of the user. */
+            subject: string;
+            /** @description Name from the principal directory; falls back to `subject`. */
+            displayName: string;
+            usage: components["schemas"]["QuotaAmounts"];
+        };
+        /**
+         * @description Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
+         *     per-user limit store. `users` lists every tenant member for tenant
+         *     administrators and only the caller for regular users.
+         */
+        QuotaView: {
+            tenant: string;
+            limits: components["schemas"]["QuotaAmounts"];
+            usage: components["schemas"]["QuotaAmounts"];
+            userLimits?: components["schemas"]["QuotaAmounts"];
+            users: components["schemas"]["UserUsage"][];
         };
         /**
          * @description Create intent. There is no owner field — ownership comes from the
@@ -494,7 +614,11 @@ export interface components {
         Me: {
             /** @description Subject claim of the verified identity. */
             subject: string;
-            /** @description Display name; equals `subject` until the principal directory lands. */
+            /**
+             * @description Display name captured from the verified ID token at login
+             *     (`name`, else `preferred_username`) and served from the principal
+             *     directory; falls back to `subject` when unknown.
+             */
             displayName: string;
             /** @description Email claim when the identity provider supplies one. */
             email?: string;
@@ -612,6 +736,14 @@ export interface components {
              * @enum {string}
              */
             clipboardPolicy: "Disabled" | "Enabled";
+            /**
+             * @description Runtime egress policy of the WorkspaceTemplate CRD —
+             *     `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
+             *     in-cluster destinations, `Isolated` denies all egress except
+             *     cluster DNS.
+             * @enum {string}
+             */
+            networkProfile: "InternetOnly" | "ClusterOnly" | "Isolated";
             /** Format: date-time */
             publishedAt: string;
         };
@@ -630,6 +762,7 @@ export interface components {
         RetainedDataView: {
             id: string;
             state: components["schemas"]["RetainedDataState"];
+            owner: components["schemas"]["Owner"];
             /** @example 20 */
             sizeGib: number;
             /** @description Runtime family of the disk, to constrain attach templates. */
@@ -802,6 +935,13 @@ export interface components {
         PageLimit: number;
         /** @description Opaque cursor from a previous response's `nextPageToken`. */
         PageToken: string;
+        /**
+         * @description `mine` restricts the list to the caller's own rows (also for tenant
+         *     administrators); `tenant` widens it to the whole tenant and requires
+         *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+         *     caller's natural scope (admins see the tenant, users their own rows).
+         */
+        ListScope: "mine" | "tenant";
     };
     requestBodies: never;
     headers: never;
@@ -840,6 +980,13 @@ export interface operations {
                 limit?: components["parameters"]["PageLimit"];
                 /** @description Opaque cursor from a previous response's `nextPageToken`. */
                 pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description `mine` restricts the list to the caller's own rows (also for tenant
+                 *     administrators); `tenant` widens it to the whole tenant and requires
+                 *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+                 *     caller's natural scope (admins see the tenant, users their own rows).
+                 */
+                scope?: components["parameters"]["ListScope"];
                 /** @description Filter by lifecycle phase. */
                 phase?: components["schemas"]["WorkspacePhase"];
             };
@@ -860,6 +1007,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -1044,6 +1192,35 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    listWorkspaceEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated workspace identifier. */
+                workspaceId: components["parameters"]["WorkspaceId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace events, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEventList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     createConnection: {
         parameters: {
             query?: never;
@@ -1141,6 +1318,31 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    getQuota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quota snapshot for the caller's tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     listRetainedData: {
         parameters: {
             query?: {
@@ -1148,6 +1350,13 @@ export interface operations {
                 limit?: components["parameters"]["PageLimit"];
                 /** @description Opaque cursor from a previous response's `nextPageToken`. */
                 pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description `mine` restricts the list to the caller's own rows (also for tenant
+                 *     administrators); `tenant` widens it to the whole tenant and requires
+                 *     the `tenant-admin` role — `403 FORBIDDEN` otherwise. Omitted keeps the
+                 *     caller's natural scope (admins see the tenant, users their own rows).
+                 */
+                scope?: components["parameters"]["ListScope"];
             };
             header?: never;
             path?: never;
@@ -1166,6 +1375,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

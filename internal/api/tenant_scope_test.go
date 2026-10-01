@@ -28,6 +28,7 @@ func newScopeEnv(t *testing.T, be workspaceBackend, ds RetainedDataStore, dir Di
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,
 		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
 	}, sessions, logger)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
