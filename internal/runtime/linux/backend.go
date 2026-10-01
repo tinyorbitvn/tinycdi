@@ -77,8 +77,9 @@ const (
 	RuntimeServiceAccount = "tinycdi-runtime"
 
 	// AnnotationNodeSelector is an optional WorkspaceTemplate annotation:
-	// a JSON map[string]string applied to the runtime Pod's nodeSelector
-	// (admin escape hatch for placement; the API exposes no such field).
+	// a JSON map[string]string applied to the runtime Pod's nodeSelector.
+	// Deprecated: spec.placement.nodeSelector is the typed replacement and
+	// wins when both are set; the annotation ships for one release (D24).
 	AnnotationNodeSelector = "workspaces.cdi.tinyorbit.vn/node-selector"
 
 	// AnnotationSeccompProfile is an optional WorkspaceTemplate annotation
@@ -261,6 +262,18 @@ type Options struct {
 	// templates are rejected (ErrTemplateRejected) — the adapter can never
 	// fall back to a mutable or caller-chosen image.
 	KasmAdapterImage string
+
+	// DefaultPlacement is the operator-wide pod placement applied when a
+	// template sets neither the spec.placement field nor (for nodeSelector)
+	// the deprecated node-selector annotation. Per field the precedence is
+	// template → annotation → this default; a field the template sets
+	// replaces the default outright.
+	DefaultPlacement workspacesv1alpha1.PlacementSpec
+
+	// DefaultHostUsers is the operator-wide pod hostUsers value applied
+	// when spec.linux.hostUsers is unset. Nil leaves the pod field nil
+	// (the apiserver default — host user namespace).
+	DefaultHostUsers *bool
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -660,7 +673,7 @@ func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspac
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
 	switch {
 	case apierrors.IsNotFound(err):
-		pod = buildPod(ws, tpl, appArmor, b.opts.KasmAdapterImage)
+		pod = buildPod(ws, tpl, appArmor, b.opts)
 		if err := controllerutil.SetControllerReference(ws, pod, b.client.Scheme()); err != nil {
 			return err
 		}
@@ -766,7 +779,7 @@ func validAppArmorProfileName(name string) bool {
 	return true
 }
 
-func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, kasmAdapterImage string) *corev1.Pod {
+func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, opts Options) *corev1.Pod {
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
@@ -953,7 +966,7 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		// profiles (a static copier needs only RuntimeDefault).
 		pod.Spec.InitContainers = []corev1.Container{{
 			Name:    adapterInitName,
-			Image:   kasmAdapterImage,
+			Image:   opts.KasmAdapterImage,
 			Command: []string{adapterInstaller},
 			// KASM-3: requests=limits so ResourceQuota-governed namespaces
 			// admit the pod (quota admission checks initContainers too).
@@ -989,12 +1002,41 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		})
 	}
+	// Placement, per field: spec.placement → legacy node-selector
+	// annotation (nodeSelector only; deprecated, one release of overlap —
+	// D24) → operator default. A set field replaces the lower layers
+	// outright; nothing is merged.
+	nodeSelector := opts.DefaultPlacement.NodeSelector
+	tolerations := opts.DefaultPlacement.Tolerations
+	runtimeClass := opts.DefaultPlacement.RuntimeClassName
 	if raw := tpl.Annotations[AnnotationNodeSelector]; raw != "" {
 		var sel map[string]string
 		if json.Unmarshal([]byte(raw), &sel) == nil && len(sel) > 0 {
-			pod.Spec.NodeSelector = sel
+			nodeSelector = sel
 		}
 	}
+	if p := tpl.Spec.Placement; p != nil {
+		if len(p.NodeSelector) > 0 {
+			nodeSelector = p.NodeSelector
+		}
+		if len(p.Tolerations) > 0 {
+			tolerations = p.Tolerations
+		}
+		if p.RuntimeClassName != nil {
+			runtimeClass = p.RuntimeClassName
+		}
+	}
+	pod.Spec.NodeSelector = nodeSelector
+	pod.Spec.Tolerations = tolerations
+	pod.Spec.RuntimeClassName = runtimeClass
+
+	// hostUsers: template field → operator default; nil leaves the pod
+	// field unset (D26 — opt-in until the R1 spike lands).
+	hostUsers := opts.DefaultHostUsers
+	if h := tpl.Spec.Linux.HostUsers; h != nil {
+		hostUsers = h
+	}
+	pod.Spec.HostUsers = hostUsers
 	return pod
 }
 
