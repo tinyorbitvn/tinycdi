@@ -439,8 +439,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 
 	catalog := catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
-		WithStatusView(statusView)
-	tplHandler := api.NewTemplateHandler(catalog, tenants)
+		WithStatusView(statusView).
+		WithImageStaleAfter(cfg.ImageStaleAfter)
+	tplHandler := api.NewTemplateHandler(catalog, tenants).
+		WithImageStaleAfter(cfg.ImageStaleAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, cfg.SessionOrigin)
 	dataHandler := api.NewDataHandler(retained, catalog, tenants)
 
