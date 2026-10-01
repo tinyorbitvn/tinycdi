@@ -14,15 +14,17 @@
     },
     "images": {
       "type": "object",
-      "required": ["api", "operator", "gateway", "portal", "linuxDesktop", "browser"],
+      "required": ["backend", "operator", "frontend", "linuxDesktop", "browser"],
       "additionalProperties": false,
       "properties": {
-        "api": {"$ref": "#/$defs/image"},
+        "backend": {"$ref": "#/$defs/image"},
         "operator": {"$ref": "#/$defs/image"},
-        "gateway": {"$ref": "#/$defs/image"},
-        "portal": {"$ref": "#/$defs/image"},
+        "frontend": {"$ref": "#/$defs/image"},
         "linuxDesktop": {"$ref": "#/$defs/image"},
-        "browser": {"$ref": "#/$defs/image"}
+        "browser": {"$ref": "#/$defs/image"},
+        "api": {"$ref": "#/$defs/image"},
+        "gateway": {"$ref": "#/$defs/image"},
+        "portal": {"$ref": "#/$defs/image"}
       }
     },
     "kasmAdapter": {
@@ -86,6 +88,94 @@
             }
           }
         }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0},
+        "gatewayID": {"type": "string"},
+        "sessionIdle": {"type": "string"},
+        "sessionCookieMode": {"type": "string", "enum": ["lax", "partitioned"]},
+        "loginKeys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": {"type": "string"},
+            "generate": {"type": "boolean"}
+          }
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "app": {"$ref": "#/$defs/secretRefRequired"},
+            "session": {"$ref": "#/$defs/secretRefRequired"},
+            "internal": {"$ref": "#/$defs/secretRefRequired"}
+          }
+        },
+        "clientCA": {"$ref": "#/$defs/secretRefRequired"},
+        "operatorCN": {"type": "string"},
+        "extraCA": {"$ref": "#/$defs/secretRef"},
+        "upstreamCA": {"$ref": "#/$defs/secretRef"},
+        "controlToken": {"$ref": "#/$defs/secretRef"},
+        "extraPortalOrigins": {"type": "array", "items": {"type": "string", "pattern": "^https://[^/\\s,]+$"}},
+        "extraAllowedHosts": {"type": "array", "items": {"type": "string", "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"}},
+        "audience": {"type": "string"},
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "annotations": {"type": "object"}
+          }
+        },
+        "pdb": {"$ref": "#/$defs/pdb"},
+        "extraArgs": {"type": "array"},
+        "extraEnv": {"type": "array"},
+        "extraVolumes": {"type": "array"},
+        "extraVolumeMounts": {"type": "array"},
+        "resources": {"type": "object"},
+        "podAnnotations": {"type": "object"},
+        "nodeSelector": {"type": "object"},
+        "tolerations": {"type": "array"},
+        "affinity": {"type": "object"},
+        "podSecurityContext": {"type": "object"},
+        "securityContext": {"type": "object"}
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0},
+        "tls": {"$ref": "#/$defs/secretRefRequired"},
+        "webRoot": {"type": "string"},
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "annotations": {"type": "object"}
+          }
+        },
+        "pdb": {"$ref": "#/$defs/pdb"},
+        "extraArgs": {"type": "array"},
+        "extraEnv": {"type": "array"},
+        "resources": {"type": "object"},
+        "podAnnotations": {"type": "object"},
+        "nodeSelector": {"type": "object"},
+        "tolerations": {"type": "array"},
+        "affinity": {"type": "object"},
+        "podSecurityContext": {"type": "object"},
+        "securityContext": {"type": "object"}
       }
     },
     "api": {
@@ -268,7 +358,9 @@
         "apiServerPeers": {"type": "array", "minItems": 1},
         "apiServerPort": {"type": "integer", "minimum": 1, "maximum": 65535},
         "dnsPeers": {"type": "array", "minItems": 1},
-        "prometheusPeers": {"type": "array"}
+        "prometheusPeers": {"type": "array"},
+        "edgeIngress": {"type": "string", "enum": ["ipBlock", "cilium", "any"]},
+        "edgeIngressCIDRs": {"type": "array"}
       }
     },
     "storageClass": {"type": "string"},
