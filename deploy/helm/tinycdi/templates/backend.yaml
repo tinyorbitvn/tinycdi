@@ -3,8 +3,10 @@
 #   :8443 app      — public API /v1/* for the PORTAL host (the edge routes
 #                    portalHost /v1/ here; everything else on that host
 #                    goes to the frontend)
-#   :8444 session  — session gateway for the SESSION host (launch, desktop
-#                    proxy, websockify, control)
+#   :8444 session  — session gateway for every <label>.<sessionDomain>
+#                    workspace host (launch, desktop proxy, websockify)
+#                    plus the in-cluster control surface (/healthz,
+#                    /v1/control/*) on the Service names below
 #   :9443 internal — mTLS broker listener for the operator (ADR 0003)
 #   :9090 metrics  — only with backend.metrics.enabled, on its own
 #                    ClusterIP Service (SEC-33)
@@ -140,12 +142,16 @@ spec:
             {{- if $loginPrevious }}
             - -login-key-file=/login-keys/previous
             {{- end }}
-            # session listener: session gateway for the session host.
+            # session listener: session gateway on every workspace host
+            # <label>.<sessionDomain> (D9).
             - -session-listen=:8444
             - -session-tls-cert=/tls/session/tls.crt
             - -session-tls-key=/tls/session/tls.key
-            # Host-header allowlist compares the hostname sans port.
-            - -session-allowed-hosts={{ join "," (prepend (.Values.backend.extraAllowedHosts | default (list)) .Values.sessionHost) }}
+            # /healthz and the bearer-gated /v1/control/* answer ONLY on
+            # these Hosts — the in-cluster Service names — never on a
+            # workspace host (D9); backend.controlHosts adds extras (the
+            # allowlist compares the hostname sans port).
+            - -session-control-hosts={{ join "," (concat (list "backend" (printf "backend.%s" .Release.Namespace) (printf "backend.%s.svc" .Release.Namespace) (printf "backend.%s.svc.cluster.local" .Release.Namespace)) (.Values.backend.controlHosts | default (list))) }}
             # lax requires portal and session on the same registrable
             # domain; partitioned (SameSite=None; Secure; Partitioned) is
             # for cross-site deployments.
@@ -167,15 +173,15 @@ spec:
             {{- if .Values.backend.metrics.enabled }}
             - -metrics-listen=:{{ .Values.backend.metrics.port | int }}
             {{- end }}
-            # shared: the session origin is the launch target and ticket
-            # audience; the portal origins are the API CSRF Origin
-            # allowlist, the launch Origin allowlist (ADR 0004) and the
-            # session listener's frame-ancestors.
-            - -session-origin={{ printf "https://%s" .Values.sessionHost }}
+            # shared: the session domain names the per-workspace hosts
+            # (launch target + ticket audience); the portal origins are
+            # the API CSRF Origin allowlist, the launch Origin allowlist
+            # (ADR 0004) and the session listener's frame-ancestors.
+            - -session-domain={{ .Values.sessionDomain }}
             {{- range prepend (.Values.backend.extraPortalOrigins | default (list)) (printf "https://%s" .Values.portalHost) }}
             - -portal-origin={{ . }}
             {{- end }}
-            - -gateway-audience={{ .Values.backend.audience | default .Values.sessionHost }}
+            - -gateway-audience={{ .Values.backend.audience | default .Values.sessionDomain }}
             # ONE identity for the whole Deployment (D19/D22): the lease
             # directory is shared, so a per-pod id would split ownership
             # across replicas. Literal value — never the pod name.
@@ -292,8 +298,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
 ---
-# app (portal host /v1/), session (session host) and internal (operator
-# mTLS) ports. ClusterIP only: the portal host needs an L7 path router
+# app (portal host /v1/), session (every <label>.<sessionDomain> host)
+# and internal (operator mTLS) ports. ClusterIP only: the portal host
+# needs an L7 path router
 # (Ingress / Gateway API) in front, and a NodePort/LoadBalancer would also
 # publish the internal port. The NetworkPolicies decide who reaches which
 # port: the edge only app/session, the operator only internal.

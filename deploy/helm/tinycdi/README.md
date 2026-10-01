@@ -34,8 +34,13 @@ helm install tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
 ```
 
 Start from `ci/example-values.yaml`; the minimal set is
-`ci/minimal-values.yaml`. `portalHost` and `sessionHost` must be
-**different registrable hosts** (enforced at render). See
+`ci/minimal-values.yaml`. `portalHost` and `sessionDomain` must be
+**disjoint** — `portalHost` may not equal or sit inside `sessionDomain`,
+because the edge routes `*.<sessionDomain>` to the session listener and a
+portal host in that scope would be captured by the wildcard (enforced at
+render). Every workspace session is served on its own
+`<label>.<sessionDomain>` host, which needs a wildcard DNS record and a
+wildcard certificate (DNS-01 — HTTP-01 cannot issue wildcards). See
 `docs/runbooks/install.md` for the full procedure including secrets and
 the apiserver NetworkPolicy peers.
 
@@ -68,6 +73,8 @@ schema error. Mapping:
 | `images.{api,gateway}` | `images.backend` |
 | `images.portal` | `images.frontend` |
 | `<c>.podDisruptionBudget` | `backend.pdb` / `frontend.pdb` (`operator.podDisruptionBudget` unchanged) |
+| `sessionHost` | `sessionDomain` — every workspace session gets its own `<label>.<sessionDomain>` host; the edge carries ONE wildcard route and needs ONE wildcard certificate for `*.<sessionDomain>` (DNS-01). `portalHost` must not equal or sit inside `sessionDomain` |
+| `backend.extraAllowedHosts` | `backend.controlHosts` — the session Host allowlist is the session domain itself plus the in-cluster Service names |
 
 New required value: `backend.loginKeys` — the AEAD key(s) sealing the
 `__Host-tcdi_login` cookie that makes OIDC logins survive replica
@@ -108,7 +115,7 @@ objects. It **keeps**:
 
 | Key | Default | Description |
 |---|---|---|
-| `portalHost` / `sessionHost` | `*.example.invalid` | public hostnames — must differ (render-time guard) |
+| `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
 | `managedNamespaces[]` | `[]` | `{name, tenant}` — tenant namespaces created with `resource-policy: keep`. The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
@@ -147,7 +154,7 @@ objects. It **keeps**:
 | `ingress.enabled` / `.className` / `.annotations` | `false`/`""`/`{}` | one Ingress per host; pods terminate TLS — use a pass-through backend annotation (e.g. nginx `backend-protocol: "HTTPS"`) |
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
 | `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through |
-| `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `sessionHost` → `backend:8444` |
+| `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
 ### Per-component tuning (`backend`, `operator`, `frontend`)
 
@@ -166,11 +173,11 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `backend.sessionIdle` | `30m` | session idle timeout |
-| `backend.sessionCookieMode` | `lax` | session cookie mode — `lax` (portal + session host on one registrable domain) or `partitioned` (cross-site) |
+| `backend.sessionCookieMode` | `lax` | session cookie mode — `lax` (portal + session domain on one registrable domain) or `partitioned` (cross-site) |
 | `backend.gatewayID` | `tinycdi-backend` | ONE gateway identity shared by all replicas — the lease directory is per-identity, so it must be a literal, never a pod name |
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
 | `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
-| `backend.extraAllowedHosts` / `.audience` | `[]` / `""` (=sessionHost) | session Host-header extras / ticket audience |
+| `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `false` / `-1` | |
@@ -324,11 +331,12 @@ chart intentionally does not model quota values.
 ## Validation & tests
 
 `values.schema.json` rejects malformed values at lint/template time
-(https-only issuers/origins, hostname-patterned `portalHost`/`sessionHost`,
+(https-only issuers/origins, hostname-patterned `portalHost`/`sessionDomain`,
 comma-free `oidc.requiredGroups` entries, pinned installer image).
-Render-time guards refuse the removed `api.*`/`gateway.*`/`portal.*` values
-(with a migration hint), equal portal/session
-hosts, conflicting exposure modes, a cert-manager toggle without an
+Render-time guards refuse the removed `api.*`/`gateway.*`/`portal.*`/
+`sessionHost`/`backend.extraAllowedHosts` values
+(with a migration hint), a portalHost equal to or inside
+sessionDomain, conflicting exposure modes, a cert-manager toggle without an
 issuer, missing `backend.loginKeys`, empty or placeholder-only
 `database.allowedPeers`, empty
 `oidc.egressCIDRs`/`networkPolicy.prometheusPeers`/`edgeIngressCIDRs`,

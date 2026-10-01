@@ -8,7 +8,7 @@ managedNamespaces:
     tenant: tenant-b
 
 portalHost: portal.lab.example.net
-sessionHost: session.lab.example.net
+sessionDomain: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
