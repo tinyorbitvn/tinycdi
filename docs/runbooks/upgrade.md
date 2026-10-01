@@ -1,4 +1,4 @@
-# Runbook — Upgrade the TinyCDI platform (operator / api / gateway / portal / CRDs)
+# Runbook — Upgrade the TinyCDI platform (operator / backend / frontend / CRDs)
 
 Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
@@ -8,14 +8,23 @@ alive, and what "rollback" does and does not mean.
 
 | Component | Effect of a restart/upgrade | Session impact |
 |---|---|---|
-| `portal` | static SPA + /v1 proxy | page reloads; no session loss |
-| `gateway` | holds live WebSocket relays | **connected streams drop** — users reconnect inside their live lease via the session cookie (no new ticket); broker fencing still binds the lease to the same runtime incarnation |
-| `api` (broker) | tickets/leases/quota in Postgres survive | in-flight API calls retry; leases renew on their next 10 s tick — a broker outage shorter than the 30 s lease TTL is invisible; longer outages fail closed: gateways drop sessions whose leases expire (by design) |
+| `frontend` | static SPA, no proxy state | page reloads; no session loss |
+| `backend` | public API + in-process broker + session gateway; tickets, leases and quota live in Postgres | a restart or rollout **closes the streams on that replica** — clients reconnect to another replica with the same session cookie inside their live lease (no new launch ticket); the lease row survives and the session is rebuilt from it |
 | `operator` | reconcile resumes from persisted annotations (`applied-intent`, `template-snapshot`, `finalizer-progress`) | running pods untouched; in-flight teardown continues after restart |
 
-Upgrade order that minimizes user-visible impact: **CRDs → api → operator →
-gateway → portal**. Gateway last-among-stateful so live streams die once,
-after the control plane they renew against is already up.
+Upgrade order that minimizes user-visible impact: **CRDs → backend →
+operator → frontend**. The backend hosts the broker and the session gateway
+in one process, so live streams drop only when the backend rolls; the
+operator follows so its teardown calls hit the new internal listener; the
+frontend is stateless and can go last (or first — it only needs the API it
+calls to be compatible).
+
+With the default `backend.replicas: 2` and `maxUnavailable: 0` a rollout
+replaces one pod at a time while a peer keeps serving: a client whose
+stream dies reconnects with the same cookie and resumes within seconds —
+no re-launch, no new ticket. The one case that still needs a re-launch is
+**every backend replica down for longer than the 30 s lease TTL**: nothing
+renews the leases, they expire, and each user must start a fresh session.
 
 ## Before you start
 
@@ -30,9 +39,9 @@ after the control plane they renew against is already up.
    (values file = the one used at install — install.md creates
    `my-values.yaml`).
 4. Check `tinycdi_workspaces_running` — decide whether the maintenance
-   window tolerates one gateway stream drop, or drain users first (stop
-   issuing tickets; running sessions still die at gateway restart — only
-   *schedule* the restart, there is no connection draining in MVP).
+   window tolerates one stream drop per backend pod, or drain users first
+   (stop issuing tickets). A graceful backend stop drains its open streams
+   and reports them closed; clients then reconnect inside their live lease.
 
 ## Procedure
 
@@ -48,7 +57,7 @@ $K apply -f deploy/helm/tinycdi/crds/   # only if the diff is reviewed
 # invalidate existing specs needs a migration plan first — stop here.
 
 # 2. Pin the new images by digest in values — never upgrade to a tag.
-#    images.{api,operator,gateway,portal}.digest: "sha256:..."
+#    images.{backend,frontend,operator}.digest: "sha256:..."
 
 # 3. Render and diff before applying. Seeded WorkspaceTemplates are
 #    published as immutable revision objects "<name>-<hash8>": a template
@@ -60,8 +69,8 @@ $HELM template tinycdi deploy/helm/tinycdi -n <release-ns> \
 $HELM upgrade tinycdi deploy/helm/tinycdi -n <release-ns> -f my-values.yaml
 
 # 5. Watch rollouts in order.
-$K -n <release-ns> rollout status deployment/api deployment/operator
-$K -n <release-ns> rollout status deployment/gateway deployment/portal
+$K -n <release-ns> rollout status deployment/backend deployment/operator
+$K -n <release-ns> rollout status deployment/frontend
 ```
 
 Post-checks: `tinycdi_lease_failures_total` back to baseline, a synthetic

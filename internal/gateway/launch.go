@@ -18,6 +18,7 @@ package gateway
 //   ticket is still required.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -194,9 +195,30 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s := newSession(randToken(32), lease, g.now())
+	// With a session directory the digest must be bound before the cookie
+	// leaves the process — an unbound cookie would die with this replica.
+	// On failure the lease is revoked and no cookie is set: the launch
+	// failed cleanly and the user retries (D19).
+	if g.cfg.Sessions != nil {
+		bctx, bcancel := context.WithTimeout(r.Context(), 10*time.Second)
+		err := g.cfg.Sessions.BindSession(bctx, g.cfg.Identity, lease.ID, sessionDigest(s.id))
+		bcancel()
+		if err != nil {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncLeaseFailure(leaseFailureReason(err))
+			}
+			rctx, rcancel := context.WithTimeout(r.Context(), 5*time.Second)
+			_ = g.cfg.Broker.RevokeLease(rctx, lease.ID)
+			rcancel()
+			g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeDenied, "bind_failed")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+			return
+		}
+	}
+
 	// Takeover: a new lease for a workspace this gateway already serves
 	// fences the old session's sockets BEFORE the new cookie is written.
-	s := newSession(randToken(32), lease, g.now())
 	g.mu.Lock()
 	old := g.byWorkspace[lease.WorkspaceUID]
 	g.sessions[s.id] = s

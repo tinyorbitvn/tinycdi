@@ -9,9 +9,9 @@ Exposure:
 {{- else if .Values.gatewayApi.enabled }}
   Gateway API HTTPRoutes ({{ len .Values.gatewayApi.parentRefs }} parentRef(s))
 {{- else }}
-  Services only ({{ .Values.portal.service.type }}/{{ .Values.gateway.service.type }})
-  — set ingress.enabled or gatewayApi.enabled, or give the portal/gateway
-  Services a LoadBalancer/NodePort type.
+  None — the backend and frontend Services are ClusterIP only: set
+  ingress.enabled or gatewayApi.enabled to expose the portal and session
+  hosts at the edge.
 {{- end }}
 
 Managed namespaces:

@@ -1,12 +1,41 @@
-# Linux runtime images — build, run, test
+# Images — build, run, test
 
-Scope: `build/linux-desktop/` and `build/browser/` (design §7, `docs/architecture.md`).
+TinyCDI ships six images, all built from `build/<name>/Dockerfile` with the
+repository root as build context. `build/release-images.txt` is the released
+set; CI (`images.yml`, `release.yml`) is the only path that pushes — by
+digest, scanned, then signed before any tag exists (see `.github/README.md`).
 Local builds are local-only — do NOT push to any registry.
 For running unmodified `kasmweb/*` images behind the injected adapter
 (`spec.linux.adapter: kasm`, `build/kasm-adapter/`), see
 `docs/kasm-images.md`.
 
-## Images
+## Platform images
+
+Three components (`docs/adr/0005-backend-frontend-operator.md`):
+
+| Image | Source | Listeners | Purpose |
+|---|---|---|---|
+| `tinycdi-backend` | `cmd/backend` (distroless, static Go) | `:8443` app (public API `/v1/*`, portal host) · `:8444` session (launch, desktop proxy, websockify — session host) · `:9443` internal mTLS (operator broker API) · `:9090` metrics | public API + session gateway in one binary/deployment |
+| `tinycdi-frontend` | `build/frontend` + the `web/` SPA built in-image (distroless) | `:8443` HTTPS | static SPA server + security headers; no API proxy |
+| `tinycdi-operator` | `cmd/operator` (distroless, static Go) | metrics/health | reconciles `Workspace` CRDs into runtime pods |
+
+Routing: on the portal host `/v1/` goes to backend `:8443` and everything
+else to frontend `:8443`; the session host goes to backend `:8444`.
+Sessions render inside the portal through an iframe on the isolated
+session origin — runtime content is never served from the portal origin.
+
+```sh
+make docker-build-images                 # every release image, tcdi/<name>:local
+make docker-build-backend                # one image (docker-build-<name>)
+make docker-build-images IMAGE_TAG=dev   # IMAGE_PREFIX / IMAGE_TAG override tags
+```
+
+The release additionally attaches static `tinycdi-backend` and
+`tinycdi-operator` linux/amd64 binaries.
+
+## Linux runtime images
+
+Scope: `build/linux-desktop/` and `build/browser/` (design §7, `docs/architecture.md`).
 
 | Image | Contents | Purpose |
 |---|---|---|
@@ -68,6 +97,8 @@ Pinned inputs (`docs/compatibility.md`):
   reduced isolation (seccomp-bpf only, no userns layer).
 
 ## Build
+
+`make docker-build-browser` builds both in order; by hand:
 
 ```sh
 docker build -f build/linux-desktop/Dockerfile -t tcdi/linux-desktop:local .

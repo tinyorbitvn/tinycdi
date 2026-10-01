@@ -7,9 +7,9 @@
 TinyCDI is a self-hosted platform that gives users disposable Linux desktop
 and browser workspaces on Kubernetes — streamed straight into their browser
 over KasmVNC. It exists for teams that want Kasm-style remote desktops
-without the Kasm Workspaces control plane: a small Go API + session
-gateway, an operator that reconciles `Workspace` CRDs into locked-down
-pods, and a React portal on top. The Windows desktop track (KubeVirt +
+without the Kasm Workspaces control plane: a small Go backend (API,
+session gateway and broker in one binary), an operator that reconciles
+`Workspace` CRDs into locked-down pods, and a React portal on top. The Windows desktop track (KubeVirt +
 Guacamole/RDP) is deferred pending its own proof gate.
 
 ## Features

@@ -87,8 +87,31 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # Override BASE_IMAGE to build from another registry, e.g.
 # make docker-build IMG=<img> BASE_IMAGE=docker.io/library/golang:1.26
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
+docker-build: ## Build the operator image as IMG (docker-build-images builds the whole set).
 	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -f build/operator/Dockerfile -t ${IMG} .
+
+# Local builds of the full image set, in build/release-images.txt order
+# (linux-desktop before browser, which FROMs it). Local tags only — CI
+# (images.yml / release.yml) is the only path that pushes, by digest.
+#   make docker-build-images                  # every release image
+#   make docker-build-backend                 # one image: docker-build-<name>
+#   make docker-build-images IMAGE_PREFIX=tcdi/ IMAGE_TAG=local
+IMAGE_PREFIX ?= tcdi/
+IMAGE_TAG ?= local
+RELEASE_IMAGES := $(shell grep -vE '^[[:space:]]*(\#|$$)' build/release-images.txt)
+
+.PHONY: docker-build-images
+docker-build-images: $(addprefix docker-build-,$(RELEASE_IMAGES)) ## Build every image in build/release-images.txt as tcdi/<name>:local (no push).
+
+docker-build-browser: docker-build-linux-desktop
+
+# browser FROMs the local linux-desktop build; the Go images honour an
+# optional BASE_IMAGE (builder) override, as docker-build does.
+image_build_args = $(if $(filter browser,$(1)),--build-arg BASE_IMAGE=$(IMAGE_PREFIX)linux-desktop:$(IMAGE_TAG),$(if $(and $(BASE_IMAGE),$(filter-out linux-desktop,$(1))),--build-arg BASE_IMAGE=$(BASE_IMAGE)))
+
+.PHONY: $(addprefix docker-build-,$(RELEASE_IMAGES))
+$(addprefix docker-build-,$(RELEASE_IMAGES)): docker-build-%:
+	$(CONTAINER_TOOL) build $(call image_build_args,$*) -f build/$*/Dockerfile -t $(IMAGE_PREFIX)$*:$(IMAGE_TAG) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
