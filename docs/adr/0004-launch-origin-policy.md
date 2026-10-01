@@ -4,6 +4,15 @@ Status: accepted (policy fixed in design review)
 
 Date: 2026-09-30
 
+> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (proposed)
+> keeps this policy verbatim. The launch form POST now targets the
+> workspace's own host (`<label>.<sessionDomain>`) and its 303 redirect
+> lands inside a sandboxed portal iframe; the Origin allowlist, the
+> fetch-metadata gate and the ticket rules below are unchanged. The
+> "different registrable domains" premise is superseded by ADR 0005's
+> cookie modes: `lax` deployments put portal and session domain on the
+> same registrable domain, `partitioned` covers cross-site.
+
 ## Context
 
 `POST /v1/launch` (design §6.3) redeems a one-use 60 s ticket: the portal

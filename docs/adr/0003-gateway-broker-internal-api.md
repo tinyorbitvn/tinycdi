@@ -4,6 +4,13 @@ Status: accepted (contract fixed in design review; both sides implement it verba
 
 Date: 2026-09-30
 
+> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (proposed)
+> merges the session gateway into the backend binary: the gateway↔broker
+> calls below become in-process, and the mTLS listener keeps only the
+> operator routes (`workspaces/{uid}/revoke`, `workspaces/{uid}/drain`).
+> The wire contract itself is unchanged — a backend run as a standalone
+> session gateway still speaks it as a remote client.
+
 ## Context
 
 The session gateway (design §6) redeems launch tickets and renews/resolves

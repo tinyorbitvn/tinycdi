@@ -7,6 +7,12 @@ installs the three components, the `workspaces.cdi.tinyorbit.vn` CRDs, and the
 namespaced RBAC/NetworkPolicy baseline — nothing else. It never ships
 Secrets, never installs KubeVirt/CDI, a database, or a dev OIDC provider.
 
+> **v0.2 (in progress):** [ADR 0005](../../../docs/adr/0005-backend-frontend-operator.md)
+> (proposed) consolidates `api` + `gateway` + `portal` into `backend` +
+> `frontend` and replaces `sessionHost` with a wildcard `sessionDomain`
+> (one host per workspace). The values below describe the chart as it
+> stands; they change when the v0.2 gate lands.
+
 * Chart: `deploy/helm/tinycdi` (Helm v4, `apiVersion: v2`)
 * OCI artifact: `oci://ghcr.io/tinyorbitvn/charts/tinycdi`
 * Source: <https://github.com/tinyorbitvn/tinycdi> · License: MIT
