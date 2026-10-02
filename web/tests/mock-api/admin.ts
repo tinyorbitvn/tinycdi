@@ -78,7 +78,7 @@ export const SEED_DATA_IDS = {
 } as const;
 
 function tplSummary(t: TemplateFixture) {
-  return { id: t.id, name: t.name, revision: t.revision, runtime: t.runtime, experience: t.experience };
+  return { id: t.id, name: t.name, family: t.family, revision: t.revision, runtime: t.runtime, experience: t.experience };
 }
 
 function seedWorkspaces(): { ws: WorkspaceFixture; owner: Owner }[] {

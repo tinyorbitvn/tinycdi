@@ -55,10 +55,14 @@ type userUsage struct {
 // tenant without a quota row (admission fails closed there); inside Limits,
 // workspaces 0 means "no count limit".
 type quotaView struct {
-	Tenant string        `json:"tenant"`
-	Limits *quotaAmounts `json:"limits,omitempty"`
-	Usage  quotaAmounts  `json:"usage"`
-	Users  []userUsage   `json:"users"`
+	Tenant string `json:"tenant"`
+	// Configured is false when the tenant has no quota row: admission then
+	// refuses every create (ErrNoQuota), so an absent Limits must not read
+	// as "unlimited".
+	Configured bool          `json:"configured"`
+	Limits     *quotaAmounts `json:"limits,omitempty"`
+	Usage      quotaAmounts  `json:"usage"`
+	Users      []userUsage   `json:"users"`
 }
 
 // QuotaHandler implements GET /v1/quota per openapi.yaml.
@@ -105,9 +109,10 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	owners := resolveOwners(r.Context(), h.dir, p.TenantID, refs)
 	out := quotaView{
-		Tenant: p.TenantID,
-		Usage:  mapQuotaAmounts(rep.Usage),
-		Users:  make([]userUsage, 0, len(refs)),
+		Tenant:     p.TenantID,
+		Configured: rep.HasLimits,
+		Usage:      mapQuotaAmounts(rep.Usage),
+		Users:      make([]userUsage, 0, len(refs)),
 	}
 	if rep.HasLimits {
 		limits := mapQuotaAmounts(rep.Limits)

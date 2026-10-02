@@ -4,13 +4,13 @@
 
 interface FamilyRef {
   id: string;
-  /** Catalog name shared by every revision (absent on servers that predate it). */
-  family?: string;
+  /** Catalog name shared by every revision. */
+  family: string;
 }
 
-/** Stable join key between workspaces and templates; the id is the fallback. */
+/** Stable join key between workspaces and templates. */
 export function templateFamily(ref: FamilyRef): string {
-  return ref.family ?? ref.id;
+  return ref.family;
 }
 
 /**

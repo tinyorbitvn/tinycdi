@@ -76,6 +76,7 @@ export function dataArea(ctx: MockContext): MockArea {
       template: {
         id: tpl.id,
         name: tpl.name,
+        family: tpl.family,
         revision: tpl.revision,
         runtime: tpl.runtime,
         experience: tpl.experience,

@@ -25,6 +25,13 @@ type ConnectionStatus struct {
 	State         string     `json:"state"`
 	LeaseActive   bool       `json:"leaseActive"`
 	LastRenewedAt *time.Time `json:"lastRenewedAt,omitempty"`
+	// LeaseRef lets a tab tell WHICH lease it is looking at: the first 16 hex
+	// chars of SHA-256 of the active lease ID (never the ID itself). Absent
+	// without an active lease.
+	LeaseRef string `json:"leaseRef,omitempty"`
+	// StreamEpoch is the active lease's stream_epoch: it advances each time a
+	// stream is claimed on the lease. 0 without an active lease.
+	StreamEpoch uint64 `json:"streamEpoch"`
 }
 
 // ConnectionStater is the broker-facing surface the handler needs. Defined

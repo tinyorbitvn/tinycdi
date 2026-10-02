@@ -49,7 +49,7 @@ and served from `cmd/api` on a **separate internal listener**
 | `POST /internal/v1/broker/redeem` | `{"ticket":"<opaque>"}` | 200 `Lease` | 401 invalid/expired ticket, 403 denied/revoked, 409 in-use/stale |
 | `POST /internal/v1/broker/leases/{id}/renew` | `{"fence":{"version":N,...}}` | 200 `Lease` | 403 foreign gateway, 404 unknown lease, 409 fenced/stale, 410 revoked |
 | `GET /internal/v1/broker/leases/{id}/target` | — | 200 `Target` | 403/404/409/410 as above |
-| `POST /internal/v1/broker/leases/{id}/revoke` | — | 204 | — |
+| `POST /internal/v1/broker/leases/{id}/revoke` | — | 200 `{"revoked":bool}` (false: unknown or already-dead lease) | — |
 
 `Lease`/`Target`/`Fence` serialize the `broker` package structs directly
 (`leaseId`, `workspaceUID`, `runtimeGeneration`, `runtimeUID`,

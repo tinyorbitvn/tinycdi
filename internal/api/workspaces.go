@@ -102,16 +102,19 @@ type workspaceBackend interface {
 
 // WorkspaceHandler implements /v1/workspaces per openapi.yaml.
 type WorkspaceHandler struct {
-	backend    workspaceBackend
-	catalog    TemplateCatalog
-	tenants    TenantResolver
-	statusView StatusView
-	directory  Directory
-	intentLog  IntentLog
-	maxBody    int64
-	staleAfter time.Duration
-	now        func() time.Time
-	log        *slog.Logger
+	backend workspaceBackend
+	catalog TemplateCatalog
+	// imageCatalog serves the image-age fallback (WithImageCatalog); nil
+	// falls back to catalog.
+	imageCatalog TemplateCatalog
+	tenants      TenantResolver
+	statusView   StatusView
+	directory    Directory
+	intentLog    IntentLog
+	maxBody      int64
+	staleAfter   time.Duration
+	now          func() time.Time
+	log          *slog.Logger
 }
 
 // WithDirectory attaches the principal directory that fills owner display
@@ -319,8 +322,9 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	owners := h.resolveOwnerRefs(r.Context(), p.TenantID, recs)
 	out := WorkspaceList{Items: make([]WorkspaceView, 0, len(recs)), NextPageToken: next}
+	ctx := withImageAgeMemo(r.Context())
 	for i := range recs {
-		v := h.viewWithStatus(r.Context(), &recs[i])
+		v := h.viewWithStatus(ctx, &recs[i])
 		v.Owner = owners[recs[i].Owner]
 		out.Items = append(out.Items, v)
 	}

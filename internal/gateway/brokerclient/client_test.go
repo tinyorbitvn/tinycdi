@@ -233,7 +233,8 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 				"protocol":      f.target.Protocol,
 			})
 		case len(r.URL.Path) > 7 && r.URL.Path[len(r.URL.Path)-7:] == "/revoke":
-			w.WriteHeader(http.StatusNoContent)
+			// A lease named "...-dead" is one the broker no longer holds live.
+			_ = json.NewEncoder(w).Encode(map[string]bool{"revoked": !strings.Contains(r.URL.Path, "-dead/")})
 		case strings.HasSuffix(r.URL.Path, "/activity"):
 			var body struct {
 				Fence struct {
@@ -415,6 +416,21 @@ func TestResolveTarget_NotFound404(t *testing.T) {
 	_, err := c.ResolveTarget(context.Background(), testGW, "gone")
 	if !errors.Is(err, broker.ErrLeaseInvalid) && !errors.Is(err, broker.ErrNotFound) {
 		t.Fatalf("404 target err = %v, want lease-invalid family", err)
+	}
+}
+
+// TestRevokeLeaseChanged: the broker's {"revoked": bool} answer is passed
+// through, so a revoke of a dead or unknown lease is not reported as done.
+func TestRevokeLeaseChanged(t *testing.T) {
+	pki := newTestPKI(t)
+	api := newFakeBrokerAPI(t, pki)
+	c := clientFor(t, api, pki)
+
+	if changed, err := c.RevokeLeaseChanged(context.Background(), "lease-1"); err != nil || !changed {
+		t.Fatalf("live lease: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.RevokeLeaseChanged(context.Background(), "lease-dead"); err != nil || changed {
+		t.Fatalf("dead lease: changed=%v err=%v, want false", changed, err)
 	}
 }
 

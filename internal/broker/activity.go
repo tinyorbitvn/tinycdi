@@ -179,7 +179,8 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 // Stream accounting is epoch-aware: ClaimStream zeroes the generation's
 // open_streams (the previous stream is fenced by definition), so "connected"
 // SETS the count to 1 for the claiming epoch rather than adding to a count a
-// hard-killed replica never decremented, and a connected/disconnect report
+// hard-killed replica never decremented (epoch-0 reports, sent when no
+// session directory is wired, keep the +1/-1 arithmetic), and a connected/disconnect report
 // from an epoch older than the lease's current stream_epoch belongs to a
 // fenced stream and is dropped.
 func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID PlatformID, gen uint64, ev ActivityEvent, now time.Time) error {
@@ -195,7 +196,10 @@ func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID Platf
 			updated_at = EXCLUDED.updated_at`
 	case ActivityConnected:
 		// A connected stream cancels a pending disconnect: the grace window
-		// does not keep ticking underneath (design §8).
+		// does not keep ticking underneath (design §8). Epoch >= 1 reports
+		// SET the count (ClaimStream already zeroed it); epoch 0 means no
+		// session directory is wired (split mode), nothing claims streams,
+		// and the +1/-1 arithmetic is all there is.
 		q = `INSERT INTO workspace_activity
 			(workspace_id, runtime_generation, connected_at, open_streams, updated_at)
 		 VALUES ($1, $2, $3, 1, $3)
@@ -204,6 +208,16 @@ func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID Platf
 			open_streams = 1,
 			disconnected_since = NULL,
 			updated_at = EXCLUDED.updated_at`
+		if ev.StreamEpoch == 0 {
+			q = `INSERT INTO workspace_activity
+				(workspace_id, runtime_generation, connected_at, open_streams, updated_at)
+			 VALUES ($1, $2, $3, 1, $3)
+			 ON CONFLICT (workspace_id, runtime_generation) DO UPDATE SET
+				connected_at = EXCLUDED.connected_at,
+				open_streams = workspace_activity.open_streams + 1,
+				disconnected_since = NULL,
+				updated_at = EXCLUDED.updated_at`
+		}
 	case ActivityDisconnect:
 		// The grace window anchors on the FIRST transition to zero streams;
 		// duplicate disconnects keep the earliest deadline.
