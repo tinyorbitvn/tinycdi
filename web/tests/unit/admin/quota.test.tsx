@@ -38,6 +38,40 @@ describe("quota: meters", () => {
   });
 });
 
+describe("quota: unlimited meters", () => {
+  it("a tenant with no quota row shows 'No limit' on every meter, never 'of 0'", async () => {
+    const api = setup();
+    control(api, "/_control/admin/quota", { limits: null });
+    renderWithApi(<QuotaPage />, api);
+
+    await screen.findByRole("heading", { name: "Quota" });
+    for (const label of ["Workspaces", "Running workspaces", "CPU", "Memory", "Storage"]) {
+      const meterLabel = await screen.findByText(label, { selector: ".tc-meter__label" });
+      const meter = meterLabel.closest(".tc-meter")!;
+      expect(meter).toHaveTextContent("No limit");
+      expect(meter).not.toHaveTextContent(/of 0/);
+      expect(meter).not.toHaveTextContent(/%/);
+    }
+  });
+
+  it("a workspace limit of 0 means no count limit; other limits still show their numbers", async () => {
+    const api = setup();
+    control(api, "/_control/admin/quota", { limits: { workspaces: 0, runningWorkspaces: 8 } });
+    renderWithApi(<QuotaPage />, api);
+
+    await screen.findByRole("heading", { name: "Quota" });
+    const workspaces = (await screen.findByText("Workspaces", { selector: ".tc-meter__label" })).closest(
+      ".tc-meter",
+    )!;
+    expect(workspaces).toHaveTextContent("No limit");
+    expect(workspaces).not.toHaveTextContent(/of 0/);
+    expect(workspaces).not.toHaveTextContent(/100%/);
+
+    const running = screen.getByText("Running workspaces", { selector: ".tc-meter__label" }).closest(".tc-meter")!;
+    expect(running).toHaveTextContent(/of 8 \(\d+%\)/);
+  });
+});
+
 describe("quota: per-user table", () => {
   it("renders one row per UserUsage and sorts by every column", async () => {
     const api = setup();

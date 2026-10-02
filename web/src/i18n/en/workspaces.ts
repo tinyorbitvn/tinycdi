@@ -32,8 +32,10 @@ export default {
   "templates.dataPolicy.ephemeral.label": "Ephemeral",
   "templates.dataPolicy.ephemeral.description":
     "the disk is destroyed when the workspace stops or is deleted",
-  "templates.clipboard.enabled": "Enabled",
   "templates.clipboard.disabled": "Disabled",
+  "templates.clipboard.send": "Send only",
+  "templates.clipboard.receive": "Receive only",
+  "templates.clipboard.bidirectional": "Both directions",
   "templates.format.cpu": "{n} vCPU",
   "templates.format.gib": "{n} GiB",
   "templates.format.mib": "{n} MiB",

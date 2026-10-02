@@ -42,7 +42,8 @@ export interface UserUsage {
 
 export interface QuotaView {
   tenant: string;
-  limits: QuotaAmounts;
+  // Absent when the tenant has no quota row; `workspaces: 0` means no count limit.
+  limits?: Partial<QuotaAmounts>;
   usage: QuotaAmounts;
   userLimits?: QuotaAmounts;
   users: UserUsage[];

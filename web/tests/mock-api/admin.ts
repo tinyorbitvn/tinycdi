@@ -13,7 +13,7 @@
 // Test controls (not part of the contract):
 //   POST /_control/admin/me     {roles?, displayName?}   patch the principal
 //   POST /_control/admin/seed                            add other users' workspaces + disks
-//   POST /_control/admin/quota  {limits?, userLimits?}   patch quota limits (userLimits: null clears)
+//   POST /_control/admin/quota  {limits?, userLimits?}   patch quota limits (null clears: no quota row / no per-user limit)
 //   POST /_control/admin/fail   {path, code?, status?}   fail the next GET of `path`
 //
 // Erasable-syntax TypeScript only (Node type-stripping runs it directly).
@@ -154,7 +154,8 @@ function seedRetained(): { rec: RetainedFixture; owner: Owner }[] {
 
 export interface Tenancy {
   me: MockMe;
-  limits: QuotaAmounts;
+  // undefined = the tenant has no quota row (the API then omits `limits`).
+  limits: QuotaAmounts | undefined;
   userLimits: QuotaAmounts | undefined;
   // Record ID -> owner; records without an entry belong to the principal.
   owners: Map<string, Owner>;
@@ -301,7 +302,7 @@ export function adminArea(ctx: MockContext): MockArea {
       .map((b) => ({ subject: b.owner.subject, displayName: b.owner.displayName, usage: b.usage }));
     return ok(200, {
       tenant: t.me.tenant,
-      limits: t.limits,
+      ...(t.limits ? { limits: t.limits } : {}),
       usage,
       ...(t.userLimits ? { userLimits: t.userLimits } : {}),
       users,
@@ -355,10 +356,11 @@ export function adminArea(ctx: MockContext): MockArea {
         seed();
         return ok(200, { seeded: true });
       case "/_control/admin/quota":
-        if (req.body?.limits) Object.assign(t.limits, req.body.limits);
+        if (req.body?.limits === null) t.limits = undefined;
+        else if (req.body?.limits) t.limits = { ...(t.limits ?? DEFAULT_LIMITS), ...(req.body.limits as object) };
         if (req.body?.userLimits === null) t.userLimits = undefined;
         else if (req.body?.userLimits) t.userLimits = { ...DEFAULT_USER_LIMITS, ...(req.body.userLimits as object) };
-        return ok(200, { limits: t.limits, userLimits: t.userLimits ?? null });
+        return ok(200, { limits: t.limits ?? null, userLimits: t.userLimits ?? null });
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

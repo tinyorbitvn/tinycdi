@@ -17,28 +17,55 @@ import { useLoader } from "./hooks";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 
-export function QuotaMeters({ limits, usage }: { limits: QuotaAmounts; usage: QuotaAmounts }) {
+// A missing limit (tenant without a quota row) or a workspace-count limit of 0
+// means "no limit" — never a meter against zero.
+export function isUnlimited(k: QuotaKey, limit: number | undefined): boolean {
+  return limit === undefined || (k === "workspaces" && limit === 0);
+}
+
+export function QuotaMeters({
+  limits,
+  usage,
+}: {
+  limits: Partial<QuotaAmounts> | undefined;
+  usage: QuotaAmounts;
+}) {
   return (
     <Grid gap={4} min="sm">
-      {QUOTA_KEYS.map((k) => (
-        <Meter
-          key={k}
-          label={quotaLabel(k)}
-          value={usage[k]}
-          max={limits[k]}
-          valueText={t("admin.quota.meter", {
-            used: formatQuota(k, usage[k]),
-            limit: formatQuota(k, limits[k]),
-            pct: usagePercent(usage[k], limits[k]),
-          })}
-        />
-      ))}
+      {QUOTA_KEYS.map((k) => {
+        const limit = limits?.[k];
+        if (limit === undefined || isUnlimited(k, limit)) {
+          return (
+            <div key={k} className="tc-meter">
+              <div className="tc-meter__header">
+                <span className="tc-meter__label">{quotaLabel(k)}</span>
+                <span className="tc-meter__value">
+                  {t("admin.quota.noLimit", { used: formatQuota(k, usage[k]) })}
+                </span>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <Meter
+            key={k}
+            label={quotaLabel(k)}
+            value={usage[k]}
+            max={limit}
+            valueText={t("admin.quota.meter", {
+              used: formatQuota(k, usage[k]),
+              limit: formatQuota(k, limit),
+              pct: usagePercent(usage[k], limit),
+            })}
+          />
+        );
+      })}
     </Grid>
   );
 }
 
 function UsageCell({ k, value, limit }: { k: QuotaKey; value: number; limit: number | undefined }) {
-  if (limit === undefined) return <>{formatQuota(k, value)}</>;
+  if (limit === undefined || isUnlimited(k, limit)) return <>{formatQuota(k, value)}</>;
   const level = usageLevel(value, limit);
   return (
     <span className="tc-admin-usage">
@@ -157,9 +184,9 @@ export function QuotaContent({ quota }: { quota: QuotaView }) {
         <Section title={t("admin.quota.userLimits.title")} headingLevel={3}>
           <p className="tc-admin-muted">
             {t("admin.quota.userLimits.body", {
-              limits: QUOTA_KEYS.map(
-                (k) => `${formatQuota(k, quota.userLimits![k])} ${quotaLabel(k).toLowerCase()}`,
-              ).join(", "),
+              limits: QUOTA_KEYS.filter((k) => !isUnlimited(k, quota.userLimits![k]))
+                .map((k) => `${formatQuota(k, quota.userLimits![k])} ${quotaLabel(k).toLowerCase()}`)
+                .join(", "),
             })}
           </p>
         </Section>

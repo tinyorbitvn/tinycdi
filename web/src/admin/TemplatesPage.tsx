@@ -3,6 +3,7 @@ import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import type { ApiClient } from "../api/client";
 import { t } from "../i18n";
+import { clipboardPolicyLabel } from "../templates/format";
 import {
   listScopedWorkspaces,
   listTemplates,
@@ -105,8 +106,8 @@ const columns: Column<CatalogRow>[] = [
         <Badge tone={tpl.dataPolicyDefault === "Retain" ? "info" : "neutral"}>
           {t("admin.templates.badge.data", { value: tpl.dataPolicyDefault })}
         </Badge>
-        <Badge tone={tpl.clipboardPolicy === "Enabled" ? "warning" : "neutral"}>
-          {t("admin.templates.badge.clipboard", { value: tpl.clipboardPolicy })}
+        <Badge tone={tpl.clipboardPolicy === "Disabled" ? "neutral" : "warning"}>
+          {t("admin.templates.badge.clipboard", { value: clipboardPolicyLabel(tpl.clipboardPolicy) })}
         </Badge>
         {tpl.networkProfile ? (
           <Badge>{t("admin.templates.badge.network", { value: tpl.networkProfile })}</Badge>

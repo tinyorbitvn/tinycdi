@@ -102,8 +102,17 @@ export function dataPolicyDescription(policy: DataPolicy): string {
   return t(DATA_POLICY_KEYS[policy].description);
 }
 
-export function clipboardPolicyLabel(policy: "Disabled" | "Enabled"): string {
-  return t(policy === "Enabled" ? "templates.clipboard.enabled" : "templates.clipboard.disabled");
+const CLIPBOARD_KEY: Record<string, MessageKey> = {
+  Disabled: "templates.clipboard.disabled",
+  Send: "templates.clipboard.send",
+  Receive: "templates.clipboard.receive",
+  Bidirectional: "templates.clipboard.bidirectional",
+};
+
+/** Label for the template clipboard policy (CRD enum: Disabled|Send|Receive|Bidirectional). */
+export function clipboardPolicyLabel(policy: string): string {
+  const key = CLIPBOARD_KEY[policy];
+  return key ? t(key) : policy;
 }
 
 /** Short date for build/publish timestamps ("Sep 30, 2026"). */

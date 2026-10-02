@@ -57,6 +57,7 @@ export default {
   "admin.quota.amount.storageGib": "Storage",
   "admin.quota.atLimit": "at limit",
   "admin.quota.meter": "{used} of {limit} ({pct}%)",
+  "admin.quota.noLimit": "{used} used · No limit",
 
   // Template catalog page.
   "admin.templates.title": "Template catalog",
