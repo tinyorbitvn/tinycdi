@@ -1,9 +1,15 @@
 import type { AppRoute } from "../app/route-types";
-import { DataPage } from "../workspaces/DataPage";
+import { t } from "../i18n";
+import { DataDetailPage } from "./DataDetailPage";
+import { DataListPage } from "./DataListPage";
 
-// Stub created by the app shell (T3.2); owned by the data area — replace
-// freely, keeping the `routes` export. Until T3.7 builds the data module
-// this delegates /data to the retained-data page living in workspaces/.
+// Data area routes (T3.7): the retained-disk inventory and the per-record
+// detail view. The app shell mounts this module for paths under /data.
 export const routes: AppRoute[] = [
-  { path: "/data", title: "Retained data", render: () => <DataPage /> },
+  { path: "/data", title: t("data.list.title"), render: () => <DataListPage /> },
+  {
+    path: "/data/:id",
+    title: (p) => t("data.detail.title", { id: p.id ?? "" }),
+    render: (p) => <DataDetailPage dataId={p.id!} />,
+  },
 ];
