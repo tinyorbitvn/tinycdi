@@ -9,6 +9,7 @@ export default {
   "session.toolbar.openInNewTab": "Open in new tab",
   "session.toolbar.fullscreen": "Full screen",
   "session.toolbar.exitFullscreen": "Exit full screen",
+  "session.toolbar.printHint": 'Printing and downloads need "Open in new tab".',
 
   "session.status.loading": "Loading",
   "session.status.notReady": "Not ready",
@@ -21,6 +22,7 @@ export default {
   "session.status.blocked": "Blocked",
   "session.status.external": "In another tab",
   "session.status.error": "Error",
+  "session.status.signedOut": "Signed out",
 
   "session.frame.title": "Desktop: {name}",
   "session.frame.keyboardHint":
@@ -81,6 +83,11 @@ export default {
   "session.error.api.csrfFailed": "Your session token expired. Reload the page and try again.",
   "session.error.api.fallback":
     "The service could not start the session; it is safe to retry.",
+
+  "session.signedOut.title": "You've been signed out",
+  "session.signedOut.body":
+    "Your sign-in expired, so the portal can no longer reach your session. Sign in again to bring the desktop back.",
+  "session.signedOut.action": "Sign in again",
 
   "session.overlay.workspaceDetails": "Workspace details",
 

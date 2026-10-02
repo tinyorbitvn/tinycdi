@@ -8,7 +8,9 @@ import { sessionOrigin, submitLaunch, type LaunchTicket } from "./launch";
  *
  * - `disconnected`/`stale` with `leaseActive: true`: the lease and its
  *   session cookie still work, so the frame is simply reloaded to the
- *   workspace origin, with bounded backoff.
+ *   workspace origin, with bounded backoff (one pending reload at a time;
+ *   a poll never re-arms it). When every step has run and the lease is
+ *   still active but not streaming, `exhausted` is reported.
  * - `leaseActive: false` (or `none`): the lease is gone; a fresh ticket is
  *   requested and submitted into the frame, at most MAX_AUTO_RELAUNCH
  *   times per 5 minutes. Past that, `exhausted` is reported and the page
@@ -70,7 +72,6 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
   const backoffStep = useRef(0);
   const relaunches = useRef<number[]>([]);
   const exhausted = useRef(false);
-  const inflight = useRef(false);
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pollIntervalMs = options.pollIntervalMs ?? CONNECTION_POLL_MS;
   const enabled = options.active && options.sessionDomain !== "";
@@ -79,6 +80,10 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
     if (!enabled) return;
     backoffStep.current = 0;
     exhausted.current = false;
+    // Generation token for this run of the effect: a poll or ticket request
+    // that settles after the watch was disabled or unmounted must not act.
+    let stopped = false;
+    let inflight = false;
 
     const cancelReload = () => {
       clearTimeout(reloadTimer.current);
@@ -86,6 +91,10 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
     };
 
     const reloadFrame = () => {
+      // The backoff advances only when a reload actually runs, so polls that
+      // find a reload already pending cannot burn through the budget.
+      reloadTimer.current = undefined;
+      backoffStep.current += 1;
       const el = opts.current.frame.current;
       if (!el) return;
       // The session cookie on this host is bound to the live lease, so a
@@ -98,6 +107,7 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       relaunches.current.push(Date.now());
       try {
         const ticket = await opts.current.requestTicket();
+        if (stopped) return;
         submitLaunch(
           ticket,
           opts.current.frameName,
@@ -106,22 +116,35 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
         );
         opts.current.onEvent({ type: "relaunched" });
       } catch (e) {
+        if (stopped) return;
         opts.current.onEvent({ type: "relaunch-error", error: e });
       }
     };
 
+    const exhaust = () => {
+      exhausted.current = true;
+      cancelReload();
+      opts.current.onEvent({ type: "exhausted" });
+    };
+
     const handle = (status: ConnectionStatus) => {
       if (status.state === "connected") {
+        cancelReload();
         backoffStep.current = 0;
         exhausted.current = false;
         return;
       }
       if (exhausted.current) return;
       if (status.leaseActive) {
-        cancelReload();
-        const step = Math.min(backoffStep.current, RECONNECT_BACKOFF_MS.length - 1);
-        backoffStep.current = step + 1;
-        reloadTimer.current = setTimeout(reloadFrame, RECONNECT_BACKOFF_MS[step]);
+        // A reload is already scheduled: let it run instead of re-arming it
+        // on every poll (the poll is faster than the later backoff steps).
+        if (reloadTimer.current !== undefined) return;
+        if (backoffStep.current >= RECONNECT_BACKOFF_MS.length) {
+          // Every step ran and the lease is still active but not streaming.
+          exhaust();
+          return;
+        }
+        reloadTimer.current = setTimeout(reloadFrame, RECONNECT_BACKOFF_MS[backoffStep.current]);
         return;
       }
       // The lease is gone: recover through a fresh ticket, bounded per
@@ -129,29 +152,30 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       const now = Date.now();
       relaunches.current = relaunches.current.filter((t) => now - t < AUTO_RELAUNCH_WINDOW_MS);
       if (relaunches.current.length >= MAX_AUTO_RELAUNCH) {
-        exhausted.current = true;
-        cancelReload();
-        opts.current.onEvent({ type: "exhausted" });
+        exhaust();
         return;
       }
+      cancelReload();
       void relaunch();
     };
 
     const tick = async () => {
       if (document.visibilityState === "hidden") return;
-      if (inflight.current) return;
-      inflight.current = true;
+      if (inflight) return;
+      inflight = true;
       try {
-        handle(await opts.current.fetchStatus());
+        const status = await opts.current.fetchStatus();
+        if (!stopped) handle(status);
       } catch (e) {
-        opts.current.onEvent({ type: "poll-error", error: e });
+        if (!stopped) opts.current.onEvent({ type: "poll-error", error: e });
       } finally {
-        inflight.current = false;
+        inflight = false;
       }
     };
 
     const interval = setInterval(() => void tick(), pollIntervalMs);
     return () => {
+      stopped = true;
       clearInterval(interval);
       cancelReload();
     };

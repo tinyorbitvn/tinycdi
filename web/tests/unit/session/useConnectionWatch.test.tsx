@@ -39,7 +39,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   const view = renderHook((p: typeof props) => useConnectionWatch(p), { initialProps: props });
-  return { frame, events, fetchStatus, requestTicket, view };
+  return { frame, events, fetchStatus, requestTicket, view, props };
 }
 
 function watchFormSubmits() {
@@ -86,6 +86,139 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(2);
     // A live lease never mints a new ticket.
     expect(requestTicket).not.toHaveBeenCalled();
+  });
+
+  // R3a: the poll runs every 5 s, longer than the first backoff steps but
+  // shorter than the last two. A poll must never cancel a pending reload.
+  it("fires every backoff step exactly once under a 5 s poll, then reports exhausted", async () => {
+    const { events, fetchStatus, requestTicket } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+
+    // Poll cadence 5 s; run long enough for the 15 s step to land and one
+    // more poll to find the budget spent.
+    await advanced(CONNECTION_POLL_MS * 12);
+    expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
+    expect(events.filter((e) => e.type === "exhausted")).toHaveLength(1);
+    // Exhaustion comes after the last reload, never before it.
+    const kinds = events.map((e) => e.type).filter((k) => k === "frame-navigated" || k === "exhausted");
+    expect(kinds).toEqual([
+      ...RECONNECT_BACKOFF_MS.map(() => "frame-navigated"),
+      "exhausted",
+    ]);
+
+    // Quiet afterwards: no further reloads, no repeated exhaustion, no tickets.
+    await advanced(CONNECTION_POLL_MS * 6);
+    expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
+    expect(events.filter((e) => e.type === "exhausted")).toHaveLength(1);
+    expect(requestTicket).not.toHaveBeenCalled();
+  });
+
+  it("does not re-arm a pending reload on every poll (8 s step survives a 5 s poll)", async () => {
+    const { frame, events, fetchStatus } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+
+    // Steps 0..2 (1 s, 2 s, 4 s) each fit between two polls.
+    await advanced(CONNECTION_POLL_MS * 4); // t = 20 s: step 3 (8 s) armed now
+    expect(navigated(events)).toHaveLength(3);
+    const before = navigated(events).length;
+    await advanced(CONNECTION_POLL_MS); // t = 25 s: a poll lands mid-wait
+    expect(navigated(events)).toHaveLength(before);
+    await advanced(3_000); // t = 28 s: the 8 s timer still fires
+    expect(navigated(events)).toHaveLength(before + 1);
+    expect(frame.getAttribute("src")).toBe(ORIGIN);
+  });
+
+  it("cancels a pending reload when the stream comes back and restarts the backoff", async () => {
+    const { events, fetchStatus } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    await advanced(CONNECTION_POLL_MS * 4); // steps 0..2 ran; the 8 s step is pending
+    expect(navigated(events)).toHaveLength(3);
+
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true });
+    await advanced(CONNECTION_POLL_MS); // t = 25 s: connected again
+    await advanced(RECONNECT_BACKOFF_MS[3]); // the cancelled reload must not fire
+    expect(navigated(events)).toHaveLength(3);
+
+    // The next outage starts again at the first step.
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    await advanced(CONNECTION_POLL_MS + RECONNECT_BACKOFF_MS[0]);
+    expect(navigated(events)).toHaveLength(4);
+  });
+
+  // R3b: a poll that is already in flight when the watch is disabled or the
+  // page unmounts must not act on its result.
+  describe("a poll in flight when the watch stops", () => {
+    function deferredStatus() {
+      let resolve!: (s: ConnectionStatus) => void;
+      const promise = new Promise<ConnectionStatus>((r) => (resolve = r));
+      return { promise, resolve };
+    }
+
+    it("arms no reload timer after unmount", async () => {
+      const { events, fetchStatus, view, frame } = setup();
+      const d = deferredStatus();
+      fetchStatus.mockReturnValue(d.promise);
+      await advanced(CONNECTION_POLL_MS);
+      expect(fetchStatus).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await act(async () => {
+        d.resolve({ state: "disconnected", leaseActive: true });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(vi.getTimerCount()).toBe(0);
+      await advanced(RECONNECT_BACKOFF_MS[0] * 3);
+      expect(navigated(events)).toHaveLength(0);
+      expect(frame.getAttribute("src")).toBeNull();
+    });
+
+    it("mints no ticket and submits no form after unmount", async () => {
+      const submitted = watchFormSubmits();
+      const { events, fetchStatus, requestTicket, view } = setup();
+      const d = deferredStatus();
+      fetchStatus.mockReturnValue(d.promise);
+      await advanced(CONNECTION_POLL_MS);
+      view.unmount();
+      await act(async () => {
+        d.resolve({ state: "disconnected", leaseActive: false });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(requestTicket).not.toHaveBeenCalled();
+      expect(submitted).toHaveLength(0);
+      expect(events).toEqual([]);
+    });
+
+    it("ignores the result when the watch is disabled mid-poll", async () => {
+      const submitted = watchFormSubmits();
+      const { events, fetchStatus, requestTicket, view, props } = setup();
+      const d = deferredStatus();
+      fetchStatus.mockReturnValue(d.promise);
+      await advanced(CONNECTION_POLL_MS);
+      view.rerender({ ...props, active: false });
+      await act(async () => {
+        d.resolve({ state: "disconnected", leaseActive: false });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(requestTicket).not.toHaveBeenCalled();
+      expect(submitted).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(events).toEqual([]);
+    });
+
+    it("submits no form when unmounted while the relaunch ticket is being minted", async () => {
+      const submitted = watchFormSubmits();
+      const { requestTicket, fetchStatus, view } = setup();
+      let release!: (t: LaunchTicket) => void;
+      requestTicket.mockReturnValue(new Promise<LaunchTicket>((r) => (release = r)));
+      fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false });
+      await advanced(CONNECTION_POLL_MS);
+      expect(requestTicket).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await act(async () => {
+        release(ticket());
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(submitted).toHaveLength(0);
+    });
   });
 
   it("relaunches with a fresh ticket when the lease is gone", async () => {
