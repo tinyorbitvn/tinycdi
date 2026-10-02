@@ -210,6 +210,82 @@ func TestMergeObserved_StaleNoSnapshot(t *testing.T) {
 	}
 }
 
+// A Terminating tombstone in the DB is authoritative: the operator's
+// finalizer never rewrites status.phase, so the CR keeps reading Ready (or
+// whatever it last was) for the whole teardown (FX-R23).
+func terminatingRecord() *provisioning.WorkspaceRecord {
+	rec := testRecord("Terminating")
+	rec.DesiredState = "Stopped"
+	return rec
+}
+
+func TestMergeObserved_TerminatingTombstoneBeatsFreshPhase(t *testing.T) {
+	for _, crPhase := range []string{"Ready", "Provisioning", "Failed", "Stopping"} {
+		t.Run(crPhase, func(t *testing.T) {
+			rec := terminatingRecord()
+			v := recordToView(rec)
+			mergeObservedStatus(&v, rec, ObservedStatus{
+				Fresh: true, Found: true, Phase: crPhase,
+				Conditions: readyConditions(),
+			})
+			if v.Phase != "Terminating" {
+				t.Fatalf("phase=%q, want Terminating", v.Phase)
+			}
+			if v.DesiredState != "Stopped" {
+				t.Fatalf("desiredState=%q, want Stopped", v.DesiredState)
+			}
+			if len(v.Conditions) != len(readyConditions()) {
+				t.Fatalf("conditions=%+v, want the CR conditions still projected", v.Conditions)
+			}
+			if v.FailureReason != "" {
+				t.Fatalf("failureReason=%q, want empty for Terminating", v.FailureReason)
+			}
+		})
+	}
+}
+
+func TestMergeObserved_TerminatingTombstoneBeatsStaleSnapshot(t *testing.T) {
+	for _, crPhase := range []string{"Ready", "Provisioning", "Failed", ""} {
+		t.Run("last-known-"+crPhase, func(t *testing.T) {
+			rec := terminatingRecord()
+			v := recordToView(rec)
+			mergeObservedStatus(&v, rec, ObservedStatus{
+				Fresh: false, Found: crPhase != "", Phase: crPhase,
+				FailureReason: "BootDeadlineExceeded",
+				Conditions:    readyConditions(),
+				ObservedAt:    time.Now().Add(-20 * time.Second),
+			})
+			if v.Phase != "Terminating" {
+				t.Fatalf("phase=%q, want Terminating", v.Phase)
+			}
+			if v.FailureReason != "" {
+				t.Fatalf("failureReason=%q, want empty for Terminating", v.FailureReason)
+			}
+			var stale *workspaceCondition
+			for i := range v.Conditions {
+				if v.Conditions[i].Reason == ReasonObservedStale {
+					stale = &v.Conditions[i]
+				}
+				if v.Conditions[i].Type == "ConnectionReady" && v.Conditions[i].Status == "True" {
+					t.Fatal("stale view kept ConnectionReady=True")
+				}
+			}
+			if stale == nil {
+				t.Fatalf("no StatusStale marker: %+v", v.Conditions)
+			}
+		})
+	}
+}
+
+func TestMergeObserved_TerminatingTombstoneWithoutCR(t *testing.T) {
+	rec := terminatingRecord()
+	v := recordToView(rec)
+	mergeObservedStatus(&v, rec, ObservedStatus{Fresh: true})
+	if v.Phase != "Terminating" {
+		t.Fatalf("phase=%q, want Terminating", v.Phase)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // K8sStatusView freshness bookkeeping — no informer needed
 // ---------------------------------------------------------------------------
@@ -350,6 +426,49 @@ func TestWorkspaceView_FailedProjection(t *testing.T) {
 	v, _ := getWorkspace(t, env, sess, csrf, created.ID)
 	if v.Phase != "Failed" || v.FailureReason != "BootDeadlineExceeded" {
 		t.Fatalf("phase=%q reason=%q, want Failed/BootDeadlineExceeded", v.Phase, v.FailureReason)
+	}
+}
+
+// FX-R23: while the operator tears a deleted workspace down, its CR keeps
+// reading Ready (fresh informer) or its last phase (stale one). Both the
+// DELETE response and a later GET must say Terminating.
+func TestWorkspaceView_DeleteStaysTerminatingWhileCRReadsReady(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		name := "stale"
+		if fresh {
+			name = "fresh"
+		}
+		t.Run(name, func(t *testing.T) {
+			be := newFakeBackend()
+			sv := &fakeStatusView{}
+			env := newStatusEnv(t, be, sv)
+			sess, csrf := login(t, env, "user-a")
+
+			created := createWorkspace(t, env, sess, csrf, "tdesk", "key-sv-term-"+name)
+			sv.set(created.ID, ObservedStatus{
+				Fresh: fresh, Found: true, Phase: "Provisioning", Conditions: readyConditions(),
+				ObservedAt: time.Now(),
+			})
+
+			r := doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+created.ID, "", nil)
+			deleted := decodeBody[WorkspaceView](t, r)
+			r.Body.Close()
+			if r.StatusCode != http.StatusAccepted {
+				t.Fatalf("DELETE status=%d, want 202", r.StatusCode)
+			}
+			if deleted.Phase != "Terminating" {
+				t.Fatalf("DELETE view phase=%q, want Terminating", deleted.Phase)
+			}
+
+			sv.set(created.ID, ObservedStatus{
+				Fresh: fresh, Found: true, Phase: "Ready", Conditions: readyConditions(),
+				ObservedAt: time.Now(),
+			})
+			v, _ := getWorkspace(t, env, sess, csrf, created.ID)
+			if v.Phase != "Terminating" {
+				t.Fatalf("GET phase=%q, want Terminating", v.Phase)
+			}
+		})
 	}
 }
 
