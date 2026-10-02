@@ -179,17 +179,34 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 // GetWorkspace returns one workspace. ownerScope, when non-empty, restricts
 // to records owned by that owner; a foreign ID yields ErrWorkspaceNotFound
 // so existence is not leaked.
+//
+// A deleted workspace stays readable (phase Terminating) while its runtime
+// is still being torn down and answers ErrWorkspaceNotFound once the runtime
+// is proven gone; see visibleWorkspaceSQL.
 func (s *Service) GetWorkspace(ctx context.Context, tenantID, ownerScope, id string) (WorkspaceRecord, error) {
-	rec, err := getWorkspaceTx(ctx, s.db.Pool(), tenantID, ownerScope, id)
+	rec, err := getWorkspace(ctx, s.db.Pool(), tenantID, ownerScope, id, true)
 	if err != nil {
 		return WorkspaceRecord{}, err
 	}
 	return *rec, nil
 }
 
+// visibleWorkspaceSQL is the read-side visibility rule for queries over the
+// workspaces table (columns are qualified with the table name). A deleted row is a tombstone: the delete
+// intent flips state to 'deleted' and phase to 'Terminating' and nothing
+// rewrites the phase afterwards. The row is shown as "Deleting" only while
+// the runtime may still be tearing down, i.e. while its quota reservation
+// is held; Recovery releases the reservation on a positive runtime-absence
+// proof, which is the terminal signal that removes the row from the API.
+// Retained data is unaffected: it lives in retained_data, not here.
+const visibleWorkspaceSQL = `(workspaces.state = 'active' OR EXISTS (
+	SELECT 1 FROM quota_reservation qr
+	WHERE qr.workspace_id = workspaces.id AND qr.state = 'held' AND ` + holdsComputeSQL + `))`
+
 // ListWorkspaces returns workspaces for tenantID scoped to ownerScope (or
 // all tenant workspaces when ownerScope is ""), ordered by creation time,
-// paginated by an opaque cursor.
+// paginated by an opaque cursor. Deleted workspaces whose runtime is proven
+// gone are omitted (visibleWorkspaceSQL).
 func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase, cursor string, limit int) ([]WorkspaceRecord, string, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -197,7 +214,7 @@ func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phas
 	var rows []WorkspaceRecord
 	var next string
 
-	conds := []string{"tenant_id = $1"}
+	conds := []string{"tenant_id = $1", visibleWorkspaceSQL}
 	args := []any{tenantID}
 	n := 2
 	if ownerScope != "" {
@@ -330,6 +347,9 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 		case IntentDelete:
 			apply = true
 			rec.Phase = "Terminating"
+			// A deleted workspace is never wanted Running: the row must not
+			// advertise a desired state the platform will not act on.
+			rec.DesiredState = "Stopped"
 		}
 		if apply {
 			var genIncr int64
@@ -435,6 +455,13 @@ type querier interface {
 }
 
 func getWorkspaceTx(ctx context.Context, q querier, tenantID, ownerScope, id string, lock ...string) (*WorkspaceRecord, error) {
+	return getWorkspace(ctx, q, tenantID, ownerScope, id, false, lock...)
+}
+
+// getWorkspace reads one row. With visibleOnly it applies the read-side
+// visibility rule (visibleWorkspaceSQL); writers pass false so a repeated
+// delete or an idempotent replay still finds the tombstone.
+func getWorkspace(ctx context.Context, q querier, tenantID, ownerScope, id string, visibleOnly bool, lock ...string) (*WorkspaceRecord, error) {
 	query := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
 		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
 		COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
@@ -447,6 +474,9 @@ func getWorkspaceTx(ctx context.Context, q querier, tenantID, ownerScope, id str
 	if ownerScope != "" {
 		query += ` AND owner_subject = $3`
 		args = append(args, ownerScope)
+	}
+	if visibleOnly {
+		query += ` AND ` + visibleWorkspaceSQL
 	}
 	if len(lock) > 0 {
 		query += " " + lock[0]

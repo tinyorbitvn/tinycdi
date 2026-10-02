@@ -215,6 +215,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(ws, FinalizerRuntimeCleanup) {
 			done, err := r.newFinalizer().Run(ctx, ws)
+			if apierrors.IsNotFound(err) {
+				// The object vanished under this reconcile (a previous
+				// reconcile removed the finalizer and the cache still served
+				// the Terminating copy). Gone is the goal of a delete.
+				return ctrl.Result{}, nil
+			}
 			if err != nil {
 				log.Error(err, "workspace teardown blocked; will retry")
 				return ctrl.Result{}, err
@@ -226,7 +232,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			if controllerutil.RemoveFinalizer(ws, FinalizerRuntimeCleanup) {
 				if err := r.Update(ctx, ws); err != nil {
-					return ctrl.Result{}, err
+					return ctrl.Result{}, client.IgnoreNotFound(err)
 				}
 			}
 		}
