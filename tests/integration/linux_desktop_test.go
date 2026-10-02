@@ -335,6 +335,72 @@ done; true`)
 			t.Fatalf("file lost across recreate: %q", got)
 		}
 	})
+
+	t.Run("UpgradeFromOpenboxHome", func(t *testing.T) {
+		// An existing desktop workspace keeps its retained home when the
+		// template's image moves from the old openbox/xterm desktop to this
+		// one. Seed a volume with what the old session leaves behind (listed
+		// from a real old-image run) plus user files and stale leftovers:
+		// the new session must come up as XFCE, leave every existing file
+		// byte-identical, and only ADD ~/.config/xfce4, ~/.cache/sessions
+		// and the like.
+		home := newVolume(t, runID, "upgrade-home")
+		seed := `set -e
+cd "$HOME"
+mkdir -p .cache/openbox/sessions .cache/fontconfig .vnc Documents .config/openbox
+echo old-log > .cache/openbox/openbox.log
+echo cache > .cache/fontconfig/CACHEDIR.TAG
+echo '! user xterm settings' > .Xresources
+echo '# user edit' >> .bashrc
+echo mine > Documents/notes.txt
+echo '<openbox_config/>' > .config/openbox/rc.xml
+echo 4242 > .vnc/deadbeef0000:1.pid
+printf 'logging:\n  level: 100\n' > .vnc/kasmvnc.yaml
+printf '#!/bin/sh\nexec xterm\n' > .vnc/xstartup && chmod 755 .vnc/xstartup
+ln -sfn /run/tcdi/kasmpasswd .kasmpasswd
+echo stale > .Xauthority`
+		dockerOK(t, "run", "--rm", "--entrypoint", "sh", "-v", home+":/home/workspace", desktopImage, "-c", seed)
+		before := dockerOK(t, "run", "--rm", "--entrypoint", "sh", "-v", home+":/home/workspace", desktopImage, "-c",
+			`cd "$HOME" && find . -type f -not -path './.vnc/*' -not -name .Xauthority | sort | xargs md5sum`)
+
+		cu := runContainer(t, runID, "upgrade-a", desktopImage, secret, home, roArgs...)
+		waitHealthy(t, cu)
+		waitWindow(t, cu, `^xfce4-panel\|`, 60*time.Second)
+		waitWindow(t, cu, `^Desktop\|`, 60*time.Second)
+
+		// The stale ~/.vnc/xstartup (exec xterm) must not hijack the session.
+		if out := strings.TrimSpace(mustExec(t, cu, "pgrep -x xterm || true")); out != "" {
+			t.Fatalf("stale ~/.vnc/xstartup took over the session (xterm running: %s)", out)
+		}
+		// First run of XFCE on an existing home creates its config...
+		mustExec(t, cu, "test -d /home/workspace/.config/xfce4 && test -d /home/workspace/.config/Thunar")
+		// ...and touches nothing that was there.
+		after := mustExec(t, cu, `cd "$HOME" && find . -type f -not -path './.vnc/*' -not -name .Xauthority \
+  -not -path './.config/xfce4/*' -not -path './.config/Thunar/*' -not -path './.cache/sessions/*' \
+  -not -path './.cache/fontconfig/*' -not -path './.local/*' -not -path './.dbus/*' -not -name .ICEauthority \
+  -not -path './Desktop/*' | sort | xargs md5sum`)
+		for _, line := range strings.Split(strings.TrimSpace(after), "\n") {
+			if !strings.Contains(before, line) {
+				t.Errorf("existing home file changed by the upgrade: %s", line)
+			}
+		}
+		if got := strings.TrimSpace(mustExec(t, cu, "cat /home/workspace/Documents/notes.txt")); got != "mine" {
+			t.Fatalf("user file changed: %q", got)
+		}
+		mustExec(t, cu, "grep -q '# user edit' /home/workspace/.bashrc && test -e /home/workspace/.cache/openbox/openbox.log && test -e /home/workspace/.config/openbox/rc.xml")
+		// The credential symlink is re-pointed by the entrypoint every boot.
+		code, err := httpsGet(t, cu, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("upgraded home: mounted secret rejected: code=%d err=%v", code, err)
+		}
+
+		// And it keeps working: a second start on the now-XFCE home.
+		dockerOK(t, "stop", cu)
+		dockerOK(t, "start", cu)
+		waitHealthy(t, cu)
+		waitWindow(t, cu, `^xfce4-panel\|`, 60*time.Second)
+		waitWindow(t, cu, `^Desktop\|`, 60*time.Second)
+	})
 }
 
 // TestLinuxRuntimeBrowserBaseline pins the V3.26 promise that splitting the

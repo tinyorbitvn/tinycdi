@@ -199,6 +199,34 @@ pod (the image depends on none, so any pod-level setting works unchanged),
 home on the data volume, and the endpoint/credential contract above. The
 desktop adds no listener, no capability and no setuid/setgid file.
 
+### Upgrading an existing desktop workspace
+
+A workspace moves to this image when its template's `spec.linux.image`
+digest changes; the pod is recreated, so the running session restarts
+(open windows are lost, as with any restart) and the **retained home is
+reused as it is**. What an old openbox/xterm session left in that home
+(listed from a real old-image run): `.Xauthority`, `.bashrc`/`.profile`/
+`.bash_logout`, `.cache/fontconfig`, `.cache/openbox/`, `.vnc/*` (a stale pid
+file, `kasmvnc.yaml`, `passwd`) and the `.kasmpasswd` symlink — there was no
+`~/.config` at all. On the first XFCE start:
+
+- XFCE creates `~/.config/xfce4` and `~/.config/Thunar`, `~/.cache/sessions`,
+  `~/.local`, `~/.dbus` and `~/Desktop`; it reads the system defaults from
+  `/etc/xdg/xfce4` until the user changes a setting. Nothing that was in the
+  home is modified or deleted (asserted file-by-file).
+- The openbox leftovers (`~/.cache/openbox`, a user's own
+  `~/.config/openbox/rc.xml`) are ignored, not removed. `~/.Xresources` was
+  read by xterm only; the XFCE session does not load it.
+- A stale `~/.vnc/xstartup`, `~/.vnc/kasmvnc.yaml` or credential file cannot
+  take over: the entrypoint passes the session explicitly and rewrites the
+  config and the credential link on every boot (runtime contract).
+- The stale `.vnc/<host>:1.pid` and `.Xauthority` are replaced by KasmVNC.
+
+`TestLinuxRuntimeDesktop/UpgradeFromOpenboxHome` seeds a volume with exactly
+that state plus user files and stale hijack attempts, boots the desktop on it
+(read-only root), and checks the panel and desktop come up, no `xterm` takes
+over, every pre-existing file is byte-identical, and a second stop/start works.
+
 ### Budgets (V3.26, measured 2026-10-03, trivy 0.70.0, Docker 29.8, 8-core host)
 
 | | old `linux-desktop` (openbox + xterm) | new `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` (new) | `browser` before → after |
