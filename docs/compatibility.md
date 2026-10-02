@@ -23,7 +23,7 @@ containerd 2.x, Cilium 1.20, and
 | Playwright harness | @playwright/test 1.63.0, typescript 5.9.3, @types/node 22.20.4; bundles: Chromium 153.0.8010.12 (r1243) + headless shell, Firefox 155.0 (r1543); WebKit declared 26.6 (r2359), intentionally not installed (Safari gated) |
 | nss tools | libnss3-tools 2:3.98-1ubuntu0.2 (certutil) |
 | Node security profile | Localhost seccomp `deploy/node-profiles/seccomp/chromium-userns.json` sha256 `c57199218f6ba2e6616f39392f3043b3e057fdfa082ee90f0798170c5715d76a` + AppArmor `deploy/node-profiles/apparmor/tinycdi-browser` sha256 `4f30e96fc396f57ddabbe8b2ac619f47ac7074865d26bd79e0ae693049a2dd56` — required on every browser-capable worker (see conditions; install: `deploy/node-profiles/README.md`) |
-| Firefox ESR fallback | firefox-esr 140.16.0esr-1~deb12u1 (deb.debian.org/debian-security bookworm-security), deb sha256 `8bf0858c24ffdc3869147210930b724a751fcedc0e3e950188d19ed6d8a86518` |
+| Firefox ESR fallback | firefox-esr 153.4.0esr-1~deb12u1 (deb.debian.org/debian-security bookworm-security), deb sha256 `a59e034759615e46d3b4071cd79f42642416865419319c0d2c2a35a559db5430` |
 
 ## Pending — pinned later
 

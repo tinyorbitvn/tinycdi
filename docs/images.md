@@ -47,7 +47,7 @@ Pinned inputs (`docs/compatibility.md`):
 - base: `debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251`
 - KasmVNC: `kasmvncserver_bookworm_1.5.0_amd64.deb`, sha256 `770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71`
 - Chromium: `154.0.8037.92-1~deb12u1` (apt pin — repin on Debian security updates)
-- Firefox ESR (fallback): `140.16.0esr-1~deb12u1`
+- Firefox ESR (fallback): `153.4.0esr-1~deb12u1`
 
 ## Published runtime images (release train)
 
@@ -165,6 +165,14 @@ contract, display-death → not-ready, Chromium sandbox engaged (nested
 userns + seccomp filter, uid 1000), restart keeping `/home/workspace` while
 losing rootfs scratch, stale in-home credential/config not overriding the
 mounted Secret, bounded shm, no secret in logs/env.
+`TestLinuxRuntimeFirefoxFallback` covers the `TCDI_BROWSER=firefox`
+fallback: installed firefox-esr == the Dockerfile pin, authenticated
+streaming endpoint, non-root, seccomp-bpf filters engaged on the browser
+and content processes (no `MOZ_DISABLE_*SANDBOX`/`--no-sandbox`), no
+first-run/what's-new page and no extra dialog window, no in-app updater.
+The image ships no Firefox enterprise policy file (distribution/
+policies.json), so there is no policy to honour; re-run this test on
+every firefox-esr major bump.
 
 ## Scan results (2026-09-30, syft 1.52.0 / grype 0.119.0, DB latest)
 
