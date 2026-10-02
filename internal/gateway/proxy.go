@@ -469,6 +469,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		return
 	}
 	var gen int
+	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
 	if isUpgrade(r) {
 		if g.isDraining() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
@@ -491,7 +492,9 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// cross-replica fence: claiming it here makes the previous
 		// replica's renew loop drop its copy of this stream (P3).
 		if g.cfg.Sessions != nil {
-			if err := g.claimStream(r.Context(), s); err != nil {
+			epoch, err := g.claimStream(r.Context(), s)
+			streamEpoch = epoch
+			if err != nil {
 				if terminalBrokerErr(err) {
 					g.killSession(s, "claim_"+leaseFailureReason(err))
 					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
@@ -528,7 +531,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 				// The stream is admitted and live: report connected so the
 				// broker counts an open stream and cancels any pending
 				// disconnect grace window (design §8).
-				s.enqueueActivity(broker.ActivityConnected)
+				s.enqueueActivity(broker.ActivityConnected, streamEpoch)
 			}
 			// The upstream handshake is done and the conn is registered:
 			// free the admission slot so a later upgrade on this session
@@ -553,7 +556,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			// any earlier connected report and ahead of a later reconnect.
 			// Enqueued BEFORE untrack drops the conn so Drain can trust
 			// "no open conns" to mean "disconnect already queued".
-			s.enqueueActivity(broker.ActivityDisconnect)
+			s.enqueueActivity(broker.ActivityDisconnect, streamEpoch)
 		}
 		s.untrack(tid, captured)
 	}()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 func digestOf(cookie string) broker.SessionDigest {
@@ -319,5 +320,138 @@ func TestLeaseBySession_MissUsesIndex(t *testing.T) {
 	}
 	if strings.Contains(plan.String(), "Seq Scan") || !strings.Contains(plan.String(), "Index") {
 		t.Fatalf("miss query is not an index scan over 5000 dead leases:\n%s", plan.String())
+	}
+}
+
+// openStreamsOf reads the (workspace, generation) activity row's stream
+// accounting.
+func openStreamsOf(t *testing.T, db *store.DB, wsUID string, gen uint64) (open int, disconnectedSince *time.Time) {
+	t.Helper()
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT open_streams, disconnected_since FROM workspace_activity
+		 WHERE workspace_id = $1 AND runtime_generation = $2`,
+		wsUID, int64(gen)).Scan(&open, &disconnectedSince); err != nil {
+		t.Fatalf("workspace_activity row: %v", err)
+	}
+	return open, disconnectedSince
+}
+
+// TestStreams_HardKillThenRehydrate: a replica killed mid-stream never
+// reports its disconnect. When the session rehydrates on another replica,
+// the new stream's ClaimStream fences the dead one, so the count follows
+// the CURRENT epoch (1), not the sum of every stream ever opened (2) — and
+// the next disconnect reaches 0 and starts the grace window.
+func TestStreams_HardKillThenRehydrate(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseFor(t, b, gwA, "ws-1", false)
+	fence := fenceOf(lease)
+
+	e1, err := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	if err != nil || e1 != 1 {
+		t.Fatalf("first ClaimStream = %d, %v; want 1", e1, err)
+	}
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
+		t.Fatalf("connected@1: %v", err)
+	}
+	if open, _ := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration); open != 1 {
+		t.Fatalf("open_streams after connected@1 = %d, want 1", open)
+	}
+
+	// No disconnect: the first replica was hard-killed. Another replica
+	// rehydrates the session and claims the stream.
+	e2, err := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	if err != nil || e2 != 2 {
+		t.Fatalf("second ClaimStream = %d, %v; want 2", e2, err)
+	}
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e2}); err != nil {
+		t.Fatalf("connected@2: %v", err)
+	}
+	if open, _ := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration); open != 1 {
+		t.Fatalf("open_streams after connected@2 = %d, want 1 (the dead stream is fenced)", open)
+	}
+
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityDisconnect, StreamEpoch: e2}); err != nil {
+		t.Fatalf("disconnect@2: %v", err)
+	}
+	open, since := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration)
+	if open != 0 {
+		t.Fatalf("open_streams after disconnect@2 = %d, want 0", open)
+	}
+	if since == nil {
+		t.Fatal("disconnected_since NULL after the last disconnect — the disconnect timeout could never fire")
+	}
+}
+
+// TestStreams_StaleDisconnectIgnored: the late "disconnect" of a fenced
+// older stream must not close the newer stream's accounting.
+func TestStreams_StaleDisconnectIgnored(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseFor(t, b, gwA, "ws-1", false)
+	fence := fenceOf(lease)
+
+	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
+		t.Fatalf("connected@1: %v", err)
+	}
+	e2, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e2}); err != nil {
+		t.Fatalf("connected@2: %v", err)
+	}
+
+	// The old stream's disconnect arrives late (a drained or partitioned
+	// replica finally reaching the broker).
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityDisconnect, StreamEpoch: e1}); err != nil {
+		t.Fatalf("stale disconnect@1: %v", err)
+	}
+	open, since := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration)
+	if open != 1 {
+		t.Fatalf("open_streams after a stale disconnect = %d, want 1", open)
+	}
+	if since != nil {
+		t.Fatal("a stale disconnect armed the disconnect grace window")
+	}
+
+	// A stale "connected" from the fenced stream is ignored the same way.
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
+		t.Fatalf("stale connected@1: %v", err)
+	}
+	if open, _ := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration); open != 1 {
+		t.Fatalf("open_streams after a stale connected = %d, want 1", open)
+	}
+}
+
+// TestClaimStream_ZeroesPreviousStream: claiming a stream fences the
+// previous one by definition, so its slot is released in the same
+// transaction — and disconnected_since is anchored until the new stream's
+// "connected" report clears it.
+func TestClaimStream_ZeroesPreviousStream(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseFor(t, b, gwA, "ws-1", false)
+	fence := fenceOf(lease)
+
+	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
+		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
+		t.Fatalf("connected@1: %v", err)
+	}
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fence); err != nil {
+		t.Fatalf("second ClaimStream: %v", err)
+	}
+	open, since := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration)
+	if open != 0 || since == nil {
+		t.Fatalf("after ClaimStream: open_streams=%d disconnected_since=%v, want 0 and set", open, since)
 	}
 }

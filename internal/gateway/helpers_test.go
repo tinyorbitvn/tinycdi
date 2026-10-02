@@ -398,6 +398,13 @@ func (f *fakeBroker) activityTypes() []broker.ActivityEventType {
 	return out
 }
 
+// activityEvents returns the full recorded ReportActivity events, in order.
+func (f *fakeBroker) activityEvents() []broker.ActivityEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]broker.ActivityEvent(nil), f.activity...)
+}
+
 // failRenew makes the broker answer renew/resolve for leaseID with err
 // (simulating a revoked lease or unreachable broker → fail closed).
 func (f *fakeBroker) failRenew(leaseID string, err error) {

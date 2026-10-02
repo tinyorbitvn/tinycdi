@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // SessionDigest is SHA-256 of the gateway session cookie value. The cookie
@@ -102,15 +104,29 @@ func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID st
 	if _, err := b.boundCurrent(ctx, l, now); err != nil {
 		return 0, err
 	}
+	// Claim and release the previous stream's slot atomically: the claim
+	// fences every earlier stream of this lease, so its open_streams share
+	// is dead whether or not its replica ever reports the disconnect (a
+	// hard-killed replica never does). The new stream's "connected" report
+	// sets the count back to 1 and clears the grace window.
 	var epoch uint64
-	if err := b.db.Pool().QueryRow(ctx,
-		`UPDATE connection_lease SET stream_epoch = stream_epoch + 1
-		 WHERE id = $1 AND state = 'active' RETURNING stream_epoch`, l.ID).
-		Scan(&epoch); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, ErrRevoked
+	err = b.db.WithTx(ctx, func(tx store.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`UPDATE connection_lease SET stream_epoch = stream_epoch + 1
+			 WHERE id = $1 AND state = 'active' RETURNING stream_epoch`, l.ID).
+			Scan(&epoch); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrRevoked
+			}
+			return fmt.Errorf("broker: claim stream: %w", err)
 		}
-		return 0, fmt.Errorf("broker: claim stream: %w", err)
+		if err := closeStreamsTx(ctx, tx, l.WorkspaceUID, l.RuntimeGeneration, now); err != nil {
+			return fmt.Errorf("broker: claim stream accounting: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return epoch, nil
 }

@@ -510,3 +510,81 @@ func TestDrain_RefusesNewUpgrades(t *testing.T) {
 		t.Fatalf("upgrade after Drain = %d, want 503", resp.StatusCode)
 	}
 }
+
+// TestActivity_EventsCarryStreamEpoch: the connected and disconnect reports
+// of a stream carry the epoch ClaimStream returned for it, so the broker
+// can ignore reports of a stream another epoch fenced.
+func TestActivity_EventsCarryStreamEpoch(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-epoch", testWSUID)
+	gwA, srvA := newReplica(t, fb, "gw-A")
+	cookie := launchOK(t, srvA, testHost, "tk-epoch")
+
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		drain(resp)
+		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	wsWrite(t, resp, []byte("x"))
+	wsRead(t, resp, 1, 2*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	gwA.Drain(ctx)
+	cancel()
+
+	var sawConnected, sawDisconnect bool
+	for _, ev := range fb.activityEvents() {
+		switch ev.Type {
+		case broker.ActivityConnected:
+			sawConnected = true
+		case broker.ActivityDisconnect:
+			sawDisconnect = true
+		default:
+			continue
+		}
+		if ev.StreamEpoch != 1 {
+			t.Fatalf("%s report carries StreamEpoch %d, want 1 (the epoch ClaimStream returned)", ev.Type, ev.StreamEpoch)
+		}
+	}
+	if !sawConnected || !sawDisconnect {
+		t.Fatalf("connected=%v disconnect=%v, want both reported", sawConnected, sawDisconnect)
+	}
+}
+
+// TestDrain_DisconnectReportedBeforeReturn: Drain's "quiet" verdict must
+// cover the window between the sender dequeuing a disconnect and its broker
+// call starting — after Drain returns, the broker has the disconnect of
+// every drained stream. Repeated under -race to catch the window.
+func TestDrain_DisconnectReportedBeforeReturn(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		t.Run("", func(t *testing.T) {
+			fb := newFakeBroker(t)
+			fb.scriptTicket("tk-dr", testWSUID)
+			gwA, srvA := newReplica(t, fb, "gw-A")
+			cookie := launchOK(t, srvA, testHost, "tk-dr")
+			resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+			if resp.StatusCode != http.StatusSwitchingProtocols {
+				drain(resp)
+				t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
+			}
+			defer resp.Body.Close()
+			wsWrite(t, resp, []byte("x"))
+			wsRead(t, resp, 1, 2*time.Second)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			gwA.Drain(ctx)
+			cancel()
+
+			var disconnects int
+			for _, ty := range fb.activityTypes() {
+				if ty == broker.ActivityDisconnect {
+					disconnects++
+				}
+			}
+			if disconnects != 1 {
+				t.Fatalf("disconnects at the broker when Drain returned = %d, want 1", disconnects)
+			}
+		})
+	}
+}
