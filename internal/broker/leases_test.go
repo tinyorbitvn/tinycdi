@@ -133,6 +133,30 @@ func TestRevokeLease_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestRevokeLeaseChanged (R9c): the variant reports whether a live lease was
+// actually revoked — true once, then false for the already-dead lease and for
+// a lease ID that never existed. The revoke itself still fails the lease
+// closed.
+func TestRevokeLeaseChanged(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseFor(t, b, gwA, "ws-1", false)
+
+	if changed, err := b.RevokeLeaseChanged(ctx, "no-such-lease"); err != nil || changed {
+		t.Fatalf("unknown lease: changed=%v err=%v, want false, nil", changed, err)
+	}
+	if changed, err := b.RevokeLeaseChanged(ctx, lease.ID); err != nil || !changed {
+		t.Fatalf("live lease: changed=%v err=%v, want true, nil", changed, err)
+	}
+	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); err == nil {
+		t.Fatal("renew succeeded after RevokeLeaseChanged")
+	}
+	if changed, err := b.RevokeLeaseChanged(ctx, lease.ID); err != nil || changed {
+		t.Fatalf("already-revoked lease: changed=%v err=%v, want false, nil", changed, err)
+	}
+}
+
 // TestRenewLease_StaleObservationFailsClosed: when the observed state ages
 // past 15 s the broker stops renewing — access cannot outlive fresh truth.
 func TestRenewLease_StaleObservationFailsClosed(t *testing.T) {

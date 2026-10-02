@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -373,6 +374,24 @@ func (c *Client) ResolveTarget(ctx context.Context, _ broker.GatewayIdentity, le
 func (c *Client) RevokeLease(ctx context.Context, leaseID string) error {
 	return c.do(ctx, "revoke", http.MethodPost,
 		leasesPath+url.PathEscape(leaseID)+"/revoke", struct{}{}, nil)
+}
+
+// RevokeLeaseChanged revokes the lease and reports whether a live lease was
+// actually revoked. An empty 204 answer (a broker that predates the report)
+// carries no information and counts as revoked.
+func (c *Client) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	var out struct {
+		Revoked bool `json:"revoked"`
+	}
+	err := c.do(ctx, "revoke", http.MethodPost,
+		leasesPath+url.PathEscape(leaseID)+"/revoke", struct{}{}, &out)
+	if errors.Is(err, io.EOF) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return out.Revoked, nil
 }
 
 // ReportActivity posts one session signal; the broker stamps its own

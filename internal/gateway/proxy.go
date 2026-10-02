@@ -36,6 +36,9 @@ type BrokerClient interface {
 	RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error)
 	ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error)
 	RevokeLease(ctx context.Context, leaseID string) error
+	// RevokeLeaseChanged is RevokeLease that also reports whether a live
+	// lease was actually revoked (false: unknown or already dead).
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
 	// ReportActivity posts one session signal (input/connected/disconnect)
 	// for the lease's bound incarnation; the broker stamps receipt time.
 	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
@@ -413,13 +416,20 @@ func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 		g.killSession(s, "control_revoke")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	err := g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
+	changed, err := g.cfg.Broker.RevokeLeaseChanged(ctx, body.LeaseID)
 	cancel()
 	if err != nil {
 		// Not accepted: the operator must retry. A local session, if any,
 		// is already dead.
 		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "broker_unavailable")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
+	if !changed {
+		// An unknown or already-dead lease: nothing was revoked, so neither
+		// the answer nor the audit trail may claim it was.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "lease_not_live")
+		writeJSON(w, http.StatusOK, map[string]bool{"revoked": false})
 		return
 	}
 	g.audit(r, "session.revoke", wsUID, observability.OutcomeSuccess, "")

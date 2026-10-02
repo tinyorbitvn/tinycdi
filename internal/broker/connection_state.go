@@ -5,6 +5,8 @@ package broker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +28,12 @@ type ConnectionState struct {
 	State         string
 	LeaseActive   bool
 	LastRenewedAt *time.Time
+	// LeaseRef identifies the active lease without exposing its ID: the
+	// first 16 hex chars of SHA-256 of the lease ID. Empty without a live
+	// lease.
+	LeaseRef string
+	// StreamEpoch is the active lease's stream_epoch (0 without a lease).
+	StreamEpoch uint64
 }
 
 // leaseStaleAfter is the renewal-freshness window: the gateway renews every
@@ -39,19 +47,21 @@ const leaseStaleAfter = 20 * time.Second
 func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (ConnectionState, error) {
 	now := b.now()
 	var (
+		leaseID     string
+		streamEpoch int64
 		expiresAt   time.Time
 		lastRenewed *time.Time
 		openStreams int
 	)
 	err := b.db.Pool().QueryRow(ctx, `
-		SELECT l.expires_at, l.last_renewed_at,
+		SELECT l.id, l.stream_epoch, l.expires_at, l.last_renewed_at,
 			COALESCE(a.open_streams, 0)
 		FROM connection_lease l
 		LEFT JOIN workspace_activity a
 			ON a.workspace_id = l.workspace_id
 			AND a.runtime_generation = l.runtime_generation
 		WHERE l.workspace_id = $1 AND l.state = 'active'`, workspaceUID).
-		Scan(&expiresAt, &lastRenewed, &openStreams)
+		Scan(&leaseID, &streamEpoch, &expiresAt, &lastRenewed, &openStreams)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConnectionState{State: "none"}, nil
 	}
@@ -63,7 +73,13 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (
 	if !expiresAt.After(now) {
 		return ConnectionState{State: "none"}, nil
 	}
-	st := ConnectionState{LeaseActive: true, LastRenewedAt: lastRenewed}
+	sum := sha256.Sum256([]byte(leaseID))
+	st := ConnectionState{
+		LeaseActive:   true,
+		LastRenewedAt: lastRenewed,
+		LeaseRef:      hex.EncodeToString(sum[:])[:16],
+		StreamEpoch:   uint64(streamEpoch),
+	}
 	switch {
 	case lastRenewed == nil || now.Sub(*lastRenewed) > leaseStaleAfter:
 		st.State = "stale"
@@ -103,5 +119,7 @@ func (s PublicStater) ConnectionState(ctx context.Context, workspaceUID string) 
 		State:         st.State,
 		LeaseActive:   st.LeaseActive,
 		LastRenewedAt: st.LastRenewedAt,
+		LeaseRef:      st.LeaseRef,
+		StreamEpoch:   st.StreamEpoch,
 	}, nil
 }

@@ -44,7 +44,8 @@ func (s *stubBroker) RenewLease(context.Context, broker.GatewayIdentity, string,
 func (s *stubBroker) ResolveTarget(context.Context, broker.GatewayIdentity, string) (broker.Target, error) {
 	return broker.Target{}, broker.ErrLeaseInvalid
 }
-func (s *stubBroker) RevokeLease(context.Context, string) error { return nil }
+func (s *stubBroker) RevokeLease(context.Context, string) error                { return nil }
+func (s *stubBroker) RevokeLeaseChanged(context.Context, string) (bool, error) { return false, nil }
 func (s *stubBroker) ReportActivity(context.Context, broker.GatewayIdentity, string, broker.Fence, broker.ActivityEvent) error {
 	return nil
 }

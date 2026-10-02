@@ -21,6 +21,7 @@ type GatewaySurface interface {
 	RenewLease(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence) (Lease, error)
 	ResolveTarget(ctx context.Context, gw GatewayIdentity, leaseID string) (Target, error)
 	RevokeLease(ctx context.Context, leaseID string) error
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
 	ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ev ActivityEvent) error
 	BindSession(ctx context.Context, gw GatewayIdentity, leaseID string, d SessionDigest) error
 	LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error)
@@ -104,6 +105,16 @@ func (l *LocalGateway) RevokeLease(ctx context.Context, leaseID string) error {
 		return ErrLeaseInvalid
 	}
 	return classify("revoke", l.b.RevokeLease(ctx, leaseID))
+}
+
+// RevokeLeaseChanged is RevokeLease that also reports whether a live lease
+// was actually revoked.
+func (l *LocalGateway) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	if !leaseIDOK(leaseID) {
+		return false, ErrLeaseInvalid
+	}
+	changed, err := l.b.RevokeLeaseChanged(ctx, leaseID)
+	return changed, classify("revoke", err)
 }
 
 // ReportActivity forwards one gateway-observed session signal; the broker

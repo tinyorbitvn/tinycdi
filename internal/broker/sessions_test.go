@@ -455,3 +455,29 @@ func TestClaimStream_ZeroesPreviousStream(t *testing.T) {
 		t.Fatalf("after ClaimStream: open_streams=%d disconnected_since=%v, want 0 and set", open, since)
 	}
 }
+
+// TestStreams_Epoch0KeepsCounting (R9d): without a session directory (split
+// mode) the gateway never claims a stream, so every report carries epoch 0.
+// There the +1/-1 arithmetic must hold: connected(old), connected(new),
+// disconnect(old) leaves the new stream open. The set-to-1 rule belongs to
+// epoch >= 1 reports only.
+func TestStreams_Epoch0KeepsCounting(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseFor(t, b, gwA, "ws-1", false)
+	fence := fenceOf(lease)
+
+	for i, typ := range []broker.ActivityEventType{broker.ActivityConnected, broker.ActivityConnected, broker.ActivityDisconnect} {
+		if err := b.ReportActivity(ctx, gwA, lease.ID, fence, broker.ActivityEvent{Type: typ}); err != nil {
+			t.Fatalf("report %d (%s): %v", i, typ, err)
+		}
+	}
+	open, since := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration)
+	if open != 1 {
+		t.Fatalf("open_streams after connected(old), connected(new), disconnect(old) = %d, want 1", open)
+	}
+	if since != nil {
+		t.Fatal("the surviving stream armed the disconnect grace window")
+	}
+}

@@ -18,6 +18,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -331,22 +333,86 @@ func (h *WorkspaceHandler) viewWithStatus(ctx context.Context, rec *provisioning
 		obs.ObservedAt = h.now()
 	}
 	mergeObservedStatus(&v, rec, obs)
-	h.mergeImageFreshness(&v, rec, obs)
+	h.mergeImageFreshness(ctx, &v, rec, obs)
 	return v
 }
 
 // mergeImageFreshness fills the optional imageBuiltAt/imageStale view
 // fields from the image age that travels with the workspace: the annotation
 // on its Workspace CR (informer cache), else the template snapshot taken at
-// create time. It never touches the template catalog — the template revision
-// a workspace was created from may be long gone. A missing or malformed age
-// leaves both fields absent; freshness is advisory and never fails the
+// create time. A workspace created before either existed (every v0.1
+// workspace at upgrade time) falls back to its template's age, looked up at
+// most once per distinct template per request (imageAgeMemo) and served from
+// the informer cache in production (WithImageCatalog). A missing or malformed
+// age leaves both fields absent; freshness is advisory and never fails the
 // request (D28).
-func (h *WorkspaceHandler) mergeImageFreshness(v *WorkspaceView, rec *provisioning.WorkspaceRecord, obs ObservedStatus) {
+func (h *WorkspaceHandler) mergeImageFreshness(ctx context.Context, v *WorkspaceView, rec *provisioning.WorkspaceRecord, obs ObservedStatus) {
 	raw := obs.ImageBuiltAt
 	if raw == "" {
 		raw = rec.Template.ImageBuiltAt
 	}
+	if raw == "" {
+		raw = h.templateImageAge(ctx, rec.TenantID, rec.Template.ID)
+	}
 	v.ImageBuiltAt, v.ImageStale = imageFreshness(h.log, raw, h.staleAfter, h.now(),
 		"workspace", rec.ID, "template", rec.Template.ID)
+}
+
+// imageAgeMemo remembers the template image ages resolved during one
+// request, including lookups that failed, so a page of workspaces costs one
+// lookup per distinct template.
+type imageAgeMemo struct {
+	mu   sync.Mutex
+	ages map[string]string
+}
+
+type imageAgeMemoKey struct{}
+
+// withImageAgeMemo scopes a template-age memo to ctx (one request).
+func withImageAgeMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, imageAgeMemoKey{}, &imageAgeMemo{ages: map[string]string{}})
+}
+
+// WithImageCatalog sets the catalog the image-age fallback resolves
+// templates through; production passes an informer-cache-backed one so a
+// list never costs API-server GETs. Nil keeps the handler's own catalog.
+func (h *WorkspaceHandler) WithImageCatalog(c TemplateCatalog) *WorkspaceHandler {
+	h.imageCatalog = c
+	return h
+}
+
+// templateImageAge returns the raw image-built-at value of the template, or
+// "" when the template is unknown, unreadable or carries none.
+func (h *WorkspaceHandler) templateImageAge(ctx context.Context, tenantID, templateID string) string {
+	cat := h.imageCatalog
+	if cat == nil {
+		cat = h.catalog
+	}
+	if cat == nil || templateID == "" {
+		return ""
+	}
+	memo, _ := ctx.Value(imageAgeMemoKey{}).(*imageAgeMemo)
+	if memo == nil {
+		memo = &imageAgeMemo{ages: map[string]string{}}
+	}
+	key := tenantID + "/" + templateID
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if raw, ok := memo.ages[key]; ok {
+		return raw
+	}
+	raw := ""
+	e, err := cat.Resolve(ctx, tenantID, templateID)
+	switch {
+	case err == nil:
+		raw = e.ImageBuiltAt
+	case !errors.Is(err, ErrTemplateNotFound):
+		log := h.log
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("image age fallback: template lookup failed", "template", templateID, "error", err)
+	}
+	memo.ages[key] = raw
+	return raw
 }
