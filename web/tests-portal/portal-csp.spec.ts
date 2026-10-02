@@ -124,3 +124,26 @@ test("every route reports zero securitypolicyviolation events", async ({
 }) => {
   await cspSweep({ page, request, harnessMode });
 });
+
+// FX-R21: the public signed-out page is served by the SPA fallback under the
+// same CSP, and makes no API call (no session probe, no login) on load.
+test("the signed-out page renders under the portal CSP without any API request", async ({
+  page,
+}) => {
+  const consoleViolations = watchConsole(page);
+  await armViolationCollector(page);
+  const api: string[] = [];
+  page.on("request", (r) => {
+    const p = new URL(r.url()).pathname;
+    if (p.startsWith("/v1/")) api.push(`${r.method()} ${p}`);
+  });
+  await page.goto("/signed-out");
+  await expect(
+    page.getByRole("heading", { name: "You have signed out" }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in again" })).toBeVisible();
+  await page.waitForLoadState("networkidle");
+  expect(await pageViolations(page)).toEqual([]);
+  expect(consoleViolations).toEqual([]);
+  expect(api).toEqual([]);
+});
