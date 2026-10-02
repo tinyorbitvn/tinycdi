@@ -74,6 +74,11 @@ ingress:
 runtime:
   placement:
     allowSharedNodes: true
+  # kind nodes have no AppArmor: the kubelet refuses a pod that names an
+  # AppArmor profile there, so do not pin RuntimeDefault (supported setting
+  # for nodes without AppArmor; keep the default true on nodes that have it).
+  appArmor:
+    requireRuntimeDefault: false
   # kind nodes cannot start user-namespaced pods (runc fails mounting sysfs),
   # so the quickstart leaves pod.spec.hostUsers unset. Keep the v0.2 default
   # (false) on a real cluster.
