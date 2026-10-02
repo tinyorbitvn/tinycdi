@@ -1,0 +1,13 @@
+{
+  "name": "tinycdi-quickstart-smoke",
+  "version": "0.2.0",
+  "license": "MIT",
+  "private": true,
+  "description": "TinyCDI quickstart smoke test: log in through the dev Keycloak, create a browser workspace and see the session frame load",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

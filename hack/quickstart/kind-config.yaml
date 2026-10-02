@@ -1,0 +1,17 @@
+# kind cluster for the TinyCDI quickstart (DEV ONLY - see docs/quickstart.md).
+#
+# One node: the control plane also runs workloads (kind removes the taint on
+# a single-node cluster), which is why the chart is installed with
+# runtime.placement.allowSharedNodes: true.
+#
+# The ingress controller (Traefik) listens on NodePorts 30080/30443; kind maps
+# them to host ports 80/443 on the loopback interface only, so
+# https://portal.tcdi.localtest.me resolves to 127.0.0.1 and lands on the
+# ingress. Free host ports 80 and 443 before running up.sh.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - {containerPort: 30080, hostPort: 80, listenAddress: "127.0.0.1", protocol: TCP}
+      - {containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: TCP}
