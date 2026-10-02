@@ -51,10 +51,12 @@ type userUsage struct {
 }
 
 // quotaView is the tenant quota snapshot (openapi QuotaView). userLimits is
-// omitted: there is no per-user limit store in v0.2.
+// omitted: there is no per-user limit store in v0.2. Limits is omitted for a
+// tenant without a quota row (admission fails closed there); inside Limits,
+// workspaces 0 means "no count limit".
 type quotaView struct {
-	Tenant string       `json:"tenant"`
-	Limits quotaAmounts `json:"limits"`
+	Tenant string        `json:"tenant"`
+	Limits *quotaAmounts `json:"limits,omitempty"`
 	Usage  quotaAmounts `json:"usage"`
 	Users  []userUsage  `json:"users"`
 }
@@ -104,9 +106,12 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 	owners := resolveOwners(r.Context(), h.dir, p.TenantID, refs)
 	out := quotaView{
 		Tenant: p.TenantID,
-		Limits: mapQuotaAmounts(rep.Limits),
 		Usage:  mapQuotaAmounts(rep.Usage),
 		Users:  make([]userUsage, 0, len(refs)),
+	}
+	if rep.HasLimits {
+		limits := mapQuotaAmounts(rep.Limits)
+		out.Limits = &limits
 	}
 	for _, o := range rep.Owners {
 		if !admin && o.OwnerRef != p.Owner() {

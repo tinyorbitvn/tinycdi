@@ -6,9 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -267,5 +271,72 @@ func TestDirectory_UpsertOnLogin(t *testing.T) {
 	}
 	if len(dir.remembered) != 2 {
 		t.Fatalf("Remember called %d times, want 2", len(dir.remembered))
+	}
+}
+
+// TestQuota_NoRowOmitsLimits: a tenant without a quota row (admission fails
+// closed) must not report zero limits — the limits object is omitted, so the
+// portal cannot render "0 of 0" as if a quota of zero had been configured.
+func TestQuota_NoRowOmitsLimits(t *testing.T) {
+	src := &fakeQuotaSource{}
+	env := newQuotaEnv(t, src, newFakeDirectory(), defaultTenants())
+	rep := quotaFixture(env.issuer.URL())
+	rep.HasLimits = false
+	rep.Limits = store.QuotaAmounts{}
+	src.report = rep
+	sess, csrf := login(t, env, "user-a")
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/quota", "", nil)
+	raw := decodeBody[map[string]any](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", r.StatusCode)
+	}
+	if _, present := raw["limits"]; present {
+		t.Fatalf("limits present without a quota row: %v", raw["limits"])
+	}
+	if _, present := raw["usage"]; !present {
+		t.Fatal("usage missing: usage is reported with or without limits")
+	}
+}
+
+// TestQuota_ZeroWorkspacesMeansUnlimited: with a quota row, limits.workspaces
+// is 0 because there is no workspace-count limit; openapi documents that 0
+// means "no count limit" so clients do not render it as a hard zero.
+func TestQuota_ZeroWorkspacesMeansUnlimited(t *testing.T) {
+	src := &fakeQuotaSource{}
+	env := newQuotaEnv(t, src, newFakeDirectory(), defaultTenants())
+	src.report = quotaFixture(env.issuer.URL())
+	sess, csrf := login(t, env, "user-a")
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/quota", "", nil)
+	v := decodeBody[quotaViewJSON](t, r)
+	if v.Limits.Workspaces != 0 {
+		t.Fatalf("limits.workspaces=%d, want 0 (no count limit)", v.Limits.Workspaces)
+	}
+
+	rawSpec, err := os.ReadFile("openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec struct {
+		Components struct {
+			Schemas map[string]struct {
+				Required   []string `yaml:"required"`
+				Properties map[string]struct {
+					Description string `yaml:"description"`
+				} `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(rawSpec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	amounts := spec.Components.Schemas["QuotaAmounts"].Properties["workspaces"].Description
+	if !strings.Contains(amounts, "no count limit") {
+		t.Fatalf("QuotaAmounts.workspaces description %q must document 0 as 'no count limit' within limits", amounts)
+	}
+	for _, req := range spec.Components.Schemas["QuotaView"].Required {
+		if req == "limits" {
+			t.Fatal("QuotaView.limits is required in openapi; it must be optional (omitted without a quota row)")
+		}
 	}
 }

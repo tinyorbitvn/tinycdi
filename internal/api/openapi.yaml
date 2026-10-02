@@ -1131,7 +1131,10 @@ components:
       properties:
         workspaces:
           type: integer
-          description: Active (not deleted) workspace count.
+          description: |
+            Active (not deleted) workspace count. Within `limits`, 0 means
+            there is no count limit (quota is enforced on running slots, CPU,
+            memory and storage).
         runningWorkspaces:
           type: integer
           description: Reserved running slots.
@@ -1163,10 +1166,11 @@ components:
     QuotaView:
       type: object
       additionalProperties: false
-      required: [tenant, limits, usage, users]
+      required: [tenant, usage, users]
       description: |
-        Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
-        per-user limit store. `users` lists every tenant member for tenant
+        Tenant quota snapshot. `limits` is absent when the tenant has no
+        quota row (new workspaces are then refused). `userLimits` is absent
+        in v0.2 — there is no per-user limit store. `users` lists every tenant member for tenant
         administrators and only the caller for regular users.
       properties:
         tenant:
