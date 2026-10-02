@@ -107,6 +107,17 @@ func TestOpenAPIContract_TemplateView(t *testing.T) {
 	})
 }
 
+func TestOpenAPIContract_SessionProbe(t *testing.T) {
+	requireValid(t, "SessionProbe", sessionProbeView{Authenticated: true})
+	requireValid(t, "SessionProbe", sessionProbeView{Authenticated: false})
+	t.Run("extra keys are rejected", func(t *testing.T) {
+		inst, _ := jsonschema.UnmarshalJSON(bytes.NewReader([]byte(`{"authenticated":true,"subject":"alice"}`)))
+		if err := specSchema(t, "SessionProbe").Validate(inst); err == nil {
+			t.Fatal("SessionProbe must be exactly {authenticated}")
+		}
+	})
+}
+
 func TestOpenAPIContract_WorkspaceView(t *testing.T) {
 	now := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
 	stale := true

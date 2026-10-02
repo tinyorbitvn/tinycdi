@@ -92,6 +92,7 @@ func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.A
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
 	mux.Handle("/auth/logout", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(a.LogoutHandler))))
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
+	MountSessionProbeRoute(mux, a)
 	mux.Handle("/v1/echo-owner", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))
 
 	var h http.Handler = mux
