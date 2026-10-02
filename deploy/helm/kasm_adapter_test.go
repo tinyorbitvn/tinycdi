@@ -3,10 +3,12 @@
 
 // Chart coverage for the kasm workspace adapter (docs/kasm-images.md):
 //
-//   - kasmAdapter.image.digest renders --kasm-adapter-image on the
-//     operator (digest-pinned only — a tag is refused),
-//   - a seeded template with spec.linux.adapter=kasm REQUIRES the pinned
-//     adapter image or the render fails,
+//   - --kasm-adapter-image renders on the operator ONLY when
+//     kasmAdapter.enabled=true (default false), whether or not release
+//     stamping filled kasmAdapter.image.digest; enabled=true requires a
+//     digest-pinned image (a tag is refused),
+//   - a seeded template with spec.linux.adapter=kasm REQUIRES the adapter
+//     to be enabled and pinned or the render fails,
 //   - the seeded kasm template carries the digest-pinned kasmweb image,
 //     the adapter marker and the sessionCmd verbatim.
 package chart_test
@@ -16,9 +18,9 @@ import (
 	"testing"
 )
 
-// TestKasmAdapterFlagRendered: with kasmAdapter.image.digest set the
-// operator gets --kasm-adapter-image=<registry>/<repo>@<digest>; without
-// it the flag is absent entirely.
+// TestKasmAdapterFlagRendered: with kasmAdapter.enabled=true and the
+// digest set the operator gets
+// --kasm-adapter-image=<registry>/<repo>@<digest>.
 func TestKasmAdapterFlagRendered(t *testing.T) {
 	dep := deployment(render(t, "example-values.yaml"), "operator")
 	args := strings.Join(firstContainerArgs(dep), "\n")
@@ -29,13 +31,72 @@ func TestKasmAdapterFlagRendered(t *testing.T) {
 	}
 }
 
+// operatorArgs renders the chart with the extra helm args and returns the
+// operator's first-container args joined by newlines.
+func operatorArgs(t *testing.T, extra ...string) string {
+	t.Helper()
+	return strings.Join(firstContainerArgs(deployment(renderArgs(t, extra...), "operator")), "\n")
+}
+
+const stampedDigest = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+
+// TestKasmAdapterFlagAbsentWhenDisabled: a release-stamped digest alone
+// (what stamp-image-digests.sh writes into the packaged values.yaml) must
+// NOT turn the adapter on — kasmAdapter.enabled gates the flag (KASM-2
+// condition 1: adapter off by default).
+func TestKasmAdapterFlagAbsentWhenDisabled(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"stamped digest, enabled unset": {"--set", "kasmAdapter.image.digest=" + stampedDigest},
+		"stamped digest, enabled=false": {"--set", "kasmAdapter.image.digest=" + stampedDigest,
+			"--set", "kasmAdapter.enabled=false"},
+	} {
+		args := operatorArgs(t, append([]string{"-f", "tinycdi/ci/minimal-values.yaml"}, extra...)...)
+		if strings.Contains(args, "--kasm-adapter-image") {
+			t.Errorf("%s: --kasm-adapter-image rendered while kasmAdapter.enabled is false\nargs:\n%s", name, args)
+		}
+	}
+}
+
+// TestKasmAdapterFlagRenderedWhenEnabled: enabled=true + digest renders
+// the flag with the digest-pinned ref.
+func TestKasmAdapterFlagRenderedWhenEnabled(t *testing.T) {
+	args := operatorArgs(t, "-f", "tinycdi/ci/minimal-values.yaml",
+		"--set", "kasmAdapter.enabled=true",
+		"--set", "kasmAdapter.image.digest="+stampedDigest)
+	want := "--kasm-adapter-image=ghcr.io/tinyorbitvn/tinycdi-kasm-adapter@" + stampedDigest
+	if !strings.Contains(args, want) {
+		t.Errorf("operator args missing %q\nargs:\n%s", want, args)
+	}
+}
+
+// TestKasmAdapterEnabledRequiresDigest: enabling the adapter without a
+// digest-pinned image fails the render with a clear message.
+func TestKasmAdapterEnabledRequiresDigest(t *testing.T) {
+	out := renderErrArgs(t, "-f", "tinycdi/ci/minimal-values.yaml",
+		"--set", "kasmAdapter.enabled=true")
+	if !strings.Contains(out, "kasmAdapter.enabled=true requires kasmAdapter.image.digest") {
+		t.Fatalf("expected render to fail on enabled adapter without digest, got: %s", out)
+	}
+}
+
+// TestKasmAdapterSeedRequiresEnabled: a seeded adapter=kasm template with
+// the adapter disabled is inconsistent (the backend would reject the
+// workspaces) and fails the render, even with a digest stamped.
+func TestKasmAdapterSeedRequiresEnabled(t *testing.T) {
+	out := renderErrArgs(t, "-f", "tinycdi/ci/example-values.yaml",
+		"--set", "kasmAdapter.enabled=false")
+	if !strings.Contains(out, "kasmAdapter.enabled=true") {
+		t.Fatalf("expected render to fail naming kasmAdapter.enabled=true, got: %s", out)
+	}
+}
+
 func TestKasmAdapterFlagAbsentByDefault(t *testing.T) {
 	for _, vf := range []string{"minimal-values.yaml", "security-values.yaml",
 		"node-profiles-values.yaml", "template-revision-values.yaml"} {
 		dep := deployment(render(t, vf), "operator")
 		args := strings.Join(firstContainerArgs(dep), "\n")
 		if strings.Contains(args, "--kasm-adapter-image") {
-			t.Errorf("%s: --kasm-adapter-image must not render without kasmAdapter.image.digest\nargs:\n%s", vf, args)
+			t.Errorf("%s: --kasm-adapter-image must not render while kasmAdapter.enabled is false\nargs:\n%s", vf, args)
 		}
 	}
 }
@@ -44,7 +105,7 @@ func TestKasmAdapterFlagAbsentByDefault(t *testing.T) {
 // kasm path is entirely off — no --kasm-adapter-image flag on the
 // operator and no seeded WorkspaceTemplate with spec.linux.adapter=kasm.
 // Kasm support is strictly opt-in (KASM-2 risk acceptance: the operator
-// must set both the digest pin and a seeded template). Bare values.yaml
+// must set kasmAdapter.enabled, the digest pin and a seeded template). Bare values.yaml
 // is not covered here on purpose — it fails closed on the
 // database.allowedPeers placeholder by design (chart_hardening_test.go).
 func TestKasmAdapterOffByDefault(t *testing.T) {
@@ -53,7 +114,7 @@ func TestKasmAdapterOffByDefault(t *testing.T) {
 		docs := render(t, vf)
 		args := strings.Join(firstContainerArgs(deployment(docs, "operator")), "\n")
 		if strings.Contains(args, "--kasm-adapter-image") {
-			t.Errorf("%s: --kasm-adapter-image must not render without kasmAdapter.image.digest\nargs:\n%s", vf, args)
+			t.Errorf("%s: --kasm-adapter-image must not render while kasmAdapter.enabled is false\nargs:\n%s", vf, args)
 		}
 		for _, d := range selectDocs(docs, "WorkspaceTemplate") {
 			spec, _ := d["spec"].(map[string]any)
@@ -74,6 +135,7 @@ func TestKasmAdapterFlagGlobalRegistry(t *testing.T) {
 	dep := deployment(renderArgs(t,
 		"-f", "tinycdi/ci/minimal-values.yaml",
 		"--set", "global.imageRegistry=mirror.example.net",
+		"--set", "kasmAdapter.enabled=true",
 		"--set", "kasmAdapter.image.digest="+digest), "operator")
 	args := strings.Join(firstContainerArgs(dep), "\n")
 	want := "--kasm-adapter-image=mirror.example.net/tinyorbitvn/tinycdi-kasm-adapter@" + digest

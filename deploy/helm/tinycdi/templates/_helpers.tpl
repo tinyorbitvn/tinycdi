@@ -282,21 +282,31 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if and $internetOnly (not .Values.operator.clusterCIDRs) -}}
 {{- fail "operator.clusterCIDRs is required when a seeded template uses networkProfile=InternetOnly — declare this cluster's pod/service/node CIDRs so runtime egress excludes them" -}}
 {{- end -}}
-{{- /* adapter=kasm templates need the adapter init image pinned — the
-        backend rejects them when the operator has no --kasm-adapter-image,
-        and the flag only renders for a digest-pinned image (a mutable tag
-        would let an image swap change what runs inside every kasm pod). */ -}}
+{{- /* The Kasm adapter is opt-in (KASM-2 condition 1): the operator gets
+        --kasm-adapter-image ONLY when kasmAdapter.enabled=true, however the
+        digest got into the values (release stamping fills it in the
+        packaged chart). Enabled needs a digest-pinned image — a mutable tag
+        would let an image swap change what runs inside every kasm pod —
+        and a seeded adapter=kasm template needs the adapter enabled (the
+        backend rejects it when the operator has no --kasm-adapter-image). */ -}}
 {{- $kasmSeed := false -}}
 {{- range .Values.templates -}}
 {{- if eq (printf "%v" (get (default dict (get (default dict .spec) "linux")) "adapter")) "kasm" -}}
 {{- $kasmSeed = true -}}
 {{- end -}}
 {{- end -}}
-{{- $kaDigest := (default dict (get (default dict .Values.kasmAdapter) "image")).digest -}}
-{{- if and $kasmSeed (not $kaDigest) -}}
-{{- fail "kasmAdapter.image.digest is required when a seeded template uses spec.linux.adapter=kasm — the adapter init image must be digest-pinned" -}}
+{{- $kaImage := (default dict (get (default dict .Values.kasmAdapter) "image")) -}}
+{{- $kaEnabled := (default dict .Values.kasmAdapter).enabled -}}
+{{- if and $kasmSeed (not $kaEnabled) -}}
+{{- fail "kasmAdapter.enabled=true is required when a seeded template uses spec.linux.adapter=kasm — the operator only gets --kasm-adapter-image when the adapter is enabled" -}}
 {{- end -}}
-{{- if and (not $kaDigest) (default dict (get (default dict .Values.kasmAdapter) "image")).tag -}}
+{{- if and $kaEnabled (not $kaImage.digest) -}}
+{{- fail "kasmAdapter.enabled=true requires kasmAdapter.image.digest — the adapter init image must be digest-pinned (a tag alone is refused)" -}}
+{{- end -}}
+{{- if and $kaEnabled (not $kaImage.repository) -}}
+{{- fail "kasmAdapter.enabled=true requires kasmAdapter.image.repository" -}}
+{{- end -}}
+{{- if and (not $kaImage.digest) $kaImage.tag -}}
 {{- fail "kasmAdapter.image.tag without .digest is refused — --kasm-adapter-image accepts digest-pinned refs only" -}}
 {{- end -}}
 {{- /* SEC-36: dev/privileged surfaces are gated behind dev.enabled. */ -}}
