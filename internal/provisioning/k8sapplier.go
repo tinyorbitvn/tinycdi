@@ -115,6 +115,9 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 			IntentRevision:    int64(in.Revision),
 		},
 	}
+	if in.Spec.ImageBuiltAt != "" {
+		ws.Annotations[AnnotationWorkspaceImageBuiltAt] = in.Spec.ImageBuiltAt
+	}
 	err := a.client.Create(ctx, ws)
 	switch {
 	case err == nil:
@@ -254,6 +257,11 @@ const LabelCatalogName = "workspaces.cdi.tinyorbit.vn/catalog-name"
 // or the seeded entry's imageBuiltAt. The API surfaces it as the
 // imageBuiltAt/imageStale view fields; it is advisory only (D28).
 const AnnotationImageBuiltAt = "workspaces.cdi.tinyorbit.vn/image-built-at"
+
+// AnnotationWorkspaceImageBuiltAt is the same annotation on a Workspace CR:
+// Create copies the template's value so the image age travels with the
+// workspace and survives the template revision being superseded.
+const AnnotationWorkspaceImageBuiltAt = AnnotationImageBuiltAt
 
 // TemplateCRName converts a public template ID to its CR name; ok=false
 // when id lacks the tpl_ prefix.

@@ -167,39 +167,35 @@ func TestImageStale_MalformedAnnotation(t *testing.T) {
 	}
 }
 
-// TestWorkspaceView_ImageStaleFromTemplate: the workspace view resolves
-// image freshness through the workspace's template — a stale template
-// reports imageStale: true; a deleted template leaves both fields absent.
-func TestWorkspaceView_ImageStaleFromTemplate(t *testing.T) {
+// TestWorkspaceView_ImageStaleFromWorkspace: the workspace view reports
+// image freshness from the age that travelled with the workspace (the
+// create-time template snapshot) — never from a live template lookup, so a
+// stale image reports imageStale: true and a workspace without an age (or
+// whose template is long gone) leaves both fields absent.
+func TestWorkspaceView_ImageStaleFromWorkspace(t *testing.T) {
 	now := time.Now().UTC()
-	cat := staleCatalog{entries: map[string]TemplateEntry{
-		"tenant-a/tpl_staleimg": {
-			ID: "tpl_staleimg", Name: "staleimg", Revision: 2,
-			Runtime: "LinuxContainer", Experience: "Desktop",
-			ImageBuiltAt: now.Add(-15 * 24 * time.Hour).Format(time.RFC3339),
-		},
-	}}
 	be := newFakeBackend()
-	env, _, _ := newStaleEnv(t, be, cat)
+	env, _, _ := newStaleEnv(t, be, staleCatalog{})
 	sess, csrf := login(t, env, "user-a")
 	owner := env.issuer.URL() + "|" + env.issuer.Subject
 
-	mkRec := func(id, tplID string) provisioning.WorkspaceRecord {
+	mkRec := func(id, tplID, builtAt string) provisioning.WorkspaceRecord {
 		return provisioning.WorkspaceRecord{
 			ID: id, TenantID: "tenant-a", Owner: owner,
 			OwnerIssuer: env.issuer.URL(), OwnerSub: env.issuer.Subject,
 			Name: "w-" + id[3:],
 			Template: provisioning.TemplateInfo{
 				ID: tplID, Name: strings.TrimPrefix(tplID, "tpl_"), Revision: 2,
-				Runtime: "LinuxContainer", Experience: "Desktop",
+				Runtime: "LinuxContainer", Experience: "Desktop", ImageBuiltAt: builtAt,
 			},
 			Phase: "Running", DesiredState: "Running", DataPolicy: "Ephemeral",
 			Revision:  1,
 			CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
 		}
 	}
-	be.recs["ws_stale0001"] = mkRec("ws_stale0001", "tpl_staleimg")
-	be.recs["ws_orphan001"] = mkRec("ws_orphan001", "tpl_gone")
+	be.recs["ws_stale0001"] = mkRec("ws_stale0001", "tpl_staleimg",
+		now.Add(-15*24*time.Hour).Format(time.RFC3339))
+	be.recs["ws_orphan001"] = mkRec("ws_orphan001", "tpl_gone", "")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/ws_stale0001", "", nil)
 	v := decodeBody[WorkspaceView](t, r)
@@ -207,19 +203,19 @@ func TestWorkspaceView_ImageStaleFromTemplate(t *testing.T) {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
 	if v.ImageStale == nil || !*v.ImageStale {
-		t.Fatalf("stale template: imageStale=%v, want true", v.ImageStale)
+		t.Fatalf("stale image: imageStale=%v, want true", v.ImageStale)
 	}
 	if v.ImageBuiltAt == nil {
-		t.Fatal("stale template: imageBuiltAt absent, want the parsed timestamp")
+		t.Fatal("stale image: imageBuiltAt absent, want the parsed timestamp")
 	}
 
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/ws_orphan001", "", nil)
 	v = decodeBody[WorkspaceView](t, r)
 	if r.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d, want 200 (deleted template must not fail the request)", r.StatusCode)
+		t.Fatalf("status=%d, want 200 (a workspace without an image age must not fail the request)", r.StatusCode)
 	}
 	if v.ImageBuiltAt != nil || v.ImageStale != nil {
-		t.Fatalf("deleted template: imageBuiltAt=%v imageStale=%v, want both absent",
+		t.Fatalf("no image age: imageBuiltAt=%v imageStale=%v, want both absent",
 			v.ImageBuiltAt, v.ImageStale)
 	}
 }

@@ -578,6 +578,7 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 			OwnerSubject:    sub,
 			DataPolicy:      "Retain",
 			RetainedDataRef: dataID,
+			ImageBuiltAt:    req.Template.ImageBuiltAt,
 		})
 		if err != nil {
 			return err

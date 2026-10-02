@@ -42,6 +42,9 @@ type IntentSpec struct {
 	OwnerSubject    string `json:"ownerSubject,omitempty"`
 	DataPolicy      string `json:"dataPolicy,omitempty"`
 	RetainedDataRef string `json:"retainedDataRef,omitempty"`
+	// ImageBuiltAt is the template's raw image-built-at annotation value at
+	// create time; the applier copies it onto the Workspace CR.
+	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
 }
 
 // intentPayload is the JSON envelope stored in outbox_intent.payload.

@@ -334,6 +334,7 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		Template: provisioning.TemplateInfo{
 			ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
 			Runtime: tpl.Runtime, Experience: tpl.Experience,
+			ImageBuiltAt: tpl.ImageBuiltAt,
 		},
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1,

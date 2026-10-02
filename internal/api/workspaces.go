@@ -399,6 +399,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	tplInfo := provisioning.TemplateInfo{
 		ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
 		Runtime: tpl.Runtime, Experience: tpl.Experience,
+		ImageBuiltAt: tpl.ImageBuiltAt,
 	}
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,
