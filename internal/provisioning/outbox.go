@@ -164,6 +164,9 @@ type WorkspaceApplier interface {
 	Apply(ctx context.Context, in Intent) error
 }
 
+// ackTimeout bounds recording one delivered intent (see serve).
+const ackTimeout = 5 * time.Second
+
 // IntentStore is the dispatcher's read/mark view of the outbox so the
 // dispatcher can be unit-tested without PostgreSQL.
 type IntentStore interface {
@@ -374,7 +377,16 @@ func (r *dispatchRun) serve(ctx context.Context, uid PlatformID) {
 					return // simulated crash: leave undispatched
 				}
 			}
-			if err := r.d.store.MarkDispatched(ctx, in.WorkspaceUID, in.Revision); err != nil {
+			// Record the delivery even if ctx was cancelled during Apply (the
+			// leader lost its lock or is shutting down): the intent was
+			// applied, and a failed ack here would make the next leader
+			// replay it. The caller waits for this goroutine before it
+			// releases leadership, so the ack lands before a successor can
+			// start; ackTimeout bounds it.
+			ackCtx, ackCancel := context.WithTimeout(context.WithoutCancel(ctx), ackTimeout)
+			err := r.d.store.MarkDispatched(ackCtx, in.WorkspaceUID, in.Revision)
+			ackCancel()
+			if err != nil {
 				failed = true
 				break
 			}

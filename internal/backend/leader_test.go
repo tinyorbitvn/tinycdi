@@ -173,13 +173,19 @@ func TestSingletonLoops_OneRunner(t *testing.T) {
 	}
 }
 
-// TestSingletonLoops_Failover (R1b): stopping the holder hands the loops to
-// the other replica, which applies a new intent within 15 s.
+// TestSingletonLoops_Failover (R1b, FX-R14): stopping the holder hands the
+// loops to the other replica, which applies a new intent. Every intent is
+// applied exactly once: the holder's last acknowledgement lands before it
+// releases the lock, so the successor never replays it. The test waits on
+// observable events (the lock changing hands, the intents being applied), not
+// on wall-clock sleeps, and injects a short retry interval so the hand-over
+// does not wait out leaderRetryInterval.
 func TestSingletonLoops_Failover(t *testing.T) {
 	db := newDB(t)
 	applier := newCountingApplier()
-	a := startReplica(t, db, "a", leaderRetryInterval, nil, dispatcherLoop(db, applier))
-	b := startReplica(t, db, "b", leaderRetryInterval, nil, dispatcherLoop(db, applier))
+	const retry = 200 * time.Millisecond
+	a := startReplica(t, db, "a", retry, nil, dispatcherLoop(db, applier))
+	b := startReplica(t, db, "b", retry, nil, dispatcherLoop(db, applier))
 
 	waitFor(t, 15*time.Second, "a leader", func() bool { return a.isLeader() || b.isLeader() })
 	holder, other := a, b
@@ -189,7 +195,8 @@ func TestSingletonLoops_Failover(t *testing.T) {
 	appendTestIntent(t, db, "ws_fail0001")
 	waitFor(t, 10*time.Second, "first intent applied", func() bool { return len(applier.snapshot()) == 1 })
 
-	t0 := time.Now()
+	// Stop the holder immediately after its first Apply: this is the window
+	// in which a failed acknowledgement would be replayed by the successor.
 	holder.cancel()
 	select {
 	case <-holder.done:
@@ -197,13 +204,11 @@ func TestSingletonLoops_Failover(t *testing.T) {
 		t.Fatal("holder did not stop")
 	}
 
-	t.Logf("holder stopped after %v", time.Since(t0))
+	// The successor takes the lock; only then is the second intent appended,
+	// so the apply below can only have come from the new leader.
+	waitFor(t, 15*time.Second, "the other replica to take the loops", other.isLeader)
 	appendTestIntent(t, db, "ws_fail0002")
-	waitFor(t, 15*time.Second, "failover apply by the other replica", func() bool { return len(applier.snapshot()) == 2 })
-	t.Logf("failover done after %v", time.Since(t0))
-	if !other.isLeader() {
-		t.Fatal("the surviving replica never took the loops")
-	}
+	waitFor(t, 10*time.Second, "failover apply by the other replica", func() bool { return len(applier.snapshot()) == 2 })
 	for k, c := range applier.snapshot() {
 		if c != 1 {
 			t.Errorf("intent %s applied %d times, want 1", k, c)
