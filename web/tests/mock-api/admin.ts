@@ -126,6 +126,7 @@ function seedRetained(): { rec: RetainedFixture; owner: Owner }[] {
       owner: grace,
       rec: {
         id: SEED_DATA_IDS.grace,
+        owner: grace,
         state: "Retained",
         sizeGib: 40,
         runtime: "LinuxContainer",
@@ -138,6 +139,7 @@ function seedRetained(): { rec: RetainedFixture; owner: Owner }[] {
       owner: linus,
       rec: {
         id: SEED_DATA_IDS.linus,
+        owner: linus,
         state: "Attached",
         sizeGib: 20,
         runtime: "LinuxContainer",
