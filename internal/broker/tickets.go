@@ -427,10 +427,11 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		// a takeover fences the old lease BEFORE the new lease exists.
 		var liveID string
 		var liveExp time.Time
+		var liveGen uint64
 		err = tx.QueryRow(ctx,
-			`SELECT id, expires_at FROM connection_lease
+			`SELECT id, expires_at, runtime_generation FROM connection_lease
 			 WHERE workspace_id = $1 AND state = 'active' FOR UPDATE`, wsUID).
-			Scan(&liveID, &liveExp)
+			Scan(&liveID, &liveExp, &liveGen)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			// no live lease
@@ -447,6 +448,13 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			}
 			if _, err := tx.Exec(ctx, next, liveID, now); err != nil {
 				return fmt.Errorf("broker: fence old lease: %w", err)
+			}
+			// The fenced lease is dead: its streams can no longer report
+			// their close, so the transition owns the bound generation's
+			// drain accounting — the same update liveLease's lazy expiry
+			// and RevokeLease run.
+			if err := closeStreamsTx(ctx, tx, wsUID, liveGen, now); err != nil {
+				return fmt.Errorf("broker: close fenced streams: %w", err)
 			}
 		}
 

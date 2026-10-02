@@ -66,8 +66,12 @@ func (g *Gateway) rehydrate(r *http.Request, cookieValue, wsID string) *session 
 		return nil
 	}
 	if c, ok := g.inflight[d]; ok {
+		g.inflightWaiters++
 		g.mu.Unlock()
 		<-c.done
+		g.mu.Lock()
+		g.inflightWaiters--
+		g.mu.Unlock()
 		if c.sess != nil && c.sess.live(g) {
 			return c.sess
 		}

@@ -154,9 +154,13 @@ type Gateway struct {
 	byLease     map[string]*session                     // lease ID -> session
 	byWorkspace map[string]*session                     // workspace UID -> session (takeover fence)
 	inflight    map[broker.SessionDigest]*rehydrateCall // digest -> shared lookup
-	draining    bool                                    // set by Drain: refuse new upgrades
-	done        chan struct{}                           // closed by Close
-	closeOnce   sync.Once
+	// inflightWaiters counts requests parked on a shared lookup's done
+	// channel — test instrumentation that makes the dedup rendezvous
+	// observable (read through export_test.go).
+	inflightWaiters int
+	draining        bool          // set by Drain: refuse new upgrades
+	done            chan struct{} // closed by Close
+	closeOnce       sync.Once
 }
 
 func (g *Gateway) now() time.Time { return g.cfg.Now() }

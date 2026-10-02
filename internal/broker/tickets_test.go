@@ -218,6 +218,66 @@ func TestRedeemTicket_WrongGatewayAudience(t *testing.T) {
 	}
 }
 
+// TestRedeemTicket_ExpiredLeaseClosesStreams: when the first touch of a
+// dead lease is a ticket redemption — not a directory lookup or a renew —
+// the fence must still close the dead lease's drain accounting: the replica
+// that owned it is gone and its streams can never report their close
+// (Review Focus #1; same accounting as liveLease lazy expiry and
+// RevokeLease).
+func TestRedeemTicket_ExpiredLeaseClosesStreams(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+
+	old := leaseFor(t, b, gwA, "ws-1", false)
+	if err := b.ReportActivity(ctx, gwA, old.ID, fenceOf(old),
+		broker.ActivityEvent{Type: broker.ActivityConnected}); err != nil {
+		t.Fatalf("ReportActivity(connected): %v", err)
+	}
+
+	// L1 dies un-renewed; IssueTicket's advisory gate sees the expired row
+	// and a plain (non-takeover) ticket issues. Refreshing the observation
+	// keeps the binding inside the freshness budget.
+	clock.Advance(broker.LeaseTTL + time.Second)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false)
+	if err != nil {
+		t.Fatalf("IssueTicket over expired lease: %v", err)
+	}
+	newLease, err := b.RedeemTicket(ctx, gwA, tk.Token)
+	if err != nil {
+		t.Fatalf("RedeemTicket over expired lease: %v", err)
+	}
+	if newLease.ID == old.ID {
+		t.Fatal("redemption returned the expired lease")
+	}
+
+	var (
+		open    int
+		disconn *time.Time
+		state   string
+	)
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT state FROM connection_lease WHERE id = $1`, old.ID).Scan(&state); err != nil {
+		t.Fatalf("old lease row: %v", err)
+	}
+	if state != "expired" {
+		t.Fatalf("old lease state = %q, want expired", state)
+	}
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT open_streams, disconnected_since FROM workspace_activity
+		 WHERE workspace_id = $1 AND runtime_generation = $2`,
+		"ws-1", int64(old.RuntimeGeneration)).Scan(&open, &disconn); err != nil {
+		t.Fatalf("workspace_activity row: %v", err)
+	}
+	if open != 0 {
+		t.Fatalf("open_streams = %d after redemption fenced the expired lease, want 0", open)
+	}
+	if disconn == nil {
+		t.Fatal("disconnected_since NULL after redemption fenced the expired lease — disconnect timeout could never fire")
+	}
+}
+
 // TestIssueTicket_ConnectionInUse: issuing while a live lease exists requires
 // explicit takeover — this is what maps to 409 CONNECTION_IN_USE on the API.
 func TestIssueTicket_ConnectionInUse(t *testing.T) {

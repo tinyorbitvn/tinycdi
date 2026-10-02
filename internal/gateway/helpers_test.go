@@ -78,6 +78,10 @@ type fakeBroker struct {
 	renewBy map[string]int // renew calls per gateway identity
 	lookupN int            // LeaseBySession calls
 	revokeN int            // RevokeLease calls
+	// lookupGate, when set, makes every LeaseBySession call block on the
+	// channel — a scripted rendezvous for the concurrent-miss test, so the
+	// overlap is deterministic rather than timing-dependent.
+	lookupGate chan struct{}
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -263,10 +267,18 @@ func (f *fakeBroker) BindSession(_ context.Context, _ broker.GatewayIdentity, le
 
 // LeaseBySession resolves a cookie digest to its scripted lease, applying
 // the same liveness view RenewLease has (a revoked/failed lease is dead).
+// When a lookup gate is scripted the call blocks until the test closes it,
+// so tests can hold the lookup open while more requests pile up behind it.
 func (f *fakeBroker) LeaseBySession(_ context.Context, _ broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.lookupN++
+	gate := f.lookupGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	leaseID, ok := f.digests[d]
 	if !ok {
 		return broker.Lease{}, broker.ErrLeaseInvalid
@@ -301,6 +313,16 @@ func (f *fakeBroker) renewCount(gwID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.renewBy[gwID]
+}
+
+// gateLookups makes every subsequent LeaseBySession call block on the
+// returned channel until the test closes it. The count of calls that have
+// entered LeaseBySession is readable via lookupCount while they block.
+func (f *fakeBroker) gateLookups() chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lookupGate = make(chan struct{})
+	return f.lookupGate
 }
 
 // lookupCount reports the LeaseBySession call count.

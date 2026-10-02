@@ -61,6 +61,22 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	return l, state, nil
 }
 
+// closeStreamsTx zeroes a runtime generation's open_streams and anchors
+// disconnected_since, inside tx. Every transition that kills a lease runs
+// it: the lease's streams can no longer report their close (every gateway
+// path refuses a dead lease), so the kill owns the drain accounting and the
+// §8 disconnect grace semantics survive a replica dying mid-stream.
+func closeStreamsTx(ctx context.Context, tx store.Tx, wsUID string, gen uint64, now time.Time) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE workspace_activity SET
+			open_streams = 0,
+			disconnected_since = COALESCE(disconnected_since, $3),
+			updated_at = $3
+		WHERE workspace_id = $1 AND runtime_generation = $2 AND open_streams > 0`,
+		wsUID, int64(gen), now)
+	return err
+}
+
 // liveLease validates a loaded lease: unknown -> ErrLeaseInvalid;
 // revoked/superseded/time-expired -> ErrRevoked (the lease is dead);
 // foreign gateway -> ErrDenied. Time-expired rows are lazily marked
@@ -89,13 +105,7 @@ func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID stri
 			if err != nil || tag.RowsAffected() == 0 {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `
-				UPDATE workspace_activity SET
-					open_streams = 0,
-					disconnected_since = COALESCE(disconnected_since, $3),
-					updated_at = $3
-				WHERE workspace_id = $1 AND runtime_generation = $2 AND open_streams > 0`,
-				l.WorkspaceUID, int64(l.RuntimeGeneration), now); err != nil {
+			if err := closeStreamsTx(ctx, tx, l.WorkspaceUID, l.RuntimeGeneration, now); err != nil {
 				return fmt.Errorf("broker: close expired streams: %w", err)
 			}
 			return nil
@@ -186,13 +196,7 @@ func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
 		// The revoked lease was the workspace's only active lease (partial
 		// unique index), so every stream counted on its generation is now
 		// closing but cannot report it — close the accounting atomically.
-		if _, err := tx.Exec(ctx, `
-			UPDATE workspace_activity SET
-				open_streams = 0,
-				disconnected_since = COALESCE(disconnected_since, $3),
-				updated_at = $3
-			WHERE workspace_id = $1 AND runtime_generation = $2 AND open_streams > 0`,
-			wsUID, gen, now); err != nil {
+		if err := closeStreamsTx(ctx, tx, wsUID, uint64(gen), now); err != nil {
 			return fmt.Errorf("broker: close revoked streams: %w", err)
 		}
 		return nil

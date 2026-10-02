@@ -147,13 +147,14 @@ func TestHostBinding_CookieOnOtherHost(t *testing.T) {
 	fb2.scriptTicket("tk-cookie-rehy", testWSUID)
 	_, srvA := newReplica(t, fb2, "gw-A")
 	auditB := &auditRecorder{}
-	_, srvB := newGatewayHandle(t, fb2, func(c *gateway.Config) {
+	gwB, srvB := newGatewayHandle(t, fb2, func(c *gateway.Config) {
 		c.Identity = broker.GatewayIdentity{ID: "gw-B", Audience: "session.example.dev"}
 		c.Sessions = fb2
 		c.Audit = auditB
 	})
 	cookieA2 := launchOK(t, srvA, testHost, "tk-cookie-rehy")
 
+	mintsBefore := gateway.SessionMints()
 	for i := 0; i < 2; i++ {
 		resp = proxied(t, srvB, testHost2, "/", cookieA2, map[string]string{"Origin": testOrigin2})
 		drain(resp)
@@ -166,29 +167,19 @@ func TestHostBinding_CookieOnOtherHost(t *testing.T) {
 	if n := fb2.lookupCount(); n != 2 {
 		t.Fatalf("LeaseBySession calls = %d, want 2 (nothing cached on replica B)", n)
 	}
+	if got := gateway.SessionMints() - mintsBefore; got != 0 {
+		t.Fatalf("newSession calls for a foreign-host cookie = %d, want 0 — a mismatch must mint nothing", got)
+	}
+	if s, l, w, i := gwB.SessionMapCounts(); s+l+w+i != 0 {
+		t.Fatalf("session state after foreign-host cookie: sessions=%d byLease=%d byWorkspace=%d inflight=%d, want all 0",
+			s, l, w, i)
+	}
 	time.Sleep(3 * testRenewInterval)
 	if n := fb2.renewCount("gw-B"); n != 0 {
 		t.Fatalf("replica B renewed a foreign-workspace lease %d times, want 0", n)
 	}
 	if n := len(fb2.activityTypes()); n != 0 {
 		t.Fatalf("activity reports after foreign-host cookie = %d, want 0", n)
-	}
-	// The control surface shows replica B's session maps stayed empty.
-	resp = proxied(t, srvB, testControlHost, "/v1/control/session", "", map[string]string{
-		"Authorization": "Bearer control-test-token",
-	})
-	var view struct {
-		Active   bool `json:"active"`
-		Sessions []struct {
-			LeaseID string `json:"leaseId"`
-		} `json:"sessions"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
-		t.Fatalf("decode control session view: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || view.Active || len(view.Sessions) != 0 {
-		t.Fatalf("replica B session view = %d %+v, want 200 with no sessions", resp.StatusCode, view)
 	}
 	found = false
 	for _, a := range auditB.auditActions() {

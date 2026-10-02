@@ -53,14 +53,25 @@ func TestRehydrate_SecondGatewayServesCookie(t *testing.T) {
 
 // TestRehydrate_UnknownCookieAllocatesNothing: a flood-safe cookie miss is
 // one store lookup — no session object, no renew or activity goroutines.
+// The map and mint counters also catch an allocate-then-kill
+// implementation: a session built and then destroyed inside the request
+// path leaves no observable side effect except these.
 func TestRehydrate_UnknownCookieAllocatesNothing(t *testing.T) {
 	fb := newFakeBroker(t)
-	_, srvB := newReplica(t, fb, "gw-B")
+	gwB, srvB := newReplica(t, fb, "gw-B")
 
+	mintsBefore := gateway.SessionMints()
 	resp := proxied(t, srvB, testHost, "/", "random", nil)
 	drain(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("proxied with random cookie = %d, want 401", resp.StatusCode)
+	}
+	if s, l, w, i := gwB.SessionMapCounts(); s+l+w+i != 0 {
+		t.Fatalf("session state after unknown cookie: sessions=%d byLease=%d byWorkspace=%d inflight=%d, want all 0",
+			s, l, w, i)
+	}
+	if got := gateway.SessionMints() - mintsBefore; got != 0 {
+		t.Fatalf("newSession calls for unknown cookie = %d, want 0 — a miss must allocate nothing", got)
 	}
 	time.Sleep(3 * testRenewInterval)
 	if n := fb.renewCount("gw-B"); n != 0 {
@@ -92,13 +103,20 @@ func TestRehydrate_DeadLeaseRejected(t *testing.T) {
 }
 
 // TestRehydrate_ConcurrentRequestsSingleLookup: 20 parallel requests with
-// the same unseen cookie share a single directory lookup.
+// the same unseen cookie share a single directory lookup. The fake's
+// LeaseBySession blocks on a channel until every request is in flight —
+// one goroutine inside the lookup, the rest parked on the shared call's
+// done channel — so the overlap is a deterministic rendezvous: a missing
+// dedup makes every request enter LeaseBySession and is caught on the
+// spot, not probabilistically at -count=5.
 func TestRehydrate_ConcurrentRequestsSingleLookup(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-conc", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
-	_, srvB := newReplica(t, fb, "gw-B")
+	gwB, srvB := newReplica(t, fb, "gw-B")
 	cookie := launchOK(t, srvA, testHost, "tk-conc")
+
+	release := fb.gateLookups()
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -123,6 +141,18 @@ func TestRehydrate_ConcurrentRequestsSingleLookup(t *testing.T) {
 			resp.Body.Close()
 			codes <- resp.StatusCode
 		}()
+	}
+
+	// Rendezvous: all n requests are inside the session lookup — either in
+	// LeaseBySession or parked on the shared call's done channel. With the
+	// dedup intact that is exactly 1 entered call + n-1 waiters.
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.lookupCount()+gwB.InflightWaiters() < n && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	if got := fb.lookupCount(); got != 1 {
+		t.Fatalf("LeaseBySession calls while %d requests were in flight = %d, want 1 (shared lookup)", n, got)
 	}
 	wg.Wait()
 	close(codes)

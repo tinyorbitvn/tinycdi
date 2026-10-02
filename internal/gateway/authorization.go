@@ -34,6 +34,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -86,7 +87,14 @@ type session struct {
 	streamTrackID int
 }
 
+// sessionMints counts newSession calls. A test cannot intercept a
+// package-internal call, so the counter lives here and is read through
+// export_test.go — it is how the allocate-nothing tests prove an unseen
+// cookie mints no session object at all.
+var sessionMints atomic.Int64
+
 func newSession(cookieID string, l broker.Lease, now time.Time) *session {
+	sessionMints.Add(1)
 	return &session{
 		id:            cookieID,
 		lease:         l,
