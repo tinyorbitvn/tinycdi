@@ -438,6 +438,7 @@ export interface components {
          *     | `INVALID_STATE` | 409 | true | phase/record state forbids the op now; retry once it settles to a compatible state |
          *     | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota |
+         *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
@@ -446,7 +447,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "CONNECTION_IN_USE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "CONNECTION_IN_USE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /** @description Uniform error body returned for every 4xx/5xx response. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -1000,8 +1001,9 @@ export interface components {
          * @description State or idempotency conflict — `IDEMPOTENCY_CONFLICT` (key reused with
          *     a different body), `INVALID_STATE` (operation not valid in the current
          *     phase/record state), `CONNECTION_IN_USE` (a live interactive lease
-         *     exists and `takeover` was not set), or `QUOTA_EXHAUSTED` (tenant/user
-         *     quota has no headroom).
+         *     exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
+         *     quota has no headroom), or `QUOTA_NOT_CONFIGURED` (the tenant has no
+         *     quota at all, so creates fail closed).
          */
         Conflict: {
             headers: {
