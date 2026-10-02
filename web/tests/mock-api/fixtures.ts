@@ -3,20 +3,9 @@
 
 import type { components } from "../../src/api/generated/schema";
 
-// networkProfile mirrors api/v1alpha1 NetworkProfile; it is additive to
-// TemplateView (requested for the public API) and optional here so the
-// fixtures type-check against both the current and the extended schema.
-export type NetworkProfileFixture = "InternetOnly" | "ClusterOnly" | "Isolated";
-// family is the catalog name shared by every revision of a template.
-export type TemplateFixture = components["schemas"]["TemplateView"] & {
-  family?: string;
-  networkProfile?: NetworkProfileFixture;
-};
+export type TemplateFixture = components["schemas"]["TemplateView"];
 export type ConditionFixture = components["schemas"]["WorkspaceCondition"];
-type WorkspaceViewSchema = components["schemas"]["WorkspaceView"];
-export type WorkspaceFixture = Omit<WorkspaceViewSchema, "template"> & {
-  template: WorkspaceViewSchema["template"] & { family?: string };
-};
+export type WorkspaceFixture = components["schemas"]["WorkspaceView"];
 export type RetainedFixture = components["schemas"]["RetainedDataView"];
 // GET /v1/workspaces/{id}/events item (Kubernetes-style event summary).
 export interface WorkspaceEventFixture {
@@ -45,7 +34,7 @@ export const TEMPLATE_LINUX: TemplateFixture = {
     maxRunningSeconds: 28800,
   },
   dataPolicyDefault: "Retain",
-  clipboardPolicy: "Enabled",
+  clipboardPolicy: "Bidirectional",
   networkProfile: "InternetOnly",
   publishedAt: "2026-09-01T00:00:00Z",
 };
