@@ -68,9 +68,8 @@ test("two workspaces", async ({ page, context, request, harnessMode }) => {
   const page2 = await context.newPage();
   const frameA = await openSession(page, harnessMode, WS_A);
   const frameB = await openSession(page2, harnessMode, WS_B);
-  for (const id of [WS_A, WS_B]) {
-    await setConnectionStatus(request, id, { state: "connected", leaseActive: true });
-  }
+  // No scripted /connection answer here: the mock's own status carries the
+  // lease reference a reload resumes against.
 
   await expect(frameA.locator("h1")).toContainText(DESKTOP_MARKER);
   await expect(frameB.locator("h1")).toContainText(DESKTOP_MARKER);
@@ -105,7 +104,6 @@ test("reload of the session tab shows the desktop again without the take-over di
 
   const origin = workspaceOrigin(harnessMode, WS_A);
   await openSession(page, harnessMode, WS_A);
-  await setConnectionStatus(request, WS_A, { state: "connected", leaseActive: true });
 
   const tickets: string[] = [];
   page.on("request", (r) => {

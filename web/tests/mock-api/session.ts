@@ -220,5 +220,12 @@ export function sessionArea(ctx: MockContext): MockArea {
     sessionDomain: ctx.sessionDomain,
   };
 
-  return { name: "session", public: publicRoutes, api, control, state: sessionState };
+  // A scripted /connection answer or a stream epoch must not outlive the
+  // test that set it (POST /_control/reset).
+  function reset(): void {
+    scripted.clear();
+    epochs.clear();
+  }
+
+  return { name: "session", reset, public: publicRoutes, api, control, state: sessionState };
 }

@@ -132,12 +132,23 @@ export async function seedReadyWorkspace(request: APIRequestContext, id: string)
 export async function setConnectionStatus(
   request: APIRequestContext,
   workspaceId: string,
-  status: { state: string; leaseActive: boolean },
+  status: { state: string; leaseActive: boolean; leaseRef?: string; streamEpoch?: number },
 ) {
   const res = await request.post(`${MOCK_API}/_control/session/connection`, {
     data: { workspaceId, ...status },
   });
   expect(res.ok(), "script /connection status").toBeTruthy();
+}
+
+// openStream tells the mock a new stream opened on the workspace's current
+// lease (its stream epoch advances) — what the real gateway reports when a
+// frame connects with the lease's session cookie.
+export async function openStream(request: APIRequestContext, workspaceId: string) {
+  const res = await request.post(`${MOCK_API}/_control/session/stream`, {
+    data: { workspaceId },
+  });
+  expect(res.ok(), "open a stream on the mock lease").toBeTruthy();
+  return (await res.json()) as { leaseRef: string; streamEpoch: number };
 }
 
 // clearLease drops the mock's lease record for the workspace — the broker-
