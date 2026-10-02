@@ -285,3 +285,29 @@ export function watchConsole(page: Page): string[] {
   page.context().on("page", (p) => p.on("console", onConsole));
   return violations;
 }
+
+// Chromium's own advisory about the pinned frame sandbox (D13): the desktop
+// client needs allow-scripts and allow-same-origin together. It is a warning
+// from the browser about the portal's deliberate choice, not an app error.
+const KNOWN_SANDBOX_WARNING =
+  "An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.";
+
+// watchConsoleErrors collects every console error/warning and uncaught page
+// error from a page and any page/frame later added to its context, so an
+// embedded session load can be held to a zero-noise console (FX-R22). The one
+// known D13 sandbox warning above is the only message let through.
+export function watchConsoleErrors(page: Page): string[] {
+  const seen: string[] = [];
+  const onConsole = (m: { type: () => string; text: () => string }) => {
+    if (m.type() !== "error" && m.type() !== "warning") return;
+    if (m.text() === KNOWN_SANDBOX_WARNING) return;
+    seen.push(`${m.type()}: ${m.text()}`);
+  };
+  const onPage = (p: Page) => {
+    p.on("console", onConsole);
+    p.on("pageerror", (e) => seen.push(`pageerror: ${e.message}`));
+  };
+  onPage(page);
+  page.context().on("page", onPage);
+  return seen;
+}
