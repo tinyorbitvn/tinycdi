@@ -1209,7 +1209,8 @@ func podReady(pod *corev1.Pod) bool {
 
 // podReason derives the machine-readable observation reason from pod state:
 // scheduling failures, container waits, terminal phases, else
-// provisioning/ready.
+// provisioning/ready. The tokens are the contract the portal's lifecycle
+// progress reads (docs/lifecycle-reasons.md).
 func podReason(pod *corev1.Pod) string {
 	if !pod.DeletionTimestamp.IsZero() {
 		return "Terminating"
@@ -1220,9 +1221,16 @@ func podReason(pod *corev1.Pod) string {
 	case corev1.PodSucceeded:
 		return "PodExited"
 	}
+	// An init container that cannot start is reported before the main
+	// container's generic PodInitializing.
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" {
+			return refineWaiting(pod, w.Reason)
+		}
+	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if w := cs.State.Waiting; w != nil && w.Reason != "" {
-			return w.Reason // ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError...
+			return refineWaiting(pod, w.Reason) // ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError...
 		}
 	}
 	for _, c := range pod.Status.Conditions {
@@ -1239,7 +1247,40 @@ func podReason(pod *corev1.Pod) string {
 	if pod.Status.Phase == corev1.PodRunning {
 		return "NotReady"
 	}
+	// Scheduled, but the kubelet has not finished the sandbox yet.
+	if podCondition(pod, corev1.PodScheduled) == corev1.ConditionTrue &&
+		podCondition(pod, corev1.PodReadyToStartContainers) == corev1.ConditionFalse {
+		return "PreparingPod"
+	}
 	return "Provisioning"
+}
+
+// refineWaiting splits the kubelet's catch-all ContainerCreating wait using
+// the PodReadyToStartContainers condition: not yet true means the sandbox,
+// network and volumes are still being prepared (PreparingPod); true means
+// the kubelet is on to the image (PullingImage). A kubelet that does not
+// report the condition keeps the original token.
+func refineWaiting(pod *corev1.Pod, reason string) string {
+	if reason != "ContainerCreating" {
+		return reason
+	}
+	switch podCondition(pod, corev1.PodReadyToStartContainers) {
+	case corev1.ConditionFalse:
+		return "PreparingPod"
+	case corev1.ConditionTrue:
+		return "PullingImage"
+	}
+	return reason
+}
+
+// podCondition returns the status of a pod condition, or "" when absent.
+func podCondition(pod *corev1.Pod, t corev1.PodConditionType) corev1.ConditionStatus {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == t {
+			return c.Status
+		}
+	}
+	return ""
 }
 
 func ptr[T any](v T) *T { return &v }
