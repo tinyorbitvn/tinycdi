@@ -30,7 +30,7 @@ import {
 } from "../templates/format";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
-import { blockingReason, isConnectable } from "./helpers";
+import { blockingReason, desiredLabel, isConnectable } from "./helpers";
 import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
 import { ConditionsTable, PhasePill } from "./StatusBits";
@@ -184,7 +184,7 @@ export function WorkspaceDetailPage({
           },
         ]
       : []),
-    { term: t("workspaces.detail.field.desired"), detail: ws.desiredState },
+    { term: t("workspaces.detail.field.desired"), detail: desiredLabel(ws) },
     {
       term: t("workspaces.detail.field.dataPolicy"),
       detail: `${dataPolicyLabel(ws.dataPolicy)} — ${dataPolicyDescription(ws.dataPolicy)}`,

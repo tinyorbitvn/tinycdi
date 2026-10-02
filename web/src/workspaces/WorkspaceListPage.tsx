@@ -7,7 +7,7 @@ import { useApi } from "../api/context";
 import { Link } from "../lib/router";
 import { listWorkspaces } from "./api";
 import type { WorkspaceView } from "./helpers";
-import { isConnectable, phaseLabelKey } from "./helpers";
+import { desiredLabel, isConnectable, phaseLabelKey } from "./helpers";
 import { useResource } from "./resource";
 import { ErrorBanner } from "./ErrorBanner";
 import { dataPolicyLabel } from "../templates/format";
@@ -52,7 +52,7 @@ const COLUMNS: Column<WorkspaceView>[] = [
     key: "desiredState",
     header: t("workspaces.list.col.desired"),
     hideOnMobile: true,
-    render: (w) => w.desiredState,
+    render: (w) => desiredLabel(w),
   },
   {
     key: "dataPolicy",
