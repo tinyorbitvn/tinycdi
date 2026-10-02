@@ -1,6 +1,7 @@
 package api
 
 import (
+	"container/list"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -631,6 +632,12 @@ func (a *Authenticator) expireLegacyCookies(w http.ResponseWriter) {
 // flood.
 const inputTouchMinInterval = time.Minute
 
+// inputThrottleMaxEntries bounds the per-principal throttle map. Every
+// distinct principal that produces desktop input adds an entry; the LRU keeps
+// the backend's memory flat however many principals pass through. An evicted
+// principal at worst gets one extra (idempotent) idle touch.
+const inputThrottleMaxEntries = 10_000
+
 // InputHook returns the broker input hook (broker.WithInputHook): each
 // recorded "input" event slides the portal idle timer of the lease's
 // principal — the Principal.Owner() string "issuer|subject" — throttled to
@@ -638,21 +645,53 @@ const inputTouchMinInterval = time.Minute
 // that already expired; the store's TouchPrincipal WHERE clause excludes
 // sessions outside the idle window (D18).
 func (a *Authenticator) InputHook() func(ctx context.Context, principal string) {
+	hook, _ := a.newInputHook(inputThrottleMaxEntries)
+	return hook
+}
+
+// newInputHook builds the throttled hook over an LRU of at most max
+// principals; size reports the current entry count (tests).
+func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, principal string), size func() int) {
 	var mu sync.Mutex
-	last := map[string]time.Time{}
-	return func(ctx context.Context, principal string) {
+	order := list.New() // front = most recently seen; elements are *throttleEntry
+	byPrincipal := map[string]*list.Element{}
+	hook = func(ctx context.Context, principal string) {
 		now := a.now()
 		mu.Lock()
-		if t, ok := last[principal]; ok && now.Sub(t) < inputTouchMinInterval {
-			mu.Unlock()
-			return
+		if el, ok := byPrincipal[principal]; ok {
+			e := el.Value.(*throttleEntry)
+			order.MoveToFront(el)
+			if now.Sub(e.at) < inputTouchMinInterval {
+				mu.Unlock()
+				return
+			}
+			e.at = now
+		} else {
+			byPrincipal[principal] = order.PushFront(&throttleEntry{principal: principal, at: now})
+			if order.Len() > max {
+				oldest := order.Back()
+				order.Remove(oldest)
+				delete(byPrincipal, oldest.Value.(*throttleEntry).principal)
+			}
 		}
-		last[principal] = now
 		mu.Unlock()
 		if _, err := a.sessions.TouchPrincipal(ctx, principal); err != nil {
 			a.log.Warn("session idle touch failed", "err", err)
 		}
 	}
+	size = func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return order.Len()
+	}
+	return hook, size
+}
+
+// throttleEntry is one LRU element: when the principal's session was last
+// touched.
+type throttleEntry struct {
+	principal string
+	at        time.Time
 }
 
 func (a *Authenticator) tenantAllowed(tenant string) bool {
