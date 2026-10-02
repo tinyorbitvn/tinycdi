@@ -344,8 +344,8 @@ func TestOperatorFlags_Placement(t *testing.T) {
 		for _, args := range [][]string{
 			{`--runtime-node-selector=[not-an-object`},
 			{`--runtime-node-selector={"a":1}`},               // non-string value
-			{`--runtime-tolerations={"not":"array"}`},          // not an array
-			{`--runtime-tolerations=[{"operator":"Exists"}]`},  // empty key tolerates all
+			{`--runtime-tolerations={"not":"array"}`},         // not an array
+			{`--runtime-tolerations=[{"operator":"Exists"}]`}, // empty key tolerates all
 			{`--runtime-tolerations=[{"key":"k","operator":"Sometimes"}]`},
 			{`--runtime-tolerations=[{"key":"k","effect":"Never"}]`},
 			{"--runtime-host-users=maybe"},
