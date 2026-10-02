@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -522,5 +523,88 @@ func TestProgress_TeardownStatusWritesDoNotLoop(t *testing.T) {
 	// Bounded: one mark per step plus the drain's own condition writes.
 	if w := counting.writes.Load(); w > 12 {
 		t.Fatalf("%d status writes for one teardown; the marks are not bounded", w)
+	}
+}
+
+// TestProgress_WaitingForDisk: while the CR names its retained claim but the
+// volume has not been retargeted to it yet, the Disk step reads
+// StorageReady=False/WaitingForDisk — not BackendError, not Degraded, and no
+// runtime children. When the attach relabels the volume the workspace
+// proceeds and the reason is gone. (RetainedClaimMissing, FX-R20, stays the
+// refusal for a claim that is not named at all.)
+func TestProgress_WaitingForDisk(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() { _ = env.Stop() }()
+	ctx := context.Background()
+	ns := newNamespace(t, c)
+	newTemplate(t, c, ns, "tpl-wfd", nil)
+
+	retained := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ws-old-home", Namespace: ns,
+			Labels: map[string]string{
+				linux.LabelWorkspaceUID: "uid-of-the-old-workspace",
+				linux.LabelDataRetained: "true",
+				linux.LabelDataRole:     "Home",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			},
+		},
+	}
+	if err := c.Create(ctx, retained); err != nil {
+		t.Fatal(err)
+	}
+	ws := newWorkspace(t, c, ns, "ws-wfd", "tpl-wfd", func(w *workspacesv1alpha1.Workspace) {
+		w.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+		w.Annotations = map[string]string{
+			linux.AnnotationRetainedPVC:     retained.Name,
+			linux.AnnotationRetainedPVCUID:  string(retained.UID),
+			linux.AnnotationRetainedDataRef: "rd_wfd",
+		}
+	})
+	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+	r := newReconciler(c)
+
+	if err := reconcileErr(r, key); err == nil || !errors.Is(err, linux.ErrRetainedNotClaimed) {
+		t.Fatalf("reconcile = %v, want the not-yet-claimed error returned for retry", err)
+	}
+	got := getWorkspace(t, c, key)
+	sc := condition(got, workspacesv1alpha1.ConditionStorageReady)
+	if sc == nil || sc.Status != metav1.ConditionFalse || sc.Reason != ReasonWaitingForDisk {
+		t.Fatalf("StorageReady = %+v, want False/%s", sc, ReasonWaitingForDisk)
+	}
+	if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc != nil && rc.Reason == ReasonBackendError {
+		t.Fatalf("the claim wait was reported as BackendError: %+v", rc)
+	}
+	if d := condition(got, workspacesv1alpha1.ConditionDegraded); d != nil && d.Status == metav1.ConditionTrue {
+		t.Fatalf("the claim wait must not mark Degraded: %+v", d)
+	}
+	if pods, svcs, _, _ := countChildren(t, c, ns, ws.UID); pods+svcs != 0 {
+		t.Fatalf("children created before the disk was handed over: pods=%d svcs=%d", pods, svcs)
+	}
+	if strings.Contains(sc.Message, retained.Name) {
+		t.Fatalf("message names the volume: %q", sc.Message)
+	}
+
+	// The attach retargets the volume to this workspace.
+	cur := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(retained), cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.Labels[linux.LabelWorkspaceUID] = string(ws.UID)
+	if err := c.Update(ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, key)
+	got = getWorkspace(t, c, key)
+	if sc := condition(got, workspacesv1alpha1.ConditionStorageReady); sc == nil || sc.Reason == ReasonWaitingForDisk {
+		t.Fatalf("StorageReady = %+v after the claim was handed over", sc)
+	}
+	if pods, _, _, _ := countChildren(t, c, ns, ws.UID); pods != 1 {
+		t.Fatalf("pods = %d after the claim was handed over, want 1", pods)
 	}
 }

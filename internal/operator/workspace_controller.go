@@ -105,6 +105,14 @@ const (
 	// refuses to build a default home in its place, so no runtime children
 	// are created until the claim reference is present (FX-R20).
 	ReasonRetainedClaimMissing = "RetainedClaimMissing"
+
+	// ReasonWaitingForDisk — the Workspace names its retained claim but the
+	// volume has not been retargeted to it yet (the attach is between
+	// stamping the CR and relabelling the claim). Transient: shown as the
+	// disk step on StorageReady, never as a backend error (V3.27). Distinct
+	// from ReasonRetainedClaimMissing, which is the refusal when the claim
+	// is not named at all.
+	ReasonWaitingForDisk = "WaitingForDisk"
 )
 
 const (
@@ -223,6 +231,17 @@ const backendErrorMessage = "the platform could not complete a runtime step; ret
 // must not flicker the condition. Best effort: a failed status write is
 // logged, never returned over the original error.
 func (r *WorkspaceReconciler) recordBackendError(ctx context.Context, ws *workspacesv1alpha1.Workspace, err error, keepReady bool) {
+	r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionRuntimeReady, ReasonBackendError,
+		backendErrorMessage, err, keepReady)
+}
+
+// waitingForDiskMessage is the fixed text for ReasonWaitingForDisk.
+const waitingForDiskMessage = "waiting for the retained disk to be handed over to this workspace"
+
+// recordStepStatus is the best-effort write behind recordBackendError and
+// the WaitingForDisk step: condition typ is set False with reason/msg and
+// nothing else changes. The caller returns err itself.
+func (r *WorkspaceReconciler) recordStepStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, typ, reason, msg string, err error, keepReady bool) {
 	if err == nil || apierrors.IsConflict(err) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
@@ -230,15 +249,14 @@ func (r *WorkspaceReconciler) recordBackendError(ctx context.Context, ws *worksp
 	if keepReady && ws.Status.Phase == workspacesv1alpha1.WorkspacePhaseReady {
 		return
 	}
-	cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionRuntimeReady)
-	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == ReasonBackendError &&
+	cur := meta.FindStatusCondition(ws.Status.Conditions, typ)
+	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == reason &&
 		cur.ObservedGeneration == ws.Generation {
 		return
 	}
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
-		metav1.ConditionFalse, ReasonBackendError, backendErrorMessage, r.now())
+	SetWorkspaceCondition(ws, typ, metav1.ConditionFalse, reason, msg, r.now())
 	if uerr := r.Status().Update(ctx, ws); uerr != nil {
-		logf.FromContext(ctx).Error(uerr, "record backend error on status")
+		logf.FromContext(ctx).Error(uerr, "record step status", "condition", typ, "reason", reason)
 	}
 }
 
@@ -420,6 +438,10 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		logf.FromContext(ctx).Info("template rejected by backend", "error", berr)
 		statusErr = errors.New(ReasonTemplateRejected)
 		obs, _ = r.Backend.Observe(ctx, ws)
+	case errors.Is(berr, linux.ErrRetainedNotClaimed):
+		r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionStorageReady, ReasonWaitingForDisk,
+			waitingForDiskMessage, berr, true)
+		return ctrl.Result{}, berr
 	default:
 		r.recordBackendError(ctx, ws, berr, true)
 		return ctrl.Result{}, berr

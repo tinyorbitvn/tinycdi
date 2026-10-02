@@ -255,6 +255,13 @@ func retainedClaimMissing(ws *workspacesv1alpha1.Workspace) bool {
 	return ws.Annotations[AnnotationRetainedPVC] == "" || ws.Annotations[AnnotationRetainedPVCUID] == ""
 }
 
+// ErrRetainedNotClaimed is returned by Ensure while the Workspace names its
+// retained claim but that claim has not been retargeted to it yet — the
+// short window between the attach stamping the CR and relabelling the
+// volume. It is transient: the operator reports it as the WaitingForDisk
+// step instead of a backend error and retries.
+var ErrRetainedNotClaimed = errors.New("linux backend: retained claim not yet claimed by this workspace")
+
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
@@ -650,7 +657,7 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspac
 			return nil, &conflictError{kind: "PersistentVolumeClaim", name: ref}
 		}
 		if pvc.Labels[LabelWorkspaceUID] != string(uid) {
-			return nil, fmt.Errorf("linux backend: retained PVC %q not yet claimed by workspace %s", ref, string(uid))
+			return nil, fmt.Errorf("retained PVC %q not yet claimed by workspace %s: %w", ref, string(uid), ErrRetainedNotClaimed)
 		}
 		return pvc, nil
 	}

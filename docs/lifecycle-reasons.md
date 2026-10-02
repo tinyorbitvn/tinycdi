@@ -27,7 +27,11 @@ reason) while it is `False`.
 | `BootDeadlineExceeded` | the start did not finish within the template's `bootDeadline`; `phase` is `Failed` |
 
 `StorageReady` is `False/Provisioning` while a retained home volume is not
-bound.
+bound, and `False/WaitingForDisk` for a workspace created from retained data
+while the disk is being handed over to it (the claim is named but the volume
+is not yet retargeted; transient, retried). `Degraded/RetainedClaimMissing`
+is different: the claim is not named at all, and the platform refuses to
+start the workspace rather than build an empty disk.
 
 ## Failed
 
