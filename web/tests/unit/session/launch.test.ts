@@ -146,6 +146,8 @@ describe("routes and frame contract", () => {
     for (const forbidden of ["allow-top-navigation", "allow-popups", "allow-modals"]) {
       expect(SESSION_FRAME_SANDBOX.split(" ")).not.toContain(forbidden);
     }
+    // No keyboard-map: the desktop client's getLayoutMap() stays refused in the
+    // frame (FX-R18); granting it needs the gateway Permissions-Policy too.
     expect(SESSION_FRAME_ALLOW).toBe("clipboard-read; clipboard-write; fullscreen");
   });
 });
