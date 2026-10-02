@@ -37,6 +37,17 @@ export function sessionOrigin(workspaceId: string, sessionDomain: string): strin
   return `https://${sessionLabel(workspaceId)}.${sessionDomain}`;
 }
 
+/**
+ * URL the session iframe is pointed at to (re)load the desktop client. The
+ * KasmVNC client treats a page inside an iframe as an embedded widget and
+ * forces resize=off, so the remote screen would keep its old size and a
+ * larger frame shows large dark regions (FX-R18). The query is a static
+ * client setting, the same one the gateway puts on its launch redirect.
+ */
+export function sessionFrameUrl(workspaceId: string, sessionDomain: string): string {
+  return `${sessionOrigin(workspaceId, sessionDomain)}/?resize=remote`;
+}
+
 /** Sandbox flags on the session iframe (D13). Navigation and dialogs stay out. */
 export const SESSION_FRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-pointer-lock";
