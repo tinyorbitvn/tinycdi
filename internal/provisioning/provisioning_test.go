@@ -167,6 +167,53 @@ func TestDispatcherRedeliversUnacked(t *testing.T) {
 	}
 }
 
+// ctxStore makes memStore honour a cancelled context on MarkDispatched, as
+// the PostgreSQL-backed Outbox does.
+type ctxStore struct{ *memStore }
+
+func (c ctxStore) MarkDispatched(ctx context.Context, uid provisioning.PlatformID, rev uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.memStore.MarkDispatched(ctx, uid, rev)
+}
+
+// cancelAfterApply applies an intent and then cancels the dispatcher's
+// context, as a leader losing the lock does between Apply and the ack.
+type cancelAfterApply struct {
+	*recorder
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterApply) Apply(ctx context.Context, in provisioning.Intent) error {
+	err := c.recorder.Apply(ctx, in)
+	c.cancel()
+	return err
+}
+
+// TestDispatcherAcksAppliedIntentOnShutdown: an intent whose Apply succeeded
+// is recorded as dispatched even when the dispatcher is stopped right after
+// Apply, so a failover does not replay it (FX-R14).
+func TestDispatcherAcksAppliedIntentOnShutdown(t *testing.T) {
+	ms := newMemStore()
+	ms.add(provisioning.Intent{WorkspaceUID: "w", Revision: 1, Kind: provisioning.IntentStart})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := provisioning.NewDispatcher(ctxStore{ms}, cancelAfterApply{&recorder{}, cancel},
+		provisioning.WithPollInterval(5*time.Millisecond))
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatcher did not stop")
+	}
+	if n := ms.pendingCount("w"); n != 0 {
+		t.Fatalf("applied intent left undispatched (%d pending): a new leader would replay it", n)
+	}
+}
+
 // TestConsumerDropsStaleAndClosed: revision <= lastApplied and any intent
 // after delete are dropped before reaching the applier.
 func TestConsumerDropsStaleAndClosed(t *testing.T) {
