@@ -167,3 +167,29 @@ func TestConnectionEndpoint_DoesNotSlideIdle(t *testing.T) {
 		t.Fatalf("RequireAuth after 31 min of passive polling: %d, want 401", r.StatusCode)
 	}
 }
+
+// TestConnectionStatus_JSONCarriesLeaseRefAndEpoch (R9a): the response carries
+// leaseRef and streamEpoch for an active lease, and omits leaseRef (not an
+// empty string) when there is none.
+func TestConnectionStatus_JSONCarriesLeaseRefAndEpoch(t *testing.T) {
+	const wsID = "ws_00000000000000000000000001"
+	get := func(state ConnectionStatus) map[string]any {
+		env := newConnStatusEnv(t, &fakeStater{state: state}, &fakeWorkspaceGet{rec: provisioning.WorkspaceRecord{ID: wsID}})
+		sess, _ := login(t, env, "alice")
+		r := env.authedGet(t, sess, "/v1/workspaces/"+wsID+"/connection")
+		defer r.Body.Close()
+		var m map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return m
+	}
+	m := get(ConnectionStatus{State: "connected", LeaseActive: true, LeaseRef: "0123456789abcdef", StreamEpoch: 3})
+	if m["leaseRef"] != "0123456789abcdef" || m["streamEpoch"] != float64(3) {
+		t.Fatalf("active lease view = %v, want leaseRef and streamEpoch 3", m)
+	}
+	m = get(ConnectionStatus{State: "none"})
+	if _, present := m["leaseRef"]; present {
+		t.Fatalf("no-lease view carries leaseRef: %v", m)
+	}
+}
