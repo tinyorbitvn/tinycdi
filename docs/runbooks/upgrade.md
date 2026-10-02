@@ -4,6 +4,169 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
+## Upgrading from v0.1 to v0.2
+
+v0.2 replaces the three v0.1 control-plane Deployments (`api`, `gateway`,
+`portal`) with two (`backend` — the public API and the session gateway
+merged into one binary — and `frontend` — the static portal SPA server)
+and moves every session onto a per-workspace host
+`<label>.<sessionDomain>` behind one wildcard edge route. It is a
+**breaking upgrade**: the values schema changed, two database migrations
+run, and every open session drops once. Read this whole section before
+touching the release.
+
+### Prerequisites
+
+All of these must be in place before `helm upgrade`; the chart renders
+fail closed without the first three:
+
+1. **Wildcard DNS record and wildcard certificate for the session
+   domain.** The edge carries one route `*.<sessionDomain>` and the
+   backend session listener terminates TLS for every
+   `<label>.<sessionDomain>` host. Create the wildcard DNS record,
+   issue a wildcard certificate (DNS-01 — HTTP-01 cannot issue
+   wildcards) and store it in the Secret that
+   `backend.tls.session.existingSecret` names. `portalHost` must not
+   equal or sit inside `sessionDomain` — the render refuses an overlap.
+2. **Dedicated workspace node pool** — the v0.2 default
+   (`runtime.placement.allowSharedNodes: false`). Label the pool nodes
+   `cdi.tinyorbit.vn/workspace=true` and taint them
+   `cdi.tinyorbit.vn/workspace:NoSchedule` (install.md "Workspace node
+   pool"), or point `runtime.placement.nodeSelector` / `.tolerations` at
+   your existing pool — a dedicated pool needs a non-empty selector.
+   The explicit opt-out `runtime.placement.allowSharedNodes: true`
+   exists for kind/dev clusters only and gives up node-level isolation.
+3. **Login-key Secret.** `backend.loginKeys.existingSecret` must name a
+   Secret holding a 32-byte `current` key (plus `previous` while
+   rotating) — it seals the `__Host-tcdi_login` cookie that lets an OIDC
+   login started on one replica finish on another.
+   `backend.loginKeys.generate: true` mints
+   `<release>-backend-login-keys` once via `lookup` instead (kept across
+   upgrades; unusable under GitOps/`helm template` against no cluster).
+4. **The coordinated backup set** from `docs/runbooks/backup-restore.md`
+   — not optional here: rollback crosses a schema migration (below).
+
+### Values migration
+
+The 0.2.0 schema still accepts the old `api.*` / `gateway.*` /
+`portal.*` / `sessionHost` keys only so the render can fail with a
+migration hint instead of a bare schema error. Translate your values
+file first:
+
+| v0.1 | v0.2 |
+|---|---|
+| `api.*` | `backend.*` — `internalTLS` → `tls.internal`; `clientCA`, `extraCA`, `operatorCN`, `sessionIdle`, `extraPortalOrigins` keep their names |
+| `gateway.*` | `backend.*` — `tls` → `tls.session`, `metricsListen` → `metrics.{enabled,port}`, `id` → `gatewayID`, `extraAllowedHosts` → `controlHosts`; `audience`, `upstreamCA`, `controlToken` keep their names; `mtls`, `trustedCA`, `service` are removed (the gateway reaches the broker in-process and the session edge is an ingress/gatewayApi route, not a Service) |
+| `portal.*` | `frontend.*` — `tls` keeps its name; `apiUpstream`, `webRoot`, `service` are removed (the edge routes `/v1` to the backend) |
+| `images.api`, `images.gateway` | `images.backend` (the `tinycdi-api`/`tinycdi-gateway` images are no longer built) |
+| `images.portal` | `images.frontend` |
+| `api.podDisruptionBudget`, `portal.podDisruptionBudget` | `backend.pdb`, `frontend.pdb` (`operator.podDisruptionBudget` is unchanged) |
+| `sessionHost` | `sessionDomain` |
+
+New or newly-required values beyond the rename: `backend.loginKeys`
+(above), `backend.tls.{app,session,internal}` (one certificate per
+listener — `tls.session` must be the wildcard), and
+`runtime.placement.*` (above). `backend` defaults to 2 replicas with
+`maxUnavailable: 0`, a `minAvailable: 1` PDB and preferred node
+anti-affinity — size the cluster for two backend pods.
+
+Example migrated values (renders as-is against the 0.2.0 chart):
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.example.com
+sessionDomain: session.example.com    # was: sessionHost
+
+oidc:
+  issuer: https://idp.example.com/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+backend:                              # was: api.* + gateway.*
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys   # NEW — 32-byte "current"
+  tls:
+    session:
+      existingSecret: tinycdi-backend-session-tls # MUST cover *.session.example.com
+
+frontend:                             # was: portal.*
+  tls:
+    existingSecret: tinycdi-frontend-tls
+
+# Dedicated workspace pool (v0.2 default) — label + taint the nodes per
+# install.md "Workspace node pool" BEFORE the upgrade, or set
+# runtime.placement.allowSharedNodes: true (kind/dev only).
+runtime:
+  placement:
+    allowSharedNodes: false
+```
+
+### What happens to running sessions
+
+**Every session drops once.** The v0.1 `gateway` Deployment is deleted,
+the v0.1 session cookies name the old single session host, and the lease
+rows gain new columns — none of that carries a live v0.1 stream into
+v0.2. Schedule a maintenance window, tell users their desktops close,
+and have them re-launch from the portal after the upgrade. From then on
+the restart-safe behaviour in the table below applies: a backend rollout
+no longer costs a session.
+
+### Database migrations — forward-only
+
+The new backend runs two embedded migrations at startup
+(`schema_migrations` is idempotent, so replicas racing is fine):
+
+- `011_lease_session` — adds `session_digest` and `stream_epoch` to
+  `connection_lease` (cookie-digest lookups and the cross-replica stream
+  fence).
+- `012_principal_directory` — adds `display_name`/`email` to `sessions`
+  and creates `principal_directory` for portal display names.
+
+Both are forward-only and additive. Deploy the new chart once; do not
+run the v0.1 binaries against the migrated schema — "old binary + new
+schema" is unsupported in both directions.
+
+### Procedure
+
+Follow the steps under "Before you start" and "Procedure" above with the
+migrated values file: CRD diff → pin digests → `helm template | kubectl
+diff` → `helm upgrade` → watch `deployment/backend`, then
+`deployment/operator`, then `deployment/frontend`. The `api`, `gateway`
+and `portal` Deployments/Services disappear in the same release.
+
+### Post-upgrade checks
+
+- `kubectl -n <release-ns> get deploy` shows exactly `backend` (2/2),
+  `frontend`, `operator` — no `api`/`gateway`/`portal` objects remain.
+- `kubectl -n <release-ns> get ingress` (or `httproute`) shows the
+  `*.<sessionDomain>` wildcard route next to the portal route.
+- A synthetic login → launch → connect round-trip: the session opens on
+  a `<label>.<sessionDomain>` host presenting the wildcard certificate,
+  and the portal sets only `__Host-`-prefixed cookies (the backend
+  expires the removed v0.1 `tcdi_csrf`/`tcdi_session_origin` cookies on
+  first login).
+- `tinycdi_lease_failures_total` back to baseline and
+  `tinycdi_quota_drift == 0`, as after any upgrade.
+- `kubectl get pods -o wide` shows new workspace pods on the dedicated
+  pool (the labelled/tainted nodes), not on shared nodes.
+
+### Rollback across v0.1 → v0.2
+
+`helm rollback` alone is NOT safe: migrations 011 and 012 are
+forward-only and the v0.1 `api`/`gateway`/`portal` values shape cannot
+drive the 0.2.0 chart. Rollback means **restore**: bring the v0.1 chart
+release back (`helm upgrade` with the v0.1 chart and the pre-upgrade
+values file) **and** restore the pre-upgrade database dump per
+`docs/runbooks/backup-restore.md`. Re-run the post-checks afterwards.
+
 ## What is safe to upgrade while sessions run
 
 | Component | Effect of a restart/upgrade | Session impact |

@@ -82,6 +82,17 @@ failover. `backend` defaults to **2 replicas** with `maxUnavailable: 0`,
 `minAvailable: 1` PDB and preferred node anti-affinity — size your cluster
 accordingly.
 
+Upgrading from 0.1.x additionally requires: a wildcard DNS record and
+wildcard certificate for `*.<sessionDomain>` (the session listener
+terminates TLS per workspace host), a dedicated workspace node pool
+(`runtime.placement.*` — `allowSharedNodes: true` opts out for kind/dev),
+and the login-key Secret above. **Every open session drops once** — users
+re-launch from the portal after the upgrade — and database migrations
+011/012 are forward-only, so rollback means restoring the pre-upgrade
+database backup together with the 0.1.x chart. The full procedure,
+prerequisite checklist and post-upgrade checks are in
+`docs/runbooks/upgrade.md` → "Upgrading from v0.1 to v0.2".
+
 ## Uninstall and CRD policy
 
 ```bash
