@@ -26,31 +26,9 @@ export interface Me {
   roles: string[];
 }
 
-export interface QuotaAmounts {
-  workspaces: number;
-  runningWorkspaces: number;
-  cpuMillicores: number;
-  memoryMib: number;
-  storageGib: number;
-}
-
-export interface UserUsage {
-  subject: string;
-  displayName: string;
-  usage: QuotaAmounts;
-}
-
-export interface QuotaView {
-  tenant: string;
-  // False when the tenant has no quota row: admission then refuses every
-  // create, so the absence of limits must not read as "unlimited".
-  configured: boolean;
-  // Absent when the tenant has no quota row; `workspaces: 0` means no count limit.
-  limits?: QuotaAmounts;
-  usage: QuotaAmounts;
-  userLimits?: QuotaAmounts;
-  users: UserUsage[];
-}
+export type QuotaAmounts = components["schemas"]["QuotaAmounts"];
+export type UserUsage = components["schemas"]["UserUsage"];
+export type QuotaView = components["schemas"]["QuotaView"];
 
 export type Scope = "mine" | "tenant";
 
