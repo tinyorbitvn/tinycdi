@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,9 +18,15 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
-// shutdownBudget is the per-phase grace on shutdown: drain, then server
-// Shutdown per listener.
-const shutdownBudget = 10 * time.Second
+// Shutdown runs against ONE shared deadline, kept under the pod's
+// terminationGracePeriodSeconds (30 s): drain first (at most drainBudget),
+// then every listener's Shutdown in parallel under whatever remains, then the
+// background loops and closers. Run returns by shutdownDeadline even if a
+// request or stream is still in flight (the listeners are then closed hard).
+const (
+	shutdownDeadline = 24 * time.Second
+	drainBudget      = 10 * time.Second
+)
 
 // namedServer is one bound listener with its server and optional TLS
 // configuration (nil = plain HTTP).
@@ -37,9 +44,16 @@ type Backend struct {
 	cfg Config
 	log *slog.Logger
 
-	// ready gates /readyz on the app and session listeners; cleared first
-	// at shutdown so routers stop sending new work before sockets drain.
+	// ready gates /readyz on the app and session listeners: true only while
+	// Run is serving AND the Workspace informer cache has synced, and cleared
+	// first at shutdown so routers stop sending new work before sockets
+	// drain. Derived from the three flags below by updateReady.
 	ready atomic.Bool
+
+	readyMu  sync.Mutex
+	serving  bool // Run has started serving
+	synced   bool // Workspace informer cache synced (or none needed)
+	draining bool // shutdown has begun
 
 	gw        *gateway.Gateway // nil when the session listener is off
 	servers   []namedServer    // bound in New, served in Run
@@ -53,6 +67,10 @@ type Backend struct {
 
 	// bg holds the ctx-bound background loops started by Run.
 	bg []func(ctx context.Context)
+	// singletons are the control loops that must run in exactly one replica
+	// (outbox dispatcher, sweepers, recovery, expiry planner); electSingletons
+	// gates them on the leader lock.
+	singletons []func(ctx context.Context)
 	// closers run in reverse order after the servers stop (DB, caches…).
 	closers []func()
 }
@@ -65,7 +83,6 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Backend, error) {
 		log = slog.Default()
 	}
 	b := &Backend{cfg: cfg, log: log}
-	b.ready.Store(true)
 	if err := b.wire(ctx); err != nil {
 		b.closeAll()
 		return nil, err
@@ -91,9 +108,11 @@ func (b *Backend) Addrs() (app, session, internal, metrics string) {
 	return app, session, internal, metrics
 }
 
-// Run serves until ctx is done, then shuts down in order: stop readiness,
+// Run serves until ctx is done, then shuts down in order (all under one shared
+// deadline, see shutdownDeadline): stop readiness,
 // drain the session gateway (disconnects reported, leases kept), graceful
-// http.Server.Shutdown on every listener, then close the broker side and DB.
+// http.Server.Shutdown on every listener in parallel, stop the background
+// loops, then close the broker side and DB.
 // A serve failure on any listener also triggers the same shutdown path and
 // is returned.
 func (b *Backend) Run(ctx context.Context) error {
@@ -102,11 +121,14 @@ func (b *Backend) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var bgWG sync.WaitGroup
 	for _, r := range b.reloaders {
-		go r.Run(runCtx)
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); r.Run(runCtx) }()
 	}
 	for _, start := range b.bg {
-		go start(runCtx)
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); start(runCtx) }()
 	}
 
 	type serveErr struct {
@@ -115,7 +137,6 @@ func (b *Backend) Run(ctx context.Context) error {
 	}
 	errCh := make(chan serveErr, len(b.servers))
 	for _, s := range b.servers {
-		s := s
 		go func() {
 			b.log.Info("listening", "listener", s.name, "addr", s.ln.Addr().String(),
 				"tls", s.tlsCfg != nil)
@@ -131,6 +152,8 @@ func (b *Backend) Run(ctx context.Context) error {
 			errCh <- serveErr{s.name, err}
 		}()
 	}
+	// The listeners are bound (New) and their accept loops are running.
+	b.markServing()
 
 	var serveFailure error
 	select {
@@ -142,28 +165,66 @@ func (b *Backend) Run(ctx context.Context) error {
 		}
 	}
 
+	// One deadline for the whole shutdown, under the pod's grace period.
+	shCtx, shCancel := context.WithTimeout(context.Background(), shutdownDeadline)
+	defer shCancel()
+
 	// 1. Stop readiness: /readyz now fails so routers stop sending new
 	//    work before sockets close.
-	b.ready.Store(false)
+	b.beginShutdown()
 
 	// 2. Drain the session gateway: close every open stream and report
 	//    disconnect for each, without revoking leases — the same cookie
-	//    reconnects on another replica.
+	//    reconnects on another replica. At most drainBudget.
 	if b.gw != nil {
-		drainCtx, dcancel := context.WithTimeout(context.Background(), shutdownBudget)
+		drainCtx, dcancel := context.WithTimeout(shCtx, drainBudget)
 		b.gw.Drain(drainCtx)
 		dcancel()
 	}
 
-	// 3. Graceful shutdown of every listener.
+	// 3. Graceful shutdown of every listener, in parallel, under the time
+	//    that remains.
+	var shWG sync.WaitGroup
 	for _, s := range b.servers {
-		shCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
-		if err := s.srv.Shutdown(shCtx); err != nil {
-			b.log.Error("listener shutdown", "listener", s.name, "err", err)
-		}
-		cancel()
+		shWG.Add(1)
+		go func() {
+			defer shWG.Done()
+			if err := s.srv.Shutdown(shCtx); err != nil {
+				b.log.Error("listener shutdown", "listener", s.name, "err", err)
+			}
+		}()
 	}
+	shWG.Wait()
+
+	// 4. Stop the background loops (singletons, reloaders, informer cache)
+	//    and wait for them before the closers release the database; bounded
+	//    by the same deadline.
+	cancel()
+	bgDone := make(chan struct{})
+	go func() { bgWG.Wait(); close(bgDone) }()
+	select {
+	case <-bgDone:
+	case <-shCtx.Done():
+		b.log.Error("background loops did not stop before the shutdown deadline")
+	}
+	// 5. deferred closeAll: hard-close any listener still open, then closers.
 	return serveFailure
+}
+
+// markServing records that Run is accepting connections.
+func (b *Backend) markServing() { b.setReadiness(func() { b.serving = true }) }
+
+// markCacheSynced records that the Workspace informer cache has synced.
+func (b *Backend) markCacheSynced() { b.setReadiness(func() { b.synced = true }) }
+
+// beginShutdown fails /readyz for good.
+func (b *Backend) beginShutdown() { b.setReadiness(func() { b.draining = true }) }
+
+func (b *Backend) setReadiness(mutate func()) {
+	b.readyMu.Lock()
+	defer b.readyMu.Unlock()
+	mutate()
+	b.ready.Store(b.serving && b.synced && !b.draining)
 }
 
 // closeAll releases resources acquired by New, in reverse order.
