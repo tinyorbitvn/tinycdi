@@ -20,7 +20,7 @@ export type WorkspaceFixture = Omit<WorkspaceViewSchema, "template"> & {
 export type RetainedFixture = components["schemas"]["RetainedDataView"];
 // GET /v1/workspaces/{id}/events item (Kubernetes-style event summary).
 export interface WorkspaceEventFixture {
-  // Stable per condition type + reason.
+  // Stable per condition type + reason; derived by the mock when omitted.
   id?: string;
   type: "Normal" | "Warning";
   reason: string;

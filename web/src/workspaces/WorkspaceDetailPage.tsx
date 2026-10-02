@@ -88,7 +88,7 @@ function EventsTable({ events }: { events: WorkspaceEvent[] }) {
     <Table
       columns={columns}
       rows={events}
-      rowKey={(ev) => ev.id ?? `${ev.reason}:${ev.lastTimestamp ?? ""}`}
+      rowKey={(ev) => ev.id}
       caption={t("workspaces.detail.events.title")}
       empty={t("workspaces.detail.events.empty")}
     />

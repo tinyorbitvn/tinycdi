@@ -21,6 +21,7 @@ import {
   makeWorkspace,
   readyWorkspace,
   type ConditionFixture,
+  type WorkspaceEventFixture,
   type WorkspaceFixture,
 } from "./fixtures.ts";
 import { DEMO_EVENTS, DEMO_TEMPLATES, DEMO_TRANSITIONAL, DEMO_WORKSPACES } from "./demo.ts";
@@ -59,6 +60,18 @@ function setCondition(ws: WorkspaceFixture, c: ConditionFixture): void {
   }
 }
 
+// The API gives every event a stable id (unique within the list); fixtures
+// that omit one get "<reason>" with a numeric suffix for repeats.
+function withEventIds(events: WorkspaceEventFixture[]): (WorkspaceEventFixture & { id: string })[] {
+  const seen = new Map<string, number>();
+  return events.map((ev) => {
+    if (ev.id) return { ...ev, id: ev.id };
+    const n = seen.get(ev.reason) ?? 0;
+    seen.set(ev.reason, n + 1);
+    return { ...ev, id: n === 0 ? ev.reason : `${ev.reason}.${n}` };
+  });
+}
+
 export function workspacesArea(ctx: MockContext): MockArea {
   const { state } = ctx;
 
@@ -92,7 +105,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     if (sub === "/start" && method === "POST") return startWorkspace(req, ws);
     if (sub === "/stop" && method === "POST") return stopWorkspace(ws);
     if (sub === "/connections" && method === "POST") return createConnection(req, ws);
-    if (sub === "/events" && method === "GET") return ok(200, { items: state.events.get(ws.id) ?? [] });
+    if (sub === "/events" && method === "GET") return ok(200, { items: withEventIds(state.events.get(ws.id) ?? []) });
     return undefined;
   }
 

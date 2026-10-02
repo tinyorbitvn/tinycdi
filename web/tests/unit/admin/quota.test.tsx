@@ -3,6 +3,7 @@ import { fireEvent, screen, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { makeAdmin, seedTenant, control } from "./helpers";
 import { QuotaPage } from "../../../src/admin/QuotaPage";
+import { OverviewPage } from "../../../src/admin/OverviewPage";
 import { adminArea } from "../../mock-api/admin.ts";
 
 function setup() {
@@ -69,6 +70,17 @@ describe("quota: unlimited meters", () => {
 
     const running = screen.getByText("Running workspaces", { selector: ".tc-meter__label" }).closest(".tc-meter")!;
     expect(running).toHaveTextContent(/of 8 \(\d+%\)/);
+  });
+});
+
+describe("quota: overview without limits", () => {
+  it("renders the capacity meters as 'No limit' when the quota response has no limits", async () => {
+    const api = setup();
+    control(api, "/_control/admin/quota", { limits: null });
+    renderWithApi(<OverviewPage />, api);
+
+    const meterLabel = await screen.findByText("Running workspaces", { selector: ".tc-meter__label" });
+    expect(meterLabel.closest(".tc-meter")).toHaveTextContent("No limit");
   });
 });
 
