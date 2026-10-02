@@ -4,6 +4,7 @@ import {
   launchInNewTab,
   sessionFrameName,
   sessionLabel,
+  sessionFrameUrl,
   sessionOrigin,
   sessionPath,
   submitLaunch,
@@ -45,6 +46,17 @@ describe("session host mapping", () => {
   it("sessionOrigin keeps a configured port", () => {
     expect(sessionOrigin(WS, "session.example.com:8443")).toBe(
       "https://ws-0123456789abcdef.session.example.com:8443",
+    );
+  });
+
+  // FX-R18: KasmVNC forces resize=off when it runs inside an iframe, so the
+  // portal loads it with resize=remote on every frame navigation.
+  it("sessionFrameUrl asks the desktop client to resize the remote screen", () => {
+    expect(sessionFrameUrl(WS, "session.example.com")).toBe(
+      "https://ws-0123456789abcdef.session.example.com/?resize=remote",
+    );
+    expect(sessionFrameUrl(WS, "session.example.com:8443")).toBe(
+      "https://ws-0123456789abcdef.session.example.com:8443/?resize=remote",
     );
   });
 
