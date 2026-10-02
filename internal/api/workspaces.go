@@ -552,7 +552,9 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, provisioning.ErrWorkspaceClosed),
 		errors.Is(err, provisioning.ErrInvalidState):
 		writeError(w, r, CodeInvalidState, err.Error())
-	case provisioning.IsQuotaExceeded(err), errors.Is(err, provisioning.ErrNoQuota):
+	case errors.Is(err, provisioning.ErrNoQuota):
+		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
+	case provisioning.IsQuotaExceeded(err):
 		writeError(w, r, CodeQuotaExhausted, "quota exhausted")
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")

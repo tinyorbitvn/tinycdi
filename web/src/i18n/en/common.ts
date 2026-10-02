@@ -14,6 +14,8 @@ export default {
   "errors.banner.dismiss": "dismiss error",
   "errors.code.quotaExhausted":
     "Quota exhausted — delete an unused workspace or ask an administrator for more quota.",
+  "errors.code.quotaNotConfigured":
+    "No quota is configured for your tenant. Ask an administrator to set one.",
   "errors.code.invalidTemplate":
     "That template is not available (unpublished or disallowed for your tenant). Pick another template.",
   "errors.code.idempotencyConflict":

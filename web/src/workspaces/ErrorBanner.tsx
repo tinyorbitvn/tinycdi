@@ -6,6 +6,7 @@ import { isPortalApiError, type ErrorCode, type PortalApiError } from "../api/er
 // `message` from the server is shown as detail only.
 const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
   QUOTA_EXHAUSTED: "errors.code.quotaExhausted",
+  QUOTA_NOT_CONFIGURED: "errors.code.quotaNotConfigured",
   INVALID_TEMPLATE: "errors.code.invalidTemplate",
   IDEMPOTENCY_CONFLICT: "errors.code.idempotencyConflict",
   INVALID_STATE: "errors.code.invalidState",

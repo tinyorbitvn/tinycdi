@@ -133,7 +133,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant}` — tenant namespaces created with `resource-policy: keep`. The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -406,11 +406,33 @@ confinement instead of restoring the default), then upgrade with
 nodes (removal verified), set `nodeProfiles.install.enabled=false` (or
 uninstall) to drop the DaemonSet.
 
-### Tenant quota
+### Tenant quotas
 
-The API has **no quota-config endpoint** — `tenant_quota` rows live in
-Postgres and are seeded by SQL (see `docs/runbooks/capacity.md`). The
-chart intentionally does not model quota values.
+Each `managedNamespaces[]` entry may carry a `quota` block. The chart renders
+the entries that have one as the backend flag `-tenant-quotas` (JSON), and the
+singleton backend leader upserts exactly those tenants' `tenant_quota` rows at
+startup:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota:
+      runningWorkspaces: 12   # whole number >= 0
+      cpu: "16"               # cores or millicores: "16", "1.5", "500m"
+      memory: 64Gi            # Kubernetes quantity
+      storage: 200Gi          # Kubernetes quantity
+```
+
+All four fields are required inside a `quota` block. The upsert is
+idempotent (an identical row is not touched), values below current usage are
+accepted (running workspaces keep running; new creates are refused with
+`QUOTA_EXHAUSTED`), and a tenant without a `quota` block is left untouched.
+A tenant with **no** row at all gets `409 QUOTA_NOT_CONFIGURED` on every
+create, so NOTES warns about each entry that has no `quota` block.
+`values.schema.json` rejects negative or unparsable quantities. Declared
+values overwrite a hand-edited row for that tenant at the next backend
+start. See `docs/runbooks/install.md` → "Tenant quotas".
 
 ## Validation & tests
 

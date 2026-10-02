@@ -561,6 +561,26 @@ func TestAttachRetained_QuotaExhausted(t *testing.T) {
 	}
 }
 
+// TestAttachRetained_QuotaNotConfigured: a tenant without a quota row is a
+// coded 409 QUOTA_NOT_CONFIGURED, not QUOTA_EXHAUSTED (FX-R17).
+func TestAttachRetained_QuotaNotConfigured(t *testing.T) {
+	fs := newFakeRetainedStore()
+	env := newDataEnv(t, fs)
+	rec := seedRetained(fs, "rd_attach0017", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	fs.quotaErr = provisioning.ErrNoQuota
+	sess, csrf := login(t, env, "user-a")
+
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+		`{"name":"no-quota","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-attach-0017"})
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", r.StatusCode)
+	}
+	if e := errBody(t, r); e.Code != CodeQuotaNotConfigured {
+		t.Fatalf("code=%s, want QUOTA_NOT_CONFIGURED", e.Code)
+	}
+}
+
 // TestAttachRetained_IdempotentReplay: same Idempotency-Key + same body
 // returns the same workspace; same key + different body conflicts.
 func TestAttachRetained_IdempotentReplay(t *testing.T) {

@@ -85,9 +85,21 @@ kasmAdapter:
 # labels each with workspaces.cdi.tinyorbit.vn/tenant=<tenant>, installs the
 # default-deny NetworkPolicy baseline, a tinycdi-runtime ServiceAccount
 # (automountServiceAccountToken=false) and the per-namespace RoleBindings.
+#
+# quota (per entry) declares the tenant's limits. The backend renders them as
+# -tenant-quotas and its singleton leader upserts exactly the listed tenants'
+# tenant_quota rows at startup (idempotent; unlisted tenants and entries
+# without a quota block are left untouched). A tenant WITHOUT a quota row has
+# every create refused with 409 QUOTA_NOT_CONFIGURED, and NOTES warns about it.
+#   runningWorkspaces  whole number >= 0 (concurrently running workspaces)
+#   cpu                cores or millicores: "16", "1.5", "500m"
+#   memory, storage    Kubernetes quantities: "64Gi", "200G", 107374182400
+# Values below current usage are accepted: running workspaces keep running
+# and new creates are refused until usage drops.
 managedNamespaces: []
   # - name: tinycdi-tenant-a
   #   tenant: tenant-a
+  #   quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
 
 # Public entry points. Every workspace session is served on its own
 # <label>.<sessionDomain> host (D9): the edge carries ONE wildcard route
