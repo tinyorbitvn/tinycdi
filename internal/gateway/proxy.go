@@ -448,7 +448,13 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_upgrade"})
 		return
 	}
-	s := g.lookupSession(r, wsID)
+	s, lookupErr := g.lookupSession(r, wsID)
+	if lookupErr != nil {
+		// The session directory could not answer: not "no session". 503
+		// so the browser retries; nothing is cached.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
 	if s != nil && s.workspaceUID() != wsID {
 		// D11: a session bound to a different workspace is "absent" on
 		// this host — the cookie is host-only and can never arrive here

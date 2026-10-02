@@ -536,23 +536,25 @@ func (g *Gateway) killSession(s *session, reason string) {
 // to a digest lookup and rebuilds the session (D19); without one the
 // v0.1 behaviour is unchanged. wsID is the workspace the request Host
 // names: a digest that resolves to another workspace's lease is refused
-// inside fetchSession before any session state is allocated.
-func (g *Gateway) lookupSession(r *http.Request, wsID string) *session {
+// inside fetchSession before any session state is allocated. A non-nil
+// error means the directory could not answer (not "no session"): the caller
+// answers 503 and nothing is cached.
+func (g *Gateway) lookupSession(r *http.Request, wsID string) (*session, error) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c.Value == "" {
-		return nil
+		return nil, nil
 	}
 	g.mu.Lock()
 	s := g.sessions[c.Value]
 	g.mu.Unlock()
 	if s != nil {
 		if s.live(g) {
-			return s
+			return s, nil
 		}
-		return nil
+		return nil, nil
 	}
 	if g.cfg.Sessions == nil {
-		return nil
+		return nil, nil
 	}
 	return g.rehydrate(r, c.Value, wsID)
 }

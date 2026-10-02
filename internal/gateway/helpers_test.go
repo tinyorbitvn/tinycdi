@@ -82,6 +82,10 @@ type fakeBroker struct {
 	// channel — a scripted rendezvous for the concurrent-miss test, so the
 	// overlap is deterministic rather than timing-dependent.
 	lookupGate chan struct{}
+	// lookupErr, when set, is returned by every LeaseBySession call (after
+	// the gate); lookupPanic makes the next call panic instead.
+	lookupErr   error
+	lookupPanic bool
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -269,16 +273,30 @@ func (f *fakeBroker) BindSession(_ context.Context, _ broker.GatewayIdentity, le
 // the same liveness view RenewLease has (a revoked/failed lease is dead).
 // When a lookup gate is scripted the call blocks until the test closes it,
 // so tests can hold the lookup open while more requests pile up behind it.
-func (f *fakeBroker) LeaseBySession(_ context.Context, _ broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error) {
+func (f *fakeBroker) LeaseBySession(ctx context.Context, _ broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error) {
 	f.mu.Lock()
 	f.lookupN++
 	gate := f.lookupGate
 	f.mu.Unlock()
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return broker.Lease{}, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return broker.Lease{}, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.lookupPanic {
+		f.lookupPanic = false
+		panic("fake directory: lookup panicked")
+	}
+	if f.lookupErr != nil {
+		return broker.Lease{}, f.lookupErr
+	}
 	leaseID, ok := f.digests[d]
 	if !ok {
 		return broker.Lease{}, broker.ErrLeaseInvalid
@@ -323,6 +341,21 @@ func (f *fakeBroker) gateLookups() chan struct{} {
 	defer f.mu.Unlock()
 	f.lookupGate = make(chan struct{})
 	return f.lookupGate
+}
+
+// setLookupErr makes LeaseBySession fail with err (nil clears it) — a
+// directory blip for the transient-error tests.
+func (f *fakeBroker) setLookupErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lookupErr = err
+}
+
+// panicNextLookup makes the next LeaseBySession call panic.
+func (f *fakeBroker) panicNextLookup() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lookupPanic = true
 }
 
 // lookupCount reports the LeaseBySession call count.
