@@ -15,7 +15,9 @@ portal.
 | `report.schema.json` | JSON Schema (draft 2020-12) for `soak-report.json` |
 | `metrics.ts` | percentile, gap and duration math (pure, unit-tested) |
 | `report.ts` | report assembly + schema validation (ajv) |
-| `soak.test.ts` | `node --test` unit tests and the dry-run end-to-end check |
+| `soak.test.ts` | `node --test` metrics/report unit tests and the dry-run end-to-end check |
+| `drive.test.ts` | orchestration tests against a scripted fake driver (relaunch, soak clock, reload, SIGINT, option validation) |
+| `drills.test.ts` | `drills.sh` tests against a fake `kubectl` |
 
 The package has its own lockfile on purpose: it is a standalone harness, not
 part of `web/`.
@@ -49,28 +51,43 @@ What a run does, in order:
    runs navigate a tab to `/workspaces/{id}/session` (the in-portal view
    fetches a `LaunchTicket` and POSTs it into the sandboxed iframe); dry
    runs do the same flow at request level against the session origin.
-4. For `SOAK_DURATION` every session is polled on
+4. Each session starts being polled right after it is opened, so `connectMs`
+   is per session. The soak clock starts once the last session has first
+   connected (workspace creation and readiness do not count against it), and
+   for `SOAK_DURATION` after that every session is polled on
    `GET /v1/workspaces/{id}/connection` (the T2.3 `ConnectionStatus`) every
    `SOAK_POLL_INTERVAL` (default 5 s) and gets scripted mouse+keyboard input
    every `SOAK_INPUT_INTERVAL` (default 10 s). Where the connection endpoint
    does not exist (the pre-T2.5 mock) the runner falls back to probing the
    desktop URL on the session origin and marks those rows `"probe"`.
-5. At half the duration every session page is reloaded once; the time back
-   to `connected` is the reconnect measurement.
+5. At half the soak duration every session page is reloaded once. The reload
+   resumes the session without a ticket, so a take-over prompt after it is a
+   harness failure (the run fails and counts a manual action). The time from
+   the first non-connected observation after the reload to the next
+   `connected` one is the reconnect measurement; a reload that never leaves
+   `connected` has `reconnectMs: null`.
 6. At the end — and on failure or SIGINT — every workspace it created is
    stopped/deleted before the report is written.
 
 A session that never reaches `connected`, or stays non-connected past
 `SOAK_CONNECT_TIMEOUT` (default 120 s), is re-launched automatically at most
 `MAX_AUTO_RELAUNCH` = 2 times per 5 minutes (same bound as the portal's
-`useConnectionWatch`). Past that it is recorded as `dropped` plus one
+`useConnectionWatch`). Every relaunch gets the full connect budget again (the
+stale browser tab is closed first); a relaunch that then connects is not a
+drop. Past the bound the session is recorded as `dropped` plus one
 `manualActions` — the report counts sessions that needed a human.
+
+A run that ends before the requested duration has elapsed on the soak clock
+(SIGINT, abort) is **truncated** and fails; so does a run whose soak clock
+never started. Numeric flags and `SOAK_SESSIONS` are validated up front.
+Playwright's own signal handlers are disabled, so SIGINT/SIGTERM/SIGHUP
+always run the cleanup and write the report.
 
 ### Report
 
 `soak-report.json` is validated against `report.schema.json` before it is
 written. Per session it records `connectMs` (launch → first `connected`),
-`reconnectMs` (reload → `connected`), `longestGapMs` (longest continuous
+`reconnectMs` (first non-connected observation after the reload → `connected`), `longestGapMs` (longest continuous
 non-connected stretch after the first connect), every span spent in a state
 other than `connected`, `manualActions`, `inputEvents` and `dropped`. The
 summary carries p50/p95 of connect and reconnect (nearest-rank), the manual
@@ -84,10 +101,11 @@ reach the report; `run.portalOrigin` stores the origin only.
 ## drills.sh
 
 ```sh
-tests/soak/drills.sh delete-pod                # delete one backend pod
+tests/soak/drills.sh delete-pod                # delete one backend pod, wait for the Deployment
 tests/soak/drills.sh rollout                   # rollout restart deployment/backend
 tests/soak/drills.sh rotate-cert --certificate tinycdi-session-tls
-tests/soak/drills.sh rotate-cert --secret tinycdi-session-tls --touch
+tests/soak/drills.sh rotate-cert --secret tinycdi-session-tls
+tests/soak/drills.sh -n tinycdi rollout        # options go before or after the drill name
 ```
 
 Every drill prints a UTC timestamp before and after it acts — line the
@@ -95,12 +113,12 @@ Every drill prints a UTC timestamp before and after it acts — line the
 `SOAK_NAMESPACE` (default `tinycdi`), `SOAK_DEPLOYMENT` (`backend`),
 `SOAK_SELECTOR` (`app.kubernetes.io/name=backend`), `KUBECTL`.
 
-`rotate-cert` prefers `cmctl renew` / `kubectl cert-manager renew` on a
+`rotate-cert` runs `cmctl renew` / `kubectl cert-manager renew` on a
 cert-manager `Certificate` (`--certificate`, or `--secret` whose owning
-Certificate is discovered). `--secret NAME --touch` only re-annotates the
-Secret to force a kubelet re-mount — that exercises the hot-reload path
-(TLS reload, D21) but does **not** mint a new certificate; use a real PKI
-renewal for criterion 3.
+Certificate is looked up), which re-issues the key material and exercises
+the TLS hot-reload path (D21). A Secret that no Certificate owns cannot be
+rotated from here and the drill fails — re-issue it with your PKI. An
+unknown option is an error.
 
 ## Development
 
