@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Badge, Button, Card, Grid, Meter, Section, Spinner, Table } from "../design";
+import { Alert, Badge, Button, Card, Grid, Meter, Section, Spinner, Table } from "../design";
 import type { Column } from "../design/Table";
 import { IconChevronDown, IconChevronUp, IconRefresh } from "../design/icons";
 import { cx } from "../design/cx";
@@ -17,19 +17,25 @@ import { useLoader } from "./hooks";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 
-// A missing limit (tenant without a quota row) or a workspace-count limit of 0
-// means "no limit" — never a meter against zero.
+// A workspace-count limit of 0 in a configured quota means "no limit" — never
+// a meter against zero. A tenant without a quota row is not unlimited: it is
+// refused every create (see QuotaMeters).
 export function isUnlimited(k: QuotaKey, limit: number | undefined): boolean {
   return limit === undefined || (k === "workspaces" && limit === 0);
 }
 
 export function QuotaMeters({
+  configured,
   limits,
   usage,
 }: {
+  configured: boolean;
   limits: Partial<QuotaAmounts> | undefined;
   usage: QuotaAmounts;
 }) {
+  if (!configured) {
+    return <Alert tone="warning">{t("admin.quota.notConfigured")}</Alert>;
+  }
   return (
     <Grid gap={4} min="sm">
       {QUOTA_KEYS.map((k) => {
@@ -178,7 +184,7 @@ export function QuotaContent({ quota }: { quota: QuotaView }) {
         title={t("admin.quota.limits.title")}
         description={t("admin.quota.limits.description", { tenant: quota.tenant })}
       >
-        <QuotaMeters limits={quota.limits} usage={quota.usage} />
+        <QuotaMeters configured={quota.configured} limits={quota.limits} usage={quota.usage} />
       </Section>
       {quota.userLimits ? (
         <Section title={t("admin.quota.userLimits.title")} headingLevel={3}>

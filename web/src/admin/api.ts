@@ -42,6 +42,9 @@ export interface UserUsage {
 
 export interface QuotaView {
   tenant: string;
+  // False when the tenant has no quota row: admission then refuses every
+  // create, so the absence of limits must not read as "unlimited".
+  configured: boolean;
   // Absent when the tenant has no quota row; `workspaces: 0` means no count limit.
   limits?: QuotaAmounts;
   usage: QuotaAmounts;

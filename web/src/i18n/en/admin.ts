@@ -57,6 +57,8 @@ export default {
   "admin.quota.amount.storageGib": "Storage",
   "admin.quota.atLimit": "at limit",
   "admin.quota.meter": "{used} of {limit} ({pct}%)",
+  "admin.quota.notConfigured":
+    "No quota configured. New workspaces are refused until a tenant quota is set.",
   "admin.quota.noLimit": "{used} used · No limit",
 
   // Template catalog page.

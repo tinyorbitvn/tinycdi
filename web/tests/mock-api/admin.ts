@@ -302,6 +302,7 @@ export function adminArea(ctx: MockContext): MockArea {
       .map((b) => ({ subject: b.owner.subject, displayName: b.owner.displayName, usage: b.usage }));
     return ok(200, {
       tenant: t.me.tenant,
+      configured: t.limits !== undefined,
       ...(t.limits ? { limits: t.limits } : {}),
       usage,
       ...(t.userLimits ? { userLimits: t.userLimits } : {}),
