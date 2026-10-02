@@ -118,6 +118,9 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 	if in.Spec.ImageBuiltAt != "" {
 		ws.Annotations[AnnotationWorkspaceImageBuiltAt] = in.Spec.ImageBuiltAt
 	}
+	for k, v := range in.CRAnnotations {
+		ws.Annotations[k] = v
+	}
 	err := a.client.Create(ctx, ws)
 	switch {
 	case err == nil:

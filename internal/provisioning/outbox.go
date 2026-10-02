@@ -71,6 +71,12 @@ type Intent struct {
 	DesiredState      string
 	RuntimeGeneration int64
 	Spec              IntentSpec
+	// CRAnnotations are extra annotations the applier stamps on the
+	// Workspace CR IN THE SAME WRITE that creates it. They are never read
+	// from or written to the outbox: a wrapping applier (RetainedApplier)
+	// sets them after verifying what they assert, so the operator never
+	// sees a CR that lacks them (FX-R20).
+	CRAnnotations map[string]string
 }
 
 var (
