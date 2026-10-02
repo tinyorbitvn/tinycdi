@@ -461,9 +461,11 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	catalog := catalogAdapter{c: provisioning.NewK8sTemplateCatalog(kc, tenants)}
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView).
+		WithImageStaleAfter(cfg.ImageStaleAfter).
 		WithDirectory(directory).
 		WithIntentLog(api.NewIntentLog(svc))
-	tplHandler := api.NewTemplateHandler(catalog, tenants)
+	tplHandler := api.NewTemplateHandler(catalog, tenants).
+		WithImageStaleAfter(cfg.ImageStaleAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain)
 	meHandler := api.NewMeHandler(sessionDomain.String())
 	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
@@ -692,5 +694,6 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		ClipboardPolicy:        e.ClipboardPolicy,
 		NetworkProfile:         e.NetworkProfile,
 		PublishedAt:            e.PublishedAt,
+		ImageBuiltAt:           e.ImageBuiltAt,
 	}
 }

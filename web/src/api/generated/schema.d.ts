@@ -513,6 +513,20 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+            /**
+             * Format: date-time
+             * @description Build timestamp of the runtime image, resolved through the
+             *     workspace's template (its
+             *     workspaces.cdi.tinyorbit.vn/image-built-at annotation). Absent
+             *     when the template is gone or carries no parseable annotation.
+             */
+            imageBuiltAt?: string;
+            /**
+             * @description True when the runtime image is older than the backend's
+             *     -image-stale-after threshold (default 336h). Advisory only —
+             *     a stale image never blocks a Start in v0.2.
+             */
+            imageStale?: boolean;
         };
         /**
          * @description One curated workspace event. `message` is a fixed catalog string —
@@ -746,6 +760,20 @@ export interface components {
             networkProfile: "InternetOnly" | "ClusterOnly" | "Isolated";
             /** Format: date-time */
             publishedAt: string;
+            /**
+             * Format: date-time
+             * @description Build timestamp of the runtime image (the template's
+             *     workspaces.cdi.tinyorbit.vn/image-built-at annotation, rendered
+             *     from images.<key>.builtAt or the seeded entry's imageBuiltAt).
+             *     Absent when the template carries no parseable annotation.
+             */
+            imageBuiltAt?: string;
+            /**
+             * @description True when the runtime image is older than the backend's
+             *     -image-stale-after threshold (default 336h). Advisory only —
+             *     a stale image never blocks a Start in v0.2.
+             */
+            imageStale?: boolean;
         };
         TemplateList: {
             items: components["schemas"]["TemplateView"][];
