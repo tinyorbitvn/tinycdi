@@ -2,9 +2,10 @@
 # runtime-images.yml — the runtime image release train (D27/D28).
 #
 # Builds, scans, signs and publishes ONLY the runtime images
-# (linux-desktop + browser) on a cadence decoupled from control-plane
-# releases: every push to main that touches build/linux-desktop/** or
-# build/browser/**, weekly, and on workflow_dispatch. Control-plane
+# (linux-base + linux-desktop + browser) on a cadence decoupled from
+# control-plane releases: every push to main that touches
+# build/linux-base/**, build/linux-desktop/** or build/browser/**,
+# weekly, and on workflow_dispatch. Control-plane
 # images are never built or tagged here (D27) — release.yml owns them.
 #
 # Publishing happens only when github.ref == 'refs/heads/main' (SUP-3):
@@ -41,11 +42,12 @@
 # not read or write `type=gha` scopes — main-branch CI cache is a
 # poisoning vector for anything that gets signed and released.
 #
-# Topology: `browser` FROMs `linux-desktop` (ARG BASE_IMAGE); the
-# docker-container buildx builder cannot see the daemon's image store,
-# so linux-desktop builds first in its own `desktop` job and the browser
-# leg consumes the pushed manifest by digest (or, on non-publishing
-# runs, the image-tar artifact via docker load).
+# Topology: `linux-desktop` and `browser` both FROM `linux-base` (ARG
+# BASE_IMAGE); the docker-container buildx builder cannot see the
+# daemon's image store, so linux-base builds first in its own `base` job
+# and the two profile legs (matrix `profile`) consume the pushed manifest
+# by digest (or, on non-publishing runs, the image-tar artifact via
+# docker load).
 #
 # Tool pins match images.yml/release.yml (trivy 0.70.0, syft 1.52.0,
 # cosign v3.1.3) — every action is pinned by full commit SHA and every
@@ -57,6 +59,7 @@ name: runtime-images
   push:
     branches: [main]
     paths:
+      - build/linux-base/**
       - build/linux-desktop/**
       - build/browser/**
   schedule:
@@ -114,10 +117,11 @@ jobs:
           echo "rt_tag=rt-$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "release_tag=runtime-$(date -u +%Y.%m.%d)" >> "$GITHUB_OUTPUT"
 
-  desktop:
-    # linux-desktop is the browser image's base — it must be pushed (or
-    # its tar uploaded) before the browser leg can consume it.
-    name: linux-desktop image (browser base)
+  base:
+    # linux-base is the base of both runtime profiles (linux-base,
+    # browser) — it must be pushed (or its tar uploaded) before they can
+    # consume it.
+    name: linux-base image (profile base)
     needs: meta
     runs-on: ubuntu-24.04
     permissions:
@@ -169,30 +173,30 @@ jobs:
           # (SBOM + THIRD_PARTY_LICENSES.md carry the full inventory)
           # and a pointer to the written source offer in NOTICE.
           {
-            echo "IMAGE_REF=$IMAGE_NS/tinycdi-linux-desktop"
+            echo "IMAGE_REF=$IMAGE_NS/tinycdi-linux-base"
             echo "OCI_LABELS<<__EOF__"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.licenses=MIT AND GPL-2.0-only AND MPL-2.0"
             echo "io.tinycdi.kasmvnc-source-offer=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/NOTICE"
-            echo "org.opencontainers.image.title=tinycdi-linux-desktop"
-            echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux desktop runtime"
+            echo "org.opencontainers.image.title=tinycdi-linux-base"
+            echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux runtime base (profiles build FROM it)"
             echo "org.opencontainers.image.version=$RT_TAG"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
             echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "__EOF__"
           } >> "$GITHUB_ENV"
 
-      - name: build linux-desktop (digest-only push / dry tar)
+      - name: build linux-base (digest-only push / dry tar)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
-          file: build/linux-desktop/Dockerfile
+          file: build/linux-base/Dockerfile
           platforms: ${{ inputs.platforms || 'linux/amd64' }}
           outputs: >-
             ${{ env.PUBLISH == 'true'
                 && format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF)
-                || 'type=docker,dest=/tmp/linux-desktop.tar' }}
+                || 'type=docker,dest=/tmp/linux-base.tar' }}
           # tags only name the non-publishing docker tar; a push-by-digest
           # build must not carry name:tag refs (buildx rejects them).
           tags: >-
@@ -207,16 +211,16 @@ jobs:
         run: |
           mkdir -p refs
           if [ "$PUBLISH" = "true" ]; then
-            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-desktop.ref
+            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-base.ref
           else
-            echo "local" > refs/linux-desktop.ref
+            echo "local" > refs/linux-base.ref
           fi
 
       - name: upload image ref
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-ref-linux-desktop
-          path: refs/linux-desktop.ref
+          name: image-ref-linux-base
+          path: refs/linux-base.ref
           retention-days: 5
 
       - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
@@ -238,24 +242,24 @@ jobs:
           if [ "$PUBLISH" = "true" ]; then
             SRC="registry:$IMAGE_REF@$BUILD_DIGEST"
           else
-            SRC="docker-archive:/tmp/linux-desktop.tar"
+            SRC="docker-archive:/tmp/linux-base.tar"
           fi
           "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
-            "$SRC" -o spdx-json="sbom-linux-desktop.spdx.json"
+            "$SRC" -o spdx-json="sbom-linux-base.spdx.json"
 
       - name: upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sbom-linux-desktop
-          path: sbom-linux-desktop.spdx.json
+          name: sbom-linux-base
+          path: sbom-linux-base.spdx.json
           retention-days: 30
 
       - name: upload image tar (non-publishing runs)
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-tar-linux-desktop
-          path: /tmp/linux-desktop.tar
+          name: image-tar-linux-base
+          path: /tmp/linux-base.tar
           retention-days: 5
           compression-level: 0  # image layers are already compressed
 
@@ -271,15 +275,23 @@ jobs:
             docker logout "$BASE_MIRROR_REGISTRY"
           fi
 
-  browser:
-    name: browser image
-    needs: [meta, desktop]
+  profile:
+    name: ${{ matrix.image }} image
+    needs: [meta, base]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write  # push-by-digest to ghcr
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [linux-desktop, browser]
     env:
       RT_TAG: ${{ needs.meta.outputs.rt_tag }}
+      IMG: ${{ matrix.image }}
+      IMG_DESCRIPTION: >-
+        ${{ matrix.image == 'linux-desktop' && 'TinyCDI Linux desktop workspace (XFCE4 + Firefox ESR)' ||
+            'TinyCDI browser workspace (Chromium + Firefox ESR)' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -317,61 +329,61 @@ jobs:
 
       - name: compute tags + OCI labels
         run: |
-          # PUB-2: browser redistributes KasmVNC (GPL-2.0), noVNC and
-          # Firefox ESR (MPL-2.0) — SPDX headline expression + the
+          # PUB-2: the profile images redistribute KasmVNC (GPL-2.0), noVNC
+          # and Firefox ESR (MPL-2.0) — SPDX headline expression + the
           # written-offer pointer (NOTICE).
           {
-            echo "IMAGE_REF=$IMAGE_NS/tinycdi-browser"
+            echo "IMAGE_REF=$IMAGE_NS/tinycdi-$IMG"
             echo "OCI_LABELS<<__EOF__"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.licenses=MIT AND GPL-2.0-only AND MPL-2.0"
             echo "io.tinycdi.kasmvnc-source-offer=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/NOTICE"
-            echo "org.opencontainers.image.title=tinycdi-browser"
-            echo "org.opencontainers.image.description=TinyCDI browser workspace (Chromium + Firefox ESR)"
+            echo "org.opencontainers.image.title=tinycdi-$IMG"
+            echo "org.opencontainers.image.description=$IMG_DESCRIPTION"
             echo "org.opencontainers.image.version=$RT_TAG"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
             echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "__EOF__"
           } >> "$GITHUB_ENV"
 
-      - name: browser build wiring (publish — consume desktop digest)
+      - name: profile build wiring (publish — consume base digest)
         if: env.PUBLISH == 'true'
         env:
-          DESKTOP_DIGEST: ${{ needs.desktop.outputs.digest }}
+          BASE_DIGEST: ${{ needs.base.outputs.digest }}
         run: |
           # The docker-container builder cannot see daemon-local
-          # images — FROM the exact linux-desktop manifest the desktop
-          # job pushed.
-          echo "BUILD_ARGS=BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop@$DESKTOP_DIGEST" \
+          # images — FROM the exact linux-base manifest the base job
+          # pushed.
+          echo "BUILD_ARGS=BASE_IMAGE=$IMAGE_NS/tinycdi-linux-base@$BASE_DIGEST" \
             >> "$GITHUB_ENV"
 
-      - name: download linux-desktop tar (non-publishing runs)
+      - name: download linux-base tar (non-publishing runs)
         if: env.PUBLISH != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: image-tar-linux-desktop
+          name: image-tar-linux-base
           path: /tmp
 
-      - name: build browser (non-publishing — daemon builder)
+      - name: build ${{ matrix.image }} (non-publishing — daemon builder)
         if: env.PUBLISH != 'true'
         run: |
-          docker load --input /tmp/linux-desktop.tar
-          args=(--platform linux/amd64 -f build/browser/Dockerfile
-                --build-arg "BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop:$RT_TAG")
+          docker load --input /tmp/linux-base.tar
+          args=(--platform linux/amd64 -f "build/$IMG/Dockerfile"
+                --build-arg "BASE_IMAGE=$IMAGE_NS/tinycdi-linux-base:$RT_TAG")
           while IFS= read -r lbl; do
             args+=(--label "$lbl")
           done <<< "$OCI_LABELS"
           args+=(-t "$IMAGE_REF:$RT_TAG")
           docker build "${args[@]}" .
-          docker save "$IMAGE_REF:$RT_TAG" -o /tmp/browser.tar
+          docker save "$IMAGE_REF:$RT_TAG" -o "/tmp/$IMG.tar"
 
-      - name: build browser (digest-only push)
+      - name: build ${{ matrix.image }} (digest-only push)
         if: env.PUBLISH == 'true'
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
-          file: build/browser/Dockerfile
+          file: build/${{ matrix.image }}/Dockerfile
           platforms: ${{ inputs.platforms || 'linux/amd64' }}
           outputs: >-
             ${{ format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF) }}
@@ -385,16 +397,16 @@ jobs:
         run: |
           mkdir -p refs
           if [ "$PUBLISH" = "true" ]; then
-            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/browser.ref
+            echo "$IMAGE_REF@$BUILD_DIGEST" > "refs/$IMG.ref"
           else
-            echo "local" > refs/browser.ref
+            echo "local" > "refs/$IMG.ref"
           fi
 
       - name: upload image ref
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-ref-browser
-          path: refs/browser.ref
+          name: image-ref-${{ matrix.image }}
+          path: refs/${{ matrix.image }}.ref
           retention-days: 5
 
       - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
@@ -416,24 +428,24 @@ jobs:
           if [ "$PUBLISH" = "true" ]; then
             SRC="registry:$IMAGE_REF@$BUILD_DIGEST"
           else
-            SRC="docker-archive:/tmp/browser.tar"
+            SRC="docker-archive:/tmp/$IMG.tar"
           fi
           "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
-            "$SRC" -o spdx-json="sbom-browser.spdx.json"
+            "$SRC" -o spdx-json="sbom-$IMG.spdx.json"
 
       - name: upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sbom-browser
-          path: sbom-browser.spdx.json
+          name: sbom-${{ matrix.image }}
+          path: sbom-${{ matrix.image }}.spdx.json
           retention-days: 30
 
       - name: upload image tar (non-publishing runs)
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-tar-browser
-          path: /tmp/browser.tar
+          name: image-tar-${{ matrix.image }}
+          path: /tmp/${{ matrix.image }}.tar
           retention-days: 5
           compression-level: 0  # image layers are already compressed
 
@@ -453,7 +465,7 @@ jobs:
     # SEC-05: scanners run in a job holding only read permissions — no
     # packages: write, no id-token, no attestations, no registry secrets.
     name: scan ${{ matrix.image }}
-    needs: [desktop, browser]
+    needs: [base, profile]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -463,7 +475,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [linux-desktop, browser]
+        image: [linux-base, linux-desktop, browser]
     env:
       IMG: ${{ matrix.image }}
       PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
@@ -628,8 +640,9 @@ jobs:
       # SUPR-10: no setup-buildx here — `docker buildx imagetools` only
       # talks to the registry and needs no privileged BuildKit container.
 
-      # The validation/manifest scripts plus the browser Dockerfile (the
-      # manifest's chromium field is read off its pin).
+      # The validation/manifest scripts plus the browser and linux-desktop
+      # Dockerfiles (the manifest's chromium/firefox fields are read off
+      # their pins).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -637,6 +650,7 @@ jobs:
           sparse-checkout: |
             .github/scripts
             build/browser/Dockerfile
+            build/linux-desktop/Dockerfile
 
       - name: install cosign ${{ env.COSIGN_VERSION }} (pinned installer + sha256)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
@@ -655,7 +669,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p refs sboms
-          for img in linux-desktop browser; do
+          for img in linux-base linux-desktop browser; do
             gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D refs
             gh run download "$GITHUB_RUN_ID" -n "sbom-$img" -D sboms
           done
@@ -664,8 +678,8 @@ jobs:
         # SUPF-1: refs must be the canonical ghcr repo@sha256:<64hex>
         # form for this repo — anything else fails before signing.
         run: |
-          .github/scripts/validate-image-refs.sh refs linux-desktop browser
-          for img in linux-desktop browser; do
+          .github/scripts/validate-image-refs.sh refs linux-base linux-desktop browser
+          for img in linux-base linux-desktop browser; do
             f="sboms/sbom-$img.spdx.json"
             [ -s "$f" ] || { echo "::error::missing SBOM for '$img'"; exit 1; }
             jq -e . "$f" >/dev/null \
@@ -711,6 +725,7 @@ jobs:
       - name: write runtime-images.json
         env:
           BROWSER_DOCKERFILE: build/browser/Dockerfile
+          DESKTOP_DOCKERFILE: build/linux-desktop/Dockerfile
         run: |
           .github/scripts/write-runtime-manifest.sh refs runtime-images.json
           jq . runtime-images.json

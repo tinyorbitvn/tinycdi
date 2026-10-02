@@ -18,6 +18,10 @@
 # The "Known limitations" scan notes in docs/images.md keep the version
 # they measured — they are historical, not a pin.
 #
+# The linux-desktop image carries the SAME firefox-esr pin (V3.26): when
+# BUMP_DESKTOP_DOCKERFILE names it, a firefox-esr bump repins its ARG too
+# (and refuses to touch anything if the two pins already disagree).
+#
 # Every extra file named after compatibility.md (NOTICE,
 # THIRD_PARTY_LICENSES.md, …) lists the shipped versions; the old version
 # is replaced there literally.
@@ -27,6 +31,9 @@
 #                           (default: today, UTC)
 #        BUMP_DEB_SHA256  — sha256 of the new firefox-esr .deb (required
 #                           for firefox-esr; 64 lowercase hex)
+#        BUMP_DESKTOP_DOCKERFILE — build/linux-desktop/Dockerfile; its
+#                           FIREFOX_ESR_APT_VERSION is repinned with the
+#                           browser's (firefox-esr only; optional)
 set -euo pipefail
 
 USAGE="usage: bump-browser-pin.sh <chromium|firefox-esr> <new-version> [dockerfile] [images.md] [compatibility.md] [extra-file...]"
@@ -38,6 +45,7 @@ COMPAT_MD="${5:-docs/compatibility.md}"
 EXTRA_FILES=("${@:6}")
 STAMP="${BUMP_DATE:-$(date -u +%F)}"
 SHA="${BUMP_DEB_SHA256:-}"
+DESKTOP_DF="${BUMP_DESKTOP_DOCKERFILE:-}"
 
 [ -n "$ENGINE" ] && [ -n "$NEW" ] || { echo "$USAGE" >&2; exit 2; }
 
@@ -64,6 +72,15 @@ if [ "$OLD" = "$NEW" ]; then
   echo "$ENGINE pin already at $NEW — no-op"
   exit 0
 fi
+# One pinned source: the desktop image's Firefox pin must equal the
+# browser's before the bump, or the bump refuses and writes nothing.
+if [ "$ENGINE" = firefox-esr ] && [ -n "$DESKTOP_DF" ]; then
+  DESKTOP_OLD="$(awk -F= -v arg="$ARG" '$1 == "ARG " arg {print $2; exit}' "$DESKTOP_DF")"
+  [ -n "$DESKTOP_OLD" ] \
+    || { echo "::error::$ARG not found in $DESKTOP_DF"; exit 1; }
+  [ "$DESKTOP_OLD" = "$OLD" ] \
+    || { echo "::error::$DESKTOP_DF pins $ARG=$DESKTOP_OLD but $DOCKERFILE pins $OLD - align them first"; exit 1; }
+fi
 echo "bumping $ENGINE pin $OLD -> $NEW"
 
 # Literal substitution — the pins carry '.'/'~' and awk's index() avoids
@@ -89,6 +106,12 @@ awk -v arg="$ARG" -v new="$NEW" '
   $0 ~ "^ARG " arg "=" { $0 = "ARG " arg "=" new }
   { print }' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
 
+if [ "$ENGINE" = firefox-esr ] && [ -n "$DESKTOP_DF" ]; then
+  awk -v arg="$ARG" -v new="$NEW" '
+    $0 ~ "^ARG " arg "=" { $0 = "ARG " arg "=" new }
+    { print }' "$DESKTOP_DF" > "$DESKTOP_DF.tmp" && mv "$DESKTOP_DF.tmp" "$DESKTOP_DF"
+fi
+
 repin_line "$IMAGES_MD" "$IMAGES_SEL" no yes
 if [ "$ENGINE" = chromium ]; then
   repin_line "$COMPAT_MD" '$0 ~ /current ARG/' yes yes
@@ -105,7 +128,7 @@ done
 
 # Fail loudly when a pin line drifts out of shape — better a red
 # freshness job than a PR that bumps only some of the pins.
-for f in "$DOCKERFILE" "$IMAGES_MD" "$COMPAT_MD" ${EXTRA_FILES[@]+"${EXTRA_FILES[@]}"}; do
+for f in "$DOCKERFILE" "$IMAGES_MD" "$COMPAT_MD" ${EXTRA_FILES[@]+"${EXTRA_FILES[@]}"} ${DESKTOP_DF:+"$DESKTOP_DF"}; do
   grep -qF "$NEW" "$f" \
     || { echo "::error::$f does not contain the new pin — pin line format drifted"; exit 1; }
 done

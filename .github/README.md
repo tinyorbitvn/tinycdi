@@ -6,10 +6,10 @@ the trailing comment) and every downloaded tool sha256-verified.
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), the soak/drill harness (`tests/soak`: npm ci, npm audit, tsc, unit tests + dry-run), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
-| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images (`backend`, `frontend`, `operator`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
+| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
-| `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
-| `runtime-images.yml` | push to `main` touching `build/{linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-desktop + browser → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
+| `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` (and, for firefox-esr, `build/linux-desktop/Dockerfile` — the desktop image carries the same Firefox pin) + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
+| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
 
@@ -163,9 +163,9 @@ the same run opens the pin-bump PR via `bump-browser-pin.sh`.
 
 ## Runtime image release train (D27/D28)
 
-`runtime-images.yml` publishes the runtime images (`linux-desktop`,
-`browser`) on their own cadence — every main push touching
-`build/linux-desktop/**` or `build/browser/**`, weekly, and on
+`runtime-images.yml` publishes the runtime images (`linux-base`,
+`linux-desktop`, `browser`) on their own cadence — every main push touching
+`build/linux-base/**`, `build/linux-desktop/**` or `build/browser/**`, weekly, and on
 `workflow_dispatch` — independent of control-plane `v*.*.*` releases.
 Promoted digests get the `rt-YYYYMMDD.N` tag (`N` = run number); the
 train never promotes `main`/`latest` and never builds control-plane
@@ -177,10 +177,13 @@ one train runs in a day):
 {
   "builtAt": "2026-10-20T03:10:00Z",
   "images": [
-    {"name": "linux-desktop", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-desktop",
+    {"name": "linux-base", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-base",
      "digest": "sha256:…", "tag": "rt-20261020.1"},
+    {"name": "linux-desktop", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-desktop",
+     "digest": "sha256:…", "tag": "rt-20261020.1", "firefox": "153.4.0esr"},
     {"name": "browser", "ref": "ghcr.io/tinyorbitvn/tinycdi-browser",
-     "digest": "sha256:…", "tag": "rt-20261020.1", "chromium": "154.0.8037.92"}
+     "digest": "sha256:…", "tag": "rt-20261020.1", "chromium": "154.0.8037.92",
+     "firefox": "153.4.0esr"}
   ]
 }
 ```
@@ -208,9 +211,9 @@ cosign verify ghcr.io/tinyorbitvn/tinycdi-browser:rt-<date>.<n> \
 in **`build/release-images.txt`** (one name per line, `#` comments allowed;
 must match a `build/<name>/Dockerfile`). Comment an image out to hold it
 back from a release, e.g. when its gate cannot pass.
-`linux-desktop` builds in its own `desktop` job because `browser` `FROM`s
-its pushed digest; `browser` requires `linux-desktop` in the set.
-`images.yml` on main still builds and scans all six images.
+`linux-base` builds in its own `base` job because `linux-desktop` and
+`browser` `FROM` its pushed digest; both require `linux-base` in the set.
+`images.yml` on main builds and scans every image in the set.
 
 ## Verifying a release
 
@@ -285,26 +288,26 @@ cosign verify-blob --bundle <asset>.sigstore.json <asset> \
 
 | Image | Dockerfile | Build context |
 |---|---|---|
-| backend, frontend, operator, linux-desktop, browser, kasm-adapter | `build/<name>/Dockerfile` | repo root (`context: .`) |
+| backend, frontend, operator, linux-base, linux-desktop, browser, kasm-adapter | `build/<name>/Dockerfile` | repo root (`context: .`) |
 
-`browser` `FROM`s `linux-desktop` (`ARG BASE_IMAGE`). A docker-container
-buildx builder cannot see the daemon's image store, so `linux-desktop`
-builds first in its own `desktop` job and the browser leg consumes the
-exact pushed manifest by digest
-(`BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-desktop@sha256:<digest>`).
-On non-publishing runs it consumes the desktop job's `image-tar` artifact
+`linux-desktop` and `browser` `FROM` `linux-base` (`ARG BASE_IMAGE`). A
+docker-container buildx builder cannot see the daemon's image store, so
+`linux-base` builds first in its own `base` job and the two profile legs
+consume the exact pushed manifest by digest
+(`BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-base@sha256:<digest>`).
+On non-publishing runs they consume the base job's `image-tar` artifact
 via `docker load`. Every Dockerfile is self-contained —
 `docker build -f build/<name>/Dockerfile .` from a clean checkout works
-(the frontend image builds the `web/` SPA in-image; the browser image needs
-a local base or a `BASE_IMAGE` override).
+(the frontend image builds the `web/` SPA in-image; the two profile images
+need a local base or a `BASE_IMAGE` override).
 
 All images carry the standard `org.opencontainers.image.*` labels
 (source, licenses, title, description, version, revision, created)
 stamped at build time so the GHCR package pages link back to this repo.
 `licenses` is per-image: `MIT` for the Go images, and
-`MIT AND GPL-2.0-only AND MPL-2.0` for `linux-desktop`/`browser` — which
+`MIT AND GPL-2.0-only AND MPL-2.0` for `linux-base`/`linux-desktop`/`browser` — which
 redistribute KasmVNC (GPL-2.0) and noVNC/Firefox ESR (MPL-2.0); the SBOM +
-`THIRD_PARTY_LICENSES.md` carry the full inventory. Those two images also
+`THIRD_PARTY_LICENSES.md` carry the full inventory. Those images also
 carry `io.tinycdi.kasmvnc-source-offer`, a pointer to the
 `kasmvnc-<ver>-corresponding-source.tar.gz` release asset produced by
 `hack/kasmvnc-source-bundle.sh` (the GPL-2.0 written offer — see NOTICE).

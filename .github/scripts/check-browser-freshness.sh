@@ -22,18 +22,38 @@
 # Exit 2 means the check itself could not run (pin missing from the
 # Dockerfile, index unreachable, package absent) — never a stale pin.
 #
-# Usage: check-browser-freshness.sh [dockerfile]
+# The linux-desktop image installs the SAME firefox-esr build from the SAME
+# apt pin (V3.26). When a second Dockerfile is given, its
+# FIREFOX_ESR_APT_VERSION must equal the browser image's, so the freshness
+# verdict below covers the desktop's Firefox too; a disagreement is exit 2
+# (a human must align the pins - the bump script refuses to guess).
+#
+# Usage: check-browser-freshness.sh [browser-dockerfile [desktop-dockerfile]]
 # Env:   BROWSER_FRESHNESS_INDEX — path to an uncompressed Packages file
 #        used instead of downloading the index (regression tests only).
 set -euo pipefail
 
 DOCKERFILE="${1:-build/browser/Dockerfile}"
+DESKTOP_DOCKERFILE="${2:-}"
 IDX_URL="https://security.debian.org/debian-security/dists/bookworm-security/main/binary-amd64/Packages.xz"
 # engine : Dockerfile ARG : Debian package
 ENGINES=(
   "chromium:CHROMIUM_APT_VERSION:chromium"
   "firefox-esr:FIREFOX_ESR_APT_VERSION:firefox-esr"
 )
+
+if [ -n "$DESKTOP_DOCKERFILE" ]; then
+  b_ff="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$DOCKERFILE")"
+  d_ff="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$DESKTOP_DOCKERFILE")"
+  if [ -z "$d_ff" ]; then
+    echo "::error::FIREFOX_ESR_APT_VERSION not found in $DESKTOP_DOCKERFILE"
+    exit 2
+  fi
+  if [ "$d_ff" != "$b_ff" ]; then
+    echo "::error::$DESKTOP_DOCKERFILE pins FIREFOX_ESR_APT_VERSION=$d_ff but $DOCKERFILE pins $b_ff — the desktop and browser images share one firefox-esr pin; align them"
+    exit 2
+  fi
+fi
 
 IDX="$(mktemp)"; trap 'rm -f "$IDX"' EXIT
 if [ -n "${BROWSER_FRESHNESS_INDEX:-}" ]; then

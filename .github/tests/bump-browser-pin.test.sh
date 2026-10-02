@@ -128,6 +128,35 @@ only_pin_lines images.md "$FF_NEW"
 only_pin_lines compatibility.md "$FF_NEW" "$SHA_NEW"
 only_pin_lines NOTICE "$FF_NEW"
 
+# --- firefox-esr with the desktop Dockerfile: both pins move together ---
+make_fixtures
+printf 'ARG BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-base:local\nFROM ${BASE_IMAGE}\nARG FIREFOX_ESR_APT_VERSION=%s\n' "$FF_OLD" > "$D/Dockerfile.desktop"
+cp "$D/Dockerfile.desktop" "$D/Dockerfile.desktop.orig"
+out="$(BUMP_DATE=2026-10-20 BUMP_DEB_SHA256="$SHA_NEW" BUMP_DESKTOP_DOCKERFILE="$D/Dockerfile.desktop" \
+  bash "$BUMP" firefox-esr "$FF_NEW" "$D/Dockerfile" "$D/images.md" "$D/compatibility.md" "$D/NOTICE" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL: firefox bump with desktop Dockerfile exited $rc: $out"; fails=1; }
+grep -qx "ARG FIREFOX_ESR_APT_VERSION=$FF_NEW" "$D/Dockerfile.desktop" \
+  || { echo "FAIL: firefox: desktop Dockerfile ARG not repinned"; fails=1; }
+grep -qx "ARG FIREFOX_ESR_APT_VERSION=$FF_NEW" "$D/Dockerfile" \
+  || { echo "FAIL: firefox: browser Dockerfile ARG not repinned alongside the desktop"; fails=1; }
+# a chromium bump never touches the desktop Dockerfile
+make_fixtures
+cp "$D/Dockerfile.desktop.orig" "$D/Dockerfile.desktop"
+BUMP_DATE=2026-10-20 BUMP_DESKTOP_DOCKERFILE="$D/Dockerfile.desktop" \
+  bash "$BUMP" chromium "$NEW" "$D/Dockerfile" "$D/images.md" "$D/compatibility.md" "$D/NOTICE" >/dev/null 2>&1
+cmp -s "$D/Dockerfile.desktop.orig" "$D/Dockerfile.desktop" \
+  || { echo "FAIL: chromium bump modified the desktop Dockerfile"; fails=1; }
+# disagreeing pins: refuse, write nothing
+make_fixtures
+printf 'ARG FIREFOX_ESR_APT_VERSION=150.0esr-1~deb12u1\n' > "$D/Dockerfile.desktop"
+cp "$D/Dockerfile.desktop" "$D/Dockerfile.desktop.orig"
+BUMP_DATE=2026-10-20 BUMP_DEB_SHA256="$SHA_NEW" BUMP_DESKTOP_DOCKERFILE="$D/Dockerfile.desktop" \
+  bash "$BUMP" firefox-esr "$FF_NEW" "$D/Dockerfile" "$D/images.md" "$D/compatibility.md" "$D/NOTICE" >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || { echo "FAIL: firefox bump accepted disagreeing desktop/browser pins"; fails=1; }
+unchanged "firefox bump with disagreeing pins" "${FILES[@]}"
+cmp -s "$D/Dockerfile.desktop.orig" "$D/Dockerfile.desktop" \
+  || { echo "FAIL: disagreeing-pins bump modified the desktop Dockerfile"; fails=1; }
+
 # --- firefox-esr without a valid deb sha256: refuse, leave everything alone ---
 for bad_sha in "" "deadbeef" "$(printf 'G%.0s' $(seq 1 64))"; do
   make_fixtures

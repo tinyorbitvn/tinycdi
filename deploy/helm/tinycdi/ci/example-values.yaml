@@ -45,6 +45,9 @@ images:
   frontend:
     repository: tinycdi/frontend
     digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+  linuxBase:                     # the profiles' base; pinned, never pulled by the chart
+    repository: tinycdi/linux-base
+    digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
   linuxDesktop:
     repository: tinycdi/linux-desktop
     digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
