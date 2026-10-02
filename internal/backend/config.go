@@ -89,6 +89,7 @@ type Config struct {
 	DevInsecureDB        bool
 	DBSSLMode            string // resolved sslmode label, for logging
 	TenantNamespaces     string
+	TenantQuotas         string // JSON; see provisioning.ParseTenantQuotas
 	SessionIdle          time.Duration
 	Kubeconfig           string
 	ExpiryInterval       time.Duration
@@ -181,6 +182,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.BoolVar(&c.DevInsecureDB, "dev-insecure-db", envOr(getenv, "TCDI_DEV_INSECURE_DB", "") == "true",
 		"allow non-verifying PostgreSQL sslmode (disable/allow/prefer/require); local development only")
 	fs.StringVar(&c.TenantNamespaces, "tenant-namespaces", envOr(getenv, "TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
+	fs.StringVar(&c.TenantQuotas, "tenant-quotas", envOr(getenv, "TCDI_TENANT_QUOTAS", ""),
+		"declared tenant quotas as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; the singleton leader upserts exactly the listed tenants at startup, unlisted tenants are untouched (env TCDI_TENANT_QUOTAS)")
 	fs.DurationVar(&c.SessionIdle, "session-idle", envDur(getenv, "TCDI_SESSION_IDLE", 30*time.Minute), "session idle timeout")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", envOr(getenv, "KUBECONFIG", ""), "kubeconfig path (default: in-cluster)")
 	fs.DurationVar(&c.ExpiryInterval, "expiry-interval", envDur(getenv, "TCDI_EXPIRY_INTERVAL", 30*time.Second),
@@ -278,6 +281,9 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 func (c *Config) validate() error {
 	if c.Listen == "" && c.SessionListen == "" && c.InternalListen == "" && c.MetricsListen == "" {
 		return errors.New("no listeners enabled: at least one of -listen, -session-listen, -internal-listen, -metrics-listen must be set")
+	}
+	if _, err := provisioning.ParseTenantQuotas(c.TenantQuotas); err != nil {
+		return fmt.Errorf("-tenant-quotas: %w", err)
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)
