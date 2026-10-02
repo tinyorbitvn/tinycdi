@@ -11,7 +11,9 @@
 # The only objects the script creates are one throwaway probe namespace
 # (tcdi-preflight-<random>) with its probe pods and a deny-ingress
 # NetworkPolicy. A trap deletes the namespace on exit, error and interrupt.
-# Secret values (DSN, TLS keys) are never printed.
+# Secret values (DSN, TLS keys) are never printed. The Postgres DSN is split
+# into PG* variables and handed to psql through its environment only, never
+# as an argument, so the password is not visible in the process list.
 #
 # See hack/preflight/README.md for the flags and the check list.
 
@@ -572,9 +574,180 @@ check_oidc() {
   esac
 }
 
+# ---- Postgres DSN splitting ---------------------------------------------------
+# The DSN holds the password, so it must never reach psql's argument list (any
+# user on the host can read that from the process list). It is split into
+# PG* variables instead, which are exported only inside the subshell that runs
+# psql. PGENV holds "NAME=value" entries; nothing here runs an external command.
+PGENV=()
+DSN_BADKEY=""
+
+# dsn_set KEY VALUE: queue the PG* variable for a libpq connection parameter.
+# Returns 1 (and records the key name, never the value) for a parameter that
+# has no environment variable.
+dsn_set() {
+  local v
+  case "$1" in
+    host) v=PGHOST ;;
+    hostaddr) v=PGHOSTADDR ;;
+    port) v=PGPORT ;;
+    dbname) v=PGDATABASE ;;
+    user) v=PGUSER ;;
+    password) v=PGPASSWORD ;;
+    passfile) v=PGPASSFILE ;;
+    sslmode) v=PGSSLMODE ;;
+    sslrootcert) v=PGSSLROOTCERT ;;
+    sslcert) v=PGSSLCERT ;;
+    sslkey) v=PGSSLKEY ;;
+    sslcrl) v=PGSSLCRL ;;
+    sslcrldir) v=PGSSLCRLDIR ;;
+    sslsni) v=PGSSLSNI ;;
+    sslcompression) v=PGSSLCOMPRESSION ;;
+    ssl_min_protocol_version) v=PGSSLMINPROTOCOLVERSION ;;
+    ssl_max_protocol_version) v=PGSSLMAXPROTOCOLVERSION ;;
+    channel_binding) v=PGCHANNELBINDING ;;
+    connect_timeout) v=PGCONNECT_TIMEOUT ;;
+    application_name) v=PGAPPNAME ;;
+    options) v=PGOPTIONS ;;
+    service) v=PGSERVICE ;;
+    target_session_attrs) v=PGTARGETSESSIONATTRS ;;
+    gssencmode) v=PGGSSENCMODE ;;
+    krbsrvname) v=PGKRBSRVNAME ;;
+    requirepeer) v=PGREQUIREPEER ;;
+    *) DSN_BADKEY="$1"; return 1 ;;
+  esac
+  PGENV+=("$v=$2")
+}
+
+# urldecode STRING: percent-decode into $REPLY; status 1 on a malformed escape.
+urldecode() {
+  local s="$1" out="" c
+  while [[ "$s" == *%* ]]; do
+    [[ "$s" =~ ^([^%]*)%([0-9A-Fa-f]{2}) ]] || return 1
+    out+="${BASH_REMATCH[1]}"
+    printf -v c '%b' "\\x${BASH_REMATCH[2]}"
+    out+="$c"
+    s="${s:$((${#BASH_REMATCH[1]} + 3))}"
+  done
+  REPLY="$out$s"
+}
+
+# dsn_from_url URL: postgres[ql]://[user[:password]@]host[:port][,host2[:port2]][/db][?k=v&...]
+dsn_from_url() {
+  local rest="${1#*://}" query="" path="" auth userinfo="" hostpart user pass item host port
+  local hosts="" ports="" anyport="" pair k v
+  local -a items pairs
+  case "$rest" in *\?*) query="${rest#*\?}"; rest="${rest%%\?*}" ;; esac
+  case "$rest" in */*) path="${rest#*/}"; auth="${rest%%/*}" ;; *) auth="$rest" ;; esac
+  case "$auth" in
+    *@*) userinfo="${auth%@*}"; hostpart="${auth##*@}" ;;
+    *) hostpart="$auth" ;;
+  esac
+  if [ -n "$userinfo" ]; then
+    user="${userinfo%%:*}"
+    if [ "$user" != "$userinfo" ]; then
+      pass="${userinfo#*:}"
+      urldecode "$pass" || return 1
+      dsn_set password "$REPLY" || return 1
+    fi
+    if [ -n "$user" ]; then
+      urldecode "$user" || return 1
+      dsn_set user "$REPLY" || return 1
+    fi
+  fi
+  if [ -n "$hostpart" ]; then
+    IFS=, read -ra items <<<"$hostpart"
+    for item in "${items[@]}"; do
+      case "$item" in
+        \[*\]*) host="${item%%]*}"; host="${host#[}"; port="${item#*]}"; port="${port#:}" ;;
+        *) host="${item%%:*}"; port=""; [ "$host" != "$item" ] && port="${item#*:}" ;;
+      esac
+      urldecode "$host" || return 1
+      hosts+="${hosts:+,}$REPLY"
+      urldecode "$port" || return 1
+      ports+="${ports:+,}$REPLY"
+      [ -n "$port" ] && anyport=1
+    done
+    [ -n "${hosts//,/}" ] && { dsn_set host "$hosts" || return 1; }
+    [ -n "$anyport" ] && { dsn_set port "$ports" || return 1; }
+  fi
+  if [ -n "$path" ]; then
+    urldecode "$path" || return 1
+    dsn_set dbname "$REPLY" || return 1
+  fi
+  if [ -n "$query" ]; then
+    IFS='&' read -ra pairs <<<"$query"
+    for pair in "${pairs[@]}"; do
+      [ -n "$pair" ] || continue
+      k="${pair%%=*}"; v=""
+      [ "$k" != "$pair" ] && v="${pair#*=}"
+      urldecode "$k" || return 1; k="$REPLY"
+      urldecode "$v" || return 1
+      dsn_set "$k" "$REPLY" || return 1
+    done
+  fi
+}
+
+# dsn_from_kv STRING: libpq "key=value key2='quoted \' value'" form.
+dsn_from_kv() {
+  local s="$1" key val c closed
+  while :; do
+    s="${s#"${s%%[![:space:]]*}"}"
+    [ -n "$s" ] || break
+    key="${s%%=*}"
+    [ "$key" != "$s" ] || return 1
+    key="${key%"${key##*[![:space:]]}"}"
+    s="${s#*=}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    val=""
+    if [ "${s:0:1}" = "'" ]; then
+      s="${s:1}"; closed=""
+      while [ -n "$s" ]; do
+        c="${s:0:1}"; s="${s:1}"
+        case "$c" in
+          \\) val+="${s:0:1}"; s="${s:1}" ;;
+          "'") closed=1; break ;;
+          *) val+="$c" ;;
+        esac
+      done
+      [ -n "$closed" ] || return 1
+    else
+      while [ -n "$s" ]; do
+        c="${s:0:1}"
+        case "$c" in
+          [[:space:]]) break ;;
+          \\) s="${s:1}"; val+="${s:0:1}"; s="${s:1}" ;;
+          *) val+="$c"; s="${s:1}" ;;
+        esac
+      done
+    fi
+    dsn_set "$key" "$val" || return 1
+  done
+}
+
+# dsn_split DSN: fill PGENV from a URL, a key=value string or a bare database name.
+dsn_split() {
+  DSN_BADKEY=""
+  case "$1" in
+    postgres://*|postgresql://*) dsn_from_url "$1" ;;
+    *=*) dsn_from_kv "$1" ;;
+    *) dsn_set dbname "$1" ;;
+  esac
+}
+
+# pgenv_get NAME: value of the last PGENV entry for NAME in $REPLY; status 1 if unset.
+pgenv_get() {
+  local e i
+  for ((i = ${#PGENV[@]} - 1; i >= 0; i--)); do
+    e="${PGENV[i]}"
+    if [ "${e%%=*}" = "$1" ]; then REPLY="${e#*=}"; return 0; fi
+  done
+  return 1
+}
+
 # ---- 9. Postgres with TLS verification ------------------------------------
 check_postgres() {
-  local dsn="" mode="" err rc
+  local dsn="" mode="" err rc e
   if [ -n "$DSN_SECRET" ]; then
     if ! split_ref "$DSN_SECRET" url; then
       report FAIL postgres "bad --postgres-dsn-secret value (want NAMESPACE/NAME[:KEY])" "use --postgres-dsn-secret <namespace>/<name>"
@@ -602,18 +775,30 @@ check_postgres() {
     report WARN postgres "psql not found on this host" "install the PostgreSQL client, or check connectivity and TLS by hand"
     return
   fi
-  mode="$(printf '%s' "$dsn" | sed -n 's/.*[?& ]sslmode=\([a-z-]*\).*/\1/p' | head -n1)"
-  if [ -z "$mode" ]; then
-    mode="${PGSSLMODE:-verify-full}"
-    export PGSSLMODE="$mode"
+  PGENV=("PGCONNECT_TIMEOUT=10")
+  if ! dsn_split "$dsn"; then
+    dsn=""; PGENV=()
+    if [ -n "$DSN_BADKEY" ]; then
+      report WARN postgres "the DSN sets '$DSN_BADKEY', which preflight cannot hand to psql without putting the DSN on its command line; database not checked" \
+        "check connectivity and TLS by hand, or drop that parameter from the DSN used for preflight"
+    else
+      report FAIL postgres "the DSN is not a valid Postgres URL or key=value string" "fix the DSN (a URL needs percent-encoded special characters in the password)"
+    fi
+    return
   fi
+  dsn=""
+  if ! pgenv_get PGSSLMODE; then
+    PGENV+=("PGSSLMODE=${PGSSLMODE:-verify-full}")
+    pgenv_get PGSSLMODE
+  fi
+  mode="$REPLY"
   if [ -n "$CA_SECRET" ]; then
     if ! split_ref "$CA_SECRET" ca.crt; then
       report FAIL postgres "bad --postgres-ca-secret value (want NAMESPACE/NAME[:KEY])" "use --postgres-ca-secret <namespace>/<name>"
       return
     fi
     if secret_value "$REF_NS" "$REF_NAME" "$REF_KEY" >"$TMP/db-ca.crt"; then
-      export PGSSLROOTCERT="$TMP/db-ca.crt"
+      PGENV+=("PGSSLROOTCERT=$TMP/db-ca.crt")
     elif [ "$KFORBID" = 1 ]; then
       report WARN postgres "not permitted to read the CA secret $REF_NS/$REF_NAME" "grant get on that secret, or set PGSSLROOTCERT yourself"
       return
@@ -622,10 +807,12 @@ check_postgres() {
       return
     fi
   fi
-  export PGCONNECT_TIMEOUT=10
-  err="$("$PSQL" -X -w -Atq -c 'select 1' "$dsn" 2>&1 >/dev/null)"
+  # The connection parameters, password included, travel in psql's environment
+  # only: the exports happen inside this subshell, and psql gets no DSN argument.
+  # shellcheck disable=SC2163  # "$e" is a NAME=value entry on purpose
+  err="$(for e in "${PGENV[@]}"; do export "$e"; done; "$PSQL" -X -w -Atq -c 'select 1' 2>&1 >/dev/null)"
   rc=$?
-  dsn=""
+  PGENV=()
   if [ "$rc" = 0 ]; then
     case "$mode" in
       verify-full|verify-ca) report PASS postgres "reachable with TLS verification ($mode)" ;;

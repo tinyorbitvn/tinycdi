@@ -89,7 +89,8 @@ EOF
 cat > "$SHIM/psql" <<'EOF'
 #!/usr/bin/env bash
 echo "psql PGSSLMODE=${PGSSLMODE:-unset} PGSSLROOTCERT=${PGSSLROOTCERT:+set}" >> "$STUB_LOG"
-printf '%s' "${*: -1}" > "$STUB_DSN_SEEN"
+printf '%s\n' "$@" > "$STUB_PSQL_ARGV"
+env | grep '^PG' > "$STUB_PSQL_ARGV.env" || true
 case "${STUB_PSQL:-ok}" in
   ok) echo 1 ;;
   cert) echo 'psql: error: connection to server failed: SSL error: certificate verify failed' >&2; exit 2 ;;
@@ -111,8 +112,8 @@ OUT="" RC=0
 run() {
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  : > "$LOG"; rm -f "$D/dsn-seen"
-  OUT="$(env -i PATH="$SHIM:/usr/bin:/bin" HOME="$D" STUB_LOG="$LOG" STUB_DSN_SEEN="$D/dsn-seen" \
+  : > "$LOG"; rm -f "$D/dsn-seen" "$D/dsn-seen.env"
+  OUT="$(env -i PATH="$SHIM:/usr/bin:/bin" HOME="$D" STUB_LOG="$LOG" STUB_PSQL_ARGV="$D/dsn-seen" \
     TCDI_PREFLIGHT_POLL=0.05 TCDI_PREFLIGHT_PROPAGATE=0 TCDI_PREFLIGHT_POD_TIMEOUT=2 \
     "${envs[@]}" bash "$SCRIPT" "$@" 2>&1)"
   RC=$?
@@ -158,8 +159,29 @@ if grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^usern
 else ok "only get/auth/create/wait and probe-namespace delete are used"; fi
 expect_no_out "DSN password never printed" 'SECRETPW|app:'
 expect_no_out "DSN host never printed" 'db\.internal'
-if [ "$(cat "$D/dsn-seen" 2>/dev/null)" = "postgres://app:SECRETPW@db.internal.example:5432/tcdi?sslmode=verify-full" ]; then
-  ok "DSN reached psql intact"; else bad "DSN did not reach psql"; fi
+psql_argv_clean() { # psql_argv_clean <desc> <fixed string that must not be on argv>
+  if grep -qF -- "$2" "$D/dsn-seen" 2>/dev/null; then bad "$1 (argv has $2)"; else ok "$1"; fi
+}
+psql_env_has() { # psql_env_has <desc> <NAME=value, exact>
+  if grep -qFx -- "$2" "$D/dsn-seen.env" 2>/dev/null; then ok "$1"; else bad "$1 (psql env lacks $2)"; fi
+}
+psql_env_lacks() { # psql_env_lacks <desc> <NAME>
+  if grep -q "^$2=" "$D/dsn-seen.env" 2>/dev/null; then bad "$1 ($2 is set)"; else ok "$1"; fi
+}
+if [ "$(cat "$D/dsn-seen" 2>/dev/null)" = "-X
+-w
+-Atq
+-c
+select 1" ]; then ok "psql argv is only its fixed flags"; else bad "psql argv is not the fixed flags: $(cat "$D/dsn-seen" 2>/dev/null)"; fi
+psql_argv_clean "DSN password not on psql argv" 'SECRETPW'
+psql_argv_clean "DSN host not on psql argv" 'db.internal'
+psql_argv_clean "no DSN scheme on psql argv" '://'
+psql_env_has "PGPASSWORD carries the exact password" 'PGPASSWORD=SECRETPW'
+psql_env_has "PGHOST from the URL" 'PGHOST=db.internal.example'
+psql_env_has "PGPORT from the URL" 'PGPORT=5432'
+psql_env_has "PGUSER from the URL" 'PGUSER=app'
+psql_env_has "PGDATABASE from the URL" 'PGDATABASE=tcdi'
+psql_env_has "PGSSLMODE from the URL query" 'PGSSLMODE=verify-full'
 
 echo "== 1. Kubernetes version"
 run STUB_K8S_VERSION=v1.30.0 -- "${ALL[@]}";            expect "1.30 passes" PASS k8s-version
@@ -270,9 +292,61 @@ run MYDSN='postgres://app:SECRETPW@db/tcdi' -- --context stub --postgres-dsn-env
 expect "DSN from env passes" PASS postgres
 expect_no_out "env DSN never printed" 'SECRETPW'
 
+echo "== 9b. DSN stays off psql's argument list"
+PWSPECIAL='p@ss:w/rd% '"'"'q"x'
+# URL form with a percent-encoded password, key=value form with a quoted one.
+run STUB_DSN='postgresql://app:p%40ss%3Aw%2Frd%25%20%27q%22x@db.example:6543/tcdi?sslmode=verify-ca&sslrootcert=%2Fetc%2Fca%20x.pem' -- "${ALL[@]}"
+expect "special-character URL password verifies" PASS postgres
+psql_argv_clean "URL: special password not on argv" 'rd%'
+psql_argv_clean "URL: decoded password not on argv" 'p@ss'
+psql_argv_clean "URL: encoded password not on argv" 'p%40ss'
+psql_argv_clean "URL: host not on argv" 'db.example'
+psql_env_has "URL: PGPASSWORD is the decoded password" "PGPASSWORD=$PWSPECIAL"
+psql_env_has "URL: PGHOST" 'PGHOST=db.example'
+psql_env_has "URL: PGPORT" 'PGPORT=6543'
+psql_env_has "URL: PGUSER" 'PGUSER=app'
+psql_env_has "URL: PGDATABASE" 'PGDATABASE=tcdi'
+psql_env_has "URL: PGSSLMODE" 'PGSSLMODE=verify-ca'
+psql_env_has "URL: PGSSLROOTCERT from the query string, decoded" 'PGSSLROOTCERT=/etc/ca x.pem'
+expect_no_out "URL: password not printed" 'rd%|p@ss|p%40ss|app:'
+run STUB_DSN="host=db.example port=6543 user=app dbname=tcdi password='p@ss:w/rd% \\'q\"x' sslmode=verify-full" -- "${ALL[@]}"
+expect "key=value DSN verifies" PASS postgres
+psql_argv_clean "kv: password not on argv" 'p@ss'
+psql_argv_clean "kv: host not on argv" 'db.example'
+psql_env_has "kv: PGPASSWORD is the exact password" "PGPASSWORD=$PWSPECIAL"
+psql_env_has "kv: PGHOST" 'PGHOST=db.example'
+psql_env_has "kv: PGPORT" 'PGPORT=6543'
+psql_env_has "kv: PGUSER" 'PGUSER=app'
+psql_env_has "kv: PGDATABASE" 'PGDATABASE=tcdi'
+psql_env_has "kv: PGSSLMODE" 'PGSSLMODE=verify-full'
+expect_no_out "kv: password not printed" 'p@ss|rd%|SECRETPW'
+run STUB_DSN='host=db user=app password=plain sslmode=verify-full' -- "${ALL[@]}"
+psql_env_has "kv unquoted: PGPASSWORD" 'PGPASSWORD=plain'
+run STUB_DSN='postgres://u:pw@[2001:db8::1]:5433,other:5434/d' -- "${ALL[@]}"
+psql_env_has "IPv6 literal host is unbracketed" 'PGHOST=2001:db8::1,other'
+psql_env_has "per-host ports are comma separated" 'PGPORT=5433,5434'
+run STUB_DSN='postgres://app@db/tcdi' -- "${ALL[@]}"
+psql_env_lacks "no password in the DSN sets no PGPASSWORD" PGPASSWORD
+run STUB_DSN='postgres://app:SECRETPW@db/tcdi?sslmode=verify-full&sslnegotiation=direct' -- "${ALL[@]}"
+expect "a parameter with no PG* variable skips the check" WARN postgres
+expect_no_out "skip message does not leak the DSN" 'SECRETPW|app:'
+psql_argv_clean "skipped check never ran psql with the DSN" 'SECRETPW'
+run STUB_DSN='postgres://app:bad%zz@db/tcdi' -- "${ALL[@]}"
+expect "a malformed escape fails" FAIL postgres
+expect_no_out "parse failure does not leak the DSN" 'bad%zz|app:'
+run STUB_DSN="host=db password='unterminated" -- "${ALL[@]}"
+expect "an unterminated quote fails" FAIL postgres
+expect_no_out "kv parse failure does not leak the password" 'unterminated'
+run MYDSN='postgres://app:SECRETPW@db.env/tcdi' -- --context stub --postgres-dsn-env MYDSN
+psql_argv_clean "env DSN: password not on argv" 'SECRETPW'
+psql_env_has "env DSN: PGPASSWORD" 'PGPASSWORD=SECRETPW'
+psql_env_has "env DSN: PGHOST" 'PGHOST=db.env'
+run -- "${ALL[@]}" --postgres-ca-secret ns/db-ca
+if grep -Eq '^PGSSLROOTCERT=/.*/db-ca\.crt$' "$D/dsn-seen.env"; then ok "CA secret goes through PGSSLROOTCERT"; else bad "CA secret goes through PGSSLROOTCERT"; fi
+
 echo "== cleanup on signal"
 : > "$LOG"
-env -i PATH="$SHIM:/usr/bin:/bin" HOME="$D" STUB_LOG="$LOG" STUB_DSN_SEEN="$D/dsn-seen" STUB_WAIT_SLEEP=2 \
+env -i PATH="$SHIM:/usr/bin:/bin" HOME="$D" STUB_LOG="$LOG" STUB_PSQL_ARGV="$D/dsn-seen" STUB_WAIT_SLEEP=2 \
   TCDI_PREFLIGHT_POLL=0.05 TCDI_PREFLIGHT_PROPAGATE=0 TCDI_PREFLIGHT_POD_TIMEOUT=2 \
   bash "$SCRIPT" --context stub >"$D/sig.out" 2>&1 &
 pid=$!

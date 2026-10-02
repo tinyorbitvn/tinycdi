@@ -60,10 +60,15 @@ With `--host-users-false` the probe pod also runs on the workspace node pool
 
 The DSN is read from a Secret (`--postgres-dsn-secret NS/NAME[:KEY]`, default
 key `url`) or from the environment variable named by `--postgres-dsn-env`
-(default `TCDI_PREFLIGHT_DSN`). It is held in memory, passed to `psql` as an
-argument and never printed; `psql` output is reduced to a fixed classification.
-Other users on the same host can see a process argument list, so run it on a
-host you trust. The CA Secret and the certificate are written to a `0700`
+(default `TCDI_PREFLIGHT_DSN`). It is held in memory, split into the `PGHOST`,
+`PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE` (and `PGSSLROOTCERT`
+etc.) variables, and handed to `psql` only through its environment, never as an
+argument, so the password does not show up in the host's process list. Both the
+URL form (percent-encode special characters in the password) and the
+`key=value` form work; a parameter that has no `PG*` variable makes the check a
+WARN rather than putting the DSN on the command line. It is never printed;
+`psql` output is reduced to a fixed classification. The CA Secret and the
+certificate are written to a `0700`
 temporary directory that the trap removes. Only the `ca.crt`/`tls.crt` keys
 are read.
 
@@ -96,4 +101,5 @@ to program the policy, default 5), `TCDI_PREFLIGHT_POLL` (default 2).
 `.github/tests/preflight.test.sh` drives the script with `PATH` shims for
 `kubectl`, `openssl`, `curl`, `psql` and `getent`, and covers every check in
 PASS/WARN/FAIL, the exit code, namespace deletion on failure and on `SIGTERM`,
-and that the DSN is never printed.
+and that the DSN is never printed and the password never reaches `psql`'s
+argument list (it arrives as `PGPASSWORD`).
