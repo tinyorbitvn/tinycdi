@@ -63,7 +63,9 @@ type Domain struct {
 
 // ParseDomain accepts "session.example.com" or "session.example.com:8444".
 // It rejects schemes, paths, wildcards, upper case, empty labels, a
-// trailing dot and IP literals.
+// trailing dot and IP literals. An explicit ":443" is the https default
+// and is normalised to no port: browsers send no port in the Host header
+// for it, so keeping it would make every request mismatch.
 func ParseDomain(s string) (Domain, error) {
 	hostport := s
 	d := Domain{raw: s}
@@ -74,6 +76,10 @@ func ParseDomain(s string) (Domain, error) {
 		}
 		d.port = p
 		hostport = hostport[:i]
+		if p == 443 {
+			d.port = 0
+			d.raw = hostport
+		}
 	}
 	if err := validDomain(hostport); err != nil {
 		return Domain{}, fmt.Errorf("sessionhost: invalid domain %q: %w", s, err)
