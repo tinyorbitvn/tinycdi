@@ -35,19 +35,22 @@ export function AuthGate({
     let cancelled = false;
     (async () => {
       try {
-        // Session probe: GET /v1/me is the first /v1 call of every load. Its
-        // 401 is the normal "signed out" answer, handled below — never logged
-        // or rethrown (MeProvider reads the body again once the gate opens).
-        unwrap(await api.GET("/v1/me"));
-        if (!cancelled) setReady(true);
-      } catch (e) {
-        if (isPortalApiError(e) && e.code === "UNAUTHENTICATED") {
+        // Passive probe first: GET /v1/session answers 200 {authenticated}
+        // for signed-out callers too, so an anonymous load issues no failed
+        // request (the browser logs those to the console, whatever the page
+        // does with them). Only a live session goes on to GET /v1/me.
+        const probe = unwrap(await api.GET("/v1/session"));
+        if (!probe.authenticated) {
           if (!cancelled) onUnauthenticated();
           return;
         }
-        // A backend without /v1/me yet: MeProvider runs on its stub principal.
-        if (isPortalApiError(e) && (e.httpStatus === 404 || e.httpStatus === 501)) {
-          if (!cancelled) setReady(true);
+        // MeProvider reads the body again once the gate opens.
+        unwrap(await api.GET("/v1/me"));
+        if (!cancelled) setReady(true);
+      } catch (e) {
+        // The session can lapse between the probe and /v1/me.
+        if (isPortalApiError(e) && e.code === "UNAUTHENTICATED") {
+          if (!cancelled) onUnauthenticated();
           return;
         }
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));

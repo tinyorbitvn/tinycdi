@@ -29,8 +29,9 @@ describe("AuthGate", () => {
     expect(screen.queryByText("secret content")).not.toBeInTheDocument();
   });
 
-  it("probes /v1/me first and treats its 401 as signed out, without logging", async () => {
-    clearCookies();
+  // The probe never answers 401, so a signed-out load issues no failed request
+  // (Chrome logs every failed fetch to the console, whatever the page does).
+  function recordingApi() {
     const seen: string[] = [];
     const base = createMockApi();
     const api = {
@@ -40,6 +41,12 @@ describe("AuthGate", () => {
         return base.handle(req);
       },
     };
+    return { api, seen };
+  }
+
+  it("probes /v1/session first and, when signed out, never calls /v1/me", async () => {
+    clearCookies();
+    const { api, seen } = recordingApi();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const rejections: unknown[] = [];
     const onRejection = (e: unknown) => rejections.push(e);
@@ -53,14 +60,94 @@ describe("AuthGate", () => {
     );
 
     await waitFor(() => expect(onUnauthenticated).toHaveBeenCalledOnce());
-    expect(seen[0]).toBe("GET /v1/me");
-    expect(seen).not.toContain("GET /v1/workspaces");
+    expect(seen).toEqual(["GET /v1/session"]);
+    expect(screen.queryByText("secret content")).not.toBeInTheDocument();
     await new Promise((r) => setTimeout(r, 0));
     expect(errors).not.toHaveBeenCalled();
     expect(rejections).toEqual([]);
     process.off("unhandledRejection", onRejection);
     errors.mockRestore();
   });
+
+  it("calls /v1/me only after the probe says authenticated", async () => {
+    loginCookies();
+    const { api, seen } = recordingApi();
+    renderWithApi(
+      <AuthGate onUnauthenticated={vi.fn()}>
+        <div>secret content</div>
+      </AuthGate>,
+      api,
+    );
+    expect(await screen.findByText("secret content")).toBeInTheDocument();
+    expect(seen.slice(0, 2)).toEqual(["GET /v1/session", "GET /v1/me"]);
+    expect(seen).not.toContain("GET /v1/workspaces");
+  });
+
+  it("redirects when the session dies between the probe and /v1/me", async () => {
+    loginCookies();
+    const base = createMockApi();
+    const api = {
+      ...base,
+      handle: (req: Parameters<typeof base.handle>[0]) =>
+        req.path === "/v1/me"
+          ? { status: 401, headers: { "content-type": "application/json" }, body: { code: "UNAUTHENTICATED", message: "expired", retryable: false } }
+          : base.handle(req),
+    };
+    const onUnauthenticated = vi.fn();
+    renderWithApi(
+      <AuthGate onUnauthenticated={onUnauthenticated}>
+        <div>secret content</div>
+      </AuthGate>,
+      api,
+    );
+    await waitFor(() => expect(onUnauthenticated).toHaveBeenCalledOnce());
+    expect(screen.queryByText("secret content")).not.toBeInTheDocument();
+  });
+
+  it("shows the unreachable alert when the probe fails", async () => {
+    clearCookies();
+    const base = createMockApi();
+    const api = {
+      ...base,
+      handle: (req: Parameters<typeof base.handle>[0]) =>
+        req.path === "/v1/session"
+          ? { status: 503, headers: { "content-type": "application/json" }, body: { code: "UNAVAILABLE", message: "down", retryable: true } }
+          : base.handle(req),
+    };
+    const onUnauthenticated = vi.fn();
+    renderWithApi(
+      <AuthGate onUnauthenticated={onUnauthenticated}>
+        <div>secret content</div>
+      </AuthGate>,
+      api,
+    );
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(onUnauthenticated).not.toHaveBeenCalled();
+    expect(screen.queryByText("secret content")).not.toBeInTheDocument();
+  });
+
+  it.each([404, 501])(
+    "does not open the gate on a %i from /v1/me (every backend ships /v1/me)",
+    async (status) => {
+      loginCookies();
+      const base = createMockApi();
+      const api = {
+        ...base,
+        handle: (req: Parameters<typeof base.handle>[0]) =>
+          req.path === "/v1/me"
+            ? { status, headers: { "content-type": "application/json" }, body: { code: "NOT_FOUND", message: "no route", retryable: false } }
+            : base.handle(req),
+      };
+      renderWithApi(
+        <AuthGate onUnauthenticated={vi.fn()}>
+          <div>secret content</div>
+        </AuthGate>,
+        api,
+      );
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(screen.queryByText("secret content")).not.toBeInTheDocument();
+    },
+  );
 
   it("renders children once the session check passes", async () => {
     loginCookies();

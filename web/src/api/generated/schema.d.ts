@@ -29,6 +29,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Passive signed-in probe
+         * @description Reports whether the request carries a live portal session. Needs no
+         *     authentication: a signed-out caller gets `200` with
+         *     `{"authenticated": false}` rather than `401`, so the portal can check
+         *     before calling `GET /v1/me` without a failed request showing up in the
+         *     browser console. The probe is passive — it never slides the idle
+         *     timer, sets no cookie and needs no CSRF token — and discloses nothing
+         *     but the boolean (no subject, tenant, roles or token). The response is
+         *     `Cache-Control: no-store`.
+         */
+        get: operations["getSessionProbe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces": {
         parameters: {
             query?: never;
@@ -678,6 +705,14 @@ export interface components {
             nextPageToken?: string;
         };
         /**
+         * @description Answer of `GET /v1/session`: exactly one key. Never carries identity,
+         *     tenant, roles or a token.
+         */
+        SessionProbe: {
+            /** @description True when the request carries a live (not idle- or absolute-expired) session. */
+            authenticated: boolean;
+        };
+        /**
          * @description Session bootstrap payload returned by `GET /v1/me`: the verified
          *     identity, the caller's roles, the CSRF token to echo on mutations, and
          *     the session domain under which per-workspace session hosts live.
@@ -1076,6 +1111,29 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getSessionProbe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether a live session accompanied the request. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionProbe"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
