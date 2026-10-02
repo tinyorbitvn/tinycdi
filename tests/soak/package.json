@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "soak": "node --disable-warning=ExperimentalWarning soak.ts",
-    "test": "node --test --disable-warning=ExperimentalWarning soak.test.ts",
+    "test": "node --test --disable-warning=ExperimentalWarning soak.test.ts drive.test.ts drills.test.ts",
     "test:dry-run": "node --disable-warning=ExperimentalWarning soak.ts --dry-run --sessions 3 --duration 25s --poll-interval 1s --input-interval 2s --report soak-report.dry-run.json",
     "typecheck": "tsc --noEmit",
     "lint:sh": "shellcheck drills.sh"

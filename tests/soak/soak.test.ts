@@ -106,6 +106,8 @@ test("buildReport: schema-valid report with pass/fail evaluation", () => {
       template: "tpl_test",
       startedAt: t0,
       endedAt: t0 + 60_000,
+      soakStartedAt: t0 + 2_000,
+      requestedDurationMs: 58_000,
       sessionsRequested: 1,
       inputIntervalSeconds: 10,
       pollIntervalSeconds: 5,
@@ -125,6 +127,7 @@ test("buildReport: schema-valid report with pass/fail evaluation", () => {
           obs(t0 + 1_000, "none"),
           obs(t0 + 2_000, "connected"),
           obs(t0 + 30_000, "connected"),
+          obs(t0 + 31_000, "disconnected"), // observed after the reload at +30.5s
           obs(t0 + 35_000, "connected"),
         ],
         launchedAt: t0 + 500,
@@ -144,7 +147,9 @@ test("buildReport: schema-valid report with pass/fail evaluation", () => {
     summary: { pass: boolean; connectMs: { p50: number | null } };
   };
   assert.equal(report.sessions[0].connectMs, 1_500);
-  assert.equal(report.sessions[0].reconnectMs, 4_500);
+  // reconnectMs: from the observed non-connected state (+31s) to the next
+  // connected one (+35s), not from the reload click.
+  assert.equal(report.sessions[0].reconnectMs, 4_000);
   assert.equal(report.summary.pass, true);
   assert.equal(report.summary.connectMs.p50, 1_500);
   // The pre-connect "none" span is still listed as a non-connected state.
@@ -159,6 +164,8 @@ test("buildReport: threshold breach fails the run", () => {
       dryRun: true,
       startedAt: t0,
       endedAt: t0 + 60_000,
+      soakStartedAt: t0 + 5_000,
+      requestedDurationMs: 55_000,
       sessionsRequested: 1,
       inputIntervalSeconds: 10,
       pollIntervalSeconds: 5,
@@ -185,6 +192,105 @@ test("buildReport: threshold breach fails the run", () => {
   ) as { summary: { pass: boolean; failures: string[] } };
   assert.equal(report.summary.pass, false);
   assert.match(report.summary.failures[0], /connect p95/);
+});
+
+const RUN = (t0: number, over: Record<string, unknown> = {}) => ({
+  dryRun: true,
+  startedAt: t0,
+  endedAt: t0 + 60_000,
+  soakStartedAt: t0 + 2_000 as number | null,
+  requestedDurationMs: 58_000,
+  sessionsRequested: 1,
+  inputIntervalSeconds: 10,
+  pollIntervalSeconds: 5,
+  ...over,
+});
+const LAX = {
+  connectP95Ms: null,
+  reconnectP95Ms: null,
+  maxGapMs: null,
+  maxManualActions: 0,
+  maxDroppedSessions: 0,
+};
+const SESSION = (t0: number, observations: Observation[], reloadedAt: number | null) => ({
+  workspaceId: "ws_r",
+  observations,
+  launchedAt: t0,
+  reloadedAt,
+  manualActions: 0,
+  inputEvents: 0,
+  dropped: false,
+  runEndAt: t0 + 60_000,
+});
+
+test("R5d: reconnectMs is null when the reload never produced a non-connected state", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(
+    RUN(t0),
+    LAX,
+    [
+      SESSION(
+        t0,
+        [
+          obs(t0 + 1_000, "connected"),
+          obs(t0 + 29_000, "connected"),
+          obs(t0 + 31_000, "connected"), // reload at +30s resumed seamlessly
+          obs(t0 + 36_000, "connected"),
+        ],
+        t0 + 30_000,
+      ),
+    ],
+  ) as { sessions: { reconnectMs: number | null }[]; summary: { reconnectMs: { p95: number | null } } };
+  assert.equal(report.sessions[0].reconnectMs, null);
+  assert.equal(report.summary.reconnectMs.p95, null);
+});
+
+test("R5d: a non-connected state seen before the reload does not count as the reconnect", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(RUN(t0), LAX, [
+    SESSION(
+      t0,
+      [
+        obs(t0 + 1_000, "none"),
+        obs(t0 + 2_000, "connected"),
+        obs(t0 + 20_000, "stale"), // before the reload
+        obs(t0 + 24_000, "connected"),
+        obs(t0 + 31_000, "connected"),
+      ],
+      t0 + 30_000,
+    ),
+  ]) as { sessions: { reconnectMs: number | null }[] };
+  assert.equal(report.sessions[0].reconnectMs, null);
+});
+
+test("R5d: a run shorter than the requested soak duration fails as truncated", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(
+    RUN(t0, { soakStartedAt: t0 + 10_000, endedAt: t0 + 40_000, requestedDurationMs: 60_000 }),
+    LAX,
+    [SESSION(t0, [obs(t0 + 1_000, "connected")], null)],
+  ) as { summary: { pass: boolean; failures: string[] } };
+  assert.equal(report.summary.pass, false);
+  assert.match(report.summary.failures.join(";"), /truncated/);
+});
+
+test("R5d: a run whose soak clock never started fails", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(RUN(t0, { soakStartedAt: null }), LAX, [
+    SESSION(t0, [obs(t0 + 1_000, "none")], null),
+  ]) as { summary: { pass: boolean; failures: string[] } };
+  assert.equal(report.summary.pass, false);
+  assert.match(report.summary.failures.join(";"), /never started|not every session/);
+});
+
+test("R5d: the full soak duration passes the truncation check", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(
+    RUN(t0, { soakStartedAt: t0 + 2_000, endedAt: t0 + 60_000, requestedDurationMs: 58_000 }),
+    LAX,
+    [SESSION(t0, [obs(t0 + 1_000, "connected")], null)],
+  ) as { summary: { pass: boolean } };
+  assert.equal(report.summary.pass, true);
 });
 
 test("validateReport rejects malformed reports", () => {
@@ -233,6 +339,8 @@ test(
     validateReport(report);
     assert.equal(report.sessions.length, 3);
     assert.equal(report.summary.pass, true);
+    assert.ok(report.run.soakStartedAt, "the soak clock started");
+    assert.equal(report.run.requestedDurationSeconds, 25);
     assert.ok(
       report.sessions.every((s: { connectMs: number | null }) => s.connectMs !== null),
       "every session connected",

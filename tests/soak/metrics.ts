@@ -97,6 +97,21 @@ export function longestDisconnectedGapMs(observations: Observation[], endAt: num
 }
 
 /**
+ * Time to recover after the mid-run reload: from the first non-connected
+ * observation at or after `reloadedAt` to the next "connected" one. A reload
+ * that resumes seamlessly never shows a non-connected state and yields null
+ * (nothing to reconnect) rather than the polling latency; null also covers a
+ * session still not connected at run end.
+ */
+export function reconnectMs(observations: Observation[], reloadedAt: number): number | null {
+  const after = [...observations].sort((a, b) => a.at - b.at).filter((o) => o.at >= reloadedAt);
+  const lost = after.find((o) => o.state !== "connected");
+  if (!lost) return null;
+  const back = after.find((o) => o.at > lost.at && o.state === "connected");
+  return back ? back.at - lost.at : null;
+}
+
+/**
  * Parse a duration like "60m", "90s", "500ms", "1h" or a bare number of
  * seconds into milliseconds.
  */

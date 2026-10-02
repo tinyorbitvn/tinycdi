@@ -11,6 +11,7 @@ import type { ErrorObject, ValidateFunction } from "ajv";
 import {
   longestDisconnectedGapMs,
   percentile,
+  reconnectMs,
   stateSpans,
   type Observation,
 } from "./metrics.ts";
@@ -65,8 +66,16 @@ export interface RunInfo {
   dryRun: boolean;
   portalOrigin?: string;
   template?: string;
+  /** Run start: login, workspace creation and readiness included. */
   startedAt: number;
   endedAt: number;
+  /**
+   * When the soak clock started: the moment the last session first
+   * connected (or was given up on). null when that never happened.
+   */
+  soakStartedAt: number | null;
+  /** The --duration the soak was asked to observe, counted from soakStartedAt. */
+  requestedDurationMs: number;
   sessionsRequested: number;
   inputIntervalSeconds: number;
   pollIntervalSeconds: number;
@@ -92,11 +101,7 @@ export function buildReport(
       ...(s.workspaceName !== undefined ? { workspaceName: s.workspaceName } : {}),
       connectMs:
         s.launchedAt !== null && connectedAt !== null ? connectedAt - s.launchedAt : null,
-      reconnectMs: (() => {
-        if (s.reloadedAt === null) return null;
-        const t = firstConnectedAt(s.observations.filter((o) => o.at >= s.reloadedAt!));
-        return t !== null ? t - s.reloadedAt : null;
-      })(),
+      reconnectMs: s.reloadedAt === null ? null : reconnectMs(s.observations, s.reloadedAt),
       longestGapMs: longestDisconnectedGapMs(s.observations, s.runEndAt),
       nonConnectedStates: spans,
       manualActions: s.manualActions,
@@ -134,6 +139,15 @@ export function buildReport(
     failures.push(`${droppedTotal} dropped sessions exceed ${thresholds.maxDroppedSessions}`);
   }
 
+  if (run.soakStartedAt === null) {
+    failures.push("soak clock never started: not every session reached connected");
+  } else if (run.endedAt - run.soakStartedAt < run.requestedDurationMs) {
+    failures.push(
+      `run truncated: observed ${(run.endedAt - run.soakStartedAt) / 1000}s of the requested ` +
+        `${run.requestedDurationMs / 1000}s soak`,
+    );
+  }
+
   const report = {
     version: 1,
     run: {
@@ -144,6 +158,10 @@ export function buildReport(
       startedAt: new Date(run.startedAt).toISOString(),
       endedAt: new Date(run.endedAt).toISOString(),
       durationSeconds: (run.endedAt - run.startedAt) / 1000,
+      ...(run.soakStartedAt !== null
+        ? { soakStartedAt: new Date(run.soakStartedAt).toISOString() }
+        : {}),
+      requestedDurationSeconds: run.requestedDurationMs / 1000,
       sessionsRequested: run.sessionsRequested,
       inputIntervalSeconds: run.inputIntervalSeconds,
       pollIntervalSeconds: run.pollIntervalSeconds,
