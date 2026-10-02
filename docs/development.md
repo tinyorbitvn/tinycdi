@@ -9,14 +9,14 @@ Building, testing and iterating on TinyCDI. For the platform design see
 ```
 api/       Kubernetes API types (workspaces/v1alpha1) + deepcopy/CRDs source
 build/     one directory per image: build/<name>/Dockerfile (context = repo root)
-cmd/       Go entrypoints: api, gateway, operator
+cmd/       Go entrypoints: backend, operator (the frontend server lives in build/frontend)
 config/    kubebuilder config: CRDs, RBAC, manager, samples
 deploy/    deploy/helm/tinycdi — the Helm chart (install/upgrade)
 docs/      architecture, ADRs, runbooks, security policy, compatibility pins
 hack/      codegen helpers (boilerplate header)
-internal/  control-plane packages (api, broker, gateway, operator, runtime, ...)
+internal/  control-plane packages (backend, api, broker, gateway, operator, runtime, ...)
 tests/     integration tests (Go, envtest + Docker — no cluster required)
-web/       portal SPA (React/TypeScript, Vite, vitest + Playwright mock suite)
+web/       frontend SPA (React/TypeScript, Vite, vitest + Playwright mock suite)
 ```
 
 ## Build & test
@@ -42,9 +42,8 @@ Every image builds from a clean checkout with repo-root context:
 
 ```sh
 docker build -f build/operator/Dockerfile -t tcdi/operator .
-docker build -f build/api/Dockerfile       -t tcdi/api .
-docker build -f build/gateway/Dockerfile   -t tcdi/gateway .
-docker build -f build/portal/Dockerfile    -t tcdi/portal .   # builds web/ in-stage
+docker build -f build/backend/Dockerfile   -t tcdi/backend .
+docker build -f build/frontend/Dockerfile  -t tcdi/frontend .  # builds web/ in-stage
 docker build -f build/linux-desktop/Dockerfile -t tcdi/linux-desktop .
 docker build -f build/browser/Dockerfile   -t tcdi/browser \
     --build-arg BASE_IMAGE=tcdi/linux-desktop .
@@ -69,7 +68,7 @@ node web/scripts/screenshots.mjs
 What it does:
 
 1. **Portal views** — boots the `tests-portal` harness: the built SPA
-   served by the real Go portal binary over HTTPS with the contract mock
+   served by the real Go frontend binary (`build/frontend`) over HTTPS with the contract mock
    (`web/tests/mock-api`) behind it, seeds generic demo workspaces through
    the mock's public + `/_control` endpoints, and captures the workspace
    list, create form, detail and retained-data pages.

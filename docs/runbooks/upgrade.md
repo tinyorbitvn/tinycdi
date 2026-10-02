@@ -248,13 +248,13 @@ fail-closed changes — `helm template`/`upgrade` fails until values comply:
   has no metrics endpoint (secure metrics need cluster-scoped authz RBAC
   the chart never grants). Drop the keys from your values.
 - `networkPolicy.prometheusPeers` is **required** (non-empty, scoped to
-  your monitoring pods) when `gateway.metricsListen` is set, and gateway
-  metrics moved off the public Service onto the ClusterIP
-  `gateway-metrics` Service.
+  your monitoring pods) when `backend.metrics.enabled` is set, and backend
+  metrics are served off the public Service on the ClusterIP
+  `backend-metrics` Service.
 - `database.allowedPeers` and `oidc.egressCIDRs` must be non-empty — and
   `allowedPeers` must also differ from the shipped `ipBlock: 0.0.0.0/32`
   **deny-all placeholder**: the render now fails on it, because upgrading
-  with the placeholder in place silently cut the api off from its
+  with the placeholder in place silently cut the backend off from its
   database (CHTR-7).
 - `ingress.enabled` requires `ingress.tls.existingSecret`; every
   `gatewayApi.parentRefs` entry needs a `sectionName` (the HTTPS
@@ -265,14 +265,15 @@ fail-closed changes — `helm template`/`upgrade` fails until values comply:
   overrides require `dev.enabled: true` — do not set it in production.
   The hardening gate additionally refuses: dangerous `extraArgs`
   (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/
-  metrics flags, api `--dev-insecure-db`/`--required-groups`, gateway
-  `--metrics-listen`), `capabilities.drop` lists that drop less than ALL,
+  metrics flags, backend `--dev-insecure-db`/`--required-groups`/
+  `--metrics-listen` and the split-mode broker flags), `capabilities.drop`
+  lists that drop less than ALL,
   `appArmorProfile: Unconfined`, `seLinuxOptions`, root
-  `fsGroup`/`supplementalGroups`, `hostPath` in `gateway.extraVolumes`,
+  `fsGroup`/`supplementalGroups`, `hostPath` in `backend.extraVolumes`,
   a non-verifying `database.tls.mode`, and
   `podSecurity.managedEnforce=privileged`. `hostUsers: false` is a
   hardening and stays allowed (CHTR-3).
-- **DB TLS is now mandatory by default (breaking):** the api refuses to
+- **DB TLS is now mandatory by default (breaking):** the backend refuses to
   start on a non-verifying sslmode (CHTR-8) — `disable`, `allow`,
   `prefer`, `require` and unset all fail. `database.tls.mode` therefore
   defaults to `verify-full`; databases with a private CA need
@@ -282,7 +283,7 @@ fail-closed changes — `helm template`/`upgrade` fails until values comply:
   `PGSSLMODE`. A dev-only escape exists: `dev.enabled=true` + a weaker
   mode renders `--dev-insecure-db`.
 - New optional login gate: `oidc.requiredGroups` (list, default `[]`)
-  renders `--required-groups=<csv>` on the api — an ID-token `groups`
+  renders `--required-groups=<csv>` on the backend — an ID-token `groups`
   claim must carry at least one listed group (exact match; empty = every
   IdP account may log in).
 - The operator's manager-role is no longer bound in the release namespace
@@ -320,12 +321,12 @@ fail-closed changes — `helm template`/`upgrade` fails until values comply:
 
 ## Schema migrations
 
-`db.Migrate` runs at `api` startup (`cmd/api/main.go`) and applies embedded
-migrations in filename order, idempotently via `schema_migrations`
-(`internal/store/migrate.go`). Deploy the **new api before or together
-with** anything that writes new-shaped rows; never run an old api against a
-newer schema it cannot read — treat "old binary + new schema" as
-unsupported, and "new binary + old schema" as the supported direction.
+`db.Migrate` runs at `backend` startup (`internal/backend/wire.go`) and
+applies embedded migrations in filename order, idempotently via
+`schema_migrations` (`internal/store/migrate.go`). Deploy the **new
+backend before or together with** anything that writes new-shaped rows;
+never run an old backend against a newer schema it cannot read — treat
+"old binary + new schema" as unsupported, and "new binary + old schema" as the supported direction.
 
 ## Rollback
 
@@ -356,14 +357,13 @@ unsupported, and "new binary + old schema" as the supported direction.
   operator, **365-day** validity: workspaces running longer than that need
   a cert-rotation story — plan one before a release that ships long-lived
   desktops.
-- The internal mTLS chain (`tinycdi-api-internal-tls`,
-  `tinycdi-internal-ca`, `tinycdi-gateway-mtls`,
-  `tinycdi-operator-mtls`) is operator-managed PKI or cert-manager
+- The internal mTLS chain (`tinycdi-backend-internal-tls`,
+  `tinycdi-internal-ca`, `tinycdi-operator-mtls`) is operator-managed PKI or cert-manager
   (`certManager.enabled`, which also handles renewal). When rotating
   manually: replace the CA bundle first (so both old and new client certs
   verify), then the client certs, then the server cert — in that order,
   or every component loses its peer at once. The operator's client cert
-  **CN must stay `operator`** (or match `api.operatorCN`) — the broker's
+  **CN must stay `operator`** (or match `backend.operatorCN`) — the broker's
   workspace revoke/drain routes accept no other identity (ADR 0003).
 - `devAllowNoBroker` exists to run the operator without a broker in dev —
   it must never appear in a release values file; the operator fails fast

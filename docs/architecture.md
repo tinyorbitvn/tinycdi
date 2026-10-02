@@ -1,24 +1,29 @@
 # Thiết kế nền tảng workspace trên Kubernetes
 > **English note:** this document is in Vietnamese — it is the original design/ADR kept for reference. Current platform state is described by `README.md`, `docs/images.md`, `docs/compatibility.md` and `docs/runbooks/`.
 >
-> **v0.2 target architecture:** [ADR 0005](adr/0005-backend-frontend-operator.md)
-> (proposed) supersedes the component split below — three Deployments
-> (`backend`, `frontend`, `operator`), one visible URL, and every
-> workspace session on its own `<label>.<sessionDomain>` host with
-> restart-safe sessions. The component list under "Current components"
-> describes v0.1 and is kept until the v0.2 gates land.
+> **Architecture:** [ADR 0005](adr/0005-backend-frontend-operator.md)
+> (accepted) supersedes the component split in the original design below —
+> three Deployments (`backend`, `frontend`, `operator`), one visible URL,
+> and every workspace session on its own `<label>.<sessionDomain>` host
+> with restart-safe sessions. The list under "Current components"
+> describes the shipped v0.2 layout.
 
 ## Current components (English summary)
 
-- **Portal** (`web/` + `build/portal`): React SPA served with the API on one
-  origin; session launches open the gateway origin.
-- **API** (`cmd/api`, `internal/api`): public REST surface (`/v1`),
-  identity/OIDC, quotas, workspace CRUD, retained-data inventory.
-- **Broker** (`internal/broker`): connection tickets (opaque, single-use,
-  TTL-bound), leases, revocation, activity.
-- **Gateway** (`cmd/gateway`, `internal/gateway`): session edge — ticket
-  redemption, launch-origin policy, authenticated reverse proxy to the
-  runtime's streaming endpoint.
+- **Frontend** (`web/` + `build/frontend`): React SPA served as static
+  files with browser security headers; it does not proxy `/v1` — the edge
+  routes `/v1` to the backend.
+- **Backend** (`cmd/backend`, `internal/backend`): one binary with four
+  separate listeners, each with its own TLS config and route table — the
+  public REST surface (`/v1`; `internal/api`: identity/OIDC, quotas,
+  workspace CRUD, retained-data inventory), the session gateway on
+  `*.<sessionDomain>` (`internal/gateway`: ticket redemption, launch-origin
+  policy, authenticated reverse proxy to the runtime's streaming
+  endpoint), the internal mTLS listener used by the operator, and an
+  optional metrics listener.
+- **Broker** (`internal/broker`): runs in-process in the backend —
+  connection tickets (opaque, single-use, TTL-bound), leases, revocation,
+  activity.
 - **Operator** (`cmd/operator`, `internal/operator`): reconciles `Workspace`
   / `WorkspaceTemplate` CRDs (`api/`), provisions runtime pods, enforces
   per-workspace NetworkPolicy, runs the teardown finalizer.

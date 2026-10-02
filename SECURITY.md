@@ -319,7 +319,7 @@ v0.2)
 17. Idempotency keys are scoped to the principal and the operation, and
     a replay never bypasses authorization.
     *Enforced:* `TestSEC21_IdempotencyPrincipalScoped` (integration).
-    Keys expire after 24 h (hourly prune in `cmd/api`).
+    Keys expire after 24 h (hourly prune in `cmd/backend`).
 
 **Logging and secrets**
 

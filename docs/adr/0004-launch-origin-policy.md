@@ -4,7 +4,7 @@ Status: accepted (policy fixed in design review)
 
 Date: 2026-09-30
 
-> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (proposed)
+> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
 > keeps this policy verbatim. The launch form POST now targets the
 > workspace's own host (`<label>.<sessionDomain>`) and its 303 redirect
 > lands inside a sandboxed portal iframe; the Origin allowlist, the

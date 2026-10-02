@@ -4,7 +4,7 @@ Status: accepted (contract fixed in design review; both sides implement it verba
 
 Date: 2026-09-30
 
-> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (proposed)
+> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
 > merges the session gateway into the backend binary: the gateway↔broker
 > calls below become in-process, and the mTLS listener keeps only the
 > operator routes (`workspaces/{uid}/revoke`, `workspaces/{uid}/drain`).

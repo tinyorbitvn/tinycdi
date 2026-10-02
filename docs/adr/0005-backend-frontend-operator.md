@@ -1,7 +1,7 @@
 # ADR 0005 — backend/frontend/operator, per-workspace session hosts
 
-Status: proposed (v0.2 target architecture; moves to *accepted* when the
-G2 security gate returns GO)
+Status: accepted (v0.2 architecture). Not independently security-reviewed;
+a review is planned before v1.0.
 
 Date: 2026-10-02
 

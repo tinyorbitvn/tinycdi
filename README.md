@@ -14,17 +14,15 @@ Guacamole/RDP) is deferred pending its own proof gate.
 
 ## Architecture
 
-The control plane runs four Deployments: the **portal** (SPA plus a `/v1`
-proxy to the API), the **API** (public REST surface plus the session
-broker's internal mTLS listener), the session **gateway** (a separate
-public host that redeems launch tickets and reverse-proxies the runtime)
-and the **operator** (`Workspace`/`WorkspaceTemplate` CRDs). The v0.2
-target — [ADR 0005](docs/adr/0005-backend-frontend-operator.md)
-(proposed) — consolidates these into three: a merged **backend** (API +
-session gateway + in-process broker on four listeners), a static
-**frontend** and the operator, behind one visible URL, with each
-workspace served on its own `<label>.<sessionDomain>` host so parallel
-sessions stay isolated. Details: [docs/architecture.md](docs/architecture.md).
+The control plane runs three Deployments, as described in
+[ADR 0005](docs/adr/0005-backend-frontend-operator.md): the **backend**
+(public REST API, session gateway and the in-process session broker on
+separate app, session, internal-mTLS and optional metrics listeners), the
+**frontend** (the static SPA with browser security headers; it does not
+proxy `/v1`) and the **operator** (`Workspace`/`WorkspaceTemplate` CRDs).
+Users see one URL, and each workspace is served on its own
+`<label>.<sessionDomain>` host so parallel sessions stay isolated.
+Details: [docs/architecture.md](docs/architecture.md).
 
 ## Features
 
