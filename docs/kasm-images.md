@@ -65,7 +65,7 @@ The adapter image (`build/kasm-adapter/`, published as
 `tinycdi-kasm-adapter`) contains a static `install-adapter` copier that
 writes the adapter files into the shared volume:
 
-- `entrypoint.sh` — same contract as `build/linux-desktop/entrypoint.sh`:
+- `entrypoint.sh` — same contract as `build/linux-base/entrypoint.sh`:
   reads credentials/TLS from the mounted Secret files, stages them on the
   ephemeral `/run/tcdi` mount, builds a **write-only non-owner**
   `kasmvncpasswd` file (owner rights would unlock KasmVNC's `/api/*`

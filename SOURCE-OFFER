@@ -1,7 +1,7 @@
 TinyCDI — Written Offer for Corresponding Source (GPL-2.0)
 =========================================================
 
-The TinyCDI runtime container images (linux-desktop, browser)
+The TinyCDI runtime container images (linux-base, linux-desktop, browser)
 redistribute the KasmVNC 1.5.0 server binaries
 (kasmvncserver_bookworm_1.5.0_amd64.deb, sha256
 770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71),

@@ -100,7 +100,9 @@ Also gather:
    (kind: `10.96.0.1`, RKE2/canal: usually `10.43.0.1`) →
    `networkPolicy.apiServerPeers`/`apiServerPort`.
 5. **Images** — default `ghcr.io/tinyorbitvn/tinycdi-{backend,operator,
-   frontend,linux-desktop,browser}` tagged with the chart
+   frontend,linux-desktop,browser}` (plus `linux-base`, the shared base the two
+   runtime profiles build from — pinned in the values, never pulled by the
+   chart) tagged with the chart
    appVersion. To pull from a mirror registry set
    `global.imageRegistry: registry.example.com` (optionally per-image
    `registry`/`repository` overrides) plus `global.imagePullSecrets`.
