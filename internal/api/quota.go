@@ -57,8 +57,8 @@ type userUsage struct {
 type quotaView struct {
 	Tenant string        `json:"tenant"`
 	Limits *quotaAmounts `json:"limits,omitempty"`
-	Usage  quotaAmounts `json:"usage"`
-	Users  []userUsage  `json:"users"`
+	Usage  quotaAmounts  `json:"usage"`
+	Users  []userUsage   `json:"users"`
 }
 
 // QuotaHandler implements GET /v1/quota per openapi.yaml.
