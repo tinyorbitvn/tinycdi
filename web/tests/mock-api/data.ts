@@ -32,6 +32,9 @@ export function dataArea(ctx: MockContext): MockArea {
     if (!m) return undefined;
     const rec = state.retained.get(m[1]);
     if (!rec || !t.visible(rec.id)) return err(404, "NOT_FOUND", "retained data record not found", false);
+    if (!m[2] && req.method === "GET") {
+      return ok(200, { ...rec, owner: t.ownerOf(rec.id), purgeConfirmationNonce: freshNonce(rec.id) });
+    }
     if (m[2] === "/attach" && req.method === "POST") return attachData(req, rec);
     if (m[2] === "/purge" && req.method === "POST") return purgeData(req, rec);
     return undefined;

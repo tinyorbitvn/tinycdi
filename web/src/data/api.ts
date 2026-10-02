@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../api/context";
 import { unwrap, type ApiClient } from "../api/client";
+import { isPortalApiError } from "../api/errors";
 import type { components } from "../api/generated/schema";
 
 // Data-area API surface. `owner` on records and the `?scope=mine|tenant`
@@ -103,18 +104,19 @@ export async function listRetainedData(
   return { ...page, items: page.items.filter((r) => r.state !== "Purged") };
 }
 
-// There is no GET /v1/data/{id}: the detail view resolves a record from the
-// caller-visible list (existence is never leaked — a foreign id reads as
-// "not found", matching the API's 404 convention).
+// GET /v1/data/{dataId}: one record, visible to its owner and to a tenant
+// admin of the same tenant. Any other caller gets 404 — existence is never
+// leaked — which reads as "not found" (null) here.
 export async function getRetainedData(
   api: ApiClient,
   id: string,
 ): Promise<ScopedRetainedData | null> {
-  const { items } = await listRetainedData(api, "mine");
-  const mine = items.find((r) => r.id === id);
-  if (mine) return mine;
-  const tenant = await listRetainedData(api, "tenant").catch(() => null);
-  return tenant?.items.find((r) => r.id === id) ?? null;
+  try {
+    return await get<ScopedRetainedData>(api, `/v1/data/${encodeURIComponent(id)}`);
+  } catch (e) {
+    if (isPortalApiError(e) && e.httpStatus === 404) return null;
+    throw e;
+  }
 }
 
 export async function attachRetainedData(
