@@ -97,18 +97,37 @@ export function longestDisconnectedGapMs(observations: Observation[], endAt: num
 }
 
 /**
- * Time to recover after the mid-run reload: from the first non-connected
- * observation at or after `reloadedAt` to the next "connected" one. A reload
- * that resumes seamlessly never shows a non-connected state and yields null
- * (nothing to reconnect) rather than the polling latency; null also covers a
- * session still not connected at run end.
+ * How far after the reload a non-connected observation is still attributed
+ * to it. Anything later is a different event (a drill, a relaunch) and must
+ * not be reported as the reload's reconnect.
  */
-export function reconnectMs(observations: Observation[], reloadedAt: number): number | null {
+export const RELOAD_RECONNECT_WINDOW_MS = 60_000;
+
+export interface ReloadRecovery {
+  /**
+   * From the first non-connected observation within the window after the
+   * reload to the next "connected" one. 0 for a seamless reload; null when
+   * the session was lost within the window and not seen connected again.
+   */
+  reconnectMs: number | null;
+  /** True when no non-connected state was observed within the window. */
+  seamless: boolean;
+}
+
+/**
+ * What the mid-run reload cost. Only a non-connected observation in
+ * [reloadedAt, reloadedAt + RELOAD_RECONNECT_WINDOW_MS] counts as the
+ * reload's reconnect; a reload without one resumed seamlessly (0 ms), so a
+ * gap that opens 20 minutes later is never attributed to it.
+ */
+export function reloadRecovery(observations: Observation[], reloadedAt: number): ReloadRecovery {
   const after = [...observations].sort((a, b) => a.at - b.at).filter((o) => o.at >= reloadedAt);
-  const lost = after.find((o) => o.state !== "connected");
-  if (!lost) return null;
+  const lost = after.find(
+    (o) => o.state !== "connected" && o.at - reloadedAt <= RELOAD_RECONNECT_WINDOW_MS,
+  );
+  if (!lost) return { reconnectMs: 0, seamless: true };
   const back = after.find((o) => o.at > lost.at && o.state === "connected");
-  return back ? back.at - lost.at : null;
+  return { reconnectMs: back ? back.at - lost.at : null, seamless: false };
 }
 
 /**

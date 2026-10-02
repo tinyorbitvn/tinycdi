@@ -11,6 +11,7 @@ import {
   longestDisconnectedGapMs,
   parseDurationMs,
   percentile,
+  reloadRecovery,
   stateSpans,
   type Observation,
 } from "./metrics.ts";
@@ -223,7 +224,7 @@ const SESSION = (t0: number, observations: Observation[], reloadedAt: number | n
   runEndAt: t0 + 60_000,
 });
 
-test("R5d: reconnectMs is null when the reload never produced a non-connected state", () => {
+test("R5d/R10b: a seamless reload records reconnectMs 0 and seamless true", () => {
   const t0 = Date.parse("2026-10-02T01:00:00Z");
   const report = buildReport(
     RUN(t0),
@@ -240,9 +241,13 @@ test("R5d: reconnectMs is null when the reload never produced a non-connected st
         t0 + 30_000,
       ),
     ],
-  ) as { sessions: { reconnectMs: number | null }[]; summary: { reconnectMs: { p95: number | null } } };
-  assert.equal(report.sessions[0].reconnectMs, null);
-  assert.equal(report.summary.reconnectMs.p95, null);
+  ) as {
+    sessions: { reconnectMs: number | null; seamless: boolean }[];
+    summary: { reconnectMs: { p95: number | null } };
+  };
+  assert.equal(report.sessions[0].reconnectMs, 0);
+  assert.equal(report.sessions[0].seamless, true);
+  assert.equal(report.summary.reconnectMs.p95, 0);
 });
 
 test("R5d: a non-connected state seen before the reload does not count as the reconnect", () => {
@@ -259,8 +264,68 @@ test("R5d: a non-connected state seen before the reload does not count as the re
       ],
       t0 + 30_000,
     ),
-  ]) as { sessions: { reconnectMs: number | null }[] };
+  ]) as { sessions: { reconnectMs: number | null; seamless: boolean }[] };
+  assert.equal(report.sessions[0].reconnectMs, 0);
+  assert.equal(report.sessions[0].seamless, true);
+});
+
+test("R10b: a drill gap 20 minutes after a seamless reload is not the reload's reconnect", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const min = 60_000;
+  const observations = [
+    obs(t0 + 1_000, "connected"),
+    obs(t0 + 30_000, "connected"),
+    obs(t0 + 31_000, "connected"), // reload at +30s, seamless
+    obs(t0 + 20 * min, "connected"),
+    obs(t0 + 20 * min + 5_000, "disconnected"), // drill: gateway restart
+    obs(t0 + 20 * min + 25_000, "connected"),
+  ];
+  assert.deepEqual(reloadRecovery(observations, t0 + 30_000), { reconnectMs: 0, seamless: true });
+  const report = buildReport(RUN(t0), LAX, [
+    { ...SESSION(t0, observations, t0 + 30_000), runEndAt: t0 + 25 * min },
+  ]) as {
+    sessions: { reconnectMs: number | null; seamless: boolean; longestGapMs: number }[];
+    summary: { reconnectMs: { p95: number | null } };
+  };
+  assert.equal(report.sessions[0].reconnectMs, 0);
+  assert.equal(report.sessions[0].seamless, true);
+  assert.equal(report.summary.reconnectMs.p95, 0);
+  // The drill gap is still reported, as the gap it is.
+  assert.equal(report.sessions[0].longestGapMs, 20_000);
+});
+
+test("R10b: only a non-connected observation within 60 s after the reload counts", () => {
+  const reloadedAt = Date.parse("2026-10-02T01:00:30Z");
+  const at = (ms: number, state: string) => obs(reloadedAt + ms, state);
+  // Exactly at the 60 s boundary still counts as the reload's.
+  assert.deepEqual(
+    reloadRecovery([at(1_000, "connected"), at(60_000, "disconnected"), at(64_000, "connected")], reloadedAt),
+    { reconnectMs: 4_000, seamless: false },
+  );
+  // One millisecond later belongs to something else.
+  assert.deepEqual(
+    reloadRecovery([at(1_000, "connected"), at(60_001, "disconnected"), at(64_000, "connected")], reloadedAt),
+    { reconnectMs: 0, seamless: true },
+  );
+  // Lost within the window and never back: no reconnect time, not seamless.
+  assert.deepEqual(reloadRecovery([at(2_000, "stale")], reloadedAt), {
+    reconnectMs: null,
+    seamless: false,
+  });
+  // A non-connected observation just before the reload never counts.
+  assert.deepEqual(
+    reloadRecovery([at(-3_000, "stale"), at(-1_000, "connected"), at(5_000, "connected")], reloadedAt),
+    { reconnectMs: 0, seamless: true },
+  );
+});
+
+test("R10b: a session that was not reloaded has no reconnect and is not seamless", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(RUN(t0), LAX, [
+    SESSION(t0, [obs(t0 + 1_000, "connected"), obs(t0 + 20_000, "connected")], null),
+  ]) as { sessions: { reconnectMs: number | null; seamless: boolean }[] };
   assert.equal(report.sessions[0].reconnectMs, null);
+  assert.equal(report.sessions[0].seamless, false);
 });
 
 test("R5d: a run shorter than the requested soak duration fails as truncated", () => {

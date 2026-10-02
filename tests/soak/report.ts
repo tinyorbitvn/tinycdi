@@ -11,7 +11,7 @@ import type { ErrorObject, ValidateFunction } from "ajv";
 import {
   longestDisconnectedGapMs,
   percentile,
-  reconnectMs,
+  reloadRecovery,
   stateSpans,
   type Observation,
 } from "./metrics.ts";
@@ -96,12 +96,14 @@ export function buildReport(
   const rows = sessions.map((s) => {
     const connectedAt = firstConnectedAt(s.observations);
     const spans = stateSpans(s.observations).filter((sp) => sp.state !== "connected");
+    const reload = s.reloadedAt === null ? null : reloadRecovery(s.observations, s.reloadedAt);
     return {
       workspaceId: s.workspaceId,
       ...(s.workspaceName !== undefined ? { workspaceName: s.workspaceName } : {}),
       connectMs:
         s.launchedAt !== null && connectedAt !== null ? connectedAt - s.launchedAt : null,
-      reconnectMs: s.reloadedAt === null ? null : reconnectMs(s.observations, s.reloadedAt),
+      reconnectMs: reload === null ? null : reload.reconnectMs,
+      seamless: reload?.seamless ?? false,
       longestGapMs: longestDisconnectedGapMs(s.observations, s.runEndAt),
       nonConnectedStates: spans,
       manualActions: s.manualActions,

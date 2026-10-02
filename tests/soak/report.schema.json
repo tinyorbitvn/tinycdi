@@ -72,6 +72,7 @@
           "workspaceId",
           "connectMs",
           "reconnectMs",
+          "seamless",
           "longestGapMs",
           "nonConnectedStates",
           "manualActions",
@@ -89,7 +90,11 @@
           "reconnectMs": {
             "type": ["number", "null"],
             "minimum": 0,
-            "description": "Mid-run reload: first non-connected observation to the next connected one; null if not reloaded, the reload never showed a non-connected state, or the session never reconnected."
+            "description": "Mid-run reload: first non-connected observation within 60 s after the reload to the next connected one; 0 when the reload was seamless; null if not reloaded or the session was lost after the reload and never reconnected."
+          },
+          "seamless": {
+            "type": "boolean",
+            "description": "True when the mid-run reload showed no non-connected state within 60 s. A later gap (a drill) is not attributed to the reload. False when not reloaded."
           },
           "longestGapMs": {
             "type": "number",
