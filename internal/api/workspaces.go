@@ -161,8 +161,10 @@ func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *Workspace
 // ---------------------------------------------------------------------------
 
 type templateSummary struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Family is the catalog name shared by every revision of one template.
+	Family     string `json:"family"`
 	Revision   int64  `json:"revision"`
 	Runtime    string `json:"runtime"`
 	Experience string `json:"experience"`
@@ -208,6 +210,7 @@ func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
 		Template: templateSummary{
 			ID:         r.Template.ID,
 			Name:       r.Template.Name,
+			Family:     r.Template.Name,
 			Revision:   r.Template.Revision,
 			Runtime:    r.Template.Runtime,
 			Experience: r.Template.Experience,
@@ -399,6 +402,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	tplInfo := provisioning.TemplateInfo{
 		ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
 		Runtime: tpl.Runtime, Experience: tpl.Experience,
+		ImageBuiltAt: tpl.ImageBuiltAt,
 	}
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,

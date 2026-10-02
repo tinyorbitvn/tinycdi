@@ -61,6 +61,9 @@ type ObservedStatus struct {
 	Conditions    []workspaceCondition
 	FailureReason string
 	ObservedAt    time.Time
+	// ImageBuiltAt is the raw image-built-at annotation the Workspace CR
+	// carries (copied from its template at create time); empty when absent.
+	ImageBuiltAt string
 }
 
 // StatusView supplies observed Workspace CR status keyed by the platform
@@ -158,6 +161,7 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	obs.Phase = string(ws.Status.Phase)
 	obs.Conditions = projectConditions(ws.Status.Conditions)
 	obs.FailureReason = failureReasonOf(ws.Status.Conditions)
+	obs.ImageBuiltAt = ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]
 	if obs.Phase != "" {
 		v.remember(workspaceUID, obs)
 	}
@@ -175,6 +179,7 @@ func (v *K8sStatusView) snapshot(workspaceUID string, at time.Time) ObservedStat
 		obs.Phase = s.Phase
 		obs.Conditions = s.Conditions
 		obs.FailureReason = s.FailureReason
+		obs.ImageBuiltAt = s.ImageBuiltAt
 	}
 	return obs
 }
@@ -187,6 +192,7 @@ func (v *K8sStatusView) remember(workspaceUID string, obs ObservedStatus) {
 		Phase:         obs.Phase,
 		Conditions:    obs.Conditions,
 		FailureReason: obs.FailureReason,
+		ImageBuiltAt:  obs.ImageBuiltAt,
 	}
 }
 
@@ -325,23 +331,22 @@ func (h *WorkspaceHandler) viewWithStatus(ctx context.Context, rec *provisioning
 		obs.ObservedAt = h.now()
 	}
 	mergeObservedStatus(&v, rec, obs)
-	h.mergeImageFreshness(ctx, &v, rec)
+	h.mergeImageFreshness(&v, rec, obs)
 	return v
 }
 
-// mergeImageFreshness resolves the workspace's template and fills the
-// optional imageBuiltAt/imageStale view fields. A missing catalog, an
-// unresolvable or deleted template, and a malformed annotation all leave
-// both fields absent — freshness is advisory and never fails the request
-// (D28).
-func (h *WorkspaceHandler) mergeImageFreshness(ctx context.Context, v *WorkspaceView, rec *provisioning.WorkspaceRecord) {
-	if h.catalog == nil {
-		return
+// mergeImageFreshness fills the optional imageBuiltAt/imageStale view
+// fields from the image age that travels with the workspace: the annotation
+// on its Workspace CR (informer cache), else the template snapshot taken at
+// create time. It never touches the template catalog — the template revision
+// a workspace was created from may be long gone. A missing or malformed age
+// leaves both fields absent; freshness is advisory and never fails the
+// request (D28).
+func (h *WorkspaceHandler) mergeImageFreshness(v *WorkspaceView, rec *provisioning.WorkspaceRecord, obs ObservedStatus) {
+	raw := obs.ImageBuiltAt
+	if raw == "" {
+		raw = rec.Template.ImageBuiltAt
 	}
-	e, err := h.catalog.Resolve(ctx, rec.TenantID, rec.Template.ID)
-	if err != nil || e.ID == "" {
-		return
-	}
-	v.ImageBuiltAt, v.ImageStale = imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(),
+	v.ImageBuiltAt, v.ImageStale = imageFreshness(h.log, raw, h.staleAfter, h.now(),
 		"workspace", rec.ID, "template", rec.Template.ID)
 }

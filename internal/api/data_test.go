@@ -119,6 +119,18 @@ func (f *fakeRetainedStore) ListRetained(_ context.Context, tenantID, caller, ow
 	return out, "", nil
 }
 
+func (f *fakeRetainedStore) ReadRetained(_ context.Context, tenantID, caller, ownerScope, id string) (RetainedRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, err := f.lookupLocked(tenantID, ownerScope, id)
+	if err != nil {
+		return RetainedRecord{}, err
+	}
+	cp := *r
+	cp.PurgeNonce = f.mintNonceLocked(caller, r)
+	return cp, nil
+}
+
 func (f *fakeRetainedStore) ImportRetained(_ context.Context, info RetainedDiskInfo) (RetainedRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -846,5 +858,50 @@ func TestDataList_BadPageToken(t *testing.T) {
 	}
 	if e := errBody(t, r); e.Code != CodeInvalidRequest {
 		t.Fatalf("code=%s, want INVALID_REQUEST", e.Code)
+	}
+}
+
+// TestGetRetainedData_Scope: GET /v1/data/{dataId} serves the same view as a
+// list row to the owner and to a tenant-admin of the same tenant; another
+// user and another tenant's admin get 404 (existence is never leaked).
+func TestGetRetainedData_Scope(t *testing.T) {
+	fs := newFakeRetainedStore()
+	env := newDataEnv(t, fs)
+	seedRetained(fs, "rd_getrec0001", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+
+	sessA, csrfA := login(t, env, "user-a")
+	r := doDataReq(t, env, sessA, csrfA, http.MethodGet, "/v1/data/rd_getrec0001", "", nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("owner: status=%d, want 200", r.StatusCode)
+	}
+	v := decodeBody[retainedDataView](t, r)
+	if v.ID != "rd_getrec0001" || v.State != "Retained" || v.PurgeConfirmationNonce == "" ||
+		v.Owner.Subject != "user-a" || v.SourceWorkspaceName != "research-desktop" {
+		t.Fatalf("owner view = %+v", v)
+	}
+
+	sessB, csrfB := login(t, env, "user-b")
+	r = doDataReq(t, env, sessB, csrfB, http.MethodGet, "/v1/data/rd_getrec0001", "", nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusNotFound || e.Code != CodeNotFound {
+		t.Fatalf("other user: status=%d code=%q, want 404 NOT_FOUND", r.StatusCode, e.Code)
+	}
+
+	env.issuer.Groups = []string{TenantAdminGroup}
+	sessAdm, csrfAdm := login(t, env, "admin-1")
+	r = doDataReq(t, env, sessAdm, csrfAdm, http.MethodGet, "/v1/data/rd_getrec0001", "", nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("tenant-admin of the same tenant: status=%d, want 200", r.StatusCode)
+	}
+
+	env.issuer.TenantID = "tenant-b"
+	sessOther, csrfOther := login(t, env, "admin-b")
+	r = doDataReq(t, env, sessOther, csrfOther, http.MethodGet, "/v1/data/rd_getrec0001", "", nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusNotFound || e.Code != CodeNotFound {
+		t.Fatalf("other tenant's admin: status=%d code=%q, want 404 NOT_FOUND", r.StatusCode, e.Code)
+	}
+
+	r = doDataReq(t, env, sessA, csrfA, http.MethodGet, "/v1/data/not-an-id", "", nil)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed id: status=%d, want 400", r.StatusCode)
 	}
 }

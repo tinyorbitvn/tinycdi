@@ -568,6 +568,40 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/data/{dataId}:
+    get:
+      operationId: getRetainedData
+      summary: Get one retained data disk
+      description: |
+        Returns the record as `GET /v1/data` lists it, including a fresh
+        `purgeConfirmationNonce`. Visible to the owner recorded on the record
+        and to tenant administrators of the same tenant; any other caller —
+        and any other tenant — gets `404 NOT_FOUND`.
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DataId"
+      responses:
+        "200":
+          description: The retained data record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetainedDataView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data/{dataId}/attach:
     post:
       operationId: attachRetainedData
@@ -1085,11 +1119,20 @@ components:
     WorkspaceEvent:
       type: object
       additionalProperties: false
-      required: [type, reason, message]
+      required: [id, type, reason, message]
       description: |
         One curated workspace event. `message` is a fixed catalog string —
         raw Kubernetes or operator error text is never forwarded.
       properties:
+        id:
+          type: string
+          description: |
+            Stable identifier, unique within the list and identical across
+            reads: condition type + reason for observed conditions
+            (`Degraded.BootDeadlineExceeded`), reason + intent revision for
+            lifecycle steps (`StartRequested.4`), `Failed.<reason>` for the
+            synthesized failure event. Usable as a list key.
+          example: StartRequested.4
         type:
           type: string
           enum: [Normal, Warning]
@@ -1121,6 +1164,12 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceEvent"
           description: Events, newest first.
+        stale:
+          type: boolean
+          description: |
+            True when the observed-state informer cannot prove freshness.
+            Condition events then show last-known state and never claim the
+            workspace is ready. Absent (false) otherwise.
 
     QuotaAmounts:
       type: object
@@ -1131,7 +1180,10 @@ components:
       properties:
         workspaces:
           type: integer
-          description: Active (not deleted) workspace count.
+          description: |
+            Active (not deleted) workspace count. Within `limits`, 0 means
+            there is no count limit (quota is enforced on running slots, CPU,
+            memory and storage).
         runningWorkspaces:
           type: integer
           description: Reserved running slots.
@@ -1163,10 +1215,11 @@ components:
     QuotaView:
       type: object
       additionalProperties: false
-      required: [tenant, limits, usage, users]
+      required: [tenant, usage, users]
       description: |
-        Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
-        per-user limit store. `users` lists every tenant member for tenant
+        Tenant quota snapshot. `limits` is absent when the tenant has no
+        quota row (new workspaces are then refused). `userLimits` is absent
+        in v0.2 — there is no per-user limit store. `users` lists every tenant member for tenant
         administrators and only the caller for regular users.
       properties:
         tenant:

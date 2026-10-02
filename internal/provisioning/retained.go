@@ -405,6 +405,26 @@ func (s *RetainedStore) ListRetained(ctx context.Context, tenantID, caller, owne
 	return recs, next, nil
 }
 
+// ReadRetained returns one record visible to ownerScope ("" = tenant-wide,
+// admin only) carrying a fresh PurgeNonce bound to caller — the single-record
+// form of ListRetained behind GET /v1/data/{dataId}. Foreign tenants and, for
+// non-admins, other owners' records are ErrRetainedNotFound.
+func (s *RetainedStore) ReadRetained(ctx context.Context, tenantID, caller, ownerScope, dataID string) (RetainedRecord, error) {
+	rec, err := getRetainedTx(ctx, s.db.Pool(), tenantID, ownerScope, dataID)
+	if err != nil {
+		return RetainedRecord{}, err
+	}
+	if rec.State == RetainedStatePurged {
+		return RetainedRecord{}, ErrRetainedNotFound
+	}
+	key, err := s.nonceKey(ctx)
+	if err != nil {
+		return RetainedRecord{}, err
+	}
+	rec.PurgeNonce = mintPurgeNonce(key, caller, rec, time.Now().UTC())
+	return *rec, nil
+}
+
 // GetRetained returns one record by id within a tenant ("" = any tenant).
 // Used by the dispatcher-side attach plumbing; the API handlers go through
 // the owner-scoped paths.
@@ -578,6 +598,7 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 			OwnerSubject:    sub,
 			DataPolicy:      "Retain",
 			RetainedDataRef: dataID,
+			ImageBuiltAt:    req.Template.ImageBuiltAt,
 		})
 		if err != nil {
 			return err

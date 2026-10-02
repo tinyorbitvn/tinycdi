@@ -102,3 +102,35 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("Wildcard = %q", d.Wildcard())
 	}
 }
+
+// TestParseDomain_ExplicitHTTPSPort: ':443' is the scheme's default port and
+// is normalised away — browsers send no port for https://…:443, so keeping it
+// would 421 every request.
+func TestParseDomain_ExplicitHTTPSPort(t *testing.T) {
+	d, err := sessionhost.ParseDomain("session.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "ws_0123456789abcdef"
+	if got, ok := d.Match("ws-0123456789abcdef.session.example.com"); !ok || got != id {
+		t.Fatalf("Match(host without port) = %q, %v; want %q, true", got, ok, id)
+	}
+	if got, ok := d.Match("ws-0123456789abcdef.session.example.com:443"); !ok || got != id {
+		t.Fatalf("Match(host with :443) = %q, %v; want %q, true", got, ok, id)
+	}
+	if _, ok := d.Match("ws-0123456789abcdef.session.example.com:8444"); ok {
+		t.Fatal("a different port must not match")
+	}
+	if h, _ := d.Host(id); h != "ws-0123456789abcdef.session.example.com" {
+		t.Fatalf("Host = %q, want no port", h)
+	}
+	if o, _ := d.Origin(id); o != "https://ws-0123456789abcdef.session.example.com" {
+		t.Fatalf("Origin = %q, want no port", o)
+	}
+	if w := d.Wildcard(); w != "*.session.example.com" {
+		t.Fatalf("Wildcard = %q, want no port", w)
+	}
+	if s := d.String(); s != "session.example.com" {
+		t.Fatalf("String = %q, want the canonical domain without :443", s)
+	}
+}

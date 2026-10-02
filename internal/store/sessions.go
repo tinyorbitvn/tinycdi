@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -223,31 +224,42 @@ func (s *SessionStore) Peek(ctx context.Context, id string) (*Session, error) {
 	return s.scanSession(ctx, row, key, id)
 }
 
+// TouchPrincipalSQL and TouchPrincipalIdleSQL are the statements behind
+// TouchPrincipal (without / with an idle window), exported so the integration
+// suite can EXPLAIN them: they match on the issuer and subject columns
+// ($1, $2) so migration 013's (issuer, subject) index applies; the idle
+// variant takes the window as $3.
+const (
+	TouchPrincipalSQL = `
+		UPDATE sessions SET last_seen_at = now()
+		WHERE issuer = $1 AND subject = $2
+		  AND epoch = ` + currentEpochSQL + `
+		  AND (expires_at IS NULL OR expires_at > now())`
+	TouchPrincipalIdleSQL = TouchPrincipalSQL + `
+		  AND last_seen_at > now() - $3::interval`
+)
+
 // TouchPrincipal slides last_seen_at for the principal's sessions that are
 // still inside the idle window and before their absolute expiry (D18):
 // desktop input keeps the owning user's portal session alive but can never
 // revive an expired one. principal is the lease's principal_subject —
-// "issuer|subject", the Principal.Owner() string. Returns the row count
-// actually updated.
+// "issuer|subject", the Principal.Owner() string — split at the first '|'
+// (an issuer URL never contains one; a subject may). A principal without a
+// separator matches nothing. Returns the row count actually updated.
 func (s *SessionStore) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
+	issuer, subject, ok := strings.Cut(principal, "|")
+	if !ok {
+		return 0, nil
+	}
 	var (
 		tag pgconn.CommandTag
 		err error
 	)
 	if s.idle > 0 {
-		tag, err = s.db.Pool().Exec(ctx, `
-			UPDATE sessions SET last_seen_at = now()
-			WHERE issuer || '|' || subject = $1
-			  AND epoch = `+currentEpochSQL+`
-			  AND (expires_at IS NULL OR expires_at > now())
-			  AND last_seen_at > now() - $2::interval`,
-			principal, fmt.Sprintf("%dms", s.idle.Milliseconds()))
+		tag, err = s.db.Pool().Exec(ctx, TouchPrincipalIdleSQL,
+			issuer, subject, fmt.Sprintf("%dms", s.idle.Milliseconds()))
 	} else {
-		tag, err = s.db.Pool().Exec(ctx, `
-			UPDATE sessions SET last_seen_at = now()
-			WHERE issuer || '|' || subject = $1
-			  AND epoch = `+currentEpochSQL+`
-			  AND (expires_at IS NULL OR expires_at > now())`, principal)
+		tag, err = s.db.Pool().Exec(ctx, TouchPrincipalSQL, issuer, subject)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("session touch: %w", err)
