@@ -280,6 +280,10 @@ func staleConditions(obs ObservedStatus) []workspaceCondition {
 // mergeObservedStatus folds an ObservedStatus into the DB-derived view.
 // rec is the source row (its Phase/FailureReason are the intent-side
 // fallback). The projection rules:
+//   - a Terminating tombstone in the DB always stands: the operator's
+//     finalizer never rewrites status.phase, so the CR keeps its last phase
+//     for the whole teardown and must not override the delete (conditions
+//     are still projected);
 //   - fresh CR with a phase: CR phase + conditions win outright;
 //   - fresh but missing/unreconciled CR: the intent-side DB phase stands;
 //   - stale informer: never Ready — last known non-Ready phase if any,
@@ -297,6 +301,9 @@ func mergeObservedStatus(v *WorkspaceView, rec *provisioning.WorkspaceRecord, ob
 			v.Phase = obs.Phase
 		}
 		v.Conditions = staleConditions(obs)
+	}
+	if rec.Phase == string(workspacesv1alpha1.WorkspacePhaseTerminating) {
+		v.Phase = rec.Phase
 	}
 	v.FailureReason = ""
 	if v.Phase == string(workspacesv1alpha1.WorkspacePhaseFailed) {
