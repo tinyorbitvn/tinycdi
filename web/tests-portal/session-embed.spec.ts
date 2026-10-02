@@ -12,6 +12,7 @@ import {
   test,
   waitForDesktopFrame,
   watchConsole,
+  watchConsoleErrors,
   workspaceOrigin,
   type HarnessMode,
 } from "./harness.ts";
@@ -31,6 +32,7 @@ async function embedRun(fixtures: {
 }) {
   const { page, request, harnessMode } = fixtures;
   const violations = watchConsole(page);
+  const consoleNoise = watchConsoleErrors(page);
   await resetState(request, harnessMode);
   await seedReadyWorkspace(request, WS_A);
   await login(page);
@@ -46,7 +48,16 @@ async function embedRun(fixtures: {
   expect(frame.url()).toBe(`${origin}/?resize=remote`);
   await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
 
+  // FX-R22: the client's two load-time probes both succeed in the frame —
+  // the data: fetch (connect-src) and getLayoutMap() (keyboard-map delegated
+  // by the frame's allow list and granted by the session Permissions-Policy)
+  // — so the console is silent and no CSP violation is reported.
+  const body = frame.locator("body");
+  await expect(body).toHaveAttribute("data-codec-probe", "ok");
+  await expect(body).toHaveAttribute("data-layout-probe", "ok");
+  await expect(body).toHaveAttribute("data-csp-violations", "0");
   expect(violations, "CSP violations on portal or session origin").toEqual([]);
+  expect(consoleNoise, "console errors/warnings on portal or session origin").toEqual([]);
 }
 
 test("lax", async ({ page, request, harnessMode }) => {

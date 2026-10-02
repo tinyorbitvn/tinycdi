@@ -142,7 +142,11 @@ iframe with:
 
 - `sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock"`
   — **never** `allow-top-navigation*`, `allow-popups*` or `allow-modals`;
-- `allow="clipboard-read; clipboard-write; fullscreen"`.
+- `allow="clipboard-read <origin>; clipboard-write <origin>; fullscreen <origin>; keyboard-map <origin>"`,
+  where `<origin>` is the workspace's own session origin. Each feature names
+  it explicitly: the frame is navigated by a form POST and has no `src`
+  attribute, so a bare feature name (default allowlist `'src'`) would
+  delegate to the portal's own origin and nothing to the session.
 
 Header contract:
 
