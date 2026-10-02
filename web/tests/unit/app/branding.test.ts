@@ -18,6 +18,12 @@ describe("loadBranding", () => {
     expect(branding).toEqual(DEFAULT_BRANDING);
   });
 
+  test("branding: the empty object the server answers without a branding dir yields the defaults", async () => {
+    // build/frontend answers 200 `{}` (application/json) for
+    // /branding/branding.json when no branding is configured.
+    await expect(loadBranding(respond(json({})))).resolves.toEqual(DEFAULT_BRANDING);
+  });
+
   test("branding: non-JSON response falls back", async () => {
     // Before the branding directory is configured the SPA fallback answers
     // /branding/branding.json with index.html.
@@ -40,7 +46,7 @@ describe("loadBranding", () => {
     );
     expect(branding.productName).toBe("Acme Desktops");
     expect(branding.logo).toBe(DEFAULT_BRANDING.logo);
-    expect(branding.logoDark).toBe(DEFAULT_BRANDING.logo);
+    expect(branding.logoDark).toBe(DEFAULT_BRANDING.logoDark);
   });
 
   test("accepts logos under /branding/ only", async () => {
