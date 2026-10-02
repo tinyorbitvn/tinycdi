@@ -57,6 +57,11 @@ func TestTwoReplicas_ConnectionStaysConnectedWhileStreaming(t *testing.T) {
 	}
 	stream := f.wsOpen(t, a, cookie)
 	defer stream.Body.Close()
+	// The gateway reports "connected" asynchronously: the observation window
+	// starts once the stream has been counted, not on the first poll.
+	eventually(t, "stream counted as connected", 10*time.Second, func() bool {
+		return f.connectionOn(t, a, sess)["state"] == "connected"
+	})
 
 	var leaseRef any
 	renewed := map[any]bool{}
