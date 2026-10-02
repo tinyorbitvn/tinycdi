@@ -136,7 +136,7 @@ in a production values file:
 | browser template runs Firefox ESR (`command: [env, TCDI_BROWSER=firefox, …]`) | Chromium's sandbox needs the Localhost seccomp/AppArmor node profiles, which a kind node cannot load; Firefox runs with seccomp-bpf only — reduced isolation, see [images.md](images.md) |
 | `networkPolicy.apiServerPeers` = the control-plane endpoint IP, `apiServerPort` = its port (6443) | kindnet enforces NetworkPolicy *after* the `kubernetes` Service is NAT-ed, so the chart's default (Service IP `10.96.0.1`, port 443) never matches; `up.sh` reads the endpoint from the cluster |
 | `oidc.port: 8443` | same reason: the egress rule towards the ingress controller has to name Traefik's container port, not Service port 443 |
-| `tenant_quota` row inserted by SQL | the API has no quota endpoint yet and a tenant without a quota row is refused every create; `up.sh` seeds `tenant-a` (3 workspaces, 4 CPU, 8 GiB, 50 GiB) the way [runbooks/capacity.md](runbooks/capacity.md) describes |
+| `managedNamespaces[].quota` (2 workspaces, 4 CPU, 8 GiB memory, 20 GiB storage) | a tenant without a quota row is refused every create (`409 QUOTA_NOT_CONFIGURED`); the chart value makes the backend upsert `tenant-a`'s row at startup, so nothing is seeded by hand. Sized for a laptop: two of the 1 CPU / 2 GiB / 5 GiB templates. See the chart README, [Tenant quotas](../deploy/helm/tinycdi/README.md#tenant-quotas) |
 | Traefik `--serversTransport.insecureSkipVerify` and `traefik.ingress.kubernetes.io/service.serversscheme: https` | the TinyCDI pods terminate TLS themselves with a quickstart-CA certificate; Traefik re-encrypts to them without verifying names |
 
 Because of the NetworkPolicy findings above, a CNI that enforces policy

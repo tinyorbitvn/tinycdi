@@ -7,6 +7,15 @@
 managedNamespaces:
   - name: tinycdi-tenant-a
     tenant: tenant-a
+    # Declarative tenant quota (chart README "Tenant quotas"): the backend
+    # leader upserts this row at startup, and a tenant without one is refused
+    # every create (409 QUOTA_NOT_CONFIGURED). Sized for a laptop kind node:
+    # two of the 1 CPU / 2 GiB / 5 GiB templates below, with headroom.
+    quota:
+      runningWorkspaces: 2
+      cpu: "4"
+      memory: 8Gi
+      storage: 20Gi
 
 # *.tcdi.localtest.me resolves to 127.0.0.1 on the public DNS, including
 # ws-<hex>.session.tcdi.localtest.me. portalHost sits outside sessionDomain.

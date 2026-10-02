@@ -278,21 +278,6 @@ helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/tinycdi" -n "$NS_SYSTE
   -f "$QS_DIR/values.yaml" -f "$GEN" --wait --timeout 10m \
   >"$STATE_DIR/logs/helm-tinycdi.log" 2>&1 || { tail -n 40 "$STATE_DIR/logs/helm-tinycdi.log" >&2; die "TinyCDI install failed"; }
 
-# The API has no quota endpoint yet and a tenant without a quota row is refused
-# every create (fail closed), so seed tenant-a the way docs/runbooks/capacity.md
-# describes: 3 running workspaces, 4 CPU, 8 GiB memory, 50 GiB disk.
-log "seeding the tenant-a quota"
-psql_dev() { kc -n "$NS_DEPS" exec postgres-0 -- psql -v ON_ERROR_STOP=1 -qAt -U tinycdi -d tinycdi "$@"; }
-for _ in $(seq 1 60); do
-  [ "$(psql_dev -c "SELECT to_regclass('public.tenant_quota') IS NOT NULL" 2>/dev/null || true)" = t ] && break
-  sleep 2
-done
-psql_dev -c "INSERT INTO tenant_quota (tenant_id, max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes)
-  VALUES ('tenant-a', 3, 4000, 8589934592, 53687091200)
-  ON CONFLICT (tenant_id) DO UPDATE SET max_running_slots = EXCLUDED.max_running_slots,
-    max_cpu_millis = EXCLUDED.max_cpu_millis, max_memory_bytes = EXCLUDED.max_memory_bytes,
-    max_disk_bytes = EXCLUDED.max_disk_bytes" >/dev/null
-
 # ---- 6. verify end to end (TLS chain, routing, OIDC discovery) -------------
 curl_ca() { # curl_ca <host> <url...>: verified TLS against the local CA, host pinned to loopback
   local host="$1"
