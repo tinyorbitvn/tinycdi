@@ -102,7 +102,8 @@ Also gather:
 5. **Images** — default `ghcr.io/tinyorbitvn/tinycdi-{backend,operator,
    frontend,linux-desktop,browser}` (plus `linux-base`, the shared base the two
    runtime profiles build from — pinned in the values, never pulled by the
-   chart) tagged with the chart
+   chart; cosign-verify it with the rest of the release, and carry
+   `images.linuxBase.digest` into any GitOps wrapper that pins digests) tagged with the chart
    appVersion. To pull from a mirror registry set
    `global.imageRegistry: registry.example.com` (optionally per-image
    `registry`/`repository` overrides) plus `global.imagePullSecrets`.

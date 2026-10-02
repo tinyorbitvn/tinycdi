@@ -123,7 +123,7 @@ objects. It **keeps**:
 |---|---|---|
 | `global.imageRegistry` | `ghcr.io` | registry prepended to every `images.*.repository` (e.g. `registry.example.com`); per-image `registry` wins |
 | `global.imagePullSecrets` | `[]` | pull secrets attached to every platform pod (names or `{name: ...}` maps) |
-| `images.<name>.repository` | `tinyorbitvn/tinycdi-<name>` | image path (joined under the registry); names: `backend`, `operator`, `frontend`, `linuxDesktop`, `browser` |
+| `images.<name>.repository` | `tinyorbitvn/tinycdi-<name>` | image path (joined under the registry); names: `backend`, `operator`, `frontend`, `linuxBase`, `linuxDesktop`, `browser` (`linuxBase` is the shared base of the two runtime profiles: a release stamps its digest next to the others for custom images built on it, but **the chart never pulls it** and no template references it) |
 | `images.<name>.tag` | chart `appVersion` | tag; ignored when `digest` is set |
 | `images.<name>.digest` | `""` | `sha256:<64hex>` — digest pinning wins over tag |
 | `images.<name>.pullPolicy` | `IfNotPresent` | per-image pull policy |

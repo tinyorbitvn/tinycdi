@@ -186,9 +186,15 @@ plain `#274060` desktop with a *Home* icon.
 - The desktop follows a remote resize: `resize=remote` (the KasmVNC client
   switching the X output to the viewport size over RandR) re-lays the panel
   and the backdrop at the new size; nothing in the image fixes a resolution.
-- Firefox ESR here has the same sandbox as the browser image's fallback:
-  seccomp-bpf on the content processes, no user-namespace layer. It needs the
-  bounded `/dev/shm` of the runtime contract.
+- **Firefox in the desktop is not equivalent to the Chromium browser
+  template for untrusted browsing.** It runs under the RuntimeDefault seccomp
+  profile (seccomp-bpf on its content processes) *without* the user-namespace
+  sandbox layer — the same reduced isolation the browser image's Firefox
+  fallback documents (`TCDI_BROWSER=firefox`). The Chromium template's nested
+  user-namespace sandbox needs the node Localhost seccomp+AppArmor pair and
+  the browser image; use that template for untrusted web content, and treat
+  the desktop's Firefox as a convenience inside an already-isolated
+  workspace. It needs the bounded `/dev/shm` of the runtime contract.
 
 ### Posture (unchanged from the base)
 
@@ -443,8 +449,9 @@ signed ones in `runtime-images.json` of each `runtime-*` GitHub Release (and
 - **Desktop profile:** no desktop notifications, sound, trash or removable-media
   integration (see *Deliberately not installed*); Firefox ESR there runs with
   seccomp-bpf only (no user-namespace layer), like the browser image's
-  fallback — it does not use the Chromium node-profile pair; PDFs open in
-  Firefox's built-in viewer.
+  fallback, and does not use the Chromium node-profile pair — so it is not a
+  substitute for the Chromium browser template when browsing untrusted
+  content; PDFs open in Firefox's built-in viewer.
 - **Residual chromium findings at the .92 pin:** the trivy CRITICAL,HIGH
   gate (severities with a fix available) is clean on
   `154.0.8037.92-1~deb12u1`, but 11 HIGH engine CVEs

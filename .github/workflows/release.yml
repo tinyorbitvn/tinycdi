@@ -321,7 +321,7 @@ jobs:
 
   base:
     # linux-base is the base of both runtime profiles: on real publishes
-    # the linux-base and browser legs consume this job's pushed manifest
+    # the linux-desktop and browser legs consume this job's pushed manifest
     # by digest; on dry_run they consume the image-tar artifact via docker
     # load. The job is skipped when linux-base is not in
     # build/release-images.txt.

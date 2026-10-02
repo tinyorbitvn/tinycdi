@@ -222,7 +222,9 @@ release signer cert is
 `https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/v<X.Y.Z>`
 and the `:main`-channel signer cert is
 `https://github.com/tinyorbitvn/tinycdi/.github/workflows/images.yml@refs/heads/main`.
-Substitute the real tag/digest.
+Substitute the real tag/digest. A release carries one more image than the
+chart deploys: verify **`tinycdi-linux-base`** with the same commands (the
+chart pins its digest as `images.linuxBase` but never pulls it).
 
 ```sh
 # Release image signature (keyless, Fulcio + Rekor):

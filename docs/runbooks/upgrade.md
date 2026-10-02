@@ -213,7 +213,15 @@ renews the leases, they expire, and each user must start a fresh session.
    `kubectl -n <release-ns> get deploy -o jsonpath='{..image}'`
    (values file = the one used at install — install.md creates
    `my-values.yaml`).
-4. Check `tinycdi_workspaces_running` — decide whether the maintenance
+4. Verify the release you are about to pin: `cosign verify` (and
+   `verify-attestation`) every image in the release, **including
+   `tinycdi-linux-base`** — the release carries one more image than the chart
+   deploys (`.github/README.md`, "Verifying a release"). If a GitOps wrapper
+   or umbrella chart pins digests from the release, copy `images.linuxBase.digest`
+   too (the packaged chart's values carry it; the chart never pulls it, so
+   leaving it stale breaks nothing but misleads anyone building a custom
+   desktop image on the base).
+5. Check `tinycdi_workspaces_running` — decide whether the maintenance
    window tolerates one stream drop per backend pod, or drain users first
    (stop issuing tickets). A graceful backend stop drains its open streams
    and reports them closed; clients then reconnect inside their live lease.
@@ -233,6 +241,9 @@ $K apply -f deploy/helm/tinycdi/crds/   # only if the diff is reviewed
 
 # 2. Pin the new images by digest in values — never upgrade to a tag.
 #    images.{backend,frontend,operator}.digest: "sha256:..."
+#    Runtime images move on their own train (docs/images.md): pin
+#    images.{linuxDesktop,browser}.digest from runtime-images.json, and
+#    images.linuxBase.digest alongside (the chart never pulls linuxBase).
 
 # 3. Render and diff before applying. Seeded WorkspaceTemplates are
 #    published as immutable revision objects "<name>-<hash8>": a template
