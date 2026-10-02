@@ -195,6 +195,49 @@ objects. It **keeps**:
 | `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
+| `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
+
+### Branding (`frontend.branding.configMap`)
+
+Set `frontend.branding.configMap` to the name of a ConfigMap in the release
+namespace to rebrand the portal. The chart mounts it read-only at
+`/branding` in the frontend pods and passes `-branding-dir=/branding`; the
+frontend serves it at `https://<portalHost>/branding/` (regular files only,
+no listing, `Cache-Control: no-cache`). Empty (the default) renders no flag
+and no volume, and `/branding/tokens.css` answers an empty stylesheet so the
+linked override is never a console error.
+
+ConfigMap layout — every key is optional:
+
+| Key | Consumed by | Content |
+|---|---|---|
+| `branding.json` | `web/src/app/branding.ts` (`loadBranding`) | `{"productName": "...", "logo": "/branding/<file>", "logoDark": "/branding/<file>"}` — unknown fields ignored; `logo*` must stay under `/branding/` (same origin) |
+| `tokens.css` | `index.html` stylesheet link, after the app CSS | CSS custom-property overrides (`--to-*`/`--tc-*` design tokens) |
+| logo files | referenced from `branding.json` | e.g. `logo.svg` — served with their extension's content type |
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme-branding
+data:
+  branding.json: |
+    {"productName": "Acme Desktops", "logo": "/branding/logo.svg"}
+  tokens.css: |
+    :root { --to-accent: #123456; }
+  logo.svg: |
+    <svg xmlns="http://www.w3.org/2000/svg">…</svg>
+```
+
+Update the ConfigMap and restart the frontend Deployment to pick up changes
+(`kubectl rollout restart deploy/frontend`). Files are re-read per request,
+so no image rebuild is needed.
+
+**Trademark note.** The TinyOrbit name, wordmark and mark shipped as the
+default branding are trademarks of TinyOrbit and are NOT covered by the MIT
+licence — see `TRADEMARKS.md`. Supplying your own `branding.json` replaces
+the default product name and marks; "TinyCDI by TinyOrbit" attribution is
+shown only for the default branding.
 
 ### Runtime pod defaults (`runtime`)
 

@@ -73,11 +73,16 @@ function at(conditions: ConditionFixture[], time: string): ConditionFixture[] {
   return conditions.map((c) => ({ ...c, lastTransitionTime: time }));
 }
 
+// Stored demo records carry a placeholder owner; the mock replaces it
+// with the tenancy owner at serve time (see admin.ts ownerOf).
+const DEMO_OWNER: WorkspaceFixture["owner"] = { subject: "user-alice", displayName: "Alice A" };
+
 export const DEMO_WORKSPACES: WorkspaceFixture[] = [
   {
     id: "ws_01J4ZH1A2B3C4D5E6F7G8H9J0K",
     owner: DEMO_OWNER,
     name: "design-review",
+    owner: DEMO_OWNER,
     template: summary(TEMPLATE_LINUX),
     phase: "Ready",
     desiredState: "Running",
@@ -90,6 +95,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH2B3C4D5E6F7G8H9J0K1M",
     owner: DEMO_OWNER,
     name: "quick-browse",
+    owner: DEMO_OWNER,
     template: summary(TEMPLATE_BROWSER),
     phase: "Ready",
     desiredState: "Running",
@@ -102,6 +108,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH3C4D5E6F7G8H9J0K1M2N",
     owner: DEMO_OWNER,
     name: "kernel-dev",
+    owner: DEMO_OWNER,
     template: summary(DEV),
     phase: "Provisioning",
     desiredState: "Running",
@@ -124,6 +131,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH4D5E6F7G8H9J0K1M2N3P",
     owner: DEMO_OWNER,
     name: "finance-office",
+    owner: DEMO_OWNER,
     template: summary(WIN),
     phase: "Failed",
     desiredState: "Running",
@@ -154,6 +162,7 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     id: "ws_01J4ZH5E6F7G8H9J0K1M2N3P4Q",
     owner: DEMO_OWNER,
     name: "build-agent",
+    owner: DEMO_OWNER,
     template: summary(DEV),
     phase: "Stopping",
     desiredState: "Stopped",
@@ -213,6 +222,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
     id: "rd_01J4ZJ1K2L3M4N5P6Q7R8S9T0V",
     owner: DEMO_OWNER,
     state: "Retained",
+    owner: DEMO_OWNER,
     sizeGib: 64,
     runtime: "WindowsVM",
     sourceWorkspaceName: "q3-reporting",
@@ -223,6 +233,7 @@ export const DEMO_RETAINED: RetainedFixture[] = [
     id: "rd_01J4ZJ2L3M4N5P6Q7R8S9T0V1W",
     owner: DEMO_OWNER,
     state: "Retained",
+    owner: DEMO_OWNER,
     sizeGib: 50,
     runtime: "LinuxContainer",
     sourceWorkspaceName: "thesis-workstation",
