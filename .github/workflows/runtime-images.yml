@@ -374,7 +374,7 @@ jobs:
           file: build/browser/Dockerfile
           platforms: ${{ inputs.platforms || 'linux/amd64' }}
           outputs: >-
-            format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF)
+            ${{ format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF) }}
           labels: ${{ env.OCI_LABELS }}
           build-args: ${{ env.BUILD_ARGS }}
           # SEC-16: no gha cache on release-train builds.
@@ -726,6 +726,8 @@ jobs:
         # P7: one runtime-YYYY.MM.DD release per day carrying
         # runtime-images.json; a second run the same day re-uploads the
         # manifest instead of minting another release.
+        # --latest=false: the repo's "Latest release" is the control-plane
+        # v* release (release.yml); a runtime release must never take it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -734,6 +736,7 @@ jobs:
           else
             gh release create "$REL_TAG" runtime-images.json \
               --target "$GITHUB_SHA" \
+              --latest=false \
               --title "Runtime images ${REL_TAG#runtime-}" \
               --notes-file - <<EOF
           Runtime image train publish for ${REL_TAG#runtime-}.

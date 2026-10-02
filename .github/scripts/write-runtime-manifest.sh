@@ -71,4 +71,4 @@ done
 jq -n --arg builtAt "$BUILT_AT" --slurpfile images "$OBJS" \
   '{builtAt: $builtAt, images: $images}' > "$OUT.tmp"
 mv "$OUT.tmp" "$OUT"
-echo "wrote $OUT ($(wc -l < "$OBJS") images, tag $TAG)"
+echo "wrote $OUT ($(jq '.images | length' "$OUT") images, tag $TAG)"

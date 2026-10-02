@@ -234,6 +234,7 @@ chk "runtime-images: manifest writer wired" "$TRAIN" 'write-runtime-manifest\.sh
 chk "runtime-images: rt tag only (no :main promotion)" "$TRAIN" 'imagetools create.*RT_TAG'
 chk_absent "runtime-images: no :main/:latest promotion" "$TRAIN" 'imagetools create .*:(main|latest)'
 chk "runtime-images: runtime-* release" "$TRAIN" 'gh release (create|upload) "\$REL_TAG"'
+chk "runtime-images: runtime release never takes the repo Latest marker (v* owns it)" "$TRAIN" -- "--latest=false"
 chk "runtime-images: never builds control-plane images" "$TRAIN" 'linux-desktop'
 chk_absent "runtime-images: no api/backend/gateway build" "$TRAIN" 'build/(api|backend|operator|gateway|portal|frontend)/Dockerfile'
 for s in check-browser-freshness.sh bump-browser-pin.sh; do
