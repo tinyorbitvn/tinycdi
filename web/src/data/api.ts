@@ -4,10 +4,8 @@ import { unwrap, type ApiClient } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import type { components } from "../api/generated/schema";
 
-// Data-area API surface. `owner` on records and the `?scope=mine|tenant`
-// filter on GET /v1/data are contract additions (T3.4); they are typed here
-// until the generated schema carries them, and the calls go through the same
-// openapi-fetch client (CSRF middleware, same-origin credentials).
+// Data-area API surface, called through the same openapi-fetch client (CSRF
+// middleware, same-origin credentials).
 
 export type WorkspaceView = components["schemas"]["WorkspaceView"];
 export type TemplateView = components["schemas"]["TemplateView"];
@@ -31,7 +29,7 @@ export interface Me {
 
 export type Scope = "mine" | "tenant";
 
-export type ScopedRetainedData = RetainedDataView & { owner?: Owner };
+export type ScopedRetainedData = RetainedDataView;
 
 export interface AttachDataBody {
   name: string;

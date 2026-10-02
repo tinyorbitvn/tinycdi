@@ -3,10 +3,9 @@ import { unwrap } from "../api/client";
 import type { components } from "../api/generated/schema";
 export { templateFamily } from "../templates/family";
 
-// Admin/data-area API surface. GET /v1/me, GET /v1/quota, the `owner` field
-// and the `scope` list filter are contract additions (backend); they are typed
-// here until the generated schema carries them, and the calls go through the
-// same openapi-fetch client (CSRF middleware, same-origin credentials).
+// Admin/data-area API surface: GET /v1/me, GET /v1/quota and the `scope` list
+// filter, called through the same openapi-fetch client (CSRF middleware,
+// same-origin credentials).
 
 export type WorkspaceView = components["schemas"]["WorkspaceView"];
 export type WorkspacePhase = components["schemas"]["WorkspacePhase"];
@@ -44,7 +43,7 @@ export interface UserUsage {
 export interface QuotaView {
   tenant: string;
   // Absent when the tenant has no quota row; `workspaces: 0` means no count limit.
-  limits?: Partial<QuotaAmounts>;
+  limits?: QuotaAmounts;
   usage: QuotaAmounts;
   userLimits?: QuotaAmounts;
   users: UserUsage[];
@@ -52,24 +51,9 @@ export interface QuotaView {
 
 export type Scope = "mine" | "tenant";
 
-// `template.family` (the catalog name shared by every revision) is a contract
-// addition typed here until the generated schema carries it.
-export type ScopedWorkspace = Omit<WorkspaceView, "template"> & {
-  template: WorkspaceView["template"] & { family?: string };
-  owner?: Owner;
-};
-export type ScopedRetainedData = RetainedDataView & { owner?: Owner };
-
-// networkProfile, imageBuiltAt and imageStale are additive contract fields
-// (template networkProfile from the CRD enum; imageBuiltAt/imageStale are the
-// stale-image fields resolved from the template's image-built-at annotation).
-// Optional here so the views compile against both schemas.
-export type AdminTemplateView = components["schemas"]["TemplateView"] & {
-  family?: string;
-  networkProfile?: string;
-  imageBuiltAt?: string;
-  imageStale?: boolean;
-};
+export type ScopedWorkspace = WorkspaceView;
+export type ScopedRetainedData = RetainedDataView;
+export type AdminTemplateView = components["schemas"]["TemplateView"];
 
 interface Page<T> {
   items: T[];

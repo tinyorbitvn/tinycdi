@@ -487,6 +487,12 @@ export interface components {
             /** @example linux-firefox-desktop */
             name: string;
             /**
+             * @description Catalog name shared by every revision of one template; revisions
+             *     of a family are grouped under it in the catalog.
+             * @example linux-firefox-desktop
+             */
+            family: string;
+            /**
              * @description Immutable template revision number.
              * @example 7
              */
@@ -757,6 +763,12 @@ export interface components {
             id: string;
             /** @example linux-firefox-desktop */
             name: string;
+            /**
+             * @description Catalog name shared by every revision of one template; revisions
+             *     of a family are grouped under it in the catalog.
+             * @example linux-firefox-desktop
+             */
+            family: string;
             description?: string;
             /** @description Immutable published revision. */
             revision: number;
@@ -789,10 +801,12 @@ export interface components {
             };
             dataPolicyDefault: components["schemas"]["DataPolicy"];
             /**
-             * @description Server-side enforced per template.
+             * @description Server-side enforced per template. `Send` allows client to
+             *     workspace only, `Receive` workspace to client only, `Bidirectional`
+             *     both directions.
              * @enum {string}
              */
-            clipboardPolicy: "Disabled" | "Enabled";
+            clipboardPolicy: "Disabled" | "Send" | "Receive" | "Bidirectional";
             /**
              * @description Runtime egress policy of the WorkspaceTemplate CRD —
              *     `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
