@@ -124,6 +124,17 @@ func ensurePostgres(t *testing.T) {
 // test gets an isolated schema.
 func newDB(t *testing.T) *store.DB {
 	t.Helper()
+	db := newBareDB(t)
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+// newBareDB creates a fresh, empty database (no migrations applied) and
+// returns a pool on it.
+func newBareDB(t *testing.T) *store.DB {
+	t.Helper()
 	ensurePostgres(t)
 	ctx := context.Background()
 
@@ -142,11 +153,6 @@ func newDB(t *testing.T) *store.DB {
 	if err != nil {
 		admin.Close()
 		t.Fatalf("connect %s: %v", name, err)
-	}
-	if err := db.Migrate(ctx); err != nil {
-		db.Close()
-		admin.Close()
-		t.Fatalf("migrate: %v", err)
 	}
 	t.Cleanup(func() {
 		db.Close()

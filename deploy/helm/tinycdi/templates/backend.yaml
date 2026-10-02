@@ -89,8 +89,9 @@ spec:
       # The API projects Workspace CRs and reads templates/secrets in the
       # managed namespaces (rbac.yaml backend-role).
       automountServiceAccountToken: true
-      # SIGTERM runs Gateway.Drain then graceful listener shutdown; 30 s
-      # covers the stream-close path.
+      # SIGTERM runs Gateway.Drain then graceful listener shutdown under one
+      # 24 s deadline (internal/backend); 30 s covers it with margin. Never
+      # lower this below 30.
       terminationGracePeriodSeconds: 30
       securityContext:
         {{- include "tinycdi.podSecurityContext" .Values.backend.podSecurityContext | nindent 8 }}
@@ -221,11 +222,26 @@ spec:
             {{- with .Values.backend.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          # /readyz answers 200 only once Run is serving AND the Workspace
+          # informer cache has synced, and 503 as soon as shutdown starts.
           readinessProbe:
-            tcpSocket: {port: app}
+            httpGet: {path: /readyz, port: app, scheme: HTTPS}
             initialDelaySeconds: 2
             periodSeconds: 5
-            failureThreshold: 24
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup (migrations queued behind another replica, cache sync)
+          # may take minutes; liveness only begins once /healthz answers.
+          startupProbe:
+            httpGet: {path: /healthz, port: app, scheme: HTTPS}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: app, scheme: HTTPS}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
           securityContext:
             {{- include "tinycdi.containerSecurityContext" .Values.backend.securityContext | nindent 12 }}
           resources:
