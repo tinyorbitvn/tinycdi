@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"os/exec"
@@ -379,3 +380,28 @@ func TestOperatorFlags_Placement(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// V3.11a: --runtime-apparmor-require-default defaults to true (today's
+// behaviour), parses an explicit false, and rejects a non-boolean.
+func TestRuntimeAppArmorRequireDefaultFlag(t *testing.T) {
+	parse := func(args ...string) (bool, error) {
+		var v bool
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		bindRuntimeAppArmorFlag(fs, &v)
+		err := fs.Parse(args)
+		return v, err
+	}
+	if v, err := parse(); err != nil || !v {
+		t.Fatalf("default = %v, %v; want true, nil", v, err)
+	}
+	if v, err := parse("--runtime-apparmor-require-default=true"); err != nil || !v {
+		t.Fatalf("=true parsed as %v, %v", v, err)
+	}
+	if v, err := parse("--runtime-apparmor-require-default=false"); err != nil || v {
+		t.Fatalf("=false parsed as %v, %v", v, err)
+	}
+	if _, err := parse("--runtime-apparmor-require-default=maybe"); err == nil {
+		t.Fatal("a non-boolean value must be rejected")
+	}
+}
