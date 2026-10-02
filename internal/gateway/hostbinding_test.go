@@ -16,7 +16,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 )
 
@@ -135,6 +137,67 @@ func TestHostBinding_CookieOnOtherHost(t *testing.T) {
 	drain(ok)
 	if ok.StatusCode != http.StatusOK {
 		t.Fatalf("A's cookie on A's host after foreign probe = %d, want 200", ok.StatusCode)
+	}
+
+	// A second replica with no in-memory copy of the session: A's cookie on
+	// B's host must not rehydrate A's session there — the workspace
+	// mismatch is decided from the directory lease before any session
+	// object, renew loop or activity sender exists.
+	fb2 := newFakeBroker(t)
+	fb2.scriptTicket("tk-cookie-rehy", testWSUID)
+	_, srvA := newReplica(t, fb2, "gw-A")
+	auditB := &auditRecorder{}
+	_, srvB := newGatewayHandle(t, fb2, func(c *gateway.Config) {
+		c.Identity = broker.GatewayIdentity{ID: "gw-B", Audience: "session.example.dev"}
+		c.Sessions = fb2
+		c.Audit = auditB
+	})
+	cookieA2 := launchOK(t, srvA, testHost, "tk-cookie-rehy")
+
+	for i := 0; i < 2; i++ {
+		resp = proxied(t, srvB, testHost2, "/", cookieA2, map[string]string{"Origin": testOrigin2})
+		drain(resp)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("A's cookie on B's host on replica B = %d, want 401", resp.StatusCode)
+		}
+	}
+	// Both probes reached the directory: a session cached on B would have
+	// answered the second probe without a second LeaseBySession.
+	if n := fb2.lookupCount(); n != 2 {
+		t.Fatalf("LeaseBySession calls = %d, want 2 (nothing cached on replica B)", n)
+	}
+	time.Sleep(3 * testRenewInterval)
+	if n := fb2.renewCount("gw-B"); n != 0 {
+		t.Fatalf("replica B renewed a foreign-workspace lease %d times, want 0", n)
+	}
+	if n := len(fb2.activityTypes()); n != 0 {
+		t.Fatalf("activity reports after foreign-host cookie = %d, want 0", n)
+	}
+	// The control surface shows replica B's session maps stayed empty.
+	resp = proxied(t, srvB, testControlHost, "/v1/control/session", "", map[string]string{
+		"Authorization": "Bearer control-test-token",
+	})
+	var view struct {
+		Active   bool `json:"active"`
+		Sessions []struct {
+			LeaseID string `json:"leaseId"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatalf("decode control session view: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || view.Active || len(view.Sessions) != 0 {
+		t.Fatalf("replica B session view = %d %+v, want 200 with no sessions", resp.StatusCode, view)
+	}
+	found = false
+	for _, a := range auditB.auditActions() {
+		if a == "session.host_mismatch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no session.host_mismatch audit on replica B in %v", auditB.auditActions())
 	}
 }
 

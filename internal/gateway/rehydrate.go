@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 // SessionDirectory is the optional broker surface that lets a session
@@ -51,7 +52,10 @@ type rehydrateCall struct {
 // lookup runs once per digest under g.inflight; every failure — unknown
 // digest, dead lease, foreign gateway, transient — maps to "no session",
 // so a bad cookie allocates no state and spawns no goroutines.
-func (g *Gateway) rehydrate(r *http.Request, cookieValue string) *session {
+// wsID is the workspace the request Host names: a digest resolving to a
+// lease owned by another workspace is a foreign cookie on this host (D11)
+// and rehydrates nothing.
+func (g *Gateway) rehydrate(r *http.Request, cookieValue, wsID string) *session {
 	d := sessionDigest(cookieValue)
 	g.mu.Lock()
 	if s := g.sessions[cookieValue]; s != nil {
@@ -73,7 +77,7 @@ func (g *Gateway) rehydrate(r *http.Request, cookieValue string) *session {
 	g.inflight[d] = c
 	g.mu.Unlock()
 
-	c.sess = g.fetchSession(r, d, cookieValue)
+	c.sess = g.fetchSession(r, d, cookieValue, wsID)
 
 	g.mu.Lock()
 	delete(g.inflight, d)
@@ -90,11 +94,19 @@ func (g *Gateway) rehydrate(r *http.Request, cookieValue string) *session {
 // A superseded session occupying the workspace slot is not killed here —
 // its own renew loop sees the dead lease within one interval and tears it
 // down (the same cross-replica fence a takeover relies on).
-func (g *Gateway) fetchSession(r *http.Request, d broker.SessionDigest, cookieValue string) *session {
+func (g *Gateway) fetchSession(r *http.Request, d broker.SessionDigest, cookieValue, wsID string) *session {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	l, err := g.cfg.Sessions.LeaseBySession(ctx, g.cfg.Identity, d)
 	cancel()
 	if err != nil {
+		return nil
+	}
+	if l.WorkspaceUID != wsID {
+		// Host binding (D11): the cookie is valid but belongs to a
+		// different workspace's host — replay or confusion. Answer as if
+		// no session existed and allocate nothing on this replica; the
+		// session stays live on its own host.
+		g.audit(r, "session.host_mismatch", l.WorkspaceUID, observability.OutcomeDenied, "host_mismatch")
 		return nil
 	}
 	s := newSession(cookieValue, l, g.now())

@@ -444,7 +444,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_upgrade"})
 		return
 	}
-	s := g.lookupSession(r)
+	s := g.lookupSession(r, wsID)
 	if s != nil && s.workspaceUID() != wsID {
 		// D11: a session bound to a different workspace is "absent" on
 		// this host — the cookie is host-only and can never arrive here

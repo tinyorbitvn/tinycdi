@@ -526,8 +526,10 @@ func (g *Gateway) killSession(s *session, reason string) {
 // lookupSession resolves the session cookie to a live session. With a
 // session directory configured, a cookie this replica never saw falls back
 // to a digest lookup and rebuilds the session (D19); without one the
-// v0.1 behaviour is unchanged.
-func (g *Gateway) lookupSession(r *http.Request) *session {
+// v0.1 behaviour is unchanged. wsID is the workspace the request Host
+// names: a digest that resolves to another workspace's lease is refused
+// inside fetchSession before any session state is allocated.
+func (g *Gateway) lookupSession(r *http.Request, wsID string) *session {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c.Value == "" {
 		return nil
@@ -544,7 +546,7 @@ func (g *Gateway) lookupSession(r *http.Request) *session {
 	if g.cfg.Sessions == nil {
 		return nil
 	}
-	return g.rehydrate(r, c.Value)
+	return g.rehydrate(r, c.Value, wsID)
 }
 
 // claimStream bumps the lease's stream epoch on an admitted upgrade and
