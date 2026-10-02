@@ -58,14 +58,14 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/backend"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 const (
 	restartTenant        = "tenant-it"
 	restartNamespace     = "ns-it"
-	restartSessionHost   = "session.test"
-	restartSessionOrigin = "https://session.test"
+	restartSessionDomain = "session.test"
 	restartPortalOrigin  = "https://portal.test"
 	restartPortalPath    = "/v1/auth/callback"
 	restartGatewayID     = "tcdi-it-gw"
@@ -74,7 +74,6 @@ const (
 	restartSubject       = "it-user"
 	restartLoginCookie   = "__Host-tcdi_login"
 	restartSessionCookie = "__Host-tcdi_session"
-	restartCSRFCookie    = "tcdi_csrf"
 	restartCSRFHeader    = "X-CSRF-Token"
 )
 
@@ -452,7 +451,7 @@ func newRestartFixture(t *testing.T) *restartFixture {
 
 	dir := t.TempDir()
 	sessCert, sessKey := writeCertPair(t, filepath.Join(dir, "session"), "it-backend-session",
-		[]string{restartSessionHost}, []net.IP{net.ParseIP("127.0.0.1")})
+		[]string{restartSessionDomain, "*." + restartSessionDomain}, []net.IP{net.ParseIP("127.0.0.1")})
 	loginKey := filepath.Join(dir, "login.key")
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -567,6 +566,18 @@ func (f *restartFixture) dsnFor(replica string) string {
 	return f.dsn + "&application_name=tcdi-it-" + replica
 }
 
+// sessionHost returns the per-workspace host this drill's workspace is
+// served on (ws-<label>.<sessionDomain>, D9/D10). The session listener
+// rejects any other Host with 421.
+func (f *restartFixture) sessionHost(t *testing.T) string {
+	t.Helper()
+	label, err := sessionhost.Label(f.wsUID)
+	if err != nil {
+		t.Fatalf("sessionhost.Label(%q): %v", f.wsUID, err)
+	}
+	return label + "." + restartSessionDomain
+}
+
 // flags is the shared replica flag set — one gateway id, one login key set,
 // one binding source — with only the listen addresses left at :0.
 func (f *restartFixture) flags(replica string) []string {
@@ -584,8 +595,8 @@ func (f *restartFixture) flags(replica string) []string {
 		"-session-listen", "127.0.0.1:0",
 		"-session-tls-cert", f.sessCert,
 		"-session-tls-key", f.sessKey,
-		"-session-origin", restartSessionOrigin,
-		"-session-allowed-hosts", restartSessionHost,
+		"-session-domain", restartSessionDomain,
+		"-session-control-hosts", restartSessionDomain,
 		"-session-cookie-mode", "lax",
 		"-gateway-id", restartGatewayID,
 		"-gateway-audience", restartGatewayAud,
@@ -722,13 +733,34 @@ func (f *restartFixture) portalLogin(t *testing.T, loginOn, callbackOn *replica)
 		if c.Name == restartSessionCookie {
 			sessionID = c.Value
 		}
-		if c.Name == restartCSRFCookie {
-			csrf = c.Value
-		}
 	}
-	if sessionID == "" || csrf == "" {
-		t.Fatalf("callback issued no session/csrf cookie (status %d)", resp3.StatusCode)
+	if sessionID == "" {
+		t.Fatalf("callback issued no session cookie (status %d)", resp3.StatusCode)
 	}
+
+	// The CSRF token is derived from the session ID and published by
+	// GET /v1/me (P1) — v0.2 sets no tcdi_csrf cookie.
+	meReq, err := http.NewRequest(http.MethodGet, callbackOn.appURL+"/v1/me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meReq.Header.Set("Cookie", restartSessionCookie+"="+sessionID)
+	meResp, err := callbackOn.client.Do(meReq)
+	if err != nil {
+		t.Fatalf("GET /v1/me: %v", err)
+	}
+	var me struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	decodeErr := json.NewDecoder(meResp.Body).Decode(&me)
+	drainBody(meResp)
+	if decodeErr != nil {
+		t.Fatalf("decode /v1/me: %v", decodeErr)
+	}
+	if me.CSRFToken == "" {
+		t.Fatalf("/v1/me returned no csrfToken (status %d)", meResp.StatusCode)
+	}
+	csrf = me.CSRFToken
 	return sessionID, csrf
 }
 
@@ -778,7 +810,7 @@ func (f *restartFixture) launch(t *testing.T, r *replica, ticket string) string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = restartSessionHost
+	req.Host = f.sessionHost(t)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", restartPortalOrigin)
 	resp, err := r.client.Do(req)
@@ -806,7 +838,7 @@ func (f *restartFixture) sessionGet(t *testing.T, r *replica, path, cookie strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = restartSessionHost
+	req.Host = f.sessionHost(t)
 	req.Header.Set("Cookie", restartSessionCookie+"="+cookie)
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -834,12 +866,16 @@ func (f *restartFixture) wsTry(r *replica, cookie string) *http.Response {
 	if err != nil {
 		return nil
 	}
-	req.Host = restartSessionHost
+	// wsTry runs before/inside fatal-free retry loops, so it computes the
+	// workspace host without t (f.wsUID is always a valid ws_<hex> ID).
+	wsHost, _ := sessionhost.Label(f.wsUID)
+	wsHost += "." + restartSessionDomain
+	req.Host = wsHost
 	req.Header.Set("Connection", "upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	req.Header.Set("Origin", restartSessionOrigin)
+	req.Header.Set("Origin", "https://"+wsHost)
 	req.Header.Set("Cookie", restartSessionCookie+"="+cookie)
 	resp, err := r.client.Transport.(*http.Transport).RoundTrip(req)
 	if err != nil {
@@ -1091,7 +1127,7 @@ func waitReady(t *testing.T, f *restartFixture, r *replica) {
 		if err != nil {
 			return false
 		}
-		req.Host = restartSessionHost
+		req.Host = f.sessionHost(t)
 		resp, err := r.client.Do(req)
 		if err != nil {
 			return false
@@ -1148,7 +1184,7 @@ func TestRestart_CertRotationKeepsStreams(t *testing.T) {
 
 	// Rotate the session cert pair: new CN, atomic rename into place.
 	newCert, newKey := writeCertPair(t, f.dir, "it-backend-session-rotated",
-		[]string{restartSessionHost}, []net.IP{net.ParseIP("127.0.0.1")})
+		[]string{restartSessionDomain, "*." + restartSessionDomain}, []net.IP{net.ParseIP("127.0.0.1")})
 	if err := os.Rename(newCert, f.sessCert); err != nil {
 		t.Fatalf("rotate cert: %v", err)
 	}
