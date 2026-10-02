@@ -142,6 +142,7 @@ export default {
   "admin.errors.invalidTemplate":
     "That template is unavailable or does not match the disk's runtime. Pick another template.",
   "admin.errors.quotaExhausted": "Quota exhausted. Free resources or raise the quota first.",
+  "admin.errors.quotaNotConfigured": "No quota is configured for your tenant. Ask an administrator to set one.",
   "admin.errors.idempotencyConflict":
     "This conflicted with an earlier attempt. Refresh and check before retrying.",
   "admin.errors.csrfFailed": "Your session token expired. Reload the page and try again.",

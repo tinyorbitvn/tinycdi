@@ -183,7 +183,8 @@ commit them.
 
 ```bash
 cp deploy/helm/tinycdi/ci/example-values.yaml my-values.yaml
-# edit: portalHost/sessionDomain, managedNamespaces, oidc, database,
+# edit: portalHost/sessionDomain, managedNamespaces (with a quota each — see
+# "Tenant quotas"), oidc, database,
 # images digests, networkPolicy.apiServerPeers, storageClass, templates
 
 # dry-run render first (no cluster access needed):
@@ -211,6 +212,55 @@ gate above). Verify:
 $K -n tinycdi-system get deploy,po
 $K get crd | grep workspaces.cdi.tinyorbit.vn
 $K get netpol -A | grep default-deny
+```
+
+## Tenant quotas
+
+A tenant with **no quota** cannot create anything: admission fails closed,
+and the API answers `409 QUOTA_NOT_CONFIGURED` ("No quota is configured for
+your tenant. Ask an administrator to set one."). Declare each tenant's
+limits in the chart values — no SQL needed:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota:
+      runningWorkspaces: 12   # whole number >= 0
+      cpu: "16"               # cores or millicores: "16", "1.5", "500m"
+      memory: 64Gi            # Kubernetes quantity
+      storage: 200Gi          # Kubernetes quantity (retained + active disks)
+```
+
+The chart renders the entries that carry a `quota` block as the backend
+flag `-tenant-quotas` (JSON). At startup the singleton leader (the replica
+holding the Postgres leader lock) upserts exactly those tenants' `tenant_quota`
+rows, so replicas starting together write once.
+
+- **Idempotent.** A row that already matches is not touched; a changed value
+  is updated in place on the next backend start (`helm upgrade` rolls the
+  backend).
+- **Listed tenants only.** A tenant without a `quota` block, or not in
+  `managedNamespaces`, is left exactly as it is — an existing row (for
+  example one set by SQL, see `capacity.md`) survives. `helm install` /
+  `upgrade` NOTES print a warning for every tenant without a `quota` block
+  because its creates are refused unless a row already exists.
+- **Declared values win.** For a tenant that has a `quota` block, the chart
+  value overwrites a hand-edited row at the next backend start. Change the
+  value in `values.yaml`, not in the database.
+- **Lowering is safe.** A limit below current usage is accepted: running
+  workspaces keep running and keep their reservations, and new creates are
+  refused with `QUOTA_EXHAUSTED` until usage drops under the limit.
+- **Validation.** `values.schema.json` rejects negative or unparsable
+  quantities at lint/template time, and the backend refuses to start on a
+  malformed `-tenant-quotas`, naming the flag.
+- **Sizing.** Keep the sum of the quotas inside what the cluster (and any
+  namespace `ResourceQuota`) can actually schedule — see `capacity.md`.
+
+Check the result — only the leader replica logs the pass:
+
+```bash
+$K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
 
 ## Upgrade

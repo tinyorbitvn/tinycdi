@@ -12,6 +12,7 @@ const GUIDANCE: Partial<Record<ErrorCode, MessageKey>> = {
   INVALID_REQUEST: "admin.errors.invalidRequest",
   INVALID_TEMPLATE: "admin.errors.invalidTemplate",
   QUOTA_EXHAUSTED: "admin.errors.quotaExhausted",
+  QUOTA_NOT_CONFIGURED: "admin.errors.quotaNotConfigured",
   IDEMPOTENCY_CONFLICT: "admin.errors.idempotencyConflict",
   CSRF_FAILED: "admin.errors.csrfFailed",
   UNAUTHENTICATED: "admin.errors.unauthenticated",
