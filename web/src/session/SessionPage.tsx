@@ -20,7 +20,6 @@ import {
   IconRefresh,
 } from "../design/icons";
 import {
-  SESSION_FRAME_ALLOW,
   SESSION_FRAME_SANDBOX,
   assertLaunchTarget,
   clearSessionOwned,
@@ -28,6 +27,7 @@ import {
   readSessionMarker,
   sessionFrameName,
   sessionLabel,
+  sessionFrameAllow,
   sessionFrameUrl,
   submitLaunch,
   type SessionMarker,
@@ -637,7 +637,7 @@ export function SessionPage({
           title={t("session.frame.title", { name })}
           className="tc-session__frame"
           sandbox={SESSION_FRAME_SANDBOX}
-          allow={SESSION_FRAME_ALLOW}
+          allow={sessionFrameAllow(workspaceId, sessionDomain)}
           aria-describedby="tc-session-keyboard-hint"
           inert={!connected}
           onLoad={onFrameLoad}

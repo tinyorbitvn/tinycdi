@@ -52,8 +52,27 @@ export function sessionFrameUrl(workspaceId: string, sessionDomain: string): str
 export const SESSION_FRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-pointer-lock";
 
-/** Permissions delegated to the session frame (clipboard + fullscreen). */
-export const SESSION_FRAME_ALLOW = "clipboard-read; clipboard-write; fullscreen";
+/** Features delegated to the session frame (clipboard, fullscreen, keyboard layout). */
+export const SESSION_FRAME_FEATURES = [
+  "clipboard-read",
+  "clipboard-write",
+  "fullscreen",
+  "keyboard-map",
+] as const;
+
+/**
+ * The iframe's allow attribute. Each feature names the workspace's session
+ * origin explicitly: the frame has no src attribute (the launch form POST
+ * navigates it), so the bare-feature default, 'src', resolves to the portal's
+ * own origin and delegated nothing to the session — clipboard, fullscreen and
+ * getLayoutMap() were all refused inside the frame (FX-R22). Empty until the
+ * session domain is known, when nothing can be launched anyway.
+ */
+export function sessionFrameAllow(workspaceId: string, sessionDomain: string): string {
+  if (sessionDomain === "") return "";
+  const origin = sessionOrigin(workspaceId, sessionDomain);
+  return SESSION_FRAME_FEATURES.map((feature) => `${feature} ${origin}`).join("; ");
+}
 
 /** sessionDomain naming a loopback listener (mock e2e / dev harness). */
 function isLoopbackDomain(sessionDomain: string): boolean {
