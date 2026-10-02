@@ -46,7 +46,7 @@ Runtime container images additionally include:
   Debian archive: deb-src entries for the "bookworm" suite at
   deb.debian.org, matched by the package names and versions recorded in
   the image SBOMs and per-package license inventories.
-* Chromium 154.0.8037.92-1~deb12u1 and Firefox ESR 140.16.0esr-1~deb12u1
+* Chromium 154.0.8037.92-1~deb12u1 and Firefox ESR 153.4.0esr-1~deb12u1
   (browser image) — see the Debian package copyright files inside the
   image (/usr/share/doc/<pkg>/copyright) for the full license texts.
 

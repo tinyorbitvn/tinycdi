@@ -19,7 +19,7 @@ echo "ghcr.io/tinyorbitvn/tinycdi-linux-desktop@sha256:$DGD" > "$D/refs/linux-de
 echo "ghcr.io/tinyorbitvn/tinycdi-browser@sha256:$DGB"       > "$D/refs/browser.ref"
 cat > "$D/Dockerfile" <<'EOF'
 ARG CHROMIUM_APT_VERSION=154.0.8037.92-1~deb12u1
-ARG FIREFOX_ESR_APT_VERSION=140.16.0esr-1~deb12u1
+ARG FIREFOX_ESR_APT_VERSION=153.4.0esr-1~deb12u1
 EOF
 
 rc=0; out=""
