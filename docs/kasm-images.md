@@ -220,10 +220,23 @@ its template merges**:
 - Operator flag `--kasm-adapter-image` (env `TCDI_KASM_ADAPTER_IMAGE`):
   digest-pinned reference of the adapter image; validated at startup.
   Unset → `adapter: kasm` templates are rejected (`ErrTemplateRejected`).
-- Chart: `kasmAdapter.image.{repository,tag,digest}` → the flag. The
-  digest is required; see `deploy/helm/tinycdi/README.md` ("Kasm
-  workspace images") and `ci/example-values.yaml` for a complete seeded
-  `kasmweb/chromium` template.
+- Chart: `kasmAdapter.enabled` (default `false`) gates the flag, and
+  `kasmAdapter.image.{repository,tag,digest}` supplies its value. The
+  adapter is **off by default**: the released chart carries a stamped
+  `kasmAdapter.image.digest`, but the operator only gets
+  `--kasm-adapter-image` when `enabled` is `true`. Enabling requires the
+  digest (the render fails otherwise), and a seeded `adapter: kasm`
+  template requires `enabled: true`. See `deploy/helm/tinycdi/README.md`
+  ("Kasm workspace images") and `ci/example-values.yaml` for a complete
+  seeded `kasmweb/chromium` template.
+
+  To enable it:
+
+  ```yaml
+  kasmAdapter:
+    enabled: true            # image.digest is already stamped in the released chart;
+                             # set image.repository/image.digest for a self-built or mirrored image
+  ```
 - CRD fields: `spec.linux.adapter` (`""`|`"kasm"`, default `""`),
   `spec.linux.sessionCmd` (only with `adapter=kasm`; `spec.linux.command`
   is forbidden with `adapter=kasm` — the adapter supplies the command).
