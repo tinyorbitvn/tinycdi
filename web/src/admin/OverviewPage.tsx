@@ -57,7 +57,11 @@ export function OverviewPage({ now }: { now?: number }) {
             title={t("admin.overview.capacity")}
             actions={<Link to="/admin/quota">{t("admin.overview.usageByUser")}</Link>}
           >
-            <QuotaMeters limits={o.data.quota.limits} usage={o.data.quota.usage} />
+            <QuotaMeters
+              configured={o.data.quota.configured}
+              limits={o.data.quota.limits}
+              usage={o.data.quota.usage}
+            />
           </Section>
           <Section
             title={t("admin.overview.byPhase")}

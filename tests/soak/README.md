@@ -64,8 +64,10 @@ What a run does, in order:
    resumes the session without a ticket, so a take-over prompt after it is a
    harness failure (the run fails and counts a manual action). The time from
    the first non-connected observation after the reload to the next
-   `connected` one is the reconnect measurement; a reload that never leaves
-   `connected` has `reconnectMs: null`.
+   `connected` one is the reconnect measurement, but only a non-connected
+   observation within 60 s after the reload counts; a reload without one is
+   seamless (`reconnectMs: 0`, `seamless: true`) and a later drill gap is never
+   attributed to it.
 6. At the end — and on failure or SIGINT — every workspace it created is
    stopped/deleted before the report is written.
 
@@ -87,7 +89,7 @@ always run the cleanup and write the report.
 
 `soak-report.json` is validated against `report.schema.json` before it is
 written. Per session it records `connectMs` (launch → first `connected`),
-`reconnectMs` (first non-connected observation after the reload → `connected`), `longestGapMs` (longest continuous
+`reconnectMs` (first non-connected observation within 60 s after the reload → `connected`; 0 when `seamless`), `longestGapMs` (longest continuous
 non-connected stretch after the first connect), every span spent in a state
 other than `connected`, `manualActions`, `inputEvents` and `dropped`. The
 summary carries p50/p95 of connect and reconnect (nearest-rank), the manual
