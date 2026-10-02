@@ -2,6 +2,13 @@
 
 // Contract test for the Linux runtime images (design §7).
 //
+// The images are a base (tcdi/linux-base: KasmVNC, X, entrypoint,
+// hardening) and two profiles built FROM it (tcdi/linux-desktop: XFCE4;
+// tcdi/browser: openbox kiosk + browsers). The contract tests below run
+// against the desktop profile and the browser profile; the base image
+// itself is checked for the same endpoint contract in BaseImage. The
+// desktop experience has its own file (linux_desktop_test.go).
+//
 // Covers: HTTPS streaming on container port 8443, healthcheck that reports
 // ready only while the X display AND the KasmVNC endpoint answer, mounted
 // Secret credentials (never env/logs), persistent /home/workspace vs
@@ -55,6 +62,7 @@ var (
 	repoRoot    = mustRepoRoot()
 	seccompFile = filepath.Join(repoRoot, "tests", "integration", "testdata", "seccomp-runtime.json")
 
+	baseImage    = envOr("TCDI_IT_BASE_IMAGE", "tcdi/linux-base:it")
 	desktopImage = envOr("TCDI_IT_DESKTOP_IMAGE", "tcdi/linux-desktop:it")
 	browserImage = envOr("TCDI_IT_BROWSER_IMAGE", "tcdi/browser:it")
 )
@@ -116,9 +124,16 @@ func dockerOK(t *testing.T, args ...string) string {
 
 // requireImage fails (the red state) until the runtime images exist locally.
 // Set TCDI_IT_BUILD=1 to build missing images from build/<name> (repo-root
-// context) instead.
+// context) instead. The profile images (build/linux-desktop, build/browser)
+// are built FROM the local base image, so asking for one also ensures the
+// base.
 func requireImage(t *testing.T, image, imageDir string) {
 	t.Helper()
+	var buildArgs []string
+	if imageDir != "build/linux-base" && (imageDir == "build/linux-desktop" || imageDir == "build/browser") {
+		requireImage(t, baseImage, "build/linux-base")
+		buildArgs = []string{"--build-arg", "BASE_IMAGE=" + baseImage}
+	}
 	if _, err := docker("image", "inspect", image); err == nil {
 		return
 	}
@@ -127,7 +142,8 @@ func requireImage(t *testing.T, image, imageDir string) {
 			image, imageDir, image)
 	}
 	t.Logf("building missing image %s from %s/Dockerfile", image, imageDir)
-	dockerOK(t, "build", "-f", filepath.Join(imageDir, "Dockerfile"), "-t", image, repoRoot)
+	args := append([]string{"build", "-f", filepath.Join(repoRoot, imageDir, "Dockerfile"), "-t", image}, buildArgs...)
+	dockerOK(t, append(args, repoRoot)...)
 }
 
 // selfSignedSecret builds a secret dir holding password/username/tls.crt/
@@ -357,6 +373,7 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 	if _, err := os.Stat(seccompFile); err != nil {
 		t.Fatalf("runtime seccomp profile missing: %s", seccompFile)
 	}
+	requireImage(t, baseImage, "build/linux-base")
 	requireImage(t, desktopImage, "build/linux-desktop")
 	requireImage(t, browserImage, "build/browser")
 
@@ -408,6 +425,27 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		shm := dockerOK(t, "inspect", "-f", "{{.HostConfig.ShmSize}}", c)
 		if strings.TrimSpace(shm) != "268435456" {
 			t.Fatalf("ShmSize = %s, want 268435456 (256m bounded mount)", shm)
+		}
+		assertNoSecret(t, c, password)
+	})
+
+	t.Run("BaseImage", func(t *testing.T) {
+		// The base alone satisfies the endpoint contract (a profile only
+		// replaces the session): healthy, authenticated, non-root, no
+		// window manager and no browser installed in it.
+		secret, password := selfSignedSecret(t)
+		c := runContainer(t, runID, "base", baseImage, secret, "")
+		waitHealthy(t, c)
+		code, err := httpsGet(t, c, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("base image endpoint auth: code=%d err=%v, want 200", code, err)
+		}
+		if out := strings.TrimSpace(mustExec(t, c, "id -u")); out != "1000" {
+			t.Fatalf("base runtime uid = %s, want 1000", out)
+		}
+		out := mustExec(t, c, "for b in openbox xterm xfce4-session chromium firefox-esr; do command -v $b; done; true")
+		if strings.TrimSpace(out) != "" {
+			t.Fatalf("base image ships profile software: %q", out)
 		}
 		assertNoSecret(t, c, password)
 	})

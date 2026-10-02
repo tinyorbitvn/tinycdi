@@ -20,10 +20,12 @@
 //   - no application updater is present (updates are Debian's apt pin);
 //   - no credential leaks into logs/env.
 //
-// The image ships no Firefox enterprise policy file (distribution/
-// policies.json): the Chromium managed policy is mounted by the kasm
-// adapter, not baked into this image. If a Firefox policy is ever shipped,
-// add an "is honoured" subtest here.
+// The browser image ships no Firefox enterprise policy file
+// (distribution/policies.json): the Chromium managed policy is mounted by
+// the kasm adapter, not baked into this image. If a Firefox policy is ever
+// shipped here, add an "is honoured" subtest. (The desktop image does ship
+// one - first-run/update/default-browser nags off - and
+// linux_desktop_test.go asserts it is honoured there.)
 //
 // Run:  TCDI_IT_BUILD=1 go test -tags=integration ./tests/integration -run TestLinuxRuntimeFirefoxFallback -v
 
@@ -84,13 +86,19 @@ func procStatus(t *testing.T, c, pid string) string {
 // dockerfileArg reads a pinned `ARG <name>=<value>` from build/browser/Dockerfile.
 func dockerfileArg(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(repoRoot, "build", "browser", "Dockerfile"))
+	return dockerfileArgIn(t, "browser", name)
+}
+
+// dockerfileArgIn reads a pinned `ARG <name>=<value>` from build/<image>/Dockerfile.
+func dockerfileArgIn(t *testing.T, image, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot, "build", image, "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := regexp.MustCompile(`(?m)^ARG ` + name + `=(\S+)$`).FindSubmatch(b)
 	if m == nil {
-		t.Fatalf("ARG %s not found in build/browser/Dockerfile", name)
+		t.Fatalf("ARG %s not found in build/%s/Dockerfile", name, image)
 	}
 	return string(m[1])
 }
@@ -99,7 +107,6 @@ func TestLinuxRuntimeFirefoxFallback(t *testing.T) {
 	if _, err := os.Stat(seccompFile); err != nil {
 		t.Fatalf("runtime seccomp profile missing: %s", seccompFile)
 	}
-	requireImage(t, desktopImage, "build/linux-desktop")
 	requireImage(t, browserImage, "build/browser")
 
 	runBytes := make([]byte, 4)
