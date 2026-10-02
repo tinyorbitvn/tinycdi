@@ -41,6 +41,11 @@ Runtime placement: dedicated pool — runtime pods (and the node-profile
   "Workspace node pool".
 {{- end }}
 
+{{- if eq (printf "%v" (dig "appArmor" "requireRuntimeDefault" true .Values.runtime)) "false" }}
+
+AppArmor: runtime.appArmor.requireRuntimeDefault=false — runtime pods omit the RuntimeDefault AppArmor profile (nodes without AppArmor); templates with a Localhost AppArmor profile cannot run on such nodes.
+{{- end }}
+
 {{- if .Values.certManager.enabled }}
 Internal mTLS: cert-manager Certificates issue the broker chain
 {{- if .Values.certManager.selfSigned }} (self-signed CA bootstrapped){{- end }}.
