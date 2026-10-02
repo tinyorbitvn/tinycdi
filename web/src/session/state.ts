@@ -15,6 +15,7 @@ export type SessionStatus =
   | "ended" //         the workspace stopped or disappeared
   | "blocked" //       the browser refused to embed the session: new-tab fallback
   | "external" //      the session was handed to a new tab
+  | "signed-out" //    the portal login expired (401): the page cannot talk to the API
   | "error"; //        launch failed
 
 export interface SessionState {
@@ -29,6 +30,11 @@ export type SessionEvent =
   | { type: "workspace"; connectable: boolean; reason?: string }
   | { type: "request" }
   | { type: "ticket" }
+  /** Resuming our own live lease: the frame was pointed at the session origin. */
+  | { type: "resume" }
+  /** The /connection poll confirmed the resumed stream. */
+  | { type: "resumed" }
+  | { type: "signed-out" }
   | { type: "in-use" }
   | { type: "failed"; error: unknown }
   | { type: "frame-loaded" }
@@ -56,7 +62,12 @@ export function sessionReducer(state: SessionState, ev: SessionEvent): SessionSt
     case "request":
       return { status: "requesting" };
     case "ticket":
+    case "resume":
       return { status: "connecting" };
+    case "resumed":
+      return state.status === "connecting" ? { status: "connected" } : state;
+    case "signed-out":
+      return { status: "signed-out" };
     case "in-use":
       return { status: "in-use" };
     case "failed":

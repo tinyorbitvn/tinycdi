@@ -8,6 +8,7 @@ import {
   seedReadyWorkspace,
   sessionFrame,
   setConnectionStatus,
+  takeoverDialogCount,
   test,
   waitForDesktopFrame,
   watchConsole,
@@ -86,4 +87,36 @@ test("two workspaces", async ({ page, context, request, harnessMode }) => {
   await page2.reload();
   await waitForDesktopFrame(page, originA);
   await waitForDesktopFrame(page2, originB);
+});
+
+// Reload (F5) of the session tab on a live session of our own: the view
+// resumes the frame with the existing cookie instead of minting a ticket, so
+// the take-over dialog never shows. Runs in both cookie modes (lax and
+// partitioned) because the resume depends on the session cookie surviving
+// the reload.
+test("reload of the session tab shows the desktop again without the take-over dialog", async ({
+  page,
+  request,
+  harnessMode,
+}) => {
+  await resetState(request, harnessMode);
+  await seedReadyWorkspace(request, WS_A);
+  await login(page);
+
+  const origin = workspaceOrigin(harnessMode, WS_A);
+  await openSession(page, harnessMode, WS_A);
+  await setConnectionStatus(request, WS_A, { state: "connected", leaseActive: true });
+
+  const tickets: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && /\/v1\/workspaces\/[^/]+\/connections$/.test(r.url())) {
+      tickets.push(r.url());
+    }
+  });
+
+  await page.reload();
+  const frame = await waitForDesktopFrame(page, origin);
+  await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
+  expect(await takeoverDialogCount(page)).toBe(0);
+  expect(tickets, "resume must not request a ticket").toEqual([]);
 });

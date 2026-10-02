@@ -58,7 +58,7 @@ type session struct {
 
 	// events is the ordered activity-report queue drained by the gateway's
 	// activitySender goroutine (connected/disconnect/input, FIFO).
-	events chan broker.ActivityEventType
+	events chan activityEvent
 
 	mu          sync.Mutex
 	lastRenewOK time.Time // gateway clock time of the last successful renew
@@ -71,9 +71,13 @@ type session struct {
 	// observed on renew. A renew reporting a newer epoch means another
 	// replica admitted the stream: our conns are fenced (P3).
 	streamEpoch uint64
-	// inflightReports counts activity reports whose broker call has not
-	// returned — Drain waits for the queue to drain and this to reach zero.
-	inflightReports int
+	// pendingReports counts activity reports that are queued or whose broker
+	// call has not returned. An event is counted from the moment it is
+	// enqueued (under s.mu) until its report finished, so there is no
+	// instant — in particular between the sender's dequeue and its broker
+	// call — at which Drain could see "nothing pending" with a report still
+	// on its way.
+	pendingReports int
 
 	// upgradeInFlight makes stream admission atomic: a second concurrent
 	// upgrade is rejected instead of both surviving the fence. upgradeGen
@@ -102,7 +106,7 @@ func newSession(cookieID string, l broker.Lease, now time.Time) *session {
 		lastRenewOK:   now,
 		streamEpoch:   l.StreamEpoch,
 		done:          make(chan struct{}),
-		events:        make(chan broker.ActivityEventType, activityQueueLen),
+		events:        make(chan activityEvent, activityQueueLen),
 		conns:         map[net.Conn]struct{}{},
 		cancels:       map[int]context.CancelFunc{},
 		streamTrackID: -1,
@@ -290,7 +294,7 @@ func (s *session) streamBusy() bool {
 func (s *session) pendingActivity() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.events) + s.inflightReports
+	return s.pendingReports
 }
 
 // setStreamEpoch records the stream epoch ClaimStream returned — the fence
@@ -536,23 +540,25 @@ func (g *Gateway) killSession(s *session, reason string) {
 // to a digest lookup and rebuilds the session (D19); without one the
 // v0.1 behaviour is unchanged. wsID is the workspace the request Host
 // names: a digest that resolves to another workspace's lease is refused
-// inside fetchSession before any session state is allocated.
-func (g *Gateway) lookupSession(r *http.Request, wsID string) *session {
+// inside fetchSession before any session state is allocated. A non-nil
+// error means the directory could not answer (not "no session"): the caller
+// answers 503 and nothing is cached.
+func (g *Gateway) lookupSession(r *http.Request, wsID string) (*session, error) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c.Value == "" {
-		return nil
+		return nil, nil
 	}
 	g.mu.Lock()
 	s := g.sessions[c.Value]
 	g.mu.Unlock()
 	if s != nil {
 		if s.live(g) {
-			return s
+			return s, nil
 		}
-		return nil
+		return nil, nil
 	}
 	if g.cfg.Sessions == nil {
-		return nil
+		return nil, nil
 	}
 	return g.rehydrate(r, c.Value, wsID)
 }
@@ -560,13 +566,13 @@ func (g *Gateway) lookupSession(r *http.Request, wsID string) *session {
 // claimStream bumps the lease's stream epoch on an admitted upgrade and
 // remembers it on the session: another replica's renew loop then fences
 // whichever process holds the older epoch.
-func (g *Gateway) claimStream(ctx context.Context, s *session) error {
+func (g *Gateway) claimStream(ctx context.Context, s *session) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	epoch, err := g.cfg.Sessions.ClaimStream(ctx, g.cfg.Identity, s.leaseID(), s.fenceSnapshot())
 	cancel()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	s.setStreamEpoch(epoch)
-	return nil
+	return epoch, nil
 }

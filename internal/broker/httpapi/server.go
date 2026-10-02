@@ -364,6 +364,9 @@ func workspaceUID(w http.ResponseWriter, r *http.Request) (string, bool) {
 type activityRequest struct {
 	Fence broker.Fence             `json:"fence"`
 	Type  broker.ActivityEventType `json:"type"`
+	// StreamEpoch is the epoch ClaimStream returned to the reporting
+	// stream; connected/disconnect reports of a fenced epoch are ignored.
+	StreamEpoch uint64 `json:"streamEpoch,omitempty"`
 }
 
 // activity records a gateway-reported session signal. The receipt time is
@@ -383,7 +386,7 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.cfg.Broker.ReportActivity(r.Context(), gatewayFrom(r.Context()), id,
-		req.Fence, broker.ActivityEvent{Type: req.Type})
+		req.Fence, broker.ActivityEvent{Type: req.Type, StreamEpoch: req.StreamEpoch})
 	if err != nil {
 		switch {
 		case errors.Is(err, broker.ErrActivityType):

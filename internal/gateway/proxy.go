@@ -344,6 +344,10 @@ func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleControlSession lists the sessions held by THIS replica only: the
+// gateway keeps no cross-replica registry (the lease directory lives in the
+// broker), so the answer is replica-local and a caller that needs the whole
+// deployment must ask every replica.
 func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -375,9 +379,10 @@ func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"active": len(out) > 0, "sessions": out})
 }
 
-// handleControlRevoke kills the named lease's session and tells the broker.
-// SEC-1: an identifier that resolves to no live session must not affect any
-// other session — there is no implicit "current session" fallback.
+// handleControlRevoke revokes the named lease at the broker and kills its
+// session if this replica holds it. SEC-1: an identifier that resolves to
+// no live lease must not affect any other session — there is no implicit
+// "current session" fallback.
 func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -395,19 +400,29 @@ func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_lease"})
 		return
 	}
+	// The session may live on another replica, so the broker (the shared
+	// lease directory) is always told; that replica's renew loop then sees
+	// the lease die and closes its streams. A session held here is killed
+	// first so it fails closed without waiting for the broker round trip.
 	g.mu.Lock()
 	s := g.byLease[body.LeaseID]
 	g.mu.Unlock()
-	if s == nil {
-		writeJSON(w, http.StatusOK, map[string]bool{"revoked": false})
+	wsUID := ""
+	if s != nil {
+		wsUID = s.workspaceUID()
+		g.killSession(s, "control_revoke")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	err := g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
+	cancel()
+	if err != nil {
+		// Not accepted: the operator must retry. A local session, if any,
+		// is already dead.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "broker_unavailable")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
 		return
 	}
-	g.killSession(s, "control_revoke")
-	// Best-effort broker revoke; the local session is already dead either way.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	_ = g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
-	cancel()
-	g.audit(r, "session.revoke", s.workspaceUID(), observability.OutcomeSuccess, "")
+	g.audit(r, "session.revoke", wsUID, observability.OutcomeSuccess, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }
 
@@ -448,7 +463,13 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_upgrade"})
 		return
 	}
-	s := g.lookupSession(r, wsID)
+	s, lookupErr := g.lookupSession(r, wsID)
+	if lookupErr != nil {
+		// The session directory could not answer: not "no session". 503
+		// so the browser retries; nothing is cached.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
 	if s != nil && s.workspaceUID() != wsID {
 		// D11: a session bound to a different workspace is "absent" on
 		// this host — the cookie is host-only and can never arrive here
@@ -463,6 +484,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		return
 	}
 	var gen int
+	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
 	if isUpgrade(r) {
 		if g.isDraining() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
@@ -485,7 +507,9 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// cross-replica fence: claiming it here makes the previous
 		// replica's renew loop drop its copy of this stream (P3).
 		if g.cfg.Sessions != nil {
-			if err := g.claimStream(r.Context(), s); err != nil {
+			epoch, err := g.claimStream(r.Context(), s)
+			streamEpoch = epoch
+			if err != nil {
 				if terminalBrokerErr(err) {
 					g.killSession(s, "claim_"+leaseFailureReason(err))
 					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
@@ -522,7 +546,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 				// The stream is admitted and live: report connected so the
 				// broker counts an open stream and cancels any pending
 				// disconnect grace window (design §8).
-				s.enqueueActivity(broker.ActivityConnected)
+				s.enqueueActivity(broker.ActivityConnected, streamEpoch)
 			}
 			// The upstream handshake is done and the conn is registered:
 			// free the admission slot so a later upgrade on this session
@@ -547,7 +571,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			// any earlier connected report and ahead of a later reconnect.
 			// Enqueued BEFORE untrack drops the conn so Drain can trust
 			// "no open conns" to mean "disconnect already queued".
-			s.enqueueActivity(broker.ActivityDisconnect)
+			s.enqueueActivity(broker.ActivityDisconnect, streamEpoch)
 		}
 		s.untrack(tid, captured)
 	}()
