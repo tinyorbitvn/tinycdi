@@ -127,6 +127,12 @@ spec:
             - -tls-cert=/tls/app/tls.crt
             - -tls-key=/tls/app/tls.key
             - -session-idle={{ .Values.backend.sessionIdle }}
+            {{- $tenantQuotas := include "tinycdi.tenantQuotas" . }}
+            {{- if $tenantQuotas }}
+            # managedNamespaces[].quota: the singleton leader upserts these
+            # tenant_quota rows at startup; unlisted tenants are untouched.
+            - {{ printf "-tenant-quotas=%s" $tenantQuotas | quote }}
+            {{- end }}
             {{- if .Values.oidc.requiredGroups }}
             - --required-groups={{ join "," .Values.oidc.requiredGroups }}
             {{- end }}

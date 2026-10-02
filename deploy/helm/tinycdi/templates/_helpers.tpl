@@ -71,6 +71,19 @@ imagePullSecrets:
 {{- join "," $pairs }}
 {{- end }}
 
+{{/* JSON array for the backend -tenant-quotas flag: one entry per managedNamespaces
+     entry that carries a quota block (tenant id = the entry's .tenant, exactly as
+     tinycdi.tenantNamespaces maps it). Empty when no entry declares one. */}}
+{{- define "tinycdi.tenantQuotas" -}}
+{{- $quotas := list -}}
+{{- range .Values.managedNamespaces -}}
+{{- if .quota -}}
+{{- $quotas = append $quotas (dict "tenant" .tenant "runningWorkspaces" .quota.runningWorkspaces "cpu" .quota.cpu "memory" .quota.memory "storage" .quota.storage) -}}
+{{- end -}}
+{{- end -}}
+{{- if $quotas }}{{ toJson $quotas }}{{ end -}}
+{{- end }}
+
 {{/* Comma-separated tenant names for the backend TCDI_TENANT_ALLOWLIST (session gateway). */}}
 {{- define "tinycdi.tenantAllowlist" -}}
 {{- $names := list -}}
