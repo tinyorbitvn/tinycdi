@@ -340,3 +340,30 @@ func TestQuota_ZeroWorkspacesMeansUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// TestQuota_NoRowConfiguredFalse (R9b): a tenant without a quota row refuses
+// every create (ErrNoQuota), so the view says configured:false explicitly —
+// "no limits" must never read as unlimited. With a row it says true.
+func TestQuota_NoRowConfiguredFalse(t *testing.T) {
+	src := &fakeQuotaSource{}
+	env := newQuotaEnv(t, src, newFakeDirectory(), defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+	get := func(rep store.QuotaReport) map[string]any {
+		src.report = rep
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/quota", "", nil)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d, want 200", r.StatusCode)
+		}
+		return decodeBody[map[string]any](t, r)
+	}
+
+	noRow := quotaFixture(env.issuer.URL())
+	noRow.HasLimits = false
+	noRow.Limits = store.QuotaAmounts{}
+	if got := get(noRow)["configured"]; got != false {
+		t.Fatalf("configured without a quota row = %v, want false", got)
+	}
+	if got := get(quotaFixture(env.issuer.URL()))["configured"]; got != true {
+		t.Fatalf("configured with a quota row = %v, want true", got)
+	}
+}
