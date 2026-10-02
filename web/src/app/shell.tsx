@@ -1,16 +1,23 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import {
   Alert,
+  Button,
   cx,
   EmptyState,
   IconCheck,
+  IconChevronDown,
   IconLaptop,
+  IconLogOut,
   IconMoon,
   IconSun,
+  IconUser,
   IconButton,
   Menu,
   Spinner,
+  useToast,
 } from "../design";
+import { useApi } from "../api/context";
+import { signOut } from "../auth/signOut";
 import { Link, navigate, NavLink, usePathname } from "./router";
 import {
   areaFor,
@@ -81,6 +88,51 @@ function ThemeMenu() {
         icon: preference === o.pref ? <IconCheck /> : o.icon,
         onSelect: () => setPreference(o.pref),
       }))}
+    />
+  );
+}
+
+// --- user menu --------------------------------------------------------------
+
+function UserMenu({ me }: { me: Me }) {
+  const api = useApi();
+  const { toast } = useToast();
+  const [signingOut, setSigningOut] = useState(false);
+  const onSignOut = () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    signOut(api).catch(() => {
+      setSigningOut(false);
+      toast({
+        tone: "danger",
+        title: t("app.user.signOutFailed.title"),
+        description: t("app.user.signOutFailed.body"),
+      });
+    });
+  };
+  return (
+    <Menu
+      label={t("app.user.menu", { name: me.displayName })}
+      align="end"
+      header={
+        <div className="tc-topbar__identity">
+          <span>{t("app.user.signedInAs", { name: me.displayName })}</span>
+          {me.tenant ? <span className="tc-topbar__tenant">{t("app.user.tenant", { tenant: me.tenant })}</span> : null}
+        </div>
+      }
+      trigger={(props) => (
+        <Button
+          {...props}
+          variant="ghost"
+          size="sm"
+          icon={<IconUser />}
+          iconEnd={<IconChevronDown />}
+          loading={signingOut}
+        >
+          <span className="tc-topbar__user">{me.displayName}</span>
+        </Button>
+      )}
+      items={[{ id: "sign-out", label: t("app.user.signOut"), icon: <IconLogOut />, onSelect: onSignOut }]}
     />
   );
 }
@@ -173,7 +225,7 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
         </Link>
         <div className="tc-topbar__actions">
           <ThemeMenu />
-          {me ? <span className="tc-topbar__user">{me.displayName}</span> : null}
+          {me ? <UserMenu me={me} /> : null}
         </div>
       </header>
       <div className="tc-shell__body">

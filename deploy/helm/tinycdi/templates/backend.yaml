@@ -136,6 +136,11 @@ spec:
             {{- if .Values.oidc.requiredGroups }}
             - --required-groups={{ join "," .Values.oidc.requiredGroups }}
             {{- end }}
+            # Sign-out also ends the IdP session (RP-initiated logout).
+            - --oidc-end-session={{ ne (toString .Values.oidc.endSession) "false" }}
+            {{- if .Values.oidc.postLogoutRedirect }}
+            - --oidc-post-logout-redirect={{ .Values.oidc.postLogoutRedirect }}
+            {{- end }}
             {{- if and .Values.dev.enabled (not (has (printf "%v" .Values.database.tls.mode) (list "verify-ca" "verify-full"))) }}
             - --dev-insecure-db
             {{- end }}

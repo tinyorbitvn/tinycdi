@@ -66,10 +66,23 @@ func newTestEnv(t *testing.T, mutate func(*AuthConfig)) *testEnv {
 // (nil = omit) wired around the mux as
 // RequestID → AuditWithSink → InstrumentHTTP → mux.
 func newTestEnvOpts(t *testing.T, mutate func(*AuthConfig), sink observability.AuditSink, metrics *observability.Metrics) *testEnv {
+	return newTestEnvFull(t, nil, mutate, sink, metrics)
+}
+
+// newTestEnvIssuer configures the fake issuer (before discovery runs) as
+// well as the AuthConfig.
+func newTestEnvIssuer(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*AuthConfig)) *testEnv {
+	return newTestEnvFull(t, issuer, mutate, nil, nil)
+}
+
+func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*AuthConfig), sink observability.AuditSink, metrics *observability.Metrics) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
 		t.Fatalf("oidctest.NewIssuer: %v", err)
+	}
+	if issuer != nil {
+		issuer(iss)
 	}
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, nil))
