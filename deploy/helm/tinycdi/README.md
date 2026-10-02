@@ -301,7 +301,8 @@ the adapter contract and the per-image onboarding checklist.
 
 | Key | Default | Description |
 |---|---|---|
-| `kasmAdapter.image.{repository,tag,digest}` | `tinyorbitvn/tinycdi-kasm-adapter` | adapter init image → operator `--kasm-adapter-image`. **Digest is required**: the flag renders only for a digest-pinned ref, a `tag` without `digest` fails the render, and a seeded `adapter: kasm` template without the digest fails the render (the backend would reject the workspaces anyway) |
+| `kasmAdapter.enabled` | `false` | opt-in switch. The operator gets `--kasm-adapter-image` **only** when this is `true` — a release-stamped `kasmAdapter.image.digest` alone does not turn the adapter on. `enabled: true` without a digest fails the render, and so does a seeded `adapter: kasm` template while `enabled` is `false` (the backend would reject the workspaces anyway) |
+| `kasmAdapter.image.{repository,tag,digest}` | `tinyorbitvn/tinycdi-kasm-adapter` | adapter init image → operator `--kasm-adapter-image` (when enabled). **Digest is required**: the flag only carries a digest-pinned ref, and a `tag` without `digest` fails the render. Release packaging stamps the digest; set it yourself for a self-built or mirrored image |
 
 A seeded kasm template sets `spec.linux.adapter: kasm`, an optional
 `spec.linux.sessionCmd` (the session payload — for Chromium-family images

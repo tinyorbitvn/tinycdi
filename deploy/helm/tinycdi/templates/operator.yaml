@@ -73,10 +73,12 @@ spec:
             - --broker-client-cert-file=/mtls/tls.crt
             - --broker-client-key-file=/mtls/tls.key
             {{- end }}
-            {{- if (default dict (get (default dict .Values.kasmAdapter) "image")).digest }}
+            {{- if (default dict .Values.kasmAdapter).enabled }}
             # Adapter init image for spec.linux.adapter=kasm templates
-            # (docs/kasm-images.md). Rendered ONLY when digest-pinned — the
-            # operator refuses a tag-only ref at startup.
+            # (docs/kasm-images.md). Rendered ONLY when kasmAdapter.enabled
+            # (a release-stamped digest alone does not turn it on) and then
+            # always digest-pinned — validation.yaml refuses enabled without
+            # a digest, and the operator refuses a tag-only ref at startup.
             - --kasm-adapter-image={{ include "tinycdi.image" (dict "image" .Values.kasmAdapter.image "root" $) }}
             {{- end }}
             {{- $placement := (default dict (default dict .Values.runtime).placement) }}

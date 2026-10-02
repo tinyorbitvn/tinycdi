@@ -51,10 +51,11 @@ images:
     repository: tinycdi/browser
     digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
 
-# Adapter init image for spec.linux.adapter=kasm templates — must be
-# digest-pinned or the render fails while a kasm template is seeded
-# (and the operator flag only ever renders a digest ref).
+# Adapter init image for spec.linux.adapter=kasm templates — opt-in via
+# enabled (the operator flag renders only then), and the image must be
+# digest-pinned or the render fails; a seeded kasm template needs both.
 kasmAdapter:
+  enabled: true
   image:
     repository: tinycdi/kasm-adapter
     digest: sha256:7777777777777777777777777777777777777777777777777777777777777777

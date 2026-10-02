@@ -65,12 +65,15 @@ images:
 
 # Kasm workspace adapter (spec.linux.adapter=kasm — docs/kasm-images.md):
 # the initContainer image that delivers the adapter scripts into pods of
-# kasm-template workspaces. The operator only gets --kasm-adapter-image
-# when the image is DIGEST-pinned here (kasmAdapter.image.digest); without
-# it the backend rejects adapter=kasm templates, and a seeded kasm
-# template fails the render. Never republish kasmweb/* images — they are
-# pulled by the nodes straight from Docker Hub.
+# kasm-template workspaces. OFF by default: the operator only gets
+# --kasm-adapter-image when kasmAdapter.enabled=true, even though release
+# stamping fills image.digest in the packaged chart. Enabling requires the
+# DIGEST-pinned image (image.digest) or the render fails; a seeded
+# adapter=kasm template without enabled=true fails the render too (the
+# backend would reject those workspaces). Never republish kasmweb/* images
+# — they are pulled by the nodes straight from Docker Hub.
 kasmAdapter:
+  enabled: false
   image:
     registry: ""
     repository: tinyorbitvn/tinycdi-kasm-adapter
