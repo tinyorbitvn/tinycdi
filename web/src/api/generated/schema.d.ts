@@ -304,6 +304,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/data/{dataId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one retained data disk
+         * @description Returns the record as `GET /v1/data` lists it, including a fresh
+         *     `purgeConfirmationNonce`. Visible to the owner recorded on the record
+         *     and to tenant administrators of the same tenant; any other caller —
+         *     and any other tenant — gets `404 NOT_FOUND`.
+         */
+        get: operations["getRetainedData"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data/{dataId}/attach": {
         parameters: {
             query?: never;
@@ -533,6 +556,15 @@ export interface components {
          *     raw Kubernetes or operator error text is never forwarded.
          */
         WorkspaceEvent: {
+            /**
+             * @description Stable identifier, unique within the list and identical across
+             *     reads: condition type + reason for observed conditions
+             *     (`Degraded.BootDeadlineExceeded`), reason + intent revision for
+             *     lifecycle steps (`StartRequested.4`), `Failed.<reason>` for the
+             *     synthesized failure event. Usable as a list key.
+             * @example StartRequested.4
+             */
+            id: string;
             /** @enum {string} */
             type: "Normal" | "Warning";
             /**
@@ -554,10 +586,20 @@ export interface components {
         WorkspaceEventList: {
             /** @description Events, newest first. */
             items: components["schemas"]["WorkspaceEvent"][];
+            /**
+             * @description True when the observed-state informer cannot prove freshness.
+             *     Condition events then show last-known state and never claim the
+             *     workspace is ready. Absent (false) otherwise.
+             */
+            stale?: boolean;
         };
         /** @description Resource vector in display units. */
         QuotaAmounts: {
-            /** @description Active (not deleted) workspace count. */
+            /**
+             * @description Active (not deleted) workspace count. Within `limits`, 0 means
+             *     there is no count limit (quota is enforced on running slots, CPU,
+             *     memory and storage).
+             */
             workspaces: number;
             /** @description Reserved running slots. */
             runningWorkspaces: number;
@@ -577,13 +619,14 @@ export interface components {
             usage: components["schemas"]["QuotaAmounts"];
         };
         /**
-         * @description Tenant quota snapshot. `userLimits` is absent in v0.2 — there is no
-         *     per-user limit store. `users` lists every tenant member for tenant
+         * @description Tenant quota snapshot. `limits` is absent when the tenant has no
+         *     quota row (new workspaces are then refused). `userLimits` is absent
+         *     in v0.2 — there is no per-user limit store. `users` lists every tenant member for tenant
          *     administrators and only the caller for regular users.
          */
         QuotaView: {
             tenant: string;
-            limits: components["schemas"]["QuotaAmounts"];
+            limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
             userLimits?: components["schemas"]["QuotaAmounts"];
             users: components["schemas"]["UserUsage"][];
@@ -1404,6 +1447,36 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getRetainedData: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated retained-data record identifier. */
+                dataId: components["parameters"]["DataId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The retained data record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetainedDataView"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
