@@ -3,10 +3,25 @@
 
 import type { components } from "../../src/api/generated/schema";
 
-export type TemplateFixture = components["schemas"]["TemplateView"];
+// networkProfile mirrors api/v1alpha1 NetworkProfile; it is additive to
+// TemplateView (requested for the public API) and optional here so the
+// fixtures type-check against both the current and the extended schema.
+export type NetworkProfileFixture = "InternetOnly" | "ClusterOnly" | "Isolated";
+export type TemplateFixture = components["schemas"]["TemplateView"] & {
+  networkProfile?: NetworkProfileFixture;
+};
 export type ConditionFixture = components["schemas"]["WorkspaceCondition"];
 export type WorkspaceFixture = components["schemas"]["WorkspaceView"];
 export type RetainedFixture = components["schemas"]["RetainedDataView"];
+// GET /v1/workspaces/{id}/events item (Kubernetes-style event summary).
+export interface WorkspaceEventFixture {
+  type: "Normal" | "Warning";
+  reason: string;
+  message: string;
+  count?: number;
+  firstTimestamp?: string;
+  lastTimestamp: string;
+}
 
 export const TEMPLATE_LINUX: TemplateFixture = {
   id: "tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M",
@@ -23,6 +38,7 @@ export const TEMPLATE_LINUX: TemplateFixture = {
   },
   dataPolicyDefault: "Retain",
   clipboardPolicy: "Enabled",
+  networkProfile: "InternetOnly",
   publishedAt: "2026-09-01T00:00:00Z",
 };
 
@@ -41,12 +57,14 @@ export const TEMPLATE_BROWSER: TemplateFixture = {
   },
   dataPolicyDefault: "Ephemeral",
   clipboardPolicy: "Disabled",
+  networkProfile: "Isolated",
   publishedAt: "2026-09-01T00:00:00Z",
 };
 
 export const WORKSPACE_STOPPED: WorkspaceFixture = {
   id: "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E",
   name: "research-desktop",
+  owner: { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" },
   template: {
     id: TEMPLATE_LINUX.id,
     name: TEMPLATE_LINUX.name,
@@ -79,12 +97,28 @@ export const WORKSPACE_STOPPED: WorkspaceFixture = {
 export const RETAINED_DISK: RetainedFixture = {
   id: "rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A",
   state: "Retained",
+  owner: { subject: "user-01J4ZDADA", displayName: "Ada Lovelace" },
   sizeGib: 20,
   runtime: "LinuxContainer",
   sourceWorkspaceName: "old-desktop",
   retainedAt: "2026-09-29T12:00:00Z",
   purgeConfirmationNonce: "nonce-initial",
 };
+
+export const SEED_EVENTS: WorkspaceEventFixture[] = [
+  {
+    type: "Normal",
+    reason: "Stopped",
+    message: "Runtime stopped; disk retained",
+    lastTimestamp: "2026-09-30T10:05:00Z",
+  },
+  {
+    type: "Normal",
+    reason: "Admitted",
+    message: "Quota reserved: 4 CPU, 8 GiB memory, 20 GiB storage",
+    lastTimestamp: "2026-09-30T10:00:00Z",
+  },
+];
 
 export function makeWorkspace(overrides: Partial<WorkspaceFixture> = {}): WorkspaceFixture {
   const base = structuredClone(WORKSPACE_STOPPED);

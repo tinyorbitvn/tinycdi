@@ -376,6 +376,83 @@ func TestWorkspaceTemplateCreateValidation(t *testing.T) {
 	}
 }
 
+// spec.placement bounds are enforced by the apiserver schema: tolerations is
+// capped (MaxItems=16) and runtimeClassName must match the RuntimeClass name
+// pattern (MaxLength=253 + Pattern).
+func TestValidation_PlacementBounds(t *testing.T) {
+	manyTolerations := make([]interface{}, 17)
+	for i := range manyTolerations {
+		manyTolerations[i] = map[string]interface{}{
+			"key":      "dedicated",
+			"operator": "Exists",
+			"effect":   "NoSchedule",
+		}
+	}
+	cases := []struct {
+		name    string
+		obj     map[string]interface{}
+		wantErr string // substring of the apiserver error; empty means accept
+	}{
+		{
+			name: "accept placement within bounds",
+			obj: mutate(linuxTemplate("tpl-acc-placement"), func(s map[string]interface{}) {
+				p := live(s, "placement")
+				p["nodeSelector"] = map[string]interface{}{"workload": "runtime"}
+				p["tolerations"] = []interface{}{map[string]interface{}{
+					"key":      "dedicated",
+					"operator": "Exists",
+					"effect":   "NoSchedule",
+				}}
+				p["runtimeClassName"] = "gvisor"
+			}),
+		},
+		{
+			name: "accept hostUsers false",
+			obj: mutate(linuxTemplate("tpl-acc-hostusers"), func(s map[string]interface{}) {
+				live(s, "linux")["hostUsers"] = false
+			}),
+		},
+		{
+			name: "reject 17 tolerations",
+			obj: mutate(linuxTemplate("tpl-rej-tol17"), func(s map[string]interface{}) {
+				live(s, "placement")["tolerations"] = manyTolerations
+			}),
+			wantErr: "tolerations",
+		},
+		{
+			name: "reject invalid runtimeClassName",
+			obj: mutate(linuxTemplate("tpl-rej-rc"), func(s map[string]interface{}) {
+				live(s, "placement")["runtimeClassName"] = "Invalid_Class!"
+			}),
+			wantErr: "runtimeClassName",
+		},
+		{
+			name: "reject overlong runtimeClassName",
+			obj: mutate(linuxTemplate("tpl-rej-rclong"), func(s map[string]interface{}) {
+				live(s, "placement")["runtimeClassName"] = strings.Repeat("a", 254)
+			}),
+			wantErr: "runtimeClassName",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := create(t, tplGVR, tc.obj)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected accept, got reject: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected reject containing %q, got accept", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("rejected but for wrong reason; want substring %q in: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceTemplateImmutable(t *testing.T) {
 	if _, err := create(t, tplGVR, linuxTemplate("tpl-immutable")); err != nil {
 		t.Fatalf("seed create: %v", err)

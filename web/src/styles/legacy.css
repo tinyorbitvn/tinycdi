@@ -1,0 +1,136 @@
+/*
+ * Transitional styling for v0.1 pages that still render their own <main>
+ * and bare elements. New pages use the design system (Page, Section, Table…)
+ * and never render <main> — the app shell owns it — so these rules stop
+ * applying as pages migrate. Delete this file once nothing matches.
+ */
+
+.tc-content main {
+  max-width: var(--tc-content-max);
+  margin: 0 auto;
+  padding: var(--tc-space-6) var(--tc-space-4);
+}
+
+.tc-content main h1 {
+  font-size: var(--tc-text-xl);
+  margin-bottom: var(--tc-space-4);
+}
+
+.tc-content main h2 {
+  font-size: var(--tc-text-lg);
+  margin: var(--tc-space-6) 0 var(--tc-space-3);
+}
+
+.tc-content main p {
+  margin: var(--tc-space-2) 0;
+}
+
+.tc-content main table {
+  width: 100%;
+  background: var(--tc-color-surface);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-md);
+}
+
+.tc-content main th,
+.tc-content main td {
+  text-align: left;
+  padding: var(--tc-space-2) var(--tc-space-3);
+  border-bottom: 1px solid var(--tc-color-border);
+}
+
+.tc-content main th {
+  color: var(--tc-color-text-muted);
+  font-weight: var(--tc-weight-semibold);
+  font-size: var(--tc-text-sm);
+}
+
+.tc-content main button:not([class*="tc-"]) {
+  margin-right: var(--tc-space-2);
+  min-height: var(--tc-control-height-sm);
+  padding: 0 var(--tc-space-3);
+  border: 1px solid var(--tc-color-border-strong);
+  border-radius: var(--tc-radius-md);
+  background: var(--tc-color-surface);
+  color: var(--tc-color-text);
+}
+
+.tc-content main button:not([class*="tc-"]):hover:not(:disabled) {
+  background: var(--tc-color-bg-subtle);
+}
+
+.tc-content main button.danger {
+  background: var(--tc-color-danger);
+  border-color: var(--tc-color-danger);
+  color: var(--tc-color-text-inverse);
+}
+
+.tc-content .phase {
+  font-weight: var(--tc-weight-semibold);
+}
+
+.tc-content .phase-ready {
+  color: var(--tc-color-success-text);
+}
+
+.tc-content .phase-failed {
+  color: var(--tc-color-danger-text);
+}
+
+.tc-content .phase-provisioning,
+.tc-content .phase-pending,
+.tc-content .phase-stopping,
+.tc-content .phase-terminating {
+  color: var(--tc-color-warning-text);
+}
+
+.tc-content .error-banner {
+  border: 1px solid var(--tc-color-danger);
+  background: var(--tc-color-danger-subtle);
+  color: var(--tc-color-danger-text);
+  padding: var(--tc-space-3) var(--tc-space-4);
+  margin: var(--tc-space-3) 0;
+  border-radius: var(--tc-radius-md);
+}
+
+.tc-content .dialog {
+  position: fixed;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--tc-color-surface-raised);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-lg);
+  padding: var(--tc-space-4) var(--tc-space-5);
+  box-shadow: var(--tc-shadow-lg);
+  max-width: min(30rem, calc(100vw - 2rem));
+  z-index: var(--tc-z-overlay);
+}
+
+.tc-content main form label {
+  display: block;
+  margin: var(--tc-space-3) 0;
+}
+
+.tc-content main form input:not([type="checkbox"]),
+.tc-content main form select {
+  display: block;
+  margin-top: var(--tc-space-1);
+  width: min(22rem, 100%);
+  min-height: var(--tc-control-height-md);
+  padding: 0 var(--tc-space-3);
+  border: 1px solid var(--tc-color-border-strong);
+  border-radius: var(--tc-radius-md);
+  background: var(--tc-color-surface);
+}
+
+.tc-content main dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, 12rem) 1fr;
+  row-gap: var(--tc-space-1);
+}
+
+.tc-content main dt {
+  font-weight: var(--tc-weight-semibold);
+  color: var(--tc-color-text-muted);
+}

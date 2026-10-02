@@ -91,9 +91,8 @@ exact_files "$DL/release-chart" "tinycdi-$CHART_VERSION.tgz"
 # ---- 4. release-assets: binaries + CRDs + (GPL) KasmVNC source bundle --
 mkdir -p "$OUT/bundle"
 assets_want=(
-  "tinycdi-api-$VERSION-linux-amd64"
+  "tinycdi-backend-$VERSION-linux-amd64"
   "tinycdi-operator-$VERSION-linux-amd64"
-  "tinycdi-gateway-$VERSION-linux-amd64"
   "tinycdi-crds-$VERSION.yaml"
 )
 kasmvnc_tar="" ; kasmvnc_sha=""
@@ -140,7 +139,7 @@ for img in "${expected[@]}"; do
   [ -n "$stamped" ] || die "chart values $section.$key.digest is unset — digests were not stamped"
   ref="$(tr -d '[:space:]' < "$OUT/refs/$img.ref")"
   [ "$stamped" = "${ref#*@}" ] \
-    || die "chart images.$key.digest ($stamped) != $img.ref digest (${ref#*@})"
+    || die "chart $section.$key.digest ($stamped) != $img.ref digest (${ref#*@})"
 done
 rm -f "$OUT/.chart-values.yaml"
 

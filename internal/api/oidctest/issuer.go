@@ -38,7 +38,7 @@ type Issuer struct {
 	TokenTTL time.Duration
 
 	mu       sync.Mutex
-	pendings map[string]*authRequest // code -> request
+	authReqs map[string]*authRequest // code -> request
 	mutate   func(map[string]any)
 	now      func() time.Time
 
@@ -66,7 +66,7 @@ func NewIssuer() (*Issuer, error) {
 		TenantID: "tenant-a",
 		Groups:   []string{"devs"},
 		TokenTTL: time.Hour,
-		pendings: make(map[string]*authRequest),
+		authReqs: make(map[string]*authRequest),
 		now:      time.Now,
 	}
 	mux := http.NewServeMux()
@@ -135,7 +135,7 @@ func (i *Issuer) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	code := randomString(24)
 	i.mu.Lock()
-	i.pendings[code] = &authRequest{
+	i.authReqs[code] = &authRequest{
 		nonce:     q.Get("nonce"),
 		challenge: q.Get("code_challenge"),
 		clientID:  q.Get("client_id"),
@@ -167,8 +167,8 @@ func (i *Issuer) token(w http.ResponseWriter, r *http.Request) {
 	}
 	code := r.Form.Get("code")
 	i.mu.Lock()
-	pend, ok := i.pendings[code]
-	delete(i.pendings, code) // single-use
+	pend, ok := i.authReqs[code]
+	delete(i.authReqs, code) // single-use
 	mutate := i.mutate
 	i.mu.Unlock()
 	if !ok {

@@ -57,6 +57,20 @@ own license (see LICENSE; declared in `web/package.json`). The
 production bundle ships `web/dist/THIRD_PARTY_LICENSES.txt`, generated
 at build time.
 
+### 2a. Vendored web assets (web/src/design/orbit/)
+
+| Asset | Source (pinned) | License |
+|---|---|---|
+| Orbit stylesheets `css/*.css` | TinyOrbit Orbit System 2.9 (exported 2026-10-02) | TinyOrbit design-system asset; ships with this project |
+| Manrope Variable WOFF2 subsets | `@fontsource-variable/manrope` 5.3.0 | OFL-1.1 (`LICENSES/manrope-LICENSE.txt`) |
+| JetBrains Mono 400 WOFF2 subsets | `@fontsource/jetbrains-mono` 5.3.0 | OFL-1.1 (`LICENSES/jetbrains-LICENSE.txt`) |
+| Tabler Icons outline SVGs | `@tabler/icons` 3.48.0 | MIT (`LICENSES/LICENSE-Tabler.txt`) |
+
+SHA-256 of every vendored file is recorded in
+`web/src/design/orbit/README.md` and pinned by
+`web/tests/unit/design/tokens.test.ts`. The TinyOrbit name, wordmark and
+mark are trademarks and are not MIT-licensed — see `TRADEMARKS.md`.
+
 ## 3. Runtime container images
 
 Per-package declared licenses were extracted from syft SPDX SBOMs of

@@ -41,7 +41,7 @@ func TestLaunch_PostOnly(t *testing.T) {
 // body afterwards, proving the attempt did not consume it.
 func TestLaunch_TicketInQueryRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-query", "ws-1")
+	fb.scriptTicket("tk-query", testWSUID)
 	srv := newGateway(t, fb, nil)
 
 	req, err := http.NewRequest(http.MethodPost, srv.URL+gateway.LaunchPath+"?ticket=tk-query", nil)
@@ -62,7 +62,7 @@ func TestLaunch_TicketInQueryRejected(t *testing.T) {
 		t.Fatal("ticket in query was consumed by the broker")
 	}
 	// non-consumption proof: the same ticket still redeems via the body
-	ok := doLaunch(t, srv, "tk-query", map[string]string{"Origin": testOrigin})
+	ok := doLaunch(t, srv, testHost, "tk-query", map[string]string{"Origin": testOrigin})
 	defer drain(ok)
 	if ok.StatusCode != http.StatusSeeOther {
 		t.Fatalf("ticket burned by rejected query attempt — body redeem = %d, want 303", ok.StatusCode)
@@ -77,10 +77,10 @@ func TestLaunch_TicketInQueryRejected(t *testing.T) {
 // regression).
 func TestLaunch_SetsHostOnlyCookie(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-1", "ws-1")
+	fb.scriptTicket("tk-1", testWSUID)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-1", map[string]string{"Origin": testOrigin})
+	resp := doLaunch(t, srv, testHost, "tk-1", map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("launch status = %d, want 303", resp.StatusCode)
@@ -111,13 +111,13 @@ func TestLaunch_SetsHostOnlyCookie(t *testing.T) {
 // launch must not burn the ticket).
 func TestLaunch_BadHostRejected_NoConsume(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-host", "ws-1")
+	fb.scriptTicket("tk-host", testWSUID)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-host", map[string]string{"Host": "evil.test", "Origin": testOrigin})
+	resp := doLaunch(t, srv, "evil.test", "tk-host", map[string]string{"Origin": testOrigin})
 	defer drain(resp)
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("launch with foreign Host = %d, want 403/400", resp.StatusCode)
+	if resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("launch with foreign Host = %d, want 421", resp.StatusCode)
 	}
 	if fb.wasRedeemed("tk-host") {
 		t.Fatal("bad-host launch consumed the ticket")
@@ -127,10 +127,10 @@ func TestLaunch_BadHostRejected_NoConsume(t *testing.T) {
 // TestLaunch_CrossOriginRejected: a foreign Origin must not redeem.
 func TestLaunch_CrossOriginRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-origin", "ws-1")
+	fb.scriptTicket("tk-origin", testWSUID)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-origin", map[string]string{"Origin": "https://evil.test"})
+	resp := doLaunch(t, srv, testHost, "tk-origin", map[string]string{"Origin": "https://evil.test"})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-origin launch = %d, want 403", resp.StatusCode)
@@ -145,10 +145,10 @@ func TestLaunch_CrossOriginRejected(t *testing.T) {
 // — cross-site must be rejected (fetch-metadata gate).
 func TestLaunch_CrossSiteFetchMetadataRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-fetch", "ws-1")
+	fb.scriptTicket("tk-fetch", testWSUID)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-fetch", map[string]string{"Sec-Fetch-Site": "cross-site"})
+	resp := doLaunch(t, srv, testHost, "tk-fetch", map[string]string{"Sec-Fetch-Site": "cross-site"})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-site fetch-metadata launch = %d, want 403", resp.StatusCode)
@@ -163,7 +163,7 @@ func TestLaunch_InvalidTicket(t *testing.T) {
 	fb := newFakeBroker(t)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-nope", map[string]string{"Origin": testOrigin})
+	resp := doLaunch(t, srv, testHost, "tk-nope", map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode == http.StatusSeeOther {
 		t.Fatal("invalid ticket redeemed to a session")

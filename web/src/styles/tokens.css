@@ -1,0 +1,122 @@
+/*
+ * TinyCDI token aliases onto Orbit System 2.9 (`--to-*`, vendored under
+ * src/design/orbit/). This file defines no colour literal: every
+ * `--tc-color-*` is a `var(--to-…)` alias so the applied palette (theme,
+ * palette-system) always wins. Dark values come from the Orbit sheets keyed
+ * on `[data-theme="dark"]` — theme-init.js sets that attribute before paint.
+ */
+
+:root {
+  /* ---- typography ---- */
+  --tc-font-sans: var(--to-font-family-core);
+  --tc-font-mono: var(--to-font-family-mono);
+  --tc-text-xs: 0.75rem;
+  --tc-text-sm: 0.8125rem;
+  --tc-text-md: 0.875rem;
+  --tc-text-base: 1rem;
+  --tc-text-lg: 1.125rem;
+  --tc-text-xl: 1.375rem;
+  --tc-text-2xl: 1.75rem;
+  --tc-leading-tight: 1.25;
+  --tc-leading-normal: 1.5;
+  --tc-weight-regular: 400;
+  --tc-weight-medium: 500;
+  --tc-weight-semibold: 600;
+  --tc-weight-bold: 700;
+
+  /* ---- spacing (4px grid) ---- */
+  --tc-space-0: 0;
+  --tc-space-1: var(--to-space-1);
+  --tc-space-2: var(--to-space-2);
+  --tc-space-3: var(--to-space-3);
+  --tc-space-4: var(--to-space-4);
+  --tc-space-5: 1.25rem;
+  --tc-space-6: var(--to-space-6);
+  --tc-space-8: var(--to-space-8);
+  --tc-space-10: var(--to-space-10);
+  --tc-space-12: var(--to-space-12);
+  --tc-space-16: var(--to-space-16);
+
+  /* ---- radius (Orbit component language: badge/control/card/overlay) ---- */
+  --tc-radius-sm: var(--to-radius-badge);
+  --tc-radius-md: var(--to-radius-control);
+  --tc-radius-lg: var(--to-radius-card);
+  --tc-radius-xl: var(--to-radius-overlay);
+  --tc-radius-full: var(--to-radius-pill);
+
+  /* ---- layout ---- */
+  --tc-topbar-height: var(--topbar-height);
+  --tc-sidebar-width: var(--sidebar-width);
+  --tc-content-max: 72rem;
+  --tc-content-narrow: 44rem;
+  --tc-control-height-sm: var(--to-control-height-small);
+  --tc-control-height-md: var(--to-control-height);
+  --tc-control-height-lg: 48px;
+
+  /* ---- motion ---- */
+  --tc-duration-fast: var(--to-duration-fast);
+  --tc-duration-normal: var(--to-duration-normal);
+  --tc-ease: var(--to-easing);
+
+  /* ---- z-index ---- */
+  --tc-z-topbar: 20;
+  --tc-z-popover: 40;
+  --tc-z-overlay: 50;
+  --tc-z-toast: 60;
+  --tc-z-tooltip: 70;
+
+  /* ---- colour: aliases only, no literals ---- */
+  --tc-color-bg: var(--to-surface-page);
+  --tc-color-bg-subtle: var(--to-surface-canvas);
+  --tc-color-surface: var(--to-surface-card);
+  --tc-color-surface-raised: var(--to-surface-raised);
+  --tc-color-surface-sunken: var(--to-surface-sunken);
+  --tc-color-overlay: var(--to-navy-950);
+
+  --tc-color-text: var(--to-text-primary);
+  --tc-color-text-muted: var(--to-text-secondary);
+  --tc-color-text-subtle: var(--to-text-tertiary);
+  --tc-color-text-inverse: var(--to-text-inverse);
+
+  --tc-color-border: var(--to-border-subtle);
+  --tc-color-border-strong: var(--to-border-default);
+
+  --tc-color-accent: var(--to-action-primary-bg);
+  --tc-color-accent-hover: var(--to-action-primary-bg-hover);
+  --tc-color-accent-active: var(--to-action-primary-bg-hover);
+  --tc-color-accent-subtle: var(--to-surface-accent-subtle);
+  --tc-color-accent-text: var(--to-text-accent);
+  --tc-color-on-accent: var(--to-action-primary-text);
+
+  --tc-color-success: var(--to-sage-solid);
+  --tc-color-success-subtle: var(--to-sage-surface);
+  --tc-color-success-text: var(--to-sage-ink);
+  --tc-color-success-border: var(--to-sage-border);
+  --tc-color-warning: var(--to-amber-solid);
+  --tc-color-warning-subtle: var(--to-amber-surface);
+  --tc-color-warning-text: var(--to-amber-ink);
+  --tc-color-warning-border: var(--to-amber-border);
+  --tc-color-danger: var(--to-rose-solid);
+  --tc-color-danger-hover: var(--to-rose-700);
+  --tc-color-danger-subtle: var(--to-rose-surface);
+  --tc-color-danger-text: var(--to-rose-ink);
+  --tc-color-danger-border: var(--to-rose-border);
+  --tc-color-info: var(--to-iris-solid);
+  --tc-color-info-subtle: var(--to-iris-surface);
+  --tc-color-info-text: var(--to-iris-ink);
+  --tc-color-info-border: var(--to-iris-border);
+  --tc-color-neutral-subtle: var(--to-neutral-surface);
+  --tc-color-neutral-text: var(--to-neutral-ink);
+
+  --tc-color-focus: var(--to-focus-ring);
+  --tc-color-skeleton: var(--to-surface-sunken);
+  --tc-color-skeleton-shine: var(--to-surface-hover);
+
+  /* ---- shadows ---- */
+  --tc-shadow-xs: var(--to-shadow-sm);
+  --tc-shadow-sm: var(--to-shadow-sm);
+  --tc-shadow-md: var(--to-shadow-md);
+  --tc-shadow-lg: var(--to-shadow-lg);
+  --tc-focus-ring: 0 0 0 var(--to-focus-offset) var(--tc-color-surface),
+    0 0 0 calc(var(--to-focus-offset) + var(--to-focus-width)) var(--tc-color-focus);
+}

@@ -9,11 +9,11 @@ managedNamespaces:
     tenant: tenant-b
 
 portalHost: portal.lab.example.net
-sessionHost: session.lab.example.net
+sessionDomain: session.lab.example.net
 
 oidc:
   issuer: https://idp.lab.example.net/realms/tinycdi
-  clientID: tinycdi-portal
+  clientID: tinycdi
   # Pre-created Secret holding the OIDC client secret (key: client-secret).
   existingSecret: tinycdi-oidc-client
   # Egress to the IdP. Restrict to the IdP's address space where known.
@@ -22,7 +22,7 @@ oidc:
 
 database:
   # Pre-created Secret holding the PostgreSQL DSN (key: url).
-  existingSecret: tinycdi-api-db
+  existingSecret: tinycdi-backend-db
   port: 5432
   allowedPeers:
     - ipBlock: {cidr: 10.20.30.40/32}
@@ -35,17 +35,14 @@ global:
     - name: lab-pull-secret
 
 images:
-  api:
-    repository: tinycdi/api
+  backend:
+    repository: tinycdi/backend
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
   operator:
     repository: tinycdi/operator
     digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
-  gateway:
-    repository: tinycdi/gateway
-    digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
-  portal:
-    repository: tinycdi/portal
+  frontend:
+    repository: tinycdi/frontend
     digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
   linuxDesktop:
     repository: tinycdi/linux-desktop
@@ -54,43 +51,31 @@ images:
     repository: tinycdi/browser
     digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
 
-api:
+backend:
   replicas: 2
-  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  pdb: {enabled: true, minAvailable: 1}
   podAnnotations: {example.com/team: platform}
-  affinity:
-    podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            topologyKey: kubernetes.io/hostname
-            labelSelector:
-              matchLabels: {app.kubernetes.io/name: api}
-  internalTLS:
-    existingSecret: tinycdi-api-internal-tls
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+  tls:
+    internal:
+      existingSecret: tinycdi-backend-internal-tls
   clientCA:
     existingSecret: tinycdi-extra-ca
   extraCA:
     existingSecret: tinycdi-extra-ca
   extraPortalOrigins:
     - https://alt.portal.example.net
-
-gateway:
-  metricsListen: ":9090"
-  tls:
-    existingSecret: tinycdi-gateway-tls
-  mtls:
-    existingSecret: tinycdi-gateway-mtls
-  trustedCA:
-    existingSecret: tinycdi-extra-ca
+  metrics:
+    enabled: true
   # /v1/control/* bearer token (optional — control routes close without it).
   controlToken:
-    existingSecret: tinycdi-gateway-control-token
+    existingSecret: tinycdi-backend-control-token
     key: token
 
-portal:
+frontend:
   tls:
-    existingSecret: tinycdi-portal-tls
+    existingSecret: tinycdi-frontend-tls
 
 operator:
   internetExceptCIDRs: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
@@ -169,3 +154,11 @@ templates:
         disconnectTimeout: 5m
         maxDuration: 8h
         dataPolicy: Ephemeral
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

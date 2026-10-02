@@ -4,12 +4,14 @@
 # helm chart values (images.<key> for component/runtime images,
 # linux-desktop -> linuxDesktop; kasm-adapter -> kasmAdapter.image).
 #
-# images.yml (main CI) is unaffected — it still builds and scans all seven
+# images.yml (main CI) is unaffected — it still builds and scans all six
 # images on every push to main.
-api
+#
+# Platform (three components): backend = public API + session gateway in
+# one binary, frontend = static SPA server, operator = session controller.
+backend
+frontend
 operator
-gateway
-portal
 linux-desktop
 # browser requires linux-desktop above (it is the FROM base).
 browser
