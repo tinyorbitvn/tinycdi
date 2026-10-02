@@ -18,7 +18,7 @@ import (
 // AnnotationRetainedDataRef records the rd_ record the consuming workspace
 // was attached from — bookkeeping for operators; the mount contract itself
 // is linux.AnnotationRetainedPVC(+UID).
-const AnnotationRetainedDataRef = "workspaces.cdi.tinyorbit.vn/retained-data-ref"
+const AnnotationRetainedDataRef = linux.AnnotationRetainedDataRef
 
 // RetainedApplier wraps a WorkspaceApplier with the retained-data side
 // effects the pure CR projection cannot express (design §5):
@@ -48,51 +48,96 @@ func NewRetainedApplier(applier WorkspaceApplier, c client.Client, tenants Tenan
 
 // Apply implements WorkspaceApplier.
 func (a *RetainedApplier) Apply(ctx context.Context, in Intent) error {
+	if in.Kind == IntentCreate && in.Spec.RetainedDataRef != "" {
+		// The claim is verified and the mount reference computed BEFORE the
+		// CR exists, and rides the CR's create: a running operator must
+		// never be able to reconcile a consuming workspace that does not
+		// yet name its retained claim (it would build a new empty home).
+		claim, err := a.verifyClaim(ctx, in)
+		if err != nil {
+			return err
+		}
+		in.CRAnnotations = claim.annotations()
+		if err := a.Next.Apply(ctx, in); err != nil {
+			return err
+		}
+		return a.applyAttach(ctx, in, claim)
+	}
 	if err := a.Next.Apply(ctx, in); err != nil {
 		return err
 	}
-	switch {
-	case in.Kind == IntentCreate && in.Spec.RetainedDataRef != "":
-		return a.applyAttach(ctx, in)
-	case in.Kind == IntentDelete:
+	if in.Kind == IntentDelete {
 		return a.applyReturn(ctx, in)
 	}
 	return nil
 }
 
-// applyAttach retargets the retained PVC to the consuming workspace and
-// settles the record. The PVC UID must match the record — a UID mismatch
-// means the recorded volume is gone (or was never this object) and the
-// claim must not proceed.
-//
-// It fails closed BEFORE any cluster mutation: the record must already be
-// claimed for this workspace by its owner (Retained->Attaching through
-// RetainedStore.AttachRetained, which performs the owner/tenant-admin,
-// state and runtime checks and the quota transfer). A create intent
-// carrying a bare rd_ reference is never sufficient — without the claim
-// there is no CR stamp and no PVC relabel (SEC-01).
-func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent) error {
+// retainedClaim is the verified mount reference of one attach.
+type retainedClaim struct {
+	rec     RetainedRecord
+	ns      string
+	settled bool
+}
+
+// annotations is the claim reference every consuming CR is created with.
+func (c *retainedClaim) annotations() map[string]string {
+	return map[string]string{
+		linux.AnnotationRetainedPVC:    c.rec.PVCName,
+		linux.AnnotationRetainedPVCUID: c.rec.PVCUID,
+		AnnotationRetainedDataRef:      c.rec.ID,
+	}
+}
+
+// verifyClaim fails closed BEFORE any cluster mutation: the record must
+// already be claimed for this workspace by its owner (Retained->Attaching
+// through RetainedStore.AttachRetained, which performs the owner/tenant-admin,
+// state and runtime checks and the quota transfer), and the recorded volume
+// must still exist under the recorded UID — a UID mismatch means the volume
+// is gone (or was never this object). A create intent carrying a bare rd_
+// reference is never sufficient — without the claim there is no CR, no CR
+// stamp and no PVC relabel (SEC-01).
+func (a *RetainedApplier) verifyClaim(ctx context.Context, in Intent) (*retainedClaim, error) {
 	rec, err := a.Records.GetRetained(ctx, in.TenantID, in.Spec.RetainedDataRef)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	owner := in.Spec.OwnerIssuer + "|" + in.Spec.OwnerSubject
 	settled := rec.State == RetainedStateAttached
 	if rec.ConsumingWorkspaceID != string(in.WorkspaceUID) || rec.Owner != owner ||
 		(rec.State != RetainedStateAttaching && !settled) {
-		return fmt.Errorf("attach retained: record %s not claimed for workspace %s by %s: %w",
+		return nil, fmt.Errorf("attach retained: record %s not claimed for workspace %s by %s: %w",
 			rec.ID, in.WorkspaceUID, owner, ErrRetainedState)
 	}
 	ns, ok := a.Tenants.Namespace(in.TenantID)
 	if !ok {
-		return fmt.Errorf("attach retained: no namespace for tenant %q", in.TenantID)
+		return nil, fmt.Errorf("attach retained: no namespace for tenant %q", in.TenantID)
 	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := a.Client.Get(ctx, client.ObjectKey{
+		Namespace: rec.PVCNamespace, Name: rec.PVCName,
+	}, pvc); err != nil {
+		return nil, fmt.Errorf("attach retained: get pvc %s/%s: %w", rec.PVCNamespace, rec.PVCName, err)
+	}
+	if string(pvc.UID) != rec.PVCUID {
+		return nil, fmt.Errorf("attach retained: pvc %s/%s UID %s != recorded %s",
+			rec.PVCNamespace, rec.PVCName, pvc.UID, rec.PVCUID)
+	}
+	return &retainedClaim{rec: rec, ns: ns, settled: settled}, nil
+}
 
-	// Stamp the mount reference on the consuming Workspace CR so the
-	// backend mounts the retained volume by name.
+// applyAttach runs after the consuming CR exists (already carrying the claim
+// reference): it retargets the retained PVC's consumer labels to the CR's UID
+// and settles the record. The UID check was done by verifyClaim.
+func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent, claim *retainedClaim) error {
+	rec := claim.rec
+
+	// The CR normally already carries the claim reference from its create.
+	// A CR left behind by a delivery that predates single-write creation
+	// (same request, no stamp) is repaired here so a replay still converges;
+	// for a CR created by this version the patch is a no-op.
 	ws := &workspacev1alpha1.Workspace{}
 	if err := a.Client.Get(ctx, client.ObjectKey{
-		Namespace: ns, Name: WorkspaceCRName(in.WorkspaceUID),
+		Namespace: claim.ns, Name: WorkspaceCRName(in.WorkspaceUID),
 	}, ws); err != nil {
 		return fmt.Errorf("attach retained: get workspace CR: %w", err)
 	}
@@ -100,21 +145,25 @@ func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent) error {
 	if ws.Annotations == nil {
 		ws.Annotations = map[string]string{}
 	}
-	ws.Annotations[linux.AnnotationRetainedPVC] = rec.PVCName
-	ws.Annotations[linux.AnnotationRetainedPVCUID] = rec.PVCUID
-	ws.Annotations[AnnotationRetainedDataRef] = rec.ID
-	if ws.Annotations[linux.AnnotationRetainedPVC] != orig.Annotations[linux.AnnotationRetainedPVC] ||
-		ws.Annotations[linux.AnnotationRetainedPVCUID] != orig.Annotations[linux.AnnotationRetainedPVCUID] ||
-		ws.Annotations[AnnotationRetainedDataRef] != orig.Annotations[AnnotationRetainedDataRef] {
+	changed := false
+	for k, v := range claim.annotations() {
+		if ws.Annotations[k] != v {
+			ws.Annotations[k] = v
+			changed = true
+		}
+	}
+	if changed {
 		if err := a.Client.Patch(ctx, ws, client.MergeFrom(orig)); err != nil {
 			return fmt.Errorf("attach retained: patch workspace CR: %w", err)
 		}
 	}
 
-	// Retarget the PVC's consumer labels — only after the UID check. The
-	// workspace-uid label now names the consuming workspace, so the
-	// consumer's own lifecycle (mount, re-retain, eventual purge) treats
-	// the volume as its home disk. Dataset identity stays the PVC UID.
+	// Retarget the PVC's consumer labels. The workspace-uid label now names
+	// the consuming workspace, so the consumer's own lifecycle (mount,
+	// re-retain, eventual purge) treats the volume as its home disk. Dataset
+	// identity stays the PVC UID. Until this lands the backend refuses the
+	// mount ("not yet claimed") and the operator retries — it never falls
+	// back to another volume.
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := a.Client.Get(ctx, client.ObjectKey{
 		Namespace: rec.PVCNamespace, Name: rec.PVCName,
@@ -141,9 +190,7 @@ func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent) error {
 	// The claim is verified and the volume retargeted: settle the record.
 	// A record already Attached is a redelivery of a completed attach —
 	// the side effects above are idempotent, so this is a no-op success.
-	// (The runtime mount itself converges through the backend's reconcile;
-	// MVP proof of attach = verified claim transfer.)
-	if settled {
+	if claim.settled {
 		return nil
 	}
 	return a.Records.CompleteAttach(ctx, rec.ID, string(in.WorkspaceUID))
