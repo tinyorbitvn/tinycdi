@@ -479,7 +479,7 @@ func TestActivity_204_AndForwards(t *testing.T) {
 	fb := &fakeBroker{}
 	e := newEnv(t, fb)
 	cert := e.pki.issue(t, "gw-1", nil, false)
-	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"},"type":"input"}`
+	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"},"type":"connected","streamEpoch":7}`
 	resp, err := e.client(t, &cert).Post(
 		e.srv.URL+"/internal/v1/broker/leases/lease-abc/activity",
 		"application/json", bytes.NewReader([]byte(body)))
@@ -490,7 +490,7 @@ func TestActivity_204_AndForwards(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("activity status=%d, want 204", resp.StatusCode)
 	}
-	if fb.gotEvent.Type != broker.ActivityInput || fb.gotLeaseID != "lease-abc" ||
+	if fb.gotEvent.Type != broker.ActivityConnected || fb.gotEvent.StreamEpoch != 7 || fb.gotLeaseID != "lease-abc" ||
 		fb.gotFence.FencingVersion != 2 || fb.gotGW.ID != "gw-1" {
 		t.Fatalf("activity args: ev=%+v lease=%q fence=%+v gw=%+v",
 			fb.gotEvent, fb.gotLeaseID, fb.gotFence, fb.gotGW)

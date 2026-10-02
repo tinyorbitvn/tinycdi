@@ -16,6 +16,7 @@
         "startedAt",
         "endedAt",
         "durationSeconds",
+        "requestedDurationSeconds",
         "sessionsRequested",
         "inputIntervalSeconds",
         "pollIntervalSeconds"
@@ -30,7 +31,21 @@
         "template": { "type": "string", "description": "Template id or name used for workspaces." },
         "startedAt": { "type": "string", "format": "date-time" },
         "endedAt": { "type": "string", "format": "date-time" },
-        "durationSeconds": { "type": "number", "minimum": 0 },
+        "durationSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-clock length of the whole run, login and workspace creation included."
+        },
+        "soakStartedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the soak clock started: the last session's first connected observation. Absent when the soak never started."
+        },
+        "requestedDurationSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The soak duration that was asked for, counted from soakStartedAt; a run that ends sooner is truncated and fails."
+        },
         "sessionsRequested": { "type": "integer", "minimum": 0 },
         "inputIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 },
         "pollIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 }
@@ -74,7 +89,7 @@
           "reconnectMs": {
             "type": ["number", "null"],
             "minimum": 0,
-            "description": "Mid-run reload to first connected observation; null if not reloaded or never reconnected."
+            "description": "Mid-run reload: first non-connected observation to the next connected one; null if not reloaded, the reload never showed a non-connected state, or the session never reconnected."
           },
           "longestGapMs": {
             "type": "number",

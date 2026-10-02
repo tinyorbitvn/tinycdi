@@ -6,7 +6,7 @@
 //	POST /internal/v1/broker/leases/{id}/renew   {"fence": {...}}       -> 200 Lease | 409 | 410
 //	GET  /internal/v1/broker/leases/{id}/target                       -> 200 Target | 404/409/410
 //	POST /internal/v1/broker/leases/{id}/revoke                       -> 204
-//	POST /internal/v1/broker/leases/{id}/activity {"fence":{...},"type":"input|connected|disconnect"} -> 204 | 400/403/409/410
+//	POST /internal/v1/broker/leases/{id}/activity {"fence":{...},"type":"input|connected|disconnect","streamEpoch":N} -> 204 | 400/403/409/410
 //
 // Identity is the mTLS client certificate (CN = gateway ID); the client only
 // loads cert/key/CA from files and never logs credential material (Target
@@ -381,7 +381,8 @@ func (c *Client) ReportActivity(ctx context.Context, _ broker.GatewayIdentity, l
 	return c.do(ctx, "activity", http.MethodPost,
 		leasesPath+url.PathEscape(leaseID)+"/activity",
 		struct {
-			Fence fenceJSON                `json:"fence"`
-			Type  broker.ActivityEventType `json:"type"`
-		}{Fence: fenceOf(fence), Type: ev.Type}, nil)
+			Fence       fenceJSON                `json:"fence"`
+			Type        broker.ActivityEventType `json:"type"`
+			StreamEpoch uint64                   `json:"streamEpoch,omitempty"`
+		}{Fence: fenceOf(fence), Type: ev.Type, StreamEpoch: ev.StreamEpoch}, nil)
 }

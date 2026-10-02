@@ -624,7 +624,14 @@ type replica struct {
 
 func (f *restartFixture) startReplica(t *testing.T, name string) *replica {
 	t.Helper()
-	cfg, err := backend.ParseFlags(f.flags(name), func(string) string { return "" })
+	return f.startReplicaWith(t, name)
+}
+
+// startReplicaWith is startReplica with extra flags appended after the
+// shared set (the last occurrence of a flag wins).
+func (f *restartFixture) startReplicaWith(t *testing.T, name string, extra ...string) *replica {
+	t.Helper()
+	cfg, err := backend.ParseFlags(append(f.flags(name), extra...), func(string) string { return "" })
 	if err != nil {
 		t.Fatalf("ParseFlags(%s): %v", name, err)
 	}
@@ -1212,8 +1219,17 @@ func TestRestart_CertRotationKeepsStreams(t *testing.T) {
 // TestRestart_HardKillExpiresLeaseCleanly: when a replica vanishes without
 // draining — no lease renewals, no disconnect report reaches the broker —
 // the lease expires at its TTL and the next session lookup lazily closes
-// stream accounting: open_streams returns to 0.
+// stream accounting: open_streams returns to 0. The second case is the
+// other hard-kill outcome: the session reconnects on another replica
+// BEFORE the TTL, so accounting must follow the new stream's epoch.
 func TestRestart_HardKillExpiresLeaseCleanly(t *testing.T) {
+	t.Run("expiry", hardKillExpiry)
+	t.Run("reconnect_within_ttl", hardKillReconnectWithinTTL)
+}
+
+// hardKillExpiry: the lease expires un-renewed and the lazy expiry closes
+// the stream accounting.
+func hardKillExpiry(t *testing.T) {
 	f := newRestartFixture(t)
 	a := f.startReplica(t, "a")
 	defer a.cleanup(t)
@@ -1258,6 +1274,44 @@ func TestRestart_HardKillExpiresLeaseCleanly(t *testing.T) {
 
 	unsever()
 	a.stop(t)
+}
+
+// hardKillReconnectWithinTTL: replica A goes silent with its stream open — it
+// renews and reports nothing for the rest of the test (the observable
+// equivalent of a SIGKILLed process, without the reconnect races of cutting
+// its database connections). The same cookie then opens a stream on replica
+// B inside the lease TTL. B's ClaimStream fences A's dead stream, so
+// open_streams follows the CURRENT stream: when B's stream closes it returns
+// to 0 and the disconnect grace window starts — it must never stay at 1 for
+// a stream that no longer exists.
+func hardKillReconnectWithinTTL(t *testing.T) {
+	f := newRestartFixture(t)
+	a := f.startReplicaWith(t, "a", "-renew-interval", "1h", "-revoke-deadline", "2h")
+	defer a.cleanup(t)
+	b := f.startReplica(t, "b")
+	defer b.cleanup(t)
+
+	sess, csrf := f.portalLogin(t, a, a)
+	cookie := f.launch(t, a, f.issueTicket(t, a, sess, csrf))
+	streamA := f.wsOpen(t, a, cookie)
+	defer streamA.Body.Close()
+	eventually(t, "open_streams = 1 for A's stream", 10*time.Second, func() bool {
+		return f.openStreams(t) == 1
+	})
+
+	streamB := f.wsOpen(t, b, cookie)
+	eventually(t, "B's stream accounted (open_streams = 1)", 10*time.Second, func() bool {
+		return f.openStreams(t) == 1
+	})
+	streamB.Body.Close()
+
+	eventually(t, "open_streams = 0 and the disconnect window armed after B's stream closed", 20*time.Second, func() bool {
+		var since *time.Time
+		err := f.db.Pool().QueryRow(context.Background(),
+			`SELECT disconnected_since FROM workspace_activity
+			 WHERE workspace_id = $1 AND runtime_generation = 1`, f.wsUID).Scan(&since)
+		return err == nil && since != nil && f.openStreams(t) == 0
+	})
 }
 
 // lockLeaseRow holds FOR UPDATE on the lease row inside a fixture

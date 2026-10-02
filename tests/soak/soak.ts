@@ -58,7 +58,7 @@ const MAX_AUTO_RELAUNCH = 2; // per 5 minutes, mirrors web/src/session/useConnec
 
 // ---- configuration ----
 
-interface Options {
+export interface Options {
   dryRun: boolean;
   portalUrl: string | undefined;
   sessions: number;
@@ -109,7 +109,21 @@ Flags:
   --verbose`;
 }
 
-function parseArgs(argv: string[]): Options {
+function nonNegativeNumber(flag: string, raw: string): number {
+  const n = raw.trim() === "" ? NaN : Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`${flag} must be a non-negative number (got "${raw}")`);
+  }
+  return n;
+}
+
+function nonNegativeInteger(flag: string, raw: string): number {
+  const n = nonNegativeNumber(flag, raw);
+  if (!Number.isInteger(n)) throw new Error(`${flag} must be a non-negative integer (got "${raw}")`);
+  return n;
+}
+
+export function parseArgs(argv: string[]): Options {
   const o: Options = {
     dryRun: false,
     portalUrl: env("SOAK_PORTAL_URL"),
@@ -169,19 +183,19 @@ function parseArgs(argv: string[]): Options {
         o.reportPath = next();
         break;
       case "--connect-p95-ms":
-        o.thresholds.connectP95Ms = Number(next());
+        o.thresholds.connectP95Ms = nonNegativeNumber(a, next());
         break;
       case "--reconnect-p95-ms":
-        o.thresholds.reconnectP95Ms = Number(next());
+        o.thresholds.reconnectP95Ms = nonNegativeNumber(a, next());
         break;
       case "--max-gap-ms":
-        o.thresholds.maxGapMs = Number(next());
+        o.thresholds.maxGapMs = nonNegativeNumber(a, next());
         break;
       case "--max-manual-actions":
-        o.thresholds.maxManualActions = Number(next());
+        o.thresholds.maxManualActions = nonNegativeInteger(a, next());
         break;
       case "--max-dropped":
-        o.thresholds.maxDroppedSessions = Number(next());
+        o.thresholds.maxDroppedSessions = nonNegativeInteger(a, next());
         break;
       case "--verbose":
         o.verbose = true;
@@ -195,7 +209,7 @@ function parseArgs(argv: string[]): Options {
     }
   }
   if (!Number.isInteger(o.sessions) || o.sessions < 1) {
-    throw new Error("--sessions must be a positive integer");
+    throw new Error("--sessions (or SOAK_SESSIONS) must be a positive integer");
   }
   if (o.portalUrl) o.portalUrl = o.portalUrl.replace(/\/+$/, "");
   return o;
@@ -207,9 +221,51 @@ function stamp(msg: string): void {
   console.log(`${new Date().toISOString()} ${msg}`);
 }
 
+// ---- small testable helpers ----
+
+/** Candidate selectors for the OIDC login form; env overrides come first. */
+export function loginSelectors(e: Record<string, string | undefined>): {
+  user: string[];
+  password: string[];
+  submit: string;
+} {
+  const get = (name: string) => (e[name] === undefined || e[name] === "" ? undefined : e[name]);
+  return {
+    user: [
+      get("SOAK_USER_SELECTOR"),
+      'input[name="username"]',
+      'input[name="login"]',
+      'input[name="email"]',
+      'input[type="email"]',
+      "input#username",
+      'input[autocomplete="username"]',
+    ].filter((x): x is string => x !== undefined),
+    password: [get("SOAK_PASSWORD_SELECTOR"), 'input[type="password"]'].filter(
+      (x): x is string => x !== undefined,
+    ),
+    submit: get("SOAK_SUBMIT_SELECTOR") ?? 'button[type="submit"]',
+  };
+}
+
+/**
+ * Playwright installs its own SIGINT/SIGTERM/SIGHUP handlers that close the
+ * browser and exit before ours can delete the workspaces and write the
+ * report; turn them off so main()'s handlers own the shutdown.
+ */
+export function chromiumLaunchOptions(headless: boolean) {
+  return { headless, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false };
+}
+
+/** True when the session view is asking the user to take the session over. */
+export async function takeoverDialogVisible(page: {
+  getByText(text: string): { count(): Promise<number> };
+}): Promise<boolean> {
+  return (await page.getByText("Take over session").count()) > 0;
+}
+
 // ---- portal API client (shared by both drivers) ----
 
-class PortalApi {
+export class PortalApi {
   ctx: APIRequestContext;
   portal: string;
   constructor(ctx: APIRequestContext, portal: string) {
@@ -294,15 +350,20 @@ class PortalApi {
 
 // ---- driver interface ----
 
-interface SessionProbe {
+export interface SessionProbe {
   state: Observation["state"];
   source: "api" | "probe";
 }
 
-interface Driver {
+export interface Driver {
   login(): Promise<void>;
   openSession(id: string): Promise<void>;
-  reloadSession(id: string): Promise<void>;
+  /**
+   * Reload the session page. After FX-R3c the reload resumes without a new
+   * ticket; takeoverPrompted reports that the portal asked the user to take
+   * the session over instead (a human would have had to click).
+   */
+  reloadSession(id: string): Promise<{ takeoverPrompted: boolean }>;
   sendInput(id: string): Promise<void>;
   probe(id: string): Promise<SessionProbe>;
   closeSession(id: string): Promise<void>;
@@ -315,7 +376,7 @@ interface Driver {
  * to probing the session origin's /desktop page (200 = connected). Input is
  * synthetic: the mock has no input channel, so ticks are counted only.
  */
-class ApiDriver implements Driver {
+export class ApiDriver implements Driver {
   ctx: APIRequestContext;
   portal: string;
   api: PortalApi;
@@ -349,12 +410,12 @@ class ApiDriver implements Driver {
     if (!r.ok()) throw new Error(`control ready ${id} -> ${r.status()}`);
   }
 
-  async openSession(id: string): Promise<void> {
+  async openSession(id: string, allowTakeover = true): Promise<void> {
     let ticket: LaunchTicket;
     try {
       ticket = await this.api.createConnection(id, false);
     } catch (e) {
-      if ((e as Error & { status?: number }).status === 409) {
+      if (allowTakeover && (e as Error & { status?: number }).status === 409) {
         ticket = await this.api.createConnection(id, true); // takeover relaunch
       } else {
         throw e;
@@ -389,15 +450,23 @@ class ApiDriver implements Driver {
     if (!landed.ok()) throw new Error(`desktop ${id} -> ${landed.status()}`);
   }
 
-  async reloadSession(id: string): Promise<void> {
+  async reloadSession(id: string): Promise<{ takeoverPrompted: boolean }> {
     const page = this.sessionPage.get(id);
     if (!page) throw new Error(`reload before launch: ${id}`);
     const r = await this.ctx.get(`${page.origin}${page.path}`, {
       headers: { cookie: page.cookie },
     });
     if (r.status() === 401 || r.status() === 403) {
-      await this.openSession(id); // session cookie lost: automatic re-launch
+      // Session cookie lost: re-launch, but never take the session over — a
+      // 409 here is the request-level equivalent of the take-over dialog.
+      try {
+        await this.openSession(id, false);
+      } catch (e) {
+        if ((e as Error & { status?: number }).status === 409) return { takeoverPrompted: true };
+        throw e;
+      }
     }
+    return { takeoverPrompted: false };
   }
 
   sendInput(_id: string): Promise<void> {
@@ -440,7 +509,7 @@ class ApiDriver implements Driver {
  * per session showing the in-portal session view (/workspaces/{id}/session).
  * Input is real mouse movement and key presses into the session frame.
  */
-class BrowserDriver implements Driver {
+export class BrowserDriver implements Driver {
   context: BrowserContext;
   portal: string;
   api: PortalApi;
@@ -450,6 +519,21 @@ class BrowserDriver implements Driver {
     this.context = context;
     this.portal = portal;
     this.api = new PortalApi(context.request, portal);
+  }
+
+  /** First visible locator among the candidates, waiting up to timeoutMs. */
+  private async firstMatch(page: Page, selectors: string[], timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      for (const selector of selectors) {
+        const loc = page.locator(selector).first();
+        if ((await loc.count()) > 0 && (await loc.isVisible())) return loc;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`no OIDC password field matched: ${selectors.join(", ")}`);
+      }
+      await sleep(250);
+    }
   }
 
   private async fillFirst(page: Page, selectors: string[], value: string): Promise<void> {
@@ -467,29 +551,16 @@ class BrowserDriver implements Driver {
     const user = env("SOAK_USER");
     const password = env("SOAK_PASSWORD");
     if (!user || !password) throw new Error("SOAK_USER and SOAK_PASSWORD are required");
+    const sel = loginSelectors(process.env);
     const page = await this.context.newPage();
     try {
       await page.goto(this.portal, { waitUntil: "domcontentloaded" });
       // The portal bounces to the IdP; wait for its password field.
-      const pw = page.locator('input[type="password"]').first();
+      const pw = await this.firstMatch(page, sel.password, 30_000);
       await pw.waitFor({ state: "visible", timeout: 30_000 });
-      await this.fillFirst(
-        page,
-        [
-          env("SOAK_USER_SELECTOR") ?? "",
-          'input[name="username"]',
-          'input[name="login"]',
-          'input[name="email"]',
-          'input[type="email"]',
-          'input#username',
-          'input[autocomplete="username"]',
-        ].filter((s) => s !== ""),
-        user,
-      );
+      await this.fillFirst(page, sel.user, user);
       await pw.fill(password);
-      const submit = page
-        .locator(env("SOAK_SUBMIT_SELECTOR") ?? 'button[type="submit"]')
-        .first();
+      const submit = page.locator(sel.submit).first();
       if ((await submit.count()) > 0) await submit.click();
       else await pw.press("Enter");
       await page.waitForURL(`${this.portal}/**`, { timeout: 60_000 });
@@ -501,6 +572,10 @@ class BrowserDriver implements Driver {
   }
 
   async openSession(id: string): Promise<void> {
+    // A relaunch replaces the session's tab: close the stale one first or
+    // every automatic relaunch leaks a tab (and a live frame) for the run.
+    await this.pages.get(id)?.close();
+    this.pages.delete(id);
     const page = await this.context.newPage();
     this.pages.set(id, page);
     await page.goto(`${this.portal}/workspaces/${id}/session`, {
@@ -514,10 +589,17 @@ class BrowserDriver implements Driver {
     }
   }
 
-  async reloadSession(id: string): Promise<void> {
+  async reloadSession(id: string): Promise<{ takeoverPrompted: boolean }> {
     const page = this.pages.get(id);
     if (!page) throw new Error(`reload before launch: ${id}`);
     await page.reload({ waitUntil: "domcontentloaded" });
+    // The SPA renders the dialog after its connection request answers; give
+    // it a few seconds to appear before declaring the reload seamless.
+    for (let waited = 0; waited < 3_000; waited += 250) {
+      if (await takeoverDialogVisible(page)) return { takeoverPrompted: true };
+      await sleep(250);
+    }
+    return { takeoverPrompted: await takeoverDialogVisible(page) };
   }
 
   async sendInput(id: string): Promise<void> {
@@ -607,12 +689,170 @@ async function spawnMock(): Promise<{ child: ChildProcess; portal: string }> {
 
 // ---- orchestration ----
 
-interface SessionCtx extends SessionResult {
+export interface SessionCtx extends SessionResult {
   id: string;
   relaunches: number;
   recentRelaunches: number[];
   lastInputAt: number;
   lastConnectedAt: number | null;
+  /** When the latest automatic relaunch was issued; starts a fresh connect budget. */
+  relaunchedAt: number | null;
+}
+
+export function newSession(id: string, name: string): SessionCtx {
+  return {
+    id,
+    workspaceId: id,
+    workspaceName: name,
+    observations: [],
+    launchedAt: null,
+    reloadedAt: null,
+    manualActions: 0,
+    inputEvents: 0,
+    dropped: false,
+    runEndAt: 0,
+    relaunches: 0,
+    recentRelaunches: [],
+    lastInputAt: 0,
+    lastConnectedAt: null,
+    relaunchedAt: null,
+  };
+}
+
+export interface DriveOptions {
+  durationMs: number;
+  inputIntervalMs: number;
+  pollIntervalMs: number;
+  connectTimeoutMs: number;
+  verbose: boolean;
+}
+
+export interface DriveOutcome {
+  /** When every session had first connected (or been given up on); null if never. */
+  soakStartedAt: number | null;
+  /** The soak ran for its full duration (not stopped early). */
+  completed: boolean;
+  /** Harness-level assertion failures to add to the report. */
+  failures: string[];
+}
+
+/**
+ * Open every session, supervise it, run the soak clock and the mid-run
+ * reload. Pure orchestration over a Driver so tests can script the driver.
+ *
+ * Each session's poller starts right after its own open, so connectMs is
+ * per session and not inflated by the sessions opened after it. The soak
+ * clock starts when the last session first connects — workspace creation and
+ * readiness do not eat into the requested duration.
+ *
+ * Reconnect supervision: a session that never connects, or stays
+ * non-connected longer than the connect budget, is re-launched automatically,
+ * at most MAX_AUTO_RELAUNCH per 5 minutes; beyond that it counts as dropped
+ * plus one manual action. Every relaunch starts a fresh connect budget.
+ */
+export async function driveSessions(
+  opts: DriveOptions,
+  sessions: SessionCtx[],
+  driver: Driver,
+  shouldStop: () => boolean,
+): Promise<DriveOutcome> {
+  const failures: string[] = [];
+  const stopPoll = { v: false };
+  const pollers: Promise<void>[] = [];
+
+  const watch = async (s: SessionCtx): Promise<void> => {
+    while (!stopPoll.v) {
+      const t0 = Date.now();
+      try {
+        const p = await driver.probe(s.id);
+        const at = Date.now();
+        s.observations.push({ at, state: p.state, source: p.source });
+        if (p.state === "connected") s.lastConnectedAt = at;
+      } catch {
+        s.observations.push({ at: Date.now(), state: "error", source: "api" });
+      }
+      const now = Date.now();
+      // The connect budget runs from the latest of: the launch, the last
+      // time the session was connected, the last automatic relaunch.
+      const reference = Math.max(s.launchedAt ?? t0, s.lastConnectedAt ?? 0, s.relaunchedAt ?? 0);
+      if (now - reference > opts.connectTimeoutMs) {
+        s.recentRelaunches = s.recentRelaunches.filter((t) => now - t < 5 * 60_000);
+        if (s.recentRelaunches.length < MAX_AUTO_RELAUNCH) {
+          s.recentRelaunches.push(now);
+          s.relaunches++;
+          s.relaunchedAt = now;
+          try {
+            await driver.openSession(s.id);
+          } catch (e) {
+            console.error(`relaunch ${s.id}: ${(e as Error).message}`);
+          }
+        } else if (!s.dropped) {
+          s.dropped = true;
+          s.manualActions++;
+          console.error(`${s.id} dropped after ${MAX_AUTO_RELAUNCH} auto-relaunches`);
+        }
+      }
+      await sleep(Math.max(10, opts.pollIntervalMs - (Date.now() - t0)));
+    }
+  };
+
+  try {
+    for (const s of sessions) {
+      if (shouldStop()) break;
+      s.launchedAt = Date.now();
+      await driver.openSession(s.id);
+      pollers.push(watch(s));
+    }
+
+    // Soak clock: every session connected at least once (or given up on).
+    while (
+      !shouldStop() &&
+      !sessions.every((s) => s.lastConnectedAt !== null || s.dropped)
+    ) {
+      await sleep(Math.min(100, opts.pollIntervalMs));
+    }
+    if (shouldStop()) return { soakStartedAt: null, completed: false, failures };
+    const soakStartedAt = Date.now();
+    const deadline = soakStartedAt + opts.durationMs;
+    const reloadAt = soakStartedAt + opts.durationMs / 2;
+    let reloaded = false;
+
+    while (Date.now() < deadline && !shouldStop()) {
+      if (!reloaded && Date.now() >= reloadAt) {
+        reloaded = true;
+        stamp("mid-run reload of every session");
+        for (const s of sessions) {
+          s.reloadedAt = Date.now();
+          try {
+            const r = await driver.reloadSession(s.id);
+            if (r.takeoverPrompted) {
+              // FX-R3c: a reload resumes without a ticket. A take-over prompt
+              // means a human would have had to click: always a failure.
+              s.manualActions++;
+              failures.push(`take-over prompt after the mid-run reload of ${s.id}`);
+            }
+          } catch (e) {
+            console.error(`reload ${s.id}: ${(e as Error).message}`);
+          }
+        }
+      }
+      for (const s of sessions) {
+        if (Date.now() - s.lastInputAt < opts.inputIntervalMs) continue;
+        s.lastInputAt = Date.now();
+        try {
+          await driver.sendInput(s.id);
+          s.inputEvents++;
+        } catch (e) {
+          if (opts.verbose) console.error(`input ${s.id}: ${(e as Error).message}`);
+        }
+      }
+      await sleep(Math.min(1_000, opts.inputIntervalMs));
+    }
+    return { soakStartedAt, completed: Date.now() >= deadline, failures };
+  } finally {
+    stopPoll.v = true;
+    await Promise.allSettled(pollers);
+  }
 }
 
 async function waitForReady(api: PortalApi, id: string, timeoutMs: number): Promise<void> {
@@ -639,6 +879,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
   const sessions: SessionCtx[] = [];
   const startedAt = Date.now();
   let runError: Error | undefined;
+  let outcome: DriveOutcome | undefined;
 
   // The API client must share the browser context's cookie jar in real
   // mode, so it is created per driver below.
@@ -652,7 +893,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     api = new PortalApi(ownCtx, portalUrl);
     driver = new ApiDriver(ownCtx, portalUrl, true);
   } else {
-    const browser = await chromium.launch({ headless: env("SOAK_HEADFUL") !== "1" });
+    const browser = await chromium.launch(chromiumLaunchOptions(env("SOAK_HEADFUL") !== "1"));
     const context = await browser.newContext({
       ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
     });
@@ -690,25 +931,10 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     if (!tpl) throw new Error("no templates listed");
 
     stamp(`creating ${opts.sessions} workspaces on template ${tpl}`);
-    for (let i = 0; i < opts.sessions; i++) {
+    for (let i = 0; i < opts.sessions && !shouldStop(); i++) {
       const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
       const id = await api.createWorkspace(name, tpl);
-      sessions.push({
-        id,
-        workspaceId: id,
-        workspaceName: name,
-        observations: [],
-        launchedAt: null,
-        reloadedAt: null,
-        manualActions: 0,
-        inputEvents: 0,
-        dropped: false,
-        runEndAt: 0,
-        relaunches: 0,
-        recentRelaunches: [],
-        lastInputAt: 0,
-        lastConnectedAt: null,
-      });
+      sessions.push(newSession(id, name));
       if (driver instanceof ApiDriver) await driver.forceReady(id);
     }
     if (!(driver instanceof ApiDriver)) {
@@ -716,82 +942,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     }
 
     stamp("opening sessions");
-    for (const s of sessions) {
-      s.launchedAt = Date.now();
-      await driver.openSession(s.id);
-    }
-
-    const deadline = startedAt + opts.durationMs;
-    const reloadAt = startedAt + opts.durationMs / 2;
-    let reloaded = false;
-    const stopPoll = { v: false };
-
-    // One poll loop per session; one shared input loop. Reconnect
-    // supervision: a session that never connects, or stays non-connected
-    // longer than the connect budget, gets an automatic re-launch bounded
-    // by MAX_AUTO_RELAUNCH per 5 minutes; beyond that it counts as dropped
-    // plus one manual action (a human would have had to click).
-    const pollers = sessions.map(async (s) => {
-      while (!stopPoll.v) {
-        const t0 = Date.now();
-        try {
-          const p = await driver.probe(s.id);
-          s.observations.push({ at: Date.now(), state: p.state, source: p.source });
-          if (p.state === "connected") s.lastConnectedAt = Date.now();
-        } catch {
-          s.observations.push({ at: Date.now(), state: "error", source: "api" });
-        }
-        const reference = s.lastConnectedAt ?? s.launchedAt ?? t0;
-        if (Date.now() - reference > opts.connectTimeoutMs) {
-          s.recentRelaunches = s.recentRelaunches.filter((t) => Date.now() - t < 5 * 60_000);
-          if (s.recentRelaunches.length < MAX_AUTO_RELAUNCH) {
-            s.recentRelaunches.push(Date.now());
-            s.relaunches++;
-            s.launchedAt = s.launchedAt ?? Date.now();
-            try {
-              await driver.openSession(s.id);
-            } catch (e) {
-              console.error(`relaunch ${s.id}: ${(e as Error).message}`);
-            }
-            if (s.lastConnectedAt === null) s.launchedAt = Date.now();
-          } else if (!s.dropped) {
-            s.dropped = true;
-            s.manualActions++;
-            console.error(`${s.id} dropped after ${MAX_AUTO_RELAUNCH} auto-relaunches`);
-          }
-        }
-        const waited = Date.now() - t0;
-        await sleep(Math.max(200, opts.pollIntervalMs - waited));
-      }
-    });
-
-    while (Date.now() < deadline && !shouldStop()) {
-      if (!reloaded && Date.now() >= reloadAt) {
-        reloaded = true;
-        stamp("mid-run reload of every session");
-        for (const s of sessions) {
-          s.reloadedAt = Date.now();
-          try {
-            await driver.reloadSession(s.id);
-          } catch (e) {
-            console.error(`reload ${s.id}: ${(e as Error).message}`);
-          }
-        }
-      }
-      for (const s of sessions) {
-        if (Date.now() - s.lastInputAt < opts.inputIntervalMs) continue;
-        s.lastInputAt = Date.now();
-        try {
-          await driver.sendInput(s.id);
-          s.inputEvents++;
-        } catch (e) {
-          if (opts.verbose) console.error(`input ${s.id}: ${(e as Error).message}`);
-        }
-      }
-      await sleep(Math.min(1_000, opts.inputIntervalMs));
-    }
-    stopPoll.v = true;
-    await Promise.allSettled(pollers);
+    outcome = await driveSessions(opts, sessions, driver, shouldStop);
   } catch (e) {
     runError = e as Error;
     console.error(`run aborted: ${runError.message}`);
@@ -807,13 +958,18 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
         ...(opts.template !== undefined ? { template: opts.template } : {}),
         startedAt,
         endedAt,
+        soakStartedAt: outcome?.soakStartedAt ?? null,
+        requestedDurationMs: opts.durationMs,
         sessionsRequested: opts.sessions,
         inputIntervalSeconds: opts.inputIntervalMs / 1000,
         pollIntervalSeconds: opts.pollIntervalMs / 1000,
       },
       opts.thresholds,
       sessions,
-      runError ? [`run aborted: ${runError.message}`] : [],
+      [
+        ...(outcome?.failures ?? []),
+        ...(runError ? [`run aborted: ${runError.message}`] : []),
+      ],
     );
     fs.writeFileSync(opts.reportPath, JSON.stringify(report, null, 2) + "\n");
     const summary = report.summary as { pass: boolean; failures: string[] };
@@ -841,12 +997,15 @@ async function main(): Promise<number> {
   };
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
+  process.on("SIGHUP", onSig);
   return run(opts, () => stopped);
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((e) => {
-    console.error(`soak failed: ${(e as Error).message}`);
-    process.exit(1);
-  });
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(`soak failed: ${(e as Error).message}`);
+      process.exit(1);
+    });
+}
