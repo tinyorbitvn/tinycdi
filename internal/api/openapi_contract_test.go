@@ -140,10 +140,46 @@ func TestOpenAPIContract_QuotaView(t *testing.T) {
 	users := []userUsage{{Subject: "user-a", DisplayName: "User A", Usage: usage}}
 	t.Run("with limits", func(t *testing.T) {
 		limits := quotaAmounts{RunningWorkspaces: 4, CPUMillicores: 16000, MemoryMib: 32768, StorageGib: 200}
-		requireValid(t, "QuotaView", quotaView{Tenant: "acme", Limits: &limits, Usage: usage, Users: users})
+		requireValid(t, "QuotaView", quotaView{Tenant: "acme", Configured: true, Limits: &limits, Usage: usage, Users: users})
 	})
 	t.Run("without limits", func(t *testing.T) {
 		requireValid(t, "QuotaView", quotaView{Tenant: "acme", Usage: usage, Users: users})
+	})
+	t.Run("configured is required", func(t *testing.T) {
+		raw := `{"tenant":"acme","usage":{"workspaces":0,"runningWorkspaces":0,"cpuMillicores":0,"memoryMib":0,"storageGib":0},"users":[]}`
+		inst, err := jsonschema.UnmarshalJSON(bytes.NewReader([]byte(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := specSchema(t, "QuotaView").Validate(inst); err == nil {
+			t.Fatal("QuotaView without configured validates; the field must be required so a client never reads 'absent' as 'unlimited'")
+		}
+	})
+}
+
+// TestOpenAPIContract_ConnectionStatus (R9a): leaseRef and streamEpoch are in
+// the published contract; leaseRef is the 16-hex lease reference, absent
+// without an active lease.
+func TestOpenAPIContract_ConnectionStatus(t *testing.T) {
+	renewed := time.Date(2026, 10, 2, 5, 0, 0, 0, time.UTC)
+	t.Run("active lease", func(t *testing.T) {
+		requireValid(t, "ConnectionStatus", ConnectionStatus{
+			State: "connected", LeaseActive: true, LastRenewedAt: &renewed,
+			LeaseRef: "0123456789abcdef", StreamEpoch: 3,
+		})
+	})
+	t.Run("no lease", func(t *testing.T) {
+		requireValid(t, "ConnectionStatus", ConnectionStatus{State: "none"})
+	})
+	t.Run("leaseRef is 16 hex chars", func(t *testing.T) {
+		inst, err := jsonschema.UnmarshalJSON(bytes.NewReader([]byte(
+			`{"state":"connected","leaseActive":true,"leaseRef":"not-hex","streamEpoch":1}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := specSchema(t, "ConnectionStatus").Validate(inst); err == nil {
+			t.Fatal("a leaseRef that is not 16 hex chars validates")
+		}
 	})
 }
 

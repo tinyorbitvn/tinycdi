@@ -625,13 +625,21 @@ export interface components {
             usage: components["schemas"]["QuotaAmounts"];
         };
         /**
-         * @description Tenant quota snapshot. `limits` is absent when the tenant has no
-         *     quota row (new workspaces are then refused). `userLimits` is absent
+         * @description Tenant quota snapshot. `configured` is false when the tenant has no
+         *     quota row: new workspaces are then refused, so the absence of
+         *     `limits` must never be read as "unlimited". `limits` is absent in that
+         *     state. `userLimits` is absent
          *     in v0.2 — there is no per-user limit store. `users` lists every tenant member for tenant
          *     administrators and only the caller for regular users.
          */
         QuotaView: {
             tenant: string;
+            /**
+             * @description False when the tenant has no quota row. Admission then refuses
+             *     every create, so clients must show "no quota configured", never
+             *     "no limit".
+             */
+            configured: boolean;
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
             userLimits?: components["schemas"]["QuotaAmounts"];
@@ -713,6 +721,21 @@ export interface components {
              * @description Last lease renewal observed by the broker; absent when no live lease exists.
              */
             lastRenewedAt?: string;
+            /**
+             * @description Opaque reference to the active lease (first 16 hex characters of
+             *     the SHA-256 of the lease ID; never the ID itself). It changes when
+             *     the session is taken over, so a tab can tell which lease it is
+             *     looking at. Absent when there is no active lease.
+             */
+            leaseRef?: string;
+            /**
+             * Format: int64
+             * @description The active lease's stream epoch. It advances each time a stream is
+             *     claimed on the lease, so a tab can tell that another stream has
+             *     opened with the same lease (a duplicated tab). 0 when there is no
+             *     active lease.
+             */
+            streamEpoch: number;
         };
         CreateConnectionRequest: {
             /**
