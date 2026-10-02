@@ -5,9 +5,11 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -55,6 +57,10 @@ func (l serviceIntentLog) IntentHistory(ctx context.Context, tenantID, workspace
 // WorkspaceEvent). Messages are fixed catalog strings — raw Kubernetes or
 // operator error text is never forwarded to the portal.
 type WorkspaceEvent struct {
+	// ID is stable across reads: the condition type + reason for observed
+	// conditions, the reason + intent revision for lifecycle steps. Clients
+	// use it as a list key.
+	ID             string     `json:"id"`
 	Type           string     `json:"type"` // Normal | Warning
 	Reason         string     `json:"reason"`
 	Message        string     `json:"message"`
@@ -66,6 +72,9 @@ type WorkspaceEvent struct {
 // WorkspaceEventList is the events response, newest first.
 type WorkspaceEventList struct {
 	Items []WorkspaceEvent `json:"items"`
+	// Stale is true when the observed-state informer cannot prove freshness:
+	// condition events then show last-known state and never claim readiness.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // reasonTokenPattern restricts forwarded reason strings to machine tokens:
@@ -97,6 +106,7 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 	default:
 		return WorkspaceEvent{}, false
 	}
+	ev.ID = fmt.Sprintf("%s.%d", ev.Reason, in.Revision)
 	return ev, true
 }
 
@@ -107,6 +117,7 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 func conditionEvent(c workspaceCondition) WorkspaceEvent {
 	ts := c.LastTransitionTime
 	ev := WorkspaceEvent{
+		ID:             c.Type + "." + curatedReason(c.Reason),
 		Type:           "Normal",
 		Reason:         curatedReason(c.Reason),
 		FirstTimestamp: &ts,
@@ -202,23 +213,44 @@ func (h *WorkspaceHandler) Events(w http.ResponseWriter, r *http.Request) {
 	if err != nil || len(intents) == 0 {
 		ts := rec.CreatedAt
 		out.Items = append(out.Items, WorkspaceEvent{
-			Type: "Normal", Reason: "Created", Message: "The workspace was created.",
+			ID: "Created", Type: "Normal", Reason: "Created", Message: "The workspace was created.",
 			FirstTimestamp: &ts, LastTimestamp: &ts,
 		})
 	}
-	// Observed condition transitions, messages curated server-side.
+	// Observed condition transitions, messages curated server-side. A stale
+	// informer cannot prove any condition is current: the list is flagged
+	// stale and shows the degraded last-known state — ConnectionReady never
+	// True, and no *Ready condition claims readiness.
+	conds := obs.Conditions
+	if !obs.Fresh {
+		out.Stale = true
+		conds = staleConditions(obs)
+	}
 	if obs.Found || obs.Fresh {
-		for _, c := range obs.Conditions {
+		for _, c := range conds {
+			if out.Stale && c.Status == "True" && strings.HasSuffix(c.Type, "Ready") {
+				continue
+			}
 			out.Items = append(out.Items, conditionEvent(c))
 		}
 	}
 	if obs.FailureReason != "" {
-		ts := obs.ObservedAt
-		out.Items = append(out.Items, WorkspaceEvent{
+		// The failure happened when Degraded=True last transitioned, not
+		// when the informer was last read: timestamps stay stable across
+		// reads.
+		ev := WorkspaceEvent{
+			ID:   "Failed." + curatedReason(obs.FailureReason),
 			Type: "Warning", Reason: curatedReason(obs.FailureReason),
-			Message:        "The workspace failed. Stop and start it again; if the failure repeats, contact an administrator.",
-			FirstTimestamp: &ts, LastTimestamp: &ts,
-		})
+			Message: "The workspace failed. Stop and start it again; if the failure repeats, contact an administrator.",
+		}
+		for _, c := range obs.Conditions {
+			if c.Type == "Degraded" && c.Status == "True" && !c.LastTransitionTime.IsZero() {
+				ts := c.LastTransitionTime
+				ev.FirstTimestamp, ev.LastTimestamp = &ts, &ts
+				break
+			}
+		}
+		out.Items = append(out.Items, ev)
 	}
 	sort.SliceStable(out.Items, func(i, j int) bool {
 		var a, b time.Time

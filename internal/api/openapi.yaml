@@ -1085,11 +1085,20 @@ components:
     WorkspaceEvent:
       type: object
       additionalProperties: false
-      required: [type, reason, message]
+      required: [id, type, reason, message]
       description: |
         One curated workspace event. `message` is a fixed catalog string —
         raw Kubernetes or operator error text is never forwarded.
       properties:
+        id:
+          type: string
+          description: |
+            Stable identifier, unique within the list and identical across
+            reads: condition type + reason for observed conditions
+            (`Degraded.BootDeadlineExceeded`), reason + intent revision for
+            lifecycle steps (`StartRequested.4`), `Failed.<reason>` for the
+            synthesized failure event. Usable as a list key.
+          example: StartRequested.4
         type:
           type: string
           enum: [Normal, Warning]
@@ -1121,6 +1130,12 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceEvent"
           description: Events, newest first.
+        stale:
+          type: boolean
+          description: |
+            True when the observed-state informer cannot prove freshness.
+            Condition events then show last-known state and never claim the
+            workspace is ready. Absent (false) otherwise.
 
     QuotaAmounts:
       type: object
