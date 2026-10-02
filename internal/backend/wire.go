@@ -167,7 +167,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants), kc, tenants, retained)
 	disp := provisioning.NewDispatcher(outbox, applier,
 		provisioning.WithPollInterval(250*time.Millisecond))
-	b.bg = append(b.bg, func(ctx context.Context) {
+	b.singletons = append(b.singletons, func(ctx context.Context) {
 		if err := disp.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("dispatcher exited", "err", err)
 		}
@@ -176,7 +176,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// Retained-data purge execution: deletes volumes whose records reached
 	// Purging and completes the records (design §5 — the only platform
 	// component allowed to delete persistent data).
-	b.bg = append(b.bg, func(ctx context.Context) {
+	b.singletons = append(b.singletons, func(ctx context.Context) {
 		if err := provisioning.NewPurgeSweeper(retained, kc, log).Run(ctx); err != nil &&
 			!errors.Is(err, context.Canceled) {
 			log.Error("purge sweeper exited", "err", err)
@@ -190,7 +190,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if cfg.RetainedSyncInterval > 0 {
 		syncer := provisioning.NewRetainedSync(kc, tenants, retained, nil, log)
 		syncer.Poll = cfg.RetainedSyncInterval
-		b.bg = append(b.bg, func(ctx context.Context) {
+		b.singletons = append(b.singletons, func(ctx context.Context) {
 			if err := syncer.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				log.Error("retained sync exited", "err", err)
 			}
@@ -199,7 +199,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	// Idempotency pruning (SEC-24): keys are single-scope and live 24 h per
 	// the contract; without a sweep the table grows without bound.
-	b.bg = append(b.bg, func(ctx context.Context) {
+	b.singletons = append(b.singletons, func(ctx context.Context) {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
@@ -224,7 +224,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// the Workspace CR and its labeled children; ambiguity never frees
 	// quota). Runs once at startup, then every -recovery-interval.
 	recovery := provisioning.NewRecovery(db, provisioning.NewK8sRuntimeObserver(kc, tenants))
-	b.bg = append(b.bg, func(ctx context.Context) {
+	b.singletons = append(b.singletons, func(ctx context.Context) {
 		for {
 			if pending, err := recovery.PendingRecovery(ctx); err != nil {
 				log.Error("recovery pending scan", "err", err)
@@ -285,6 +285,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		if kcache.WaitForCacheSync(ctx) {
 			bindings.MarkSynced()
 			statusView.MarkSynced()
+			b.markCacheSynced()
 		}
 	})
 
@@ -296,9 +297,13 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// against recorded session activity and emit generation-fenced stop
 	// intents through the outbox.
 	expiry := broker.NewExpiryPlanner(brk)
-	b.bg = append(b.bg, func(ctx context.Context) {
+	b.singletons = append(b.singletons, func(ctx context.Context) {
 		expiry.Run(ctx, broker.NewK8sRunningSource(kcache), cfg.ExpiryInterval, log)
 	})
+
+	// The loops registered above are read-modify-write without a claim, so
+	// only the replica holding the Postgres leader lock runs them.
+	b.electSingletons(db, leaderRetryInterval)
 
 	// Internal broker API on its own mTLS listener (ADR 0003): never shares
 	// the public mux. Client certs are verified against the CA bundle; an
@@ -369,6 +374,9 @@ func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, id broke
 	if err != nil {
 		return fmt.Errorf("broker client: %w", err)
 	}
+	// Split mode runs no Workspace informer cache, so there is nothing to
+	// wait for.
+	b.markCacheSynced()
 	// P6: split/test mode has no session directory — sessions live in this
 	// process, exactly as in v0.1.
 	return b.newGateway(cfg, bc, id, metrics, nil)

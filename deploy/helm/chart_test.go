@@ -2781,3 +2781,46 @@ func TestNetworkPolicyEdgeIngressModes(t *testing.T) {
 		t.Errorf("edgeIngress=cilium must render 2 CiliumNetworkPolicies (backend+frontend), got %d", len(cnp))
 	}
 }
+
+// TestBackendProbes (R1c/R1d): readiness is an HTTPS GET of /readyz on the app
+// port (200 only once Run serves and the Workspace cache has synced, 503 while
+// draining) — never a bare TCP check — liveness is /healthz, and the pod's
+// grace period covers the backend's 24 s shared shutdown deadline.
+func TestBackendProbes(t *testing.T) {
+	for _, values := range []string{"minimal-values.yaml", "example-values.yaml"} {
+		dep := deployment(render(t, values), "backend")
+		if dep == nil {
+			t.Fatalf("%s: no backend Deployment rendered", values)
+		}
+		c := firstContainer(dep)
+		for _, probe := range []struct{ field, path string }{
+			{"readinessProbe", "/readyz"},
+			{"livenessProbe", "/healthz"},
+		} {
+			p, _ := c[probe.field].(map[string]any)
+			if p == nil {
+				t.Errorf("%s: backend has no %s", values, probe.field)
+				continue
+			}
+			if _, tcp := p["tcpSocket"]; tcp {
+				t.Errorf("%s: %s must be httpGet, not tcpSocket", values, probe.field)
+			}
+			get, _ := p["httpGet"].(map[string]any)
+			if get == nil {
+				t.Errorf("%s: %s has no httpGet", values, probe.field)
+				continue
+			}
+			if get["path"] != probe.path || get["port"] != "app" || get["scheme"] != "HTTPS" {
+				t.Errorf("%s: %s httpGet = %v, want path %s port app scheme HTTPS", values, probe.field, get, probe.path)
+			}
+		}
+
+		spec, _ := dep["spec"].(map[string]any)
+		tpl, _ := spec["template"].(map[string]any)
+		podSpec, _ := tpl["spec"].(map[string]any)
+		grace, ok := podSpec["terminationGracePeriodSeconds"].(int)
+		if !ok || grace < 30 {
+			t.Errorf("%s: terminationGracePeriodSeconds = %v, want >= 30", values, podSpec["terminationGracePeriodSeconds"])
+		}
+	}
+}
