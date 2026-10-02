@@ -90,6 +90,12 @@ type RetainedDataStore interface {
 	// current transition epoch.
 	ListRetained(ctx context.Context, tenantID, caller, ownerScope, cursor string, limit int) ([]RetainedRecord, string, error)
 
+	// ReadRetained returns one record visible to ownerScope ("" = tenant-wide,
+	// admin only) with a fresh PurgeNonce bound to caller, exactly as a list
+	// row. Unknown ids, foreign tenants and (for non-admins) other owners'
+	// records all fail ErrRetainedNotFound.
+	ReadRetained(ctx context.Context, tenantID, caller, ownerScope, dataID string) (RetainedRecord, error)
+
 	// ImportRetained records a dataset the operator moved into the
 	// inventory (workspace delete with dataPolicy=Retain, or inventory
 	// reconstruction after API DB loss). Idempotent on
@@ -223,6 +229,7 @@ func MountDataRoutes(mux *http.ServeMux, authn *Authenticator, h *DataHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
 	unsafe := func(h http.Handler) http.Handler { return authn.RequireAuth(authn.RequireCSRF(h)) }
 	mux.Handle("GET /v1/data", safe(http.HandlerFunc(h.List)))
+	mux.Handle("GET /v1/data/{dataId}", safe(http.HandlerFunc(h.Get)))
 	mux.Handle("POST /v1/data/{dataId}/attach", unsafe(http.HandlerFunc(h.Attach)))
 	mux.Handle("POST /v1/data/{dataId}/purge", unsafe(http.HandlerFunc(h.Purge)))
 }
@@ -279,6 +286,29 @@ func (h *DataHandler) List(w http.ResponseWriter, r *http.Request) {
 		out.Items = append(out.Items, v)
 	}
 	respondJSON(w, out)
+}
+
+// Get handles GET /v1/data/{dataId}: one record with a fresh purge nonce.
+// Visibility is the list's — the owner, or a tenant-admin of the same
+// tenant; anyone else (and any other tenant) gets a 404.
+func (h *DataHandler) Get(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	dataID := r.PathValue("dataId")
+	if !retainedIDPattern.MatchString(dataID) {
+		writeError(w, r, CodeInvalidRequest, "bad retained data id")
+		return
+	}
+	rec, err := h.data.ReadRetained(r.Context(), p.TenantID, p.Owner(), ownerScope(p), dataID)
+	if err != nil {
+		h.writeDataError(w, r, err)
+		return
+	}
+	v := recordToRetainedView(&rec)
+	v.Owner = resolveOwners(r.Context(), h.directory, p.TenantID, []string{rec.Owner})[rec.Owner]
+	respondJSON(w, v)
 }
 
 // Attach handles POST /v1/data/{dataId}/attach.
