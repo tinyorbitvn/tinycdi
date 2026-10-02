@@ -137,6 +137,19 @@ oidc:
   # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
   # login open to every IdP account — tighten this in production.
   requiredGroups: []
+  # Sign-out also ends the identity provider session (RP-initiated logout)
+  # when the provider's discovery document has end_session_endpoint. Without
+  # it the provider session survives and the next visit signs the user
+  # straight back in. false keeps sign-out local to the portal.
+  # Rendered as --oidc-end-session=<bool>.
+  endSession: true
+  # Where the provider sends the browser after it ended its session
+  # (post_logout_redirect_uri), e.g. https://<portalHost>/signed-out. The URI
+  # must be registered at the provider (Keycloak: client "Valid post logout
+  # redirect URIs"), so it is empty by default; the provider then shows its
+  # own logged-out page. https only. Rendered as
+  # --oidc-post-logout-redirect=<url> when set.
+  postLogoutRedirect: ""
   # backend -> IdP egress. Narrow to the IdP address space when known.
   egressCIDRs: ["0.0.0.0/0"]
   port: 443

@@ -36,6 +36,11 @@ type Issuer struct {
 	Groups   []string
 	// TokenTTL controls the exp claim. Default 1h.
 	TokenTTL time.Duration
+	// EndSessionEndpoint, when set before the Authenticator runs discovery,
+	// is advertised as the discovery document's end_session_endpoint
+	// (RP-initiated logout). Empty omits the field, like a provider
+	// without RP-initiated logout.
+	EndSessionEndpoint string
 
 	mu       sync.Mutex
 	authReqs map[string]*authRequest // code -> request
@@ -111,7 +116,7 @@ func (i *Issuer) MutateTokenClaims(fn func(map[string]any)) {
 }
 
 func (i *Issuer) discovery(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"issuer":                                i.URL(),
 		"authorization_endpoint":                i.URL() + "/authorize",
 		"token_endpoint":                        i.URL() + "/token",
@@ -121,7 +126,11 @@ func (i *Issuer) discovery(w http.ResponseWriter, r *http.Request) {
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"code_challenge_methods_supported":      []string{"S256"},
-	})
+	}
+	if i.EndSessionEndpoint != "" {
+		doc["end_session_endpoint"] = i.EndSessionEndpoint
+	}
+	writeJSON(w, doc)
 }
 
 // authorize validates the request and redirects back with code+state, like a
