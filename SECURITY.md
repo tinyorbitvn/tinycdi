@@ -5,6 +5,22 @@ or operator can expose one user's workspace, credentials or network
 position to another. This file sets out how to report a vulnerability and
 the hardening rules that contributors and operators must follow.
 
+> **TinyCDI v0.2 has not had an independent security review; one is
+> planned before v1.0.** Until then, the mandatory rules and the blocking
+> CI scanners in this file are the bar.
+>
+> **v0.2 architecture note:** v0.2 merges the v0.1 `api`, `portal` and
+> `gateway` Deployments into one `backend` binary plus a static `frontend`
+> server
+> ([ADR 0005](docs/adr/0005-backend-frontend-operator.md)). The broker
+> moves in-process into `backend`; the internal mTLS listener keeps only
+> operator routes; and each workspace is served on its own host
+> `<label>.<sessionDomain>` behind one wildcard edge rule instead of a
+> single shared session origin. Where a rule below still names `api`,
+> `gateway` or `portal`, it binds the same code in its new home. Items
+> marked *(v0.2 design)* describe the ADR 0005 target where the code is
+> still in flight; everything else is enforced today.
+
 ## Supported versions
 
 | Version | Supported |
@@ -29,9 +45,9 @@ draft GitHub Security Advisory that only you and the maintainers can see.
 
 Please include:
 
-- the affected component (`api`, `gateway`, `broker`, `operator`,
-  `portal`, runtime image, Helm chart, CI) and the version, commit or
-  image digest;
+- the affected component (`backend`/`api`/`gateway`, `frontend`/`portal`,
+  `broker`, `operator`, runtime image, Helm chart, CI) and the version,
+  commit or image digest;
 - the trust boundary you crossed (see the threat model below) and the
   attacker position you assumed: unauthenticated, an authenticated user,
   a tenant controlling their own workspace, or a cluster-namespace user;
@@ -59,13 +75,19 @@ access, modify or keep other users' data.
 ## Threat model in one paragraph
 
 Browsers authenticate to the **portal/API** with OIDC (server-side
-session, `__Host-` cookie, synchronizer CSRF token, Origin allowlist). The
-portal mints a one-use, hash-stored, 60 s **launch ticket**, which the
-browser POSTs cross-site to the **session gateway**. The gateway redeems it
-over an internal **mTLS broker API** (ADR 0003). That yields a fenced
-**lease**, renewed every 10 s, and the gateway fails closed within 30 s if
-renewal stops. The gateway then reverse-proxies HTTP/WebSocket traffic to
-the workspace **runtime pod**, injecting per-workspace credentials and
+session, `__Host-` cookie, derived synchronizer CSRF token, Origin
+allowlist). The API mints a one-use, hash-stored, 60 s **launch ticket**
+and returns a `launchUrl` on the workspace's own host
+`<label>.<sessionDomain>`; the portal submits it as a form POST inside a
+sandboxed iframe — same-site under the default `lax` cookie mode,
+cross-site only under `partitioned` *(v0.2 design)*. The **session
+listener** on the backend redeems the ticket against the broker —
+in-process since the merge; the internal **mTLS** listener keeps only
+operator routes (ADR 0003, ADR 0005). That yields a fenced **lease**,
+renewed every 10 s, and the session fails closed within 30 s if renewal
+stops. The session listener binds every request to the lease's workspace
+by host label, then reverse-proxies HTTP/WebSocket traffic to the
+workspace **runtime pod**, injecting per-workspace credentials and
 pinning the per-workspace TLS certificate. The **operator** creates the
 runtime pods, Secrets, Services and NetworkPolicies in managed namespaces.
 Treat every runtime pod as **tenant-controlled**: the user has a shell
@@ -76,6 +98,7 @@ mutually hostile tenants (see `docs/architecture.md` §6).
 Background: [architecture](docs/architecture.md) ·
 [ADR 0003 internal broker API](docs/adr/0003-gateway-broker-internal-api.md) ·
 [ADR 0004 launch origin policy](docs/adr/0004-launch-origin-policy.md) ·
+[ADR 0005 v0.2 components and session hosts](docs/adr/0005-backend-frontend-operator.md) ·
 [vulnerability policy (proposal)](docs/security/vulnerability-policy.md) ·
 [release provenance](docs/security/provenance.md) ·
 [node profiles](deploy/node-profiles/README.md).
@@ -130,8 +153,10 @@ and an update to this file.
 5. Sessions use opaque IDs of at least 256 bits, rotated at login.
    Cookies are `__Host-`, `Secure`, `HttpOnly` and have no `Domain`.
    Idle and absolute expiry are enforced server-side and bound to the
-   session epoch. The database stores only a hash of the session ID
-   (and only a MAC of the CSRF token).
+   session epoch. The database stores only a hash of the session ID and
+   only a MAC of the CSRF token; the token itself is derived —
+   `HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")` — not random and
+   never stored *(v0.2 design)*.
    *Enforced:* `TestSessionFixationPrevented`,
    `TestSessionIdleAndAbsoluteExpiry`, `TestOIDCLoginFlowSucceeds`,
    `TestSessionKeyIsDigest`, `TestCSRFTokenMACIsKeyedBySessionID`,
@@ -146,29 +171,54 @@ and an update to this file.
 **CSRF and Origin**
 
 7. Nothing changes state on `GET`, `HEAD` or `OPTIONS`. A cookie-
-   authenticated mutation needs the synchronizer token, compared in
-   constant time against the server-side copy, and must pass
-   `RequireTrustedOrigin`.
+   authenticated mutation needs the synchronizer token — in v0.2 derived,
+   not stored: recomputed as
+   `HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")` and compared in
+   constant time — and must pass `RequireTrustedOrigin`. The JS-readable
+   `tcdi_csrf` and `tcdi_session_origin` cookies are removed; the SPA
+   reads `csrfToken` and `sessionDomain` from `GET /v1/me` and keeps them
+   in memory, so every portal cookie can carry `__Host-`
+   *(v0.2 design)*.
    *Enforced:* `TestCSRF*`, `TestOriginAllowlist`,
    `TestOriginMultipleHeadersRejected`, `TestCSRFChainForgedOriginRejected`.
-8. On the session origin, only `POST /v1/launch` accepts the
+8. On each workspace session host, only the launch POST accepts the
    portal-origin allowlist (ADR 0004). WebSocket upgrades and every other
-   route require `Origin` to equal the public origin. A rejected launch
-   never consumes the ticket. Because the launch POST is cross-site:
-   - the portal CSP `form-action` lists the session origin;
+   route require `Origin` to equal that workspace host's own origin. A
+   rejected launch never consumes the ticket. The launch form posts into
+   a sandboxed iframe on `<label>.<sessionDomain>`; how far the POST
+   travels depends on the cookie mode *(v0.2 design)*:
+   - `lax` (default): portal host and session domain share one
+     registrable domain, so the POST is same-site and the `__Host-`
+     `SameSite=Lax` session cookie is sent on the iframe navigation;
+   - `partitioned`: cross-site deployments use
+     `SameSite=None; Secure; Partitioned`, which keys the cookie to the
+     portal top-level site.
+
+   In both modes:
+   - the portal CSP `form-action` allows `'self'` and
+     `https://*.<sessionDomain>`;
    - the portal `Referrer-Policy` must keep the `Origin` header (use
      `strict-origin`). With `no-referrer` or `same-origin`, browsers
      send `Origin: null` and every launch is rejected;
-   - the gateway session cookie is `__Host-`, `Secure`, `HttpOnly`,
-     `SameSite=Lax`. A `Strict` cookie is never sent on the redirect
-     that follows the cross-site POST.
+   - the session cookie stays `__Host-`, `Secure`, `HttpOnly`, `Path=/`,
+     host-only on the workspace's own host;
+   - session responses pin `frame-ancestors <portal-origin>` (or `'none'`
+     when no portal origin is configured),
+     `Cross-Origin-Resource-Policy: same-origin` and
+     `Origin-Agent-Cluster: ?1`; the iframe `sandbox` never carries
+     `allow-top-navigation*`, `allow-popups*` or `allow-modals`, and no
+     `postMessage` channel exists between portal and frame
+     *(v0.2 design)*.
 
    *Enforced:* `TestLaunch_*` (incl. `TestLaunch_SetsHostOnlyCookie`),
    `TestUpgrade_OriginEnforced`, `TestUpgrade_PortalOriginRejected`,
    `TestPortalCSP`, `TestSecurityHeaders` (`Referrer-Policy: strict-origin`),
    `TestPortalSessionOrigin`, and `web/tests-portal/portal-csp.spec.ts`
    (the real portal binary against a session mock that applies the
-   gateway's Origin gate, with a `no-referrer` negative control).
+   session listener's Origin gate, with a `no-referrer` negative
+   control). The per-workspace host-binding, cookie-mode and
+   iframe-isolation e2e checks are *(v0.2 design)* and land with the
+   session-host work.
 
 **Tickets, leases and the internal broker**
 
@@ -184,12 +234,15 @@ and an update to this file.
    *Enforced:* `TestIssueTicket_*`, `TestRedeemTicket_*`,
    `TestLaunch_TicketInQueryRejected`, `TestCreateConnection_NoTicketInLogs`,
    `TestCreateConnection_IssuesTicket` (`Cache-Control: no-store`). The
-   SPA posts a ticket only to the configured session origin
-   (`TestNormalizeSessionOrigin`, `web/tests/unit/connect.test.tsx`).
+   SPA posts a ticket only to the per-workspace `launchUrl` host the API
+   returns, validated against the configured session domain
+   (`TestNormalizeSessionOrigin`, `web/tests/unit/connect.test.tsx`;
+   per-workspace hosts *(v0.2 design)*).
 10. Leases:
     - at most one is active per workspace (DB unique index);
     - each is fenced by generation + runtimeUID + fencingVersion and
-      bound to one gateway identity;
+      bound to one gateway identity — in v0.2, one identity shared by
+      every backend replica *(v0.2 design)*;
     - renewal happens at least every 10 s, and the session fails closed
       within 30 s;
     - the broker refuses issue and renew when its observed state is
@@ -200,15 +253,20 @@ and an update to this file.
     `TestRevoke_ClosesOpenStream`, `TestRenewLease_StaleObservationFailsClosed`.
 11. The broker API is served only on the internal mTLS listener (TLS 1.3,
     client certificate required) and never on a public mux. Operator and
-    gateway identities are disjoint.
+    gateway identities are disjoint. *(v0.2 design, ADR 0005:* the broker
+    moves in-process into `backend` and the mTLS listener keeps only
+    operator routes; the remote broker API survives unchanged in a
+    split/test mode.)
     *Enforced:* `TestNoClientCert_401`, `TestWrongClientCA_Rejected`,
     `TestSPIFFESAN_*`, `TestActivity_OperatorIdentityForbidden`,
     `TestOperatorEndpoints_GatewayForbidden`.
 
-**Gateway proxy**
+**Session proxy** (the v0.1 gateway; the backend's session listener in
+v0.2)
 
 12. The upstream target and its credentials come only from the broker.
-    The gateway strips the client's `Authorization` and `Cookie` headers.
+    The session listener strips the client's `Authorization` and `Cookie`
+    headers.
     Upstream TLS is verified against the pinned per-workspace
     certificate. `InsecureSkipVerify` never appears in non-test code.
     *Enforced:* `TestProxy_ArbitraryTargetRejected`,
@@ -219,16 +277,19 @@ and an update to this file.
       dot-segments or encoded separators);
     - upstream `Set-Cookie`, `Service-Worker-Allowed` and similar
       origin-wide headers are dropped;
-    - the gateway adds its own CSP, `nosniff` and HSTS.
+    - the session listener adds its own CSP, `nosniff` and HSTS.
 
     *Enforced:* `TestProxy_ManagementPathsDenied`,
     `TestProxy_DotSegmentsRejected`, `TestProxy_ForwardsCleanedPath`,
     `TestProxy_HostileUpstreamHeadersDropped`,
     `TestProxy_ServiceWorkerScriptFetchRejected`,
-    `TestProxy_SecurityHeadersEverywhere`. Runtime HTML/JS still runs on
-    the shared session origin (the KasmVNC client needs inline scripts),
-    so serving the pinned client assets from the gateway remains
-    *not yet enforced*.
+    `TestProxy_SecurityHeadersEverywhere`. *(v0.2 design:* each workspace
+    serves its runtime HTML/JS on its own host under
+    `*.<sessionDomain>`, so tenant-controlled script from one workspace
+    no longer shares an origin with another workspace's session. ADR
+    0005 rejected serving pinned client assets from the backend — a
+    pinned client could skew against the runtime's own KasmVNC version —
+    so the earlier "pinned client assets" follow-up is obsolete.)
 
 **Input validation and data**
 
@@ -258,7 +319,7 @@ and an update to this file.
 17. Idempotency keys are scoped to the principal and the operation, and
     a replay never bypasses authorization.
     *Enforced:* `TestSEC21_IdempotencyPrincipalScoped` (integration).
-    Keys expire after 24 h (hourly prune in `cmd/api`).
+    Keys expire after 24 h (hourly prune in `cmd/backend`).
 
 **Logging and secrets**
 
@@ -293,8 +354,10 @@ and an update to this file.
     `TestCheckDatabaseTLSMalformedDSN`, `TestPGConnHonoursSSEnv`.
     *Not yet enforced:*
     - a CA lifetime longer than its leaves;
-    - certificate hot-reload (pods load certificates once at startup, so
-      restart them after every rotation, including edge certificates);
+    - certificate hot-reload *(v0.2 design:* every backend listener
+      reloads its certificate when the files change; until then pods
+      load certificates once at startup, so restart them after every
+      rotation, including edge certificates);
     - a schema check that a CA key name is never a private key.
 
 **Kubernetes**
@@ -466,15 +529,24 @@ and an update to this file.
      when their session ends (up to the absolute timeout);
    - the client secret is supplied via `oidc.existingSecret`.
 2. **Edges:**
-   - portal and session hosts are on **different registrable domains**
-     (the chart only checks that the hostnames differ);
+   - the portal host and the session domain must satisfy the cookie mode
+     *(v0.2 design)*: the default `lax` mode requires both on the
+     **same registrable domain** (same eTLD+1) over `https`;
+     `partitioned` mode (`SameSite=None; Secure; Partitioned`) covers
+     cross-site deployments;
+   - wildcard DNS and a wildcard certificate for `*.<sessionDomain>`,
+     fronted by one wildcard edge rule (HTTPRoute/Ingress);
+   - every cookie on the portal origin carries the `__Host-` prefix, so
+     a sibling host on the same registrable domain cannot toss `Domain=`
+     cookies at it;
    - TLS on both edges (the chart enforces Ingress TLS and an HTTPRoute
      `sectionName`; point it at the HTTPS listener);
-   - HSTS: the portal and gateway already send it;
+   - HSTS: the portal and the session listener already send it;
    - rate limits on `/v1/login` and `/v1/launch`;
-   - if a CDN/WAF proxies the portal, it terminates TLS and sees session
-     cookies and launch tickets. Require strict origin TLS, never cache
-     `/v1/*`, and make the origin reachable only through the CDN.
+   - if a CDN/WAF proxies the portal, it terminates TLS and sees portal
+     session cookies and launch tickets. Require strict origin TLS,
+     never cache `/v1/*`, and make the origin reachable only through
+     the CDN.
 3. **Database:**
    - `database.tls.mode: verify-full` (the default) with
      `database.tls.caSecret` for a private CA (the api gets
@@ -488,15 +560,18 @@ and an update to this file.
    - backups are encrypted;
    - after a restore, rotate the session epoch
      ([backup-restore](docs/runbooks/backup-restore.md)).
-4. **Internal mTLS:**
+4. **Internal mTLS** (operator → backend; in v0.2 the broker is
+   in-process and the mTLS listener keeps only operator routes):
    - a dedicated CA, never a cluster-wide shared issuer: every cert the
-     CA signs is a valid gateway or operator identity;
+     CA signs is a valid operator (or, in split/test mode, gateway)
+     identity;
    - the CA Secrets you reference contain only `ca.crt`;
    - `api.operatorCN` is unique;
    - certificates rotate through cert-manager `duration`/`renewBefore`.
-     Give the CA a longer lifetime than its leaves. Pods read
-     certificates only at startup, so restart api, gateway, operator and
-     portal after a renewal (or use a reloader).
+     Give the CA a longer lifetime than its leaves. *(v0.2 design)*
+     backend listeners hot-reload certificates when their files change;
+     any pod that still loads certificates only at startup must be
+     restarted after a renewal (or use a reloader).
 5. **Egress:**
    - the operator always excludes RFC 1918, `100.64.0.0/10`, loopback,
      link-local/metadata and multicast/reserved ranges from `InternetOnly`;
@@ -548,6 +623,10 @@ and an update to this file.
      adapter requires `--kasm-adapter-image` (digest-pinned); a seeded
      kasm template without it fails the render and the backend rejects
      the workspace.
+     **Accepted residual risk for v0.2:** `kasmweb/*` browser images may
+     lag the native `tinycdi-browser` image by up to 4 Chromium major
+     versions. The adapter is off by default; use the native
+     `tinycdi-browser` image for untrusted browsing.
 9. **Secret rotation:**
    - rotate the OIDC client secret, the DB credentials and the internal
      certs on a schedule;
@@ -557,7 +636,8 @@ and an update to this file.
      workspace is recreated.
 10. **Observability:**
     - keep metrics off public Services;
-    - restrict access to API and gateway logs, which contain OIDC
+    - restrict access to API and session-listener logs (the v0.1
+      api/gateway pods; the backend in v0.2), which contain OIDC
       subjects and lease IDs;
     - alert on spikes of denied `launch.redeem` events.
 11. **Clipboard and other in-desktop restrictions are UX defaults, not

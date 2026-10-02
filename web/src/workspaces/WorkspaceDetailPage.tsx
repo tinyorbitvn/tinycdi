@@ -1,58 +1,132 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
+import {
+  Alert,
+  Badge,
+  Button,
+  Cluster,
+  DescriptionList,
+  Page,
+  Section,
+  Spinner,
+  Table,
+} from "../design";
+import type { Column } from "../design/Table";
+import { IconArrowLeft } from "../design/icons";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { navigate, Link } from "../lib/router";
-import type { WorkspaceView } from "./helpers";
-import { blockingCondition, isConnectable } from "./helpers";
-import { ConditionsTable, PhaseBadge } from "./StatusBits";
+import { resolveTemplate } from "../templates/family";
+import { useTemplates } from "../templates/useTemplates";
+import {
+  dataPolicyDescription,
+  dataPolicyLabel,
+  experienceLabel,
+  formatDate,
+  formatDateTime,
+  networkProfileDescription,
+  networkProfileLabel,
+  runtimeLabel,
+} from "../templates/format";
+import { getWorkspace, listWorkspaceEvents } from "./api";
+import type { WorkspaceEvent, WorkspaceView } from "./helpers";
+import { blockingReason, isConnectable } from "./helpers";
+import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
-import { ErrorBanner } from "./ErrorBanner";
+import { ConditionsTable, PhasePill } from "./StatusBits";
 import { DeleteWorkspaceButton } from "./DeleteWorkspaceButton";
+import { ErrorBanner } from "./ErrorBanner";
 
 const TERMINAL = new Set(["Stopped", "Failed"]);
+const BUSY_MS = 1500;
+const IDLE_MS = 8000;
+
+interface DetailData {
+  workspace: WorkspaceView;
+  events: WorkspaceEvent[];
+}
+
+function pollDelay(d: DetailData | undefined): number {
+  const p = d?.workspace.phase;
+  return p === "Pending" || p === "Provisioning" || p === "Stopping" || p === "Terminating"
+    ? BUSY_MS
+    : IDLE_MS;
+}
+
+const EVENT_TONE = { Normal: "neutral", Warning: "warning" } as const;
+
+function eventTypeLabel(ev: WorkspaceEvent): string {
+  return t(
+    ev.type === "Warning" ? "workspaces.detail.events.type.warning" : "workspaces.detail.events.type.normal",
+  );
+}
+
+function EventsTable({ events }: { events: WorkspaceEvent[] }) {
+  const columns: Column<WorkspaceEvent>[] = [
+    {
+      key: "type",
+      header: t("workspaces.conditions.col.type"),
+      render: (ev) => (
+        <Badge tone={EVENT_TONE[ev.type] ?? "neutral"}>{eventTypeLabel(ev)}</Badge>
+      ),
+    },
+    { key: "reason", header: t("workspaces.conditions.col.reason"), rowHeader: true },
+    { key: "message", header: t("workspaces.conditions.col.message") },
+    {
+      key: "count",
+      header: "",
+      align: "end",
+      render: (ev) => (ev.count && ev.count > 1 ? t("workspaces.detail.events.count", { n: ev.count }) : ""),
+    },
+    {
+      key: "lastTimestamp",
+      header: t("workspaces.conditions.col.since"),
+      render: (ev) => (ev.lastTimestamp ? formatDateTime(ev.lastTimestamp) : ""),
+    },
+  ];
+  return (
+    <Table
+      columns={columns}
+      rows={events}
+      rowKey={(ev) => ev.id}
+      caption={t("workspaces.detail.events.title")}
+      empty={t("workspaces.detail.events.empty")}
+    />
+  );
+}
 
 export function WorkspaceDetailPage({
   workspaceId,
-  pollIntervalMs = 2000,
+  pollIntervalMs,
 }: {
   workspaceId: string;
   pollIntervalMs?: number;
 }) {
   const api = useApi();
-  const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const templates = useTemplates();
   const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<unknown>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const ws = unwrap(
-        await api.GET("/v1/workspaces/{workspaceId}", {
-          params: { path: { workspaceId } },
-        }),
-      );
-      setWorkspace(ws);
-      setError(null);
-    } catch (e) {
-      setError(e);
-    }
+  const load = useCallback(async (): Promise<DetailData> => {
+    const [workspace, events] = await Promise.all([
+      getWorkspace(api, workspaceId),
+      listWorkspaceEvents(api, workspaceId),
+    ]);
+    return { workspace, events };
   }, [api, workspaceId]);
-
-  useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), pollIntervalMs);
-    return () => clearInterval(t);
-  }, [refresh, pollIntervalMs]);
+  const detail = useResource(load, pollIntervalMs ?? pollDelay);
 
   async function act(kind: "start" | "stop") {
-    if (!workspace) return;
+    const ws = detail.data?.workspace;
+    if (!ws) return;
     setBusy(kind);
-    setError(null);
+    setActionError(null);
     try {
       if (kind === "start") {
         unwrap(
           await api.POST("/v1/workspaces/{workspaceId}/start", {
             params: {
-              path: { workspaceId: workspace.id },
+              path: { workspaceId: ws.id },
               header: { "Idempotency-Key": newIdempotencyKey() },
             },
           }),
@@ -60,93 +134,138 @@ export function WorkspaceDetailPage({
       } else {
         unwrap(
           await api.POST("/v1/workspaces/{workspaceId}/stop", {
-            params: { path: { workspaceId: workspace.id } },
+            params: { path: { workspaceId: ws.id } },
           }),
         );
       }
-      await refresh();
+      await detail.refresh();
     } catch (e) {
-      setError(e);
+      setActionError(e);
     } finally {
       setBusy(null);
     }
   }
 
-  if (!workspace) {
+  const ws = detail.data?.workspace;
+  const template = ws ? resolveTemplate(templates.data, ws.template) : undefined;
+  const error = actionError ?? detail.error;
+
+  if (!ws) {
     return (
-      <main aria-busy="true">
-        <ErrorBanner error={error} onDismiss={() => setError(null)} />
-        {error ? null : "Loading workspace…"}
-      </main>
+      <Page title={t("workspaces.detail.loading")} eyebrow={<Link to="/">{t("nav.allWorkspaces")}</Link>}>
+        <ErrorBanner error={error} onRetry={() => void detail.refresh()} onDismiss={detail.clearError} />
+        {error ? null : <Spinner label={t("workspaces.detail.loading")} />}
+      </Page>
     );
   }
 
-  const blocker = blockingCondition(workspace);
-  const canStart = workspace.phase === "Stopped" || workspace.phase === "Failed";
-  const canStop = workspace.desiredState === "Running" && !TERMINAL.has(workspace.phase);
+  const blocker = blockingReason(ws);
+  const canStart = ws.phase === "Stopped" || ws.phase === "Failed";
+  const canStop = ws.desiredState === "Running" && !TERMINAL.has(ws.phase);
+
+  const fields = [
+    {
+      term: t("workspaces.detail.field.template"),
+      detail: t("workspaces.detail.template", {
+        name: ws.template.name,
+        revision: ws.template.revision,
+        runtime: runtimeLabel(ws.template.runtime),
+        experience: experienceLabel(ws.template.experience),
+      }),
+    },
+    ...(ws.owner
+      ? [
+          {
+            term: t("workspaces.detail.field.owner"),
+            detail:
+              ws.owner.displayName && ws.owner.displayName !== ws.owner.subject
+                ? `${ws.owner.displayName} (${ws.owner.subject})`
+                : ws.owner.subject,
+          },
+        ]
+      : []),
+    { term: t("workspaces.detail.field.desired"), detail: ws.desiredState },
+    {
+      term: t("workspaces.detail.field.dataPolicy"),
+      detail: `${dataPolicyLabel(ws.dataPolicy)} — ${dataPolicyDescription(ws.dataPolicy)}`,
+    },
+    ...(template?.networkProfile
+      ? [
+          {
+            term: t("workspaces.detail.field.networkProfile"),
+            detail: `${networkProfileLabel(template.networkProfile)} — ${networkProfileDescription(template.networkProfile)}`,
+          },
+        ]
+      : []),
+    ...(ws.imageBuiltAt
+      ? [{ term: t("workspaces.detail.field.imageBuilt"), detail: formatDateTime(ws.imageBuiltAt) }]
+      : []),
+    ...(ws.failureReason ? [{ term: t("workspaces.detail.field.failure"), detail: ws.failureReason }] : []),
+    { term: t("workspaces.detail.field.created"), detail: formatDateTime(ws.createdAt) },
+    { term: t("workspaces.detail.field.updated"), detail: formatDateTime(ws.updatedAt) },
+    { term: t("workspaces.detail.field.id"), detail: ws.id },
+  ];
 
   return (
-    <main>
-      <p>
-        <Link to="/">← All workspaces</Link>
-      </p>
-      <h1>
-        {workspace.name} <PhaseBadge phase={workspace.phase} />
-      </h1>
-      <ErrorBanner error={error} onRetry={() => void refresh()} onDismiss={() => setError(null)} />
-      <dl>
-        <dt>ID</dt>
-        <dd>{workspace.id}</dd>
-        <dt>Template</dt>
-        <dd>
-          {workspace.template.name}@{workspace.template.revision} (
-          {workspace.template.runtime} / {workspace.template.experience})
-        </dd>
-        <dt>Desired state</dt>
-        <dd>{workspace.desiredState}</dd>
-        <dt>Data policy</dt>
-        <dd>{workspace.dataPolicy}</dd>
-        {workspace.failureReason ? (
-          <>
-            <dt>Failure</dt>
-            <dd>{workspace.failureReason}</dd>
-          </>
-        ) : null}
-        <dt>Created</dt>
-        <dd>{new Date(workspace.createdAt).toLocaleString()}</dd>
-        <dt>Updated</dt>
-        <dd>{new Date(workspace.updatedAt).toLocaleString()}</dd>
-      </dl>
-
-      <h2>Conditions</h2>
-      <ConditionsTable workspace={workspace} />
-
-      <div className="actions">
-        {canStart ? (
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() => void act("start")}
-          >
-            {busy === "start" ? "Starting…" : workspace.phase === "Failed" ? "Retry start" : "Start"}
-          </button>
-        ) : null}
-        {canStop || workspace.phase === "Ready" || workspace.phase === "Provisioning" ? (
-          <button
-            type="button"
-            disabled={busy !== null || workspace.desiredState === "Stopped"}
-            onClick={() => void act("stop")}
-          >
-            {busy === "stop" ? "Stopping…" : "Stop"}
-          </button>
-        ) : null}
-        <ConnectButton workspace={workspace} disabled={!isConnectable(workspace)} />
-        {blocker ? <small aria-label="connect status">Connect unavailable: {blocker}</small> : null}
-        <DeleteWorkspaceButton
-          workspace={workspace}
-          onDeleted={() => navigate("/")}
-        />
-      </div>
-    </main>
+    <Page
+      eyebrow={
+        <Link to="/">
+          <IconArrowLeft size={14} /> {t("nav.allWorkspaces")}
+        </Link>
+      }
+      title={
+        <Cluster gap={3}>
+          {ws.name} <PhasePill phase={ws.phase} />
+        </Cluster>
+      }
+      actions={
+        <Cluster gap={2}>
+          <ConnectButton workspace={ws} disabled={!isConnectable(ws)} />
+          {canStart ? (
+            <Button variant="secondary" loading={busy === "start"} disabled={busy !== null} onClick={() => void act("start")}>
+              {busy === "start"
+                ? t("workspaces.detail.action.starting")
+                : ws.phase === "Failed"
+                  ? t("workspaces.detail.action.retryStart")
+                  : t("workspaces.detail.action.start")}
+            </Button>
+          ) : null}
+          {canStop || ws.phase === "Ready" || ws.phase === "Provisioning" ? (
+            <Button
+              variant="secondary"
+              loading={busy === "stop"}
+              disabled={busy !== null || ws.desiredState === "Stopped"}
+              onClick={() => void act("stop")}
+            >
+              {busy === "stop" ? t("workspaces.detail.action.stopping") : t("workspaces.detail.action.stop")}
+            </Button>
+          ) : null}
+          <DeleteWorkspaceButton workspace={ws} onDeleted={() => navigate("/")} />
+        </Cluster>
+      }
+    >
+      <ErrorBanner error={error} onRetry={() => void detail.refresh()} onDismiss={() => { setActionError(null); detail.clearError(); }} />
+      {blocker ? (
+        <Alert tone="info" title={t("workspaces.detail.connectStatus")}>
+          {t("workspaces.detail.connectUnavailable", { reason: t(blocker.key, blocker.params) })}
+        </Alert>
+      ) : null}
+      {ws.imageStale === true ? (
+        <Alert tone="warning" title={t("workspaces.detail.stale.badge")}>
+          {ws.imageBuiltAt
+            ? t("workspaces.detail.stale.body", { date: formatDate(ws.imageBuiltAt) })
+            : t("workspaces.detail.stale.bodyUnknown")}
+        </Alert>
+      ) : null}
+      <Section>
+        <DescriptionList items={fields} />
+      </Section>
+      <Section title={t("workspaces.detail.events.title")}>
+        <EventsTable events={detail.data?.events ?? []} />
+      </Section>
+      <Section title={t("workspaces.detail.conditions.title")}>
+        <ConditionsTable workspace={ws} />
+      </Section>
+    </Page>
   );
 }

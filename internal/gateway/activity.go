@@ -45,6 +45,15 @@ const activityQueueLen = 64
 // operator's drain step burns its whole budget.
 const activityFlushBudget = 2 * time.Second
 
+// activityEvent is one queued report: the signal plus the stream epoch of
+// the stream it describes (0 for input, which is not stream-scoped, and when
+// there is no session directory). The epoch lets the broker drop the late
+// report of a stream another epoch already fenced.
+type activityEvent struct {
+	typ   broker.ActivityEventType
+	epoch uint64
+}
+
 // activitySender drains the session's event queue in order. When the
 // session dies it runs one bounded tail flush before exiting.
 func (g *Gateway) activitySender(s *session) {
@@ -83,28 +92,47 @@ func (g *Gateway) flushActivity(s *session) {
 // queue even on a dead session — the sender's tail flush still delivers —
 // and only drops when the queue is full after death (the second select
 // keeps a dead session's producer from blocking forever).
-func (s *session) enqueueActivity(t broker.ActivityEventType) {
+//
+// The event counts as pending from this call — under the session lock —
+// until its broker call returned, so Drain can never observe an empty
+// queue and no in-flight call while a report is still on its way.
+func (s *session) enqueueActivity(t broker.ActivityEventType, epoch uint64) {
+	ev := activityEvent{typ: t, epoch: epoch}
+	s.mu.Lock()
+	s.pendingReports++
+	s.mu.Unlock()
 	select {
-	case s.events <- t:
+	case s.events <- ev:
 		return
 	default:
 	}
 	select {
-	case s.events <- t:
+	case s.events <- ev:
 	case <-s.done:
+		s.reportDone() // dropped: it will never reach the broker
 	}
+}
+
+// reportDone retires one pending report (delivered, failed or dropped).
+func (s *session) reportDone() {
+	s.mu.Lock()
+	s.pendingReports--
+	s.mu.Unlock()
 }
 
 // reportActivity posts one activity event to the broker, bounded by ctx
 // and at most 5 s. Called only by activitySender/flushActivity, so
-// per-session ordering is preserved on the wire.
-func (g *Gateway) reportActivity(ctx context.Context, s *session, t broker.ActivityEventType) {
+// per-session ordering is preserved on the wire. The event stays counted in
+// pendingReports (set at enqueue) until the broker call returns, which is
+// how Drain knows a dequeued disconnect has actually reached the broker.
+func (g *Gateway) reportActivity(ctx context.Context, s *session, ev activityEvent) {
+	defer s.reportDone()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	err := g.cfg.Broker.ReportActivity(ctx, g.cfg.Identity, s.leaseID(),
-		s.fenceSnapshot(), broker.ActivityEvent{Type: t})
+		s.fenceSnapshot(), broker.ActivityEvent{Type: ev.typ, StreamEpoch: ev.epoch})
 	cancel()
 	if err != nil && g.cfg.Logger != nil {
-		g.cfg.Logger.Debug("activity report failed", "type", string(t), "err", err)
+		g.cfg.Logger.Debug("activity report failed", "type", string(ev.typ), "err", err)
 	}
 }
 
@@ -112,7 +140,7 @@ func (g *Gateway) reportActivity(ctx context.Context, s *session, t broker.Activ
 // broker report per InputReportInterval per session.
 func (g *Gateway) noteInput(s *session) {
 	if s.claimInputReport(g.now(), g.cfg.InputReportInterval) {
-		s.enqueueActivity(broker.ActivityInput)
+		s.enqueueActivity(broker.ActivityInput, 0)
 	}
 }
 

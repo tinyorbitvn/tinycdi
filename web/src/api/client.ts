@@ -4,53 +4,73 @@ import { PortalApiError } from "./errors";
 
 export type ApiClient = Client<paths>;
 
-// Non-HttpOnly CSRF cookie set by the login flow; echoed as X-CSRF-Token on
-// every state-changing request (see ADR 0002 §6).
-export const CSRF_COOKIE = "tcdi_csrf";
+// The CSRF token is derived server-side and returned in the GET /v1/me body
+// (P1/D17). It lives only in module state — installed by web/src/app/me.tsx
+// via setCsrfToken — and is echoed on every state-changing request. No
+// export reads document.cookie; the tcdi_csrf cookie is gone in v0.2.
 export const CSRF_HEADER = "X-CSRF-Token";
 
-// JS-readable cookie the API sets at login carrying the deployment's
-// configured session origin. launchSession refuses to POST a launch ticket
-// to any other origin (SEC-26) — the ticket is bearer-equivalent and must
-// never leave the configured session host.
-export const SESSION_ORIGIN_COOKIE = "tcdi_session_origin";
+let csrfToken: string | undefined;
 
-function readCookie(name: string): string | undefined {
-  for (const part of document.cookie.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx > 0 && part.slice(0, idx).trim() === name) {
-      return decodeURIComponent(part.slice(idx + 1).trim());
-    }
-  }
-  return undefined;
+export function setCsrfToken(token: string | undefined): void {
+  csrfToken = token;
 }
 
-export function getCsrfToken(): string | undefined {
-  return readCookie(CSRF_COOKIE);
+function csrfMiddleware(fetchImpl: typeof fetch, baseUrl: string): Middleware {
+  // The request body is consumed by fetch(); keep a clone per request so a
+  // CSRF_FAILED retry can replay it verbatim.
+  const clones = new WeakMap<Request, Request>();
+  return {
+    async onRequest({ request }) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        if (csrfToken) request.headers.set(CSRF_HEADER, csrfToken);
+        clones.set(request, request.clone());
+      }
+      return request;
+    },
+    async onResponse({ request, response }) {
+      if (response.status !== 403) return response;
+      const retry = clones.get(request);
+      if (!retry) return response; // already retried, or a safe method
+      let code: string | undefined;
+      try {
+        const body = (await response.clone().json()) as Record<string, unknown>;
+        code = typeof body?.code === "string" ? body.code : undefined;
+      } catch {
+        return response;
+      }
+      if (code !== "CSRF_FAILED") return response;
+      clones.delete(request); // one retry only
+      // The session likely rotated: refresh the token from /v1/me once,
+      // then replay the request. A second 403 surfaces to the caller.
+      try {
+        const me = await fetchImpl(new URL("/v1/me", baseUrl), {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (me.ok) {
+          const body = (await me.json()) as Record<string, unknown>;
+          if (typeof body.csrfToken === "string") setCsrfToken(body.csrfToken);
+        }
+      } catch {
+        /* fall through and surface the original 403's retry */
+      }
+      if (csrfToken) retry.headers.set(CSRF_HEADER, csrfToken);
+      return fetchImpl(retry);
+    },
+  };
 }
-
-export function getSessionOrigin(): string | undefined {
-  return readCookie(SESSION_ORIGIN_COOKIE);
-}
-
-const csrfMiddleware: Middleware = {
-  async onRequest({ request }) {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      const token = getCsrfToken();
-      if (token) request.headers.set(CSRF_HEADER, token);
-    }
-    return request;
-  },
-};
 
 export function createApi(fetchImpl?: typeof fetch): ApiClient {
+  const baseUrl =
+    typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const impl = fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   const client = createClient<paths>({
-    baseUrl:
-      typeof window !== "undefined" ? window.location.origin : "http://localhost",
+    baseUrl,
     credentials: "same-origin",
-    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    fetch: impl,
   });
-  client.use(csrfMiddleware);
+  client.use(csrfMiddleware(impl, baseUrl));
   return client;
 }
 

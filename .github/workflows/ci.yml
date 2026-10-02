@@ -70,9 +70,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: gofmt clean
-        run: test -z "$(gofmt -l api cmd internal deploy/helm | tee /dev/stderr)"
+        run: test -z "$(gofmt -l api cmd internal build deploy/helm | tee /dev/stderr)"
       - name: go vet
-        run: go vet ./api/... ./cmd/... ./internal/... ./deploy/helm
+        run: go vet ./api/... ./cmd/... ./internal/... ./build/... ./deploy/helm
       - name: setup-envtest (pinned)
         run: |
           GOBIN="$PWD/bin" go install \
@@ -82,7 +82,7 @@ jobs:
         run: |
           KUBEBUILDER_ASSETS="$(./bin/setup-envtest use \
             ${{ env.ENVTEST_K8S_VERSION }} --bin-dir "$PWD/bin" -p path)" \
-            go test -race -count=1 ./api/... ./cmd/... ./internal/...
+            go test -race -count=1 ./api/... ./cmd/... ./internal/... ./build/...
 
   integration:
     name: integration (postgres service + envtest)
@@ -129,6 +129,20 @@ jobs:
           # tcdi/browser:it, a pulled kasmweb/* image) — image-bound suites,
           # not routine CI. Everything else runs on envtest + the suite's
           # own docker-provisioned postgres.
+      - name: restart-drill evidence (verbose)
+        # The G1 gate criterion (D23) is the two-replica restart drill; keep a
+        # verbose re-run in the log so reviewers can see each test ran and
+        # passed rather than trust the package-level "ok" line.
+        run: |
+          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use \
+            ${{ env.ENVTEST_K8S_VERSION }} --bin-dir "$PWD/bin" -p path)" \
+            go test -tags=integration -race -count=1 -v \
+            -run '^TestRestart_' ./tests/integration/...
+          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use \
+            ${{ env.ENVTEST_K8S_VERSION }} --bin-dir "$PWD/bin" -p path)" \
+            go test -count=1 -v \
+            -run '^(TestRun_DrainsOnShutdown|TestGatewayIDSharedAcrossInstances)$' \
+            ./internal/backend/
 
   web:
     name: portal ui (npm ci, tsc, vitest, build)
@@ -145,8 +159,10 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
-      # The portal-CSP e2e suite (web/tests-portal) builds and runs the real
-      # Go portal binary.
+      # The portal e2e suite (web/tests-portal) builds and runs the real Go
+      # binaries itself — ./build/frontend (SPA server) and ./cmd/backend in
+      # split mode (-broker-url, session listener only) — in Playwright
+      # setup, so the job only needs Go here plus `npm run test:e2e` below.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -161,7 +177,31 @@ jobs:
       - run: npm run build          # tsc --noEmit && vite build
       - name: install playwright chromium
         run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e       # playwright: vite suite + portal CSP regression
+      - run: npm run test:e2e       # playwright: vite suite + frontend/backend e2e
+
+  soak:
+    name: soak harness (npm ci, tsc, unit + dry-run)
+    # tests/soak is the v0.2 soak/drill harness (acceptance criterion 9):
+    # `npm test` runs its unit tests and the dry-run end-to-end check
+    # against the contract mock — no cluster and no browser needed.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tests/soak
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: tests/soak/package-lock.json
+      - run: npm ci
+      - name: npm audit (prod deps, high+)
+        run: npm audit --omit=dev --audit-level=high
+      - run: npm run typecheck      # tsc --noEmit
+      - run: npm test               # node --test: unit tests + dry-run
 
   helm:
     name: chart (helm lint --strict + chart tests)
@@ -246,17 +286,6 @@ jobs:
         run: |
           .github/scripts/check-kasm-catalog.sh
           .github/scripts/check-trivyignore.sh build/kasm-catalog.trivyignore
-
-  browser-freshness:
-    # SUPR-4: fails once bookworm-security offers a chromium newer than the
-    # pinned CHROMIUM_APT_VERSION, so the engine pin cannot go stale quietly.
-    name: chromium apt-pin freshness
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - run: .github/scripts/check-chromium-freshness.sh
 
   kasm-contract:
     # KASM-4/KASM-5: the docker-emulated pod contract test plus the

@@ -25,6 +25,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
 // BrokerClient is the session-broker surface the gateway needs. Production
@@ -35,6 +36,9 @@ type BrokerClient interface {
 	RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error)
 	ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error)
 	RevokeLease(ctx context.Context, leaseID string) error
+	// RevokeLeaseChanged is RevokeLease that also reports whether a live
+	// lease was actually revoked (false: unknown or already dead).
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
 	// ReportActivity posts one session signal (input/connected/disconnect)
 	// for the lease's bound incarnation; the broker stamps receipt time.
 	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
@@ -52,14 +56,44 @@ const (
 	SessionCookieName = "__Host-tcdi_session"
 )
 
+// CookieMode selects the session cookie's cross-site behavior. The portal
+// embeds the session origin in an iframe, so the cookie must reach the
+// session origin from inside that frame.
+type CookieMode string
+
+const (
+	// CookieModeLax (default) issues SameSite=Lax. Browsers send it from the
+	// portal's iframe only when portal and session origins share a
+	// registrable domain (same site, e.g. workspace.example.com and
+	// workspace-session.example.com). Cross-site portals still work via
+	// "open in new tab" (a top-level navigation), not in-portal.
+	CookieModeLax CookieMode = "lax"
+	// CookieModePartitioned issues SameSite=None; Secure; Partitioned
+	// (CHIPS) for deployments where portal and session are different
+	// sites: the cookie is keyed to the embedding portal's site, so it is
+	// usable inside that portal's iframe and nowhere else.
+	CookieModePartitioned CookieMode = "partitioned"
+)
+
+// ParseCookieMode validates a -session-cookie-mode value; "" means lax.
+func ParseCookieMode(v string) (CookieMode, error) {
+	switch m := CookieMode(strings.ToLower(strings.TrimSpace(v))); m {
+	case "", CookieModeLax:
+		return CookieModeLax, nil
+	case CookieModePartitioned:
+		return m, nil
+	}
+	return "", fmt.Errorf("gateway: unknown session cookie mode %q (want lax or partitioned)", v)
+}
+
 // Config wires a Gateway.
 type Config struct {
 	// Identity this gateway presents to the broker.
 	Identity broker.GatewayIdentity
-	// PublicOrigin is the external session origin, e.g.
-	// "https://session.example.dev" — used for the Origin triple-match on
-	// WebSocket upgrades and the launch POST.
-	PublicOrigin string
+	// SessionDomain replaces PublicOrigin (design §3.2, D9). Launch and the
+	// desktop proxy are served only on <label>.<SessionDomain>, where the
+	// label names the workspace the request is for.
+	SessionDomain sessionhost.Domain
 	// PortalOrigins is the allowlist of portal origins permitted to POST
 	// /v1/launch (ADR 0004): portal and session live on different
 	// registrable domains, so a real launch arrives cross-site with
@@ -67,12 +101,23 @@ type Config struct {
 	// (scheme://host[:port], no path); matching is exact on
 	// scheme+host+port with default ports normalized. The allowlist does
 	// not relax any other route — WebSocket upgrades and the desktop
-	// proxy still require Origin == PublicOrigin.
+	// proxy still require Origin == the request's own workspace origin.
 	PortalOrigins []string
-	// AllowedHosts is the Host-header allowlist for every listener route.
-	AllowedHosts []string
+	// ControlHosts is the Host allowlist for /healthz and /v1/control/*
+	// (in-cluster Service names). It replaces AllowedHosts; the launch and
+	// proxy surface takes its hosts from SessionDomain instead.
+	ControlHosts []string
+	// CookieMode selects the session cookie attributes (default lax).
+	CookieMode CookieMode
 	// Broker is required.
 	Broker BrokerClient
+	// Sessions is the optional session directory (design §3.6, P6): when
+	// set, launch binds the cookie digest to the lease, a cookie this
+	// replica never saw rehydrates its session from the store, and stream
+	// admission claims the lease's stream epoch so a newer claim on any
+	// replica fences this process's stream. Nil keeps v0.1 single-process
+	// session semantics.
+	Sessions SessionDirectory
 	// UpstreamCA is the fallback trust root for runtime upstream TLS when a
 	// resolved Target carries no TLSCA; verification is never skipped.
 	UpstreamCA *x509.CertPool
@@ -96,34 +141,37 @@ type Config struct {
 	Logger  *slog.Logger
 }
 
-// Gateway is the session-origin HTTP handler: launch, cookie-gated desktop
-// proxy and bearer-gated control endpoints on one mux.
+// Gateway is the session-domain HTTP handler: launch, cookie-gated desktop
+// proxy on per-workspace hosts, and bearer-gated control endpoints on the
+// in-cluster control hosts — one mux, two disjoint host classes.
 type Gateway struct {
 	cfg           Config
-	pubOrigin     *url.URL
 	portalOrigins []*url.URL
-	hosts         map[string]bool
+	controlHosts  map[string]bool
+	embedders     []string // serialized portal origins for frame-ancestors
 	proxy         *httputil.ReverseProxy
-	csp           string // Content-Security-Policy pinned on every response
+	permissions   string // Permissions-Policy pinned on every response
 
 	mu          sync.Mutex
-	sessions    map[string]*session // cookie value -> session
-	byLease     map[string]*session // lease ID -> session
-	byWorkspace map[string]*session // workspace UID -> session (takeover fence)
-	done        chan struct{}       // closed by Close
-	closeOnce   sync.Once
+	sessions    map[string]*session                     // cookie value -> session
+	byLease     map[string]*session                     // lease ID -> session
+	byWorkspace map[string]*session                     // workspace UID -> session (takeover fence)
+	inflight    map[broker.SessionDigest]*rehydrateCall // digest -> shared lookup
+	// inflightWaiters counts requests parked on a shared lookup's done
+	// channel — test instrumentation that makes the dedup rendezvous
+	// observable (read through export_test.go).
+	inflightWaiters int
+	draining        bool          // set by Drain: refuse new upgrades
+	done            chan struct{} // closed by Close
+	closeOnce       sync.Once
 }
 
 func (g *Gateway) now() time.Time { return g.cfg.Now() }
 
 // New builds the session gateway handler.
 func New(cfg Config) (*Gateway, error) {
-	if cfg.Broker == nil || cfg.PublicOrigin == "" || len(cfg.AllowedHosts) == 0 {
-		return nil, errors.New("gateway: Config requires Broker, PublicOrigin and AllowedHosts")
-	}
-	pub, err := url.Parse(cfg.PublicOrigin)
-	if err != nil || pub.Scheme != "https" || pub.Host == "" {
-		return nil, errors.New("gateway: PublicOrigin must be a valid https origin")
+	if cfg.Broker == nil || cfg.SessionDomain.String() == "" {
+		return nil, errors.New("gateway: Config requires Broker and SessionDomain")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -137,25 +185,35 @@ func New(cfg Config) (*Gateway, error) {
 	if cfg.InputReportInterval <= 0 {
 		cfg.InputReportInterval = InputReportInterval
 	}
+	mode, err := ParseCookieMode(string(cfg.CookieMode))
+	if err != nil {
+		return nil, err
+	}
+	cfg.CookieMode = mode
 	g := &Gateway{
-		cfg:         cfg,
-		pubOrigin:   pub,
-		hosts:       map[string]bool{},
-		sessions:    map[string]*session{},
-		byLease:     map[string]*session{},
-		byWorkspace: map[string]*session{},
-		done:        make(chan struct{}),
-		csp:         sessionCSP(pub.Host),
+		cfg:          cfg,
+		controlHosts: map[string]bool{},
+		sessions:     map[string]*session{},
+		byLease:      map[string]*session{},
+		byWorkspace:  map[string]*session{},
+		inflight:     map[broker.SessionDigest]*rehydrateCall{},
+		done:         make(chan struct{}),
 	}
 	for _, po := range cfg.PortalOrigins {
 		u, ok := parseOrigin(strings.TrimSpace(po))
 		if !ok {
 			return nil, fmt.Errorf("gateway: PortalOrigins entry %q must be a scheme://host[:port] origin", po)
 		}
+		ser, ok := serializeOrigin(u)
+		if !ok {
+			return nil, fmt.Errorf("gateway: PortalOrigins entry %q is not a plain origin", po)
+		}
 		g.portalOrigins = append(g.portalOrigins, u)
+		g.embedders = append(g.embedders, ser)
 	}
-	for _, h := range cfg.AllowedHosts {
-		g.hosts[h] = true
+	g.permissions = sessionPermissionsPolicy(g.embedders)
+	for _, h := range cfg.ControlHosts {
+		g.controlHosts[h] = true
 	}
 	g.proxy = &httputil.ReverseProxy{
 		Director:       g.direct,
@@ -190,14 +248,32 @@ func (g *Gateway) Close() {
 	})
 }
 
-// ServeHTTP routes: launch, bearer-gated control endpoints, then the
-// cookie-gated desktop proxy on the catch-all.
+// ServeHTTP routes by host class first: workspace hosts (a label that
+// Domain.Match resolves under the session domain) get launch and the
+// cookie-gated desktop proxy; configured control hosts get /healthz and
+// the bearer-gated /v1/control/* endpoints. Anything else is misdirected.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// SEC-07: pin the session-origin security policy on every response
+	wsID, wsOK := g.cfg.SessionDomain.Match(r.Host)
+	controlOK := g.controlHostOK(r)
+
+	// SEC-07/D14: pin the session-origin security policy on every response
 	// (proxied or not). Proxied upstream copies of these headers are
 	// dropped in responsePolicy so a hostile runtime cannot weaken them.
+	// Framing is governed by CSP frame-ancestors (portal origins only) —
+	// never X-Frame-Options, which cannot express an allowlist and would
+	// break the in-portal session view. The CSP names the request's own
+	// host in connect-src; an unmatched Host is attacker-controlled, so
+	// the configured domain stands in for it rather than echoing bytes a
+	// request smuggled into the Host header.
+	cspHost := r.Host
+	if !wsOK && !controlOK {
+		cspHost = g.cfg.SessionDomain.String()
+	}
 	h := w.Header()
-	h.Set("Content-Security-Policy", g.csp)
+	h.Set("Content-Security-Policy", sessionCSP(cspHost, g.embedders))
+	h.Set("Permissions-Policy", g.permissions)
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	h.Set("Origin-Agent-Cluster", "?1")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 
@@ -207,15 +283,31 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == LaunchPath:
 		route = "launch"
-		g.handleLaunch(rec, r)
-	case strings.HasPrefix(r.URL.Path, "/v1/control/"):
-		route = "control"
-		g.serveControl(rec, r)
-	case r.URL.Path == "/healthz":
-		route = "healthz"
-		writeJSON(rec, http.StatusOK, map[string]string{"status": "ok"})
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.handleLaunch(rec, r, wsID)
+	case strings.HasPrefix(r.URL.Path, "/v1/control/") || r.URL.Path == "/healthz":
+		// The operator surface exists only on the in-cluster control
+		// hosts; on workspace or foreign hosts these paths do not exist.
+		if !controlOK {
+			writeJSON(rec, http.StatusNotFound, map[string]string{"error": "not_found"})
+			break
+		}
+		if r.URL.Path == "/healthz" {
+			route = "healthz"
+			writeJSON(rec, http.StatusOK, map[string]string{"status": "ok"})
+		} else {
+			route = "control"
+			g.serveControl(rec, r)
+		}
 	default:
-		g.serveProxy(rec, r)
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.serveProxy(rec, r, wsID)
 	}
 	if g.cfg.Metrics != nil {
 		g.cfg.Metrics.ObserveHTTP(route, r.Method, codeClass(rec.status), g.now().Sub(start))
@@ -238,11 +330,9 @@ func (g *Gateway) controlAuth(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, p)), []byte(g.cfg.ControlToken)) == 1
 }
 
+// serveControl is reached only on a control host (ServeHTTP gates the
+// path); the bearer check is the remaining gate.
 func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
-	if !g.hostOK(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_host"})
-		return
-	}
 	if !g.controlAuth(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -257,6 +347,10 @@ func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleControlSession lists the sessions held by THIS replica only: the
+// gateway keeps no cross-replica registry (the lease directory lives in the
+// broker), so the answer is replica-local and a caller that needs the whole
+// deployment must ask every replica.
 func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -288,9 +382,10 @@ func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"active": len(out) > 0, "sessions": out})
 }
 
-// handleControlRevoke kills the named lease's session and tells the broker.
-// SEC-1: an identifier that resolves to no live session must not affect any
-// other session — there is no implicit "current session" fallback.
+// handleControlRevoke revokes the named lease at the broker and kills its
+// session if this replica holds it. SEC-1: an identifier that resolves to
+// no live lease must not affect any other session — there is no implicit
+// "current session" fallback.
 func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -308,19 +403,36 @@ func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_lease"})
 		return
 	}
+	// The session may live on another replica, so the broker (the shared
+	// lease directory) is always told; that replica's renew loop then sees
+	// the lease die and closes its streams. A session held here is killed
+	// first so it fails closed without waiting for the broker round trip.
 	g.mu.Lock()
 	s := g.byLease[body.LeaseID]
 	g.mu.Unlock()
-	if s == nil {
+	wsUID := ""
+	if s != nil {
+		wsUID = s.workspaceUID()
+		g.killSession(s, "control_revoke")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	changed, err := g.cfg.Broker.RevokeLeaseChanged(ctx, body.LeaseID)
+	cancel()
+	if err != nil {
+		// Not accepted: the operator must retry. A local session, if any,
+		// is already dead.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "broker_unavailable")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
+	if !changed {
+		// An unknown or already-dead lease: nothing was revoked, so neither
+		// the answer nor the audit trail may claim it was.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "lease_not_live")
 		writeJSON(w, http.StatusOK, map[string]bool{"revoked": false})
 		return
 	}
-	g.killSession(s, "control_revoke")
-	// Best-effort broker revoke; the local session is already dead either way.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	_ = g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
-	cancel()
-	g.audit(r, "session.revoke", s.workspaceUID(), observability.OutcomeSuccess, "")
+	g.audit(r, "session.revoke", wsUID, observability.OutcomeSuccess, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }
 
@@ -332,13 +444,11 @@ type ctxKey int
 
 const ctxKeySession ctxKey = iota
 
-// serveProxy is the desktop catch-all: allowlist -> session auth -> upgrade
-// admission -> authenticated reverse proxy to the resolved runtime target.
-func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
-	if !g.hostOK(r) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_host"})
-		return
-	}
+// serveProxy is the desktop catch-all on a workspace host (ServeHTTP
+// already resolved wsID from the request Host): session auth -> host
+// binding -> upgrade admission -> authenticated reverse proxy to the
+// resolved runtime target.
+func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string) {
 	if r.URL.Query().Get(TicketField) != "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "ticket_in_query"})
 		return
@@ -363,13 +473,33 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_upgrade"})
 		return
 	}
-	s := g.lookupSession(r)
+	s, lookupErr := g.lookupSession(r, wsID)
+	if lookupErr != nil {
+		// The session directory could not answer: not "no session". 503
+		// so the browser retries; nothing is cached.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
+	if s != nil && s.workspaceUID() != wsID {
+		// D11: a session bound to a different workspace is "absent" on
+		// this host — the cookie is host-only and can never arrive here
+		// through a browser, so a mismatch means replay or confusion.
+		// Answer as if no session existed and audit; the session itself
+		// stays live on its own host.
+		g.audit(r, "session.host_mismatch", s.workspaceUID(), observability.OutcomeDenied, "host_mismatch")
+		s = nil
+	}
 	if s == nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 	var gen int
+	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
 	if isUpgrade(r) {
+		if g.isDraining() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+			return
+		}
 		if !g.originOK(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_origin"})
 			return
@@ -383,6 +513,22 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 		// newer upgrade, the defer is a no-op and cannot clear the
 		// successor's admission.
 		defer s.endUpgrade(gen)
+		// With a session directory the lease's stream epoch is the
+		// cross-replica fence: claiming it here makes the previous
+		// replica's renew loop drop its copy of this stream (P3).
+		if g.cfg.Sessions != nil {
+			epoch, err := g.claimStream(r.Context(), s)
+			streamEpoch = epoch
+			if err != nil {
+				if terminalBrokerErr(err) {
+					g.killSession(s, "claim_"+leaseFailureReason(err))
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+				return
+			}
+		}
 	}
 	if err := g.ensureTarget(r.Context(), s); err != nil {
 		if terminalBrokerErr(err) {
@@ -410,7 +556,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 				// The stream is admitted and live: report connected so the
 				// broker counts an open stream and cancels any pending
 				// disconnect grace window (design §8).
-				s.enqueueActivity(broker.ActivityConnected)
+				s.enqueueActivity(broker.ActivityConnected, streamEpoch)
 			}
 			// The upstream handshake is done and the conn is registered:
 			// free the admission slot so a later upgrade on this session
@@ -429,13 +575,15 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request) {
 		s.setStreamTrack(tid)
 	}
 	defer func() {
-		s.untrack(tid, captured)
 		if captured != nil {
 			// The interactive stream closed — start the disconnect grace
 			// window server-side. The FIFO queue keeps this ordered behind
 			// any earlier connected report and ahead of a later reconnect.
-			s.enqueueActivity(broker.ActivityDisconnect)
+			// Enqueued BEFORE untrack drops the conn so Drain can trust
+			// "no open conns" to mean "disconnect already queued".
+			s.enqueueActivity(broker.ActivityDisconnect, streamEpoch)
 		}
+		s.untrack(tid, captured)
 	}()
 	g.proxy.ServeHTTP(hw, r.WithContext(context.WithValue(ctx, ctxKeySession, s)))
 }
@@ -581,10 +729,18 @@ func (sessionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 //   - worker-src 'self': decoder and port-relay workers.
 //   - frame-src blob:: the print feature renders a PDF blob in a hidden
 //     iframe.
+//   - frame-ancestors: only the configured portal origins may embed the
+//     session (the in-portal session view); with no portal origin
+//     configured framing is denied outright ('none').
 //
-// Every other directive stays default-src 'self' or harder; framing,
-// plugins, forms and base-tag rewriting are all denied outright.
-func sessionCSP(host string) string {
+// Every other directive stays default-src 'self' or harder; plugins, forms
+// and base-tag rewriting are all denied outright. The policy is per-host:
+// connect-src names wss://<this workspace's host>, never a sibling's.
+func sessionCSP(host string, embedders []string) string {
+	ancestors := "'none'"
+	if len(embedders) > 0 {
+		ancestors = strings.Join(embedders, " ")
+	}
 	return "default-src 'self'" +
 		"; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'" +
 		"; style-src 'self' 'unsafe-inline'" +
@@ -594,10 +750,48 @@ func sessionCSP(host string) string {
 		"; worker-src 'self'" +
 		"; media-src 'self'" +
 		"; frame-src blob:" +
-		"; frame-ancestors 'none'" +
+		"; frame-ancestors " + ancestors +
 		"; base-uri 'none'" +
 		"; object-src 'none'" +
 		"; form-action 'none'"
+}
+
+// sessionPermissionsPolicy grants clipboard and fullscreen to the session
+// origin itself and to the embedding portal origins only (the portal's
+// iframe must also delegate them via its allow attribute); powerful
+// features the desktop client never uses are disabled outright.
+func sessionPermissionsPolicy(embedders []string) string {
+	allow := "self"
+	for _, e := range embedders {
+		allow += ` "` + e + `"`
+	}
+	return "clipboard-read=(" + allow + ")" +
+		", clipboard-write=(" + allow + ")" +
+		", fullscreen=(" + allow + ")" +
+		", camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+}
+
+// serializeOrigin renders u as a browser-serialized origin for policy
+// headers (CSP frame-ancestors, Permissions-Policy): lowercase
+// scheme://host with default ports dropped. Anything that could break out
+// of a header token is refused.
+func serializeOrigin(u *url.URL) (string, bool) {
+	host := strings.ToLower(u.Hostname())
+	if host == "" || strings.ContainsAny(host, " \t;,'\"()*") {
+		return "", false
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	out := u.Scheme + "://" + host
+	if p := u.Port(); p != "" && p != effectivePortDefault(u.Scheme) {
+		out += ":" + p
+	}
+	return out, true
+}
+
+func effectivePortDefault(scheme string) string {
+	return effectivePort(&url.URL{Scheme: scheme})
 }
 
 // responsePolicy is the ModifyResponse policy for runtime-proxied responses
@@ -613,6 +807,8 @@ func (g *Gateway) responsePolicy(resp *http.Response) error {
 		"Refresh", "Link",
 		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
 		"X-Content-Type-Options", "Strict-Transport-Security",
+		"X-Frame-Options", "Permissions-Policy", "Feature-Policy",
+		"Cross-Origin-Resource-Policy", "Origin-Agent-Cluster",
 	} {
 		resp.Header.Del(h)
 	}

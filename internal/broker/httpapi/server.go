@@ -47,6 +47,8 @@ type BrokerAPI interface {
 	RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error)
 	ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error)
 	RevokeLease(ctx context.Context, leaseID string) error
+	// RevokeLeaseChanged reports whether a live lease was actually revoked.
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
 	// ReportActivity records a gateway-observed session signal (input /
 	// connected / disconnect); the server stamps the receipt time.
 	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
@@ -313,11 +315,14 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad lease id")
 		return
 	}
-	if err := s.cfg.Broker.RevokeLease(r.Context(), id); err != nil {
+	changed, err := s.cfg.Broker.RevokeLeaseChanged(r.Context(), id)
+	if err != nil {
 		brokerError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// {"revoked": false} is a successful no-op: the lease is unknown or was
+	// already dead, so nothing changed.
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": changed})
 }
 
 // requireGateway refuses the operator identity on the lease-scoped routes:
@@ -364,6 +369,9 @@ func workspaceUID(w http.ResponseWriter, r *http.Request) (string, bool) {
 type activityRequest struct {
 	Fence broker.Fence             `json:"fence"`
 	Type  broker.ActivityEventType `json:"type"`
+	// StreamEpoch is the epoch ClaimStream returned to the reporting
+	// stream; connected/disconnect reports of a fenced epoch are ignored.
+	StreamEpoch uint64 `json:"streamEpoch,omitempty"`
 }
 
 // activity records a gateway-reported session signal. The receipt time is
@@ -383,7 +391,7 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.cfg.Broker.ReportActivity(r.Context(), gatewayFrom(r.Context()), id,
-		req.Fence, broker.ActivityEvent{Type: req.Type})
+		req.Fence, broker.ActivityEvent{Type: req.Type, StreamEpoch: req.StreamEpoch})
 	if err != nil {
 		switch {
 		case errors.Is(err, broker.ErrActivityType):

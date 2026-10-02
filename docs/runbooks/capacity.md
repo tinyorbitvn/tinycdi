@@ -17,15 +17,20 @@ A workspace consumes resources at two layers:
    500 mCPU / 1 GiB / 1 GiB per session; a fuller desktop profile is
    1 CPU / 2 GiB / 5 GiB
    (`deploy/helm/tinycdi/ci/example-values.yaml`).
-2. **Control-plane share** — api (broker), gateway, operator, portal and
-   Postgres. Chart defaults total ≈220 mCPU / 224 MiB across one replica of
-   each (`deploy/helm/tinycdi/values.yaml`). The gateway carries
-   the steady-state cost of live sessions (TLS + WebSocket relay); api and
-   operator cost is concentrated at provisioning and teardown bursts.
-   **Measured at 20 live streams:** gateway peaked at 60 mCPU / 18 MiB,
-   api 49 mCPU / 25 MiB, operator 31 mCPU / 25 MiB, portal 24 mCPU / 10 MiB,
-   Postgres 42 mCPU / 88 MiB — the whole control plane stayed under ~200 mCPU
-   aggregate, i.e. noise at this scale (see §The 20-session load gate).
+2. **Control-plane share** — backend (API, session gateway and broker in
+   one process), frontend, operator and Postgres. Chart default *requests*
+   (`deploy/helm/tinycdi/values.yaml`): backend 50 mCPU / 64 MiB × 2
+   replicas, frontend 20 mCPU / 32 MiB × 2, operator 50 mCPU / 64 MiB × 1 —
+   ≈190 mCPU / 256 MiB in total, before Postgres. The backend's session
+   listener carries the steady-state cost of live sessions (TLS + WebSocket
+   relay); API and operator cost is concentrated at provisioning and
+   teardown bursts.
+   **Measured at 20 live streams on the v0.1 topology** (separate api,
+   gateway and portal Deployments; not re-measured on v0.2): gateway
+   peaked at 60 mCPU / 18 MiB, api 49 mCPU / 25 MiB, operator
+   31 mCPU / 25 MiB, portal 24 mCPU / 10 MiB, Postgres 42 mCPU / 88 MiB —
+   the whole control plane stayed under ~200 mCPU aggregate, i.e. noise at
+   this scale (see §The 20-session load gate).
 3. **Network** — KasmVNC WebSocket streaming; dominated by screen-change
    rate and client bandwidth, not by the platform. The load gate measures
    gateway throughput directly.
@@ -103,15 +108,17 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
 
 `internal/observability/metrics.go` defines the `tinycdi_*` series
 (bounded labels only — no UIDs/emails). Where they are actually served
-today: the **gateway** registers the full set and serves `/metrics` when
-`gateway.metricsListen` is set (it emits the HTTP-request and
-lease-failure series; the capacity gauges have setters and are the
-designed signal set for the api/operator wiring that remains). The
-**operator** exposes controller-runtime metrics on
-`-metrics-bind-address` (default `"0"` = disabled; map it via
-`operator.metricsBindAddress`). The api has the `InstrumentHTTP`
-middleware helper (`internal/api/middleware.go`) but `cmd/api` does not
-wire or serve it yet — treat api-side metrics as planned, not present.
+today: the **backend** registers the full set and serves `/metrics` on its
+dedicated metrics listener when `backend.metrics.enabled` is set (port
+`backend.metrics.port`, reached through the ClusterIP `backend-metrics`
+Service and never the public ports). The in-process session gateway emits
+the HTTP-request and lease-failure series; the capacity gauges have
+setters and are the designed signal set for the app-listener/operator
+wiring that remains. The **operator** exposes no metrics endpoint (the
+chart pins `--metrics-bind-address=0`). The API has the `InstrumentHTTP`
+middleware helper (`internal/api/middleware.go`) but the backend does not
+wire it onto the app listener yet — treat API-side metrics as planned, not
+present.
 
 | Signal | Metric | Alert when |
 |---|---|---|
@@ -126,11 +133,15 @@ wire or serve it yet — treat api-side metrics as planned, not present.
 
 Saturation symptoms to expect, in order: `QUOTA_EXHAUSTED` 409s (quota gate
 — by design), pod `Pending` on cpu/memory (cluster gate), image-pull
-latency in `workspace_provisioning_seconds` (cold node), then gateway CPU
-saturation (scale `gateway.replicas`; two replicas still enforce
+latency in `workspace_provisioning_seconds` (cold node), then session-listener CPU
+saturation (scale `backend.replicas`; the default two replicas still enforce
 single-writer-per-workspace via broker fencing).
 
 ## The 20-session load gate — measured
+
+> Measured on the v0.1 topology (separate api, gateway and portal
+> Deployments); component names below are v0.1's. The v0.2 soak harness is
+> `tests/soak`.
 
 A load run executed 20 concurrent sessions for 60 minutes
 (2026-09-30): **14 Linux desktop** (test oracle template —

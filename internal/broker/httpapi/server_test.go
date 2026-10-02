@@ -33,13 +33,14 @@ import (
 // fakeBroker scripts the broker surface; err maps let tests inject the
 // domain errors the handler must translate.
 type fakeBroker struct {
-	redeemLease broker.Lease
-	redeemErr   error
-	renewLease  broker.Lease
-	renewErr    error
-	target      broker.Target
-	targetErr   error
-	revokeErr   error
+	redeemLease   broker.Lease
+	redeemErr     error
+	renewLease    broker.Lease
+	renewErr      error
+	target        broker.Target
+	targetErr     error
+	revokeErr     error
+	revokeChanged bool
 
 	activityErr   error
 	revokedLeases int
@@ -75,6 +76,11 @@ func (f *fakeBroker) ResolveTarget(_ context.Context, gw broker.GatewayIdentity,
 func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.gotLeaseID = leaseID
 	return f.revokeErr
+}
+
+func (f *fakeBroker) RevokeLeaseChanged(_ context.Context, leaseID string) (bool, error) {
+	f.gotLeaseID = leaseID
+	return f.revokeChanged, f.revokeErr
 }
 
 func (f *fakeBroker) ReportActivity(_ context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error {
@@ -432,21 +438,31 @@ func TestTarget_OK_AndRevoked(t *testing.T) {
 	}
 }
 
-func TestRevoke_204(t *testing.T) {
-	fb := &fakeBroker{}
-	e := newEnv(t, fb)
-	cert := e.pki.issue(t, "gw-1", nil, false)
-	resp, err := e.client(t, &cert).Post(
-		e.srv.URL+"/internal/v1/broker/leases/lease-abc/revoke", "application/json", nil)
-	if err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("revoke status=%d, want 204", resp.StatusCode)
-	}
-	if fb.gotLeaseID != "lease-abc" {
-		t.Fatalf("revoke id=%q", fb.gotLeaseID)
+// TestRevoke_ReportsWhetherLiveLeaseChanged (R9c): the revoke answers 200
+// {"revoked": <bool>} — true only when a live lease was actually revoked — so
+// the session gateway can tell the operator the truth.
+func TestRevoke_ReportsWhetherLiveLeaseChanged(t *testing.T) {
+	for _, changed := range []bool{true, false} {
+		fb := &fakeBroker{revokeChanged: changed}
+		e := newEnv(t, fb)
+		cert := e.pki.issue(t, "gw-1", nil, false)
+		resp, err := e.client(t, &cert).Post(
+			e.srv.URL+"/internal/v1/broker/leases/lease-abc/revoke", "application/json", nil)
+		if err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		var body struct {
+			Revoked *bool `json:"revoked"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || decodeErr != nil || body.Revoked == nil || *body.Revoked != changed {
+			t.Fatalf("revoke (changed=%v): status=%d revoked=%v decode=%v, want 200 {\"revoked\":%v}",
+				changed, resp.StatusCode, body.Revoked, decodeErr, changed)
+		}
+		if fb.gotLeaseID != "lease-abc" {
+			t.Fatalf("revoke id=%q", fb.gotLeaseID)
+		}
 	}
 }
 
@@ -479,7 +495,7 @@ func TestActivity_204_AndForwards(t *testing.T) {
 	fb := &fakeBroker{}
 	e := newEnv(t, fb)
 	cert := e.pki.issue(t, "gw-1", nil, false)
-	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"},"type":"input"}`
+	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"},"type":"connected","streamEpoch":7}`
 	resp, err := e.client(t, &cert).Post(
 		e.srv.URL+"/internal/v1/broker/leases/lease-abc/activity",
 		"application/json", bytes.NewReader([]byte(body)))
@@ -490,7 +506,7 @@ func TestActivity_204_AndForwards(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("activity status=%d, want 204", resp.StatusCode)
 	}
-	if fb.gotEvent.Type != broker.ActivityInput || fb.gotLeaseID != "lease-abc" ||
+	if fb.gotEvent.Type != broker.ActivityConnected || fb.gotEvent.StreamEpoch != 7 || fb.gotLeaseID != "lease-abc" ||
 		fb.gotFence.FencingVersion != 2 || fb.gotGW.ID != "gw-1" {
 		t.Fatalf("activity args: ev=%+v lease=%q fence=%+v gw=%+v",
 			fb.gotEvent, fb.gotLeaseID, fb.gotFence, fb.gotGW)

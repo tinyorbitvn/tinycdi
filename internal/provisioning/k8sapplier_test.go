@@ -232,3 +232,31 @@ func TestTemplateCatalogImmutableRevisions(t *testing.T) {
 		t.Fatalf("list = %v, want {linuxdesk1->tpl_linuxdesk1-bbbb1111, admintpl}", got)
 	}
 }
+
+// TestK8sApplierCreateCopiesImageBuiltAt: the template's image age travels
+// with the workspace as an annotation on the Workspace CR.
+func TestK8sApplierCreateCopiesImageBuiltAt(t *testing.T) {
+	c, applier := newFakeK8sApplier(t)
+	in := createIntent("ws_0123456789abcdef0123456789abcdef", "req-img-1", 1)
+	in.Spec.ImageBuiltAt = "2026-09-01T00:00:00Z"
+	if err := applier.Apply(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	ws := getWorkspace(t, c, "ns-a", provisioning.WorkspaceCRName(in.WorkspaceUID))
+	if got := ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]; got != "2026-09-01T00:00:00Z" {
+		t.Fatalf("annotation = %q, want the template's image-built-at", got)
+	}
+	if provisioning.AnnotationWorkspaceImageBuiltAt != "workspaces.cdi.tinyorbit.vn/image-built-at" {
+		t.Fatalf("annotation key changed: %s", provisioning.AnnotationWorkspaceImageBuiltAt)
+	}
+
+	// No age on the template -> no annotation (never an empty value).
+	in2 := createIntent("ws_0123456789abcdef0123456789abcde2", "req-img-2", 1)
+	if err := applier.Apply(context.Background(), in2); err != nil {
+		t.Fatal(err)
+	}
+	ws2 := getWorkspace(t, c, "ns-a", provisioning.WorkspaceCRName(in2.WorkspaceUID))
+	if _, ok := ws2.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]; ok {
+		t.Fatalf("annotation present without a template age: %v", ws2.Annotations)
+	}
+}

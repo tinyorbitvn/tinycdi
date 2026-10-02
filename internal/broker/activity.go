@@ -39,8 +39,13 @@ const (
 // the SERVER receipt time assigned by the broker from its own clock:
 // client-supplied timestamps are never trusted and are overwritten.
 type ActivityEvent struct {
-	Type       ActivityEventType
-	ReceivedAt time.Time // server receipt time; broker-assigned, client input ignored
+	Type ActivityEventType
+	// StreamEpoch is the lease stream epoch the reporting stream claimed
+	// (the value ClaimStream returned; 0 when the gateway has no session
+	// directory). It makes stream accounting epoch-aware: a report from a
+	// stream an older epoch already fenced is ignored.
+	StreamEpoch uint64
+	ReceivedAt  time.Time // server receipt time; broker-assigned, client input ignored
 }
 
 // StopReason identifies which deadline (or explicit request) produced a
@@ -150,7 +155,16 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 		binding.RuntimeUID != l.RuntimeUID {
 		return ErrStaleBinding
 	}
-	return b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev.Type, now)
+	if err := b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev, now); err != nil {
+		return err
+	}
+	// Desktop input extends the owning user's PORTAL session idle timer
+	// (D18): the hook receives the lease's principal — the "iss|sub" owner
+	// string — after the event is durably recorded.
+	if ev.Type == ActivityInput && b.inputHook != nil {
+		b.inputHook(ctx, l.PrincipalSubject)
+	}
+	return nil
 }
 
 // recordActivity upserts the (workspace, generation) activity row. All
@@ -161,7 +175,16 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 // ReportActivity's initial state check and this write drops the event
 // instead of re-opening drain accounting that the revoke already closed —
 // a revoked lease's streams are closed authoritatively at revoke time.
-func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID PlatformID, gen uint64, t ActivityEventType, now time.Time) error {
+//
+// Stream accounting is epoch-aware: ClaimStream zeroes the generation's
+// open_streams (the previous stream is fenced by definition), so "connected"
+// SETS the count to 1 for the claiming epoch rather than adding to a count a
+// hard-killed replica never decremented (epoch-0 reports, sent when no
+// session directory is wired, keep the +1/-1 arithmetic), and a connected/disconnect report
+// from an epoch older than the lease's current stream_epoch belongs to a
+// fenced stream and is dropped.
+func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID PlatformID, gen uint64, ev ActivityEvent, now time.Time) error {
+	t := ev.Type
 	var q string
 	switch t {
 	case ActivityInput:
@@ -173,15 +196,28 @@ func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID Platf
 			updated_at = EXCLUDED.updated_at`
 	case ActivityConnected:
 		// A connected stream cancels a pending disconnect: the grace window
-		// does not keep ticking underneath (design §8).
+		// does not keep ticking underneath (design §8). Epoch >= 1 reports
+		// SET the count (ClaimStream already zeroed it); epoch 0 means no
+		// session directory is wired (split mode), nothing claims streams,
+		// and the +1/-1 arithmetic is all there is.
 		q = `INSERT INTO workspace_activity
 			(workspace_id, runtime_generation, connected_at, open_streams, updated_at)
 		 VALUES ($1, $2, $3, 1, $3)
 		 ON CONFLICT (workspace_id, runtime_generation) DO UPDATE SET
 			connected_at = EXCLUDED.connected_at,
-			open_streams = workspace_activity.open_streams + 1,
+			open_streams = 1,
 			disconnected_since = NULL,
 			updated_at = EXCLUDED.updated_at`
+		if ev.StreamEpoch == 0 {
+			q = `INSERT INTO workspace_activity
+				(workspace_id, runtime_generation, connected_at, open_streams, updated_at)
+			 VALUES ($1, $2, $3, 1, $3)
+			 ON CONFLICT (workspace_id, runtime_generation) DO UPDATE SET
+				connected_at = EXCLUDED.connected_at,
+				open_streams = workspace_activity.open_streams + 1,
+				disconnected_since = NULL,
+				updated_at = EXCLUDED.updated_at`
+		}
 	case ActivityDisconnect:
 		// The grace window anchors on the FIRST transition to zero streams;
 		// duplicate disconnects keep the earliest deadline.
@@ -198,10 +234,10 @@ func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID Platf
 			updated_at = EXCLUDED.updated_at`
 	}
 	return b.db.WithTx(ctx, func(tx store.Tx) error {
-		var locked string
+		var currentEpoch uint64
 		err := tx.QueryRow(ctx,
-			`SELECT id FROM connection_lease WHERE id = $1 AND state = 'active' FOR UPDATE`,
-			leaseID).Scan(&locked)
+			`SELECT stream_epoch FROM connection_lease WHERE id = $1 AND state = 'active' FOR UPDATE`,
+			leaseID).Scan(&currentEpoch)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			// The lease died between ReportActivity's check and this write;
@@ -210,6 +246,11 @@ func (b *Broker) recordActivity(ctx context.Context, leaseID string, wsUID Platf
 			return nil
 		case err != nil:
 			return fmt.Errorf("broker: activity lease lock: %w", err)
+		}
+		if t != ActivityInput && ev.StreamEpoch < currentEpoch {
+			// A fenced stream's report: a newer ClaimStream already
+			// accounted for it, so it must not touch the live stream's count.
+			return nil
 		}
 		if _, err := tx.Exec(ctx, q, wsUID, int64(gen), now); err != nil {
 			return fmt.Errorf("broker: record activity: %w", err)

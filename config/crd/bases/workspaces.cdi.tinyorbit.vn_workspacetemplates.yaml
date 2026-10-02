@@ -148,6 +148,14 @@ spec:
                     items:
                       type: string
                     type: array
+                  hostUsers:
+                    description: |-
+                      hostUsers sets the pod's hostUsers field: false runs the runtime in a
+                      user namespace so its root is not node root. Unset leaves the pod
+                      field nil — the operator's default applies when configured. Opt-in in
+                      v0.2; it becomes the default only after the R1 spike proves
+                      KasmVNC + the Chromium sandbox + PVC on RKE2 (design §3.7, D26).
+                    type: boolean
                   image:
                     description: |-
                       image is the OCI reference for the runtime image, digest-pinned:
@@ -183,6 +191,70 @@ spec:
                 - ClusterOnly
                 - Isolated
                 type: string
+              placement:
+                description: |-
+                  placement controls where runtime pods are scheduled: node selector,
+                  tolerations, runtime class. Admin-only and immutable with the spec.
+                properties:
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: nodeSelector pins runtime pods to nodes carrying
+                      these labels.
+                    type: object
+                  runtimeClassName:
+                    description: |-
+                      runtimeClassName selects the node container runtime handler (e.g.
+                      gvisor). Passed through to pod.spec.runtimeClassName; v0.2 does not
+                      maintain a tested handler matrix (design §3.7).
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  tolerations:
+                    description: |-
+                      tolerations let runtime pods land on tainted nodes (the dedicated
+                      workspace pool). Capped at 16 — a scheduling hint, not a policy
+                      surface.
+                    items:
+                      description: |-
+                        The pod this Toleration is attached to tolerates any taint that matches
+                        the triple <key,value,effect> using the matching operator <operator>.
+                      properties:
+                        effect:
+                          description: |-
+                            Effect indicates the taint effect to match. Empty means match all taint effects.
+                            When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                          type: string
+                        key:
+                          description: |-
+                            Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                            If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                          type: string
+                        operator:
+                          description: |-
+                            Operator represents a key's relationship to the value.
+                            Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                            Exists is equivalent to wildcard for value, so that a pod can
+                            tolerate all taints of a particular category.
+                            Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                          type: string
+                        tolerationSeconds:
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration (which must be
+                            of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                            it is not set, which means tolerate the taint forever (do not evict). Zero and
+                            negative values will be treated as 0 (evict immediately) by the system.
+                          format: int64
+                          type: integer
+                        value:
+                          description: |-
+                            Value is the taint value the toleration matches to.
+                            If the operator is Exists, the value should be empty, otherwise just a regular string.
+                          type: string
+                      type: object
+                    maxItems: 16
+                    type: array
+                type: object
               resources:
                 description: resources is the compute/storage profile for the runtime.
                 properties:

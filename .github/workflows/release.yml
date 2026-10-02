@@ -44,7 +44,7 @@
 # the publish allowlist derive from it.
 #
 # Assets attached to the GitHub Release:
-#   tinycdi-{api,operator,gateway}-<ver>-linux-amd64  static binaries
+#   tinycdi-{backend,operator}-<ver>-linux-amd64      static binaries
 #   tinycdi-crds-<ver>.yaml                           config/crd/bases bundle
 #   tinycdi-<chartver>.tgz                            helm chart
 #   sbom-<image>.spdx.json                             SPDX SBOM per image
@@ -508,10 +508,9 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
       IMG_DESCRIPTION: >-
-        ${{ matrix.image == 'api' && 'TinyCDI platform API' ||
+        ${{ matrix.image == 'backend' && 'TinyCDI backend (public API + session gateway)' ||
+            matrix.image == 'frontend' && 'TinyCDI web frontend (portal SPA)' ||
             matrix.image == 'operator' && 'TinyCDI Kubernetes operator' ||
-            matrix.image == 'gateway' && 'TinyCDI session gateway' ||
-            matrix.image == 'portal' && 'TinyCDI web portal' ||
             matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' ||
             matrix.image == 'kasm-adapter' && 'TinyCDI Kasm workspace adapter (initContainer)' }}
     steps:
@@ -980,7 +979,7 @@ jobs:
       - name: build static linux/amd64 binaries
         run: |
           mkdir -p dist
-          for comp in api operator gateway; do
+          for comp in backend operator; do
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
               -trimpath -ldflags "-s -w -X main.version=$VERSION" \
               -o "dist/tinycdi-${comp}-${VERSION}-linux-amd64" "./cmd/${comp}"
@@ -1151,14 +1150,14 @@ jobs:
           subject-digest: ${{ steps.refs.outputs.digest_linux_desktop }}
           push-to-registry: true
 
-      - name: attest build provenance — api
+      - name: attest build provenance — backend
         if: >-
           ${{ vars.ATTESTATIONS_ENABLED == 'true'
-              && contains(fromJSON(needs.prepare.outputs.release_images), 'api') }}
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'backend') }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-name: ${{ steps.refs.outputs.name_api }}
-          subject-digest: ${{ steps.refs.outputs.digest_api }}
+          subject-name: ${{ steps.refs.outputs.name_backend }}
+          subject-digest: ${{ steps.refs.outputs.digest_backend }}
           push-to-registry: true
 
       - name: attest build provenance — operator
@@ -1171,24 +1170,14 @@ jobs:
           subject-digest: ${{ steps.refs.outputs.digest_operator }}
           push-to-registry: true
 
-      - name: attest build provenance — gateway
+      - name: attest build provenance — frontend
         if: >-
           ${{ vars.ATTESTATIONS_ENABLED == 'true'
-              && contains(fromJSON(needs.prepare.outputs.release_images), 'gateway') }}
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'frontend') }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-name: ${{ steps.refs.outputs.name_gateway }}
-          subject-digest: ${{ steps.refs.outputs.digest_gateway }}
-          push-to-registry: true
-
-      - name: attest build provenance — portal
-        if: >-
-          ${{ vars.ATTESTATIONS_ENABLED == 'true'
-              && contains(fromJSON(needs.prepare.outputs.release_images), 'portal') }}
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        with:
-          subject-name: ${{ steps.refs.outputs.name_portal }}
-          subject-digest: ${{ steps.refs.outputs.digest_portal }}
+          subject-name: ${{ steps.refs.outputs.name_frontend }}
+          subject-digest: ${{ steps.refs.outputs.digest_frontend }}
           push-to-registry: true
 
       - name: attest build provenance — browser
@@ -1268,14 +1257,23 @@ jobs:
           {
             echo "## Container images"
             echo
-            echo "| Image | Tag | Digest |"
-            echo "|---|---|---|"
+            echo "| Image | Component | Tag | Digest |"
+            echo "|---|---|---|---|"
           } > notes.md
           for f in refs/*.ref; do
             ref="$(tr -d '[:space:]' < "$f")"
             base="${ref%@*}"; digest="${ref#*@}"
+            case "$(basename "$f" .ref)" in
+              backend)       role="backend — public API + session gateway" ;;
+              frontend)      role="frontend — web portal (SPA)" ;;
+              operator)      role="operator — workspace controller" ;;
+              linux-desktop) role="runtime — Linux desktop" ;;
+              browser)       role="runtime — browser (Chromium + Firefox ESR)" ;;
+              kasm-adapter)  role="kasm adapter — initContainer for kasmweb/* workspaces" ;;
+              *)             role="" ;;
+            esac
             echo "${base}:${CHART_VERSION}@${digest}" >> bundle/images.txt
-            echo "| \`${base}\` | \`${CHART_VERSION}\` | \`${digest}\` |" >> notes.md
+            echo "| \`${base}\` | ${role} | \`${CHART_VERSION}\` | \`${digest}\` |" >> notes.md
           done
           echo "$CHART_REF" >> bundle/images.txt
           sort -o bundle/images.txt bundle/images.txt

@@ -45,6 +45,9 @@ type TemplateInfo struct {
 	Revision   int64  `json:"revision"`
 	Runtime    string `json:"runtime"`
 	Experience string `json:"experience"`
+	// ImageBuiltAt is the template's raw image-built-at annotation value
+	// (RFC 3339 when well formed), snapshotted at create time.
+	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
 }
 
 // WorkspaceRecord is the API-facing read model of a workspace row.
@@ -157,6 +160,7 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 			OwnerSubject:    req.OwnerSubject,
 			DataPolicy:      dataPolicy,
 			RetainedDataRef: req.RetainedDataRef,
+			ImageBuiltAt:    req.Template.ImageBuiltAt,
 		})
 		if err != nil {
 			return err

@@ -90,6 +90,12 @@ type RetainedDataStore interface {
 	// current transition epoch.
 	ListRetained(ctx context.Context, tenantID, caller, ownerScope, cursor string, limit int) ([]RetainedRecord, string, error)
 
+	// ReadRetained returns one record visible to ownerScope ("" = tenant-wide,
+	// admin only) with a fresh PurgeNonce bound to caller, exactly as a list
+	// row. Unknown ids, foreign tenants and (for non-admins) other owners'
+	// records all fail ErrRetainedNotFound.
+	ReadRetained(ctx context.Context, tenantID, caller, ownerScope, dataID string) (RetainedRecord, error)
+
 	// ImportRetained records a dataset the operator moved into the
 	// inventory (workspace delete with dataPolicy=Retain, or inventory
 	// reconstruction after API DB loss). Idempotent on
@@ -148,6 +154,7 @@ var _ RetainedDataStore = (*provisioning.RetainedStore)(nil)
 type retainedDataView struct {
 	ID                     string    `json:"id"`
 	State                  string    `json:"state"`
+	Owner                  Owner     `json:"owner"`
 	SizeGiB                int64     `json:"sizeGib"`
 	Runtime                string    `json:"runtime"`
 	SourceWorkspaceName    string    `json:"sourceWorkspaceName"`
@@ -166,6 +173,7 @@ func recordToRetainedView(r *RetainedRecord) retainedDataView {
 	return retainedDataView{
 		ID:                     r.ID,
 		State:                  string(r.State),
+		Owner:                  ownerFallback(r.Owner),
 		SizeGiB:                (r.SizeBytes + (1 << 30) - 1) / (1 << 30),
 		Runtime:                r.Runtime,
 		SourceWorkspaceName:    r.SourceWorkspaceName,
@@ -193,11 +201,12 @@ type purgeDataRequest struct {
 
 // DataHandler implements /v1/data per openapi.yaml.
 type DataHandler struct {
-	data    RetainedDataStore
-	catalog TemplateCatalog
-	tenants TenantResolver
-	maxBody int64
-	now     func() time.Time
+	data      RetainedDataStore
+	catalog   TemplateCatalog
+	tenants   TenantResolver
+	directory Directory
+	maxBody   int64
+	now       func() time.Time
 }
 
 // NewDataHandler wires the handler. catalog resolves the attach
@@ -207,12 +216,20 @@ func NewDataHandler(d RetainedDataStore, c TemplateCatalog, t TenantResolver) *D
 		maxBody: 64 << 10, now: time.Now}
 }
 
+// WithDirectory attaches the principal directory that fills owner display
+// names on views. Nil falls back to bare subjects.
+func (h *DataHandler) WithDirectory(d Directory) *DataHandler {
+	h.directory = d
+	return h
+}
+
 // MountDataRoutes registers the retained-data routes: RequireAuth on the
 // list read, RequireAuth+RequireCSRF on attach/purge writes.
 func MountDataRoutes(mux *http.ServeMux, authn *Authenticator, h *DataHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
 	unsafe := func(h http.Handler) http.Handler { return authn.RequireAuth(authn.RequireCSRF(h)) }
 	mux.Handle("GET /v1/data", safe(http.HandlerFunc(h.List)))
+	mux.Handle("GET /v1/data/{dataId}", safe(http.HandlerFunc(h.Get)))
 	mux.Handle("POST /v1/data/{dataId}/attach", unsafe(http.HandlerFunc(h.Attach)))
 	mux.Handle("POST /v1/data/{dataId}/purge", unsafe(http.HandlerFunc(h.Purge)))
 }
@@ -247,17 +264,51 @@ func (h *DataHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	scope, ok := listScope(w, r, p)
+	if !ok {
+		return
+	}
 	recs, next, err := h.data.ListRetained(r.Context(), p.TenantID,
-		p.Owner(), ownerScope(p), r.URL.Query().Get("pageToken"), limit)
+		p.Owner(), scope, r.URL.Query().Get("pageToken"), limit)
 	if err != nil {
 		h.writeDataError(w, r, err)
 		return
 	}
+	refs := make([]string, 0, len(recs))
+	for i := range recs {
+		refs = append(refs, recs[i].Owner)
+	}
+	owners := resolveOwners(r.Context(), h.directory, p.TenantID, refs)
 	out := retainedDataList{Items: make([]retainedDataView, 0, len(recs)), NextPageToken: next}
 	for i := range recs {
-		out.Items = append(out.Items, recordToRetainedView(&recs[i]))
+		v := recordToRetainedView(&recs[i])
+		v.Owner = owners[recs[i].Owner]
+		out.Items = append(out.Items, v)
 	}
 	respondJSON(w, out)
+}
+
+// Get handles GET /v1/data/{dataId}: one record with a fresh purge nonce.
+// Visibility is the list's — the owner, or a tenant-admin of the same
+// tenant; anyone else (and any other tenant) gets a 404.
+func (h *DataHandler) Get(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrFail(w, r)
+	if !ok {
+		return
+	}
+	dataID := r.PathValue("dataId")
+	if !retainedIDPattern.MatchString(dataID) {
+		writeError(w, r, CodeInvalidRequest, "bad retained data id")
+		return
+	}
+	rec, err := h.data.ReadRetained(r.Context(), p.TenantID, p.Owner(), ownerScope(p), dataID)
+	if err != nil {
+		h.writeDataError(w, r, err)
+		return
+	}
+	v := recordToRetainedView(&rec)
+	v.Owner = resolveOwners(r.Context(), h.directory, p.TenantID, []string{rec.Owner})[rec.Owner]
+	respondJSON(w, v)
 }
 
 // Attach handles POST /v1/data/{dataId}/attach.
@@ -313,6 +364,7 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		Template: provisioning.TemplateInfo{
 			ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
 			Runtime: tpl.Runtime, Experience: tpl.Experience,
+			ImageBuiltAt: tpl.ImageBuiltAt,
 		},
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1,
@@ -328,7 +380,9 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(recordToView(&rec))
+	v := recordToView(&rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // Purge handles POST /v1/data/{dataId}/purge.
@@ -370,7 +424,9 @@ func (h *DataHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(recordToRetainedView(&rec))
+	v := recordToRetainedView(&rec)
+	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // writeDataError maps retained-store errors onto the stable error model.

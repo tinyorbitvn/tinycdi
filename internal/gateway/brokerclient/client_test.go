@@ -233,15 +233,18 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 				"protocol":      f.target.Protocol,
 			})
 		case len(r.URL.Path) > 7 && r.URL.Path[len(r.URL.Path)-7:] == "/revoke":
-			w.WriteHeader(http.StatusNoContent)
+			// A lease named "...-dead" is one the broker no longer holds live.
+			_ = json.NewEncoder(w).Encode(map[string]bool{"revoked": !strings.Contains(r.URL.Path, "-dead/")})
 		case strings.HasSuffix(r.URL.Path, "/activity"):
 			var body struct {
 				Fence struct {
 					Version uint64 `json:"version"`
 				} `json:"fence"`
-				Type string `json:"type"`
+				Type        string `json:"type"`
+				StreamEpoch uint64 `json:"streamEpoch"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.lastBody["streamEpoch"] = json.RawMessage(fmt.Sprint(body.StreamEpoch))
 			f.lastBody["type"] = json.RawMessage(`"` + body.Type + `"`)
 			f.lastBody["version"] = json.RawMessage(json.Number(fmt.Sprint(body.Fence.Version)).String())
 			w.WriteHeader(http.StatusNoContent)
@@ -416,6 +419,21 @@ func TestResolveTarget_NotFound404(t *testing.T) {
 	}
 }
 
+// TestRevokeLeaseChanged: the broker's {"revoked": bool} answer is passed
+// through, so a revoke of a dead or unknown lease is not reported as done.
+func TestRevokeLeaseChanged(t *testing.T) {
+	pki := newTestPKI(t)
+	api := newFakeBrokerAPI(t, pki)
+	c := clientFor(t, api, pki)
+
+	if changed, err := c.RevokeLeaseChanged(context.Background(), "lease-1"); err != nil || !changed {
+		t.Fatalf("live lease: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.RevokeLeaseChanged(context.Background(), "lease-dead"); err != nil || changed {
+		t.Fatalf("dead lease: changed=%v err=%v, want false", changed, err)
+	}
+}
+
 func TestRevokeLease_204(t *testing.T) {
 	pki := newTestPKI(t)
 	api := newFakeBrokerAPI(t, pki)
@@ -436,7 +454,7 @@ func TestReportActivity_204(t *testing.T) {
 
 	fence := broker.Fence{WorkspaceUID: "ws-1", RuntimeGeneration: 3, RuntimeUID: "rt-9", FencingVersion: 2}
 	err := c.ReportActivity(context.Background(), testGW, "lease-1", fence,
-		broker.ActivityEvent{Type: broker.ActivityInput, ReceivedAt: time.Now().Add(-time.Hour)})
+		broker.ActivityEvent{Type: broker.ActivityInput, StreamEpoch: 4, ReceivedAt: time.Now().Add(-time.Hour)})
 	if err != nil {
 		t.Fatalf("activity: %v", err)
 	}
@@ -448,6 +466,9 @@ func TestReportActivity_204(t *testing.T) {
 	}
 	if string(api.lastBody["version"]) != `2` {
 		t.Fatalf("fence version on wire = %s", api.lastBody["version"])
+	}
+	if string(api.lastBody["streamEpoch"]) != `4` {
+		t.Fatalf("stream epoch on wire = %s, want 4", api.lastBody["streamEpoch"])
 	}
 }
 

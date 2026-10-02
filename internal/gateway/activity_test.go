@@ -59,9 +59,9 @@ func (b *activityBroker) ReportActivity(ctx context.Context, gw broker.GatewayId
 func syncGateway(t *testing.T, brk gateway.BrokerClient, mutate func(*gateway.Config)) *httptest.Server {
 	t.Helper()
 	cfg := gateway.Config{
-		Identity:       broker.GatewayIdentity{ID: "gw-test", Audience: "session.example.dev"},
-		PublicOrigin:   testOrigin,
-		AllowedHosts:   []string{testHost},
+		Identity:       broker.GatewayIdentity{ID: "gw-test", Audience: testDomain},
+		SessionDomain:  testSessionDomain,
+		ControlHosts:   []string{testControlHost},
 		Broker:         brk,
 		ControlToken:   "control-test-token",
 		RenewInterval:  25 * time.Millisecond, // fast cadence so revoke tests don't sleep
@@ -152,11 +152,11 @@ func inputs(fb *fakeBroker) int {
 // disconnect grace timer.
 func TestActivity_ConnectDisconnectAndReconnect(t *testing.T) {
 	fb := newActivityBroker(t)
-	fb.scriptTicket("tk-act", "ws-1")
+	fb.scriptTicket("tk-act", testWSUID)
 	srv := syncGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-act")
+	cookie := launchOK(t, srv, testHost, "tk-act")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -168,7 +168,7 @@ func TestActivity_ConnectDisconnectAndReconnect(t *testing.T) {
 
 	// Reconnect: a fresh upgrade reports connected again — broker-side this
 	// cancels the pending disconnect window.
-	resp2 := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp2 := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp2.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp2)
 		t.Fatalf("reconnect upgrade = %d, want 101", resp2.StatusCode)
@@ -183,7 +183,7 @@ func TestActivity_ConnectDisconnectAndReconnect(t *testing.T) {
 // advances the window so a later input reports again.
 func TestActivity_InputReported_RateLimited(t *testing.T) {
 	fb := newActivityBroker(t)
-	fb.scriptTicket("tk-inp", "ws-1")
+	fb.scriptTicket("tk-inp", testWSUID)
 	clock := &fakeClock{now: time.Now()}
 	srv := syncGateway(t, fb, func(c *gateway.Config) {
 		c.Now = clock.Now
@@ -192,9 +192,9 @@ func TestActivity_InputReported_RateLimited(t *testing.T) {
 		// pin it well above the advance so only the limiter sees the jump.
 		c.RevokeDeadline = time.Hour
 	})
-	cookie := launchOK(t, srv, "tk-inp")
+	cookie := launchOK(t, srv, testHost, "tk-inp")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -242,7 +242,7 @@ func TestActivity_InputReported_RateLimited(t *testing.T) {
 // input — and upstream->client video never enters the sniffed direction.
 func TestActivity_PingsTextVideoIgnored(t *testing.T) {
 	fb := newActivityBroker(t)
-	fb.scriptTicket("tk-noninput", "ws-1")
+	fb.scriptTicket("tk-noninput", testWSUID)
 	clock := &fakeClock{now: time.Now()}
 	srv := syncGateway(t, fb, func(c *gateway.Config) {
 		c.Now = clock.Now
@@ -251,9 +251,9 @@ func TestActivity_PingsTextVideoIgnored(t *testing.T) {
 		// pin it well above the advance so only the limiter sees the jump.
 		c.RevokeDeadline = time.Hour
 	})
-	cookie := launchOK(t, srv, "tk-noninput")
+	cookie := launchOK(t, srv, testHost, "tk-noninput")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -300,11 +300,11 @@ func TestActivity_PingsTextVideoIgnored(t *testing.T) {
 // signal — dropping it leaks open_streams and burns the 45 s drain budget.
 func TestActivity_KillSessionFlushesDisconnect(t *testing.T) {
 	fb := newActivityBroker(t)
-	fb.scriptTicket("tk-kill", "ws-1")
+	fb.scriptTicket("tk-kill", testWSUID)
 	srv := syncGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-kill")
+	cookie := launchOK(t, srv, testHost, "tk-kill")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)

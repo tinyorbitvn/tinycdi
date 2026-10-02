@@ -1,0 +1,24 @@
+{
+  "name": "tinycdi-soak",
+  "version": "0.2.0",
+  "license": "MIT",
+  "private": true,
+  "description": "TinyCDI soak and drill harness — session soak runner (soak.ts), failure drills (drills.sh) and the soak report schema",
+  "type": "module",
+  "scripts": {
+    "soak": "node --disable-warning=ExperimentalWarning soak.ts",
+    "test": "node --test --disable-warning=ExperimentalWarning soak.test.ts drive.test.ts drills.test.ts",
+    "test:dry-run": "node --disable-warning=ExperimentalWarning soak.ts --dry-run --sessions 3 --duration 25s --poll-interval 1s --input-interval 2s --report soak-report.dry-run.json",
+    "typecheck": "tsc --noEmit",
+    "lint:sh": "shellcheck drills.sh"
+  },
+  "dependencies": {
+    "ajv": "8.18.0",
+    "ajv-formats": "3.0.1",
+    "playwright": "1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "typescript": "5.9.3"
+  }
+}

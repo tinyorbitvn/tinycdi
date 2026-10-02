@@ -1,0 +1,220 @@
+/*
+ * In-portal session view. Fills the shell's "bleed" content area: a slim
+ * toolbar above a stage that hosts the session iframe and its status
+ * overlay. Tokens come from styles/tokens.css; no inline styles (CSP).
+ */
+
+.tc-session {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--tc-topbar-height, 0px));
+  min-height: 20rem;
+  background: var(--tc-color-bg);
+}
+
+.tc-session__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--tc-space-2);
+  padding: var(--tc-space-2) var(--tc-space-3);
+  background: var(--tc-color-surface);
+  border-bottom: 1px solid var(--tc-color-border);
+}
+
+.tc-session__title {
+  font-size: var(--tc-text-md);
+  font-weight: var(--tc-weight-semibold);
+  line-height: var(--tc-leading-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24ch;
+}
+
+.tc-session__status {
+  display: inline-flex;
+}
+
+.tc-session__notice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tc-space-1);
+  margin-left: auto;
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+}
+
+.tc-session__notice[data-warn] {
+  color: var(--tc-color-warning-text);
+}
+
+.tc-session__warning {
+  margin-left: var(--tc-space-2);
+  padding: 0 var(--tc-space-2);
+  border-radius: var(--tc-radius-full);
+  background: var(--tc-color-warning-subtle);
+  color: var(--tc-color-warning-text);
+  font-weight: var(--tc-weight-medium);
+}
+
+.tc-session__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--tc-space-1);
+}
+
+.tc-session__printhint {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+  margin-right: var(--tc-space-2);
+}
+
+/* Right-align the controls; when the lifecycle notice is present it takes
+ * the auto margin instead. */
+.tc-session__controls {
+  margin-left: auto;
+}
+
+.tc-session__notice ~ .tc-session__controls {
+  margin-left: 0;
+}
+
+/* Clipboard hint: a native <details> disclosure, keyboard accessible. */
+.tc-session__clipboard {
+  position: relative;
+}
+
+.tc-session__clipboard > summary {
+  list-style: none;
+}
+
+.tc-session__clipboard > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tc-session__popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--tc-space-1));
+  z-index: var(--tc-z-popover);
+  width: min(22rem, 80vw);
+  padding: var(--tc-space-3);
+  display: grid;
+  gap: var(--tc-space-2);
+  background: var(--tc-color-surface-raised);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-md);
+  box-shadow: var(--tc-shadow-md);
+  font-size: var(--tc-text-sm);
+}
+
+/* Stage: the iframe fills it; the overlay sits on top until connected. */
+.tc-session__stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--tc-color-surface-sunken);
+}
+
+.tc-session__stage:fullscreen {
+  background: #000;
+}
+
+.tc-session__frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--tc-color-surface-sunken);
+}
+
+.tc-session__frame:focus-visible {
+  outline: var(--tc-focus-ring, 2px solid var(--tc-color-focus));
+  outline-offset: -3px;
+}
+
+.tc-session__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--tc-z-overlay);
+  display: grid;
+  place-items: center;
+  padding: var(--tc-space-4);
+  background: var(--tc-color-surface-sunken);
+}
+
+.tc-session__panel {
+  display: grid;
+  justify-items: center;
+  gap: var(--tc-space-3);
+  max-width: 32rem;
+  padding: var(--tc-space-6);
+  text-align: center;
+  background: var(--tc-color-surface);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-lg);
+  box-shadow: var(--tc-shadow-sm);
+}
+
+.tc-session__overlay[data-tone="progress"] .tc-session__panel {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.tc-session__overlay[data-tone="alert"] .tc-session__panel {
+  border-color: var(--tc-color-border-strong);
+}
+
+.tc-session__panel-title {
+  font-size: var(--tc-text-lg);
+  font-weight: var(--tc-weight-semibold);
+}
+
+.tc-session__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--tc-space-2);
+}
+
+.tc-session__hint,
+.tc-session__meta {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+}
+
+.tc-session__meta {
+  font-family: var(--tc-font-mono);
+}
+
+.tc-session__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tc-color-accent-text);
+  text-decoration: underline;
+}
+
+.tc-session__link:focus-visible {
+  outline: var(--tc-focus-ring, 2px solid var(--tc-color-focus));
+  outline-offset: 2px;
+  border-radius: var(--tc-radius-sm);
+}
+
+@media (max-width: 40rem) {
+  .tc-session__notice {
+    display: none;
+  }
+
+  .tc-session__controls .tc-button__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}

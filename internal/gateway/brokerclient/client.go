@@ -6,7 +6,7 @@
 //	POST /internal/v1/broker/leases/{id}/renew   {"fence": {...}}       -> 200 Lease | 409 | 410
 //	GET  /internal/v1/broker/leases/{id}/target                       -> 200 Target | 404/409/410
 //	POST /internal/v1/broker/leases/{id}/revoke                       -> 204
-//	POST /internal/v1/broker/leases/{id}/activity {"fence":{...},"type":"input|connected|disconnect"} -> 204 | 400/403/409/410
+//	POST /internal/v1/broker/leases/{id}/activity {"fence":{...},"type":"input|connected|disconnect","streamEpoch":N} -> 204 | 400/403/409/410
 //
 // Identity is the mTLS client certificate (CN = gateway ID); the client only
 // loads cert/key/CA from files and never logs credential material (Target
@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -375,13 +376,32 @@ func (c *Client) RevokeLease(ctx context.Context, leaseID string) error {
 		leasesPath+url.PathEscape(leaseID)+"/revoke", struct{}{}, nil)
 }
 
+// RevokeLeaseChanged revokes the lease and reports whether a live lease was
+// actually revoked. An empty 204 answer (a broker that predates the report)
+// carries no information and counts as revoked.
+func (c *Client) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	var out struct {
+		Revoked bool `json:"revoked"`
+	}
+	err := c.do(ctx, "revoke", http.MethodPost,
+		leasesPath+url.PathEscape(leaseID)+"/revoke", struct{}{}, &out)
+	if errors.Is(err, io.EOF) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return out.Revoked, nil
+}
+
 // ReportActivity posts one session signal; the broker stamps its own
 // receipt time — no client timestamp is sent.
 func (c *Client) ReportActivity(ctx context.Context, _ broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error {
 	return c.do(ctx, "activity", http.MethodPost,
 		leasesPath+url.PathEscape(leaseID)+"/activity",
 		struct {
-			Fence fenceJSON                `json:"fence"`
-			Type  broker.ActivityEventType `json:"type"`
-		}{Fence: fenceOf(fence), Type: ev.Type}, nil)
+			Fence       fenceJSON                `json:"fence"`
+			Type        broker.ActivityEventType `json:"type"`
+			StreamEpoch uint64                   `json:"streamEpoch,omitempty"`
+		}{Fence: fenceOf(fence), Type: ev.Type, StreamEpoch: ev.StreamEpoch}, nil)
 }

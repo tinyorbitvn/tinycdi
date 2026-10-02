@@ -1,0 +1,319 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeIntentLog serves a canned API-side lifecycle history.
+type fakeIntentLog struct {
+	recs []IntentRecord
+	err  error
+}
+
+func (f *fakeIntentLog) IntentHistory(_ context.Context, _, _ string) ([]IntentRecord, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.recs, nil
+}
+
+func newEventsEnv(t *testing.T, be workspaceBackend, sv StatusView, il IntentLog) *testEnv {
+	t.Helper()
+	return newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants(),
+		func(h *WorkspaceHandler) {
+			h.WithStatusView(sv)
+			h.WithIntentLog(il)
+		})
+}
+
+// TestEvents_Curated: an operator failure whose raw text leaks a node name
+// and an image reference must surface only curated messages — never the raw
+// Kubernetes/operator strings.
+func TestEvents_Curated(t *testing.T) {
+	be := newFakeBackend()
+	sv := &fakeStatusView{}
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: time.Now().Add(-time.Hour)},
+	}}
+	env := newEventsEnv(t, be, sv, il)
+	sess, csrf := login(t, env, "user-a")
+
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"doomed","templateRef":"tpl_linuxdesktop","desiredState":"Running"}`,
+		map[string]string{"Idempotency-Key": "key-evt-10000"})
+	created := decodeBody[WorkspaceView](t, r)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", r.StatusCode)
+	}
+
+	const nodeName = "node-42.lab.internal"
+	const imageRef = "registry.local/kasmweb/core@sha256:deadbeef"
+	sv.set(created.ID, ObservedStatus{
+		Fresh:         true,
+		Found:         true,
+		Phase:         "Failed",
+		FailureReason: "BootDeadlineExceeded",
+		Conditions: []workspaceCondition{
+			{Type: "Admitted", Status: "True", Reason: "TemplateResolved",
+				LastTransitionTime: time.Now().Add(-time.Hour)},
+			{Type: "Degraded", Status: "True", Reason: "ReconcileError",
+				Message: "pod ws-x failed on node " + nodeName +
+					": pull " + imageRef + " timed out",
+				LastTransitionTime: time.Now()},
+		},
+	})
+
+	r = doReq(t, env, sess, csrf, http.MethodGet,
+		"/v1/workspaces/"+created.ID+"/events", "", nil)
+	list := decodeBody[WorkspaceEventList](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", r.StatusCode)
+	}
+	if len(list.Items) == 0 {
+		t.Fatal("events list is empty")
+	}
+	sawWarning := false
+	for _, e := range list.Items {
+		if strings.Contains(e.Message, nodeName) || strings.Contains(e.Message, imageRef) {
+			t.Fatalf("event message leaks operator internals: %q", e.Message)
+		}
+		if strings.Contains(e.Reason, nodeName) || strings.Contains(e.Reason, imageRef) {
+			t.Fatalf("event reason leaks operator internals: %q", e.Reason)
+		}
+		if e.Type != "Normal" && e.Type != "Warning" {
+			t.Fatalf("bad event type %q", e.Type)
+		}
+		if e.Type == "Warning" {
+			sawWarning = true
+		}
+	}
+	if !sawWarning {
+		t.Fatal("failed workspace produced no Warning event")
+	}
+}
+
+// TestEvents_NotOwner: events share the workspace read's ownership rule —
+// a foreign workspace id is indistinguishable from a missing one.
+func TestEvents_NotOwner(t *testing.T) {
+	be := newFakeBackend()
+	env := newEventsEnv(t, be, &fakeStatusView{}, &fakeIntentLog{})
+	sessA, csrfA := login(t, env, "user-a")
+
+	r := doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/workspaces",
+		`{"name":"a-desktop","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-evt-20000"})
+	created := decodeBody[WorkspaceView](t, r)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", r.StatusCode)
+	}
+
+	sessB, csrfB := login(t, env, "user-b")
+	r = doReq(t, env, sessB, csrfB, http.MethodGet,
+		"/v1/workspaces/"+created.ID+"/events", "", nil)
+	body := decodeBody[Error](t, r)
+	if r.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", r.StatusCode)
+	}
+	if body.Code != CodeNotFound {
+		t.Fatalf("code=%q, want NOT_FOUND", body.Code)
+	}
+}
+
+// TestEvents_NewestFirst: the list is ordered newest first (OpenAPI
+// WorkspaceEventList contract).
+func TestEvents_NewestFirst(t *testing.T) {
+	be := newFakeBackend()
+	base := time.Now().Add(-time.Hour)
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: base},
+		{Kind: "start", Revision: 2, At: base.Add(10 * time.Minute)},
+		{Kind: "stop", Revision: 3, At: base.Add(20 * time.Minute)},
+	}}
+	env := newEventsEnv(t, be, &fakeStatusView{}, il)
+	sess, csrf := login(t, env, "user-a")
+
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"cycle","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-evt-30000"})
+	created := decodeBody[WorkspaceView](t, r)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", r.StatusCode)
+	}
+
+	r = doReq(t, env, sess, csrf, http.MethodGet,
+		"/v1/workspaces/"+created.ID+"/events", "", nil)
+	list := decodeBody[WorkspaceEventList](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", r.StatusCode)
+	}
+	if len(list.Items) < 3 {
+		t.Fatalf("events len=%d, want >=3", len(list.Items))
+	}
+	for i := 1; i < len(list.Items); i++ {
+		prev := list.Items[i-1].LastTimestamp
+		cur := list.Items[i].LastTimestamp
+		if prev != nil && cur != nil && cur.After(*prev) {
+			t.Fatalf("events not newest-first at %d: %v > %v", i, cur, prev)
+		}
+	}
+}
+
+// eventsFixture creates a workspace through the API and returns it with the
+// logged-in session — the shared preamble of the R4d event tests.
+func eventsFixture(t *testing.T, env *testEnv, key string) (WorkspaceView, *http.Cookie, *http.Cookie) {
+	t.Helper()
+	sess, csrf := login(t, env, "user-a")
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"evt-ws","templateRef":"tpl_linuxdesktop","desiredState":"Running"}`,
+		map[string]string{"Idempotency-Key": key})
+	created := decodeBody[WorkspaceView](t, r)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", r.StatusCode)
+	}
+	return created, sess, csrf
+}
+
+func getEvents(t *testing.T, env *testEnv, sess, csrf *http.Cookie, id string) WorkspaceEventList {
+	t.Helper()
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/"+id+"/events", "", nil)
+	list := decodeBody[WorkspaceEventList](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d, want 200", r.StatusCode)
+	}
+	return list
+}
+
+// TestEvents_IdsUnique: every event carries a stable id (kind + reason, plus
+// the intent revision for lifecycle steps) and ids never collide within one
+// list — two start requests, a Degraded condition and the synthesized
+// failure event all keep distinct ids, and the ids are identical across calls.
+func TestEvents_IdsUnique(t *testing.T) {
+	now := time.Now()
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: now.Add(-3 * time.Hour)},
+		{Kind: "start", Revision: 2, At: now.Add(-2 * time.Hour)},
+		{Kind: "stop", Revision: 3, At: now.Add(-90 * time.Minute)},
+		{Kind: "start", Revision: 4, At: now.Add(-time.Hour)},
+	}}
+	sv := &fakeStatusView{}
+	env := newEventsEnv(t, newFakeBackend(), sv, il)
+	created, sess, csrf := eventsFixture(t, env, "key-evt-ids-0001")
+	sv.set(created.ID, ObservedStatus{
+		Fresh: true, Found: true, Phase: "Failed", FailureReason: "BootDeadlineExceeded",
+		Conditions: []workspaceCondition{
+			{Type: "Admitted", Status: "True", Reason: "TemplateResolved", LastTransitionTime: now.Add(-time.Hour)},
+			{Type: "Degraded", Status: "True", Reason: "BootDeadlineExceeded", LastTransitionTime: now.Add(-time.Minute)},
+		},
+	})
+
+	first := getEvents(t, env, sess, csrf, created.ID)
+	if len(first.Items) < 6 {
+		t.Fatalf("got %d events, want >= 6", len(first.Items))
+	}
+	seen := map[string]bool{}
+	for _, e := range first.Items {
+		if e.ID == "" {
+			t.Fatalf("event %q has no id", e.Reason)
+		}
+		if seen[e.ID] {
+			t.Fatalf("duplicate event id %q in %+v", e.ID, first.Items)
+		}
+		seen[e.ID] = true
+	}
+	second := getEvents(t, env, sess, csrf, created.ID)
+	for i := range first.Items {
+		if first.Items[i].ID != second.Items[i].ID {
+			t.Fatalf("ids not stable across calls: %q vs %q", first.Items[i].ID, second.Items[i].ID)
+		}
+	}
+}
+
+// TestEvents_FailureTimestampStable: the synthesized failure event takes its
+// timestamps from the Degraded condition's transition time, so two reads a
+// minute apart return the same instants (ObservedAt moves with the clock).
+func TestEvents_FailureTimestampStable(t *testing.T) {
+	clock := time.Now().Truncate(time.Second)
+	transition := clock.Add(-10 * time.Minute)
+	sv := &fakeStatusView{}
+	env := newWorkspaceEnv(t, newFakeBackend(), defaultCatalog(), defaultTenants(),
+		func(h *WorkspaceHandler) {
+			h.WithStatusView(sv)
+			h.WithIntentLog(&fakeIntentLog{recs: []IntentRecord{{Kind: "create", Revision: 1, At: clock.Add(-time.Hour)}}})
+		})
+	created, sess, csrf := eventsFixture(t, env, "key-evt-fts-0001")
+	read := func() WorkspaceEvent {
+		sv.set(created.ID, ObservedStatus{
+			Fresh: true, Found: true, Phase: "Failed", FailureReason: "BootDeadlineExceeded",
+			ObservedAt: clock,
+			Conditions: []workspaceCondition{
+				{Type: "Degraded", Status: "True", Reason: "BootDeadlineExceeded", LastTransitionTime: transition},
+			},
+		})
+		for _, e := range getEvents(t, env, sess, csrf, created.ID).Items {
+			if strings.HasPrefix(e.ID, "Failed") {
+				return e
+			}
+		}
+		t.Fatal("no failure event")
+		return WorkspaceEvent{}
+	}
+	a := read()
+	clock = clock.Add(time.Minute) // a minute later: ObservedAt moved, the failure did not
+	b := read()
+	if a.FirstTimestamp == nil || b.FirstTimestamp == nil || a.LastTimestamp == nil || b.LastTimestamp == nil {
+		t.Fatalf("failure event timestamps missing: %+v %+v", a, b)
+	}
+	if !a.FirstTimestamp.Equal(transition) || !a.LastTimestamp.Equal(transition) {
+		t.Fatalf("failure timestamps %v/%v, want the condition transition time %v",
+			a.FirstTimestamp, a.LastTimestamp, transition)
+	}
+	if !a.LastTimestamp.Equal(*b.LastTimestamp) || !a.FirstTimestamp.Equal(*b.FirstTimestamp) {
+		t.Fatalf("failure timestamps changed between reads: %v -> %v", a.LastTimestamp, b.LastTimestamp)
+	}
+}
+
+// TestEvents_StaleInformer: with an informer that cannot prove freshness the
+// list is flagged stale: true and never claims the workspace is ready — no
+// ready-typed condition reports True and the last-known ConnectionReady=True
+// does not surface as a "ready" event.
+func TestEvents_StaleInformer(t *testing.T) {
+	now := time.Now()
+	sv := &fakeStatusView{}
+	il := &fakeIntentLog{recs: []IntentRecord{{Kind: "create", Revision: 1, At: now.Add(-time.Hour)}}}
+	env := newEventsEnv(t, newFakeBackend(), sv, il)
+	created, sess, csrf := eventsFixture(t, env, "key-evt-stale-001")
+	sv.set(created.ID, ObservedStatus{
+		Fresh: false, Found: true, Phase: "Ready", ObservedAt: now,
+		Conditions: readyConditions(),
+	})
+	list := getEvents(t, env, sess, csrf, created.ID)
+	if !list.Stale {
+		t.Fatal("stale informer: list.stale = false, want true")
+	}
+	for _, e := range list.Items {
+		if e.Reason == "Ready" || strings.Contains(e.Message, "is ready to connect.") ||
+			strings.HasSuffix(e.Message, "is ready.") {
+			t.Fatalf("stale informer emitted a ready event: %+v", e)
+		}
+	}
+
+	// A fresh informer is not flagged stale and does emit the ready event.
+	sv.set(created.ID, ObservedStatus{
+		Fresh: true, Found: true, Phase: "Ready", ObservedAt: now, Conditions: readyConditions(),
+	})
+	fresh := getEvents(t, env, sess, csrf, created.ID)
+	if fresh.Stale {
+		t.Fatal("fresh informer: list.stale = true, want false")
+	}
+	ready := false
+	for _, e := range fresh.Items {
+		ready = ready || e.ID == "ConnectionReady.Ready"
+	}
+	if !ready {
+		t.Fatalf("fresh informer: no ConnectionReady event in %+v", fresh.Items)
+	}
+}

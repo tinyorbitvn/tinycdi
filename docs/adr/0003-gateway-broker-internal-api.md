@@ -4,6 +4,13 @@ Status: accepted (contract fixed in design review; both sides implement it verba
 
 Date: 2026-09-30
 
+> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
+> merges the session gateway into the backend binary: the gateway↔broker
+> calls below become in-process, and the mTLS listener keeps only the
+> operator routes (`workspaces/{uid}/revoke`, `workspaces/{uid}/drain`).
+> The wire contract itself is unchanged — a backend run as a standalone
+> session gateway still speaks it as a remote client.
+
 ## Context
 
 The session gateway (design §6) redeems launch tickets and renews/resolves
@@ -42,7 +49,7 @@ and served from `cmd/api` on a **separate internal listener**
 | `POST /internal/v1/broker/redeem` | `{"ticket":"<opaque>"}` | 200 `Lease` | 401 invalid/expired ticket, 403 denied/revoked, 409 in-use/stale |
 | `POST /internal/v1/broker/leases/{id}/renew` | `{"fence":{"version":N,...}}` | 200 `Lease` | 403 foreign gateway, 404 unknown lease, 409 fenced/stale, 410 revoked |
 | `GET /internal/v1/broker/leases/{id}/target` | — | 200 `Target` | 403/404/409/410 as above |
-| `POST /internal/v1/broker/leases/{id}/revoke` | — | 204 | — |
+| `POST /internal/v1/broker/leases/{id}/revoke` | — | 200 `{"revoked":bool}` (false: unknown or already-dead lease) | — |
 
 `Lease`/`Target`/`Fence` serialize the `broker` package structs directly
 (`leaseId`, `workspaceUID`, `runtimeGeneration`, `runtimeUID`,

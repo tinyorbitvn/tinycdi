@@ -34,6 +34,7 @@ type Lease struct {
 	RuntimeUID        string    `json:"runtimeUID"`
 	FencingVersion    uint64    `json:"fencingVersion"`
 	GatewayID         string    `json:"gatewayId"`
+	StreamEpoch       uint64    `json:"streamEpoch"`
 	ExpiresAt         time.Time `json:"expiresAt"`
 }
 
@@ -46,11 +47,11 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	err := b.db.Pool().QueryRow(ctx,
 		`SELECT id, workspace_id, tenant_id, principal_subject,
 			runtime_generation, runtime_uid, fencing_version, gateway_id,
-			state, expires_at
+			state, expires_at, stream_epoch
 		 FROM connection_lease WHERE id = $1`, leaseID).
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
-			&l.GatewayID, &state, &l.ExpiresAt)
+			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, "", ErrLeaseInvalid
 	}
@@ -60,10 +61,34 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	return l, state, nil
 }
 
+// closeStreamsTx zeroes a runtime generation's open_streams and anchors
+// disconnected_since, inside tx. Every transition that kills a lease runs
+// it: the lease's streams can no longer report their close (every gateway
+// path refuses a dead lease), so the kill owns the drain accounting and the
+// §8 disconnect grace semantics survive a replica dying mid-stream.
+func closeStreamsTx(ctx context.Context, tx store.Tx, wsUID string, gen uint64, now time.Time) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE workspace_activity SET
+			open_streams = 0,
+			disconnected_since = COALESCE(disconnected_since, $3),
+			updated_at = $3
+		WHERE workspace_id = $1 AND runtime_generation = $2 AND open_streams > 0`,
+		wsUID, int64(gen), now)
+	return err
+}
+
 // liveLease validates a loaded lease: unknown -> ErrLeaseInvalid;
 // revoked/superseded/time-expired -> ErrRevoked (the lease is dead);
 // foreign gateway -> ErrDenied. Time-expired rows are lazily marked
 // 'expired' so the partial unique index frees the workspace.
+//
+// The lazy expiry is authoritative for drain accounting, like RevokeLease:
+// the lease's streams can no longer report their close (every gateway path
+// refuses a dead lease), so the active->expired transition zeroes the bound
+// generation's open_streams in the same transaction and anchors
+// disconnected_since, keeping the disconnect grace semantics of §8. A
+// concurrent transition (RowsAffected = 0) skips the accounting — whoever
+// moved the row owned it.
 func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID string, now time.Time) (Lease, error) {
 	l, state, err := b.loadLease(ctx, leaseID)
 	if err != nil {
@@ -73,9 +98,18 @@ func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID stri
 		return Lease{}, ErrRevoked
 	}
 	if !l.ExpiresAt.After(now) {
-		_, _ = b.db.Pool().Exec(ctx,
-			`UPDATE connection_lease SET state = 'expired', closed_at = $2
-			 WHERE id = $1 AND state = 'active'`, l.ID, now)
+		_ = b.db.WithTx(ctx, func(tx store.Tx) error {
+			tag, err := tx.Exec(ctx,
+				`UPDATE connection_lease SET state = 'expired', closed_at = $2
+				 WHERE id = $1 AND state = 'active'`, l.ID, now)
+			if err != nil || tag.RowsAffected() == 0 {
+				return err
+			}
+			if err := closeStreamsTx(ctx, tx, l.WorkspaceUID, l.RuntimeGeneration, now); err != nil {
+				return fmt.Errorf("broker: close expired streams: %w", err)
+			}
+			return nil
+		})
 		return Lease{}, ErrRevoked
 	}
 	if l.GatewayID != gw.ID {
@@ -142,8 +176,17 @@ func (b *Broker) RenewLease(ctx context.Context, gw GatewayIdentity, leaseID str
 // of an already-dead lease skips the accounting — a live successor lease
 // may own those streams.
 func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
+	_, err := b.RevokeLeaseChanged(ctx, leaseID)
+	return err
+}
+
+// RevokeLeaseChanged is RevokeLease that also reports whether a live lease
+// was actually revoked: false for an unknown or already-dead lease, where
+// nothing changed.
+func (b *Broker) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
 	now := b.now()
-	return b.db.WithTx(ctx, func(tx store.Tx) error {
+	changed := false
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
 		var (
 			wsUID string
 			gen   int64
@@ -159,18 +202,14 @@ func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
 		case err != nil:
 			return fmt.Errorf("broker: revoke lease: %w", err)
 		}
+		changed = true
 		// The revoked lease was the workspace's only active lease (partial
 		// unique index), so every stream counted on its generation is now
 		// closing but cannot report it — close the accounting atomically.
-		if _, err := tx.Exec(ctx, `
-			UPDATE workspace_activity SET
-				open_streams = 0,
-				disconnected_since = COALESCE(disconnected_since, $3),
-				updated_at = $3
-			WHERE workspace_id = $1 AND runtime_generation = $2 AND open_streams > 0`,
-			wsUID, gen, now); err != nil {
+		if err := closeStreamsTx(ctx, tx, wsUID, uint64(gen), now); err != nil {
 			return fmt.Errorf("broker: close revoked streams: %w", err)
 		}
 		return nil
 	})
+	return changed && err == nil, err
 }

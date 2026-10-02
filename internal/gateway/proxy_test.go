@@ -5,6 +5,7 @@ package gateway_test
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 // TestProxy_RequiresSession: every desktop route needs a valid session
@@ -24,12 +26,12 @@ func TestProxy_RequiresSession(t *testing.T) {
 	fb := newFakeBroker(t)
 	srv := newGateway(t, fb, nil)
 
-	resp := proxied(t, srv, "/", "", map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/", "", map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("unauthenticated proxy = %d, want 401/403", resp.StatusCode)
 	}
-	resp = proxied(t, srv, "/", "bogus-cookie", map[string]string{"Origin": testOrigin})
+	resp = proxied(t, srv, testHost, "/", "bogus-cookie", map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("bogus session cookie proxied to the runtime")
@@ -40,14 +42,14 @@ func TestProxy_RequiresSession(t *testing.T) {
 // a spoofed Host must not ride a valid session.
 func TestProxy_BadHostRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-host2", "ws-1")
+	fb.scriptTicket("tk-host2", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-host2")
+	cookie := launchOK(t, srv, testHost, "tk-host2")
 
-	resp := proxied(t, srv, "/", cookie, map[string]string{"Host": "evil.test", "Origin": testOrigin})
+	resp := proxied(t, srv, "evil.test", "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("proxied request with foreign Host = %d, want 403/400", resp.StatusCode)
+	if resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("proxied request with foreign Host = %d, want 421", resp.StatusCode)
 	}
 }
 
@@ -56,15 +58,15 @@ func TestProxy_BadHostRejected(t *testing.T) {
 // only exposes streaming assets and the socket endpoint.
 func TestProxy_ManagementPathsDenied(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-mgmt", "ws-1")
+	fb.scriptTicket("tk-mgmt", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-mgmt")
+	cookie := launchOK(t, srv, testHost, "tk-mgmt")
 
 	// /Downloads is the kasm images' writable-inside-webroot path (KASM-6);
 	// it must stay off the allowlist even though the runtime rootfs is now
 	// read-only — the gateway is the outer gate.
 	for _, p := range []string{"/api/get_users", "/api/", "/admin", "/Downloads/", "/Downloads"} {
-		resp := proxied(t, srv, p, cookie, map[string]string{"Origin": testOrigin})
+		resp := proxied(t, srv, testHost, p, cookie, map[string]string{"Origin": testOrigin})
 		drain(resp)
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusSwitchingProtocols {
 			t.Fatalf("management path %s was proxied (status %d)", p, resp.StatusCode)
@@ -78,9 +80,9 @@ func TestProxy_ManagementPathsDenied(t *testing.T) {
 // different host, sent over a raw socket to the gateway listener.
 func TestProxy_ArbitraryTargetRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-ssrf", "ws-1")
+	fb.scriptTicket("tk-ssrf", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-ssrf")
+	cookie := launchOK(t, srv, testHost, "tk-ssrf")
 
 	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
 	if err != nil {
@@ -108,23 +110,23 @@ func TestProxy_ArbitraryTargetRejected(t *testing.T) {
 // rejected before the socket opens.
 func TestUpgrade_OriginEnforced(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-ws", "ws-1")
+	fb.scriptTicket("tk-ws", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-ws")
+	cookie := launchOK(t, srv, testHost, "tk-ws")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": "https://evil.test"})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": "https://evil.test"})
 	drain(resp)
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		t.Fatal("upgrade with foreign Origin got 101")
 	}
 
-	resp = upgrade(t, srv, "/websockify", cookie, nil)
+	resp = upgrade(t, srv, testHost, "/websockify", cookie, nil)
 	drain(resp)
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		t.Fatal("upgrade with absent Origin got 101")
 	}
 
-	resp = upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp = upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("valid upgrade = %d, want 101", resp.StatusCode)
@@ -135,9 +137,9 @@ func TestUpgrade_OriginEnforced(t *testing.T) {
 // websocket (e.g. h2c) must get 400 — never be proxied as an upgrade.
 func TestUpgrade_NonWebSocketRejected(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-h2c", "ws-1")
+	fb.scriptTicket("tk-h2c", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-h2c")
+	cookie := launchOK(t, srv, testHost, "tk-h2c")
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL+"/websockify", nil)
 	if err != nil {
@@ -167,12 +169,12 @@ func TestUpgrade_NonWebSocketRejected(t *testing.T) {
 // live stream.
 func TestUpgrade_HeaderWithoutConnectionNotUpgrade(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-stray", "ws-1")
+	fb.scriptTicket("tk-stray", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-stray")
+	cookie := launchOK(t, srv, testHost, "tk-stray")
 
 	// open a real stream first
-	live := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	live := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if live.StatusCode != http.StatusSwitchingProtocols {
 		drain(live)
 		t.Fatalf("initial upgrade = %d, want 101", live.StatusCode)
@@ -218,16 +220,16 @@ func TestUpgrade_HeaderWithoutConnectionNotUpgrade(t *testing.T) {
 // revoke acts only on what it resolves to.
 func TestRevoke_UnknownTargetDoesNotKillSession(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-live", "ws-1")
+	fb.scriptTicket("tk-live", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-live")
+	cookie := launchOK(t, srv, testHost, "tk-live")
 
 	// revoke a lease that does not resolve
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/control/revoke", strings.NewReader(`{"leaseId":"no-such-lease"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = testHost
+	req.Host = testControlHost
 	req.Header.Set("Authorization", "Bearer control-test-token")
 	resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
 	if err != nil {
@@ -236,7 +238,7 @@ func TestRevoke_UnknownTargetDoesNotKillSession(t *testing.T) {
 	drain(resp)
 
 	// live session must still work
-	ok := proxied(t, srv, "/", cookie, map[string]string{"Origin": testOrigin})
+	ok := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(ok)
 	if ok.StatusCode == http.StatusUnauthorized || ok.StatusCode == http.StatusForbidden {
 		t.Fatalf("revoke of unknown lease killed the live session (status %d) — SEC-1", ok.StatusCode)
@@ -253,7 +255,7 @@ func TestControlEndpoints_RequireBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = testHost
+	req.Host = testControlHost
 	resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
 	if err != nil {
 		t.Fatalf("control request: %v", err)
@@ -276,7 +278,7 @@ func controlRoundTrip(t *testing.T, srv *httptest.Server, method, path, bearer, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = testHost
+	req.Host = testControlHost
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -296,9 +298,9 @@ func controlRoundTrip(t *testing.T, srv *httptest.Server, method, path, bearer, 
 // leaseId or confirm session existence.
 func TestControlEndpoints_NoTokenFailsClosed(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-notoken", "ws-1")
+	fb.scriptTicket("tk-notoken", testWSUID)
 	srv := newGateway(t, fb, func(c *gateway.Config) { c.ControlToken = "" })
-	cookie := launchOK(t, srv, "tk-notoken")
+	cookie := launchOK(t, srv, testHost, "tk-notoken")
 	lease := fb.leaseOf(t, "tk-notoken")
 
 	cases := []struct {
@@ -320,7 +322,7 @@ func TestControlEndpoints_NoTokenFailsClosed(t *testing.T) {
 	}
 
 	// the live session is untouched: a denied revoke must not have killed it
-	resp := proxied(t, srv, "/", cookie, map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		t.Fatalf("denied control probe killed the live session (status %d)", resp.StatusCode)
@@ -361,17 +363,17 @@ func TestControlEndpoints_WrongBearerRejected(t *testing.T) {
 // never forwarded upstream; the gateway injects broker-resolved credentials.
 func TestProxy_StripsClientAuth(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-auth", "ws-1")
+	fb.scriptTicket("tk-auth", testWSUID)
 	up := newUpstream(t)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-auth")
+	cookie := launchOK(t, srv, testHost, "tk-auth")
 	// Point the lease's resolved target at the recording upstream.
 	lease := fb.leaseOf(t, "tk-auth")
 	fb.mu.Lock()
 	fb.resolveT[lease.ID] = targetFor(up.srv)
 	fb.mu.Unlock()
 
-	resp := proxied(t, srv, "/", cookie, map[string]string{
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{
 		"Origin":        testOrigin,
 		"Authorization": "Bearer client-token-must-not-leak",
 		"Cookie":        "__Host-tcdi_session=" + cookie + "; injected=1",
@@ -396,14 +398,14 @@ func TestProxy_StripsClientAuth(t *testing.T) {
 // (proven semantics: wrong-CA → 502, zero requests relayed).
 func TestUpstreamTLS_RequiresPinnedCA(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-tls", "ws-1")
+	fb.scriptTicket("tk-tls", testWSUID)
 	// foreign-CA TLS upstream
 	foreign := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("request reached wrong-CA upstream — must be rejected at the handshake")
 	}))
 	defer foreign.Close()
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-tls")
+	cookie := launchOK(t, srv, testHost, "tk-tls")
 	lease := fb.leaseOf(t, "tk-tls")
 	// ResolveTarget now points at the foreign-CA upstream; the gateway's
 	// pinned CA pool does not trust it.
@@ -415,7 +417,7 @@ func TestUpstreamTLS_RequiresPinnedCA(t *testing.T) {
 	}
 	fb.mu.Unlock()
 
-	resp := proxied(t, srv, "/", cookie, map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("proxy to wrong-CA upstream = %d, want 502", resp.StatusCode)
@@ -427,11 +429,11 @@ func TestUpstreamTLS_RequiresPinnedCA(t *testing.T) {
 // the runtime is stripped before the response reaches the browser.
 func TestProxy_UpstreamSetCookieNotForwarded(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-cookie", "ws-1")
+	fb.scriptTicket("tk-cookie", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-cookie")
+	cookie := launchOK(t, srv, testHost, "tk-cookie")
 
-	resp := proxied(t, srv, "/", cookie, map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	for _, c := range resp.Cookies() {
 		if c.Name == gateway.SessionCookieName {
@@ -444,12 +446,12 @@ func TestProxy_UpstreamSetCookieNotForwarded(t *testing.T) {
 // gateway must close open sockets within the revoke deadline (fail closed).
 func TestRevoke_ClosesOpenStream(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-live2", "ws-1")
+	fb.scriptTicket("tk-live2", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-live2")
+	cookie := launchOK(t, srv, testHost, "tk-live2")
 	lease := fb.leaseOf(t, "tk-live2")
 
-	resp := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		drain(resp)
 		t.Fatalf("upgrade = %d, want 101", resp.StatusCode)
@@ -479,18 +481,18 @@ func TestRevoke_ClosesOpenStream(t *testing.T) {
 // fences the old socket (sequential replacement) — never two live streams.
 func TestUpgrade_SequentialFencesPrevious(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-seq", "ws-1")
+	fb.scriptTicket("tk-seq", testWSUID)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-seq")
+	cookie := launchOK(t, srv, testHost, "tk-seq")
 
-	first := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	first := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	if first.StatusCode != http.StatusSwitchingProtocols {
 		drain(first)
 		t.Fatalf("first upgrade = %d, want 101", first.StatusCode)
 	}
 	defer first.Body.Close()
 
-	second := upgrade(t, srv, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	second := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
 	defer second.Body.Close()
 	if second.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("second upgrade = %d, want 101 (replacement)", second.StatusCode)
@@ -529,12 +531,12 @@ func TestProxy_HostileUpstreamHeadersDropped(t *testing.T) {
 	defer up.Close()
 
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-sec7", "ws-1")
+	fb.scriptTicket("tk-sec7", testWSUID)
 	fb.pointLeaseAt(t, "tk-sec7", up)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-sec7")
+	cookie := launchOK(t, srv, testHost, "tk-sec7")
 
-	resp := proxied(t, srv, "/app/hostile.js", cookie, map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/app/hostile.js", cookie, map[string]string{"Origin": testOrigin})
 	defer drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("proxied status = %d, want 200", resp.StatusCode)
@@ -575,13 +577,13 @@ func TestProxy_HostileUpstreamHeadersDropped(t *testing.T) {
 func TestProxy_ServiceWorkerScriptFetchRejected(t *testing.T) {
 	u := newUpstream(t)
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-sw", "ws-1")
+	fb.scriptTicket("tk-sw", testWSUID)
 	fb.pointLeaseAt(t, "tk-sw", u.srv)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-sw")
+	cookie := launchOK(t, srv, testHost, "tk-sw")
 
 	for _, sw := range []string{"script", "SCRIPT", " script "} {
-		resp := proxied(t, srv, "/app/sw.js", cookie, map[string]string{
+		resp := proxied(t, srv, testHost, "/app/sw.js", cookie, map[string]string{
 			"Origin":         testOrigin,
 			"Service-Worker": sw,
 		})
@@ -603,10 +605,10 @@ func TestProxy_ServiceWorkerScriptFetchRejected(t *testing.T) {
 // the policy must not depend on hitting the runtime.
 func TestProxy_SecurityHeadersEverywhere(t *testing.T) {
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-hdr", "ws-1")
+	fb.scriptTicket("tk-hdr", testWSUID)
 	srv := newGateway(t, fb, nil)
 
-	resp := doLaunch(t, srv, "tk-hdr", map[string]string{
+	resp := doLaunch(t, srv, testHost, "tk-hdr", map[string]string{
 		"Origin":         testOrigin,
 		"Sec-Fetch-Site": "same-origin",
 	})
@@ -617,7 +619,7 @@ func TestProxy_SecurityHeadersEverywhere(t *testing.T) {
 		}
 	}
 
-	bad := proxied(t, srv, "/app/x", "", map[string]string{"Origin": testOrigin})
+	bad := proxied(t, srv, testHost, "/app/x", "", map[string]string{"Origin": testOrigin})
 	defer drain(bad)
 	if bad.Header.Get("Content-Security-Policy") == "" {
 		t.Fatal("401 response missing CSP")
@@ -631,10 +633,10 @@ func TestProxy_SecurityHeadersEverywhere(t *testing.T) {
 func TestProxy_DotSegmentsRejected(t *testing.T) {
 	u := newUpstream(t)
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-dots", "ws-1")
+	fb.scriptTicket("tk-dots", testWSUID)
 	fb.pointLeaseAt(t, "tk-dots", u.srv)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-dots")
+	cookie := launchOK(t, srv, testHost, "tk-dots")
 
 	bad := []string{
 		"/app/../api/get_users",
@@ -650,7 +652,7 @@ func TestProxy_DotSegmentsRejected(t *testing.T) {
 		"/app/%2E%2E/api/get_users",
 	}
 	for _, p := range bad {
-		resp := proxied(t, srv, p, cookie, map[string]string{"Origin": testOrigin})
+		resp := proxied(t, srv, testHost, p, cookie, map[string]string{"Origin": testOrigin})
 		drain(resp)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("unclean path %q = %d, want 404", p, resp.StatusCode)
@@ -668,12 +670,12 @@ func TestProxy_DotSegmentsRejected(t *testing.T) {
 func TestProxy_ForwardsCleanedPath(t *testing.T) {
 	u := newUpstream(t)
 	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-clean", "ws-1")
+	fb.scriptTicket("tk-clean", testWSUID)
 	fb.pointLeaseAt(t, "tk-clean", u.srv)
 	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, "tk-clean")
+	cookie := launchOK(t, srv, testHost, "tk-clean")
 
-	resp := proxied(t, srv, "/app/%61ssets/main.js", cookie, map[string]string{"Origin": testOrigin})
+	resp := proxied(t, srv, testHost, "/app/%61ssets/main.js", cookie, map[string]string{"Origin": testOrigin})
 	drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("clean encoded path = %d, want 200", resp.StatusCode)
@@ -681,5 +683,121 @@ func TestProxy_ForwardsCleanedPath(t *testing.T) {
 	seen := u.seenURIs()
 	if len(seen) != 1 || seen[0] != "/app/assets/main.js" {
 		t.Fatalf("upstream saw %v, want [/app/assets/main.js]", seen)
+	}
+}
+
+// TestControlRevoke_OtherReplica: the operator's revoke reaches whichever
+// replica the Service picked; the session may live on the other one. The
+// revoke must still reach the broker (the shared lease directory), and the
+// replica that holds the session sees the lease die on its next renew and
+// closes the stream.
+func TestControlRevoke_OtherReplica(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-xrev", testWSUID)
+	_, srvA := newReplica(t, fb, "gw-A")
+	_, srvB := newReplica(t, fb, "gw-B")
+	cookie := launchOK(t, srvA, testHost, "tk-xrev")
+	lease := fb.leaseOf(t, "tk-xrev")
+
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		drain(resp)
+		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	wsWrite(t, resp, []byte("x"))
+	wsRead(t, resp, 1, 2*time.Second) // the stream is live
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := resp.Body.Read(make([]byte, 1))
+		closed <- err
+	}()
+
+	// B holds no such session — the revoke must not be a local-only lookup.
+	status, body := controlRoundTrip(t, srvB, http.MethodPost, "/v1/control/revoke",
+		"control-test-token", `{"leaseId":"`+lease.ID+`"}`)
+	if status != http.StatusOK || !strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("revoke on the other replica = %d %s, want 200 {\"revoked\":true}", status, body)
+	}
+	if n := fb.leaseRevokeCount(lease.ID); n != 1 {
+		t.Fatalf("RevokeLease calls = %d, want 1", n)
+	}
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Fatal("A's stream survived the revoke")
+		}
+	case <-time.After(2 * testRenewInterval):
+		t.Fatal("A's stream not closed within 2xRenewInterval of the revoke")
+	}
+}
+
+// TestControlRevoke_UnknownOrDeadLeaseNotRevoked (R9c): the answer is
+// {"revoked":true} and the audit says success only when a live lease was
+// actually revoked. An unknown lease ID, or a lease that is already dead,
+// answers {"revoked":false} and records no success event.
+func TestControlRevoke_UnknownOrDeadLeaseNotRevoked(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-revdead", testWSUID)
+	audit := &auditRecorder{}
+	srv := newGateway(t, fb, func(c *gateway.Config) { c.Audit = audit })
+	launchOK(t, srv, testHost, "tk-revdead")
+	lease := fb.leaseOf(t, "tk-revdead")
+
+	revoke := func(id string) (int, string) {
+		return controlRoundTrip(t, srv, http.MethodPost, "/v1/control/revoke",
+			"control-test-token", `{"leaseId":"`+id+`"}`)
+	}
+	successes := func() int {
+		audit.mu.Lock()
+		defer audit.mu.Unlock()
+		n := 0
+		for _, e := range audit.events {
+			if e.Action == "session.revoke" && e.Outcome == observability.OutcomeSuccess {
+				n++
+			}
+		}
+		return n
+	}
+
+	if status, body := revoke("lease-that-never-existed"); status != http.StatusOK || !strings.Contains(body, `"revoked":false`) {
+		t.Fatalf("unknown lease = %d %s, want 200 {\"revoked\":false}", status, body)
+	}
+	if n := successes(); n != 0 {
+		t.Fatalf("unknown lease recorded %d success audit events, want 0", n)
+	}
+
+	if status, body := revoke(lease.ID); status != http.StatusOK || !strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("live lease = %d %s, want 200 {\"revoked\":true}", status, body)
+	}
+	if n := successes(); n != 1 {
+		t.Fatalf("live lease recorded %d success audit events, want 1", n)
+	}
+
+	if status, body := revoke(lease.ID); status != http.StatusOK || !strings.Contains(body, `"revoked":false`) {
+		t.Fatalf("already-dead lease = %d %s, want 200 {\"revoked\":false}", status, body)
+	}
+	if n := successes(); n != 1 {
+		t.Fatalf("already-dead lease added a success audit event (%d total, want 1)", n)
+	}
+}
+
+// TestControlRevoke_BrokerErrorIs503: a revoke the broker did not accept is
+// not reported as done — the operator retries.
+func TestControlRevoke_BrokerErrorIs503(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-rev503", testWSUID)
+	_, srv := newReplica(t, fb, "gw-A")
+	launchOK(t, srv, testHost, "tk-rev503")
+	lease := fb.leaseOf(t, "tk-rev503")
+
+	fb.mu.Lock()
+	fb.revokeErr = errors.New("broker unreachable")
+	fb.mu.Unlock()
+	status, body := controlRoundTrip(t, srv, http.MethodPost, "/v1/control/revoke",
+		"control-test-token", `{"leaseId":"`+lease.ID+`"}`)
+	if status != http.StatusServiceUnavailable || strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("revoke with a failing broker = %d %s, want 503 and no revoked:true", status, body)
 	}
 }

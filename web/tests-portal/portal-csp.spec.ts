@@ -1,207 +1,126 @@
-import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
-import { MOCK_API, PORTAL_ORIGIN, SESSION_ORIGIN, SESSION_PORT } from "./harness.ts";
+import type { APIRequestContext, Page } from "@playwright/test";
+import {
+  expect,
+  login,
+  MOCK_API,
+  resetState,
+  seedReadyWorkspace,
+  test,
+  waitForDesktopFrame,
+  watchConsole,
+  workspaceOrigin,
+  type HarnessMode,
+} from "./harness.ts";
 
-// Regression tests: the built SPA served by the real
-// portal binary must complete the whole launch round-trip — the
-// cross-site form POST reaches the session origin (CSP form-action) AND
-// the session cookie rides the POST→302 redirect into the desktop (the
-// cookie must be SameSite=Lax; Strict would not be sent). The portal runs
-// its real headers on https://localhost:4174 and the mocked session
-// origin lives on https://127.0.0.1:4312 — different sites, the
-// production shape.
+// Portal CSP gate (D31): every v0.2 route, served by the REAL frontend
+// binary (web/dist through build/frontend with the production security
+// headers), must produce zero `securitypolicyviolation` events. The
+// listener is installed by init script so it catches violations from the
+// very first navigation; console-reported CSP messages are collected too.
+// Runs under both harness projects (lax and partitioned session sites) —
+// the CSP frame-src/form-action wildcard names the mode's domain.
 //
-// The origin leg: the mock session origin enforces the
-// gateway's ADR-0004 launch gate (Origin must equal the portal origin
-// when Sec-Fetch-Site is present), so the launch now also proves the
-// portal's Referrer-Policy sends a real Origin — and the second test
-// replays the original defect (no-referrer -> Origin: null -> 403
-// bad_origin) as a negative control.
+// The session route is the load-bearing case: the launch form POSTs to
+// <label>.<sessionDomain> (form-action) and the reply loads in the iframe
+// (frame-src). The test requires the fake desktop to actually render, so a
+// silently blocked launch cannot masquerade as "no violations".
 
-const SEED_WS = "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E";
+const WS = "ws_csp0001aabbcc";
 
-const READY_CONDITIONS = [
-  { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-09-30T10:00:00Z" },
-  { type: "StorageReady", status: "True", reason: "VolumeBound", lastTransitionTime: "2026-09-30T10:01:00Z" },
-  { type: "RuntimeReady", status: "True", reason: "RuntimeUp", lastTransitionTime: "2026-09-30T10:02:00Z" },
-  { type: "ConnectionReady", status: "True", reason: "StreamEndpointUp", lastTransitionTime: "2026-09-30T10:02:30Z" },
-];
+// The v0.2 shell routes (same set a11y.spec.ts sweeps).
+const ROUTES = [
+  "/workspaces",
+  "/workspaces/new",
+  `/workspaces/${WS}`,
+  `/workspaces/${WS}/session`,
+  "/admin",
+  "/admin/quota",
+  "/admin/templates",
+  "/admin/workspaces",
+  "/data",
+] as const;
 
-async function login(page: Page) {
-  await page.goto("/v1/login?returnTo=/");
-  await page.getByRole("button", { name: "Log in with SSO" }).click();
-  await page.waitForURL("/");
+// Violations the page itself reports (bubbling securitypolicyviolation
+// events), installed before any document script runs.
+async function armViolationCollector(page: Page) {
+  await page.addInitScript(() => {
+    const bag: string[] = [];
+    (window as unknown as { __cspViolations: string[] }).__cspViolations = bag;
+    document.addEventListener("securitypolicyviolation", (e) => {
+      const ev = e as SecurityPolicyViolationEvent;
+      bag.push(
+        `${ev.effectiveDirective} blocked ${ev.blockedURI} on ${ev.sourceFile ?? "?"}:${ev.lineNumber ?? 0}`,
+      );
+    });
+  });
+}
+
+async function pageViolations(page: Page): Promise<string[]> {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __cspViolations?: string[] }).__cspViolations ??
+      [],
+  );
+}
+
+// Seed everything the sweep needs: the caller's Ready workspace plus the
+// tenant-admin role and other tenants' records so the admin and data
+// routes render their real content.
+async function seed(request: APIRequestContext) {
+  const admin = await request.post(`${MOCK_API}/_control/admin/me`, {
+    data: { roles: ["user", "tenant-admin"] },
+  });
+  expect(admin.ok(), "admin role grant").toBeTruthy();
+  const peers = await request.post(`${MOCK_API}/_control/admin/seed`);
+  expect(peers.ok(), "admin seed").toBeTruthy();
+  await seedReadyWorkspace(request, WS);
+}
+
+async function cspSweep(fixtures: {
+  page: Page;
+  request: APIRequestContext;
+  harnessMode: HarnessMode;
+}) {
+  const { page, request, harnessMode } = fixtures;
+  const consoleViolations = watchConsole(page);
+  await armViolationCollector(page);
+  await resetState(request, harnessMode);
+  await seed(request);
+  await login(page);
   await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible();
-}
 
-async function seedReady(request: APIRequestContext) {
-  const res = await request.post(`${MOCK_API}/_control/workspaces/${SEED_WS}`, {
-    data: { phase: "Ready", desiredState: "Running", conditions: READY_CONDITIONS },
-  });
-  expect(res.ok()).toBeTruthy();
-}
-
-test.beforeEach(async ({ request }) => {
-  const res = await request.post(`${MOCK_API}/_control/reset`);
-  expect(res.ok()).toBeTruthy();
-});
-
-test("portal CSP form-action allows the launch POST to the session origin", async ({
-  page,
-  context,
-  request,
-}) => {
-  // CSP violations surface as console errors on the page that owns the
-  // blocked form — collect them on every page in the context.
-  const cspViolations: string[] = [];
-  const watch = (p: Page) =>
-    p.on("console", (m) => {
-      if (/content security policy|form-action/i.test(m.text())) cspViolations.push(m.text());
-    });
-  watch(page);
-  context.on("page", watch);
-
-  await seedReady(request);
-
-  await login(page);
-  await page.goto(`/workspaces/${SEED_WS}`);
-  await expect(page.getByRole("button", { name: "Connect" })).toBeEnabled({ timeout: 15_000 });
-
-  const [popup] = await Promise.all([
-    context.waitForEvent("page"),
-    page.getByRole("button", { name: "Connect" }).click(),
-  ]);
-  await popup.waitForLoadState("load");
-
-  // The launch POST reached the session origin and redeemed the ticket:
-  // the browser followed the mock's 302 into the desktop page, and the
-  // mock recorded the ticket in the POST body.
-  expect(popup.url()).toContain(`:${SESSION_PORT}/desktop/`);
-  const launches = await (await request.get(`${MOCK_API}/_control/launchRequests`)).json();
-  expect(launches.requests).toHaveLength(1);
-  expect(new URLSearchParams(launches.requests[0].rawBody).get("ticket")).toBeTruthy();
-
-  // The launch POST must carry Origin=<portal origin> — the mock
-  // enforces the ADR-0004 gate like the real gateway, so an Origin that
-  // is "null"/absent (what Referrer-Policy: no-referrer produces) would
-  // have failed the launch above; assert the header explicitly too.
-  expect(launches.requests[0].headers.origin).toBe(PORTAL_ORIGIN);
-  expect(launches.requests[0].headers["sec-fetch-site"]).toBe("cross-site");
-
-  // The session cookie rode the cross-site POST→302 redirect: the mock
-  // desktop route is cookie-gated like the real gateway, so "desktop
-  // session" — not "unauthorized" — proves the cookie was sent.
-  await expect(popup.locator("h1")).toContainText("desktop session");
-
-  expect(cspViolations).toEqual([]);
-});
-
-test("a no-referrer portal sends Origin: null and the launch is rejected", async ({
-  page,
-  context,
-  request,
-}) => {
-  // Negative control for the defect: replay the old
-  // Referrer-Policy: no-referrer by rewriting ONLY the workspace
-  // document's response header (the document that owns the launch form).
-  // Everything else stays real — real portal binary, real SPA, real
-  // browser fetch-metadata. The browser then derives Origin: null on the
-  // cross-site launch POST, and the ADR-0004 gate must reject it.
-  await page.route(`${PORTAL_ORIGIN}/workspaces/${SEED_WS}`, async (route) => {
-    const resp = await route.fetch();
-    await route.fulfill({
-      response: resp,
-      headers: { ...resp.headers(), "referrer-policy": "no-referrer" },
-    });
-  });
-
-  await seedReady(request);
-
-  await login(page);
-  await page.goto(`/workspaces/${SEED_WS}`);
-  await expect(page.getByRole("button", { name: "Connect" })).toBeEnabled({ timeout: 15_000 });
-
-  const [popup, launchResp] = await Promise.all([
-    context.waitForEvent("page"),
-    context.waitForEvent(
-      "response",
-      (r) => r.url().endsWith("/v1/launch") && r.request().method() === "POST",
-    ),
-    page.getByRole("button", { name: "Connect" }).click(),
-  ]);
-
-  // Rejected exactly like the real gateway: 403 {"error":"bad_origin"},
-  // no redirect into the desktop.
-  expect(launchResp.status()).toBe(403);
-  expect(await launchResp.json()).toEqual({ error: "bad_origin" });
-  await popup.waitForLoadState("load");
-  expect(popup.url()).toContain(`:${SESSION_PORT}/v1/launch`);
-
-  // The browser sent what no-referrer produces: an unattributable Origin
-  // on a fetch-metadata-labelled cross-site POST.
-  const launches = await (await request.get(`${MOCK_API}/_control/launchRequests`)).json();
-  expect(launches.requests).toHaveLength(1);
-  const recorded = launches.requests[0];
-  expect(recorded.headers["sec-fetch-site"]).toBe("cross-site");
-  expect(recorded.headers.origin === undefined || recorded.headers.origin === "null").toBeTruthy();
-
-  // The gate ran before redemption: the same ticket still redeems with a
-  // proper Origin (the real gateway's "rejected launch never consumes the
-  // ticket" rule).
-  const ticket = new URLSearchParams(recorded.rawBody).get("ticket");
-  expect(ticket).toBeTruthy();
-  const retry = await request.post(`${SESSION_ORIGIN}/v1/launch`, {
-    headers: { Origin: PORTAL_ORIGIN, "Sec-Fetch-Site": "cross-site" },
-    form: { ticket: ticket! },
-    maxRedirects: 0,
-  });
-  expect(retry.status()).toBe(302);
-});
-
-test("session origin launch gate rejects unattributable browser POSTs (ADR 0004)", async ({
-  request,
-}) => {
-  // Mock-level contract check of the gate itself, mirroring the gateway's
-  // TestLaunch_* origin cases (internal/gateway/launch_origin_test.go):
-  // fetch metadata present requires an allowlisted Origin.
-  for (const headers of [
-    { "Sec-Fetch-Site": "cross-site" }, // no Origin
-    { "Sec-Fetch-Site": "cross-site", Origin: "null" },
-    { "Sec-Fetch-Site": "same-site", Origin: "https://evil.example" },
-  ]) {
-    const res = await request.post(`${SESSION_ORIGIN}/v1/launch`, {
-      headers,
-      form: { ticket: "bogus" },
-      maxRedirects: 0,
-    });
-    expect(res.status()).toBe(403);
-    expect(await res.json()).toEqual({ error: "bad_origin" });
+  for (const route of ROUTES) {
+    await page.evaluate(
+      () =>
+        ((window as unknown as { __cspViolations: string[] }).__cspViolations =
+          []),
+    );
+    consoleViolations.length = 0;
+    await page.goto(route);
+    if (route.endsWith("/session")) {
+      // The session view auto-launches: the ticket POST and the frame
+      // navigation to the workspace's own host are the two directives
+      // (form-action, frame-src) a broken portal CSP would trip.
+      await waitForDesktopFrame(page, workspaceOrigin(harnessMode, WS));
+    } else {
+      await page.waitForLoadState("networkidle");
+      await expect(page.locator("main").first()).toBeVisible();
+    }
+    expect(
+      await pageViolations(page),
+      `securitypolicyviolation events on ${route} [${harnessMode}]`,
+    ).toEqual([]);
+    expect(
+      consoleViolations,
+      `console CSP reports on ${route} [${harnessMode}]`,
+    ).toEqual([]);
   }
+}
 
-  // An unrecognized fetch-site value is bad_fetch_site.
-  const badSite = await request.post(`${SESSION_ORIGIN}/v1/launch`, {
-    headers: { "Sec-Fetch-Site": "none", Origin: PORTAL_ORIGIN },
-    form: { ticket: "bogus" },
-    maxRedirects: 0,
-  });
-  expect(badSite.status()).toBe(403);
-  expect(await badSite.json()).toEqual({ error: "bad_fetch_site" });
-
-  // An allowlisted Origin passes the gate and reaches ticket validation
-  // (which rejects this bogus ticket with the API-shape error, not
-  // bad_origin) — the check order proves the gate ran first.
-  const gated = await request.post(`${SESSION_ORIGIN}/v1/launch`, {
-    headers: { "Sec-Fetch-Site": "cross-site", Origin: PORTAL_ORIGIN },
-    form: { ticket: "bogus" },
-    maxRedirects: 0,
-  });
-  expect(gated.status()).toBe(403);
-  expect((await gated.json()).code).toBe("FORBIDDEN");
-
-  // A non-browser client (neither header) is allowed through the gate.
-  const nonBrowser = await request.post(`${SESSION_ORIGIN}/v1/launch`, {
-    form: { ticket: "bogus" },
-    maxRedirects: 0,
-  });
-  expect(nonBrowser.status()).toBe(403);
-  expect((await nonBrowser.json()).code).toBe("FORBIDDEN");
+test("every route reports zero securitypolicyviolation events", async ({
+  page,
+  request,
+  harnessMode,
+}) => {
+  await cspSweep({ page, request, harnessMode });
 });

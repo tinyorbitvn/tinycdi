@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Button, ConfirmDialog } from "../design";
+import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import type { WorkspaceView } from "./helpers";
@@ -6,7 +8,7 @@ import { ErrorBanner } from "./ErrorBanner";
 
 // Delete ≠ Purge: deleting a workspace frees the runtime and handles data per
 // its dataPolicy (Retain moves the disk to the retained inventory, Ephemeral
-// destroys it). Purging retained disks is a separate flow on /data.
+// destroys it). The confirm dialog names that consequence explicitly.
 export function DeleteWorkspaceButton({
   workspace,
   onDeleted,
@@ -40,33 +42,27 @@ export function DeleteWorkspaceButton({
   }
 
   return (
-    <span>
-      <button type="button" className="danger" onClick={() => setConfirming(true)}>
-        Delete
-      </button>
-      {confirming ? (
-        <div role="dialog" aria-label="delete workspace" className="dialog">
-          <p>
-            Delete <strong>{workspace.name}</strong>? Access is revoked and the
-            runtime is removed.
-            {workspace.dataPolicy === "Retain"
-              ? " Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that)."
-              : " Its data is Ephemeral and will be destroyed."}
-          </p>
-          <ErrorBanner error={error} onDismiss={() => setError(null)} />
-          <button
-            type="button"
-            className="danger"
-            disabled={busy}
-            onClick={() => void doDelete()}
-          >
-            {busy ? "Deleting…" : "Confirm delete"}
-          </button>
-          <button type="button" disabled={busy} onClick={() => setConfirming(false)}>
-            Cancel
-          </button>
-        </div>
-      ) : null}
-    </span>
+    <>
+      <Button variant="danger" onClick={() => setConfirming(true)}>
+        {t("workspaces.delete.action")}
+      </Button>
+      <ConfirmDialog
+        open={confirming}
+        title={t("workspaces.delete.title", { name: workspace.name })}
+        confirmLabel={busy ? t("workspaces.delete.confirming") : t("workspaces.delete.confirmButton")}
+        cancelLabel={t("common.cancel")}
+        busy={busy}
+        onConfirm={() => void doDelete()}
+        onCancel={() => setConfirming(false)}
+      >
+        <p>{t("workspaces.delete.confirm", { name: workspace.name })}</p>
+        <p>
+          {workspace.dataPolicy === "Retain"
+            ? t("workspaces.delete.dataRetain")
+            : t("workspaces.delete.dataEphemeral")}
+        </p>
+        <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      </ConfirmDialog>
+    </>
   );
 }

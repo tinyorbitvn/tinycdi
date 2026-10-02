@@ -42,6 +42,9 @@ type IntentSpec struct {
 	OwnerSubject    string `json:"ownerSubject,omitempty"`
 	DataPolicy      string `json:"dataPolicy,omitempty"`
 	RetainedDataRef string `json:"retainedDataRef,omitempty"`
+	// ImageBuiltAt is the template's raw image-built-at annotation value at
+	// create time; the applier copies it onto the Workspace CR.
+	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
 }
 
 // intentPayload is the JSON envelope stored in outbox_intent.payload.
@@ -457,4 +460,39 @@ func (c *Consumer) Dropped() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.dropped
+}
+
+// IntentRecord is one recorded lifecycle intent, read back for the
+// workspace events projection (GET /v1/workspaces/{id}/events).
+type IntentRecord struct {
+	Kind      IntentKind
+	Revision  uint64
+	CreatedAt time.Time
+}
+
+// IntentHistory returns the workspace's recorded intents newest first,
+// bounded to the latest 200. tenantID is part of the predicate so a
+// caller can never read another tenant's history by guessing a UID.
+func (s *Service) IntentHistory(ctx context.Context, tenantID string, workspaceUID PlatformID) ([]IntentRecord, error) {
+	rows, err := s.db.Pool().Query(ctx, `
+		SELECT kind, revision, created_at
+		FROM outbox_intent
+		WHERE workspace_id = $1 AND tenant_id = $2
+		ORDER BY revision DESC
+		LIMIT 200`, string(workspaceUID), tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("intent history: %w", err)
+	}
+	defer rows.Close()
+	var out []IntentRecord
+	for rows.Next() {
+		var rec IntentRecord
+		var kind string
+		if err := rows.Scan(&kind, &rec.Revision, &rec.CreatedAt); err != nil {
+			return nil, fmt.Errorf("intent history: %w", err)
+		}
+		rec.Kind = IntentKind(kind)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }

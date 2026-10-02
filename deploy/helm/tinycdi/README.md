@@ -1,10 +1,17 @@
 # tinycdi — official Helm chart
 
-TinyCDI is a Kubernetes-native Linux workspace platform: an **API**, an
-**operator**, a session **gateway** and a web **portal**. This chart
-installs all four components, the `workspaces.cdi.tinyorbit.vn` CRDs, and the
+TinyCDI is a Kubernetes-native Linux workspace platform: a **backend**
+(public API + session gateway in one binary), a **frontend** (static
+portal SPA server) and an **operator**. This chart
+installs the three components, the `workspaces.cdi.tinyorbit.vn` CRDs, and the
 namespaced RBAC/NetworkPolicy baseline — nothing else. It never ships
 Secrets, never installs KubeVirt/CDI, a database, or a dev OIDC provider.
+
+> **v0.2:** [ADR 0005](../../../docs/adr/0005-backend-frontend-operator.md)
+> (accepted) consolidated the v0.1 `api` + `gateway` + `portal` into
+> `backend` + `frontend` and replaced `sessionHost` with a wildcard
+> `sessionDomain` (one host per workspace). The values below describe the
+> v0.2 chart.
 
 * Chart: `deploy/helm/tinycdi` (Helm v4, `apiVersion: v2`)
 * OCI artifact: `oci://ghcr.io/tinyorbitvn/charts/tinycdi`
@@ -15,8 +22,9 @@ Secrets, never installs KubeVirt/CDI, a database, or a dev OIDC provider.
 | Requirement | Notes |
 |---|---|
 | Kubernetes | `>= 1.30` (CEL-immutable WorkspaceTemplate specs) |
-| PostgreSQL | reachable from the cluster; DSN in a Secret (`database.existingSecret`); the api runs embedded migrations at startup, so the role needs DDL rights |
+| PostgreSQL | reachable from the cluster; DSN in a Secret (`database.existingSecret`); the backend runs embedded migrations at startup, so the role needs DDL rights |
 | OIDC provider | a client with redirect URL `https://<portalHost>/v1/auth/callback`; client secret in a Secret (`oidc.existingSecret`) |
+| Login keys | AEAD keys sealing the `__Host-tcdi_login` cookie — a Secret with `current` (and `previous` while rotating), 32 bytes each (`backend.loginKeys.existingSecret`), or `backend.loginKeys.generate=true` |
 | TLS | portal + session certificates (pods terminate TLS themselves) and the internal mTLS chain — either pre-created Secrets or `certManager.enabled` |
 | Node profiles (browser sandbox) | Browser templates reference **Localhost** seccomp/AppArmor profiles that must be pre-loaded on nodes (`<kubelet-root>/seccomp/profiles/`, `apparmor_parser`). Either set `nodeProfiles.install.enabled` (chart-managed DaemonSet — see [Node profiles](#node-profiles)) or provision them yourself per `deploy/node-profiles/` |
 | Release namespace PSS | The release namespace stays **baseline/restricted** — it never needs privileged pods. When `nodeProfiles.install.enabled`, only the DEDICATED installer namespace (`nodeProfiles.install.namespace`, default `tinycdi-node-profiles`) must allow privileged pods; the chart creates it labelled `pod-security.kubernetes.io/enforce=privileged` (`createNamespace: false` = label it yourself) |
@@ -32,8 +40,13 @@ helm install tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
 ```
 
 Start from `ci/example-values.yaml`; the minimal set is
-`ci/minimal-values.yaml`. `portalHost` and `sessionHost` must be
-**different registrable hosts** (enforced at render). See
+`ci/minimal-values.yaml`. `portalHost` and `sessionDomain` must be
+**disjoint** — `portalHost` may not equal or sit inside `sessionDomain`,
+because the edge routes `*.<sessionDomain>` to the session listener and a
+portal host in that scope would be captured by the wildcard (enforced at
+render). Every workspace session is served on its own
+`<label>.<sessionDomain>` host, which needs a wildcard DNS record and a
+wildcard certificate (DNS-01 — HTTP-01 cannot issue wildcards). See
 `docs/runbooks/install.md` for the full procedure including secrets and
 the apiserver NetworkPolicy peers.
 
@@ -47,6 +60,44 @@ Ordering guidance and rollback semantics: `docs/runbooks/upgrade.md`.
 Seeded WorkspaceTemplates are immutable `<name>-<hash8>` revision objects —
 a spec change creates a new revision and removes the superseded one, so
 upgrades and rollbacks never hit the CEL immutability wall.
+
+## Upgrading to 0.2.0
+
+Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
+`backend` (the public API and the session gateway merged into one
+binary — `api-internal.<ns>.svc:9443` becomes `backend.<ns>.svc:9443`)
+and `frontend` (the static portal SPA server). The schema still accepts
+the old `api.*`/`gateway.*`/`portal.*`/`images.{api,gateway,portal}` keys
+only so the render can fail with a migration hint instead of a bare
+schema error. Mapping:
+
+| 0.1.x | 0.2.0 |
+|---|---|
+| `api.*` | `backend.*` (`internalTLS` → `tls.internal`, `clientCA`/`extraCA`/`operatorCN`/`sessionIdle`/`extraPortalOrigins` keep their names) |
+| `gateway.*` | `backend.*` (`tls` → `tls.session`, `metricsListen` → `metrics.{enabled,port}`, `id` → `gatewayID`; `mtls`/`trustedCA`/`service` removed — the gateway reaches the broker in-process and the session edge is exposed via ingress/gatewayApi) |
+| `portal.*` | `frontend.*` (`tls` keeps its name; `apiUpstream`/`service` removed — the edge routes `/v1` to the backend) |
+| `images.{api,gateway}` | `images.backend` |
+| `images.portal` | `images.frontend` |
+| `<c>.podDisruptionBudget` | `backend.pdb` / `frontend.pdb` (`operator.podDisruptionBudget` unchanged) |
+| `sessionHost` | `sessionDomain` — every workspace session gets its own `<label>.<sessionDomain>` host; the edge carries ONE wildcard route and needs ONE wildcard certificate for `*.<sessionDomain>` (DNS-01). `portalHost` must not equal or sit inside `sessionDomain` |
+| `backend.extraAllowedHosts` | `backend.controlHosts` — the session Host allowlist is the session domain itself plus the in-cluster Service names |
+
+New required value: `backend.loginKeys` — the AEAD key(s) sealing the
+`__Host-tcdi_login` cookie that makes OIDC logins survive replica
+failover. `backend` defaults to **2 replicas** with `maxUnavailable: 0`,
+`minAvailable: 1` PDB and preferred node anti-affinity — size your cluster
+accordingly.
+
+Upgrading from 0.1.x additionally requires: a wildcard DNS record and
+wildcard certificate for `*.<sessionDomain>` (the session listener
+terminates TLS per workspace host), a dedicated workspace node pool
+(`runtime.placement.*` — `allowSharedNodes: true` opts out for kind/dev),
+and the login-key Secret above. **Every open session drops once** — users
+re-launch from the portal after the upgrade — and database migrations
+011/012 are forward-only, so rollback means restoring the pre-upgrade
+database backup together with the 0.1.x chart. The full procedure,
+prerequisite checklist and post-upgrade checks are in
+`docs/runbooks/upgrade.md` → "Upgrading from v0.1 to v0.2".
 
 ## Uninstall and CRD policy
 
@@ -72,7 +123,7 @@ objects. It **keeps**:
 |---|---|---|
 | `global.imageRegistry` | `ghcr.io` | registry prepended to every `images.*.repository` (e.g. `registry.example.com`); per-image `registry` wins |
 | `global.imagePullSecrets` | `[]` | pull secrets attached to every platform pod (names or `{name: ...}` maps) |
-| `images.<name>.repository` | `tinyorbitvn/tinycdi-<name>` | image path (joined under the registry); names: `api`, `operator`, `gateway`, `portal`, `linuxDesktop`, `browser` |
+| `images.<name>.repository` | `tinyorbitvn/tinycdi-<name>` | image path (joined under the registry); names: `backend`, `operator`, `frontend`, `linuxDesktop`, `browser` |
 | `images.<name>.tag` | chart `appVersion` | tag; ignored when `digest` is set |
 | `images.<name>.digest` | `""` | `sha256:<64hex>` — digest pinning wins over tag |
 | `images.<name>.pullPolicy` | `IfNotPresent` | per-image pull policy |
@@ -81,7 +132,7 @@ objects. It **keeps**:
 
 | Key | Default | Description |
 |---|---|---|
-| `portalHost` / `sessionHost` | `*.example.invalid` | public hostnames — must differ (render-time guard) |
+| `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
 | `managedNamespaces[]` | `[]` | `{name, tenant}` — tenant namespaces created with `resource-policy: keep`. The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
@@ -89,20 +140,18 @@ objects. It **keeps**:
 
 | Key | Secret holds | Used by |
 |---|---|---|
-| `database.existingSecret` / `.urlKey` | Postgres DSN (`url`) | api `TCDI_DATABASE_URL` |
-| `database.tls.caSecret.name` / `.key` | DB server CA bundle | api `PGSSLROOTCERT` (with `database.tls.mode`, e.g. `verify-full`, exported as `PGSSLMODE`) |
-| `oidc.existingSecret` / `.clientSecretKey` | OIDC client secret | api `TCDI_OIDC_CLIENT_SECRET` |
-| `api.internalTLS.existingSecret` | `tls.crt`/`tls.key` | api internal mTLS listener :9443 |
-| `api.clientCA.existingSecret` | `ca.crt` | api verifies broker client certs |
-| `api.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
-| `gateway.tls.existingSecret` | `tls.crt`/`tls.key` | session edge TLS |
-| `gateway.mtls.existingSecret` | `tls.crt`/`tls.key` | gateway broker client cert |
-| `gateway.trustedCA.existingSecret` | `ca.crt` | gateway verifies the broker cert (`-broker-ca`, required) |
-| `gateway.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
-| `gateway.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
-| `operator.brokerClient.mtls.existingSecret` | `tls.crt`/`tls.key` | operator broker client cert — **CN must equal `api.operatorCN` (default `operator`)** |
+| `database.existingSecret` / `.urlKey` | Postgres DSN (`url`) | backend `TCDI_DATABASE_URL` |
+| `database.tls.caSecret.name` / `.key` | DB server CA bundle | backend `PGSSLROOTCERT` (with `database.tls.mode`, e.g. `verify-full`, exported as `PGSSLMODE`) |
+| `oidc.existingSecret` / `.clientSecretKey` | OIDC client secret | backend `TCDI_OIDC_CLIENT_SECRET` |
+| `backend.loginKeys.existingSecret` | `current` (+ `previous` while rotating), 32 bytes each | backend `-login-key-file` — seals the `__Host-tcdi_login` cookie; **required** unless `loginKeys.generate` |
+| `backend.tls.{app,session,internal}.existingSecret` | `tls.crt`/`tls.key` | backend app listener :8443 / session listener :8444 / internal mTLS listener :9443 |
+| `backend.clientCA.existingSecret` | `ca.crt` | backend verifies internal-listener client certs |
+| `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
+| `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
+| `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
+| `operator.brokerClient.mtls.existingSecret` | `tls.crt`/`tls.key` | operator broker client cert — **CN must equal `backend.operatorCN` (default `operator`)** |
 | `operator.brokerClient.ca.existingSecret` | `ca.crt` | operator verifies the broker cert |
-| `portal.tls.existingSecret` | `tls.crt`/`tls.key` | portal TLS |
+| `frontend.tls.existingSecret` | `tls.crt`/`tls.key` | frontend TLS |
 | `ingress.tls.existingSecret` | `tls.crt`/`tls.key` | **required** when `ingress.enabled` — edge TLS is mandatory |
 
 ### Internal mTLS via cert-manager
@@ -112,7 +161,7 @@ objects. It **keeps**:
 | `certManager.enabled` | `false` | render `Certificate` resources producing the internal mTLS Secrets |
 | `certManager.issuerRef.{kind,name}` | `ClusterIssuer`/`""` | existing signer; required unless `selfSigned` |
 | `certManager.selfSigned` | `false` | also bootstrap selfsigned ClusterIssuer → CA Certificate → Issuer |
-| `certManager.caSecretName` | `<release>-internal-ca` | bootstrap CA Secret (point `*.clientCA`/`trustedCA`/`brokerClient.ca` at it) |
+| `certManager.caSecretName` | `<release>-internal-ca` | bootstrap CA Secret (point `backend.clientCA`/`operator.brokerClient.ca` at it) |
 | `certManager.duration` / `.renewBefore` | `2160h` / `360h` | leaf lifetime/renewal |
 
 ### Exposure — pick ONE (`ingress.enabled` XOR `gatewayApi.enabled`; both → render fails)
@@ -122,49 +171,107 @@ objects. It **keeps**:
 | `ingress.enabled` / `.className` / `.annotations` | `false`/`""`/`{}` | one Ingress per host; pods terminate TLS — use a pass-through backend annotation (e.g. nginx `backend-protocol: "HTTPS"`) |
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
 | `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through |
-| `<component>.service.{type,nodePort,loadBalancerIP,loadBalancerSourceRanges,annotations}` | `ClusterIP` | direct exposure option for `portal`/`gateway` |
+| `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
-### Per-component tuning (`api`, `operator`, `gateway`, `portal`)
+### Per-component tuning (`backend`, `operator`, `frontend`)
 
 | Key | Default | Description |
 |---|---|---|
-| `<c>.replicas` | `1` | |
+| `<c>.replicas` | `2` (backend, frontend) / `1` (operator) | |
 | `<c>.resources` | set | requests+limits required by chart tests |
 | `<c>.podAnnotations` | `{}` | pod template annotations |
-| `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement |
+| `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
-| `<c>.podDisruptionBudget.{enabled,minAvailable,maxUnavailable}` | disabled | PDB per component |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, api `--dev-insecure-db`/`--required-groups`, gateway `--metrics-listen`) and `gateway.extraVolumes` hostPath fail the render unless `dev.enabled` |
+| `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | `backend` on (`minAvailable: 1`), `frontend` off | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled` |
 
 ### Component-specific highlights
 
 | Key | Default | Description |
 |---|---|---|
-| `api.sessionIdle` | `30m` | session idle timeout |
-| `api.extraPortalOrigins` | `[]` | extra CSRF Origin allowlist entries |
-| `api.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
+| `backend.sessionIdle` | `30m` | session idle timeout |
+| `backend.sessionCookieMode` | `lax` | session cookie mode — `lax` (portal + session domain on one registrable domain) or `partitioned` (cross-site) |
+| `backend.gatewayID` | `tinycdi-backend` | ONE gateway identity shared by all replicas — the lease directory is per-identity, so it must be a literal, never a pod name |
+| `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
+| `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
+| `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
+| `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
+| `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `false` / `-1` | |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
 | `operator.clusterCIDRs` | `[]` | this cluster's pod/service/node CIDRs — appended to `--internet-except-cidrs`; **required** (render fails) when any seeded template uses `networkProfile: InternetOnly` |
 | `operator.brokerClient.enabled` | `true` | internal broker wiring (teardown finalizer); `devAllowNoBroker` is dev-only — needs `dev.enabled` |
-| `database.tls.mode` | `verify-full` | `PGSSLMODE` on the api — only `verify-ca`/`verify-full` render without `dev.enabled` (the api refuses weaker sslmodes at startup, CHTR-8); dev + insecure mode renders `--dev-insecure-db`; DSN `sslmode=` still wins |
-| `database.allowedPeers` | deny-all placeholder | api→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
-| `oidc.requiredGroups` | `[]` | login gate — api flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
-| `oidc.egressCIDRs` | `[0.0.0.0/0]` | api→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
-| `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `gateway.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
-| `gateway.metricsListen` | `""` | e.g. `":9090"` — served on the dedicated ClusterIP `gateway-metrics` Service, never on the public gateway port |
-| `gateway.extraAllowedHosts` / `.extraPortalOrigins` | `[]` | Host-header / launch-Origin extras |
+| `database.tls.mode` | `verify-full` | `PGSSLMODE` on the backend — only `verify-ca`/`verify-full` render without `dev.enabled` (the backend refuses weaker sslmodes at startup, CHTR-8); dev + insecure mode renders `--dev-insecure-db`; DSN `sslmode=` still wins |
+| `database.allowedPeers` | deny-all placeholder | backend→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
+| `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
+| `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
+| `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
+| `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
+
+### Branding (`frontend.branding.configMap`)
+
+Set `frontend.branding.configMap` to the name of a ConfigMap in the release
+namespace to rebrand the portal. The chart mounts it read-only at
+`/branding` in the frontend pods and passes `-branding-dir=/branding`; the
+frontend serves it at `https://<portalHost>/branding/` (regular files only,
+no listing, `Cache-Control: no-cache`). Empty (the default) renders no flag
+and no volume, and `/branding/tokens.css` answers an empty stylesheet so the
+linked override is never a console error.
+
+ConfigMap layout — every key is optional:
+
+| Key | Consumed by | Content |
+|---|---|---|
+| `branding.json` | `web/src/app/branding.ts` (`loadBranding`) | `{"productName": "...", "logo": "/branding/<file>", "logoDark": "/branding/<file>"}` — unknown fields ignored; `logo*` must stay under `/branding/` (same origin) |
+| `tokens.css` | `index.html` stylesheet link, after the app CSS | CSS custom-property overrides (`--to-*`/`--tc-*` design tokens) |
+| logo files | referenced from `branding.json` | e.g. `logo.svg` — served with their extension's content type |
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme-branding
+data:
+  branding.json: |
+    {"productName": "Acme Desktops", "logo": "/branding/logo.svg"}
+  tokens.css: |
+    :root { --to-accent: #123456; }
+  logo.svg: |
+    <svg xmlns="http://www.w3.org/2000/svg">…</svg>
+```
+
+Update the ConfigMap and restart the frontend Deployment to pick up changes
+(`kubectl rollout restart deploy/frontend`). Files are re-read per request,
+so no image rebuild is needed.
+
+**Trademark note.** The TinyOrbit name, wordmark and mark shipped as the
+default branding are trademarks of TinyOrbit and are NOT covered by the MIT
+licence — see `TRADEMARKS.md`. Supplying your own `branding.json` replaces
+the default product name and marks; "TinyCDI by TinyOrbit" attribution is
+shown only for the default branding.
+
+### Runtime pod defaults (`runtime`)
+
+Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.placement` / `spec.linux.hostUsers` overrides them per field.
+
+| Key | Default | Description |
+|---|---|---|
+| `runtime.placement.allowSharedNodes` | `false` | `false` = dedicated workspace pool: the operator gets `--runtime-node-selector`/`--runtime-tolerations` and the node-profile installer DaemonSet targets the same pool. `true` opts out (kind/dev only): no placement flags, runtime pods schedule anywhere, and install NOTES warn — node-level isolation is lost |
+| `runtime.placement.nodeSelector` | `{cdi.tinyorbit.vn/workspace: "true"}` | node labels every runtime pod selects; **must be non-empty** while `allowSharedNodes=false` (render fails otherwise) |
+| `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
+| `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 
 ### Observability & network
 
 | Key | Default | Description |
 |---|---|---|
-| `serviceMonitor.enabled` | `false` | ServiceMonitor for the gateway metrics endpoint (`gateway-metrics` Service). The operator exposes no metrics endpoint: secure metrics need cluster-scoped TokenReview/SAR RBAC the chart never grants, and HTTP metrics are banned — `--metrics-bind-address=0` is pinned |
+| `serviceMonitor.enabled` | `false` | ServiceMonitor for the backend metrics endpoint (`backend-metrics` Service). The operator exposes no metrics endpoint: secure metrics need cluster-scoped TokenReview/SAR RBAC the chart never grants, and HTTP metrics are banned — `--metrics-bind-address=0` is pinned |
 | `serviceMonitor.labels` / `.interval` / `.scrapeTimeout` / `.honorLabels` | `{}`/`""`/`""`/`false` | Prometheus Operator selection + timing |
-| `networkPolicy.enabled` | `true` | default-deny baseline + allow rules (incl. the operator↔api :9443 broker rule) |
+| `networkPolicy.enabled` | `true` | default-deny baseline + allow rules (incl. the operator↔backend :9443 broker rule) |
 | `networkPolicy.apiServerPeers` / `.apiServerPort` | `10.96.0.1/32` / `443` | apiserver egress — set your `kubernetes.default` ClusterIP |
 | `networkPolicy.dnsPeers` | kube-system pods | DNS egress |
-| `networkPolicy.prometheusPeers` | `[]` | metrics-scrape ingress peers — **required** (render fails) when `gateway.metricsListen` is set; scope to your monitoring namespace/pods |
+| `networkPolicy.prometheusPeers` | `[]` | metrics-scrape ingress peers — **required** (render fails) when `backend.metrics.enabled` is set; scope to your monitoring namespace/pods |
+| `networkPolicy.edgeIngress` / `.edgeIngressCIDRs` | `ipBlock` / `[0.0.0.0/0]` | how edge traffic reaches the public listeners (backend :8443/:8444, frontend :8443) — `ipBlock` needs non-empty CIDRs (empty fails closed), `any` admits every source on the TLS ports, `cilium` renders `*-edge-ingress` CiliumNetworkPolicies instead |
 
 ### Runtime catalog (`templates[]`)
 
@@ -176,7 +283,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (runtime pod placement; tolerations are not supported by the backend) |
+| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (**deprecated** — prefer the typed `spec.placement` block, which also carries `tolerations` and `runtimeClassName`) |
 | `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
 
 ### Kasm workspace images
@@ -295,17 +402,21 @@ chart intentionally does not model quota values.
 ## Validation & tests
 
 `values.schema.json` rejects malformed values at lint/template time
-(https-only issuers/origins, hostname-patterned `portalHost`/`sessionHost`,
+(https-only issuers/origins, hostname-patterned `portalHost`/`sessionDomain`,
 comma-free `oidc.requiredGroups` entries, pinned installer image).
-Render-time guards refuse equal portal/session
-hosts, conflicting exposure modes, a cert-manager toggle without an
-issuer, empty or placeholder-only `database.allowedPeers`, empty
-`oidc.egressCIDRs`/`networkPolicy.prometheusPeers`, ingress without TLS,
+Render-time guards refuse the removed `api.*`/`gateway.*`/`portal.*`/
+`sessionHost`/`backend.extraAllowedHosts` values
+(with a migration hint), a portalHost equal to or inside
+sessionDomain, conflicting exposure modes, a cert-manager toggle without an
+issuer, missing `backend.loginKeys`, empty or placeholder-only
+`database.allowedPeers`, empty
+`oidc.egressCIDRs`/`networkPolicy.prometheusPeers`/`edgeIngressCIDRs`,
+ingress without TLS,
 HTTPRoute parentRefs without `sectionName`, InternetOnly templates without
 `operator.clusterCIDRs`, an installer namespace equal to the release
 namespace/a managed namespace/`kube-*`/`default`, `database.tls.mode`
 `disable`/`allow`, `podSecurity.managedEnforce=privileged`, hostPath
-`gateway.extraVolumes`, dangerous `extraArgs`, and privilege-weakening
+`backend.extraVolumes`, dangerous `extraArgs`, and privilege-weakening
 securityContext overrides — the dev surfaces all unless `dev.enabled`. Run
 `go test ./deploy/helm/` for the full assertion suite (helm resolved via
 `$TCDI_HELM`, `bin/helm`, or `PATH`); the installer behaviour is

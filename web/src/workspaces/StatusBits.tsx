@@ -1,35 +1,37 @@
+import { StatusPill, Table } from "../design";
+import type { Column } from "../design/Table";
+import { t } from "../i18n";
+import { formatDateTime } from "../templates/format";
+import { phaseLabelKey } from "./helpers";
 import type { WorkspaceView } from "./helpers";
 
-export function PhaseBadge({ phase }: { phase: WorkspaceView["phase"] }) {
-  return <span className={`phase phase-${phase.toLowerCase()}`}>{phase}</span>;
+type Condition = WorkspaceView["conditions"][number];
+
+/** Phase pill with a catalog text label — status is never colour alone. */
+export function PhasePill({ phase }: { phase: WorkspaceView["phase"] }) {
+  return <StatusPill phase={phase} label={t(phaseLabelKey(phase))} />;
 }
 
+const COLUMNS: Column<Condition>[] = [
+  { key: "type", header: t("workspaces.conditions.col.type"), rowHeader: true },
+  { key: "status", header: t("workspaces.conditions.col.status") },
+  { key: "reason", header: t("workspaces.conditions.col.reason") },
+  { key: "message", header: t("workspaces.conditions.col.message"), render: (c) => c.message ?? "" },
+  {
+    key: "lastTransitionTime",
+    header: t("workspaces.conditions.col.since"),
+    render: (c) => formatDateTime(c.lastTransitionTime),
+  },
+];
+
 export function ConditionsTable({ workspace }: { workspace: WorkspaceView }) {
-  if (workspace.conditions.length === 0) {
-    return <p>No conditions reported yet.</p>;
-  }
   return (
-    <table aria-label="conditions">
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Status</th>
-          <th>Reason</th>
-          <th>Message</th>
-          <th>Since</th>
-        </tr>
-      </thead>
-      <tbody>
-        {workspace.conditions.map((c) => (
-          <tr key={c.type}>
-            <td>{c.type}</td>
-            <td>{c.status}</td>
-            <td>{c.reason}</td>
-            <td>{c.message ?? ""}</td>
-            <td>{new Date(c.lastTransitionTime).toLocaleString()}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <Table
+      columns={COLUMNS}
+      rows={workspace.conditions}
+      rowKey={(c) => c.type}
+      caption={t("workspaces.conditions.label")}
+      empty={t("workspaces.conditions.empty")}
+    />
   );
 }

@@ -3,7 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>tinycdi workspaces</title>
+    <script src="/theme-init.js"></script>
+    <link rel="stylesheet" href="/src/styles/index.css" />
+    <!-- Operator branding overrides: the frontend serves -branding-dir at
+         /branding/ and answers an empty stylesheet when unset. The build moves this link
+         after the bundled stylesheet (vite.config.ts) so overrides win. -->
+    <link rel="stylesheet" href="/branding/tokens.css" />
+    <title>TinyCDI</title>
   </head>
   <body>
     <div id="root"></div>

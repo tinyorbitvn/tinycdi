@@ -1,12 +1,16 @@
 {{- if .Values.certManager.enabled }}
 # cert-manager integration for the INTERNAL mTLS chain only
-# (gateway/operator -> api broker, ADR 0003). The Certificates below
-# produce the Secrets referenced by api.internalTLS.existingSecret,
-# gateway.mtls.existingSecret and operator.brokerClient.mtls.existingSecret
-# — the pods keep consuming plain secret volumes either way.
+# (operator -> backend broker, ADR 0003). The Certificates below produce
+# the Secrets referenced by backend.tls.internal.existingSecret and
+# operator.brokerClient.mtls.existingSecret — the pods keep consuming plain
+# secret volumes either way.
 #
-# Public-edge certs (portal.tls, gateway.tls) are NOT issued here: those
-# terminate real browser traffic and should come from your PKI/ACME flow.
+# Public-edge certs (backend.tls.app, backend.tls.session, frontend.tls)
+# are NOT issued here: point them at certificates from your PKI/ACME flow.
+# backend.tls.session must be a WILDCARD certificate covering
+# *.<sessionDomain> — every workspace session is served on its own
+# <label>.<sessionDomain> host (D9). Wildcards need DNS-01; HTTP-01
+# cannot issue them.
 {{- if .Values.certManager.selfSigned }}
 ---
 # Bootstrap: self-signed root -> CA Certificate -> CA Issuer. Only enable
@@ -16,7 +20,7 @@ kind: ClusterIssuer
 metadata:
   name: {{ .Release.Namespace }}-{{ .Release.Name }}-selfsigned
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
 spec:
   selfSigned: {}
 ---
@@ -26,7 +30,7 @@ metadata:
   name: {{ .Release.Name }}-internal-ca
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
 spec:
   secretName: {{ include "tinycdi.internalCASecret" . }}
   isCA: true
@@ -43,53 +47,37 @@ metadata:
   name: {{ .Release.Name }}-internal-ca
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
 spec:
   ca:
     secretName: {{ include "tinycdi.internalCASecret" . }}
 {{- end }}
 ---
-# api internal broker listener (:9443) server certificate.
+# backend internal broker listener (:9443) server certificate — the
+# operator dials https://backend.<namespace>.svc:9443.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ .Release.Name }}-api-internal-tls
+  name: {{ .Release.Name }}-backend-internal-tls
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "api" "root" $) | nindent 4 }}
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
 spec:
-  secretName: {{ .Values.api.internalTLS.existingSecret }}
-  commonName: api-internal.{{ .Release.Namespace }}.svc
+  secretName: {{ .Values.backend.tls.internal.existingSecret }}
+  commonName: backend.{{ .Release.Namespace }}.svc
   dnsNames:
-    - api-internal
-    - api-internal.{{ .Release.Namespace }}
-    - api-internal.{{ .Release.Namespace }}.svc
-    - api-internal.{{ .Release.Namespace }}.svc.cluster.local
+    - backend
+    - backend.{{ .Release.Namespace }}
+    - backend.{{ .Release.Namespace }}.svc
+    - backend.{{ .Release.Namespace }}.svc.cluster.local
   usages: [server auth]
   duration: {{ .Values.certManager.duration }}
   renewBefore: {{ .Values.certManager.renewBefore }}
   issuerRef:
     {{- include "tinycdi.leafIssuerRef" . | nindent 4 }}
 ---
-# gateway broker client certificate (mTLS to the api internal listener).
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {{ .Release.Name }}-gateway-mtls
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "tinycdi.componentLabels" (dict "component" "gateway" "root" $) | nindent 4 }}
-spec:
-  secretName: {{ .Values.gateway.mtls.existingSecret }}
-  commonName: gateway
-  usages: [client auth]
-  duration: {{ .Values.certManager.duration }}
-  renewBefore: {{ .Values.certManager.renewBefore }}
-  issuerRef:
-    {{- include "tinycdi.leafIssuerRef" . | nindent 4 }}
----
 # operator broker client certificate. The commonName MUST match
-# api.operatorCN (default "operator") — the internal workspace
+# backend.operatorCN (default "operator") — the internal workspace
 # revoke/drain routes accept no other client identity.
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -100,7 +88,7 @@ metadata:
     {{- include "tinycdi.componentLabels" (dict "component" "operator" "root" $) | nindent 4 }}
 spec:
   secretName: {{ .Values.operator.brokerClient.mtls.existingSecret }}
-  commonName: {{ .Values.api.operatorCN | default "operator" }}
+  commonName: {{ .Values.backend.operatorCN | default "operator" }}
   usages: [client auth]
   duration: {{ .Values.certManager.duration }}
   renewBefore: {{ .Values.certManager.renewBefore }}
