@@ -161,7 +161,8 @@ exactly what the chart defaults to.
 The `quickstart` job in `.github/workflows/ci.yml` runs `up.sh` under a
 20-minute budget on a stock runner, drives the portal with the Playwright
 smoke in `hack/quickstart/smoke/` (log in, create a browser workspace, wait for
-the session frame) and then runs `down.sh` twice, failing if any kind cluster
-remains. It runs on pushes to `main`, on manual dispatch and on pull requests
-that touch `hack/quickstart/`, `deploy/helm/` or `build/`; it is not a required
-check.
+the session frame; then write a file into a Retain workspace, delete it, attach
+the retained disk to a new workspace and read the file back with `kubectl exec`)
+and then runs `down.sh` twice, failing if any kind cluster remains. It runs on
+pushes to `main`, on manual dispatch and on pull requests that touch
+`hack/quickstart/`, `deploy/helm/` or `build/`; it is not a required check.

@@ -444,10 +444,13 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: portal smoke (login, create browser workspace, session frame)
+      - name: portal smoke (session frame; retained-disk attach round trip)
         if: steps.gate.outputs.run == 'true'
         working-directory: hack/quickstart/smoke
-        run: npx playwright test
+        # kubectl inside the smoke writes/reads a file in the workspace home.
+        run: |
+          export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
+          npx playwright test
       - name: diagnostics
         if: failure() && steps.gate.outputs.run == 'true'
         run: |
