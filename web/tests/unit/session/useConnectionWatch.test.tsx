@@ -67,7 +67,7 @@ afterEach(() => {
 describe("useConnectionWatch (D15)", () => {
   it("reloads the frame while the lease is active", async () => {
     const { frame, events, fetchStatus, requestTicket } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
     // First poll finds the lease still alive: reload after backoff[0] = 1 s.
     await advanced(CONNECTION_POLL_MS);
@@ -92,7 +92,7 @@ describe("useConnectionWatch (D15)", () => {
   // shorter than the last two. A poll must never cancel a pending reload.
   it("fires every backoff step exactly once under a 5 s poll, then reports exhausted", async () => {
     const { events, fetchStatus, requestTicket } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
     // Poll cadence 5 s; run long enough for the 15 s step to land and one
     // more poll to find the budget spent.
@@ -115,7 +115,7 @@ describe("useConnectionWatch (D15)", () => {
 
   it("does not re-arm a pending reload on every poll (8 s step survives a 5 s poll)", async () => {
     const { frame, events, fetchStatus } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
     // Steps 0..2 (1 s, 2 s, 4 s) each fit between two polls.
     await advanced(CONNECTION_POLL_MS * 4); // t = 20 s: step 3 (8 s) armed now
@@ -130,17 +130,17 @@ describe("useConnectionWatch (D15)", () => {
 
   it("cancels a pending reload when the stream comes back and restarts the backoff", async () => {
     const { events, fetchStatus } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
     await advanced(CONNECTION_POLL_MS * 4); // steps 0..2 ran; the 8 s step is pending
     expect(navigated(events)).toHaveLength(3);
 
-    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true, streamEpoch: 0 });
     await advanced(CONNECTION_POLL_MS); // t = 25 s: connected again
     await advanced(RECONNECT_BACKOFF_MS[3]); // the cancelled reload must not fire
     expect(navigated(events)).toHaveLength(3);
 
     // The next outage starts again at the first step.
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
     await advanced(CONNECTION_POLL_MS + RECONNECT_BACKOFF_MS[0]);
     expect(navigated(events)).toHaveLength(4);
   });
@@ -162,7 +162,7 @@ describe("useConnectionWatch (D15)", () => {
       expect(fetchStatus).toHaveBeenCalledTimes(1);
       view.unmount();
       await act(async () => {
-        d.resolve({ state: "disconnected", leaseActive: true });
+        d.resolve({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(vi.getTimerCount()).toBe(0);
@@ -179,7 +179,7 @@ describe("useConnectionWatch (D15)", () => {
       await advanced(CONNECTION_POLL_MS);
       view.unmount();
       await act(async () => {
-        d.resolve({ state: "disconnected", leaseActive: false });
+        d.resolve({ state: "disconnected", leaseActive: false, streamEpoch: 0 });
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(requestTicket).not.toHaveBeenCalled();
@@ -195,7 +195,7 @@ describe("useConnectionWatch (D15)", () => {
       await advanced(CONNECTION_POLL_MS);
       view.rerender({ ...props, active: false });
       await act(async () => {
-        d.resolve({ state: "disconnected", leaseActive: false });
+        d.resolve({ state: "disconnected", leaseActive: false, streamEpoch: 0 });
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(requestTicket).not.toHaveBeenCalled();
@@ -209,7 +209,7 @@ describe("useConnectionWatch (D15)", () => {
       const { requestTicket, fetchStatus, view } = setup();
       let release!: (t: LaunchTicket) => void;
       requestTicket.mockReturnValue(new Promise<LaunchTicket>((r) => (release = r)));
-      fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false });
+      fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false, streamEpoch: 0 });
       await advanced(CONNECTION_POLL_MS);
       expect(requestTicket).toHaveBeenCalledTimes(1);
       view.unmount();
@@ -224,7 +224,7 @@ describe("useConnectionWatch (D15)", () => {
   it("relaunches with a fresh ticket when the lease is gone", async () => {
     const submitted = watchFormSubmits();
     const { events, fetchStatus, requestTicket } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false, streamEpoch: 0 });
 
     await advanced(CONNECTION_POLL_MS);
     await vi.waitFor(() => expect(submitted).toHaveLength(1));
@@ -239,7 +239,7 @@ describe("useConnectionWatch (D15)", () => {
   it("stops after MAX_AUTO_RELAUNCH within 5 minutes", async () => {
     const submitted = watchFormSubmits();
     const { events, fetchStatus, requestTicket } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: false, streamEpoch: 0 });
 
     await advanced(CONNECTION_POLL_MS);
     await vi.waitFor(() => expect(requestTicket).toHaveBeenCalledTimes(1));
@@ -261,7 +261,7 @@ describe("useConnectionWatch (D15)", () => {
   it("pauses polling while the page is hidden", async () => {
     vi.spyOn(Document.prototype, "visibilityState", "get").mockReturnValue("hidden");
     const { fetchStatus } = setup();
-    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true, streamEpoch: 0 });
 
     await advanced(CONNECTION_POLL_MS * 3);
     expect(fetchStatus).not.toHaveBeenCalled();
@@ -282,7 +282,7 @@ describe("useConnectionWatch last backoff step (FX-R8)", () => {
     const { fetchStatus } = setup({
       onEvent: (e: WatchEvent) => stamps.push({ type: e.type, at: Date.now() }),
     });
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
     await advanced(CONNECTION_POLL_MS * 20);
     const lastReload = stamps.filter((s) => s.type === "frame-navigated").at(-1);
@@ -295,12 +295,12 @@ describe("useConnectionWatch last backoff step (FX-R8)", () => {
 
   it("a connected report during the last grace period cancels the exhaustion", async () => {
     const { events, fetchStatus } = setup();
-    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
     // Run until the last reload has happened (about 45 s with a 5 s poll).
     await advanced(CONNECTION_POLL_MS * 9 + 1000);
     expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
 
-    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true });
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true, streamEpoch: 0 });
     await advanced(CONNECTION_POLL_MS * 6);
     expect(events.filter((e) => e.type === "exhausted")).toHaveLength(0);
   });

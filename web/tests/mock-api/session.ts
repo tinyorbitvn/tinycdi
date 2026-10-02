@@ -161,7 +161,7 @@ export function sessionArea(ctx: MockContext): MockArea {
       lastRenewedAt: ctx.nowIso(),
       ...(leaseActive
         ? { leaseRef: leaseRefOf(leaseId), streamEpoch: epochs.get(leaseId) ?? 1 }
-        : {}),
+        : { streamEpoch: 0 }),
     });
   }
 

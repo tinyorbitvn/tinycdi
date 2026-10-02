@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from "react";
+import type { components } from "../api/generated/schema";
 import { sessionOrigin, submitLaunch, type LaunchTicket } from "./launch";
 
 /**
@@ -27,16 +28,8 @@ export const MAX_AUTO_RELAUNCH = 2; // per 5 minutes
 export const CONNECTION_POLL_MS = 5_000;
 export const AUTO_RELAUNCH_WINDOW_MS = 5 * 60_000;
 
-/** GET /v1/workspaces/{id}/connection response body (T2.3). */
-export interface ConnectionStatus {
-  state: "none" | "connected" | "disconnected" | "stale";
-  leaseActive: boolean;
-  lastRenewedAt?: string;
-  /** First 16 hex chars of SHA-256 of the active lease ID; absent without a lease. */
-  leaseRef?: string;
-  /** The lease's stream epoch: advances every time a new stream opens. */
-  streamEpoch?: number;
-}
+/** GET /v1/workspaces/{id}/connection response body. */
+export type ConnectionStatus = components["schemas"]["ConnectionStatus"];
 
 export type WatchEvent =
   /** The frame was navigated to the workspace origin (lease-active reload). */
