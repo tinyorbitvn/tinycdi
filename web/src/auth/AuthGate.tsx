@@ -35,13 +35,19 @@ export function AuthGate({
     let cancelled = false;
     (async () => {
       try {
-        // Session probe: any authenticated GET works; the list call is the
-        // cheapest one that exists in the contract.
-        unwrap(await api.GET("/v1/workspaces", { params: { query: { limit: 1 } } }));
+        // Session probe: GET /v1/me is the first /v1 call of every load. Its
+        // 401 is the normal "signed out" answer, handled below — never logged
+        // or rethrown (MeProvider reads the body again once the gate opens).
+        unwrap(await api.GET("/v1/me"));
         if (!cancelled) setReady(true);
       } catch (e) {
         if (isPortalApiError(e) && e.code === "UNAUTHENTICATED") {
-          onUnauthenticated();
+          if (!cancelled) onUnauthenticated();
+          return;
+        }
+        // A backend without /v1/me yet: MeProvider runs on its stub principal.
+        if (isPortalApiError(e) && (e.httpStatus === 404 || e.httpStatus === 501)) {
+          if (!cancelled) setReady(true);
           return;
         }
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));

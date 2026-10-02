@@ -1,7 +1,9 @@
 # Trademarks
 
 "TinyOrbit", the TinyOrbit wordmark (`web` branding assets:
-`tinyorbit-logo-*.png`) and the TinyOrbit mark (`tinyorbit-mark-*.svg`) are
+`tinyorbit-logo-*.png`) and the TinyOrbit mark (`tinyorbit-mark-*.svg`, and
+the portal favicons `web/public/favicon.svg` and `web/public/favicon.ico`
+generated from it) are
 trademarks of TinyOrbit. They are **not** covered by the MIT licence that
 applies to this project's source code, and no right to use them is granted
 except to identify this unmodified software.

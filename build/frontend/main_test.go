@@ -360,19 +360,89 @@ func TestBrandingDir_EmptyTokensFallback(t *testing.T) {
 	}
 }
 
-// TestBrandingDir_JSONAbsent: without -branding-dir,
-// /branding/branding.json answers 404 — never the SPA fallback, which
-// would hand the app's loadBranding an HTML document.
+// TestBrandingDir_JSONAbsent: the SPA always fetches /branding/branding.json,
+// so with no -branding-dir — and with the dir set but no branding.json in it
+// — it answers 200 with the empty object (application/json, no-cache): the
+// app's loadBranding falls back to its defaults and the console stays
+// clean. It is never the SPA fallback, which would hand loadBranding an
+// HTML document.
 func TestBrandingDir_JSONAbsent(t *testing.T) {
-	h := newTestHandler(t, "session.test")
-	res := get(t, h, http.MethodGet, "/branding/branding.json")
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("status %d, want 404", res.StatusCode)
+	handlers := map[string]http.Handler{
+		"no branding dir":  newTestHandler(t, "session.test"),
+		"dir without file": newTestHandlerBranding(t, "session.test", t.TempDir()),
 	}
-	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	if strings.Contains(string(body), "<html>") {
-		t.Fatalf("body is the SPA fallback, want a plain 404: %q", body)
+	for name, h := range handlers {
+		res := get(t, h, http.MethodGet, "/branding/branding.json")
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", name, res.StatusCode)
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("%s: Content-Type %q, want application/json", name, ct)
+		}
+		if cc := res.Header.Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s: Cache-Control %q, want no-cache", name, cc)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if strings.TrimSpace(string(body)) != "{}" {
+			t.Fatalf("%s: body %q, want {}", name, body)
+		}
+	}
+}
+
+// TestBrandingDir_OtherNamesStay404: only the names index.html / the app
+// always request get an empty fallback; any other absent name stays a plain
+// 404 (never the SPA fallback).
+func TestBrandingDir_OtherNamesStay404(t *testing.T) {
+	h := newTestHandler(t, "session.test")
+	for _, path := range []string{"/branding/logo.svg", "/branding/nope.json"} {
+		res := get(t, h, http.MethodGet, path)
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", path, res.StatusCode)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if strings.Contains(string(body), "<html>") {
+			t.Fatalf("%s: body is the SPA fallback, want a plain 404: %q", path, body)
+		}
+	}
+}
+
+// TestBrandingDir_FaviconOverride: the SPA ships /favicon.svg and
+// /favicon.ico in its web root; a favicon.svg / favicon.ico in the branding
+// directory replaces the shipped one at the same URL (no-cache, since it
+// changes at operator cadence). Without the override the web root's file is
+// served.
+func TestBrandingDir_FaviconOverride(t *testing.T) {
+	root := t.TempDir()
+	for name, body := range map[string]string{
+		"index.html":  "<html><body>portal</body></html>",
+		"favicon.svg": "<svg>shipped</svg>",
+		"favicon.ico": "shipped-ico",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "favicon.svg"), []byte("<svg>acme</svg>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandler(root, dir, frontendCSP(nil))
+
+	for _, tc := range []struct{ path, want, cache string }{
+		{"/favicon.svg", "<svg>acme</svg>", "no-cache"}, // overridden
+		{"/favicon.ico", "shipped-ico", ""},             // no override: shipped
+	} {
+		res := get(t, h, http.MethodGet, tc.path)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || string(body) != tc.want {
+			t.Fatalf("%s: status %d body %q, want 200 %q", tc.path, res.StatusCode, body, tc.want)
+		}
+		if cc := res.Header.Get("Cache-Control"); cc != tc.cache {
+			t.Fatalf("%s: Cache-Control %q, want %q", tc.path, cc, tc.cache)
+		}
 	}
 }
 

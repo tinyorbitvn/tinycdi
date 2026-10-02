@@ -29,6 +29,39 @@ describe("AuthGate", () => {
     expect(screen.queryByText("secret content")).not.toBeInTheDocument();
   });
 
+  it("probes /v1/me first and treats its 401 as signed out, without logging", async () => {
+    clearCookies();
+    const seen: string[] = [];
+    const base = createMockApi();
+    const api = {
+      ...base,
+      handle: (req: Parameters<typeof base.handle>[0]) => {
+        seen.push(`${req.method} ${req.path}`);
+        return base.handle(req);
+      },
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rejections: unknown[] = [];
+    const onRejection = (e: unknown) => rejections.push(e);
+    process.on("unhandledRejection", onRejection);
+    const onUnauthenticated = vi.fn();
+    renderWithApi(
+      <AuthGate onUnauthenticated={onUnauthenticated}>
+        <div>secret content</div>
+      </AuthGate>,
+      api,
+    );
+
+    await waitFor(() => expect(onUnauthenticated).toHaveBeenCalledOnce());
+    expect(seen[0]).toBe("GET /v1/me");
+    expect(seen).not.toContain("GET /v1/workspaces");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errors).not.toHaveBeenCalled();
+    expect(rejections).toEqual([]);
+    process.off("unhandledRejection", onRejection);
+    errors.mockRestore();
+  });
+
   it("renders children once the session check passes", async () => {
     loginCookies();
     const onUnauthenticated = vi.fn();
