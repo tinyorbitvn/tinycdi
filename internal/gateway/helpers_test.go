@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -240,6 +241,23 @@ func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.renewErr[leaseID] = broker.ErrRevoked
 	f.revokes[leaseID]++
 	return f.revokeErr
+}
+
+// RevokeLeaseChanged is RevokeLease plus the broker's report of whether a live
+// lease was actually revoked: false for an unknown or already-dead lease.
+func (f *fakeBroker) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	f.mu.Lock()
+	live := false
+	for _, l := range f.leases {
+		if l.ID == leaseID {
+			live = !errors.Is(f.renewErr[leaseID], broker.ErrRevoked)
+		}
+	}
+	f.mu.Unlock()
+	if err := f.RevokeLease(ctx, leaseID); err != nil {
+		return false, err
+	}
+	return live, nil
 }
 
 // leaseRevokeCount reports how many times RevokeLease ran for the lease —

@@ -176,8 +176,17 @@ func (b *Broker) RenewLease(ctx context.Context, gw GatewayIdentity, leaseID str
 // of an already-dead lease skips the accounting — a live successor lease
 // may own those streams.
 func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
+	_, err := b.RevokeLeaseChanged(ctx, leaseID)
+	return err
+}
+
+// RevokeLeaseChanged is RevokeLease that also reports whether a live lease
+// was actually revoked: false for an unknown or already-dead lease, where
+// nothing changed.
+func (b *Broker) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
 	now := b.now()
-	return b.db.WithTx(ctx, func(tx store.Tx) error {
+	changed := false
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
 		var (
 			wsUID string
 			gen   int64
@@ -193,6 +202,7 @@ func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
 		case err != nil:
 			return fmt.Errorf("broker: revoke lease: %w", err)
 		}
+		changed = true
 		// The revoked lease was the workspace's only active lease (partial
 		// unique index), so every stream counted on its generation is now
 		// closing but cannot report it — close the accounting atomically.
@@ -201,4 +211,5 @@ func (b *Broker) RevokeLease(ctx context.Context, leaseID string) error {
 		}
 		return nil
 	})
+	return changed && err == nil, err
 }

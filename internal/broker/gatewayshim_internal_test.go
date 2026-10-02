@@ -37,6 +37,10 @@ func (r *recordingSurface) ResolveTarget(_ context.Context, gw GatewayIdentity, 
 	return Target{}, r.err
 }
 
+func (r *recordingSurface) RevokeLeaseChanged(ctx context.Context, id string) (bool, error) {
+	return true, r.RevokeLease(ctx, id)
+}
+
 func (r *recordingSurface) RevokeLease(_ context.Context, _ string) error {
 	r.calls = append(r.calls, "revoke")
 	return r.err

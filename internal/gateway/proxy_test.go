@@ -17,6 +17,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 // TestProxy_RequiresSession: every desktop route needs a valid session
@@ -729,6 +730,56 @@ func TestControlRevoke_OtherReplica(t *testing.T) {
 		}
 	case <-time.After(2 * testRenewInterval):
 		t.Fatal("A's stream not closed within 2xRenewInterval of the revoke")
+	}
+}
+
+// TestControlRevoke_UnknownOrDeadLeaseNotRevoked (R9c): the answer is
+// {"revoked":true} and the audit says success only when a live lease was
+// actually revoked. An unknown lease ID, or a lease that is already dead,
+// answers {"revoked":false} and records no success event.
+func TestControlRevoke_UnknownOrDeadLeaseNotRevoked(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-revdead", testWSUID)
+	audit := &auditRecorder{}
+	srv := newGateway(t, fb, func(c *gateway.Config) { c.Audit = audit })
+	launchOK(t, srv, testHost, "tk-revdead")
+	lease := fb.leaseOf(t, "tk-revdead")
+
+	revoke := func(id string) (int, string) {
+		return controlRoundTrip(t, srv, http.MethodPost, "/v1/control/revoke",
+			"control-test-token", `{"leaseId":"`+id+`"}`)
+	}
+	successes := func() int {
+		audit.mu.Lock()
+		defer audit.mu.Unlock()
+		n := 0
+		for _, e := range audit.events {
+			if e.Action == "session.revoke" && e.Outcome == observability.OutcomeSuccess {
+				n++
+			}
+		}
+		return n
+	}
+
+	if status, body := revoke("lease-that-never-existed"); status != http.StatusOK || !strings.Contains(body, `"revoked":false`) {
+		t.Fatalf("unknown lease = %d %s, want 200 {\"revoked\":false}", status, body)
+	}
+	if n := successes(); n != 0 {
+		t.Fatalf("unknown lease recorded %d success audit events, want 0", n)
+	}
+
+	if status, body := revoke(lease.ID); status != http.StatusOK || !strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("live lease = %d %s, want 200 {\"revoked\":true}", status, body)
+	}
+	if n := successes(); n != 1 {
+		t.Fatalf("live lease recorded %d success audit events, want 1", n)
+	}
+
+	if status, body := revoke(lease.ID); status != http.StatusOK || !strings.Contains(body, `"revoked":false`) {
+		t.Fatalf("already-dead lease = %d %s, want 200 {\"revoked\":false}", status, body)
+	}
+	if n := successes(); n != 1 {
+		t.Fatalf("already-dead lease added a success audit event (%d total, want 1)", n)
 	}
 }
 

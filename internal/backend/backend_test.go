@@ -204,6 +204,10 @@ func (f *fakeBrokerClient) RevokeLease(_ context.Context, leaseID string) error 
 	return nil
 }
 
+func (f *fakeBrokerClient) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	return true, f.RevokeLease(ctx, leaseID)
+}
+
 func (f *fakeBrokerClient) ReportActivity(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ev broker.ActivityEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -405,6 +409,9 @@ func (f *fakeInternalBroker) ResolveTarget(context.Context, broker.GatewayIdenti
 	return broker.Target{}, broker.ErrLeaseInvalid
 }
 func (f *fakeInternalBroker) RevokeLease(context.Context, string) error { return nil }
+func (f *fakeInternalBroker) RevokeLeaseChanged(context.Context, string) (bool, error) {
+	return false, nil
+}
 func (f *fakeInternalBroker) ReportActivity(context.Context, broker.GatewayIdentity, string, broker.Fence, broker.ActivityEvent) error {
 	return nil
 }
@@ -838,6 +845,9 @@ func (a internalAdapter) ResolveTarget(ctx context.Context, gw broker.GatewayIde
 }
 func (a internalAdapter) RevokeLease(ctx context.Context, leaseID string) error {
 	return a.fb.RevokeLease(ctx, leaseID)
+}
+func (a internalAdapter) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	return a.fb.RevokeLeaseChanged(ctx, leaseID)
 }
 func (a internalAdapter) ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error {
 	return a.fb.ReportActivity(ctx, gw, leaseID, fence, ev)
