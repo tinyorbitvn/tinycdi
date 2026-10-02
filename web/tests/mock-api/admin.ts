@@ -162,6 +162,9 @@ export interface Tenancy {
   isAdmin(): boolean;
   ownerOf(id: string): Owner;
   visible(id: string): boolean;
+  // Every `scope` query value seen by resolveScope ("" when absent) — lets
+  // tests assert which scope a screen requested.
+  scopesSeen: string[];
   // Resolves ?scope: { mine } or an error response (403 tenant for
   // non-admins, 400 unknown value). Omitted = admin sees the tenant.
   resolveScope(req: MockRequest): { mine: boolean } | MockResponse;
@@ -191,11 +194,13 @@ export function tenancy(ctx: MockContext): Tenancy {
     userLimits: { ...DEFAULT_USER_LIMITS },
     owners: new Map(),
     failNext: new Map(),
+    scopesSeen: [],
     isAdmin: () => self.me.roles.includes("tenant-admin"),
     ownerOf: (id) => self.owners.get(id) ?? { subject: self.me.subject, displayName: self.me.displayName },
     visible: (id) => self.isAdmin() || self.ownerOf(id).subject === self.me.subject,
     resolveScope(req) {
       const scope = req.query.get("scope");
+      self.scopesSeen.push(scope ?? "");
       if (scope === "tenant") {
         return self.isAdmin() ? { mine: false } : err(403, "FORBIDDEN", "tenant scope requires tenant-admin", false);
       }
@@ -247,6 +252,7 @@ export function adminArea(ctx: MockContext): MockArea {
     t.userLimits = { ...DEFAULT_USER_LIMITS };
     t.owners = new Map();
     t.failNext = new Map();
+    t.scopesSeen = [];
     if (ctx.demo) seed();
   }
 
