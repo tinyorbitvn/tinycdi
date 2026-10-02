@@ -63,10 +63,15 @@ Quota is enforced in Postgres, not by cluster capacity:
   is actually gone — quota is never released early
   (`internal/provisioning/recovery.go`).
 
-### Setting quota (MVP)
+### Setting quota
 
-There is **no admin API** for quota in the MVP; `SetQuota` runs inside a
-tenant-provisioning transaction. Set it with SQL against the platform DB:
+Declare quota in the chart: `managedNamespaces[].quota` (`runningWorkspaces`,
+`cpu`, `memory`, `storage`) — the backend leader upserts those tenants' rows
+at startup (`docs/runbooks/install.md` → "Tenant quotas"). There is **no
+admin API** for quota; for a tenant the chart does not declare, set the row
+with SQL against the platform DB. Do not hand-edit a tenant that has a
+`quota` block in the chart: the declared values overwrite it at the next
+backend start.
 
 ```sql
 INSERT INTO tenant_quota
@@ -80,7 +85,8 @@ ON CONFLICT (tenant_id) DO UPDATE SET
 ```
 
 A tenant with no `tenant_quota` row gets `ErrNoQuota` — creates fail closed,
-never open. Lowering a limit below current usage does not kill running
+never open, and the API reports `409 QUOTA_NOT_CONFIGURED` (distinct from
+`QUOTA_EXHAUSTED`, which means a configured limit has no headroom). Lowering a limit below current usage does not kill running
 workspaces; it only blocks new reservations until held < limit.
 
 ## Cluster sizing
