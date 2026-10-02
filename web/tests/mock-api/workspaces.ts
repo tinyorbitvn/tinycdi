@@ -81,7 +81,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     state.workspaces.set(seed.id, seed);
     state.events.set(seed.id, structuredClone(SEED_EVENTS));
     if (ctx.demo) {
-      state.templates.push(...structuredClone(DEMO_TEMPLATES).map((tpl) => ({ family: tpl.name, ...tpl })));
+      state.templates.push(...structuredClone(DEMO_TEMPLATES));
       for (const ws of structuredClone(DEMO_WORKSPACES)) {
         if (DEMO_TRANSITIONAL.has(ws.id)) ws.updatedAt = ctx.nowIso();
         state.workspaces.set(ws.id, ws);
@@ -140,7 +140,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
       template: {
         id: tpl.id,
         name: tpl.name,
-        family: tpl.family ?? tpl.name,
+        family: tpl.family,
         revision: tpl.revision,
         runtime: tpl.runtime,
         experience: tpl.experience,

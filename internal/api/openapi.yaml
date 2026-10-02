@@ -1010,7 +1010,7 @@ components:
     TemplateSummary:
       type: object
       additionalProperties: false
-      required: [id, name, revision, runtime, experience]
+      required: [id, name, family, revision, runtime, experience]
       description: Immutable template+revision the workspace was created from.
       properties:
         id:
@@ -1019,6 +1019,12 @@ components:
           example: tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M
         name:
           type: string
+          example: linux-firefox-desktop
+        family:
+          type: string
+          description: |
+            Catalog name shared by every revision of one template; revisions
+            of a family are grouped under it in the catalog.
           example: linux-firefox-desktop
         revision:
           type: integer
@@ -1396,6 +1402,7 @@ components:
       required:
         - id
         - name
+        - family
         - revision
         - runtime
         - experience
@@ -1415,6 +1422,12 @@ components:
           pattern: "^tpl_[A-Za-z0-9][A-Za-z0-9-]{6,62}[A-Za-z0-9]$"
         name:
           type: string
+          example: linux-firefox-desktop
+        family:
+          type: string
+          description: |
+            Catalog name shared by every revision of one template; revisions
+            of a family are grouped under it in the catalog.
           example: linux-firefox-desktop
         description:
           type: string
@@ -1463,8 +1476,11 @@ components:
           $ref: "#/components/schemas/DataPolicy"
         clipboardPolicy:
           type: string
-          enum: [Disabled, Enabled]
-          description: Server-side enforced per template.
+          enum: [Disabled, Send, Receive, Bidirectional]
+          description: |
+            Server-side enforced per template. `Send` allows client to
+            workspace only, `Receive` workspace to client only, `Bidirectional`
+            both directions.
         networkProfile:
           type: string
           enum: [InternetOnly, ClusterOnly, Isolated]

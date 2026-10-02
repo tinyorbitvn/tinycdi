@@ -22,6 +22,7 @@ export const DEMO_TEMPLATES: TemplateFixture[] = [
   {
     id: "tpl_01J4ZE2K8VQW5R7T3N9P1M6X4D",
     name: "dev-workstation",
+    family: "dev-workstation",
     description: "Ubuntu workstation with VS Code, Git and container tooling for in-cluster development",
     revision: 12,
     runtime: "LinuxContainer",
@@ -29,13 +30,14 @@ export const DEMO_TEMPLATES: TemplateFixture[] = [
     resources: { cpuMillicores: 8000, memoryMib: 16384, storageGib: 50 },
     lifecycleDefaults: { idleTimeoutSeconds: 3600, disconnectGraceSeconds: 900, maxRunningSeconds: 43200 },
     dataPolicyDefault: "Retain",
-    clipboardPolicy: "Enabled",
+    clipboardPolicy: "Bidirectional",
     networkProfile: "ClusterOnly",
     publishedAt: "2026-09-12T08:30:00Z",
   },
   {
     id: "tpl_01J4ZF6P3XRB8T2W7K5N9Q1H3C",
     name: "windows-office",
+    family: "windows-office",
     description: "Windows desktop VM with an office suite for line-of-business apps",
     revision: 4,
     runtime: "WindowsVM",
@@ -43,13 +45,14 @@ export const DEMO_TEMPLATES: TemplateFixture[] = [
     resources: { cpuMillicores: 4000, memoryMib: 8192, storageGib: 64 },
     lifecycleDefaults: { idleTimeoutSeconds: 1800, disconnectGraceSeconds: 600, maxRunningSeconds: 28800 },
     dataPolicyDefault: "Retain",
-    clipboardPolicy: "Enabled",
+    clipboardPolicy: "Bidirectional",
     networkProfile: "InternetOnly",
     publishedAt: "2026-09-18T14:00:00Z",
   },
   {
     id: "tpl_01J4ZG9R5YTC1V4X8M2P6S3K7B",
     name: "isolated-analysis",
+    family: "isolated-analysis",
     description: "Air-gapped desktop for handling sensitive datasets — no egress, clipboard off",
     revision: 2,
     runtime: "LinuxContainer",
@@ -66,7 +69,7 @@ export const DEMO_TEMPLATES: TemplateFixture[] = [
 const [DEV, WIN] = DEMO_TEMPLATES;
 
 function summary(t: TemplateFixture): WorkspaceFixture["template"] {
-  return { id: t.id, name: t.name, family: t.family ?? t.name, revision: t.revision, runtime: t.runtime, experience: t.experience };
+  return { id: t.id, name: t.name, family: t.family, revision: t.revision, runtime: t.runtime, experience: t.experience };
 }
 
 function at(conditions: ConditionFixture[], time: string): ConditionFixture[] {
