@@ -17,8 +17,17 @@ touching the release.
 
 ### Prerequisites
 
-All of these must be in place before `helm upgrade`; the chart renders
-fail closed without the first three:
+All of these must be in place before `helm upgrade`. The chart's render
+checks cover only part of them: it fails closed without `sessionDomain`, with
+a `portalHost` that equals or sits inside it, without the login-key Secret
+(3) and with `runtime.placement.allowSharedNodes: false` and an empty
+`nodeSelector`. It does **not** check that the wildcard DNS record or the
+wildcard certificate exist (1) — `backend.tls.session.existingSecret`
+defaults to `tinycdi-backend-session-tls`, and a missing or non-wildcard
+Secret only shows up as a backend pod stuck in `ContainerCreating` or as
+browser certificate errors on the session hosts — nor that the labelled and
+tainted node pool exists (2): without it workspace pods stay `Pending`.
+Verify items 1, 2 and 4 yourself.
 
 1. **Wildcard DNS record and wildcard certificate for the session
    domain.** The edge carries one route `*.<sessionDomain>` and the
@@ -44,7 +53,8 @@ fail closed without the first three:
    `<release>-backend-login-keys` once via `lookup` instead (kept across
    upgrades; unusable under GitOps/`helm template` against no cluster).
 4. **The coordinated backup set** from `docs/runbooks/backup-restore.md`
-   — not optional here: rollback crosses a schema migration (below).
+   — not optional here: rollback crosses a schema migration (see "Database migrations" and
+   "Rollback across v0.1 → v0.2" below).
 
 ### Values migration
 
@@ -64,9 +74,9 @@ file first:
 | `sessionHost` | `sessionDomain` |
 
 New or newly-required values beyond the rename: `backend.loginKeys`
-(above), `backend.tls.{app,session,internal}` (one certificate per
+(prerequisite 3 above), `backend.tls.{app,session,internal}` (one certificate per
 listener — `tls.session` must be the wildcard), and
-`runtime.placement.*` (above). `backend` defaults to 2 replicas with
+`runtime.placement.*` (prerequisite 2 above). `backend` defaults to 2 replicas with
 `maxUnavailable: 0`, a `minAvailable: 1` PDB and preferred node
 anti-affinity — size the cluster for two backend pods.
 
@@ -116,7 +126,8 @@ the v0.1 session cookies name the old single session host, and the lease
 rows gain new columns — none of that carries a live v0.1 stream into
 v0.2. Schedule a maintenance window, tell users their desktops close,
 and have them re-launch from the portal after the upgrade. From then on
-the restart-safe behaviour in the table below applies: a backend rollout
+the restart-safe behaviour in the table under "What is safe to upgrade while
+sessions run" (further down) applies: a backend rollout
 no longer costs a session.
 
 ### Database migrations — forward-only
@@ -136,7 +147,8 @@ schema" is unsupported in both directions.
 
 ### Procedure
 
-Follow the steps under "Before you start" and "Procedure" above with the
+Follow the steps under "Before you start" and "Procedure" further down (the
+sections after "Upgrading from v0.1 to v0.2") with the
 migrated values file: CRD diff → pin digests → `helm template | kubectl
 diff` → `helm upgrade` → watch `deployment/backend`, then
 `deployment/operator`, then `deployment/frontend`. The `api`, `gateway`

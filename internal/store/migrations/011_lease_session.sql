@@ -8,6 +8,9 @@
 --   * The partial unique index guarantees a digest resolves to at most one
 --     ACTIVE lease at a time; dead leases keep their digest so a replayed
 --     cookie still fails closed with "revoked" instead of "unknown".
+--   * The plain partial index on every non-NULL digest serves the miss
+--     path of that dead-row check: lease rows are never pruned, so without
+--     it a random cookie would scan every lease ever issued.
 --   * stream_epoch is a per-lease monotonically increasing stream fence:
 --     every interactive stream claims the next epoch, so when the same
 --     cookie reaches two replicas only the newest stream survives.
@@ -18,3 +21,6 @@ ALTER TABLE connection_lease
 CREATE UNIQUE INDEX IF NOT EXISTS connection_lease_session_digest
     ON connection_lease (session_digest)
     WHERE session_digest IS NOT NULL AND state = 'active';
+CREATE INDEX IF NOT EXISTS connection_lease_session_digest_any
+    ON connection_lease (session_digest)
+    WHERE session_digest IS NOT NULL;
