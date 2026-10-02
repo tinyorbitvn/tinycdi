@@ -155,7 +155,7 @@ curl -sk -u "kasm_user:$(cat "$SECRETS_DIR/password")" "https://127.0.0.1:$PORT/
 
 ```sh
 go test -tags=integration ./tests/integration \
-  -run TestLinuxRuntimeReadinessAndHome -v
+  -run TestLinuxRuntime -v
 ```
 
 Drives Docker via the CLI. Expects `tcdi/linux-desktop:it` and
