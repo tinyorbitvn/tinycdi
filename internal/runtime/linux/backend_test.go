@@ -322,3 +322,40 @@ func TestBuildPod_HostUsers(t *testing.T) {
 		}
 	})
 }
+
+// TestEnsureRefusesRetainedDataWithoutClaim (FX-R20): a workspace that says
+// it consumes retained data but names no retained claim must never get a
+// default home — Ensure fails with ErrRetainedClaimMissing before any child
+// object (not even the Secret) exists.
+func TestEnsureRefusesRetainedDataWithoutClaim(t *testing.T) {
+	cases := map[string]map[string]string{
+		"no claim at all":   {AnnotationRetainedDataRef: "rd_x"},
+		"name without UID":  {AnnotationRetainedDataRef: "rd_x", AnnotationRetainedPVC: "ws-old-home"},
+		"UID without name":  {AnnotationRetainedDataRef: "rd_x", AnnotationRetainedPVCUID: "uid"},
+		"empty claim value": {AnnotationRetainedDataRef: "rd_x", AnnotationRetainedPVC: "", AnnotationRetainedPVCUID: ""},
+	}
+	for name, ann := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
+			ws := testWorkspace()
+			ws.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+			ws.Annotations = ann
+			_, err := New(c, Options{}).Ensure(context.Background(), ws, testTemplate(nil))
+			if !errors.Is(err, ErrRetainedClaimMissing) {
+				t.Fatalf("Ensure err = %v, want ErrRetainedClaimMissing", err)
+			}
+			pvcs := &corev1.PersistentVolumeClaimList{}
+			secrets := &corev1.SecretList{}
+			pods := &corev1.PodList{}
+			for _, l := range []client.ObjectList{pvcs, secrets, pods} {
+				if err := c.List(context.Background(), l); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(pvcs.Items)+len(secrets.Items)+len(pods.Items) != 0 {
+				t.Fatalf("children created: pvcs=%d secrets=%d pods=%d",
+					len(pvcs.Items), len(secrets.Items), len(pods.Items))
+			}
+		})
+	}
+}

@@ -64,6 +64,29 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 16rem;
+  display: block;
+}
+
+.tc-topbar__identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-1);
+  font-size: var(--tc-text-sm);
+  max-width: 16rem;
+  overflow-wrap: anywhere;
+}
+
+.tc-topbar__tenant {
+  color: var(--tc-color-text-muted);
+}
+
+/* Public signed-out page: no shell, content centred in the viewport. */
+.tc-signedout {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--tc-space-6);
 }
 
 /* ---------- body: sidebar + content ---------- */
