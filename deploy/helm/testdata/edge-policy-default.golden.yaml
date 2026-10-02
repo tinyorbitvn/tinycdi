@@ -1,0 +1,162 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tcdi-system
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tinycdi-tenant-a
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tinycdi-tenant-b
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Cluster DNS for every pod in the release namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: tcdi-system
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# Pods that must reach the kube-apiserver (backend: CR projection; operator:
+# watches). Peers are values — point them at
+# the kubernetes.default Service IP of YOUR cluster (see install.md).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-apiserver-egress
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {cdi.tinyorbit.vn/needs-apiserver: "true"}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - {protocol: TCP, port: 443}
+---
+# backend: app (:8443) and session (:8444, every <label>.<sessionDomain>
+# workspace host) take traffic from the edge only (see
+# networkPolicy.edgeIngress) — plus the in-cluster control surface on
+# :8444 from the release namespace; the internal mTLS listener
+# (:9443) only from the operator. Egress: OIDC issuer, PostgreSQL and the
+# runtime pods in managed namespaces (streaming port); apiserver and DNS
+# come from the shared policies above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: backend}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 8443}
+        - {protocol: TCP, port: 8444}
+    # Session control surface (D9): /healthz and the bearer-gated
+    # /v1/control/* on :8444 answer only on the in-cluster Service names
+    # (-session-control-hosts), never on a workspace host. Pods in the
+    # release namespace (operator, admin/tooling Jobs) may reach it even
+    # when edgeIngressCIDRs is narrowed to the load-balancer range.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: "tcdi-system"}
+      ports:
+        - {protocol: TCP, port: 8444}
+    # internal mTLS listener (ADR 0003): the operator's teardown
+    # revoke/drain seam only — the session gateway reaches the broker
+    # in-process.
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: operator}
+      ports:
+        - {protocol: TCP, port: 9443}
+  egress:
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - ipBlock:
+            cidr: 10.20.30.40/32
+      ports:
+        - {protocol: TCP, port: 5432}
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+      ports: [{protocol: TCP, port: 8443}]
+---
+# frontend: static SPA server. Ingress from the edge only; no egress at all
+# beyond DNS (it proxies nothing).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 8443}
+  egress: []
+---
+# operator: reaches the backend internal mTLS listener for the teardown
+# finalizer's revoke/drain seam (ADR 0003). apiserver + DNS egress come
+# from the shared policies above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: operator}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: backend}
+      ports: [{protocol: TCP, port: 9443}]
+---
+# Default-deny baseline: nothing talks unless a policy below allows it.
+# Managed namespaces get ONLY the baseline — the operator converges a
+# per-workspace boundary policy for each runtime pod.
+---
