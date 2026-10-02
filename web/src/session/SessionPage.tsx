@@ -28,7 +28,7 @@ import {
   readSessionMarker,
   sessionFrameName,
   sessionLabel,
-  sessionOrigin,
+  sessionFrameUrl,
   submitLaunch,
   type SessionMarker,
 } from "./launch";
@@ -288,7 +288,7 @@ export function SessionPage({
     armed.current = false;
     armPending();
     dispatch({ type: "resume" });
-    el.src = sessionOrigin(workspaceId, sessionDomain);
+    el.src = sessionFrameUrl(workspaceId, sessionDomain);
     resumeDeadline.current = setTimeout(() => {
       clearResume();
       void launch("frame", false);

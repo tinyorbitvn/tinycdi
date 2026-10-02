@@ -41,7 +41,9 @@ async function embedRun(fixtures: {
 
   // The frame settled on the workspace's own session host and shows the
   // fake desktop the real gateway proxied out of the fake upstream.
-  expect(frame.url()).toBe(`${origin}/`);
+  // The gateway redirects the launch POST to the desktop with resize=remote
+  // (KasmVNC forces resize=off inside an iframe otherwise, FX-R18).
+  expect(frame.url()).toBe(`${origin}/?resize=remote`);
   await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
 
   expect(violations, "CSP violations on portal or session origin").toEqual([]);

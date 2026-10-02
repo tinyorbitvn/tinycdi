@@ -445,3 +445,35 @@ func TestCSP_PerHostConnectSrc(t *testing.T) {
 		t.Fatalf("CSP on A's host names B's host: %q", csp)
 	}
 }
+
+// TestCSP_KnownBlockedKasmVNCProbes pins two deliberate refusals found while
+// debugging the embedded desktop (FX-R18). The KasmVNC client logs both in
+// the browser console; neither affects rendering:
+//
+//   - connect-src has no data:. The client's AVC codec probe fetch()es a
+//     data: URI; blocked, it reports "Failed to detect codecs" and keeps
+//     JPEG/WebP. The runtime image has no H.264 encoder (no ffmpeg), so
+//     allowing data: would loosen SEC-07 for no gain.
+//   - Permissions-Policy does not grant keyboard-map. In the portal frame
+//     navigator.keyboard.getLayoutMap() is refused, which only skips
+//     keyboard-layout auto-detection. Granting it means adding it to the
+//     frame's allow attribute too (D13 pins that list), so it is a design
+//     decision, not a side effect.
+//
+// Changing either must be a conscious edit of this test.
+func TestCSP_KnownBlockedKasmVNCProbes(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-probe", testWSUID)
+	srv := newGateway(t, fb, nil)
+	cookie := launchOK(t, srv, testHost, "tk-probe")
+
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
+	drain(resp)
+	if got, want := cspDirective(t, resp.Header.Get("Content-Security-Policy"), "connect-src"),
+		"connect-src 'self' wss://"+testHost; got != want {
+		t.Fatalf("connect-src = %q, want exactly %q (no data:)", got, want)
+	}
+	if pp := resp.Header.Get("Permissions-Policy"); strings.Contains(pp, "keyboard-map") {
+		t.Fatalf("Permissions-Policy %q grants keyboard-map; update the frame allow attribute (D13) and this test together", pp)
+	}
+}

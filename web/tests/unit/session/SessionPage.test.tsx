@@ -213,13 +213,15 @@ function setupScripted(
 
 const originOf = (id: string) =>
   `https://ws-${id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}`;
+// Frame navigations load the desktop client with resize=remote (FX-R18).
+const frameUrlOf = (id: string) => `${originOf(id)}/?resize=remote`;
 
 describe("SessionPage resume (R3c)", () => {
   it("mount with an active lease loads the frame without a ticket request", async () => {
     const { ws, submitted, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
 
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
-    await waitFor(() => expect(frame.getAttribute("src")).toBe(originOf(ws.id)));
+    await waitFor(() => expect(frame.getAttribute("src")).toBe(frameUrlOf(ws.id)));
     // The poll confirms the stream: the overlay goes away, badge says connected.
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
     expect(screen.queryByRole("alertdialog")).toBeNull();
@@ -240,7 +242,7 @@ describe("SessionPage resume (R3c)", () => {
     });
 
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
-    await waitFor(() => expect(frame.getAttribute("src")).toBe(originOf(ws.id)));
+    await waitFor(() => expect(frame.getAttribute("src")).toBe(frameUrlOf(ws.id)));
     expect(ticketPosts()).toHaveLength(0);
 
     await waitFor(() => expect(ticketPosts()).toHaveLength(1));
