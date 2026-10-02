@@ -9,7 +9,9 @@ export type WorkspacePhase = Schemas["WorkspacePhase"];
 export type RetainedDataView = Schemas["RetainedDataView"];
 
 /** GET /v1/workspaces/{id}/events item (newest first). */
-export type WorkspaceEvent = Schemas["WorkspaceEvent"];
+// `id` (stable per condition type + reason) is a contract addition typed here
+// until the generated schema carries it.
+export type WorkspaceEvent = Schemas["WorkspaceEvent"] & { id?: string };
 
 // A workspace is connectable only when the phase says Ready AND the
 // ConnectionReady condition confirms the streaming endpoint is usable —

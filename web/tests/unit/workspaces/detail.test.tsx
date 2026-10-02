@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import { WorkspaceDetailPage } from "../../../src/workspaces/WorkspaceDetailPage";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
@@ -34,6 +34,28 @@ describe("WorkspaceDetailPage", () => {
     const reasons = rows.map((r) => within(r).getAllByRole("rowheader")[0]!.textContent);
     expect(reasons).toEqual(["RuntimeReady", "BackOff", "Admitted"]);
     expect(within(table).getByText("Warning")).toBeInTheDocument();
+  }, 20000);
+
+  it("detail: events with the same reason and timestamp are keyed by their id", async () => {
+    const api = createMockApi();
+    seedReady(api);
+    seedEvents(api, [
+      { id: "Ready:RuntimeReady", type: "Normal", reason: "Retry", message: "first attempt", lastTimestamp: "2026-09-30T10:00:00Z" },
+      { id: "Ready:RuntimeReadyAgain", type: "Normal", reason: "Retry", message: "second attempt", lastTimestamp: "2026-09-30T10:00:00Z" },
+    ]);
+    loginCookies();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+
+      const table = await screen.findByRole("table", { name: "Events" });
+      expect(within(table).getByText("first attempt")).toBeInTheDocument();
+      expect(within(table).getByText("second attempt")).toBeInTheDocument();
+      const duplicateKey = errors.mock.calls.some((c) => String(c[0]).includes("same key"));
+      expect(duplicateKey).toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
   }, 20000);
 
   it("detail: stale image badge shows with its explanation", async () => {
