@@ -21,6 +21,7 @@ export default {
   "session.status.ended": "Ended",
   "session.status.blocked": "Blocked",
   "session.status.external": "In another tab",
+  "session.status.elsewhere": "Open in another tab",
   "session.status.error": "Error",
   "session.status.signedOut": "Signed out",
 
@@ -38,6 +39,11 @@ export default {
   "session.inUse.body":
     "Another session is connected to this workspace. Taking over disconnects it.",
   "session.inUse.takeover": "Take over session",
+
+  "session.elsewhere.title": "This session is open in another tab",
+  "session.elsewhere.body":
+    "Another tab or window opened this desktop. Using it here disconnects the other one.",
+  "session.elsewhere.useHere": "Use here",
 
   "session.notReady.title": "This workspace isn't ready to connect",
   "session.notReady.fallback": "Start the workspace and try again.",

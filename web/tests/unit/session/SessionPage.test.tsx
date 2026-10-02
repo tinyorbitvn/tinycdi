@@ -8,12 +8,14 @@ import {
   SESSION_FRAME_ALLOW,
   SESSION_FRAME_SANDBOX,
   markSessionOwned,
+  readSessionMarker,
   sessionFrameName,
   TICKET_FIELD,
 } from "../../../src/session/launch";
 import { createMockApi, CSRF_TOKEN_VALUE } from "../../mock-api/handler.ts";
 import { loginCookies, stubFetch } from "../helpers";
 import { readyWorkspace } from "../../mock-api/fixtures.ts";
+import { leaseRefOf } from "../../mock-api/session.ts";
 
 const SESSION_DOMAIN = "session.example.com";
 
@@ -150,7 +152,7 @@ type SessionPageProps = Parameters<typeof SessionPage>[0];
 // `connection` scripts the poll; `fail` turns matching requests into errors.
 function setupScripted(
   opts: {
-    marker?: boolean;
+    marker?: boolean | { leaseRef: string; streamEpoch: number };
     lease?: boolean;
     props?: Partial<SessionPageProps>;
   } = {},
@@ -159,7 +161,14 @@ function setupScripted(
   const api = newApi();
   api.state.workspaces.set(ws.id, ws);
   if (opts.lease ?? true) api.state.leases.set(ws.id, "lease_own");
-  if (opts.marker ?? true) markSessionOwned(ws.id);
+  // The tab remembers the lease (and the stream epoch) it last saw connected.
+  const marker = opts.marker ?? true;
+  if (marker) {
+    markSessionOwned(
+      ws.id,
+      marker === true ? { leaseRef: leaseRefOf("lease_own"), streamEpoch: 0 } : marker,
+    );
+  }
   loginCookies();
   const control = {
     connection: undefined as (() => unknown) | undefined,
@@ -218,23 +227,27 @@ describe("SessionPage resume (R3c)", () => {
     expect(submitted).toHaveLength(0);
   });
 
-  it("resume timeout falls back to a ticket that replaces our own lease", async () => {
+  it("resume timeout asks for a ticket without forcing a takeover (R8b)", async () => {
     const { ws, control, submitted, ticketPosts } = setupScripted({
       props: { pollIntervalMs: 20, resumeTimeoutMs: 150 },
     });
     // The lease is alive but the stream never comes back.
-    control.connection = () => ({ state: "disconnected", leaseActive: true });
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 1,
+    });
 
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
     await waitFor(() => expect(frame.getAttribute("src")).toBe(originOf(ws.id)));
     expect(ticketPosts()).toHaveLength(0);
 
-    await waitFor(() => expect(submitted).toHaveLength(1));
-    expect(ticketPosts()).toHaveLength(1);
-    // It is our own lease, so the fallback must not stop at the take-over dialog.
-    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: true });
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(submitted[0].target).toBe(sessionFrameName(ws.id));
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1));
+    // Never a silent takeover: the lease is still held, so the user is asked.
+    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(submitted).toHaveLength(0);
   });
 
   it("requests a ticket right away when there is no active lease", async () => {
@@ -308,5 +321,147 @@ describe("SessionPage toolbar (R3f)", () => {
     expect(
       await screen.findByText('Printing and downloads need "Open in new tab".'),
     ).toBeInTheDocument();
+  });
+});
+
+// ---- FX-R8: lease-aware resume and the duplicate-tab guard ----
+
+const OWN_REF = leaseRefOf("lease_own");
+// The progress overlay is a status region too; the badge is the toolbar one.
+const badge = () => document.querySelector(".tc-session__status");
+const OTHER_REF = leaseRefOf("lease_taken_over");
+
+describe("SessionPage resume marker (R8a)", () => {
+  it("skips the resume when /connection reports another lease, and asks before taking over", async () => {
+    const { ws, submitted, ticketPosts } = setupScripted({
+      marker: { leaseRef: OTHER_REF, streamEpoch: 4 },
+      props: { pollIntervalMs: 20 },
+    });
+
+    // Someone took the session over: the marker is stale, so the normal
+    // ticket request runs without takeover and the dialog shows.
+    await screen.findByRole("alertdialog");
+    const frame = screen.getByTitle(`Desktop: ${ws.name}`) as HTMLIFrameElement;
+    expect(frame.getAttribute("src")).toBeNull();
+    expect(ticketPosts()).toHaveLength(1);
+    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+    expect(submitted).toHaveLength(0);
+    expect(readSessionMarker(ws.id)).toBeNull();
+    expect(screen.getByRole("status")).not.toHaveTextContent("Connected");
+  });
+
+  it("a Reconnect after the skipped resume still asks (no inherited ownership)", async () => {
+    const { ticketPosts } = setupScripted({
+      marker: { leaseRef: OTHER_REF, streamEpoch: 4 },
+      props: { pollIntervalMs: 20 },
+    });
+    await screen.findByRole("alertdialog");
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(ticketPosts()).toHaveLength(2));
+    expect(JSON.parse(ticketPosts()[1].rawBody)).toEqual({ takeover: false });
+  });
+
+  it("stores the lease and stream epoch this tab saw connected", async () => {
+    const { ws } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: OWN_REF, streamEpoch: 1 });
+  });
+
+  it("does not take a stream at or below the remembered epoch for the resumed one", async () => {
+    const { control } = setupScripted({
+      marker: { leaseRef: OWN_REF, streamEpoch: 3 },
+      props: { pollIntervalMs: 20, resumeTimeoutMs: 5_000 },
+    });
+    // The previous page's stream (epoch 3) lingers: not our stream yet.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Connecting"));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(badge()).toHaveTextContent("Connecting");
+
+    // The reloaded frame opened its own stream.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 4,
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+  });
+});
+
+describe("SessionPage duplicate tab (R8c)", () => {
+  const status = (streamEpoch: number, leaseRef = OWN_REF) => ({
+    state: "connected",
+    leaseActive: true,
+    leaseRef,
+    streamEpoch,
+  });
+
+  it("a higher stream epoch on the same lease shows 'open in another tab' and does not reload", async () => {
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
+    control.connection = () => status(1);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    const frame = screen.getByTitle(`Desktop: ${ws.name}`) as HTMLIFrameElement;
+    const srcBefore = frame.getAttribute("src");
+
+    // Another tab with the same cookie opened a stream on our lease.
+    control.connection = () => status(2);
+    expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use here" })).toBeInTheDocument();
+
+    // No ping-pong: nothing reloads the frame or mints a ticket, even over
+    // several more polls.
+    const polls = control.connectionGets;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(frame.getAttribute("src")).toBe(srcBefore);
+    expect(submitted).toHaveLength(0);
+    expect(ticketPosts()).toHaveLength(0);
+    expect(screen.getByText("This session is open in another tab")).toBeInTheDocument();
+    // The watch is idle in this state: it does not poll.
+    expect(control.connectionGets).toBe(polls);
+  });
+
+  it("'Use here' brings the desktop back into this tab and does not flag our own new stream", async () => {
+    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    control.connection = () => status(1);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    control.connection = () => status(2);
+    await screen.findByText("This session is open in another tab");
+
+    fireEvent.click(screen.getByRole("button", { name: "Use here" }));
+    // The reloaded frame opens its own stream (epoch 3), which is ours.
+    control.connection = () => status(3);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
+    expect(ticketPosts()).toHaveLength(0);
+  });
+
+  it("a stream epoch advance caused by this tab's own frame reload is not 'another tab'", async () => {
+    const { control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    control.connection = () => status(1);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+
+    // The stream drops with the lease alive: the watch reloads the frame
+    // after its first backoff step, which opens stream 2.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 1,
+    });
+    await new Promise((r) => setTimeout(r, 1_300));
+    control.connection = () => status(2);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
   });
 });

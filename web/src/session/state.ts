@@ -11,6 +11,7 @@ export type SessionStatus =
   | "in-use" //        CONNECTION_IN_USE: offer takeover
   | "connecting" //    ticket POSTed into the frame, waiting for it to load
   | "connected" //     the frame loaded the session origin
+  | "elsewhere" //     another tab opened a newer stream on our lease: offer "Use here"
   | "disconnected" //  the stream is down and auto-recovery is spent or impossible
   | "ended" //         the workspace stopped or disappeared
   | "blocked" //       the browser refused to embed the session: new-tab fallback
@@ -41,7 +42,9 @@ export type SessionEvent =
   | { type: "frame-blocked"; reason: string }
   | { type: "offline"; reason: "offline" | "unreachable" | "exhausted" }
   | { type: "ended"; reason: string }
-  | { type: "external" };
+  | { type: "external" }
+  /** /connection shows a newer stream on our lease than the one this tab opened. */
+  | { type: "elsewhere" };
 
 export const initialSessionState: SessionState = { status: "loading" };
 
@@ -91,5 +94,7 @@ export function sessionReducer(state: SessionState, ev: SessionEvent): SessionSt
         : { status: "ended", reason: ev.reason };
     case "external":
       return { status: "external" };
+    case "elsewhere":
+      return state.status === "connected" ? { status: "elsewhere" } : state;
   }
 }

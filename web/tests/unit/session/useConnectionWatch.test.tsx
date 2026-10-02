@@ -273,3 +273,53 @@ describe("useConnectionWatch (D15)", () => {
     expect(fetchStatus).not.toHaveBeenCalled();
   });
 });
+
+// FX-R8 R8d: the last reload deserves its whole interval before the watch
+// gives up; otherwise it is judged by the very next poll, seconds later.
+describe("useConnectionWatch last backoff step (FX-R8)", () => {
+  it("waits the last step's full interval after the final reload before reporting exhausted", async () => {
+    const stamps: { type: string; at: number }[] = [];
+    const { fetchStatus } = setup({
+      onEvent: (e: WatchEvent) => stamps.push({ type: e.type, at: Date.now() }),
+    });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+
+    await advanced(CONNECTION_POLL_MS * 20);
+    const lastReload = stamps.filter((s) => s.type === "frame-navigated").at(-1);
+    const exhausted = stamps.find((s) => s.type === "exhausted");
+    expect(lastReload).toBeDefined();
+    expect(exhausted).toBeDefined();
+    const last = RECONNECT_BACKOFF_MS[RECONNECT_BACKOFF_MS.length - 1];
+    expect(exhausted!.at - lastReload!.at).toBeGreaterThanOrEqual(last);
+  });
+
+  it("a connected report during the last grace period cancels the exhaustion", async () => {
+    const { events, fetchStatus } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true });
+    // Run until the last reload has happened (about 45 s with a 5 s poll).
+    await advanced(CONNECTION_POLL_MS * 9 + 1000);
+    expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
+
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true });
+    await advanced(CONNECTION_POLL_MS * 6);
+    expect(events.filter((e) => e.type === "exhausted")).toHaveLength(0);
+  });
+});
+
+// FX-R8 R8a/R8c: every successful poll is also handed to the page, which
+// owns the lease/epoch bookkeeping.
+describe("useConnectionWatch observations (FX-R8)", () => {
+  it("passes each polled status to onObserve before acting on it", async () => {
+    const seen: ConnectionStatus[] = [];
+    const { fetchStatus } = setup({ onObserve: (s: ConnectionStatus) => seen.push(s) });
+    const status: ConnectionStatus = {
+      state: "connected",
+      leaseActive: true,
+      leaseRef: "0123456789abcdef",
+      streamEpoch: 3,
+    };
+    fetchStatus.mockResolvedValue(status);
+    await advanced(CONNECTION_POLL_MS * 2);
+    expect(seen).toEqual([status, status]);
+  });
+});

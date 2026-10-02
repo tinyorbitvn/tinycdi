@@ -10,7 +10,8 @@ import { sessionOrigin, submitLaunch, type LaunchTicket } from "./launch";
  *   session cookie still work, so the frame is simply reloaded to the
  *   workspace origin, with bounded backoff (one pending reload at a time;
  *   a poll never re-arms it). When every step has run and the lease is
- *   still active but not streaming, `exhausted` is reported.
+ *   still active but not streaming, `exhausted` is reported — but only
+ *   after the last reload had its own interval to take effect.
  * - `leaseActive: false` (or `none`): the lease is gone; a fresh ticket is
  *   requested and submitted into the frame, at most MAX_AUTO_RELAUNCH
  *   times per 5 minutes. Past that, `exhausted` is reported and the page
@@ -31,6 +32,10 @@ export interface ConnectionStatus {
   state: "none" | "connected" | "disconnected" | "stale";
   leaseActive: boolean;
   lastRenewedAt?: string;
+  /** First 16 hex chars of SHA-256 of the active lease ID; absent without a lease. */
+  leaseRef?: string;
+  /** The lease's stream epoch: advances every time a new stream opens. */
+  streamEpoch?: number;
 }
 
 export type WatchEvent =
@@ -55,6 +60,8 @@ export interface ConnectionWatchOptions {
   /** Poll only while the session is live (status "connected"). */
   active: boolean;
   fetchStatus: () => Promise<ConnectionStatus>;
+  /** Sees every successful poll before the watch acts on it. */
+  onObserve?: ((status: ConnectionStatus) => void) | undefined;
   /** Mint a launch ticket (POST /v1/workspaces/{id}/connections). */
   requestTicket: () => Promise<LaunchTicket>;
   onEvent: (ev: WatchEvent) => void;
@@ -84,6 +91,9 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
     // that settles after the watch was disabled or unmounted must not act.
     let stopped = false;
     let inflight = false;
+    // Earliest moment the lease-active path may give up: the last reload
+    // gets its step's full interval, not just the time to the next poll.
+    let exhaustAfter = 0;
 
     const cancelReload = () => {
       clearTimeout(reloadTimer.current);
@@ -94,7 +104,9 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       // The backoff advances only when a reload actually runs, so polls that
       // find a reload already pending cannot burn through the budget.
       reloadTimer.current = undefined;
+      const interval = RECONNECT_BACKOFF_MS[backoffStep.current] ?? 0;
       backoffStep.current += 1;
+      if (backoffStep.current >= RECONNECT_BACKOFF_MS.length) exhaustAfter = Date.now() + interval;
       const el = opts.current.frame.current;
       if (!el) return;
       // The session cookie on this host is bound to the live lease, so a
@@ -140,7 +152,9 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
         // on every poll (the poll is faster than the later backoff steps).
         if (reloadTimer.current !== undefined) return;
         if (backoffStep.current >= RECONNECT_BACKOFF_MS.length) {
-          // Every step ran and the lease is still active but not streaming.
+          // Every step ran and the lease is still active but not streaming;
+          // the last reload may still be settling.
+          if (Date.now() < exhaustAfter) return;
           exhaust();
           return;
         }
@@ -165,7 +179,10 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       inflight = true;
       try {
         const status = await opts.current.fetchStatus();
-        if (!stopped) handle(status);
+        if (!stopped) {
+          opts.current.onObserve?.(status);
+          handle(status);
+        }
       } catch (e) {
         if (!stopped) opts.current.onEvent({ type: "poll-error", error: e });
       } finally {

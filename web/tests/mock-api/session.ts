@@ -15,6 +15,7 @@
 //   backend; on a loopback session domain the mock keeps its listener's
 //   scheme so browser e2e can reach it.
 
+import { createHash } from "node:crypto";
 import {
   CSRF_TOKEN_VALUE,
   err,
@@ -36,6 +37,15 @@ export interface MockConnectionStatus {
   state: "none" | "connected" | "disconnected" | "stale";
   leaseActive: boolean;
   lastRenewedAt?: string;
+  /** First 16 hex chars of SHA-256 of the active lease ID (absent without a lease). */
+  leaseRef?: string;
+  /** The lease's stream epoch; advances when a new stream opens. */
+  streamEpoch?: number;
+}
+
+/** What the API publishes as leaseRef: SHA-256(lease ID), first 16 hex chars. */
+export function leaseRefOf(leaseId: string): string {
+  return createHash("sha256").update(leaseId).digest("hex").slice(0, 16);
 }
 
 export interface SessionAreaState {
@@ -52,6 +62,9 @@ export interface SessionAreaState {
 export function sessionArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const scripted = new Map<string, MockConnectionStatus>();
+  // Stream epoch per lease ID: 1 for a lease's first stream; the control
+  // route below advances it like a new stream opening would.
+  const epochs = new Map<string, number>();
 
   // launchOriginOK is the gateway's launchOriginOK (ADR 0004): the Origin
   // must exactly match a configured portal origin, or the session origin
@@ -140,11 +153,15 @@ export function sessionArea(ctx: MockContext): MockArea {
     }
     const fixed = scripted.get(m[1]);
     if (fixed) return ok(200, fixed);
-    const leaseActive = state.leases.has(m[1]);
+    const leaseId = state.leases.get(m[1]);
+    const leaseActive = leaseId !== undefined;
     return ok(200, {
       state: leaseActive ? "connected" : "none",
       leaseActive,
       lastRenewedAt: ctx.nowIso(),
+      ...(leaseActive
+        ? { leaseRef: leaseRefOf(leaseId), streamEpoch: epochs.get(leaseId) ?? 1 }
+        : {}),
     });
   }
 
@@ -156,9 +173,19 @@ export function sessionArea(ctx: MockContext): MockArea {
     if (req.path === "/_control/launchRequests" && req.method === "GET") {
       return { status: 200, headers: { "content-type": "application/json" }, body: { requests: state.launchRequests } };
     }
+    // POST /_control/session/stream {workspaceId} — a new stream opened on
+    // the workspace's current lease: its epoch advances by one.
+    if (req.path === "/_control/session/stream" && req.method === "POST") {
+      const id = String(req.body?.workspaceId ?? "");
+      const leaseId = state.leases.get(id);
+      if (leaseId === undefined) return err(404, "NOT_FOUND", "no active lease", false);
+      const next = (epochs.get(leaseId) ?? 1) + 1;
+      epochs.set(leaseId, next);
+      return ok(200, { leaseRef: leaseRefOf(leaseId), streamEpoch: next });
+    }
     // POST /_control/session/connection {workspaceId, state?, leaseActive?,
-    // lastRenewedAt?} — script the poll response; a missing/absent "state"
-    // clears the override. GET lists the scripted entries.
+    // lastRenewedAt?, leaseRef?, streamEpoch?} — script the poll response; a
+    // missing/absent "state" clears the override. GET lists the scripted entries.
     if (req.path === "/_control/session/connection") {
       if (req.method === "GET") {
         return ok(200, { scripted: Object.fromEntries(scripted) });
@@ -174,6 +201,10 @@ export function sessionArea(ctx: MockContext): MockArea {
           leaseActive: req.body.leaseActive === true,
           ...(typeof req.body?.lastRenewedAt === "string"
             ? { lastRenewedAt: req.body.lastRenewedAt }
+            : {}),
+          ...(typeof req.body?.leaseRef === "string" ? { leaseRef: req.body.leaseRef } : {}),
+          ...(typeof req.body?.streamEpoch === "number"
+            ? { streamEpoch: req.body.streamEpoch }
             : {}),
         });
         return ok(200, { scripted: id });

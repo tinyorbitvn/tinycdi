@@ -132,26 +132,40 @@ export function launchInNewTab(
 
 // Ownership marker. The session cookie is HttpOnly and lives on another
 // origin, so the portal cannot ask whether *this browser* holds the live
-// lease. A tab that redeemed a ticket for the workspace remembers that for
-// the lifetime of the tab (survives F5 and in-portal navigation, not a new
-// tab or another browser), which lets a remount resume its own session
-// instead of asking the user to take it over from themselves. The value is
-// a boolean flag, never a ticket or cookie.
+// lease. A tab remembers which lease (leaseRef) and which stream (epoch) it
+// last saw connected, for the lifetime of the tab (survives F5 and in-portal
+// navigation, not a new tab or another browser). A remount resumes only if
+// /connection still reports the same leaseRef: the marker alone, or the
+// workspace merely being "connected", proves nothing about who holds the
+// lease. The value holds the public lease reference and an integer, never a
+// ticket, cookie or lease ID.
 const OWNED_KEY_PREFIX = "tcdi.session.owned.";
 
-export function markSessionOwned(workspaceId: string): void {
+export interface SessionMarker {
+  leaseRef: string;
+  streamEpoch: number;
+}
+
+export function markSessionOwned(workspaceId: string, marker: SessionMarker): void {
   try {
-    sessionStorage.setItem(OWNED_KEY_PREFIX + workspaceId, "1");
+    sessionStorage.setItem(OWNED_KEY_PREFIX + workspaceId, JSON.stringify(marker));
   } catch {
     /* storage unavailable: the page falls back to a ticket request */
   }
 }
 
-export function ownsSession(workspaceId: string): boolean {
+export function readSessionMarker(workspaceId: string): SessionMarker | null {
   try {
-    return sessionStorage.getItem(OWNED_KEY_PREFIX + workspaceId) === "1";
+    const raw = sessionStorage.getItem(OWNED_KEY_PREFIX + workspaceId);
+    if (raw === null) return null;
+    const v: unknown = JSON.parse(raw);
+    if (typeof v !== "object" || v === null) return null;
+    const { leaseRef, streamEpoch } = v as Partial<SessionMarker>;
+    if (typeof leaseRef !== "string" || leaseRef === "") return null;
+    if (typeof streamEpoch !== "number" || !Number.isInteger(streamEpoch)) return null;
+    return { leaseRef, streamEpoch };
   } catch {
-    return false;
+    return null;
   }
 }
 

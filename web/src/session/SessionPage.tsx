@@ -25,11 +25,12 @@ import {
   assertLaunchTarget,
   clearSessionOwned,
   markSessionOwned,
-  ownsSession,
+  readSessionMarker,
   sessionFrameName,
   sessionLabel,
   sessionOrigin,
   submitLaunch,
+  type SessionMarker,
 } from "./launch";
 import {
   initialSessionState,
@@ -50,6 +51,14 @@ const END_WARNING_MS = 10 * 60_000;
 
 /** Cadence of the confirmation poll while a resumed session reconnects. */
 const RESUME_POLL_MS = 1_000;
+
+/**
+ * What a /connection report says about the stream this tab is looking at:
+ * `ours` (record it), `stale` (an older stream than the one we opened, keep
+ * waiting), `elsewhere` (a newer stream on our lease: another tab opened it)
+ * or `unknown` (not connected, or no lease/stream identity to compare).
+ */
+type Observation = "ours" | "stale" | "elsewhere" | "unknown";
 
 const isUnauthenticated = (e: unknown) => isPortalApiError(e) && e.code === "UNAUTHENTICATED";
 
@@ -97,9 +106,17 @@ export function SessionPage({
   const inflight = useRef(false);
   // A launch POST was submitted into the frame and its load is awaited.
   const armed = useRef(false);
-  // This tab redeemed a ticket before (also across a reload): relaunches
-  // replace our own lease instead of asking for a takeover.
-  const owned = useRef(ownsSession(workspaceId));
+  // The lease and stream epoch this tab last saw connected (also across a
+  // reload, through the per-tab marker). It is what a resume is checked
+  // against and what a newer stream on the same lease is measured from.
+  const seen = useRef<SessionMarker | null>(readSessionMarker(workspaceId));
+  // After this tab itself starts a stream (launch, resume, frame reload) the
+  // next connected report is not "another tab": it is judged against what
+  // was known before — a different lease, or a higher epoch, is ours.
+  const pending = useRef<{ leaseRef: string; minEpoch: number } | null>(null);
+  // This tab holds a live lease of its own: relaunches replace it instead of
+  // asking for a takeover.
+  const owned = useRef(seen.current !== null);
   const lastMode = useRef<LaunchMode>("frame");
   const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Resume: the deadline for the confirmation poll and the poll itself.
@@ -129,6 +146,50 @@ export function SessionPage({
       dispatch({ type: "frame-blocked", reason: "timeout" });
     }, loadTimeoutMs);
   }, [loadTimeoutMs]);
+
+  const remember = useCallback(
+    (m: SessionMarker) => {
+      seen.current = m;
+      markSessionOwned(workspaceId, m);
+    },
+    [workspaceId],
+  );
+
+  const forget = useCallback(() => {
+    seen.current = null;
+    pending.current = null;
+    clearSessionOwned(workspaceId);
+  }, [workspaceId]);
+
+  const armPending = useCallback(() => {
+    pending.current = seen.current
+      ? { leaseRef: seen.current.leaseRef, minEpoch: seen.current.streamEpoch }
+      : { leaseRef: "", minEpoch: -1 };
+  }, []);
+
+  const observe = useCallback(
+    (s: ConnectionStatus): Observation => {
+      const { leaseRef, streamEpoch } = s;
+      if (s.state !== "connected" || !s.leaseActive) return "unknown";
+      if (leaseRef === undefined || streamEpoch === undefined) return "unknown";
+      const p = pending.current;
+      if (p) {
+        if (leaseRef === p.leaseRef && streamEpoch <= p.minEpoch) return "stale";
+        pending.current = null;
+        remember({ leaseRef, streamEpoch });
+        return "ours";
+      }
+      const prev = seen.current;
+      if (prev && prev.leaseRef === leaseRef && streamEpoch > prev.streamEpoch) {
+        // Remember the newer epoch: "Use here" must out-wait that stream.
+        remember({ leaseRef, streamEpoch });
+        return "elsewhere";
+      }
+      if (!prev || prev.leaseRef !== leaseRef) remember({ leaseRef, streamEpoch });
+      return "ours";
+    },
+    [remember],
+  );
 
   const fetchConnection = useCallback(
     async (): Promise<ConnectionStatus> =>
@@ -168,14 +229,14 @@ export function SessionPage({
         if (mode === "tab") {
           // The new tab holds the lease now; a reload of this one must not
           // try to resume it.
-          clearSessionOwned(workspaceId);
+          forget();
           submitLaunch(ticket, "_blank", workspaceId, sessionDomain);
           // The new tab takes the lease over: drop the embedded desktop.
           setFrameKey((k) => k + 1);
           dispatch({ type: "external" });
           return;
         }
-        markSessionOwned(workspaceId);
+        armPending();
         armed.current = true;
         submitLaunch(ticket, frameName, workspaceId, sessionDomain);
         dispatch({ type: "ticket" });
@@ -189,18 +250,22 @@ export function SessionPage({
         inflight.current = false;
       }
     },
-    [api, workspaceId, frameName, sessionDomain, armLoadTimer, fail],
+    [api, workspaceId, frameName, sessionDomain, armLoadTimer, armPending, fail, forget],
   );
 
   // Resume our own live session after a reload or an in-portal round trip:
   // the host-only session cookie is still valid, so pointing the frame at the
   // workspace origin brings the desktop back without a ticket (and without
-  // the "in use - take over?" dialog against ourselves). The /connection
-  // poll confirms the stream; if it does not within resumeTimeoutMs the
-  // page falls back to a ticket that replaces our own lease. Resolves true
-  // when it took over the start-up flow.
+  // the "in use - take over?" dialog against ourselves). It is attempted only
+  // when /connection reports the very lease this tab last saw connected: a
+  // different lease means someone took the session over, and the frame is not
+  // loaded. The /connection poll confirms our new stream; if it does not
+  // within resumeTimeoutMs the page asks for a ticket WITHOUT takeover, so a
+  // still-held lease shows the dialog instead of being replaced silently.
+  // Resolves true when it took over the start-up flow.
   const resume = useCallback(async (): Promise<boolean> => {
-    if (!owned.current) return false;
+    const marker = seen.current;
+    if (!marker) return false;
     let status: ConnectionStatus;
     try {
       status = await fetchConnection();
@@ -212,29 +277,44 @@ export function SessionPage({
     if (!mounted.current) return true;
     const el = frameRef.current;
     if (!status.leaseActive || !el) return false;
+    if (status.leaseRef !== marker.leaseRef) {
+      // Not the lease this tab had: the marker proves nothing any more.
+      forget();
+      owned.current = false;
+      return false;
+    }
 
     clearResume();
     armed.current = false;
+    armPending();
     dispatch({ type: "resume" });
     el.src = sessionOrigin(workspaceId, sessionDomain);
     resumeDeadline.current = setTimeout(() => {
       clearResume();
-      void launch("frame", true);
+      void launch("frame", false);
     }, resumeTimeoutMs);
     const pollMs = Math.min(pollIntervalMs ?? RESUME_POLL_MS, RESUME_POLL_MS);
     const poll = async () => {
       try {
         const s = await fetchConnection();
         if (!mounted.current || resumeDeadline.current === undefined) return;
-        if (s.state === "connected") {
-          clearResume();
-          dispatch({ type: "resumed" });
-          return;
-        }
         if (!s.leaseActive) {
           // The lease vanished while we waited: nothing left to resume.
           clearResume();
           void launch("frame", false);
+          return;
+        }
+        if (s.leaseRef !== undefined && s.leaseRef !== marker.leaseRef) {
+          // Taken over while we waited.
+          clearResume();
+          forget();
+          owned.current = false;
+          void launch("frame", false);
+          return;
+        }
+        if (s.state === "connected" && observe(s) !== "stale") {
+          clearResume();
+          dispatch({ type: "resumed" });
           return;
         }
       } catch (e) {
@@ -249,7 +329,24 @@ export function SessionPage({
     };
     resumePoll.current = setTimeout(() => void poll(), pollMs);
     return true;
-  }, [fetchConnection, launch, workspaceId, sessionDomain, resumeTimeoutMs, pollIntervalMs]);
+  }, [
+    fetchConnection,
+    launch,
+    observe,
+    armPending,
+    forget,
+    workspaceId,
+    sessionDomain,
+    resumeTimeoutMs,
+    pollIntervalMs,
+  ]);
+
+  // "Use here": the same lease, so no ticket is needed — resume points this
+  // tab's frame back at the session, which the other tab will then see as a
+  // newer stream and step aside for.
+  const useHere = useCallback(async () => {
+    if (!(await resume()) && mounted.current) void launch("frame", false);
+  }, [resume, launch]);
 
   const relaunch = useCallback(
     (mode: LaunchMode) => void launch(mode, owned.current),
@@ -288,6 +385,12 @@ export function SessionPage({
     active: state.status === "connected",
     pollIntervalMs,
     fetchStatus: fetchConnection,
+    onObserve: useCallback(
+      (status: ConnectionStatus) => {
+        if (observe(status) === "elsewhere") dispatch({ type: "elsewhere" });
+      },
+      [observe],
+    ),
     requestTicket: useCallback(
       async () =>
         // The lease is gone, so no takeover is needed; if the poll raced a
@@ -305,6 +408,7 @@ export function SessionPage({
       (ev: WatchEvent) => {
         switch (ev.type) {
           case "relaunched":
+            armPending();
             armed.current = true;
             dispatch({ type: "ticket" });
             armLoadTimer();
@@ -330,10 +434,12 @@ export function SessionPage({
             }
             break;
           case "frame-navigated":
+            // Our own reload opens a new stream: not another tab's.
+            armPending();
             break;
         }
       },
-      [checkEnded, armLoadTimer],
+      [checkEnded, armLoadTimer, armPending],
     ),
   });
 
@@ -381,8 +487,25 @@ export function SessionPage({
   // The lease is no longer (or no longer only) ours: a reload must not try
   // to resume it.
   useEffect(() => {
-    if (state.status === "ended" || state.status === "external") clearSessionOwned(workspaceId);
-  }, [state.status, workspaceId]);
+    if (state.status === "ended" || state.status === "external") forget();
+  }, [state.status, forget]);
+
+  // A freshly launched session has no baseline yet: take one right away
+  // instead of after the first watch poll, so a reload in between still finds
+  // its lease. (A resume already recorded one when it saw the stream.)
+  useEffect(() => {
+    if (state.status !== "connected" || pending.current === null) return;
+    let cancelled = false;
+    fetchConnection().then(
+      (s) => {
+        if (!cancelled && observe(s) === "elsewhere") dispatch({ type: "elsewhere" });
+      },
+      () => undefined, // the watch's own poll reports API failures
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [state.status, fetchConnection, observe]);
 
   // The portal's own CSP refusing the frame (frame-src) or the launch POST
   // (form-action) is the one embedding failure the portal can observe
@@ -530,6 +653,7 @@ export function SessionPage({
             onRetry={() => (workspace ? relaunch("frame") : void loadWorkspace())}
             onNewTab={() => relaunch("tab")}
             onTakeover={() => void launch(lastMode.current, true)}
+            onUseHere={() => void useHere()}
             onSignIn={onSignIn}
           />
         )}
@@ -545,6 +669,7 @@ const STATUS_KEY: Record<SessionStatus, [Parameters<typeof t>[0], Tone]> = {
   "in-use": ["session.status.inUse", "warning"],
   connecting: ["session.status.connecting", "info"],
   connected: ["session.status.connected", "success"],
+  elsewhere: ["session.status.elsewhere", "warning"],
   disconnected: ["session.status.disconnected", "warning"],
   ended: ["session.status.ended", "neutral"],
   blocked: ["session.status.blocked", "danger"],
@@ -572,6 +697,7 @@ function Overlay({
   onRetry,
   onNewTab,
   onTakeover,
+  onUseHere,
   onSignIn,
 }: {
   state: SessionState;
@@ -580,6 +706,7 @@ function Overlay({
   onRetry: () => void;
   onNewTab: () => void;
   onTakeover: () => void;
+  onUseHere: () => void;
   onSignIn: () => void;
 }) {
   const back = (
@@ -624,6 +751,23 @@ function Overlay({
           }
         >
           <p>{t("session.inUse.body")}</p>
+        </OverlayPanel>
+      );
+    case "elsewhere":
+      return (
+        <OverlayPanel
+          tone="dialog"
+          title={t("session.elsewhere.title")}
+          actions={
+            <>
+              <Button ref={actionRef} variant="primary" onClick={onUseHere}>
+                {t("session.elsewhere.useHere")}
+              </Button>
+              {back}
+            </>
+          }
+        >
+          <p>{t("session.elsewhere.body")}</p>
         </OverlayPanel>
       );
     case "not-ready":
