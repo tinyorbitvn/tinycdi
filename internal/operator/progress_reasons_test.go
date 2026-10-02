@@ -15,6 +15,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,5 +345,182 @@ func TestProgress_TeardownReasonsAreTokens(t *testing.T) {
 		if reason == "" || strings.ContainsAny(reason, " -_:") || !(reason[0] >= 'A' && reason[0] <= 'Z') {
 			t.Errorf("step %s has reason %q; want a CamelCase token", step, reason)
 		}
+	}
+}
+
+// failingStatusClient fails every status write (Update and Patch) with err and
+// counts the attempts; everything else goes to the real client.
+type failingStatusClient struct {
+	client.Client
+	err      error
+	attempts atomic.Int64
+}
+
+func (f *failingStatusClient) Status() client.SubResourceWriter {
+	return &failingStatusWriter{SubResourceWriter: f.Client.Status(), owner: f}
+}
+
+type failingStatusWriter struct {
+	client.SubResourceWriter
+	owner *failingStatusClient
+}
+
+func (w *failingStatusWriter) Update(context.Context, client.Object, ...client.SubResourceUpdateOption) error {
+	w.owner.attempts.Add(1)
+	return w.owner.err
+}
+
+func (w *failingStatusWriter) Patch(context.Context, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+	w.owner.attempts.Add(1)
+	return w.owner.err
+}
+
+// countingStatusClient counts successful status writes.
+type countingStatusClient struct {
+	client.Client
+	writes atomic.Int64
+}
+
+func (f *countingStatusClient) Status() client.SubResourceWriter {
+	return &countingStatusWriter{SubResourceWriter: f.Client.Status(), owner: f}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+	owner *countingStatusClient
+}
+
+func (w *countingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err == nil {
+		w.owner.writes.Add(1)
+	}
+	return err
+}
+
+func statusConflict() error {
+	return apierrors.NewConflict(schema.GroupResource{Group: "workspaces.cdi.tinyorbit.vn", Resource: "workspaces"},
+		"ws", errors.New("the object has been modified; please apply your changes to the latest version"))
+}
+
+// TestProgress_TeardownCompletesWhenEveryStatusWriteConflicts: the per-step
+// status marks are best effort. With every status write failing with a
+// conflict a reconcile still runs all six steps in order and removes the
+// finalizer, so the workspace is gone.
+func TestProgress_TeardownCompletesWhenEveryStatusWriteConflicts(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() { _ = env.Stop() }()
+	ns := newNamespace(t, c)
+	newTemplate(t, c, ns, "tpl-bw", nil)
+	_, key := deletingWorkspace(t, c, ns, "ws-bw", "tpl-bw", nil)
+
+	failing := &failingStatusClient{Client: c, err: statusConflict()}
+	rec := newStepRecorder()
+	r := newReconciler(failing)
+	r.Backend = &fakeBackend{}
+	r.Connects, r.Leases, r.Drainer, r.Retention = rec, rec, rec, rec
+
+	reconcile(t, r, key)
+
+	got := rec.sequence()
+	if len(got) != len(FinalizerOrder) {
+		t.Fatalf("steps run = %v, want each of %v once", got, FinalizerOrder)
+	}
+	for i, want := range FinalizerOrder {
+		if got[i] != want {
+			t.Fatalf("step order = %v, want %v", got, FinalizerOrder)
+		}
+	}
+	if failing.attempts.Load() < int64(len(FinalizerOrder)) {
+		t.Fatalf("only %d status writes attempted; the marks were not exercised", failing.attempts.Load())
+	}
+	if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("workspace still present after teardown with failing status writes: %v", err)
+	}
+}
+
+// TestProgress_BackendErrorWriteFailureKeepsOriginalError: a failed
+// RuntimeReady=BackendError write is logged, never returned in place of the
+// backend's own error, so controller-runtime retries on the real cause.
+func TestProgress_BackendErrorWriteFailureKeepsOriginalError(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() { _ = env.Stop() }()
+	ns := newNamespace(t, c)
+	newTemplate(t, c, ns, "tpl-bw2", nil)
+	ws := newWorkspace(t, c, ns, "ws-bw2", "tpl-bw2", nil)
+	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+
+	sentinel := errors.New("cluster refused the pod")
+	for name, werr := range map[string]error{
+		"status write conflicts": statusConflict(),
+		"status write fails":     errors.New("apiserver unavailable"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			failing := &failingStatusClient{Client: c, err: werr}
+			be := &flakyBackend{Backend: linux.New(c, linux.Options{})}
+			be.set(sentinel, nil)
+			r := &WorkspaceReconciler{Client: failing, Scheme: testScheme, Backend: be}
+
+			err := reconcileErr(r, key)
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("reconcile returned %v, want the original backend error", err)
+			}
+			if failing.attempts.Load() == 0 {
+				t.Fatal("the BackendError write was never attempted")
+			}
+		})
+	}
+}
+
+// TestProgress_TeardownStatusWritesDoNotLoop: the step marks are status
+// writes, and the controller watches Workspaces without a predicate, so each
+// one wakes the reconciler. The wake-ups must neither re-run a completed step
+// nor keep producing writes. Reconcile is driven the way the watch drives it:
+// again and again while the drain window is open, then once the gateway
+// reports drained.
+func TestProgress_TeardownStatusWritesDoNotLoop(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() { _ = env.Stop() }()
+	ns := newNamespace(t, c)
+	newTemplate(t, c, ns, "tpl-loop", nil)
+	_, key := deletingWorkspace(t, c, ns, "ws-loop", "tpl-loop", nil)
+
+	counting := &countingStatusClient{Client: c}
+	rec := newStepRecorder()
+	rec.drained = false // the drain window stays open
+	r := newReconciler(counting)
+	r.Backend = &fakeBackend{}
+	r.Connects, r.Leases, r.Drainer, r.Retention = rec, rec, rec, rec
+
+	reconcile(t, r, key) // blocks, revokes, then waits in the drain window
+	if n := rec.calls(StepStopRuntime); n != 0 {
+		t.Fatalf("stop-runtime ran inside the drain window")
+	}
+	// Every later wake-up is a no-op for the object: no new status writes
+	// that change it, so no new watch event, so no loop.
+	rvAfterFirst := getWorkspace(t, c, key).ResourceVersion
+	for i := 0; i < 5; i++ {
+		reconcile(t, r, key)
+	}
+	if rv := getWorkspace(t, c, key).ResourceVersion; rv != rvAfterFirst {
+		t.Fatalf("resourceVersion moved %s -> %s across idle wake-ups: the reconciler is generating its own events", rvAfterFirst, rv)
+	}
+	if b, rv := rec.calls(StepBlockConnects), rec.calls(StepRevokeLeases); b != 1 || rv != 1 {
+		t.Fatalf("completed steps re-ran on wake-ups: block-connects=%d revoke-leases=%d, want 1/1", b, rv)
+	}
+
+	rec.drained = true
+	reconcile(t, r, key)
+	for _, step := range []FinalizerStep{StepBlockConnects, StepRevokeLeases, StepStopRuntime, StepRetention, StepCleanup} {
+		if n := rec.calls(step); n != 1 {
+			t.Errorf("step %s ran %d times, want exactly 1", step, n)
+		}
+	}
+	if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("workspace still present after the drain finished: %v", err)
+	}
+	// Bounded: one mark per step plus the drain's own condition writes.
+	if w := counting.writes.Load(); w > 12 {
+		t.Fatalf("%d status writes for one teardown; the marks are not bounded", w)
 	}
 }
