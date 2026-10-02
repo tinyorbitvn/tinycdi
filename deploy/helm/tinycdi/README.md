@@ -263,6 +263,15 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.placement.nodeSelector` | `{cdi.tinyorbit.vn/workspace: "true"}` | node labels every runtime pod selects; **must be non-empty** while `allowSharedNodes=false` (render fails otherwise) |
 | `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
+| `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
+
+#### Nodes without AppArmor
+
+Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch.
+
+- **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
+- **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
+- **Localhost profiles still apply:** a template that requests a Localhost AppArmor profile (`appArmorProfile: <name>`, e.g. the browser templates) always sets it, so those pods are refused on such nodes. Run browser templates only on AppArmor nodes (use `nodeProfiles.install` there), or use a template without a Localhost profile.
 
 ### Observability & network
 
