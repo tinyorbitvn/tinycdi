@@ -1,0 +1,6 @@
+[Configuration]
+FontUseSystem=TRUE
+MiscAlwaysShowTabs=FALSE
+MiscBell=FALSE
+MiscDefaultGeometry=110x30
+ScrollingLines=10000
