@@ -34,9 +34,10 @@ containerd 2.x, Cilium 1.20, and
 - **Chromium apt pin** — runtime Dockerfile installs bookworm Chromium;
   current ARG `154.0.8037.92-1~deb12u1` (latest published in
   bookworm-security as of 2026-10-01). Repin on each Debian security
-  update — `.github/scripts/check-chromium-freshness.sh` fails CI while
-  bookworm-security offers a newer build (see docs/images.md "Known
-  limitations").
+  update — `.github/scripts/check-browser-freshness.sh` (chromium and the
+  firefox-esr fallback above) fails the daily runtime-freshness run while
+  bookworm-security offers a newer build or the pinned version is gone
+  (see docs/images.md "Known limitations").
 
 ## Deferred — needs its own proof gate
 

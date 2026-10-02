@@ -60,8 +60,8 @@ the manifest `runtime-images.json` is attached to the GitHub Release
 `runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
 the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
 from that manifest — values are GitOps-owned and never written back by
-the train. `runtime-freshness.yml` keeps the chromium pin current (daily
-check + auto PR) and fails when the newest `runtime-*` release is older
+the train. `runtime-freshness.yml` keeps the chromium and firefox-esr pins current
+(daily check + auto PR) and fails when the newest `runtime-*` release is older
 than 14 days (`docs/security/vulnerability-policy.md` §5).
 
 ## Runtime contract
@@ -172,7 +172,7 @@ and content processes (no `MOZ_DISABLE_*SANDBOX`/`--no-sandbox`), no
 first-run/what's-new page and no extra dialog window, no in-app updater.
 The image ships no Firefox enterprise policy file (distribution/
 policies.json), so there is no policy to honour; re-run this test on
-every firefox-esr major bump.
+every firefox-esr major bump (the freshness PR says so).
 
 ## Scan results (2026-09-30, syft 1.52.0 / grype 0.119.0, DB latest)
 
@@ -215,8 +215,16 @@ every firefox-esr major bump.
   and are listed in the scan-job summary — the same `wont-fix`/
   `not-fixed` posture as the base-distro findings. Repin when
   bookworm-security publishes a newer build;
-  `.github/scripts/check-chromium-freshness.sh` fails CI until the pin
-  catches up.
+  `.github/scripts/check-browser-freshness.sh` fails the daily
+  runtime-freshness run until the pin catches up.
+- **A stale pin is also a broken build.** bookworm-security keeps only the
+  newest build of each package, so once a newer one lands the pinned
+  version no longer exists and `apt-get install pkg=<pin>` fails with
+  `Version '<pin>' for '<pkg>' was not found` — masked while the build
+  cache still holds the layer (FX-R15: firefox-esr 140.16.0esr vanished
+  and the images workflow went red on the first cache miss). The freshness
+  check covers **both** engines and reports that state as "pinned version
+  gone".
 - `network.udp` KasmVNC keys are left at upstream defaults; the streaming
   contract is websocket-only (G4a). UDP/WebRTC relay is not exercised.
 - Clipboard DLP defaults to fully disabled; per-template clipboard policy

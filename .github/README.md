@@ -8,7 +8,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), the soak/drill harness (`tests/soak`: npm ci, npm audit, tsc, unit tests + dry-run), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
 | `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the six images (`backend`, `frontend`, `operator`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
-| `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-chromium-freshness.sh`; when bookworm-security offers a newer chromium, `bump-chromium-pin.sh` repins `build/browser/Dockerfile` + the doc pins and a pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
+| `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
 | `runtime-images.yml` | push to `main` touching `build/{linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-desktop + browser → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
@@ -79,7 +79,7 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
 - **Branch protection on `main`** — required status checks = every ci.yml
   job except `kasm adapter contract + catalog scan` (network-dependent,
   must not gate merges; its fast catalog policy leg still runs inside
-  the required workflow-policy job). The chromium freshness check is
+  the required workflow-policy job). The browser engine freshness check is
   equally non-gating — it now lives in `runtime-freshness.yml` (daily)
   rather than ci.yml, so it never appears as a required check at all.
   Strict (up-to-date) mode, enforce admins, dismiss stale
@@ -153,10 +153,13 @@ run with `--config` pointing at an empty file so a committed
 asserts none exists).
 
 The browser image carries a second gate:
-`.github/scripts/check-chromium-freshness.sh` (runtime-freshness.yml,
-daily) fails once Debian bookworm-security publishes a chromium newer
-than the pinned `CHROMIUM_APT_VERSION` — and the same run opens the
-pin-bump PR via `bump-chromium-pin.sh`.
+`.github/scripts/check-browser-freshness.sh` (runtime-freshness.yml,
+daily) fails once Debian bookworm-security publishes a chromium or
+firefox-esr newer than the pinned `CHROMIUM_APT_VERSION` /
+`FIREFOX_ESR_APT_VERSION` — or once a pinned version no longer exists
+there (bookworm-security keeps only the newest build, so a stale pin
+turns into a failing from-scratch build: "pinned version gone") — and
+the same run opens the pin-bump PR via `bump-browser-pin.sh`.
 
 ## Runtime image release train (D27/D28)
 

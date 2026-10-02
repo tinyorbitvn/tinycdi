@@ -223,19 +223,23 @@ chk_absent "ci: conflicting pathspec pin" "$CI" 'pathspec==0\.12'
 
 # SUPR-4 + D27/D28: the browser-engine freshness check and the runtime
 # image age SLO moved from ci.yml to the daily runtime-freshness train.
-chk "runtime-freshness: chromium freshness check" "$FRESH" 'check-chromium-freshness\.sh'
-chk "runtime-freshness: pin-bump script wired" "$FRESH" 'bump-chromium-pin\.sh'
+chk "runtime-freshness: browser freshness check (chromium + firefox-esr)" "$FRESH" 'check-browser-freshness\.sh'
+chk "runtime-freshness: pin-bump script wired" "$FRESH" 'bump-browser-pin\.sh'
+chk "runtime-freshness: firefox-esr bumped too" "$FRESH" 'FIREFOX_ESR_APT_VERSION'
+chk "runtime-freshness: run fails while a pin is stale" "$FRESH" 'fail the run while a pin is stale'
 chk "runtime-freshness: image age check" "$FRESH" 'check-runtime-image-age\.sh'
 chk "runtime-freshness: daily schedule" "$FRESH" 'cron: ".* \* \* \*"'
-chk_absent "ci: freshness job moved out" "$CI" 'check-chromium-freshness\.sh'
+chk_absent "ci: freshness job moved out" "$CI" 'check-(browser|chromium)-freshness\.sh'
 chk "runtime-images: manifest writer wired" "$TRAIN" 'write-runtime-manifest\.sh'
 chk "runtime-images: rt tag only (no :main promotion)" "$TRAIN" 'imagetools create.*RT_TAG'
 chk_absent "runtime-images: no :main/:latest promotion" "$TRAIN" 'imagetools create .*:(main|latest)'
 chk "runtime-images: runtime-* release" "$TRAIN" 'gh release (create|upload) "\$REL_TAG"'
 chk "runtime-images: never builds control-plane images" "$TRAIN" 'linux-desktop'
 chk_absent "runtime-images: no api/backend/gateway build" "$TRAIN" 'build/(api|backend|operator|gateway|portal|frontend)/Dockerfile'
-[ -x "$ROOT/.github/scripts/check-chromium-freshness.sh" ] \
-  || { echo "FAIL: check-chromium-freshness.sh missing/not executable"; fails=1; }
+for s in check-browser-freshness.sh bump-browser-pin.sh; do
+  [ -x "$ROOT/.github/scripts/$s" ] \
+    || { echo "FAIL: $s missing/not executable"; fails=1; }
+done
 
 # SUPR-5 + SUPF-2/3/4: post-public protection script exists, defaults to
 # dry-run, grants the Actions app no tag bypass, requires 0 reviews while
