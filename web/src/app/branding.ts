@@ -1,7 +1,7 @@
 // App branding. The frontend server serves an optional branding directory at
 // /branding/ (operator-supplied ConfigMap); without it /branding/branding.json
-// falls through to the SPA fallback and answers with index.html, so any
-// failure — 404, non-JSON, network error — yields the defaults.
+// answers 200 with the empty object, which yields the defaults like any other
+// failure — 404, non-JSON, network error.
 
 export interface Branding {
   productName: string;
@@ -28,14 +28,16 @@ function logo(value: unknown, fallback: string | null): string | null {
 /** Field-level sanitizing: an invalid field falls back on its own. */
 export function parseBranding(body: unknown): Branding {
   const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  const lg = logo(b.logo, DEFAULT_BRANDING.logo);
+  const lg = logo(b.logo, null);
   return {
     productName:
       typeof b.productName === "string" && b.productName.trim() !== ""
         ? b.productName
         : DEFAULT_BRANDING.productName,
-    logo: lg,
-    logoDark: logo(b.logoDark, lg),
+    // The shipped dark-theme mark is paired with the shipped light mark only:
+    // an operator logo without a dark variant is used in both themes.
+    logo: lg ?? DEFAULT_BRANDING.logo,
+    logoDark: logo(b.logoDark, lg ?? DEFAULT_BRANDING.logoDark),
   };
 }
 

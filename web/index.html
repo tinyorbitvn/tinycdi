@@ -9,6 +9,10 @@
          /branding/ and answers an empty stylesheet when unset. The build moves this link
          after the bundled stylesheet (vite.config.ts) so overrides win. -->
     <link rel="stylesheet" href="/branding/tokens.css" />
+    <!-- Favicons live in the web root (web/public); a favicon.svg / favicon.ico
+         in the branding directory replaces them at the same URL. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
     <title>TinyCDI</title>
   </head>
   <body>

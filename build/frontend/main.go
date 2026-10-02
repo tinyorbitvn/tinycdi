@@ -196,6 +196,15 @@ func branding(dir string, next http.Handler) http.Handler {
 			serveBranding(dir, w, r)
 			return
 		}
+		// The SPA ships its own favicons in the web root; a same-named file
+		// in the branding directory replaces them at the same URL.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			(r.URL.Path == "/favicon.svg" || r.URL.Path == "/favicon.ico") {
+			if full := brandingFile(dir, strings.TrimPrefix(r.URL.Path, "/")); full != "" {
+				serveBrandingFile(full, w, r)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -209,10 +218,11 @@ func branding(dir string, next http.Handler) http.Handler {
 // into ..data, so containment is checked after EvalSymlinks, which also
 // defeats symlinks pointing outside.
 //
-// tokens.css is special: index.html always links it, so when the dir or
-// the file is absent it answers 200 with an empty text/css body — the
-// console stays clean. Every other absent name, including branding.json
-// without -branding-dir, answers 404 (never the SPA fallback, which would
+// tokens.css and branding.json are special: index.html links the former and
+// the app always fetches the latter, so when the dir or the file is absent
+// they answer 200 with an empty text/css body and the empty JSON object
+// respectively — the console stays clean and the app keeps its defaults.
+// Every other absent name answers 404 (never the SPA fallback, which would
 // hand the app's loadBranding an HTML document).
 func serveBranding(dir string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -225,28 +235,51 @@ func serveBranding(dir string, w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r) // /branding, the bare listing, or traversal
 		return
 	}
-	full := ""
-	if dir != "" {
-		if root, err := filepath.EvalSymlinks(dir); err == nil {
-			if resolved, err := filepath.EvalSymlinks(filepath.Join(dir, name)); err == nil &&
-				strings.HasPrefix(resolved, root+string(filepath.Separator)) {
-				if st, err := os.Stat(resolved); err == nil && st.Mode().IsRegular() {
-					full = resolved
-				}
-			}
-		}
-	}
+	full := brandingFile(dir, name)
 	if full == "" {
-		if name == "tokens.css" {
+		switch name {
+		case "tokens.css":
 			w.Header().Set("Content-Type", "text/css")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.WriteHeader(http.StatusOK)
-			return
+		case "branding.json":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-cache")
+			if r.Method != http.MethodHead {
+				_, _ = w.Write([]byte("{}\n"))
+			}
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 		return
 	}
-	f, err := os.Open(full) // #nosec G304 -- resolved path proven inside -branding-dir above
+	serveBrandingFile(full, w, r)
+}
+
+// brandingFile returns the fully-resolved path of the regular file name in
+// the branding directory, or "" when there is no such file or it is not
+// provably inside the directory.
+func brandingFile(dir, name string) string {
+	if dir == "" || hasDotDotSegment(name) {
+		return ""
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(dir, name))
+	if err != nil || !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return ""
+	}
+	if st, err := os.Stat(resolved); err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	return resolved
+}
+
+// serveBrandingFile serves a path brandingFile resolved, no-cache.
+func serveBrandingFile(full string, w http.ResponseWriter, r *http.Request) {
+	f, err := os.Open(full) // #nosec G304 -- resolved path proven inside -branding-dir by brandingFile
 	if err != nil {
 		http.NotFound(w, r)
 		return
