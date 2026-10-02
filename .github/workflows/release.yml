@@ -1254,7 +1254,15 @@ jobs:
           [[ "$CHART_REF" =~ ^ghcr\.io/tinyorbitvn/charts/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] \
             || { echo "::error::unexpected chart ref '$CHART_REF'"; exit 1; }
           : > bundle/images.txt
+          # FX-R11: every release states its security-review status, and a
+          # pre-release says it is a test build (tests: release-notes-review-status).
           {
+            echo "Not independently security-reviewed; a review is planned before v1.0."
+            echo
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "Pre-release test build."
+              echo
+            fi
             echo "## Container images"
             echo
             echo "| Image | Component | Tag | Digest |"
