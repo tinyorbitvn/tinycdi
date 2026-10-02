@@ -92,7 +92,9 @@ func TestImageStale_SurvivesSupersededRevision(t *testing.T) {
 	}
 }
 
-// TestList_NoTemplateGets: a 200-row list never resolves a template.
+// TestList_NoTemplateGets: a 200-row list whose workspaces carry their image
+// age (the create-time snapshot) never resolves a template. Rows without an
+// age fall back to one lookup per template — TestList_AtMostOneLookupPerTemplate.
 func TestList_NoTemplateGets(t *testing.T) {
 	now := time.Now().UTC()
 	cat := &countingCatalog{staleCatalog: staleCatalog{entries: map[string]TemplateEntry{
@@ -109,7 +111,7 @@ func TestList_NoTemplateGets(t *testing.T) {
 			ID: id, TenantID: "tenant-a", Owner: owner,
 			OwnerIssuer: env.issuer.URL(), OwnerSub: env.issuer.Subject, Name: fmt.Sprintf("w-%d", i),
 			Template: provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1,
-				Runtime: "LinuxContainer", Experience: "Desktop"},
+				Runtime: "LinuxContainer", Experience: "Desktop", ImageBuiltAt: now.Format(time.RFC3339)},
 			Phase: "Running", DesiredState: "Running", DataPolicy: "Ephemeral",
 			Revision: 1, CreatedAt: now, UpdatedAt: now,
 		}
@@ -121,6 +123,89 @@ func TestList_NoTemplateGets(t *testing.T) {
 	}
 	if n := cat.resolves.Load(); n != 0 {
 		t.Fatalf("list did %d template GETs, want 0", n)
+	}
+}
+
+// oldWorkspaces seeds n workspace records that predate the create-time image
+// snapshot (no ImageBuiltAt anywhere on them), spread over the given template
+// IDs round-robin.
+func oldWorkspaces(be *fakeWorkspaceBackend, env *testEnv, n int, tplIDs ...string) {
+	now := time.Now().UTC()
+	owner := env.issuer.URL() + "|" + env.issuer.Subject
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("ws_old%08d", i)
+		tpl := tplIDs[i%len(tplIDs)]
+		be.recs[id] = provisioning.WorkspaceRecord{
+			ID: id, TenantID: "tenant-a", Owner: owner,
+			OwnerIssuer: env.issuer.URL(), OwnerSub: env.issuer.Subject, Name: fmt.Sprintf("old-%d", i),
+			Template: provisioning.TemplateInfo{ID: tpl, Name: tpl[4:], Revision: 1,
+				Runtime: "LinuxContainer", Experience: "Desktop"},
+			Phase: "Running", DesiredState: "Running", DataPolicy: "Ephemeral",
+			Revision: 1, CreatedAt: now, UpdatedAt: now,
+		}
+	}
+}
+
+// TestImageStale_FallbackForOldWorkspace (R9e): a workspace created before
+// the image-built-at annotation existed (every v0.1 workspace at upgrade
+// time) has no age on its CR or its record; the view falls back to its
+// template's age instead of reporting nothing.
+func TestImageStale_FallbackForOldWorkspace(t *testing.T) {
+	now := time.Now().UTC()
+	cat := &countingCatalog{staleCatalog: staleCatalog{entries: map[string]TemplateEntry{
+		"tenant-a/tpl_linuxdesktop": {ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1,
+			Runtime: "LinuxContainer", Experience: "Desktop",
+			ImageBuiltAt: now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)},
+	}}}
+	be := newFakeBackend()
+	env, _, _ := newStaleEnv(t, be, cat)
+	sess, csrf := login(t, env, "user-a")
+	oldWorkspaces(be, env, 1, "tpl_linuxdesktop")
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/ws_old00000000", "", nil)
+	v := decodeBody[WorkspaceView](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", r.StatusCode)
+	}
+	if v.ImageBuiltAt == nil || v.ImageStale == nil || !*v.ImageStale {
+		t.Fatalf("old workspace: imageBuiltAt=%v imageStale=%v, want the template's 20-day-old age reported stale",
+			v.ImageBuiltAt, v.ImageStale)
+	}
+}
+
+// TestList_AtMostOneLookupPerTemplate (R9e): the fallback resolves each
+// distinct template once per request, however many rows share it — and a
+// template that cannot be resolved is not retried per row either.
+func TestList_AtMostOneLookupPerTemplate(t *testing.T) {
+	now := time.Now().UTC()
+	cat := &countingCatalog{staleCatalog: staleCatalog{entries: map[string]TemplateEntry{
+		"tenant-a/tpl_one": {ID: "tpl_one", Name: "one", Revision: 1,
+			Runtime: "LinuxContainer", Experience: "Desktop", ImageBuiltAt: now.Format(time.RFC3339)},
+		"tenant-a/tpl_two": {ID: "tpl_two", Name: "two", Revision: 1,
+			Runtime: "LinuxContainer", Experience: "Desktop", ImageBuiltAt: now.Format(time.RFC3339)},
+		// tpl_gone is deliberately absent: its lookup fails once, not 50 times.
+	}}}
+	be := newFakeBackend()
+	env, _, _ := newStaleEnv(t, be, cat)
+	sess, csrf := login(t, env, "user-a")
+	oldWorkspaces(be, env, 150, "tpl_one", "tpl_two", "tpl_gone")
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?limit=200", "", nil)
+	list := decodeBody[WorkspaceList](t, r)
+	if r.StatusCode != http.StatusOK || len(list.Items) != 150 {
+		t.Fatalf("status=%d items=%d, want 200/150", r.StatusCode, len(list.Items))
+	}
+	if n := cat.resolves.Load(); n != 3 {
+		t.Fatalf("list of 150 rows over 3 templates did %d template lookups, want exactly 3", n)
+	}
+	withAge := 0
+	for _, it := range list.Items {
+		if it.ImageBuiltAt != nil {
+			withAge++
+		}
+	}
+	if withAge != 100 {
+		t.Fatalf("%d rows carry imageBuiltAt, want the 100 whose template resolves", withAge)
 	}
 }
 

@@ -276,6 +276,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
+	// Template ages for the workspace image-age fallback are read from the
+	// same informer cache (registered before Start so cache sync covers it):
+	// a page of old workspaces never costs API-server GETs.
+	if _, err := kcache.GetInformer(ctx, &workspacev1alpha1.WorkspaceTemplate{}); err != nil {
+		return fmt.Errorf("template cache: %w", err)
+	}
+	cachedKC, err := client.New(rcfg, client.Options{Scheme: scheme, Cache: &client.CacheOptions{Reader: kcache}})
+	if err != nil {
+		return fmt.Errorf("cached kube client: %w", err)
+	}
 	b.bg = append(b.bg, func(ctx context.Context) {
 		if err := kcache.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("workspace cache exited", "err", err)
@@ -353,7 +363,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	// App listener: OIDC login + the public API mux.
 	if cfg.Listen != "" {
-		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, tenants, retained, brk); err != nil {
+		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, cachedKC, tenants, retained, brk); err != nil {
 			return err
 		}
 	}
@@ -427,7 +437,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 // newAppHandler builds the public API mux (OIDC + workspaces + templates +
 // connections + data) and records it on b.
 func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
-	svc *provisioning.Service, statusView *api.K8sStatusView, kc client.Client,
+	svc *provisioning.Service, statusView *api.K8sStatusView, kc, cachedKC client.Client,
 	tenants provisioning.TenantNamespaces, retained *provisioning.RetainedStore, brk *broker.Broker) error {
 
 	// Pending OIDC logins ride in an AEAD-sealed cookie (D20): the first
@@ -470,6 +480,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView).
 		WithImageStaleAfter(cfg.ImageStaleAfter).
+		WithImageCatalog(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(cachedKC, tenants)}).
 		WithDirectory(directory).
 		WithIntentLog(api.NewIntentLog(svc))
 	tplHandler := api.NewTemplateHandler(catalog, tenants).
