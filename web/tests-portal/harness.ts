@@ -181,12 +181,21 @@ export function sessionFrame(page: Page, origin: string): Frame | undefined {
     .find((f) => f.url().startsWith(origin) && !f.url().includes("/v1/launch"));
 }
 
+// takeoverDialogCount reports how many "Take over session" buttons the
+// session view shows right now (count() is non-waiting, so it never blocks
+// the poll loop below).
+export async function takeoverDialogCount(page: Page): Promise<number> {
+  return page
+    .getByRole("button", { name: "Take over session", exact: true })
+    .count()
+    .catch(() => 0);
+}
+
 // waitForDesktopFrame polls until a frame on `origin` serves the fake
-// desktop marker. The session view auto-launches, so the only button it may
-// legitimately need is "Take over session" when a live lease answers
-// CONNECTION_IN_USE. Clicks are rate-limited: a click mid-launch restarts
-// the frame navigation, so eager polling must never fire faster than a
-// launch can settle.
+// desktop marker. The session view resumes or launches by itself, so no
+// click is ever needed: if the "Take over session" dialog shows up, the
+// session view asked the user to take a live session over from themselves,
+// and the test fails instead of papering over it by clicking through.
 export async function waitForDesktopFrame(
   page: Page,
   origin: string,
@@ -206,7 +215,6 @@ export async function waitForDesktopFrame(
     ]).catch(() => false);
 
   const deadline = Date.now() + timeoutMs;
-  let lastClick = 0;
   for (;;) {
     const frame = sessionFrame(page, origin);
     if (frame) {
@@ -215,15 +223,7 @@ export async function waitForDesktopFrame(
     } else {
       dbg(`no frame on ${origin}; frames=${JSON.stringify(page.frames().map((f) => f.url()))}`);
     }
-    // count() is non-waiting — isEnabled()/isVisible() would block the poll
-    // loop waiting for the button to appear.
-    if (Date.now() - lastClick > 4_000) {
-      const b = page.getByRole("button", { name: "Take over session", exact: true }).first();
-      if ((await b.count().catch(() => 0)) > 0) {
-        await b.click({ timeout: 2_000 }).catch(() => {});
-        lastClick = Date.now();
-      }
-    }
+    expect(await takeoverDialogCount(page), "unexpected take-over dialog").toBe(0);
     if (Date.now() > deadline) break;
     await page.waitForTimeout(300);
   }

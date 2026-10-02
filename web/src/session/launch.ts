@@ -129,3 +129,36 @@ export function launchInNewTab(
 ): void {
   submitLaunch(ticket, "_blank", workspaceId, sessionDomain);
 }
+
+// Ownership marker. The session cookie is HttpOnly and lives on another
+// origin, so the portal cannot ask whether *this browser* holds the live
+// lease. A tab that redeemed a ticket for the workspace remembers that for
+// the lifetime of the tab (survives F5 and in-portal navigation, not a new
+// tab or another browser), which lets a remount resume its own session
+// instead of asking the user to take it over from themselves. The value is
+// a boolean flag, never a ticket or cookie.
+const OWNED_KEY_PREFIX = "tcdi.session.owned.";
+
+export function markSessionOwned(workspaceId: string): void {
+  try {
+    sessionStorage.setItem(OWNED_KEY_PREFIX + workspaceId, "1");
+  } catch {
+    /* storage unavailable: the page falls back to a ticket request */
+  }
+}
+
+export function ownsSession(workspaceId: string): boolean {
+  try {
+    return sessionStorage.getItem(OWNED_KEY_PREFIX + workspaceId) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function clearSessionOwned(workspaceId: string): void {
+  try {
+    sessionStorage.removeItem(OWNED_KEY_PREFIX + workspaceId);
+  } catch {
+    /* nothing stored */
+  }
+}

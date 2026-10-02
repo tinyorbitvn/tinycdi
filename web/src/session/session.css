@@ -65,6 +65,12 @@
   gap: var(--tc-space-1);
 }
 
+.tc-session__printhint {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+  margin-right: var(--tc-space-2);
+}
+
 /* Right-align the controls; when the lifecycle notice is present it takes
  * the auto margin instead. */
 .tc-session__controls {

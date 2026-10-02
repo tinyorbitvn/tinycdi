@@ -4,6 +4,7 @@ import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { useMe } from "../app/me";
+import { defaultLoginRedirect } from "../auth/AuthGate";
 import type { components } from "../api/generated/schema";
 import { Link, navigate } from "../lib/router";
 import { Badge, type Tone } from "../design/Badge";
@@ -22,8 +23,12 @@ import {
   SESSION_FRAME_ALLOW,
   SESSION_FRAME_SANDBOX,
   assertLaunchTarget,
+  clearSessionOwned,
+  markSessionOwned,
+  ownsSession,
   sessionFrameName,
   sessionLabel,
+  sessionOrigin,
   submitLaunch,
 } from "./launch";
 import {
@@ -33,7 +38,7 @@ import {
   type SessionState,
   type SessionStatus,
 } from "./state";
-import { useConnectionWatch, type WatchEvent } from "./useConnectionWatch";
+import { useConnectionWatch, type ConnectionStatus, type WatchEvent } from "./useConnectionWatch";
 import "./session.css";
 
 type WorkspaceView = components["schemas"]["WorkspaceView"];
@@ -43,12 +48,24 @@ type LaunchMode = "frame" | "tab";
 /** Remaining running time below which the portal warns the user. */
 const END_WARNING_MS = 10 * 60_000;
 
+/** Cadence of the confirmation poll while a resumed session reconnects. */
+const RESUME_POLL_MS = 1_000;
+
+const isUnauthenticated = (e: unknown) => isPortalApiError(e) && e.code === "UNAUTHENTICATED";
+
 export interface SessionPageProps {
   workspaceId: string;
   /** How long the frame may take to load before the new-tab fallback is offered. */
   loadTimeoutMs?: number;
   /** Connection-status poll cadence while the session is live (D15). */
   pollIntervalMs?: number;
+  /**
+   * How long a resumed session (own live lease, reloaded page) may take to
+   * report `connected` before the page falls back to a fresh ticket.
+   */
+  resumeTimeoutMs?: number;
+  /** Navigates to the portal login (401). Injectable for tests. */
+  onSignIn?: () => void;
 }
 
 // The in-portal session view: a full-height surface hosting the desktop in
@@ -61,6 +78,8 @@ export function SessionPage({
   workspaceId,
   loadTimeoutMs = 20_000,
   pollIntervalMs,
+  resumeTimeoutMs = 10_000,
+  onSignIn = defaultLoginRedirect,
 }: SessionPageProps) {
   const api = useApi();
   const { me } = useMe();
@@ -78,10 +97,14 @@ export function SessionPage({
   const inflight = useRef(false);
   // A launch POST was submitted into the frame and its load is awaited.
   const armed = useRef(false);
-  // This page redeemed a ticket before: relaunches replace our own lease.
-  const owned = useRef(false);
+  // This tab redeemed a ticket before (also across a reload): relaunches
+  // replace our own lease instead of asking for a takeover.
+  const owned = useRef(ownsSession(workspaceId));
   const lastMode = useRef<LaunchMode>("frame");
   const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Resume: the deadline for the confirmation poll and the poll itself.
+  const resumeDeadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const resumePoll = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const frameName = sessionFrameName(workspaceId);
 
   const clearLoadTimer = () => {
@@ -89,12 +112,47 @@ export function SessionPage({
     loadTimer.current = undefined;
   };
 
+  const clearResume = () => {
+    clearTimeout(resumeDeadline.current);
+    clearTimeout(resumePoll.current);
+    resumeDeadline.current = undefined;
+    resumePoll.current = undefined;
+  };
+
+  // The frame never fires `load` when the embed is refused or the network
+  // swallows the navigation: every launch path (first, manual, watch-driven)
+  // arms the same timer so the page ends in blocked/timeout, not "connecting"
+  // forever.
+  const armLoadTimer = useCallback(() => {
+    clearTimeout(loadTimer.current);
+    loadTimer.current = setTimeout(() => {
+      dispatch({ type: "frame-blocked", reason: "timeout" });
+    }, loadTimeoutMs);
+  }, [loadTimeoutMs]);
+
+  const fetchConnection = useCallback(
+    async (): Promise<ConnectionStatus> =>
+      unwrap(
+        await api.GET("/v1/workspaces/{workspaceId}/connection", {
+          params: { path: { workspaceId } },
+        }),
+      ),
+    [api, workspaceId],
+  );
+
+  // A 401 means the portal login is gone; every API call from here on fails
+  // the same way, so say so instead of showing a stale badge or a generic error.
+  const fail = useCallback((e: unknown) => {
+    dispatch(isUnauthenticated(e) ? { type: "signed-out" } : { type: "failed", error: e });
+  }, []);
+
   const launch = useCallback(
     async (mode: LaunchMode, takeover: boolean) => {
       if (inflight.current) return;
       inflight.current = true;
       lastMode.current = mode;
       clearLoadTimer();
+      clearResume();
       armed.current = false;
       if (mode === "frame") dispatch({ type: "request" });
       try {
@@ -108,29 +166,90 @@ export function SessionPage({
         assertLaunchTarget(ticket, workspaceId, sessionDomain);
         owned.current = true;
         if (mode === "tab") {
+          // The new tab holds the lease now; a reload of this one must not
+          // try to resume it.
+          clearSessionOwned(workspaceId);
           submitLaunch(ticket, "_blank", workspaceId, sessionDomain);
           // The new tab takes the lease over: drop the embedded desktop.
           setFrameKey((k) => k + 1);
           dispatch({ type: "external" });
           return;
         }
+        markSessionOwned(workspaceId);
         armed.current = true;
         submitLaunch(ticket, frameName, workspaceId, sessionDomain);
         dispatch({ type: "ticket" });
-        loadTimer.current = setTimeout(() => {
-          dispatch({ type: "frame-blocked", reason: "timeout" });
-        }, loadTimeoutMs);
+        armLoadTimer();
       } catch (e) {
         armed.current = false;
         if (!mounted.current) return;
         if (isPortalApiError(e) && e.code === "CONNECTION_IN_USE") dispatch({ type: "in-use" });
-        else dispatch({ type: "failed", error: e });
+        else fail(e);
       } finally {
         inflight.current = false;
       }
     },
-    [api, workspaceId, frameName, loadTimeoutMs, sessionDomain],
+    [api, workspaceId, frameName, sessionDomain, armLoadTimer, fail],
   );
+
+  // Resume our own live session after a reload or an in-portal round trip:
+  // the host-only session cookie is still valid, so pointing the frame at the
+  // workspace origin brings the desktop back without a ticket (and without
+  // the "in use - take over?" dialog against ourselves). The /connection
+  // poll confirms the stream; if it does not within resumeTimeoutMs the
+  // page falls back to a ticket that replaces our own lease. Resolves true
+  // when it took over the start-up flow.
+  const resume = useCallback(async (): Promise<boolean> => {
+    if (!owned.current) return false;
+    let status: ConnectionStatus;
+    try {
+      status = await fetchConnection();
+    } catch (e) {
+      if (!isUnauthenticated(e)) return false;
+      if (mounted.current) dispatch({ type: "signed-out" });
+      return true;
+    }
+    if (!mounted.current) return true;
+    const el = frameRef.current;
+    if (!status.leaseActive || !el) return false;
+
+    clearResume();
+    armed.current = false;
+    dispatch({ type: "resume" });
+    el.src = sessionOrigin(workspaceId, sessionDomain);
+    resumeDeadline.current = setTimeout(() => {
+      clearResume();
+      void launch("frame", true);
+    }, resumeTimeoutMs);
+    const pollMs = Math.min(pollIntervalMs ?? RESUME_POLL_MS, RESUME_POLL_MS);
+    const poll = async () => {
+      try {
+        const s = await fetchConnection();
+        if (!mounted.current || resumeDeadline.current === undefined) return;
+        if (s.state === "connected") {
+          clearResume();
+          dispatch({ type: "resumed" });
+          return;
+        }
+        if (!s.leaseActive) {
+          // The lease vanished while we waited: nothing left to resume.
+          clearResume();
+          void launch("frame", false);
+          return;
+        }
+      } catch (e) {
+        if (!mounted.current || resumeDeadline.current === undefined) return;
+        if (isUnauthenticated(e)) {
+          clearResume();
+          dispatch({ type: "signed-out" });
+          return;
+        }
+      }
+      resumePoll.current = setTimeout(() => void poll(), pollMs);
+    };
+    resumePoll.current = setTimeout(() => void poll(), pollMs);
+    return true;
+  }, [fetchConnection, launch, workspaceId, sessionDomain, resumeTimeoutMs, pollIntervalMs]);
 
   const relaunch = useCallback(
     (mode: LaunchMode) => void launch(mode, owned.current),
@@ -150,7 +269,9 @@ export function SessionPage({
       const end = endReason(ws);
       if (end) dispatch({ type: "ended", reason: end });
     } catch (e) {
-      if (mounted.current && isPortalApiError(e) && e.code === "NOT_FOUND") {
+      if (!mounted.current) return;
+      if (isUnauthenticated(e)) dispatch({ type: "signed-out" });
+      else if (isPortalApiError(e) && e.code === "NOT_FOUND") {
         dispatch({ type: "ended", reason: "deleted" });
       }
     }
@@ -166,15 +287,7 @@ export function SessionPage({
     frame: frameRef,
     active: state.status === "connected",
     pollIntervalMs,
-    fetchStatus: useCallback(
-      async () =>
-        unwrap(
-          await api.GET("/v1/workspaces/{workspaceId}/connection", {
-            params: { path: { workspaceId } },
-          }),
-        ),
-      [api, workspaceId],
-    ),
+    fetchStatus: fetchConnection,
     requestTicket: useCallback(
       async () =>
         // The lease is gone, so no takeover is needed; if the poll raced a
@@ -194,20 +307,25 @@ export function SessionPage({
           case "relaunched":
             armed.current = true;
             dispatch({ type: "ticket" });
+            armLoadTimer();
             break;
           case "exhausted":
             dispatch({ type: "offline", reason: "exhausted" });
             void checkEnded();
             break;
           case "relaunch-error":
-            if (isPortalApiError(ev.error) && ev.error.code === "NOT_FOUND") {
+            if (isUnauthenticated(ev.error)) {
+              dispatch({ type: "signed-out" });
+            } else if (isPortalApiError(ev.error) && ev.error.code === "NOT_FOUND") {
               dispatch({ type: "ended", reason: "deleted" });
             } else if (isPortalApiError(ev.error) && ev.error.code === "INVALID_STATE") {
               void checkEnded();
             }
             break;
           case "poll-error":
-            if (isPortalApiError(ev.error) && ev.error.code === "NOT_FOUND") {
+            if (isUnauthenticated(ev.error)) {
+              dispatch({ type: "signed-out" });
+            } else if (isPortalApiError(ev.error) && ev.error.code === "NOT_FOUND") {
               dispatch({ type: "ended", reason: "deleted" });
             }
             break;
@@ -215,7 +333,7 @@ export function SessionPage({
             break;
         }
       },
-      [checkEnded],
+      [checkEnded, armLoadTimer],
     ),
   });
 
@@ -232,12 +350,17 @@ export function SessionPage({
           ? { type: "workspace", connectable: false, reason: blocker }
           : { type: "workspace", connectable: true },
       );
-      if (!blocker) void launch("frame", false);
+      if (!blocker) {
+        // Resume first; request a ticket only when there is nothing to resume.
+        void resume().then((resuming) => {
+          if (!resuming && mounted.current) void launch("frame", false);
+        });
+      }
       void loadTemplate(api, ws).then((tpl) => mounted.current && setTemplate(tpl));
     } catch (e) {
-      if (mounted.current) dispatch({ type: "failed", error: e });
+      if (mounted.current) fail(e);
     }
-  }, [api, workspaceId, launch]);
+  }, [api, workspaceId, launch, resume, fail]);
 
   // Initial load + automatic first launch. Guarded so React StrictMode's
   // double effect run does not mint two tickets. The launch waits for
@@ -251,8 +374,15 @@ export function SessionPage({
     return () => {
       mounted.current = false;
       clearLoadTimer();
+      clearResume();
     };
   }, [loadWorkspace, me]);
+
+  // The lease is no longer (or no longer only) ours: a reload must not try
+  // to resume it.
+  useEffect(() => {
+    if (state.status === "ended" || state.status === "external") clearSessionOwned(workspaceId);
+  }, [state.status, workspaceId]);
 
   // The portal's own CSP refusing the frame (frame-src) or the launch POST
   // (form-action) is the one embedding failure the portal can observe
@@ -344,6 +474,7 @@ export function SessionPage({
         <StatusBadge status={state.status} />
         <LifecycleNotice workspace={workspace} template={template} live={isLive(state.status)} />
         <div className="tc-session__controls" role="group" aria-label={t("session.toolbar.controls")}>
+          <span className="tc-session__printhint">{t("session.toolbar.printHint")}</span>
           <ClipboardHint template={template} />
           <Button
             size="sm"
@@ -399,6 +530,7 @@ export function SessionPage({
             onRetry={() => (workspace ? relaunch("frame") : void loadWorkspace())}
             onNewTab={() => relaunch("tab")}
             onTakeover={() => void launch(lastMode.current, true)}
+            onSignIn={onSignIn}
           />
         )}
       </div>
@@ -417,6 +549,7 @@ const STATUS_KEY: Record<SessionStatus, [Parameters<typeof t>[0], Tone]> = {
   ended: ["session.status.ended", "neutral"],
   blocked: ["session.status.blocked", "danger"],
   external: ["session.status.external", "neutral"],
+  "signed-out": ["session.status.signedOut", "warning"],
   error: ["session.status.error", "danger"],
 };
 
@@ -439,6 +572,7 @@ function Overlay({
   onRetry,
   onNewTab,
   onTakeover,
+  onSignIn,
 }: {
   state: SessionState;
   workspaceId: string;
@@ -446,6 +580,7 @@ function Overlay({
   onRetry: () => void;
   onNewTab: () => void;
   onTakeover: () => void;
+  onSignIn: () => void;
 }) {
   const back = (
     <Link to="/" className={buttonClass("secondary", "md")}>
@@ -581,6 +716,20 @@ function Overlay({
           }
         >
           <p>{t("session.external.body")}</p>
+        </OverlayPanel>
+      );
+    case "signed-out":
+      return (
+        <OverlayPanel
+          tone="alert"
+          title={t("session.signedOut.title")}
+          actions={
+            <Button ref={actionRef} variant="primary" onClick={onSignIn}>
+              {t("session.signedOut.action")}
+            </Button>
+          }
+        >
+          <p>{t("session.signedOut.body")}</p>
         </OverlayPanel>
       );
     case "error":
