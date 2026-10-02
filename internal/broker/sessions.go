@@ -56,7 +56,8 @@ func (b *Broker) BindSession(ctx context.Context, gw GatewayIdentity, leaseID st
 // Unknown digest: ErrLeaseInvalid. Dead lease: ErrRevoked. Foreign gateway:
 // ErrDenied. The live lookup goes through the partial unique index
 // (session_digest + state = 'active'); the dead-row check runs only on the
-// miss path so a replayed cookie still fails closed as revoked.
+// miss path, through the plain session_digest index, so a replayed cookie
+// still fails closed as revoked without scanning the unpruned lease table.
 func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error) {
 	now := b.now()
 	var leaseID string

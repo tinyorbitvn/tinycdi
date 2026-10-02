@@ -276,3 +276,48 @@ func TestMigration011_Idempotent(t *testing.T) {
 		t.Fatalf("index %q is not the pinned partial unique index", def)
 	}
 }
+
+// TestLeaseBySession_MissUsesIndex: lease rows are never pruned, so the
+// dead-row check on the miss path must be an index probe, not a scan of
+// every lease ever issued — otherwise random cookies become full scans.
+func TestLeaseBySession_MissUsesIndex(t *testing.T) {
+	db, _, _, _ := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO connection_lease
+		  (id, workspace_id, tenant_id, principal_subject, runtime_generation,
+		   runtime_uid, fencing_version, gateway_id, state, expires_at, closed_at,
+		   session_digest)
+		SELECT 'dead-' || g, 'ws-1', 'tenant-a', 'iss|alice', 1, 'rt-1', 1, 'gw-a',
+		       'revoked', now(), now(), sha256(('cookie-' || g)::bytea)
+		FROM generate_series(1, 5000) AS g`); err != nil {
+		t.Fatalf("seed dead leases: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `ANALYZE connection_lease`); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+
+	// The exact miss-path probe from LeaseBySession, for a digest that
+	// does not exist.
+	miss := digestOf("never-issued")
+	rows, err := db.Pool().Query(ctx,
+		`EXPLAIN SELECT EXISTS (SELECT 1 FROM connection_lease WHERE session_digest = $1)`, miss[:])
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		plan.WriteString(line + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	if strings.Contains(plan.String(), "Seq Scan") || !strings.Contains(plan.String(), "Index") {
+		t.Fatalf("miss query is not an index scan over 5000 dead leases:\n%s", plan.String())
+	}
+}
