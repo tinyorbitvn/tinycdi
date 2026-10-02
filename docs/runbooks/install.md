@@ -56,6 +56,27 @@ secret values — every Secret is a pre-existing object referenced by name
 
 ## Prerequisites check
 
+Run the preflight script first. It checks the Kubernetes version,
+NetworkPolicy enforcement (with a throwaway probe namespace it always
+deletes), a StorageClass, user-namespace support, the workspace node pool,
+wildcard DNS, the session TLS Secret, OIDC discovery and Postgres with TLS
+verification, and prints `PASS`/`WARN`/`FAIL` with a one-line fix for each
+(exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
+not permitted to run is a `WARN`. Flags and the check table are in
+`hack/preflight/README.md`.
+
+```bash
+hack/preflight/preflight.sh \
+  --session-domain session.example.com \
+  --tls-secret tinycdi-system/tinycdi-backend-session-tls \
+  --oidc-issuer https://idp.example.com/realms/tinycdi \
+  --postgres-dsn-secret tinycdi-system/tinycdi-backend-db:url \
+  --host-users-false          # only if runtime.hostUsers=false is wanted
+# on a throwaway cluster add:  --allow-shared-nodes
+```
+
+Checks preflight does not cover (tools and cluster-wide rights):
+
 ```bash
 HELM=helm
 K=kubectl
