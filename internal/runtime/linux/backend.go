@@ -109,6 +109,12 @@ const (
 	// AnnotationRetainedPVC: dataset identity is PVC UID + workspace UID,
 	// never the reusable name.
 	AnnotationRetainedPVCUID = "workspaces.cdi.tinyorbit.vn/retained-pvc-uid"
+	// AnnotationRetainedDataRef records the rd_ record the workspace was
+	// created to consume. It is the CR-level statement of intent "my home
+	// is retained data": when present, AnnotationRetainedPVC(+UID) must be
+	// present too, or the backend refuses to build a home at all
+	// (ErrRetainedClaimMissing) instead of falling back to a new empty disk.
+	AnnotationRetainedDataRef = "workspaces.cdi.tinyorbit.vn/retained-data-ref"
 
 	streamingPort int32 = 8443
 
@@ -231,6 +237,23 @@ func (e *templateRejectedError) Error() string {
 	return fmt.Sprintf("%v: %s", ErrTemplateRejected, e.reason)
 }
 func (e *templateRejectedError) Is(target error) bool { return target == ErrTemplateRejected }
+
+// ErrRetainedClaimMissing is returned when a Workspace says it consumes a
+// retained record (retained-data-ref) but carries no retained claim
+// reference (retained-pvc / retained-pvc-uid). Building the default home
+// then would silently mount a NEW EMPTY volume while the record says the
+// disk is attached, so Ensure fails before any child object is created; the
+// operator surfaces the reason on the Degraded condition.
+var ErrRetainedClaimMissing = errors.New("linux backend: workspace consumes retained data but names no retained claim")
+
+// retainedClaimMissing reports whether ws declares retained data without
+// the claim reference that makes the mount unambiguous.
+func retainedClaimMissing(ws *workspacesv1alpha1.Workspace) bool {
+	if ws.Annotations[AnnotationRetainedDataRef] == "" {
+		return false
+	}
+	return ws.Annotations[AnnotationRetainedPVC] == "" || ws.Annotations[AnnotationRetainedPVCUID] == ""
+}
 
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
@@ -369,6 +392,9 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 		// without it the pod cannot satisfy the runtime contract, so the
 		// template is rejected before ANY child object is created.
 		return runtime.Observation{}, &templateRejectedError{reason: "spec.linux.adapter=kasm requires the operator's --kasm-adapter-image (digest-pinned adapter init image)"}
+	}
+	if retainedClaimMissing(ws) {
+		return runtime.Observation{}, ErrRetainedClaimMissing
 	}
 	if _, err := b.ensureSecret(ctx, ws); err != nil {
 		return runtime.Observation{}, err

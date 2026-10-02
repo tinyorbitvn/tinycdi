@@ -99,6 +99,12 @@ const (
 	ReasonBootDeadlineExceeded    = "BootDeadlineExceeded"
 	ReasonBackendError            = "BackendError"
 	ReasonNominal                 = "Nominal"
+
+	// ReasonRetainedClaimMissing — the Workspace says it consumes retained
+	// data (retained-data-ref) but names no retained claim; the backend
+	// refuses to build a default home in its place, so no runtime children
+	// are created until the claim reference is present (FX-R20).
+	ReasonRetainedClaimMissing = "RetainedClaimMissing"
 )
 
 const (
@@ -215,6 +221,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(ws, FinalizerRuntimeCleanup) {
 			done, err := r.newFinalizer().Run(ctx, ws)
+			if apierrors.IsNotFound(err) {
+				// The object vanished under this reconcile (a previous
+				// reconcile removed the finalizer and the cache still served
+				// the Terminating copy). Gone is the goal of a delete.
+				return ctrl.Result{}, nil
+			}
 			if err != nil {
 				log.Error(err, "workspace teardown blocked; will retry")
 				return ctrl.Result{}, err
@@ -226,7 +238,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			if controllerutil.RemoveFinalizer(ws, FinalizerRuntimeCleanup) {
 				if err := r.Update(ctx, ws); err != nil {
-					return ctrl.Result{}, err
+					return ctrl.Result{}, client.IgnoreNotFound(err)
 				}
 			}
 		}
@@ -362,6 +374,11 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	case berr == nil:
 	case errors.Is(berr, linux.ErrNameConflict):
 		statusErr = errors.New(ReasonNameConflict)
+		obs, _ = r.Backend.Observe(ctx, ws)
+	case errors.Is(berr, linux.ErrRetainedClaimMissing):
+		logf.FromContext(ctx).Info("retained claim reference missing; refusing to build a default home",
+			"retainedDataRef", ws.Annotations[linux.AnnotationRetainedDataRef])
+		statusErr = errors.New(ReasonRetainedClaimMissing)
 		obs, _ = r.Backend.Observe(ctx, ws)
 	case errors.Is(berr, linux.ErrTemplateRejected):
 		logf.FromContext(ctx).Info("template rejected by backend", "error", berr)

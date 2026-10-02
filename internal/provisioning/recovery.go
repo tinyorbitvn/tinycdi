@@ -58,6 +58,7 @@ const (
 	// ActionQuarantineIntent — an intent exceeded MaxIntentApplyAttempts
 	// and was parked for manual attention instead of looping forever.
 	ActionQuarantineIntent RecoveryActionKind = "quarantine_intent"
+	ActionHoldRetainedDisk RecoveryActionKind = "hold_retained_disk"
 )
 
 // Recovery rebuilds control-plane invariants after an API or operator
@@ -187,7 +188,7 @@ func (r *Recovery) PendingRecovery(ctx context.Context) ([]string, error) {
 		UNION
 		SELECT qr.workspace_id
 		FROM quota_reservation qr JOIN workspaces w ON w.id = qr.workspace_id
-		WHERE qr.state = 'held'
+		WHERE qr.state = 'held' AND `+holdsComputeSQL+`
 		  AND (w.state = 'deleted' OR w.desired_state = 'Stopped')
 		ORDER BY 1`)
 	if err != nil {
@@ -244,8 +245,79 @@ func (r *Recovery) SettleQuota(ctx context.Context, tenantID string, workspaceUI
 		}
 	}
 	return r.db.WithTx(ctx, func(tx store.Tx) error {
-		return Release(ctx, tx, tenantID, string(workspaceUID), proof)
+		if err := Release(ctx, tx, tenantID, string(workspaceUID), proof); err != nil {
+			return err
+		}
+		// Compute is free; a retained disk the workspace left behind keeps
+		// counting until it is purged (design: retained quota holds to purge).
+		return holdRetainedDisk(ctx, tx, tenantID, string(workspaceUID))
 	})
+}
+
+// holdsComputeSQL selects reservations that still hold compute (qr = the
+// quota_reservation alias). A disk-only hold — the retained disk of a deleted
+// workspace — is not a recovery candidate: its compute is already settled,
+// and re-releasing it would silently stop counting the retained disk.
+const holdsComputeSQL = `(qr.running_slots > 0 OR qr.cpu_millis > 0 OR qr.memory_bytes > 0)`
+
+// holdRetainedDisk re-holds, disk only, the bytes of the workspace's live
+// retained datasets (Retained, or Purging until the volume is gone) against
+// its released reservation. Idempotent; a no-op without such datasets and for
+// reservations that are still held. Attached datasets belong to the consuming
+// workspace's reservation and are not counted here.
+func holdRetainedDisk(ctx context.Context, tx store.Tx, tenantID, workspaceID string) error {
+	var size int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0) FROM retained_data
+		WHERE source_workspace_id = $1 AND state IN ('Retained', 'Purging')`,
+		workspaceID).Scan(&size); err != nil {
+		return fmt.Errorf("retained disk size %s: %w", workspaceID, err)
+	}
+	if size == 0 {
+		return nil
+	}
+	return restoreDiskQuota(ctx, tx, tenantID, workspaceID, size)
+}
+
+// repairRetainedDiskHolds restores the disk hold of deleted workspaces whose
+// whole reservation was released while a live retained dataset exists —
+// including rows stranded by releases that predate holdRetainedDisk. It
+// returns the repaired workspace ids.
+func (r *Recovery) repairRetainedDiskHolds(ctx context.Context) ([]PlatformID, error) {
+	rows, err := r.db.Pool().Query(ctx, `
+		SELECT DISTINCT w.id, w.tenant_id
+		FROM workspaces w
+		JOIN quota_reservation qr ON qr.workspace_id = w.id AND qr.state = 'released'
+		JOIN retained_data rd ON rd.source_workspace_id = w.id AND rd.state IN ('Retained', 'Purging')
+		WHERE w.state = 'deleted'
+		ORDER BY w.id`)
+	if err != nil {
+		return nil, err
+	}
+	type target struct{ ws, tenant string }
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.ws, &t.tenant); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var repaired []PlatformID
+	for _, t := range targets {
+		if err := r.db.WithTx(ctx, func(tx store.Tx) error {
+			return holdRetainedDisk(ctx, tx, t.tenant, t.ws)
+		}); err != nil {
+			return repaired, err
+		}
+		repaired = append(repaired, PlatformID(t.ws))
+	}
+	return repaired, nil
 }
 
 // recordApplyFailure bumps the persisted apply-attempts counter on the
@@ -357,7 +429,7 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 	rows, err := r.db.Pool().Query(ctx, `
 		SELECT qr.workspace_id, qr.tenant_id
 		FROM quota_reservation qr JOIN workspaces w ON w.id = qr.workspace_id
-		WHERE qr.state = 'held'
+		WHERE qr.state = 'held' AND `+holdsComputeSQL+`
 		  AND (w.state = 'deleted' OR w.desired_state = 'Stopped')
 		ORDER BY qr.workspace_id`)
 	if err != nil {
@@ -392,6 +464,18 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 		default:
 			return actions, err
 		}
+	}
+
+	// --- keep retained disks counted -----------------------------------
+	repaired, err := r.repairRetainedDiskHolds(ctx)
+	if err != nil {
+		return actions, err
+	}
+	for _, ws := range repaired {
+		actions = append(actions, RecoveryAction{
+			WorkspaceUID: ws, Kind: ActionHoldRetainedDisk,
+			Detail: "retained disk re-held against the deleted workspace's reservation",
+		})
 	}
 	return actions, nil
 }
