@@ -288,9 +288,16 @@ curl_ca() { # curl_ca <host> <url...>: verified TLS against the local CA, host p
 log "checking the portal, the OIDC issuer and a session host through https"
 curl_ca "$PORTAL_HOST" -o /dev/null "https://${PORTAL_HOST}/"
 curl_ca "$KEYCLOAK_HOST" -o /dev/null "https://${KEYCLOAK_HOST}/realms/tinycdi/.well-known/openid-configuration"
-code="$(curl -sS --max-time 10 --cacert "$T/local-ca.crt" --resolve "ws-check.${SESSION_DOMAIN}:443:127.0.0.1" \
-  -o /dev/null -w '%{http_code}' "https://ws-check.${SESSION_DOMAIN}/" || true)"
-case "$code" in 000 | 400 | 5??) code="" ;; esac
+# Traefik picks the new Ingress up asynchronously, so retry until the session
+# host answers (400 and 5xx mean the router is not there yet).
+code=""
+for _ in $(seq 1 60); do
+  code="$(curl -sS --max-time 10 --cacert "$T/local-ca.crt" --resolve "ws-check.${SESSION_DOMAIN}:443:127.0.0.1" \
+    -o /dev/null -w '%{http_code}' "https://ws-check.${SESSION_DOMAIN}/" || true)"
+  case "$code" in 000 | 400 | 5??) code="" ;; esac
+  [ -n "$code" ] && break
+  sleep 2
+done
 if [ -z "$code" ]; then
   die "session host ws-check.${SESSION_DOMAIN} did not answer over https"
 fi
