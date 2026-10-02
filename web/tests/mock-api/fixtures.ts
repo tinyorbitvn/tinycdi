@@ -7,11 +7,16 @@ import type { components } from "../../src/api/generated/schema";
 // TemplateView (requested for the public API) and optional here so the
 // fixtures type-check against both the current and the extended schema.
 export type NetworkProfileFixture = "InternetOnly" | "ClusterOnly" | "Isolated";
+// family is the catalog name shared by every revision of a template.
 export type TemplateFixture = components["schemas"]["TemplateView"] & {
+  family?: string;
   networkProfile?: NetworkProfileFixture;
 };
 export type ConditionFixture = components["schemas"]["WorkspaceCondition"];
-export type WorkspaceFixture = components["schemas"]["WorkspaceView"];
+type WorkspaceViewSchema = components["schemas"]["WorkspaceView"];
+export type WorkspaceFixture = Omit<WorkspaceViewSchema, "template"> & {
+  template: WorkspaceViewSchema["template"] & { family?: string };
+};
 export type RetainedFixture = components["schemas"]["RetainedDataView"];
 // GET /v1/workspaces/{id}/events item (Kubernetes-style event summary).
 export interface WorkspaceEventFixture {
@@ -26,6 +31,7 @@ export interface WorkspaceEventFixture {
 export const TEMPLATE_LINUX: TemplateFixture = {
   id: "tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M",
   name: "linux-firefox-desktop",
+  family: "linux-firefox-desktop",
   description: "Ubuntu desktop with Firefox, KasmVNC streaming",
   revision: 7,
   runtime: "LinuxContainer",
@@ -45,6 +51,7 @@ export const TEMPLATE_LINUX: TemplateFixture = {
 export const TEMPLATE_BROWSER: TemplateFixture = {
   id: "tpl_01J4ZC7M2QXW8P3V9H5K1N6R4T",
   name: "linux-chromium-browser",
+  family: "linux-chromium-browser",
   description: "Ephemeral Chromium browser profile",
   revision: 3,
   runtime: "LinuxContainer",
@@ -68,6 +75,7 @@ export const WORKSPACE_STOPPED: WorkspaceFixture = {
   template: {
     id: TEMPLATE_LINUX.id,
     name: TEMPLATE_LINUX.name,
+    family: TEMPLATE_LINUX.name,
     revision: TEMPLATE_LINUX.revision,
     runtime: TEMPLATE_LINUX.runtime,
     experience: TEMPLATE_LINUX.experience,

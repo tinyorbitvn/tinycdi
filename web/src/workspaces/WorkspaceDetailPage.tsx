@@ -16,6 +16,7 @@ import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { navigate, Link } from "../lib/router";
+import { resolveTemplate } from "../templates/family";
 import { useTemplates } from "../templates/useTemplates";
 import {
   dataPolicyDescription,
@@ -146,7 +147,7 @@ export function WorkspaceDetailPage({
   }
 
   const ws = detail.data?.workspace;
-  const template = ws ? templates.data?.find((tpl) => tpl.id === ws.template.id) : undefined;
+  const template = ws ? resolveTemplate(templates.data, ws.template) : undefined;
   const error = actionError ?? detail.error;
 
   if (!ws) {

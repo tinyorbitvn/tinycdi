@@ -1,6 +1,7 @@
 import type { ApiClient } from "../api/client";
 import { unwrap } from "../api/client";
 import type { components } from "../api/generated/schema";
+export { templateFamily } from "../templates/family";
 
 // Admin/data-area API surface. GET /v1/me, GET /v1/quota, the `owner` field
 // and the `scope` list filter are contract additions (backend); they are typed
@@ -51,7 +52,12 @@ export interface QuotaView {
 
 export type Scope = "mine" | "tenant";
 
-export type ScopedWorkspace = WorkspaceView & { owner?: Owner };
+// `template.family` (the catalog name shared by every revision) is a contract
+// addition typed here until the generated schema carries it.
+export type ScopedWorkspace = Omit<WorkspaceView, "template"> & {
+  template: WorkspaceView["template"] & { family?: string };
+  owner?: Owner;
+};
 export type ScopedRetainedData = RetainedDataView & { owner?: Owner };
 
 // networkProfile, imageBuiltAt and imageStale are additive contract fields
@@ -59,6 +65,7 @@ export type ScopedRetainedData = RetainedDataView & { owner?: Owner };
 // stale-image fields resolved from the template's image-built-at annotation).
 // Optional here so the views compile against both schemas.
 export type AdminTemplateView = components["schemas"]["TemplateView"] & {
+  family?: string;
   networkProfile?: string;
   imageBuiltAt?: string;
   imageStale?: boolean;

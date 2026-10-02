@@ -9,6 +9,7 @@ import {
   listTemplates,
   type AdminTemplateView,
   type ScopedWorkspace,
+  templateFamily,
 } from "./api";
 import { formatDateTime, formatQuota, formatSeconds } from "./format";
 import { useLoader } from "./hooks";
@@ -23,14 +24,14 @@ export interface CatalogRow {
 
 // Joins the catalog with the tenant's workspaces so admins can see which
 // templates are actually used before retiring one. Workspaces pin a template
-// ID; a revision bump keeps the same ID.
+// revision; the join is on the family, which survives a revision bump.
 export function catalogRows(
   templates: AdminTemplateView[],
   workspaces: ScopedWorkspace[],
 ): CatalogRow[] {
   return templates
     .map((template) => {
-      const users = workspaces.filter((w) => w.template.id === template.id && w.phase !== "Terminating");
+      const users = workspaces.filter((w) => templateFamily(w.template) === templateFamily(template) && w.phase !== "Terminating");
       return {
         template,
         inUse: users.length,

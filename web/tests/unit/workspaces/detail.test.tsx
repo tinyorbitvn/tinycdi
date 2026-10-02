@@ -75,6 +75,28 @@ describe("WorkspaceDetailPage", () => {
     expect(screen.getByText(/Internet only/)).toBeInTheDocument();
   }, 20000);
 
+  it("detail: resolves the template through its family after a revision bump", async () => {
+    const api = createMockApi();
+    // The workspace pins a superseded revision (its object is gone from the
+    // catalog); the current revision of the family has a different id.
+    seedReady(api, {
+      template: {
+        id: "tpl_SUPERSEDED_REV",
+        name: "linux-firefox-desktop",
+        family: "linux-firefox-desktop",
+        revision: 6,
+        runtime: "LinuxContainer",
+        experience: "Desktop",
+      },
+    });
+    seedEvents(api, []);
+    loginCookies();
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+
+    await screen.findByRole("table", { name: "Events" });
+    expect(await screen.findByText(/Internet only/)).toBeInTheDocument();
+  }, 20000);
+
   it("detail: connect button routes to the in-portal session route", async () => {
     const api = createMockApi();
     seedReady(api);

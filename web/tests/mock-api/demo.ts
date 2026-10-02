@@ -66,7 +66,7 @@ export const DEMO_TEMPLATES: TemplateFixture[] = [
 const [DEV, WIN] = DEMO_TEMPLATES;
 
 function summary(t: TemplateFixture): WorkspaceFixture["template"] {
-  return { id: t.id, name: t.name, revision: t.revision, runtime: t.runtime, experience: t.experience };
+  return { id: t.id, name: t.name, family: t.family ?? t.name, revision: t.revision, runtime: t.runtime, experience: t.experience };
 }
 
 function at(conditions: ConditionFixture[], time: string): ConditionFixture[] {
