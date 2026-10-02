@@ -73,6 +73,7 @@ type lifecycleDefaults struct {
 type templateView struct {
 	ID                string            `json:"id"`
 	Name              string            `json:"name"`
+	Family            string            `json:"family"`
 	Description       string            `json:"description,omitempty"`
 	Revision          int64             `json:"revision"`
 	Runtime           string            `json:"runtime"`
@@ -124,6 +125,7 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 		out.Items = append(out.Items, templateView{
 			ID:           e.ID,
 			Name:         e.Name,
+			Family:       e.Name,
 			Description:  e.Description,
 			Revision:     e.Revision,
 			Runtime:      e.Runtime,

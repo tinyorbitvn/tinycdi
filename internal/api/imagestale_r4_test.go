@@ -145,3 +145,54 @@ func TestCreate_SnapshotsImageBuiltAt(t *testing.T) {
 		t.Fatalf("create request template=%+v, want ImageBuiltAt=%q", be.gotCreate, builtAt)
 	}
 }
+
+// TestTemplateFamily_StableAcrossRevisions: two immutable revisions of one
+// catalog family (distinct template ids, same catalog name) report the same
+// 'family' on GET /v1/templates and on WorkspaceView.template, so clients can
+// group a workspace with the catalog entry it was created from.
+func TestTemplateFamily_StableAcrossRevisions(t *testing.T) {
+	now := time.Now().UTC()
+	cat := staleCatalog{entries: map[string]TemplateEntry{
+		"tenant-a/tpl_linux-aaaaaaaa": {ID: "tpl_linux-aaaaaaaa", Name: "linux", Revision: 1,
+			Runtime: "LinuxContainer", Experience: "Desktop"},
+		"tenant-a/tpl_linux-bbbbbbbb": {ID: "tpl_linux-bbbbbbbb", Name: "linux", Revision: 2,
+			Runtime: "LinuxContainer", Experience: "Desktop"},
+	}}
+	be := newFakeBackend()
+	env, _, _ := newStaleEnv(t, be, cat)
+	sess, csrf := login(t, env, "user-a")
+	owner := env.issuer.URL() + "|" + env.issuer.Subject
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/templates", "", nil)
+	list := decodeBody[templateList](t, r)
+	if len(list.Items) != 2 {
+		t.Fatalf("got %d templates, want 2", len(list.Items))
+	}
+	for _, v := range list.Items {
+		if v.Family != "linux" {
+			t.Fatalf("template %s family=%q, want linux", v.ID, v.Family)
+		}
+	}
+
+	for i, tpl := range []string{"tpl_linux-aaaaaaaa", "tpl_linux-bbbbbbbb"} {
+		id := fmt.Sprintf("ws_family%04d", i)
+		be.recs[id] = provisioning.WorkspaceRecord{
+			ID: id, TenantID: "tenant-a", Owner: owner,
+			OwnerIssuer: env.issuer.URL(), OwnerSub: env.issuer.Subject, Name: fmt.Sprintf("fam-%d", i),
+			Template: provisioning.TemplateInfo{ID: tpl, Name: "linux", Revision: int64(i + 1),
+				Runtime: "LinuxContainer", Experience: "Desktop"},
+			Phase: "Running", DesiredState: "Running", DataPolicy: "Ephemeral",
+			Revision: 1, CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
+	wl := decodeBody[WorkspaceList](t, r)
+	if len(wl.Items) != 2 {
+		t.Fatalf("got %d workspaces, want 2", len(wl.Items))
+	}
+	for _, v := range wl.Items {
+		if v.Template.Family != "linux" {
+			t.Fatalf("workspace %s template.family=%q, want linux", v.ID, v.Template.Family)
+		}
+	}
+}
