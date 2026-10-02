@@ -268,7 +268,7 @@ func TestRouteIsolation_SessionListener(t *testing.T) {
 	for _, path := range []string{
 		"/v1/workspaces", "/v1/templates", "/v1/data",
 		"/v1/login", "/v1/auth/callback",
-		"/v1/me", "/v1/workspaces/ws_abc12345/connection",
+		"/v1/me", "/v1/session", "/v1/workspaces/ws_abc12345/connection",
 	} {
 		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 		if err != nil {
@@ -385,6 +385,30 @@ func TestRouteIsolation_AppListener(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("%s %s on app listener = %d, want 404", tc.method, tc.path, resp.StatusCode)
 		}
+	}
+}
+
+// TestAppListener_SessionProbe (FX-R13b): the production route table serves
+// the anonymous probe as 200 {"authenticated":false} while /v1/me stays 401.
+func TestAppListener_SessionProbe(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+
+	get := func(path string) (*http.Response, string) {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, strings.TrimSpace(string(body))
+	}
+	resp, body := get("/v1/session")
+	if resp.StatusCode != http.StatusOK || body != `{"authenticated":false}` {
+		t.Fatalf("GET /v1/session = %d %q, want 200 {\"authenticated\":false}", resp.StatusCode, body)
+	}
+	if resp, _ = get("/v1/me"); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /v1/me anonymous = %d, want 401", resp.StatusCode)
 	}
 }
 

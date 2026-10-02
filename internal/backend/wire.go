@@ -510,6 +510,7 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	mux.Handle("GET /v1/login", http.HandlerFunc(authn.LoginHandler))
 	mux.Handle("GET /v1/auth/callback", http.HandlerFunc(authn.CallbackHandler))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
+	api.MountSessionProbeRoute(mux, authn)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
 	api.MountConnectionRoutes(mux, authn, conn)

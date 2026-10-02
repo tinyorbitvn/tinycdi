@@ -7,6 +7,8 @@ import {
   SESSION_COOKIE,
   SESSION_PRINCIPAL,
   err,
+  ok,
+  parseCookies,
   type MockArea,
   type MockContext,
   type MockRequest,
@@ -41,6 +43,14 @@ export function authArea(_ctx: MockContext): MockArea {
 
   return {
     name: "auth",
-    public: (req) => (req.path === "/v1/login" ? login(req) : undefined),
+    public: (req) => {
+      if (req.path === "/v1/login") return login(req);
+      // GET /v1/session: the anonymous, passive probe (openapi.yaml
+      // SessionProbe) — 200 {authenticated} for everyone, never a 401.
+      if (req.path === "/v1/session" && req.method === "GET") {
+        return ok(200, { authenticated: !!parseCookies(req.headers.cookie)[SESSION_COOKIE] }, { "cache-control": "no-store" });
+      }
+      return undefined;
+    },
   };
 }

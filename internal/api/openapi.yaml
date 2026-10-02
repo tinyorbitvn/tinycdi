@@ -101,6 +101,35 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/session:
+    get:
+      operationId: getSessionProbe
+      summary: Passive signed-in probe
+      description: |
+        Reports whether the request carries a live portal session. Needs no
+        authentication: a signed-out caller gets `200` with
+        `{"authenticated": false}` rather than `401`, so the portal can check
+        before calling `GET /v1/me` without a failed request showing up in the
+        browser console. The probe is passive — it never slides the idle
+        timer, sets no cookie and needs no CSRF token — and discloses nothing
+        but the boolean (no subject, tenant, roles or token). The response is
+        `Cache-Control: no-store`.
+      tags: [session]
+      security: []
+      responses:
+        "200":
+          description: Whether a live session accompanied the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionProbe"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/workspaces:
     get:
       operationId: listWorkspaces
@@ -1296,6 +1325,18 @@ components:
         nextPageToken:
           type: string
           description: Cursor for the next page; absent when the list is exhausted.
+
+    SessionProbe:
+      type: object
+      additionalProperties: false
+      required: [authenticated]
+      description: |
+        Answer of `GET /v1/session`: exactly one key. Never carries identity,
+        tenant, roles or a token.
+      properties:
+        authenticated:
+          type: boolean
+          description: True when the request carries a live (not idle- or absolute-expired) session.
 
     Me:
       type: object
