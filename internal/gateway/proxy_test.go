@@ -5,6 +5,7 @@ package gateway_test
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -681,5 +682,71 @@ func TestProxy_ForwardsCleanedPath(t *testing.T) {
 	seen := u.seenURIs()
 	if len(seen) != 1 || seen[0] != "/app/assets/main.js" {
 		t.Fatalf("upstream saw %v, want [/app/assets/main.js]", seen)
+	}
+}
+
+// TestControlRevoke_OtherReplica: the operator's revoke reaches whichever
+// replica the Service picked; the session may live on the other one. The
+// revoke must still reach the broker (the shared lease directory), and the
+// replica that holds the session sees the lease die on its next renew and
+// closes the stream.
+func TestControlRevoke_OtherReplica(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-xrev", testWSUID)
+	_, srvA := newReplica(t, fb, "gw-A")
+	_, srvB := newReplica(t, fb, "gw-B")
+	cookie := launchOK(t, srvA, testHost, "tk-xrev")
+	lease := fb.leaseOf(t, "tk-xrev")
+
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		drain(resp)
+		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	wsWrite(t, resp, []byte("x"))
+	wsRead(t, resp, 1, 2*time.Second) // the stream is live
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := resp.Body.Read(make([]byte, 1))
+		closed <- err
+	}()
+
+	// B holds no such session — the revoke must not be a local-only lookup.
+	status, body := controlRoundTrip(t, srvB, http.MethodPost, "/v1/control/revoke",
+		"control-test-token", `{"leaseId":"`+lease.ID+`"}`)
+	if status != http.StatusOK || !strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("revoke on the other replica = %d %s, want 200 {\"revoked\":true}", status, body)
+	}
+	if n := fb.leaseRevokeCount(lease.ID); n != 1 {
+		t.Fatalf("RevokeLease calls = %d, want 1", n)
+	}
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Fatal("A's stream survived the revoke")
+		}
+	case <-time.After(2 * testRenewInterval):
+		t.Fatal("A's stream not closed within 2xRenewInterval of the revoke")
+	}
+}
+
+// TestControlRevoke_BrokerErrorIs503: a revoke the broker did not accept is
+// not reported as done — the operator retries.
+func TestControlRevoke_BrokerErrorIs503(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-rev503", testWSUID)
+	_, srv := newReplica(t, fb, "gw-A")
+	launchOK(t, srv, testHost, "tk-rev503")
+	lease := fb.leaseOf(t, "tk-rev503")
+
+	fb.mu.Lock()
+	fb.revokeErr = errors.New("broker unreachable")
+	fb.mu.Unlock()
+	status, body := controlRoundTrip(t, srv, http.MethodPost, "/v1/control/revoke",
+		"control-test-token", `{"leaseId":"`+lease.ID+`"}`)
+	if status != http.StatusServiceUnavailable || strings.Contains(body, `"revoked":true`) {
+		t.Fatalf("revoke with a failing broker = %d %s, want 503 and no revoked:true", status, body)
 	}
 }

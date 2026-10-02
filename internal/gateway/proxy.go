@@ -344,6 +344,10 @@ func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleControlSession lists the sessions held by THIS replica only: the
+// gateway keeps no cross-replica registry (the lease directory lives in the
+// broker), so the answer is replica-local and a caller that needs the whole
+// deployment must ask every replica.
 func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -375,9 +379,10 @@ func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"active": len(out) > 0, "sessions": out})
 }
 
-// handleControlRevoke kills the named lease's session and tells the broker.
-// SEC-1: an identifier that resolves to no live session must not affect any
-// other session — there is no implicit "current session" fallback.
+// handleControlRevoke revokes the named lease at the broker and kills its
+// session if this replica holds it. SEC-1: an identifier that resolves to
+// no live lease must not affect any other session — there is no implicit
+// "current session" fallback.
 func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -395,19 +400,29 @@ func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_lease"})
 		return
 	}
+	// The session may live on another replica, so the broker (the shared
+	// lease directory) is always told; that replica's renew loop then sees
+	// the lease die and closes its streams. A session held here is killed
+	// first so it fails closed without waiting for the broker round trip.
 	g.mu.Lock()
 	s := g.byLease[body.LeaseID]
 	g.mu.Unlock()
-	if s == nil {
-		writeJSON(w, http.StatusOK, map[string]bool{"revoked": false})
+	wsUID := ""
+	if s != nil {
+		wsUID = s.workspaceUID()
+		g.killSession(s, "control_revoke")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	err := g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
+	cancel()
+	if err != nil {
+		// Not accepted: the operator must retry. A local session, if any,
+		// is already dead.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "broker_unavailable")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
 		return
 	}
-	g.killSession(s, "control_revoke")
-	// Best-effort broker revoke; the local session is already dead either way.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	_ = g.cfg.Broker.RevokeLease(ctx, body.LeaseID)
-	cancel()
-	g.audit(r, "session.revoke", s.workspaceUID(), observability.OutcomeSuccess, "")
+	g.audit(r, "session.revoke", wsUID, observability.OutcomeSuccess, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }
 

@@ -86,6 +86,7 @@ type fakeBroker struct {
 	// the gate); lookupPanic makes the next call panic instead.
 	lookupErr   error
 	lookupPanic bool
+	revokeErr   error // injected RevokeLease failure
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -238,7 +239,7 @@ func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.revokeN++
 	f.renewErr[leaseID] = broker.ErrRevoked
 	f.revokes[leaseID]++
-	return nil
+	return f.revokeErr
 }
 
 // leaseRevokeCount reports how many times RevokeLease ran for the lease —
