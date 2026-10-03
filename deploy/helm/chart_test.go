@@ -3193,12 +3193,25 @@ func TestAlertRulesReferenceExistingMetrics(t *testing.T) {
 	if len(rules) != len(want) {
 		t.Errorf("expected exactly %d alert rules, got %d: %v", len(want), len(rules), rules)
 	}
+	// SessionDropSpike carries the alerts.sessionDropFloor guard (default
+	// 5) — a small install draining at night must not page critical.
+	if expr := rules["TinyCDISessionDropSpike"]; !strings.Contains(expr, "offset 5m) >= 5") {
+		t.Errorf("TinyCDISessionDropSpike must floor on alerts.sessionDropFloor (default 5), expr: %s", expr)
+	}
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "alerts.enabled=true",
+		"--set", "alerts.sessionDropFloor=12")
+	if expr := prometheusRules(t, docs)["TinyCDISessionDropSpike"]; !strings.Contains(expr, "offset 5m) >= 12") {
+		t.Errorf("alerts.sessionDropFloor=12 must render in the drop-spike guard, expr: %s", expr)
+	}
 }
 
-// TestPromtoolCheckRules renders the PrometheusRule and runs
-// `promtool check rules` on its spec — the same validation CI performs.
-// Resolves promtool via $TCDI_PROMTOOL, then bin/promtool, then PATH.
-func TestPromtoolCheckRules(t *testing.T) {
+// promtoolRuleFile renders the PrometheusRule spec to a rules file in
+// dir and returns its path — the shared input for `promtool check` and
+// `promtool test rules`.
+func promtoolRuleFile(t *testing.T, dir string) string {
+	t.Helper()
 	docs := renderArgs(t,
 		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
 		"--set", "alerts.enabled=true")
@@ -3214,13 +3227,71 @@ func TestPromtoolCheckRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal PrometheusRule spec: %v", err)
 	}
-	dir := t.TempDir()
-	f := filepath.Join(dir, "tinycdi-rules.yaml")
+	f := filepath.Join(dir, "rules.yaml")
 	if err := os.WriteFile(f, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return f
+}
+
+// TestPromtoolCheckRules renders the PrometheusRule and runs
+// `promtool check rules` on its spec — the same validation CI performs.
+// Resolves promtool via $TCDI_PROMTOOL, then bin/promtool, then PATH.
+func TestPromtoolCheckRules(t *testing.T) {
+	dir := t.TempDir()
+	f := promtoolRuleFile(t, dir)
 	out, err := exec.Command(promtoolBin(t), "check", "rules", f).CombinedOutput()
 	if err != nil {
 		t.Fatalf("promtool check rules failed: %v\n%s", err, out)
+	}
+}
+
+// TestPromtoolTestRules runs `promtool test rules` on the rendered
+// PrometheusRule: TinyCDISessionDropSpike must fire on a 20→2 drop above
+// alerts.sessionDropFloor (default 5) and must NOT fire on a 2→0 drop
+// below it (the night-drain false positive the floor exists for).
+func TestPromtoolTestRules(t *testing.T) {
+	dir := t.TempDir()
+	promtoolRuleFile(t, dir)
+	unittest := `rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 20 -> 2 inside 5m, above the default floor of 5: must fire.
+  - interval: 1m
+    input_series:
+      - series: 'tinycdi_sessions_active{instance="10.0.0.1:9090"}'
+        values: '20x5 2x14'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TinyCDISessionDropSpike
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "TinyCDI live sessions dropped sharply"
+              description: "Over half of the live sessions vanished inside 5m (90% dropped) — check backend restarts, Postgres and the session gateway."
+
+  # 2 -> 0 inside 5m, below the default floor of 5: must NOT fire.
+  - interval: 1m
+    input_series:
+      - series: 'tinycdi_sessions_active{instance="10.0.0.2:9090"}'
+        values: '2x5 0x14'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TinyCDISessionDropSpike
+        exp_alerts: []
+`
+	f := filepath.Join(dir, "unittest.yaml")
+	if err := os.WriteFile(f, []byte(unittest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(promtoolBin(t), "test", "rules", f)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("promtool test rules failed: %v\n%s", err, out)
 	}
 }

@@ -462,6 +462,10 @@ dashboards:
 alerts:
   enabled: false
   labels: {}            # e.g. {release: prometheus} — the operator's ruleSelector
+  # TinyCDISessionDropSpike floor: minimum live sessions 5m back required
+  # for the drop alert to fire — keeps a small install draining at night
+  # (2→0) from paging critical. 0 disables the floor.
+  sessionDropFloor: 5
 
 networkPolicy:
   enabled: true

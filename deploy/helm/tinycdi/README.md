@@ -286,6 +286,7 @@ Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs 
 | `dashboards.labels` | `{grafana_dashboard: "1"}` | sidecar discovery labels on the ConfigMaps (kube-prometheus-stack default; set your Grafana's label/value when it differs) |
 | `alerts.enabled` | `false` | `PrometheusRule` with the platform alert set below — requires `backend.metrics.enabled` and the Prometheus Operator CRDs |
 | `alerts.labels` | `{}` | labels on the `PrometheusRule` — the operator's ruleSelector (e.g. `{release: prometheus}`) |
+| `alerts.sessionDropFloor` | `5` | minimum live sessions 5m back required for `TinyCDISessionDropSpike` to fire — a small install draining at night (2→0) stays quiet; `0` disables the floor |
 | `networkPolicy.enabled` | `true` | default-deny baseline + allow rules (incl. the operator↔backend :9443 broker rule) |
 | `networkPolicy.apiServerPeers` / `.apiServerPort` | `10.96.0.1/32` / `443` | apiserver egress — set your `kubernetes.default` ClusterIP |
 | `networkPolicy.dnsPeers` | kube-system pods | DNS egress |
@@ -309,7 +310,7 @@ other sidecar configurations.
 | Alert | Fires when |
 |---|---|
 | `TinyCDIBackendReplicaDown` | fewer backend replicas report metrics than `backend.replicas`, for 15m |
-| `TinyCDISessionDropSpike` | >50% of live sessions vanish inside 5m |
+| `TinyCDISessionDropSpike` | >50% of live sessions vanish inside 5m while ≥`alerts.sessionDropFloor` were live |
 | `TinyCDILeaseRenewFailures` | lease acquire/renew failures sustain ≈ >1 per 50 s for 15m |
 | `TinyCDIRehydrationFailures` | >20% of session rehydrations return miss/error for 15m |
 | `TinyCDIRuntimeImageStale` | a catalog family's newest revision is older than `-image-stale-after` (14 d default) for 1h |
