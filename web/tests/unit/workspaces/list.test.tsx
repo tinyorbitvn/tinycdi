@@ -45,6 +45,42 @@ describe("WorkspaceListPage", () => {
     expect(within(row).queryByText("Running")).not.toBeInTheDocument();
   }, 20000);
 
+  it("list: a deleting row shows the compact progress and announces when gone", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    const ws = makeWorkspace({
+      id: "ws_del",
+      name: "going-away",
+      phase: "Terminating",
+      desiredState: "Stopped",
+      conditions: [
+        { type: "RuntimeReady", status: "False", reason: "DrainingStreams", lastTransitionTime: "2026-10-03T09:59:00Z" },
+      ],
+    });
+    api.state.workspaces.set(ws.id, ws);
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={80} />, api);
+
+    const table = await screen.findByRole("table", { name: "workspaces" });
+    const row = within(table).getByText("going-away").closest("tr") as HTMLElement;
+    // Compact line: title + step position + active step label (the text
+    // also lives in the hidden live region — match the visible line).
+    expect(
+      within(row).getByText(/Deleting going-away/, { selector: ".tc-progress__compactline" }),
+    ).toBeInTheDocument();
+    // The step label appears in the line and in the hidden announce region.
+    expect(within(row).getAllByText(/Closing sessions/).length).toBeGreaterThan(0);
+
+    api.state.workspaces.delete(ws.id);
+    // The row's quiet disappearance is announced politely.
+    await waitFor(() =>
+      expect(screen.getByText("going-away was deleted.")).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "going-away" })).toBeNull(),
+    );
+  }, 20000);
+
   it("list: each phase maps to a StatusPill with a text label", async () => {
     const api = createMockApi();
     api.state.workspaces.clear();

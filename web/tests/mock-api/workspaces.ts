@@ -263,6 +263,14 @@ export function workspacesArea(ctx: MockContext): MockArea {
       state.workspaces.set(ws.id, ws);
       return ok(200, ws);
     }
+    if (wsm && req.method === "DELETE" && !wsm[2]) {
+      // Simulate teardown completion: the API hides a finalised row (FX-R19).
+      const ws = state.workspaces.get(wsm[1]);
+      if (!ws) return err(404, "NOT_FOUND", "no such workspace", false);
+      state.workspaces.delete(ws.id);
+      state.events.delete(ws.id);
+      return ok(200, { deleted: ws.id });
+    }
     if (wsm && req.method === "POST") {
       const ws = state.workspaces.get(wsm[1]);
       if (!ws) return err(404, "NOT_FOUND", "no such workspace", false);
