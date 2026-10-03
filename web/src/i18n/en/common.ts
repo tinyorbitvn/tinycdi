@@ -14,6 +14,8 @@ export default {
   "errors.banner.dismiss": "dismiss error",
   "errors.code.quotaExhausted":
     "Quota exhausted — delete an unused workspace or ask an administrator for more quota.",
+  "errors.code.quotaReleasePending":
+    "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
   "errors.code.quotaNotConfigured":
     "No quota is configured for your tenant. Ask an administrator to set one.",
   "errors.code.invalidTemplate":

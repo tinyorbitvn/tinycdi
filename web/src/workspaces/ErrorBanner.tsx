@@ -1,6 +1,11 @@
 import { Alert, Button } from "../design";
 import { t, type MessageKey } from "../i18n";
-import { isPortalApiError, type ErrorCode, type PortalApiError } from "../api/errors";
+import {
+  isPortalApiError,
+  isReleasePending,
+  type ErrorCode,
+  type PortalApiError,
+} from "../api/errors";
 
 // Stable-code → operator-facing guidance, keyed on `code` per the contract.
 // `message` from the server is shown as detail only.
@@ -22,6 +27,9 @@ const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
 };
 
 function guidance(e: PortalApiError): string {
+  // A teardown-pending quota refusal resolves on the next recovery pass —
+  // distinct copy from a real exhaustion.
+  if (isReleasePending(e)) return t("errors.code.quotaReleasePending");
   return t(GUIDANCE_KEYS[e.code]);
 }
 
@@ -58,7 +66,9 @@ export function ErrorBanner({
     >
       {apiErr ? guidance(apiErr) : detail}
       {apiErr?.message ? ` ${apiErr.message}` : null}
-      {apiErr?.requestId ? ` ${t("errors.banner.requestId", { id: apiErr.requestId })}` : null}
+      {apiErr?.requestId
+        ? ` ${t("errors.banner.requestId", { id: apiErr.requestId })}`
+        : null}
     </Alert>
   );
 }

@@ -160,8 +160,34 @@ test("attach a retained disk: the file written before delete is there after", as
     .toBeGreaterThan(0);
 
   // 4. Attach it to a new workspace and wait for that workspace to run.
+  //    The deleted source's compute quota stays held until the backend's
+  //    recovery pass proves the runtime gone (30 s cadence). An attach that
+  //    lands inside that window is refused with 409 QUOTA_EXHAUSTED and
+  //    details.reason=release_pending — a retryable refusal that resolves
+  //    on its own. Retry only that specific response within 60 s; any
+  //    other failure aborts immediately.
   await row.getByRole("button", { name: "Attach" }).click();
-  await page.getByRole("button", { name: "Attach disk" }).click();
+  const attachButton = page.getByRole("button", { name: "Attach disk" });
+  const attachDeadline = Date.now() + 60_000;
+  for (;;) {
+    const [resp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/attach") && r.request().method() === "POST",
+        { timeout: 60_000 },
+      ),
+      attachButton.click(),
+    ]);
+    if (resp.ok()) break;
+    const body = (await resp.json().catch(() => null)) as {
+      details?: { reason?: string };
+    } | null;
+    if (resp.status() !== 409 || body?.details?.reason !== "release_pending") {
+      throw new Error(`attach failed: HTTP ${resp.status()} ${JSON.stringify(body)}`);
+    }
+    if (Date.now() > attachDeadline) {
+      throw new Error("attach still refused with release_pending after 60 s");
+    }
+  }
   await page.waitForURL(/\/workspaces\/ws_/);
   const attachedId = workspaceIdFromUrl(page);
   expect(attachedId).not.toBe(sourceId);

@@ -8,6 +8,7 @@ export class PortalApiError extends Error {
   readonly httpStatus: number;
   readonly retryable: boolean;
   readonly requestId: string;
+  readonly details: { reason?: "release_pending" | undefined } | undefined;
 
   constructor(
     httpStatus: number,
@@ -16,6 +17,7 @@ export class PortalApiError extends Error {
       message?: string | undefined;
       retryable?: boolean | undefined;
       requestId?: string | undefined;
+      details?: { reason?: "release_pending" | undefined } | undefined;
     },
   ) {
     const rawCode = body.code ?? "INTERNAL";
@@ -28,7 +30,20 @@ export class PortalApiError extends Error {
     // Unknown codes are treated as INTERNAL (retryable) per the contract.
     this.retryable = known ? body.retryable === true : true;
     this.requestId = body.requestId ?? "";
+    this.details = body.details;
   }
+}
+
+// isReleasePending reports whether a QUOTA_EXHAUSTED refusal is the
+// transient teardown-pending kind (details.reason=release_pending): the
+// refused quota is held only by a workspace still shutting down and frees
+// on the next recovery pass, so the request may be retried.
+export function isReleasePending(e: unknown): boolean {
+  return (
+    isPortalApiError(e) &&
+    e.code === "QUOTA_EXHAUSTED" &&
+    e.details?.reason === "release_pending"
+  );
 }
 
 const KNOWN_CODES: ReadonlySet<string> = new Set([
