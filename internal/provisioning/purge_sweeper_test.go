@@ -14,8 +14,10 @@ package provisioning_test
 //     Purging until the consumer is gone.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -121,6 +123,52 @@ func TestPurgeSweeper_StripsProtectionWithPatch(t *testing.T) {
 	}
 	if s := retainedState(t, st, tenant, rec.ID); s != provisioning.RetainedStatePurged {
 		t.Fatalf("record = %s, want Purged", s)
+	}
+}
+
+// notFoundPVCPatchClient answers every Patch on a PVC with NotFound — the
+// volume was removed between the sweep's second Get and the finalizer
+// strip (seen live on rc.2).
+func notFoundPVCPatchClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(retainedApplyScheme(t)).
+		WithObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, _ ...client.PatchOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+					return apierrors.NewNotFound(
+						schema.GroupResource{Resource: "persistentvolumeclaims"},
+						obj.GetName())
+				}
+				return c.Patch(ctx, obj, patch)
+			},
+		}).Build()
+}
+
+// TestPurgeSweeper_VanishedPVCOnStrip: a PVC deleted between the second
+// Get and the finalizer-strip Patch is the same completion proof as the
+// NotFound branches — the record reaches Purged in ONE sweep and nothing
+// is logged.
+func TestPurgeSweeper_VanishedPVCOnStrip(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	const tenant, ns, name = "tenant-fx28", "ns-it", "pvc-fx28"
+	rec := purgingRecord(t, db, tenant, ns, name, "uid-"+name)
+	st := provisioning.NewRetainedStore(db)
+
+	pvc := retainedPVC(ns, name, "cruid-fx28", "ws-"+name, nil)
+	pvc.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	kc := notFoundPVCPatchClient(t, pvc)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	provisioning.NewPurgeSweeper(st, kc, log).SweepOnce(ctx)
+
+	if s := retainedState(t, st, tenant, rec.ID); s != provisioning.RetainedStatePurged {
+		t.Fatalf("record = %s, want Purged after one sweep", s)
+	}
+	if out := logBuf.String(); out != "" {
+		t.Fatalf("sweep logged %q, want silence — a vanished PVC is completion, not an error", out)
 	}
 }
 
