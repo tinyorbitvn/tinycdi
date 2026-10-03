@@ -2,7 +2,10 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -365,5 +368,68 @@ func TestCSRFChainForgedOriginRejected(t *testing.T) {
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusForbidden || decodeError(t, r) != string(CodeCSRFFailed) {
 		t.Fatalf("status=%d, want 403 CSRF_FAILED", r.StatusCode)
+	}
+}
+
+// failingSessionStore is a SessionStore whose reads return err — the shape
+// RequireAuth sees while Postgres is down (E6 drill).
+type failingSessionStore struct{ err error }
+
+func (s failingSessionStore) Save(context.Context, *Session) error           { return s.err }
+func (s failingSessionStore) Get(context.Context, string) (*Session, error)  { return nil, s.err }
+func (s failingSessionStore) Peek(context.Context, string) (*Session, error) { return nil, s.err }
+func (s failingSessionStore) TouchPrincipal(context.Context, string) (int64, error) {
+	return 0, s.err
+}
+func (s failingSessionStore) Delete(context.Context, string) error { return s.err }
+
+// TestRequireAuth_SessionStoreErrors: a store error is not "no session".
+// Not-found stays 401; a store that cannot answer (outage, failover) must
+// be 503 UNAVAILABLE so the portal retries instead of forcing re-login;
+// anything else is a bug — 500.
+func TestRequireAuth_SessionStoreErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   ErrorCode
+	}{
+		{"not found stays 401", ErrSessionNotFound, http.StatusUnauthorized, CodeUnauthenticated},
+		{"store outage is 503", fmt.Errorf("get session: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, CodeUnavailable},
+		{"store bug is 500", errors.New("scan: column count mismatch"), http.StatusInternalServerError, CodeInternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &Authenticator{
+				cfg:      &AuthConfig{SessionCookieName: "__Host-tcdi_session"},
+				sessions: failingSessionStore{err: tc.err},
+			}
+			h := auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			for _, passive := range []bool{false, true} {
+				handler := h
+				if passive {
+					handler = auth.RequireAuthPassive(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.WriteHeader(http.StatusNoContent)
+					}))
+				}
+				req := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
+				req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: "sess-x"})
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("passive=%v status=%d, want %d", passive, rec.Code, tc.wantStatus)
+				}
+				var body struct {
+					Code string `json:"code"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("error body: %v", err)
+				}
+				if body.Code != string(tc.wantCode) {
+					t.Fatalf("passive=%v code=%q, want %s", passive, body.Code, tc.wantCode)
+				}
+			}
+		})
 	}
 }
