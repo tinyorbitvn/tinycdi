@@ -308,6 +308,9 @@ Check the result — only the leader replica logs the pass:
 $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
 
+Day-2 quota operations (reading usage, `QUOTA_EXHAUSTED` vs
+`release_pending`, changing limits): `tenant-quotas.md`.
+
 ## Rate limits and trusted proxies
 
 `GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited
