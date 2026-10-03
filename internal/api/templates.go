@@ -12,9 +12,9 @@ import (
 // workspace views.
 const DefaultImageStaleAfter = 14 * 24 * time.Hour
 
-// DefaultImageBlockAfter is the -image-block-after default (45 days, E3):
-// create, and a start that cannot move to a fresher revision, refuse a
-// runtime image older than this with 409 IMAGE_STALE.
+// DefaultImageBlockAfter is the -image-block-after default (1080h = 45
+// days, E3): create, and a start that cannot move to a fresher revision,
+// refuse a runtime image older than this with 409 IMAGE_STALE.
 const DefaultImageBlockAfter = 45 * 24 * time.Hour
 
 // imageFreshness maps the raw image-built-at annotation value to the
