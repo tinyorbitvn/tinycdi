@@ -444,6 +444,25 @@ serviceMonitor:
   scrapeTimeout: ""
   honorLabels: false
 
+# Optional Grafana dashboards (E8) — one ConfigMap per JSON file under
+# files/dashboards/, side-loaded by the Grafana dashboard sidecar.
+# Requires backend.metrics.enabled: every panel reads the tinycdi_*
+# series the backend metrics listener serves.
+dashboards:
+  enabled: false
+  # Labels ON the dashboard ConfigMaps — the sidecar's discovery labels.
+  # kube-prometheus-stack default is grafana_dashboard: "1"; set your
+  # Grafana's label/labelValue here when it differs.
+  labels:
+    grafana_dashboard: "1"
+
+# Optional PrometheusRule (E8) — the platform alert set (README "Alerts").
+# Requires backend.metrics.enabled plus the Prometheus Operator CRDs;
+# pair with serviceMonitor so something actually scrapes the series.
+alerts:
+  enabled: false
+  labels: {}            # e.g. {release: prometheus} — the operator's ruleSelector
+
 networkPolicy:
   enabled: true
   # Egress peers for the cluster apiserver (pods labeled

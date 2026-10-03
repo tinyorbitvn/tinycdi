@@ -178,6 +178,12 @@ present.
 | Boot failures | `tinycdi_boot_deadline_exceeded_total` | rising — image pull or scheduling trouble |
 | API health | `tinycdi_http_requests_total` / `tinycdi_http_request_duration_seconds` | 5xx-class growth, p95 on `/v1/workspaces` |
 
+Ready-made Grafana dashboards and a `PrometheusRule` shipping the alert
+set above ship inside the chart, both off by default: set
+`dashboards.enabled` and `alerts.enabled` (each requires
+`backend.metrics.enabled`); see the chart README "Dashboards and
+alerts".
+
 Saturation symptoms to expect, in order: `QUOTA_EXHAUSTED` 409s (quota gate
 — by design), pod `Pending` on cpu/memory (cluster gate), image-pull
 latency in `workspace_provisioning_seconds` (cold node), then session-listener CPU

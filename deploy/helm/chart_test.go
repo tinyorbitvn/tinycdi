@@ -28,6 +28,7 @@ package chart_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2972,5 +2973,254 @@ func TestBackendProbes(t *testing.T) {
 		if !ok || grace < 30 {
 			t.Errorf("%s: terminationGracePeriodSeconds = %v, want >= 30", values, podSpec["terminationGracePeriodSeconds"])
 		}
+	}
+}
+
+// promtoolBin resolves promtool like helmBin: $TCDI_PROMTOOL, then
+// bin/promtool, then PATH.
+func promtoolBin(t *testing.T) string {
+	t.Helper()
+	if p := os.Getenv("TCDI_PROMTOOL"); p != "" {
+		return p
+	}
+	pinned := filepath.Join(repoRoot(t), "bin", "promtool")
+	if _, err := os.Stat(pinned); err == nil {
+		return pinned
+	}
+	if p, err := exec.LookPath("promtool"); err == nil {
+		return p
+	}
+	t.Skip("no promtool binary: set TCDI_PROMTOOL or put promtool on PATH")
+	return ""
+}
+
+// dashboardConfigMaps returns the rendered ConfigMaps that carry the
+// Grafana dashboard sidecar label.
+func dashboardConfigMaps(docs []doc) []doc {
+	var out []doc
+	for _, d := range selectDocs(docs, "ConfigMap") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		if _, ok := lbls["grafana_dashboard"]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// TestDashboardsOffByDefault: dashboards are opt-in (E8) — no dashboard
+// ConfigMap renders unless dashboards.enabled, and enabling them without
+// backend.metrics.enabled fails the render rather than shipping empty
+// dashboards (the panels only read the metrics listener's tinycdi_*
+// series).
+func TestDashboardsOffByDefault(t *testing.T) {
+	for _, values := range []string{"minimal-values.yaml", "example-values.yaml"} {
+		if n := len(dashboardConfigMaps(render(t, values))); n != 0 {
+			t.Errorf("%s: dashboards must be off by default, got %d dashboard ConfigMaps", values, n)
+		}
+	}
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "dashboards.enabled=true")
+	if !strings.Contains(out, "backend.metrics.enabled") {
+		t.Errorf("dashboards.enabled without backend.metrics must fail mentioning backend.metrics.enabled, got: %s", out)
+	}
+}
+
+// TestAlertsOffByDefault: the PrometheusRule is opt-in (E8) — nothing
+// renders unless alerts.enabled, and enabling it without
+// backend.metrics.enabled fails the render (nothing serves the series
+// the rules evaluate).
+func TestAlertsOffByDefault(t *testing.T) {
+	for _, values := range []string{"minimal-values.yaml", "example-values.yaml"} {
+		if n := len(selectDocs(render(t, values), "PrometheusRule")); n != 0 {
+			t.Errorf("%s: alerts must be off by default, got %d PrometheusRules", values, n)
+		}
+	}
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "alerts.enabled=true")
+	if !strings.Contains(out, "backend.metrics.enabled") {
+		t.Errorf("alerts.enabled without backend.metrics must fail mentioning backend.metrics.enabled, got: %s", out)
+	}
+}
+
+// TestDashboardsRender: dashboards.enabled renders one ConfigMap per JSON
+// file under files/dashboards/, each carrying the Grafana sidecar label
+// (grafana_dashboard) and a JSON document that parses.
+func TestDashboardsRender(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "dashboards.enabled=true")
+	cms := dashboardConfigMaps(docs)
+	onDisk, err := filepath.Glob(filepath.Join("tinycdi", "files", "dashboards", "*.json"))
+	if err != nil || len(onDisk) == 0 {
+		t.Fatalf("files/dashboards/*.json must ship at least one dashboard, got %d (err %v)", len(onDisk), err)
+	}
+	if len(cms) != len(onDisk) {
+		t.Fatalf("expected %d dashboard ConfigMaps (one per files/dashboards/*.json), got %d", len(onDisk), len(cms))
+	}
+	for _, cm := range cms {
+		name, ns := meta(cm)
+		if ns != "tcdi-system" {
+			t.Errorf("dashboard ConfigMap %s must render in the release namespace, got %s", name, ns)
+		}
+		m, _ := cm["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		if lbls["grafana_dashboard"] != "1" {
+			t.Errorf("dashboard ConfigMap %s must carry the grafana_dashboard sidecar label, got %v", name, lbls)
+		}
+		data, _ := cm["data"].(map[string]any)
+		if len(data) != 1 {
+			t.Errorf("dashboard ConfigMap %s must embed exactly one JSON file, got %d keys", name, len(data))
+		}
+		for key, raw := range data {
+			s, _ := raw.(string)
+			var v map[string]any
+			if err := json.Unmarshal([]byte(s), &v); err != nil {
+				t.Errorf("dashboard %s:%s does not parse as JSON: %v", name, key, err)
+				continue
+			}
+			if v["uid"] == nil || v["title"] == nil || v["panels"] == nil {
+				t.Errorf("dashboard %s:%s is not a Grafana dashboard (missing uid/title/panels)", name, key)
+			}
+		}
+	}
+	// dashboards.labels overrides the sidecar discovery labels.
+	docs = renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "dashboards.enabled=true",
+		"--set", "dashboards.labels.custom_label=enabled")
+	found := false
+	for _, cm := range dashboardConfigMaps(docs) {
+		m, _ := cm["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		if lbls["custom_label"] == "enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dashboards.labels must land on the dashboard ConfigMaps")
+	}
+}
+
+// prometheusRules extracts the rendered PrometheusRule's alerting rules
+// as (alert name, expr) pairs.
+func prometheusRules(t *testing.T, docs []doc) map[string]string {
+	t.Helper()
+	rules := map[string]string{}
+	for _, d := range selectDocs(docs, "PrometheusRule") {
+		spec, _ := d["spec"].(map[string]any)
+		for _, g := range toSlice(spec["groups"]) {
+			gm, _ := g.(map[string]any)
+			for _, r := range toSlice(gm["rules"]) {
+				rm, _ := r.(map[string]any)
+				name, _ := rm["alert"].(string)
+				expr, _ := rm["expr"].(string)
+				if name != "" {
+					rules[name] = expr
+				}
+			}
+		}
+	}
+	return rules
+}
+
+// exportedMetricNames is the full tinycdi_* series the backend metrics
+// listener serves after V3.8 (PR #54): the pre-existing platform set plus
+// the E8 additions. Histogram child series (_bucket/_sum/_count) count as
+// their parent. Alert rules and dashboards must never reference a series
+// outside this set — a typo silently alerts never.
+var exportedMetricNames = map[string]bool{
+	"tinycdi_http_requests_total":                   true,
+	"tinycdi_http_request_duration_seconds":         true,
+	"tinycdi_http_request_duration_seconds_bucket":  true,
+	"tinycdi_http_request_duration_seconds_sum":     true,
+	"tinycdi_http_request_duration_seconds_count":   true,
+	"tinycdi_workspace_provisioning_seconds":        true,
+	"tinycdi_workspace_provisioning_seconds_bucket": true,
+	"tinycdi_workspace_provisioning_seconds_sum":    true,
+	"tinycdi_workspace_provisioning_seconds_count":  true,
+	"tinycdi_workspaces_running":                    true,
+	"tinycdi_workspaces_reserved":                   true,
+	"tinycdi_lease_failures_total":                  true,
+	"tinycdi_finalizers_stuck":                      true,
+	"tinycdi_quota_drift":                           true,
+	"tinycdi_pvc_leaks":                             true,
+	"tinycdi_boot_deadline_exceeded_total":          true,
+	"tinycdi_sessions_active":                       true,
+	"tinycdi_gateway_rehydrations_total":            true,
+	"tinycdi_gateway_streams_fenced_total":          true,
+	"tinycdi_logins_total":                          true,
+	"tinycdi_runtime_image_age_seconds":             true,
+	"tinycdi_rate_limited_total":                    true,
+}
+
+var metricNameRe = regexp.MustCompile(`tinycdi_[a-z0-9_]+`)
+
+// TestAlertRulesReferenceExistingMetrics: alerts.enabled renders the six
+// E8 alert rules, and every tinycdi_* metric name in a rule expression is
+// one the platform actually exports (the V3.8 set plus the existing one).
+func TestAlertRulesReferenceExistingMetrics(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "alerts.enabled=true")
+	rules := prometheusRules(t, docs)
+	want := []string{
+		"TinyCDIBackendReplicaDown",
+		"TinyCDISessionDropSpike",
+		"TinyCDILeaseRenewFailures",
+		"TinyCDIRehydrationFailures",
+		"TinyCDIRuntimeImageStale",
+		"TinyCDILoginFailuresHigh",
+	}
+	for _, name := range want {
+		expr, ok := rules[name]
+		if !ok {
+			t.Errorf("missing alert rule %s", name)
+			continue
+		}
+		names := metricNameRe.FindAllString(expr, -1)
+		if len(names) == 0 {
+			t.Errorf("%s: expression references no tinycdi_* series: %s", name, expr)
+		}
+		for _, mn := range names {
+			if !exportedMetricNames[mn] {
+				t.Errorf("%s: expression references unknown metric %q (not in the V3.8/existing export set)", name, mn)
+			}
+		}
+	}
+	if len(rules) != len(want) {
+		t.Errorf("expected exactly %d alert rules, got %d: %v", len(want), len(rules), rules)
+	}
+}
+
+// TestPromtoolCheckRules renders the PrometheusRule and runs
+// `promtool check rules` on its spec — the same validation CI performs.
+// Resolves promtool via $TCDI_PROMTOOL, then bin/promtool, then PATH.
+func TestPromtoolCheckRules(t *testing.T) {
+	docs := renderArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "alerts.enabled=true")
+	prules := selectDocs(docs, "PrometheusRule")
+	if len(prules) != 1 {
+		t.Fatalf("expected exactly 1 PrometheusRule, got %d", len(prules))
+	}
+	spec, _ := prules[0]["spec"].(map[string]any)
+	if spec == nil {
+		t.Fatal("PrometheusRule has no spec")
+	}
+	raw, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal PrometheusRule spec: %v", err)
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "tinycdi-rules.yaml")
+	if err := os.WriteFile(f, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(promtoolBin(t), "check", "rules", f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("promtool check rules failed: %v\n%s", err, out)
 	}
 }

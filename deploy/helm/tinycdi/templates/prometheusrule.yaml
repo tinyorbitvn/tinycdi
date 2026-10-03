@@ -1,0 +1,77 @@
+# Optional PrometheusRule (E8): the platform alert set over the tinycdi_*
+# series. Requires backend.metrics.enabled — nothing serves the series
+# otherwise — and the Prometheus Operator CRDs; alerts.labels selects the
+# operator's ruleSelector the way serviceMonitor.labels does.
+{{- if .Values.alerts.enabled }}
+{{- if not .Values.backend.metrics.enabled }}
+{{- fail "alerts.enabled requires backend.metrics.enabled (the rules evaluate the backend metrics listener's tinycdi_* series) — set backend.metrics.enabled: true plus networkPolicy.prometheusPeers, or turn alerts.enabled off" }}
+{{- end }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tinycdi
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.labels" . | nindent 4 }}
+    {{- with .Values.alerts.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: tinycdi.platform
+      rules:
+        # Fewer backend replicas report metrics than backend.replicas —
+        # the down replica's series go stale within one scrape-staleness
+        # window, so `for` also covers the staleness lag.
+        - alert: TinyCDIBackendReplicaDown
+          expr: "(count(count by (instance) (tinycdi_sessions_active)) or vector(0)) < {{ .Values.backend.replicas | int }}"
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Fewer TinyCDI backend replicas reporting than configured"
+            description: "Only {{ "{{" }} $value {{ "}}" }} of {{ .Values.backend.replicas | int }} backend replicas have reported metrics for 15m — a replica is down or its metrics listener is unreachable."
+        # More than half the live sessions disappeared within 5 minutes.
+        - alert: TinyCDISessionDropSpike
+          expr: "sum(tinycdi_sessions_active offset 5m) > 0 and (1 - sum(tinycdi_sessions_active) / sum(tinycdi_sessions_active offset 5m)) > 0.5"
+          labels: {severity: critical}
+          annotations:
+            summary: "TinyCDI live sessions dropped sharply"
+            description: "Over half of the live sessions vanished inside 5m ({{ "{{" }} $value | humanizePercentage {{ "}}" }} dropped) — check backend restarts, Postgres and the session gateway."
+        # Sustained lease acquire/renew failures (≈ >1 per 50 s).
+        - alert: TinyCDILeaseRenewFailures
+          expr: "rate(tinycdi_lease_failures_total[15m]) > 0.02"
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "TinyCDI lease renewals failing"
+            description: "Lease failures run at {{ "{{" }} $value | humanize {{ "}}" }}/s for 15m — gateway↔broker or fencing trouble; see the lease_failures reason label."
+        # >20% of session rehydrations do not answer "ok" (restarts losing
+        # sessions, or the shared session directory misbehaving).
+        - alert: TinyCDIRehydrationFailures
+          expr: "sum(rate(tinycdi_gateway_rehydrations_total[15m])) > 0.01 and (sum(rate(tinycdi_gateway_rehydrations_total{result!=\"ok\"}[15m])) / sum(rate(tinycdi_gateway_rehydrations_total[15m]))) > 0.2"
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "TinyCDI session rehydrations failing"
+            description: "{{ "{{" }} $value | humanizePercentage {{ "}}" }} of session rehydrations return miss/error for 15m — restarts are losing sessions users should keep."
+        # Runtime image age past the -image-stale-after advisory threshold
+        # (default 14 d — mirror it here when the flag is overridden via
+        # backend.extraArgs).
+        - alert: TinyCDIRuntimeImageStale
+          expr: "tinycdi_runtime_image_age_seconds > 1209600"
+          for: 1h
+          labels: {severity: warning}
+          annotations:
+            summary: "TinyCDI runtime image {{ "{{" }} $labels.family {{ "}}" }} older than the stale threshold"
+            description: "The newest published revision of family {{ "{{" }} $labels.family {{ "}}" }} is older than -image-stale-after (14 d default) — the publish train is overdue."
+        # >50% of completed logins fail (IdP trouble, gate misconfig or
+        # brute force) with non-trivial volume.
+        - alert: TinyCDILoginFailuresHigh
+          expr: "sum(rate(tinycdi_logins_total[15m])) > 0.01 and (sum(rate(tinycdi_logins_total{outcome!=\"success\"}[15m])) / sum(rate(tinycdi_logins_total[15m]))) > 0.5"
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "TinyCDI login failure rate high"
+            description: "{{ "{{" }} $value | humanizePercentage {{ "}}" }} of completed logins are denied/error for 15m — check the IdP, required groups/tenants and brute-force patterns."
+{{- end }}
