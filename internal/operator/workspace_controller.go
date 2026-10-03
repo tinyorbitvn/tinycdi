@@ -730,40 +730,14 @@ func appliedIntent(ws *workspacesv1alpha1.Workspace) (*AppliedIntent, error) {
 }
 
 // resolveTemplate fetches the WorkspaceTemplate named by
-// spec.templateRef.name. When the exact object is gone — e.g. a stopped
-// workspace created before an upgrade that replaced the chart-seeded
-// immutable revision — it falls back to the newest revision carrying the
-// workspaces.cdi.tinyorbit.vn/catalog-name label equal to the reference, so a
-// base-name reference resolves through revision churn. Nothing else is
-// retried: a reference to a specific revision object that was deleted
-// stays TemplateNotFound.
+// spec.templateRef.name through the shared by-name resolver: the exact
+// object first, else the newest revision carrying the catalog-name label
+// equal to the reference, so a stopped workspace created before an upgrade
+// that replaced the chart-seeded immutable revision still resolves.
+// Nothing else is retried: a reference to a specific revision object that
+// was deleted stays TemplateNotFound.
 func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*workspacesv1alpha1.WorkspaceTemplate, error) {
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{}
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      ws.Spec.TemplateRef.Name,
-		Namespace: ws.Namespace,
-	}, tpl)
-	if !apierrors.IsNotFound(err) {
-		return tpl, err
-	}
-	var list workspacesv1alpha1.WorkspaceTemplateList
-	if lerr := r.List(ctx, &list, client.InNamespace(ws.Namespace),
-		client.MatchingLabels{provisioning.LabelCatalogName: ws.Spec.TemplateRef.Name}); lerr != nil {
-		return nil, lerr
-	}
-	var latest *workspacesv1alpha1.WorkspaceTemplate
-	for i := range list.Items {
-		t := &list.Items[i]
-		if latest == nil ||
-			t.CreationTimestamp.After(latest.CreationTimestamp.Time) ||
-			(t.CreationTimestamp.Equal(&latest.CreationTimestamp) && t.Name > latest.Name) {
-			latest = t
-		}
-	}
-	if latest == nil {
-		return nil, err
-	}
-	return latest, nil
+	return provisioning.ResolveTemplateByName(ctx, r.Client, ws.Namespace, ws.Spec.TemplateRef.Name)
 }
 
 func templateSnapshotFor(ws *workspacesv1alpha1.Workspace) (*templateSnapshot, error) {
