@@ -623,17 +623,27 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
 
-	// E7: the unauthenticated login family shares one per-client bucket —
-	// /v1/login, /v1/auth/callback and the anonymous session probe
-	// (backlog 12). The client key honors -trusted-proxies exactly like
-	// the session gateway's launch limiter.
+	// E7 + FX-R30: the login family shares one token bucket per KEY —
+	// /v1/login, /v1/auth/callback and the session probe (backlog 12).
+	// /v1/login keeps the plain client-IP key: it is the anonymous login
+	// start, and keying it by cookie would buy every forged value a store
+	// read before the refusal (advisor review). The probe keys on a
+	// validated session digest and the callback on its validated OIDC
+	// state — plus a per-IP ceiling at 10x the login budget, so states an
+	// attacker mints through IP-limited logins cannot amplify throughput
+	// past a bounded multiplier. Anonymous fallback everywhere is the
+	// trusted-proxy client key (S18), unchanged.
 	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	loginLimit := api.RateLimit(ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil), trusted, b.metrics)
+	loginLimiter := ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil)
+	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
+	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
+	callbackCeiling := ratelimit.New(10*cfg.LoginRate, 10*loginRateBurst, rateLimitMaxKeys, nil)
+	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit)
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -641,16 +651,18 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // appMux assembles the public API route table. The session surface
 // (launch, control, desktop proxy) is deliberately absent: API routes must
 // not exist on the session listener and vice versa (D7). loginLimit wraps
-// the anonymous login-family routes (E7).
+// the anonymous login start on the plain client-IP key, sessionLimit the
+// session-cookie-aware probe and callbackLimit the OIDC callback
+// (E7, FX-R30).
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
 	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
-	loginLimit func(http.Handler) http.Handler) *http.ServeMux {
+	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
-	mux.Handle("GET /v1/auth/callback", loginLimit(http.HandlerFunc(authn.CallbackHandler)))
+	mux.Handle("GET /v1/auth/callback", callbackLimit(http.HandlerFunc(authn.CallbackHandler)))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
-	api.MountSessionProbeRoute(mux, authn, loginLimit)
+	api.MountSessionProbeRoute(mux, authn, sessionLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
 	api.MountConnectionRoutes(mux, authn, conn)
