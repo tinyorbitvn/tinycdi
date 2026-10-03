@@ -274,6 +274,16 @@ func (s *PurgeSweeper) SweepOnce(ctx context.Context) {
 	}
 }
 
+// completePurge records the deletion proof on a bounded detached context:
+// the cluster-side delete already happened (or the volume was already
+// gone), so a sweep cancelled between the two must still land the
+// bookkeeping — the same crash window the dispatcher's detached ack closes.
+func (s *PurgeSweeper) completePurge(ctx context.Context, rec *RetainedRecord) error {
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ackTimeout)
+	defer cancel()
+	return s.Records.CompletePurge(pctx, rec.ID)
+}
+
 // purgeOne deletes the recorded volume when it is verifiably not attached,
 // then completes the record. Deletion and completion are both
 // retry-safe: the next sweep finishes whatever a crash left.
@@ -283,13 +293,13 @@ func (s *PurgeSweeper) purgeOne(ctx context.Context, rec *RetainedRecord) error 
 	switch {
 	case apierrors.IsNotFound(err):
 		// Volume already gone — completion proof.
-		return s.Records.CompletePurge(ctx, rec.ID)
+		return s.completePurge(ctx, rec)
 	case err != nil:
 		return err
 	case string(pvc.UID) != rec.PVCUID:
 		// A different dataset sits at the name: the recorded volume is
 		// gone, and the foreign object is never ours to delete.
-		return s.Records.CompletePurge(ctx, rec.ID)
+		return s.completePurge(ctx, rec)
 	case pvc.Labels[linux.LabelDataRetained] != "true":
 		return fmt.Errorf("pvc %s/%s lost its retained marker; refusing to delete", rec.PVCNamespace, rec.PVCName)
 	}
@@ -328,7 +338,7 @@ func (s *PurgeSweeper) purgeOne(ctx context.Context, rec *RetainedRecord) error 
 			}
 		}
 	}
-	return s.Records.CompletePurge(ctx, rec.ID)
+	return s.completePurge(ctx, rec)
 }
 
 // attached reports whether any live consumer mounts the recorded claim: a

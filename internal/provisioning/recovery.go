@@ -59,6 +59,11 @@ const (
 	// and was parked for manual attention instead of looping forever.
 	ActionQuarantineIntent RecoveryActionKind = "quarantine_intent"
 	ActionHoldRetainedDisk RecoveryActionKind = "hold_retained_disk"
+	// ActionSettleReservation — a held reservation left holding nothing at
+	// all (every dimension zero, no restart vector) on a deleted workspace
+	// was released. Stranded by disk releases that predate the
+	// in-transaction settle in releaseDiskQuota.
+	ActionSettleReservation RecoveryActionKind = "settle_reservation"
 )
 
 // Recovery rebuilds control-plane invariants after an API or operator
@@ -341,6 +346,37 @@ func (r *Recovery) repairRetainedDiskHolds(ctx context.Context) ([]PlatformID, e
 	return repaired, nil
 }
 
+// settleEmptyReservations releases held reservation rows that hold
+// nothing at all — every dimension zero and no stored restart vector — on
+// DELETED workspaces. Such rows are stranded by disk releases that
+// predate the in-transaction settle in releaseDiskQuota: nothing they
+// hold can ever be freed by an absence proof, and a deleted workspace
+// never re-acquires. The workspace-state guard keeps a live workspace's
+// (unreachable) all-zero row untouched. Returns the released workspace ids.
+func (r *Recovery) settleEmptyReservations(ctx context.Context) ([]PlatformID, error) {
+	rows, err := r.db.Pool().Query(ctx, `
+		UPDATE quota_reservation qr
+		SET state = 'released', release_proof = $1, released_at = now()
+		FROM workspaces w
+		WHERE qr.workspace_id = w.id AND qr.state = 'held' AND w.state = 'deleted'
+		  AND qr.running_slots = 0 AND qr.cpu_millis = 0 AND qr.memory_bytes = 0 AND qr.disk_bytes = 0
+		  AND qr.restart_slots IS NULL AND qr.restart_cpu_millis IS NULL AND qr.restart_memory_bytes IS NULL
+		RETURNING qr.workspace_id`, string(ProofQuotaSettled))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlatformID
+	for rows.Next() {
+		var id PlatformID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // recordApplyFailure bumps the persisted apply-attempts counter on the
 // intent and quarantines it once the bound is reached. It returns the
 // attempt count and whether the intent is now quarantined.
@@ -406,6 +442,13 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 	}
 	broken := map[PlatformID]bool{} // streams already parked/failed this pass
 	for _, in := range pending {
+		if ctx.Err() != nil {
+			// A cancelled pass stops driving new applies: an apply failing
+			// on the cancelled ctx would still inflate the persisted
+			// attempt count toward quarantine. The in-flight intent's
+			// bookkeeping above already landed on its detached ctx.
+			break
+		}
 		if broken[in.WorkspaceUID] {
 			continue // never jump ahead of a failed/parked revision
 		}
@@ -414,7 +457,12 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 			continue
 		}
 		if err := applier.Apply(ctx, in.Intent); err != nil {
-			attempts, quarantined, rerr := r.recordApplyFailure(ctx, in)
+			// Record the failed attempt even if ctx was cancelled during
+			// Apply: losing the count lets a poison intent outlive
+			// MaxIntentApplyAttempts. Bounded like the dispatcher's ack.
+			fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), ackTimeout)
+			attempts, quarantined, rerr := r.recordApplyFailure(fctx, in)
+			fcancel()
 			if rerr != nil {
 				return actions, rerr
 			}
@@ -429,10 +477,17 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 			broken[in.WorkspaceUID] = true
 			continue
 		}
-		if _, err := r.db.Pool().Exec(ctx, `
+		// Record the delivery even if ctx was cancelled during Apply (the
+		// leader lost its lock or is shutting down): the intent was applied,
+		// and a failed ack would replay it on the next pass. Mirrors the
+		// dispatcher's detached ack; ackTimeout bounds it.
+		ackCtx, ackCancel := context.WithTimeout(context.WithoutCancel(ctx), ackTimeout)
+		_, err = r.db.Pool().Exec(ackCtx, `
 			UPDATE outbox_intent SET dispatched_at = now()
 			WHERE workspace_id = $1 AND revision = $2`,
-			in.WorkspaceUID, in.Revision); err != nil {
+			in.WorkspaceUID, in.Revision)
+		ackCancel()
+		if err != nil {
 			return actions, fmt.Errorf("mark dispatched %s rev %d: %w", in.WorkspaceUID, in.Revision, err)
 		}
 		actions = append(actions, RecoveryAction{
@@ -495,6 +550,18 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 		actions = append(actions, RecoveryAction{
 			WorkspaceUID: ws, Kind: ActionHoldRetainedDisk,
 			Detail: "retained disk re-held against the deleted workspace's reservation",
+		})
+	}
+
+	// --- settle reservations left holding nothing -----------------------
+	settled, err := r.settleEmptyReservations(ctx)
+	if err != nil {
+		return actions, err
+	}
+	for _, ws := range settled {
+		actions = append(actions, RecoveryAction{
+			WorkspaceUID: ws, Kind: ActionSettleReservation,
+			Detail: "empty held reservation released (all dimensions zero)",
 		})
 	}
 	return actions, nil
