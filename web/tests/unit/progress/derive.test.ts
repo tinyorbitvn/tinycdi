@@ -103,7 +103,7 @@ describe("deriveProgress — op detection", () => {
     );
     expect(m?.op).toBe("start");
     expect(states(m)).toEqual(["active", "waiting", "waiting", "waiting", "waiting"]);
-    expect(active(m).label).toBe("progress.step.queued");
+    expect(active(m).label).toBe("progress.step.scheduling");
   });
 
   it("stop: FX-R19 — Terminating wins over desiredState Stopped", () => {
