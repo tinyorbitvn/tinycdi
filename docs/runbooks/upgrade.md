@@ -322,6 +322,17 @@ $K -n <release-ns> rollout status deployment/frontend
 Post-checks: `tinycdi_lease_failures_total` back to baseline, a synthetic
 create→connect→delete round-trip, and `tinycdi_quota_drift == 0`.
 
+### GitOps note — the Argo CD schema cache on CRD changes
+
+Argo CD validates and diffs CRs against the CRD OpenAPI schemas it has
+**cached**; a CRD update is not picked up automatically. After applying a
+changed CRD (step 1 — v0.3 updates both `workspaces` and
+`workspacetemplates`), a sync that writes the new fields can fail or diff
+them as "unknown field" until the cache is refreshed. Apply `crds/` first
+(outside the app, or in an earlier sync wave), then hard-refresh the
+application — `argocd app get <app> --hard-refresh`, or Refresh → Hard in
+the UI — before letting it reconcile the CRs.
+
 ### Hardening notes (chart)
 
 When upgrading to a chart that includes the SEC-* hardening set, note the
@@ -448,6 +459,12 @@ never run an old backend against a newer schema it cannot read — treat
   or every component loses its peer at once. The operator's client cert
   **CN must stay `operator`** (or match `backend.operatorCN`) — the broker's
   workspace revoke/drain routes accept no other identity (ADR 0003).
+- Rotation needs **no restart**: the operator hot-reloads its broker
+  client certificate and the backend hot-reloads the internal listener's
+  client-CA bundle plus all three listener certs — the updated Secret
+  material lands on the next handshake. Mounts refresh within the kubelet
+  sync period (~1 min), so a CA-swap rollout should still follow the order
+  above rather than racing the reload.
 - `devAllowNoBroker` exists to run the operator without a broker in dev —
   it must never appear in a release values file; the operator fails fast
   if the broker client is unconfigured. The render rejects

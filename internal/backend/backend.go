@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 // Shutdown runs against ONE shared deadline, kept under the pod's
@@ -70,6 +71,10 @@ type Backend struct {
 	sessionHandler  http.Handler
 	internalHandler http.Handler
 	internalTLSCfg  *tls.Config
+
+	// metrics is the platform metric set (E8), built only when the metrics
+	// listener is enabled — with no listener there is nothing to scrape.
+	metrics *observability.Metrics
 
 	// bg holds the ctx-bound background loops started by Run.
 	bg []func(ctx context.Context)
