@@ -374,5 +374,3 @@ func TestK8sApplierStartRepointsTemplateRef(t *testing.T) {
 		t.Fatalf("running CR templateRef moved to %q", ws.Spec.TemplateRef.Name)
 	}
 }
-
-
