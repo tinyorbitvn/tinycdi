@@ -160,17 +160,7 @@ func Reserve(ctx context.Context, tx store.Tx, tenantID, workspaceID string, v R
 	}
 
 	if dim := v.Exceeds(used, limit); dim != "" {
-		e := &QuotaExceededError{TenantID: tenantID, Dimension: dim, Requested: v.RunningSlots}
-		e.Used, e.Limit = used.RunningSlots, limit.RunningSlots
-		switch dim {
-		case "cpuMillis":
-			e.Used, e.Limit, e.Requested = used.CPUMillis, limit.CPUMillis, v.CPUMillis
-		case "memoryBytes":
-			e.Used, e.Limit, e.Requested = used.MemoryBytes, limit.MemoryBytes, v.MemoryBytes
-		case "diskBytes":
-			e.Used, e.Limit, e.Requested = used.DiskBytes, limit.DiskBytes, v.DiskBytes
-		}
-		return e
+		return newQuotaExceeded(tenantID, dim, v, used, limit)
 	}
 
 	if state == "released" {
@@ -196,8 +186,94 @@ func Reserve(ctx context.Context, tx store.Tx, tenantID, workspaceID string, v R
 	return nil
 }
 
-// Release frees a held reservation. proof must evidence that the runtime
-// no longer consumes compute; ProofUnspecified is rejected so a failed
+// newQuotaExceeded describes the dimension a request would overrun.
+func newQuotaExceeded(tenantID, dim string, v, used, limit ResourceVector) *QuotaExceededError {
+	e := &QuotaExceededError{TenantID: tenantID, Dimension: dim, Requested: v.RunningSlots}
+	e.Used, e.Limit = used.RunningSlots, limit.RunningSlots
+	switch dim {
+	case "cpuMillis":
+		e.Used, e.Limit, e.Requested = used.CPUMillis, limit.CPUMillis, v.CPUMillis
+	case "memoryBytes":
+		e.Used, e.Limit, e.Requested = used.MemoryBytes, limit.MemoryBytes, v.MemoryBytes
+	case "diskBytes":
+		e.Used, e.Limit, e.Requested = used.DiskBytes, limit.DiskBytes, v.DiskBytes
+	}
+	return e
+}
+
+// convertToDiskOnly turns a stopped Retain workspace's held reservation into a
+// disk-only hold once the pod is proven gone: the compute vector moves to
+// restart_* (so a start re-acquires exactly it) and the compute columns are
+// zeroed; disk_bytes stays. It runs under the workspace row lock and only
+// while the workspace is active and Stopped, so a start that lands between the
+// absence proof and this write keeps its compute. Idempotent: a row already
+// converted (or released) is untouched. It reports whether it converted.
+func convertToDiskOnly(ctx context.Context, tx store.Tx, tenantID, workspaceID string) (bool, error) {
+	var desired, state string
+	err := tx.QueryRow(ctx, `
+		SELECT desired_state, state FROM workspaces
+		WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, workspaceID, tenantID).Scan(&desired, &state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("convert: lock workspace %w", err)
+	}
+	if state != "active" || desired != "Stopped" {
+		return false, nil
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE quota_reservation
+		SET restart_slots = running_slots, restart_cpu_millis = cpu_millis,
+		    restart_memory_bytes = memory_bytes,
+		    running_slots = 0, cpu_millis = 0, memory_bytes = 0
+		WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held'
+		  AND (running_slots > 0 OR cpu_millis > 0 OR memory_bytes > 0)`,
+		workspaceID, tenantID)
+	if err != nil {
+		return false, fmt.Errorf("convert: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// reacquireCompute adds a converted workspace's stored compute vector back to
+// its held reservation (the disk is already counted) and clears the stored
+// vector. It serializes with other reservations on the tenant_quota row and
+// checks only the compute dimensions.
+func reacquireCompute(ctx context.Context, tx store.Tx, tenantID, workspaceID string, v ResourceVector) error {
+	var limit ResourceVector
+	err := tx.QueryRow(ctx, `
+		SELECT max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes
+		FROM tenant_quota WHERE tenant_id = $1 FOR UPDATE`, tenantID).
+		Scan(&limit.RunningSlots, &limit.CPUMillis, &limit.MemoryBytes, &limit.DiskBytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoQuota
+	}
+	if err != nil {
+		return fmt.Errorf("reacquire: lock quota %w", err)
+	}
+	used, err := HeldUsage(ctx, tx, tenantID)
+	if err != nil {
+		return fmt.Errorf("reacquire: usage %w", err)
+	}
+	limit.DiskBytes = used.DiskBytes // disk is already held; only compute can overrun
+	if dim := v.Exceeds(used, limit); dim != "" {
+		return newQuotaExceeded(tenantID, dim, v, used, limit)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE quota_reservation
+		SET running_slots = $3, cpu_millis = $4, memory_bytes = $5,
+		    restart_slots = NULL, restart_cpu_millis = NULL, restart_memory_bytes = NULL
+		WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held'`,
+		workspaceID, tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes); err != nil {
+		return fmt.Errorf("reacquire: %w", err)
+	}
+	return nil
+}
+
+// Release frees a held reservation and drops any stored restart vector (a
+// disk-only hold that is released belongs to a deleted workspace). proof must
+// evidence that the runtime no longer consumes compute; ProofUnspecified is rejected so a failed
 // request or HTTP timeout never silently frees quota.
 func Release(ctx context.Context, tx store.Tx, tenantID, workspaceID string, proof AbsenceProof) error {
 	if !proof.Valid() {
@@ -205,7 +281,8 @@ func Release(ctx context.Context, tx store.Tx, tenantID, workspaceID string, pro
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE quota_reservation
-		SET state = 'released', release_proof = $3, released_at = now()
+		SET state = 'released', release_proof = $3, released_at = now(),
+		    restart_slots = NULL, restart_cpu_millis = NULL, restart_memory_bytes = NULL
 		WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held'`,
 		workspaceID, tenantID, string(proof))
 	if err != nil {
