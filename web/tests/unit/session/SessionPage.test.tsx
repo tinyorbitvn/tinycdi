@@ -632,6 +632,39 @@ describe("SessionPage provisional marker (backlog 1)", () => {
   });
 });
 
+describe("SessionPage foreign epoch in the resume window (PR1b)", () => {
+  it("a foreign claim inside the resume window shows 'open in another tab', not Connected", async () => {
+    let epoch = 1;
+    const { control, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
+    // Our marker and the live lease are at epoch 1: the armed baseline.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: epoch,
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Connecting"));
+
+    // Before our stream lands, another tab claims twice: epoch 4 is a gap
+    // our navigation could never make (each claim advances exactly one).
+    epoch = 4;
+    await waitFor(() =>
+      expect(screen.getByText("This session is open in another tab")).toBeInTheDocument(),
+    );
+    // Never claimed as ours, and no ticket minted into a takeover.
+    expect(badge()).not.toHaveTextContent("Connected");
+    expect(ticketPosts()).toHaveLength(0);
+  });
+
+  it("an epoch exactly one above the baseline still confirms as ours", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    // Baseline 1 (mock default); our navigation claims exactly +1.
+    await connectViaResume(ws, control, 2);
+  });
+});
+
 describe("SessionPage split-mode resume (backlog 3)", () => {
   it("streamEpoch 0 cannot fence: a leaseRef match confirms the resume", async () => {
     const { ws, control, ticketPosts } = setupScripted({

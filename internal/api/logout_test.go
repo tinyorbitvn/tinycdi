@@ -127,15 +127,41 @@ func TestLogout_ClearsSessionAndReturnsEndSessionURL(t *testing.T) {
 	if q.Get("client_id") != env.issuer.ClientID {
 		t.Fatalf("client_id = %q, want %q", q.Get("client_id"), env.issuer.ClientID)
 	}
-	// The session keeps no ID token, so there is no id_token_hint; and
-	// without oidc.postLogoutRedirect there is no post_logout_redirect_uri.
-	for _, k := range []string{"id_token_hint", "post_logout_redirect_uri"} {
-		if q.Has(k) {
-			t.Fatalf("%s present in %q", k, got)
+	// The session retains the ID token, so id_token_hint is exactly the
+	// token the issuer signed at login — that is what makes the provider
+	// skip its own confirmation page (V3.24).
+	if q.Get("id_token_hint") != env.issuer.LastIDToken() {
+		t.Fatalf("id_token_hint = %q, want the login ID token", q.Get("id_token_hint"))
+	}
+	// Without oidc.postLogoutRedirect there is no post_logout_redirect_uri.
+	if q.Has("post_logout_redirect_uri") {
+		t.Fatalf("post_logout_redirect_uri present in %q", got)
+	}
+	if len(q) != 2 {
+		t.Fatalf("unexpected query parameters in %q", got)
+	}
+}
+
+// A session without a retained ID token (pre-migration row, or one whose
+// seal no longer opens) still signs out: client_id-only, no hint — the
+// logout must never fail over the hint (V3.24).
+func TestLogout_NoIDTokenFallsBackToClientID(t *testing.T) {
+	env := newLogoutEnv(t, nil)
+	sess := env.loginSession(t)
+	// Wipe the retained token, like a legacy session row.
+	if rec, err := env.auth.sessions.Peek(context.Background(), sess.Value); err == nil {
+		rec.IDToken = ""
+		if err := env.auth.sessions.Save(context.Background(), rec); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if len(q) != 1 {
-		t.Fatalf("unexpected query parameters in %q", got)
+	got := decodeEndSession(t, env.postLogout(t, sess, csrfTokenFor(sess.Value), nil))
+	u, _ := url.Parse(got)
+	if u.Query().Has("id_token_hint") {
+		t.Fatalf("id_token_hint present without a stored token in %q", got)
+	}
+	if u.Query().Get("client_id") != env.issuer.ClientID {
+		t.Fatalf("client_id missing in %q", got)
 	}
 }
 
@@ -224,7 +250,16 @@ func TestLogout_NoOpenRedirect(t *testing.T) {
 		r.Body = io.NopCloser(strings.NewReader(`{"endSessionUrl":"https://evil.example/","post_logout_redirect_uri":"https://evil.example/"}`))
 	})
 	got := decodeEndSession(t, resp)
-	if got != baseline {
+	// The id_token_hint legitimately differs between the two logins —
+	// compare the URLs with it stripped.
+	strip := func(raw string) string {
+		u, _ := url.Parse(raw)
+		q := u.Query()
+		q.Del("id_token_hint")
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	if strip(got) != strip(baseline) {
 		t.Fatalf("request input changed the end-session URL:\n got  %q\n want %q", got, baseline)
 	}
 	if strings.Contains(got, "evil.example") {

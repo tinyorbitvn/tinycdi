@@ -183,6 +183,11 @@ type Session struct {
 	ID        string
 	Principal Principal
 	CSRFToken string
+	// IDToken is the raw OIDC id_token retained so logout can send
+	// id_token_hint (the provider then skips its own confirmation page).
+	// It is only ever persisted AEAD-sealed (store); it is never written to
+	// a log line or an API response (V3.24).
+	IDToken   string
 	CreatedAt time.Time
 	// LastSeenAt drives the sliding idle timeout; refreshed by store reads.
 	LastSeenAt time.Time
@@ -587,6 +592,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		ID:         mustRandToken(32),
 		Principal:  principal,
 		CSRFToken:  "", // derived from the session ID on demand (P1); column stays until v0.3
+		IDToken:    rawID,
 		CreatedAt:  a.now(),
 		LastSeenAt: a.now(),
 		ExpiresAt:  a.now().Add(a.cfg.AbsoluteTimeout),
@@ -653,16 +659,24 @@ type LogoutResult struct {
 // continue there and end the provider session — otherwise the next visit
 // signs the user straight back in. Otherwise 204. The URL is built only from
 // discovery and configuration; nothing in the request reaches it (no open
-// redirect). The session keeps no ID token, so the hint is client_id rather
-// than id_token_hint.
+// redirect). The session's retained ID token supplies id_token_hint, which
+// is what makes the provider skip its own confirmation page; a session
+// without one (pre-migration row, rotated key) falls back to client_id.
 func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	var idToken string
 	if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" {
+		// Peek, not Get: the session is destroyed next, so the idle slide
+		// would be a dead write. A missing or unopenable token never fails
+		// the sign-out.
+		if sess, err := a.sessions.Peek(ctx, c.Value); err == nil {
+			idToken = sess.IDToken
+		}
 		_ = a.sessions.Delete(ctx, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
 	a.expireLegacyCookies(w)
-	endSession := a.endSessionURL()
+	endSession := a.endSessionURL(idToken)
 	if endSession == "" {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -674,8 +688,9 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // endSessionURL assembles the RP-initiated logout URL, or "" when sign-out
-// should stay local.
-func (a *Authenticator) endSessionURL() string {
+// should stay local. idToken is the session's retained ID token; "" emits
+// no id_token_hint (the provider may then show its own confirmation page).
+func (a *Authenticator) endSessionURL(idToken string) string {
 	if a.endSessionEndpoint == "" {
 		return ""
 	}
@@ -684,6 +699,9 @@ func (a *Authenticator) endSessionURL() string {
 		return ""
 	}
 	q := u.Query()
+	if idToken != "" {
+		q.Set("id_token_hint", idToken)
+	}
 	q.Set("client_id", a.cfg.ClientID)
 	if a.cfg.PostLogoutRedirect != "" {
 		q.Set("post_logout_redirect_uri", a.cfg.PostLogoutRedirect)

@@ -27,8 +27,11 @@ type IssuedTicket struct {
 
 // ConnectionIssuer is the ticket-issuing surface the handler needs. The
 // adapter translates domain errors into *Error with the stable codes.
+// clipboardPolicy is the workspace template's policy, recorded on the
+// ticket so the gateway's redirect can re-assert the client's flags; ""
+// records nothing.
 type ConnectionIssuer interface {
-	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool) (IssuedTicket, *Error)
+	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool, clipboardPolicy string) (IssuedTicket, *Error)
 }
 
 // LaunchPath is the session-origin endpoint the browser POSTs the ticket to
@@ -41,7 +44,10 @@ type ConnectionHandler struct {
 	issuer  ConnectionIssuer
 	tenants TenantResolver
 	domain  sessionhost.Domain
-	maxBody int64
+	// clipboard resolves the workspace's template clipboard policy so the
+	// ticket can record it (WithClipboardSource); nil records nothing.
+	clipboard func(ctx context.Context, p Principal, workspaceUID string) (string, error)
+	maxBody   int64
 }
 
 // NewConnectionHandler wires the handler. domain is the session domain the
@@ -54,6 +60,14 @@ func NewConnectionHandler(issuer ConnectionIssuer, tenants TenantResolver, domai
 		domain:  domain,
 		maxBody: 16 << 10,
 	}
+}
+
+// WithClipboardSource wires the resolver that supplies the workspace's
+// template clipboard policy for ticket recording (V3.24: the gateway
+// redirect re-asserts the client flags from what the ticket recorded).
+func (h *ConnectionHandler) WithClipboardSource(fn func(ctx context.Context, p Principal, workspaceUID string) (string, error)) *ConnectionHandler {
+	h.clipboard = fn
+	return h
 }
 
 // MountConnectionRoutes registers the connections route with authn + CSRF.
@@ -109,7 +123,16 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover)
+	// The template's clipboard policy rides the ticket: its redemption
+	// redirect is the URL the session frame actually loads, so the gateway
+	// — not the portal's iframe src — is what lands the client's clipboard
+	// flags (V3.24). Resolution is best effort: a failure records nothing
+	// and the ticket still issues (least privilege on the redirect).
+	var policy string
+	if h.clipboard != nil {
+		policy, _ = h.clipboard(r.Context(), p, id)
+	}
+	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy)
 	if apiErr != nil {
 		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
 		return

@@ -17,8 +17,8 @@ type PublicIssuer struct {
 // IssueTicket issues a launch ticket and translates domain errors into the
 // public error model (api.Error). The ticket token is returned verbatim to
 // the handler and must only ever appear in the 201 response body.
-func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspaceUID string, takeover bool) (api.IssuedTicket, *api.Error) {
-	tk, err := s.B.IssueTicket(ctx, p, PlatformID(workspaceUID), takeover)
+func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspaceUID string, takeover bool, clipboardPolicy string) (api.IssuedTicket, *api.Error) {
+	tk, err := s.B.IssueTicket(ctx, p, PlatformID(workspaceUID), takeover, clipboardPolicy)
 	if err != nil {
 		return api.IssuedTicket{}, PublicIssueError(err)
 	}
