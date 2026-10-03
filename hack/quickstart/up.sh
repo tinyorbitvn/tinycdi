@@ -191,6 +191,7 @@ kc -n "$NS_DEPS" create secret generic keycloak-admin --from-literal=username=ad
   --from-literal=password="$KC_ADMIN_PASSWORD" --dry-run=client -o yaml | kc apply -f - >/dev/null
 sed -e "s|@CLIENT_SECRET@|${CLIENT_SECRET}|g" -e "s|@PORTAL_HOST@|${PORTAL_HOST}|g" \
   -e "s|@DEMO_USER@|${DEMO_USER}|g" -e "s|@DEMO_PASSWORD@|${DEMO_PASSWORD}|g" \
+  -e "s|@NOQUOTA_USER@|${NOQUOTA_USER}|g" \
   "$QS_DIR/realm-export.json" >"$STATE_DIR/realm.json"
 chmod 600 "$STATE_DIR/realm.json"
 kc -n "$NS_DEPS" create secret generic keycloak-realm --from-file=tinycdi-realm.json="$STATE_DIR/realm.json" \
@@ -310,6 +311,7 @@ cat >"$STATE_DIR/env" <<ENVEOF
 TCDI_QS_PORTAL_URL=https://${PORTAL_HOST}
 TCDI_QS_SESSION_DOMAIN=${SESSION_DOMAIN}
 TCDI_QS_USER=${DEMO_USER}
+TCDI_QS_NOQUOTA_USER=${NOQUOTA_USER}
 TCDI_QS_CA_FILE=${T}/local-ca.crt
 KUBECONFIG=${KUBECONFIG}
 ENVEOF

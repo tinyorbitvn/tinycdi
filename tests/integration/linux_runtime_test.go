@@ -523,6 +523,18 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 				}
 			}
 		}
+
+		// monospace:vi must resolve to a real monospace face, not fall back
+		// to a proportional one: DejaVu Sans Mono lacks the Vietnamese
+		// letters (U+1EA0-1EF9), so fontconfig used to answer DejaVu Sans.
+		matched := strings.TrimSpace(mustExec(t, c,
+			"fc-match -f '%{family}\\n' 'monospace:lang=vi' | head -1 | cut -d, -f1"))
+		if !strings.Contains(matched, "Mono") {
+			t.Errorf("fc-match monospace:lang=vi selected %q, not a monospace face", matched)
+		} else if out := strings.TrimSpace(mustExec(t, c,
+			"fc-list '"+matched+":charset="+scripts["vi"]+"' family")); out == "" {
+			t.Errorf("monospace:lang=vi selected %q, which does not cover the Vietnamese codepoints", matched)
+		}
 	})
 
 	t.Run("ReadinessProbeIsNotAnAuthFailure", func(t *testing.T) {

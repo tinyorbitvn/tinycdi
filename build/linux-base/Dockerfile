@@ -39,7 +39,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       x11-xserver-utils x11-utils dbus-x11 \
-      fontconfig fonts-dejavu-core fonts-noto-core fonts-wqy-microhei \
+      fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-mono \
+      fonts-wqy-microhei \
       perl libswitch-perl libyaml-tiny-perl libhash-merge-simple-perl \
       libscalar-list-utils-perl liblist-moreutils-perl libtry-tiny-perl \
       libdatetime-perl libdatetime-timezone-perl \
@@ -54,13 +55,17 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends /tmp/kasmvncserver.deb \
  && rm -f /tmp/kasmvncserver.deb \
 # fonts-noto-core ships 268 faces covering every Unicode script; keep the
-# Latin/Greek/Cyrillic core (Vietnamese included). CJK is
+# Latin/Greek/Cyrillic core (Vietnamese included) plus the
+# fonts-noto-mono faces — DejaVu Sans Mono lacks the Vietnamese block
+# (U+1EA0-1EF9), so without Noto Sans Mono fontconfig resolves
+# monospace:lang=vi to the proportional DejaVu Sans. CJK is
 # fonts-wqy-microhei: the smallest package covering zh/ja/ko — the Noto
 # CJK faces alone would exceed the browser image's +2 % size budget
 # (docs/images.md). Installed unpinned like the other runtime-base
 # packages.
  && find /usr/share/fonts/truetype/noto -type f \
-      ! -name 'NotoSans-*.ttf' ! -name 'NotoSerif-*.ttf' -delete \
+      ! -name 'NotoSans-*.ttf' ! -name 'NotoSerif-*.ttf' \
+      ! -name 'NotoSansMono-*.ttf' ! -name 'NotoMono-*.ttf' -delete \
  && fc-cache -f >/dev/null \
  && rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem \
           /etc/ssl/private/ssl-cert-snakeoil.key \
