@@ -207,6 +207,10 @@ type DataHandler struct {
 	directory Directory
 	maxBody   int64
 	now       func() time.Time
+	// releaseRetryAfter estimates seconds until the next recovery pass for
+	// the Retry-After header of a release-pending QUOTA_EXHAUSTED. Nil
+	// reports the 30 s cadence ceiling.
+	releaseRetryAfter func() int
 }
 
 // NewDataHandler wires the handler. catalog resolves the attach
@@ -214,6 +218,22 @@ type DataHandler struct {
 func NewDataHandler(d RetainedDataStore, c TemplateCatalog, t TenantResolver) *DataHandler {
 	return &DataHandler{data: d, catalog: c, tenants: t,
 		maxBody: 64 << 10, now: time.Now}
+}
+
+// WithReleaseRetryAfter sets the Retry-After estimate used for a
+// release-pending QUOTA_EXHAUSTED response (nil → 30 s ceiling).
+func (h *DataHandler) WithReleaseRetryAfter(f func() int) *DataHandler {
+	h.releaseRetryAfter = f
+	return h
+}
+
+// retryAfterSeconds resolves the Retry-After estimate for release-pending
+// quota refusals.
+func (h *DataHandler) retryAfterSeconds() int {
+	if h.releaseRetryAfter != nil {
+		return h.releaseRetryAfter()
+	}
+	return 30
 }
 
 // WithDirectory attaches the principal directory that fills owner display
@@ -445,7 +465,7 @@ func (h *DataHandler) writeDataError(w http.ResponseWriter, r *http.Request, err
 	case errors.Is(err, provisioning.ErrNoQuota):
 		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
 	case provisioning.IsQuotaExceeded(err):
-		writeError(w, r, CodeQuotaExhausted, "quota exhausted")
+		writeQuotaExceeded(w, r, err, h.retryAfterSeconds())
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
 	case errors.Is(err, provisioning.ErrNameTaken):

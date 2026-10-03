@@ -95,6 +95,10 @@ export function unwrap<T>(result: {
       message: typeof body.message === "string" ? body.message : undefined,
       retryable: typeof body.retryable === "boolean" ? body.retryable : undefined,
       requestId: typeof body.requestId === "string" ? body.requestId : undefined,
+      details:
+        typeof body.details === "object" && body.details !== null
+          ? (body.details as { reason?: "release_pending" | undefined })
+          : undefined,
     });
   }
   return result.data as T;

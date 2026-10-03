@@ -472,7 +472,7 @@ export interface components {
          *     | `INVALID_TEMPLATE` | 422 | false | templateRef unknown, unpublished or disallowed |
          *     | `INVALID_STATE` | 409 | true | phase/record state forbids the op now; retry once it settles to a compatible state |
          *     | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
-         *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota |
+         *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -501,6 +501,21 @@ export interface components {
              * @example req_01J4ZA1X0YJ8H6K0Q3MW1N5B2P
              */
             requestId: string;
+            /**
+             * @description Optional machine-readable context alongside `code`; absent on
+             *     most errors.
+             */
+            details?: {
+                /**
+                 * @description Finer-grained cause within `code`. `release_pending` on
+                 *     `QUOTA_EXHAUSTED` means the refused amount is held only by
+                 *     workspaces whose quota release is already pending teardown
+                 *     — the response then also carries `retryable: true` and a
+                 *     `Retry-After` header.
+                 * @enum {string}
+                 */
+                reason?: "release_pending";
+            };
         };
         /**
          * @description Lifecycle phase — a summary; `conditions` carry the operational detail.

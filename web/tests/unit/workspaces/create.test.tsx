@@ -133,4 +133,32 @@ describe("CreateWorkspacePage", () => {
     // Neither refusal is retryable: no Retry button.
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   }, 20000);
+
+  // QS-FLAKE: QUOTA_EXHAUSTED + details.reason=release_pending is the
+  // transient teardown refusal — it gets its own "still shutting down"
+  // copy instead of the exhaustion guidance.
+  it("create: release-pending quota refusal shows the transient copy", async () => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: {
+        code: "QUOTA_EXHAUSTED",
+        message: "quota exhausted",
+        retryable: true,
+        requestId: "r-rp",
+        details: { reason: "release_pending" },
+      },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).toHaveTextContent(
+      "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
+    );
+    expect(alert).not.toHaveTextContent("delete an unused workspace");
+  }, 20000);
 });

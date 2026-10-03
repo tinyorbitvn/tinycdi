@@ -71,8 +71,27 @@ type Backend struct {
 	// (outbox dispatcher, sweepers, recovery, expiry planner); electSingletons
 	// gates them on the leader lock.
 	singletons []func(ctx context.Context)
+	// nextRecoveryTick is the unix time of the next scheduled recovery
+	// pass, published by the recovery singleton for the API's Retry-After
+	// estimate on release-pending quota refusals. 0 = unknown.
+	nextRecoveryTick atomic.Int64
 	// closers run in reverse order after the servers stop (DB, caches…).
 	closers []func()
+}
+
+// recoveryTickETA estimates seconds until the next recovery pass for a
+// Retry-After header: ceil of the published tick time, floored at 1, and
+// 30 when the pass schedule is unknown (no leader yet / single-shot mode).
+func (b *Backend) recoveryTickETA() int {
+	t := b.nextRecoveryTick.Load()
+	if t <= 0 {
+		return 30
+	}
+	secs := int(time.Until(time.Unix(t, 0)).Seconds()) + 1
+	if secs < 1 {
+		return 1
+	}
+	return secs
 }
 
 // New wires the backend and binds every enabled listener (pass ":0" for an

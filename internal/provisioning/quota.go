@@ -25,6 +25,23 @@ type ResourceVector struct {
 	DiskBytes    int64 `json:"diskBytes"`
 }
 
+// minus returns v - o per dimension, clamped at zero (o is a bound on what
+// will be freed, not a precise future usage).
+func (v ResourceVector) minus(o ResourceVector) ResourceVector {
+	sub := func(a, b int64) int64 {
+		if a-b < 0 {
+			return 0
+		}
+		return a - b
+	}
+	return ResourceVector{
+		RunningSlots: sub(v.RunningSlots, o.RunningSlots),
+		CPUMillis:    sub(v.CPUMillis, o.CPUMillis),
+		MemoryBytes:  sub(v.MemoryBytes, o.MemoryBytes),
+		DiskBytes:    sub(v.DiskBytes, o.DiskBytes),
+	}
+}
+
 // Exceeds reports the first dimension where used+req would pass limit,
 // or "" when the request fits. A limit of 0 means "none allowed".
 func (v ResourceVector) Exceeds(used, limit ResourceVector) string {
@@ -49,6 +66,11 @@ type QuotaExceededError struct {
 	Limit     int64
 	Used      int64
 	Requested int64
+	// ReleasePending is set when the refusal would disappear once the
+	// reservations held by deleted or stopped workspaces are settled —
+	// their release is already pending with Recovery, so the caller may
+	// retry shortly instead of treating the quota as hard-exhausted.
+	ReleasePending bool
 }
 
 func (e *QuotaExceededError) Error() string {
@@ -60,6 +82,14 @@ func (e *QuotaExceededError) Error() string {
 func IsQuotaExceeded(err error) bool {
 	var q *QuotaExceededError
 	return errors.As(err, &q)
+}
+
+// IsReleasePending reports whether err is a quota refusal that resolves
+// itself: the shortfall is covered by reservations whose release is already
+// pending with Recovery, so retrying shortly may succeed.
+func IsReleasePending(err error) bool {
+	var q *QuotaExceededError
+	return errors.As(err, &q) && q.ReleasePending
 }
 
 var (
@@ -160,7 +190,20 @@ func Reserve(ctx context.Context, tx store.Tx, tenantID, workspaceID string, v R
 	}
 
 	if dim := v.Exceeds(used, limit); dim != "" {
-		return newQuotaExceeded(tenantID, dim, v, used, limit)
+		e := newQuotaExceeded(tenantID, dim, v, used, limit)
+		// A refusal caused only by reservations whose release is pending —
+		// held compute (or, for Ephemeral, the whole vector) on deleted or
+		// stopped workspaces awaiting the runtime-absence proof — is
+		// transient: flag it so the API can signal a retry instead of a
+		// hard rejection.
+		pending, perr := pendingReleaseVector(ctx, tx, tenantID)
+		if perr != nil {
+			return fmt.Errorf("reserve: pending release %w", perr)
+		}
+		if v.Exceeds(used.minus(pending), limit) == "" {
+			e.ReleasePending = true
+		}
+		return e
 	}
 
 	if state == "released" {
@@ -258,7 +301,15 @@ func reacquireCompute(ctx context.Context, tx store.Tx, tenantID, workspaceID st
 	}
 	limit.DiskBytes = used.DiskBytes // disk is already held; only compute can overrun
 	if dim := v.Exceeds(used, limit); dim != "" {
-		return newQuotaExceeded(tenantID, dim, v, used, limit)
+		e := newQuotaExceeded(tenantID, dim, v, used, limit)
+		pending, perr := pendingReleaseVector(ctx, tx, tenantID)
+		if perr != nil {
+			return fmt.Errorf("reacquire: pending release %w", perr)
+		}
+		if v.Exceeds(used.minus(pending), limit) == "" {
+			e.ReleasePending = true
+		}
+		return e
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE quota_reservation
@@ -303,4 +354,23 @@ func HeldUsage(ctx context.Context, q interface {
 		FROM quota_reservation WHERE tenant_id = $1 AND state = 'held'`, tenantID).
 		Scan(&used.RunningSlots, &used.CPUMillis, &used.MemoryBytes, &used.DiskBytes)
 	return used, err
+}
+
+// pendingReleaseVector sums the quota that settle candidates (held
+// reservations on deleted or stopped workspaces — the same predicate
+// Recovery uses, see settleCandidateSQL) will free once their runtime
+// absence is proven. Compute always frees; disk frees only for Ephemeral
+// workspaces — a deleted Retain workspace keeps counting its retained
+// datasets' bytes, so its disk is not pending.
+func pendingReleaseVector(ctx context.Context, tx store.Tx, tenantID string) (ResourceVector, error) {
+	var p ResourceVector
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(qr.running_slots), 0), COALESCE(SUM(qr.cpu_millis), 0),
+		       COALESCE(SUM(qr.memory_bytes), 0),
+		       COALESCE(SUM(qr.disk_bytes) FILTER (WHERE w.data_policy = 'Ephemeral'), 0)
+		FROM quota_reservation qr
+		JOIN workspaces w ON w.id = qr.workspace_id
+		WHERE qr.tenant_id = $1 AND (`+settleCandidateSQL+`)`, tenantID).
+		Scan(&p.RunningSlots, &p.CPUMillis, &p.MemoryBytes, &p.DiskBytes)
+	return p, err
 }

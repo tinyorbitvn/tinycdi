@@ -307,7 +307,7 @@ func (f *fakeRetainedStore) RetainedPVCUIDs(_ context.Context, tenantID string) 
 
 // ---------------------------------------------------------------------------
 
-func newDataEnv(t *testing.T, ds RetainedDataStore) *testEnv {
+func newDataEnv(t *testing.T, ds RetainedDataStore, opts ...func(*DataHandler)) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
@@ -326,6 +326,9 @@ func newDataEnv(t *testing.T, ds RetainedDataStore) *testEnv {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	h := NewDataHandler(ds, defaultCatalog(), defaultTenants())
+	for _, o := range opts {
+		o(h)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
@@ -555,6 +558,39 @@ func TestAttachRetained_QuotaExhausted(t *testing.T) {
 	}
 	if e := errBody(t, r); e.Code != CodeQuotaExhausted {
 		t.Fatalf("code=%s, want QUOTA_EXHAUSTED", e.Code)
+	}
+	if fs.get(rec.ID).State != RetainedStateRetained {
+		t.Fatalf("rejected attach moved state to %s", fs.get(rec.ID).State)
+	}
+}
+
+// TestAttachRetained_QuotaReleasePending: a quota refusal covered only by
+// teardown-held reservations keeps the QUOTA_EXHAUSTED code but is
+// retryable with details.reason=release_pending and a Retry-After header.
+func TestAttachRetained_QuotaReleasePending(t *testing.T) {
+	fs := newFakeRetainedStore()
+	env := newDataEnv(t, fs, func(h *DataHandler) {
+		h.WithReleaseRetryAfter(func() int { return 3 })
+	})
+	rec := seedRetained(fs, "rd_attach0023", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	fs.quotaErr = &provisioning.QuotaExceededError{
+		TenantID: "tenant-a", Dimension: "runningSlots", ReleasePending: true,
+	}
+	sess, csrf := login(t, env, "user-a")
+
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+		`{"name":"pending-release","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-attach-0023"})
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("release_pending attach: status=%d, want 409", r.StatusCode)
+	}
+	if got := r.Header.Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After=%q, want 3", got)
+	}
+	e := errBody(t, r)
+	if e.Code != CodeQuotaExhausted || !e.Retryable ||
+		e.Details == nil || e.Details.Reason != ReasonReleasePending {
+		t.Fatalf("body=%+v, want retryable QUOTA_EXHAUSTED release_pending", e)
 	}
 	if fs.get(rec.ID).State != RetainedStateRetained {
 		t.Fatalf("rejected attach moved state to %s", fs.get(rec.ID).State)

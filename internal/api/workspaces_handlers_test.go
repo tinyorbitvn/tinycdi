@@ -485,6 +485,84 @@ func TestStartQuotaExhaustedMapping(t *testing.T) {
 	r.Body.Close()
 }
 
+// TestQuotaReleasePending: a quota refusal whose shortfall is only
+// teardown-held quota keeps the QUOTA_EXHAUSTED code for compatibility but
+// is retryable with details.reason=release_pending and a Retry-After
+// header — a real exhaustion stays plain and non-retryable.
+func TestQuotaReleasePending(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants(), func(h *WorkspaceHandler) {
+		h.WithReleaseRetryAfter(func() int { return 7 })
+	})
+	sess, csrf := login(t, env, "user-a")
+	body := `{"name":"x","templateRef":"tpl_linuxdesktop"}`
+
+	// Release-pending create: 409 QUOTA_EXHAUSTED + retryable + reason +
+	// Retry-After from the wired estimate.
+	be.createErr = &provisioning.QuotaExceededError{
+		TenantID: "tenant-a", Dimension: "runningSlots", Limit: 2, Used: 2, Requested: 1,
+		ReleasePending: true,
+	}
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,
+		map[string]string{"Idempotency-Key": "key-rel-0001"})
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("release_pending create: status=%d, want 409", r.StatusCode)
+	}
+	if got := r.Header.Get("Retry-After"); got != "7" {
+		t.Fatalf("Retry-After=%q, want 7", got)
+	}
+	e := errBody(t, r)
+	if e.Code != CodeQuotaExhausted {
+		t.Fatalf("code=%s, want QUOTA_EXHAUSTED", e.Code)
+	}
+	if !e.Retryable {
+		t.Fatal("release_pending must be retryable")
+	}
+	if e.Details == nil || e.Details.Reason != ReasonReleasePending {
+		t.Fatalf("details=%+v, want reason release_pending", e.Details)
+	}
+	be.createErr = nil
+
+	// The same signal on the start path.
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"started","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-rel-0002"})
+	created := decodeBody[WorkspaceView](t, r)
+	r.Body.Close()
+	be.signalErr = &provisioning.QuotaExceededError{
+		TenantID: "tenant-a", Dimension: "runningSlots", Limit: 2, Used: 2, Requested: 1,
+		ReleasePending: true,
+	}
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", "",
+		map[string]string{"Idempotency-Key": "key-rel-0003"})
+	if r.StatusCode != http.StatusConflict || r.Header.Get("Retry-After") != "7" {
+		t.Fatalf("release_pending start: status=%d Retry-After=%q", r.StatusCode, r.Header.Get("Retry-After"))
+	}
+	e = errBody(t, r)
+	if e.Code != CodeQuotaExhausted || !e.Retryable || e.Details == nil ||
+		e.Details.Reason != ReasonReleasePending {
+		t.Fatalf("start body=%+v, want retryable QUOTA_EXHAUSTED release_pending", e)
+	}
+	be.signalErr = nil
+
+	// A genuine over-limit stays the plain non-retryable refusal.
+	be.createErr = &provisioning.QuotaExceededError{
+		TenantID: "tenant-a", Dimension: "runningSlots", Limit: 2, Used: 2, Requested: 1,
+	}
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,
+		map[string]string{"Idempotency-Key": "key-rel-0004"})
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("pure exhaustion: status=%d, want 409", r.StatusCode)
+	}
+	if got := r.Header.Get("Retry-After"); got != "" {
+		t.Fatalf("pure exhaustion must not set Retry-After, got %q", got)
+	}
+	e = errBody(t, r)
+	if e.Code != CodeQuotaExhausted || e.Retryable || e.Details != nil {
+		t.Fatalf("pure exhaustion body=%+v, want non-retryable QUOTA_EXHAUSTED without details", e)
+	}
+}
+
 func TestUnknownTenantForbidden(t *testing.T) {
 	be := newFakeBackend()
 	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants())
