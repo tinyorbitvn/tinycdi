@@ -8,6 +8,7 @@ import { SIGN_IN_AGAIN_URL, SIGNED_OUT_PATH, signOut } from "../../../src/auth/s
 import { AppShell, BrandingProvider } from "../../../src/app/shell";
 import { MeProvider, type Me } from "../../../src/app/me";
 import { ThemeProvider } from "../../../src/app/theme";
+import { LocaleProvider } from "../../../src/app/locale";
 import { DEFAULT_BRANDING } from "../../../src/app/branding";
 import type { RouteArea } from "../../../src/app/routes";
 import { ToastProvider } from "../../../src/design";
@@ -135,11 +136,13 @@ describe("user menu", () => {
       <ApiProvider client={createApi(stubFetch(api))}>
         <ThemeProvider>
           <BrandingProvider load={async () => DEFAULT_BRANDING}>
-            <ToastProvider>
-              <MeProvider load={async () => ME}>
-                <AppShell areas={AREAS} />
-              </MeProvider>
-            </ToastProvider>
+            <LocaleProvider>
+              <ToastProvider>
+                <MeProvider load={async () => ME}>
+                  <AppShell areas={AREAS} />
+                </MeProvider>
+              </ToastProvider>
+            </LocaleProvider>
           </BrandingProvider>
         </ThemeProvider>
       </ApiProvider>,

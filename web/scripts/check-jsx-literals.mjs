@@ -62,11 +62,50 @@ const files = roots
   .flatMap((root) => collect(root))
   .filter((file) => !file.startsWith(i18nDir));
 
+// Catalog parity (E11): every locale directory under src/i18n must carry
+// the same key set as en/, per area file. Missing keys are reported as
+// "missing", keys with no English counterpart as "extra". Only runs in the
+// default full scan — positional args mean a targeted literal check.
+const KEY_LINE = /^\s*"((?:[^"\\]|\\.)+)"\s*:/gm;
+function catalogKeys(file) {
+  return new Set(
+    [...readFileSync(file, "utf8").matchAll(KEY_LINE)].map((m) => m[1]),
+  );
+}
+
+const catalogProblems = [];
+if (args.length === 0) {
+  const enDir = join(i18nDir, "en");
+  const areas = readdirSync(enDir).filter((f) => f.endsWith(".ts"));
+  for (const entry of readdirSync(i18nDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "en") continue;
+    for (const area of areas) {
+      const enKeys = catalogKeys(join(enDir, area));
+      const localeFile = join(i18nDir, entry.name, area);
+      let localeKeys;
+      try {
+        localeKeys = catalogKeys(localeFile);
+      } catch {
+        catalogProblems.push(`${localeFile}: missing area file`);
+        continue;
+      }
+      const missing = [...enKeys].filter((k) => !localeKeys.has(k));
+      const extra = [...localeKeys].filter((k) => !enKeys.has(k));
+      if (missing.length > 0) {
+        catalogProblems.push(`${localeFile}: missing keys: ${missing.join(", ")}`);
+      }
+      if (extra.length > 0) {
+        catalogProblems.push(`${localeFile}: extra keys: ${extra.join(", ")}`);
+      }
+    }
+  }
+}
+
 const problems = files.flatMap(checkFile);
-for (const problem of problems) console.log(problem);
-if (problems.length > 0) {
+for (const problem of [...problems, ...catalogProblems]) console.log(problem);
+if (problems.length > 0 || catalogProblems.length > 0) {
   console.error(
-    `${problems.length} literal string(s) found — move user-visible text into src/i18n/en.ts`,
+    `${problems.length + catalogProblems.length} problem(s) found — move user-visible text into src/i18n/en.ts and keep locale catalogs in key parity`,
   );
   process.exit(1);
 }

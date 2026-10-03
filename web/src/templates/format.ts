@@ -1,4 +1,9 @@
-import { t, type MessageKey } from "../i18n";
+import {
+  t,
+  formatDate as formatDateIntl,
+  formatDateTime as formatDateTimeIntl,
+  type MessageKey,
+} from "../i18n";
 import type { DataPolicy, NetworkProfile, RuntimeKind, ExperienceKind, TemplateView } from "./types";
 
 // Every user-visible label comes from the message catalog (D33); the maps
@@ -117,9 +122,9 @@ export function clipboardPolicyLabel(policy: string): string {
 
 /** Short date for build/publish timestamps ("Sep 30, 2026"). */
 export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+  return formatDateIntl(iso);
 }
 
 export function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString();
+  return formatDateTimeIntl(iso);
 }

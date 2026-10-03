@@ -4,6 +4,7 @@ import { useApi } from "../api/context";
 import { newIdempotencyKey } from "../api/client";
 import { isPortalApiError, isReleasePending } from "../api/errors";
 import { t } from "../i18n";
+import { runtimeLabel } from "../templates/format";
 import { useLoader } from "../app/me";
 import {
   attachRetainedData,
@@ -104,11 +105,11 @@ export function AttachDialog({
           error={name && !nameOk ? t("data.attach.name.invalid") : undefined}
         />
         {templates.data && eligible.length === 0 ? (
-          <Alert tone="warning">{t("data.attach.noTemplates", { runtime: record.runtime })}</Alert>
+          <Alert tone="warning">{t("data.attach.noTemplates", { runtime: runtimeLabel(record.runtime) })}</Alert>
         ) : (
           <Select
             label={t("data.attach.template.label")}
-            hint={t("data.attach.template.hint", { runtime: record.runtime })}
+            hint={t("data.attach.template.hint", { runtime: runtimeLabel(record.runtime) })}
             required
             value={selected?.id ?? ""}
             onChange={(e) => setTemplateRef(e.target.value)}

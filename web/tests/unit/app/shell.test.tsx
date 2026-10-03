@@ -5,6 +5,7 @@ import { ApiProvider } from "../../../src/api/context";
 import { AppShell, BrandingProvider } from "../../../src/app/shell";
 import { MeProvider, type Me } from "../../../src/app/me";
 import { ThemeProvider, THEME_STORAGE_KEY } from "../../../src/app/theme";
+import { LocaleProvider } from "../../../src/app/locale";
 import { DEFAULT_BRANDING, type Branding } from "../../../src/app/branding";
 import type { RouteArea } from "../../../src/app/routes";
 
@@ -30,11 +31,13 @@ function renderShell(branding: Branding = DEFAULT_BRANDING) {
     <ApiProvider>
       <ThemeProvider>
         <BrandingProvider load={async () => branding}>
-          <ToastProvider>
-            <MeProvider load={async () => TEST_ME}>
-              <AppShell areas={TEST_AREAS} />
-            </MeProvider>
-          </ToastProvider>
+          <LocaleProvider>
+            <ToastProvider>
+              <MeProvider load={async () => TEST_ME}>
+                <AppShell areas={TEST_AREAS} />
+              </MeProvider>
+            </ToastProvider>
+          </LocaleProvider>
         </BrandingProvider>
       </ThemeProvider>
     </ApiProvider>,
@@ -80,11 +83,13 @@ describe("AppShell", () => {
       <ApiProvider>
         <ThemeProvider>
           <BrandingProvider load={async () => DEFAULT_BRANDING}>
-            <ToastProvider>
-              <MeProvider load={async () => ({ ...TEST_ME, roles: ["tenant-admin"] })}>
-                <AppShell areas={TEST_AREAS} />
-              </MeProvider>
-            </ToastProvider>
+            <LocaleProvider>
+              <ToastProvider>
+                <MeProvider load={async () => ({ ...TEST_ME, roles: ["tenant-admin"] })}>
+                  <AppShell areas={TEST_AREAS} />
+                </MeProvider>
+              </ToastProvider>
+            </LocaleProvider>
           </BrandingProvider>
         </ThemeProvider>
       </ApiProvider>,

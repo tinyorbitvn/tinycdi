@@ -13,6 +13,10 @@ export default {
   "app.theme.dark": "Dark",
   "app.theme.system": "System",
 
+  "app.language.label": "Language",
+  "app.language.en": "English",
+  "app.language.vi": "Tiếng Việt",
+
   "app.user.menu": "Account menu for {name}",
   "app.user.signedInAs": "Signed in as {name}",
   "app.user.tenant": "Tenant {tenant}",

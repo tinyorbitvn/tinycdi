@@ -5,6 +5,7 @@ import { usePathname } from "./app/router";
 import { AppShell, BrandingProvider } from "./app/shell";
 import { MeProvider } from "./app/me";
 import { ThemeProvider } from "./app/theme";
+import { LocaleProvider } from "./app/locale";
 import { ToastProvider } from "./design";
 
 export function App() {
@@ -15,6 +16,7 @@ export function App() {
   return (
     <ThemeProvider>
       <BrandingProvider>
+        <LocaleProvider>
         <ToastProvider>
           {signedOut ? (
             <SignedOut />
@@ -26,6 +28,7 @@ export function App() {
             </AuthGate>
           )}
         </ToastProvider>
+        </LocaleProvider>
       </BrandingProvider>
     </ThemeProvider>
   );
