@@ -31,7 +31,7 @@
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "https://@PORTAL_HOST@/*"
+        "post.logout.redirect.uris": "https://@PORTAL_HOST@/signed-out"
       },
       "defaultClientScopes": [
         "web-origins",
