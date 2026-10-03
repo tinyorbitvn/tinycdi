@@ -13,11 +13,17 @@
   local image builds, screenshot regeneration
 - [quickstart.md](quickstart.md) — TinyCDI on a throwaway kind cluster in
   one command (dev only)
+- [branding.md](branding.md) — operator branding: ConfigMap layout, worked
+  example, trademark note
 
 ## Runbooks
 
 - [runbooks/install.md](runbooks/install.md) — install from the Helm chart
 - [runbooks/upgrade.md](runbooks/upgrade.md) — upgrade ordering and rollback
+- [runbooks/observability.md](runbooks/observability.md) — metrics,
+  dashboards and alerts: enabling them and what each alert means
+- [runbooks/tenant-quotas.md](runbooks/tenant-quotas.md) — declarative
+  tenant quotas, refusal codes, day-2 operations
 - [runbooks/retained-data.md](runbooks/retained-data.md) — Retain policy,
   re-attach and purge flows
 - [runbooks/backup-restore.md](runbooks/backup-restore.md) — backup and restore

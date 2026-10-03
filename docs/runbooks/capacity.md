@@ -178,11 +178,33 @@ present.
 | Boot failures | `tinycdi_boot_deadline_exceeded_total` | rising — image pull or scheduling trouble |
 | API health | `tinycdi_http_requests_total` / `tinycdi_http_request_duration_seconds` | 5xx-class growth, p95 on `/v1/workspaces` |
 
+Ready-made Grafana dashboards and a `PrometheusRule` shipping the alert
+set above ship inside the chart, both off by default: set
+`dashboards.enabled` and `alerts.enabled` (each requires
+`backend.metrics.enabled`); see the chart README "Dashboards and
+alerts".
+
 Saturation symptoms to expect, in order: `QUOTA_EXHAUSTED` 409s (quota gate
 — by design), pod `Pending` on cpu/memory (cluster gate), image-pull
 latency in `workspace_provisioning_seconds` (cold node), then session-listener CPU
 saturation (scale `backend.replicas`; the default two replicas still enforce
 single-writer-per-workspace via broker fencing).
+
+## Postgres outage / failover timing — measured
+
+Dependency-outage behaviour measured in the v0.3 drill
+(`tests/integration/postgres_outage_test.go`; Postgres container
+stop/start, production `-revoke-deadline` 30 s, fast renew cadence):
+
+| Event | Measured | Budget |
+|---|---|---|
+| Short outage (10 s) — stream survival | WebSocket open + echoing during and after outage | survives while < revoke deadline |
+| Long outage (45 s) — stream close | **30.1 s** after outage start (30.4 s after last counted renew; `renew_deadline`) | fail-closed at 30 s; must land 30–40 s |
+| `GET /v1/workspaces` during outage | **503 `UNAVAILABLE` in ~1 ms** | ≤ 5 s, never a hang |
+| Reconnect after 45 s outage | lease expired → new ticket + relaunch | same cookie only while lease row is active |
+
+A database failover longer than the 30 s revoke deadline intentionally
+drops all streams — budget it into DB maintenance windows.
 
 ## The 20-session load gate — measured
 
