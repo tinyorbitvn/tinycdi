@@ -362,6 +362,31 @@ func TestControlTokenUnsetWarning(t *testing.T) {
 	}
 }
 
+// TestRateLimitsUntrustedWarning (E7 advisor review): with a limit on and
+// -trusted-proxies empty every client behind one ingress shares the
+// ingress's bucket — the startup warning must name exactly that state.
+func TestRateLimitsUntrustedWarning(t *testing.T) {
+	if !strings.Contains(trustedProxiesUnsetWarning, "-trusted-proxies") {
+		t.Fatalf("warning must name the flag that fixes it: %q", trustedProxiesUnsetWarning)
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"merged defaults warn", Config{Listen: ":8443", SessionListen: ":8444", LoginRate: 30, LaunchRate: 60}, true},
+		{"trusted proxies silences it", Config{Listen: ":8443", LoginRate: 30, TrustedProxies: "10.0.0.0/8"}, false},
+		{"app off + launch on warns", Config{SessionListen: ":8444", LaunchRate: 60}, true},
+		{"app on + launch off warns", Config{Listen: ":8443", LoginRate: 30}, true},
+		{"all limits off", Config{Listen: ":8443", SessionListen: ":8444"}, false},
+		{"listeners off", Config{LoginRate: 30, LaunchRate: 60}, false},
+	} {
+		if got := rateLimitsUntrusted(tc.cfg); got != tc.want {
+			t.Errorf("%s: rateLimitsUntrusted = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // FX-R21: sign-out also ends the identity provider session by default; the
 // post-logout redirect is opt-in.
 func TestParseFlags_SignOut(t *testing.T) {
