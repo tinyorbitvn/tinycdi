@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
 // fakeIntentLog serves a canned API-side lifecycle history.
@@ -338,5 +340,58 @@ func TestEvents_MaxDurationStop(t *testing.T) {
 	}
 	if !got["MaxDurationReached.3"] || !got["StopRequested.2"] {
 		t.Fatalf("event ids = %v, want MaxDurationReached.3 and StopRequested.2", got)
+	}
+}
+
+// TestEvents_TemplateUpdateSkipped (V3.2/E2): a start intent carrying a
+// recorded guard-skip reason surfaces the curated TemplateUpdateSkipped
+// warning — naming the cause token — alongside the start's own event.
+func TestEvents_TemplateUpdateSkipped(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: base},
+		{Kind: "start", Revision: 2, At: base.Add(10 * time.Minute),
+			Reason: provisioning.SkipReasonStorageSmaller},
+	}}
+	env := newEventsEnv(t, newFakeBackend(), &fakeStatusView{}, il)
+	created, sess, csrf := eventsFixture(t, env, "key-evt-v32-001")
+
+	got := map[string]WorkspaceEvent{}
+	for _, ev := range getEvents(t, env, sess, csrf, created.ID).Items {
+		got[ev.ID] = ev
+	}
+	if _, ok := got["StartRequested.2"]; !ok {
+		t.Fatalf("start event missing from %+v", got)
+	}
+	skip, ok := got["TemplateUpdateSkipped.2"]
+	if !ok {
+		t.Fatalf("no TemplateUpdateSkipped event in %+v", got)
+	}
+	if skip.Reason != "TemplateUpdateSkipped" || skip.Type != "Warning" ||
+		!strings.Contains(skip.Message, "storage-smaller") {
+		t.Fatalf("skip event = %+v, want Warning TemplateUpdateSkipped naming storage-smaller", skip)
+	}
+}
+
+// TestEvents_TemplateSkipReasons: every recorded E2 skip token curates to a
+// distinct fixed message; an unrecognized token on a start intent yields no
+// skip event (forward compatibility).
+func TestEvents_TemplateSkipReasons(t *testing.T) {
+	for _, reason := range []string{
+		provisioning.SkipReasonRuntimeChanged,
+		provisioning.SkipReasonExperienceChanged,
+		provisioning.SkipReasonDataPolicyChanged,
+		provisioning.SkipReasonStorageSmaller,
+	} {
+		ev, ok := templateSkipEvent(IntentRecord{Kind: "start", Revision: 7, Reason: reason})
+		if !ok || ev.Reason != "TemplateUpdateSkipped" || !strings.Contains(ev.Message, reason) {
+			t.Fatalf("reason %q -> %+v ok=%v, want TemplateUpdateSkipped naming it", reason, ev, ok)
+		}
+	}
+	if _, ok := templateSkipEvent(IntentRecord{Kind: "start", Revision: 7, Reason: "future-cause"}); ok {
+		t.Fatal("unknown reason must not produce a skip event")
+	}
+	if _, ok := templateSkipEvent(IntentRecord{Kind: "stop", Revision: 7, Reason: provisioning.SkipReasonStorageSmaller}); ok {
+		t.Fatal("skip reason on a non-start intent must not produce a skip event")
 	}
 }
