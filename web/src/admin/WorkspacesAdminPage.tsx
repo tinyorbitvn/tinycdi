@@ -6,6 +6,7 @@ import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { Link } from "../lib/router";
 import { t } from "../i18n";
+import { phaseLabelKey } from "../workspaces/helpers";
 import { listScopedWorkspaces, type ScopedWorkspace, type WorkspacePhase } from "./api";
 import { formatAge, formatDateTime, ownerLabel } from "./format";
 import { useLoader } from "../app/me";
@@ -140,7 +141,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       header: t("admin.workspaces.column.phase"),
       render: (ws) => (
         <span className="tc-admin-cell-stack">
-          <StatusPill phase={ws.phase} />
+          <StatusPill phase={ws.phase} label={t(phaseLabelKey(ws.phase))} />
           {ws.phase === "Failed" && ws.failureReason ? (
             <span className="tc-admin-muted">{ws.failureReason}</span>
           ) : null}
@@ -214,7 +215,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           onChange={(e) => setPhase(e.target.value as WorkspacePhase | "")}
           options={[
             { value: "", label: t("admin.workspaces.phase.all") },
-            ...PHASES.map((p) => ({ value: p, label: p })),
+            ...PHASES.map((p) => ({ value: p, label: t(phaseLabelKey(p)) })),
           ]}
         />
       </Cluster>
