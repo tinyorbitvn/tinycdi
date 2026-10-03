@@ -59,8 +59,10 @@ secret values — every Secret is a pre-existing object referenced by name
 Run the preflight script first. It checks the Kubernetes version,
 NetworkPolicy enforcement (with a throwaway probe namespace it always
 deletes), a StorageClass, user-namespace support, the workspace node pool,
-wildcard DNS, the session TLS Secret, OIDC discovery and Postgres with TLS
-verification, and prints `PASS`/`WARN`/`FAIL` with a one-line fix for each
+AppArmor on the workspace nodes (it names the fitting
+`runtime.appArmor.requireRuntimeDefault` value), wildcard DNS, the session
+TLS Secret, OIDC discovery and Postgres with TLS verification, and prints
+`PASS`/`WARN`/`FAIL` with a one-line fix for each
 (exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
 not permitted to run is a `WARN`. Flags and the check table are in
 `hack/preflight/README.md`.
@@ -148,7 +150,9 @@ Also gather:
    `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
    AppArmor (kind; RHEL-family and other SELinux-based distributions)
    refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
-   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   host`. The preflight `apparmor` check probes every node workspaces can
+   reach and names the fitting value. On such a pool set
+   `runtime.appArmor.requireRuntimeDefault:
    false` (operator flag `--runtime-apparmor-require-default=false`; the
    install NOTES print a reminder). This is a supported setting. It omits
    only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,

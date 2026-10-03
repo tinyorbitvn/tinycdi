@@ -1,8 +1,9 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-// Package tlsreload serves a TLS certificate from disk and reloads it when
-// the underlying files change. Detection hashes file contents rather than
+// Package tlsreload serves TLS certificates and CA bundles from disk and
+// reloads them when the underlying files change. Detection hashes file
+// contents rather than
 // comparing mtimes: Kubernetes Secret volumes swap a symlink atomically and
 // mtime can move backwards across the swap.
 package tlsreload
@@ -21,24 +22,29 @@ import (
 type Reloader struct {
 	certFile string
 	keyFile  string
-	interval time.Duration
-	log      *slog.Logger
+	options
 
 	cur  atomic.Pointer[tls.Certificate]
 	hash [32]byte
 }
 
-// Option configures a Reloader.
-type Option func(*Reloader)
+// options are the knobs shared by Reloader and CAPool.
+type options struct {
+	interval time.Duration
+	log      *slog.Logger
+}
+
+// Option configures a Reloader or a CAPool.
+type Option func(*options)
 
 // WithInterval sets how often the files are checked (default 30s).
 func WithInterval(d time.Duration) Option {
-	return func(r *Reloader) { r.interval = d }
+	return func(o *options) { o.interval = d }
 }
 
 // WithLogger reports reload successes and failures.
 func WithLogger(l *slog.Logger) Option {
-	return func(r *Reloader) { r.log = l }
+	return func(o *options) { o.log = l }
 }
 
 // New loads the pair once and fails if it is unusable.
@@ -46,11 +52,10 @@ func New(certFile, keyFile string, opts ...Option) (*Reloader, error) {
 	r := &Reloader{
 		certFile: certFile,
 		keyFile:  keyFile,
-		interval: 30 * time.Second,
-		log:      slog.Default(),
+		options:  options{interval: 30 * time.Second, log: slog.Default()},
 	}
 	for _, o := range opts {
-		o(r)
+		o(&r.options)
 	}
 	cert, hash, err := loadPair(certFile, keyFile)
 	if err != nil {

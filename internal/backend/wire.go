@@ -350,6 +350,14 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			return fmt.Errorf("internal tls cert: %w", err)
 		}
 		b.reloaders = append(b.reloaders, rel)
+		// The client-CA bundle hot-reloads (E5): each handshake verifies
+		// against the pool's newest parsed bundle, so rotating the file
+		// adds and removes trust without a restart.
+		caPool, err := tlsreload.NewCAPool(cfg.InternalClientCA, tlsreload.WithLogger(log))
+		if err != nil {
+			return fmt.Errorf("internal client ca: %w", err)
+		}
+		b.reloaders = append(b.reloaders, caPool)
 		caPEM, err := os.ReadFile(cfg.InternalClientCA)
 		if err != nil {
 			return fmt.Errorf("internal client ca: %w", err)
@@ -363,9 +371,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			return fmt.Errorf("internal tls config: %w", err)
 		}
 		// Serve the cert through the reloader so rotation lands without a
-		// restart (D21).
+		// restart (D21); client-CA verification reads the pool per
+		// handshake for the same reason (E5).
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
+		hotReloadClientCAs(tlsCfg, caPool)
 		b.internalTLSCfg = tlsCfg
 		b.internalHandler = httpapi.NewHandler(httpapi.Config{
 			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log,

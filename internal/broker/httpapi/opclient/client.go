@@ -36,6 +36,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // Compile-time conformance with the settled operator seams (
@@ -57,16 +58,21 @@ type Config struct {
 	// CertFile/KeyFile/CAFile are PEM paths for the operator client
 	// certificate and the CA that signed the broker's internal listener.
 	CertFile, KeyFile, CAFile string
-	// TLSConfig, when set, is used verbatim and the file fields are ignored.
+	// TLSConfig, when set, is used verbatim and the file fields are ignored
+	// (and no hot-reload is wired).
 	TLSConfig *tls.Config
 	// Timeout bounds each call; default 10 s.
 	Timeout time.Duration
+	// ReloadInterval is how often the client certificate files are
+	// re-checked by Run; default 30 s.
+	ReloadInterval time.Duration
 }
 
 // Client calls the workspace-scoped internal broker routes over mTLS.
 type Client struct {
 	hc   *http.Client
 	base string
+	rel  *tlsreload.Reloader // nil when TLSConfig was injected
 }
 
 // New loads the mTLS material and returns the client.
@@ -79,11 +85,16 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("opclient: BaseURL must be a valid https URL: %q", cfg.BaseURL)
 	}
 	tc := cfg.TLSConfig
+	var rel *tlsreload.Reloader
 	if tc == nil {
 		if cfg.CertFile == "" || cfg.KeyFile == "" || cfg.CAFile == "" {
 			return nil, errors.New("opclient: CertFile, KeyFile and CAFile are required")
 		}
-		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		var opts []tlsreload.Option
+		if cfg.ReloadInterval > 0 {
+			opts = append(opts, tlsreload.WithInterval(cfg.ReloadInterval))
+		}
+		rel, err = tlsreload.New(cfg.CertFile, cfg.KeyFile, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("opclient: load client cert: %w", err)
 		}
@@ -96,9 +107,13 @@ func New(cfg Config) (*Client, error) {
 			return nil, errors.New("opclient: CA file contains no PEM certificates")
 		}
 		tc = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      pool,
-			MinVersion:   tls.VersionTLS12,
+			// GetClientCertificate re-reads the reloader's current pair at
+			// every new handshake, so rotating the cert files presents the
+			// new certificate without a restart (E5). Run must be started
+			// for the reloader to pick up changes.
+			GetClientCertificate: rel.GetClientCertificate,
+			RootCAs:              pool,
+			MinVersion:           tls.VersionTLS12,
 		}
 	}
 	timeout := cfg.Timeout
@@ -114,7 +129,16 @@ func New(cfg Config) (*Client, error) {
 			},
 		},
 		base: cfg.BaseURL,
+		rel:  rel,
 	}, nil
+}
+
+// Run reloads the client certificate files until ctx is done (E5). It is a
+// no-op when the client was built from an injected TLSConfig.
+func (c *Client) Run(ctx context.Context) {
+	if c.rel != nil {
+		c.rel.Run(ctx)
+	}
 }
 
 // Error is a broker-side failure: HTTP status + the standard error body.
