@@ -453,8 +453,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (**deprecated** — prefer the typed `spec.placement` block, which also carries `tolerations` and `runtimeClassName`) |
-| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
+| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec — pod placement lives in `spec.placement` (`nodeSelector`, `tolerations`, `runtimeClassName`); the v0.1 `nodeSelector` entry field was removed in v0.3 and fails the render |
 
 ### Kasm workspace images
 

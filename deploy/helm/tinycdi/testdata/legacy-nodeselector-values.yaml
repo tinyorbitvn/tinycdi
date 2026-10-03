@@ -1,0 +1,44 @@
+# Invalid: a template entry still carries the v0.1 nodeSelector field —
+# removed in v0.3 (E14); spec.placement.nodeSelector is the replacement.
+# `helm template`/`helm lint` must reject this file.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+
+runtime:
+  placement:
+    allowSharedNodes: true
+
+templates:
+  - name: browser01
+    namespace: tinycdi-tenant-a
+    nodeSelector: {workload: runtime}
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Browser
+      linux: {image: "registry.lab.example.net/tinycdi/browser@sha256:6666666666666666666666666666666666666666666666666666666666666666"}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral

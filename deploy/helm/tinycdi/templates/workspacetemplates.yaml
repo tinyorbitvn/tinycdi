@@ -13,7 +13,10 @@
 # tpl_<name> (and lists) to the newest published revision.
 #
 # Per-entry structured fields map to the annotations the runtime backend
-# honors (internal/runtime/linux/backend.go):
+# honors (internal/runtime/linux/backend.go). The v0.1 nodeSelector entry
+# field is gone (E14): the render fails below — pod placement lives in the
+# typed spec.placement block, with unset fields falling back to the
+# operator defaults rendered from runtime.placement.
 #   image:           key into .Values.images (e.g. "linuxDesktop",
 #                    "browser") or a literal reference; used when
 #                    spec.linux.image is empty. Runtime images must be
@@ -23,11 +26,6 @@
 #                    images.<key>.builtAt instead)
 #   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
-#   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
-#                    DEPRECATED — prefer the typed spec.placement.nodeSelector;
-#                    the spec field wins when both are set, and unset
-#                    placement fields fall back to the operator defaults
-#                    rendered from runtime.placement
 #   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
 #                    (falls back to the top-level storageClass value)
 #   annotations:     -> extra annotations, verbatim
@@ -71,7 +69,7 @@
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/apparmor-profile" (printf "localhost/%s" (.appArmorProfile | trimPrefix "localhost/")) }}
 {{- end }}
 {{- if .nodeSelector }}
-{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/node-selector" (toJson .nodeSelector) }}
+{{- fail (printf "templates[%s]: nodeSelector was removed in v0.3 — use spec.placement.nodeSelector" $tplName) }}
 {{- end }}
 {{- $sc := .storageClass | default $.Values.storageClass }}
 {{- if and $sc (not (index $ann "workspaces.cdi.tinyorbit.vn/storage-class")) }}

@@ -270,6 +270,16 @@ func TestSchemaRejectsBadValues(t *testing.T) {
 	}
 }
 
+// TestLegacyNodeSelectorRejected: the v0.1 templates[].nodeSelector field
+// is gone (E14) — a values file still carrying it fails the render
+// (values.schema.json's additionalProperties or the template's fail).
+func TestLegacyNodeSelectorRejected(t *testing.T) {
+	out := renderBad(t, "legacy-nodeselector-values.yaml")
+	if !strings.Contains(out, "nodeSelector") {
+		t.Errorf("render failure should name the removed field, got: %s", out)
+	}
+}
+
 // TestExposureToggles: ingress renders Ingress and no HTTPRoute; gatewayApi
 // renders HTTPRoute and no Ingress; both enabled is a render-time error.
 func TestExposureToggles(t *testing.T) {
@@ -417,12 +427,33 @@ func TestImageDigestPinning(t *testing.T) {
 	for _, want := range []string{
 		"workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/profiles/chromium-userns.json",
 		"workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/tinycdi-browser",
-		"workspaces.cdi.tinyorbit.vn/node-selector",
 		"workspaces.cdi.tinyorbit.vn/storage-class: longhorn",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("seeded templates missing %q", want)
 		}
+	}
+	// Pod placement lives in the typed spec.placement block — the v0.1
+	// node-selector annotation is gone (E14) and must not be rendered.
+	if strings.Contains(s, "workspaces.cdi.tinyorbit.vn/node-selector") {
+		t.Errorf("legacy node-selector annotation must not render:\n%s", s)
+	}
+	var browser doc
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		if lbls["workspaces.cdi.tinyorbit.vn/catalog-name"] == "browser01" {
+			browser = d
+		}
+	}
+	if browser == nil {
+		t.Fatal("browser01 template not rendered")
+	}
+	spec, _ := browser["spec"].(map[string]any)
+	placement, _ := spec["placement"].(map[string]any)
+	sel, _ := placement["nodeSelector"].(map[string]any)
+	if sel["workload"] != "runtime" {
+		t.Errorf("browser01 spec.placement.nodeSelector = %v, want {workload: runtime}", placement["nodeSelector"])
 	}
 }
 
