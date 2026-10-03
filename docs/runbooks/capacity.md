@@ -154,29 +154,33 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
 ## What to watch (metrics)
 
 `internal/observability/metrics.go` defines the `tinycdi_*` series
-(bounded labels only — no UIDs/emails). Where they are actually served
-today: the **backend** registers the full set and serves `/metrics` on its
-dedicated metrics listener when `backend.metrics.enabled` is set (port
-`backend.metrics.port`, reached through the ClusterIP `backend-metrics`
-Service and never the public ports). The in-process session gateway emits
-the HTTP-request and lease-failure series; the capacity gauges have
-setters and are the designed signal set for the app-listener/operator
-wiring that remains. The **operator** exposes no metrics endpoint (the
-chart pins `--metrics-bind-address=0`). The API has the `InstrumentHTTP`
-middleware helper (`internal/api/middleware.go`) but the backend does not
-wire it onto the app listener yet — treat API-side metrics as planned, not
-present.
+(bounded labels only — no UIDs/emails; `route` is always a mux template,
+never a concrete path). Where they are served: the **backend** registers
+the full set and serves `/metrics` on its dedicated metrics listener when
+`backend.metrics.enabled` is set (port `backend.metrics.port`, reached
+through the ClusterIP `backend-metrics` Service and never the public
+ports — `/metrics` answers 404 on the app and session listeners). All
+three serving listeners are instrumented: the app mux
+(`listener="app"`), the session gateway (`listener="session"`) and the
+internal mTLS broker API (`listener="internal"`). The **operator**
+exposes no metrics endpoint (the chart pins `--metrics-bind-address=0`).
 
 | Signal | Metric | Alert when |
 |---|---|---|
 | Provisioning latency | `tinycdi_workspace_provisioning_seconds` (histogram by `result`) | p95 approaches `bootDeadline` |
 | Load | `tinycdi_workspaces_running{tenant}`, `tinycdi_workspaces_reserved{tenant}` | reserved ≈ tenant limit (saturation) |
+| Live sessions | `tinycdi_sessions_active` (per replica) | drops while streams stay open |
 | Lease health | `tinycdi_lease_failures_total{reason}` | any sustained increase — gateway↔broker or fencing issue |
+| Rehydration | `tinycdi_gateway_rehydrations_total{result}` | `miss`/`error` growth — restarts losing sessions or directory trouble |
+| Stream fencing | `tinycdi_gateway_streams_fenced_total` | spikes — replicas fighting over one lease's stream |
+| Logins | `tinycdi_logins_total{outcome}` | `denied`/`error` growth — IdP or gate misconfiguration, brute force |
+| Image age | `tinycdi_runtime_image_age_seconds{family}` | approaches `-image-stale-after` (default 14 d) — publish train overdue |
+| Rate limits | `tinycdi_rate_limited_total{route}` | sustained refusals — attack or too-tight limits |
 | Stuck teardown | `tinycdi_finalizers_stuck` | > 0 — see `docs/runbooks/stuck-finalizer.md` |
 | Quota drift | `tinycdi_quota_drift{tenant}` | ≠ 0 — reservation/actual disagreement; run recovery reconcile |
 | PVC leaks | `tinycdi_pvc_leaks` | > 0 — orphaned volumes cost disk quota/$$ |
 | Boot failures | `tinycdi_boot_deadline_exceeded_total` | rising — image pull or scheduling trouble |
-| API health | `tinycdi_http_requests_total` / `tinycdi_http_request_duration_seconds` | 5xx-class growth, p95 on `/v1/workspaces` |
+| API health | `tinycdi_http_requests_total` / `tinycdi_http_request_duration_seconds` (by `listener`) | 5xx-class growth, p95 on `/v1/workspaces` |
 
 Ready-made Grafana dashboards and a `PrometheusRule` shipping the alert
 set above ship inside the chart, both off by default: set
