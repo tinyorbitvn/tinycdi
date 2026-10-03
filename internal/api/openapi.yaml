@@ -622,6 +622,80 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/quota:
+    get:
+      operationId: getAdminTenantQuota
+      summary: Tenant quota limits, usage and management source
+      description: |
+        Administrator view of one tenant's quota: the configured limits and
+        current usage in display units (CPU in millicores, memory in MiB,
+        storage in GiB), the per-user breakdown, and `source`, which names
+        the layer owning the limits row. Usage counts held reservations —
+        including disk-only holds a stopped Retain workspace keeps — plus
+        active workspaces, exactly what admission counts. Requires the
+        tenant-admin role on the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Quota snapshot for the named tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminQuotaView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: putAdminTenantQuota
+      summary: Set a tenant's quota limits
+      description: |
+        Replaces the tenant's quota limits for tenants **not** declared in
+        `-tenant-quotas`; a declared tenant answers
+        `409 QUOTA_MANAGED_BY_CONFIG` and must be changed through the
+        platform configuration. Limits below current usage are accepted:
+        held reservations stay, new ones are refused — a lowered limit
+        therefore takes effect without forcing a release. Requires the
+        tenant-admin role on the named tenant and the `X-CSRF-Token` header.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminQuotaLimits"
+      responses:
+        "200":
+          description: The updated quota snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminQuotaView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -841,6 +915,17 @@ components:
         type: string
         pattern: "^rd_[A-Za-z0-9]{8,64}$"
         example: rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A
+    Tenant:
+      name: tenant
+      in: path
+      required: true
+      description: |
+        Tenant identifier. Callers may only administer their own tenant —
+        the tenant-admin role is tenant-scoped, so a `tenant` value that
+        differs from the caller's tenant answers `403 FORBIDDEN`.
+      schema:
+        type: string
+        example: acme
     IdempotencyKeyRequired:
       name: Idempotency-Key
       in: header
@@ -933,8 +1018,10 @@ components:
         a different body), `INVALID_STATE` (operation not valid in the current
         phase/record state), `CONNECTION_IN_USE` (a live interactive lease
         exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
-        quota has no headroom), or `QUOTA_NOT_CONFIGURED` (the tenant has no
-        quota at all, so creates fail closed).
+        quota has no headroom), `QUOTA_NOT_CONFIGURED` (the tenant has no
+        quota at all, so creates fail closed), or `QUOTA_MANAGED_BY_CONFIG`
+        (the tenant's quota is owned by `-tenant-quotas` and only the
+        platform configuration may change it).
       content:
         application/json:
           schema:
@@ -994,6 +1081,7 @@ components:
         | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
         | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
         | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
+        | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
         | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
         | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
         | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -1012,6 +1100,7 @@ components:
         - IDEMPOTENCY_CONFLICT
         - QUOTA_EXHAUSTED
         - QUOTA_NOT_CONFIGURED
+        - QUOTA_MANAGED_BY_CONFIG
         - CONNECTION_IN_USE
         - IMAGE_STALE
         - RATE_LIMITED
@@ -1389,6 +1478,77 @@ components:
         usage:
           $ref: "#/components/schemas/QuotaAmounts"
         userLimits:
+          $ref: "#/components/schemas/QuotaAmounts"
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserUsage"
+
+    QuotaSource:
+      type: string
+      enum: [config, api, none]
+      description: |
+        Which layer owns the tenant's limits row. `config`: the tenant is
+        declared in `-tenant-quotas` and its row is upserted from the
+        platform configuration — writes through the API are refused with
+        `QUOTA_MANAGED_BY_CONFIG`. `api`: a row exists that no config
+        declaration claims, so it stays writable through the admin quota
+        API. `none`: no row exists at all — admission fails closed, so the
+        absence of `limits` must never read as "unlimited".
+
+    AdminQuotaLimits:
+      type: object
+      additionalProperties: false
+      required: [runningWorkspaces, cpuMillicores, memoryMib, storageGib]
+      description: |
+        Quota limits in display units — the enforced dimensions of
+        `QuotaAmounts`. Every field is required; a partial block would
+        silently mean "none allowed" for the missing dimension. A value of
+        0 admits nothing on that dimension, and limits below current usage
+        are accepted (held reservations stay, new ones are refused). There
+        is no workspace-count limit, so `workspaces` is not settable.
+      properties:
+        runningWorkspaces:
+          type: integer
+          minimum: 0
+          description: Maximum reserved running slots.
+        cpuMillicores:
+          type: integer
+          minimum: 0
+          description: Maximum CPU in millicores.
+        memoryMib:
+          type: integer
+          minimum: 0
+          description: Maximum memory in MiB.
+        storageGib:
+          type: integer
+          minimum: 0
+          description: Maximum storage in GiB.
+
+    AdminQuotaView:
+      type: object
+      additionalProperties: false
+      required: [tenant, configured, source, usage, users]
+      description: |
+        Administrator quota snapshot for one tenant: `QuotaView` plus
+        `source`, which names the layer owning the limits row. `limits` is
+        absent when the tenant has no quota row (`configured: false`,
+        `source: none` — or `config` while a declared row is still pending
+        the startup upsert). `users` lists every owner with usage.
+      properties:
+        tenant:
+          type: string
+        configured:
+          type: boolean
+          description: |
+            False when the tenant has no quota row. Admission then refuses
+            every create, so clients must show "no quota configured", never
+            "no limit".
+        source:
+          $ref: "#/components/schemas/QuotaSource"
+        limits:
+          $ref: "#/components/schemas/QuotaAmounts"
+        usage:
           $ref: "#/components/schemas/QuotaAmounts"
         users:
           type: array

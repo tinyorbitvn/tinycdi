@@ -29,6 +29,9 @@ export interface Me {
 export type QuotaAmounts = components["schemas"]["QuotaAmounts"];
 export type UserUsage = components["schemas"]["UserUsage"];
 export type QuotaView = components["schemas"]["QuotaView"];
+export type QuotaSource = components["schemas"]["QuotaSource"];
+export type AdminQuotaLimits = components["schemas"]["AdminQuotaLimits"];
+export type AdminQuotaView = components["schemas"]["AdminQuotaView"];
 
 export type Scope = "mine" | "tenant";
 
@@ -67,6 +70,28 @@ export function fetchMe(api: ApiClient): Promise<Me> {
 
 export function fetchQuota(api: ApiClient): Promise<QuotaView> {
   return get<QuotaView>(api, "/v1/quota");
+}
+
+// Admin quota management (GET/PUT /v1/admin/tenants/{tenant}/quota): the
+// tenant-admin-only view that also reports which layer owns the limits and
+// writes them back when the platform configuration does not.
+export async function fetchAdminQuota(api: ApiClient, tenant: string): Promise<AdminQuotaView> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/quota", { params: { path: { tenant } } }),
+  );
+}
+
+export async function putAdminQuota(
+  api: ApiClient,
+  tenant: string,
+  limits: AdminQuotaLimits,
+): Promise<AdminQuotaView> {
+  return unwrap(
+    await api.PUT("/v1/admin/tenants/{tenant}/quota", {
+      params: { path: { tenant } },
+      body: limits,
+    }),
+  );
 }
 
 // Lists stop following cursors at `maxPages` so a runaway server cannot pin

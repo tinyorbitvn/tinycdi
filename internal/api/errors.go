@@ -19,21 +19,22 @@ import (
 type ErrorCode string
 
 const (
-	CodeUnauthenticated     ErrorCode = "UNAUTHENTICATED"      // 401
-	CodeCSRFFailed          ErrorCode = "CSRF_FAILED"          // 403
-	CodeForbidden           ErrorCode = "FORBIDDEN"            // 403
-	CodeNotFound            ErrorCode = "NOT_FOUND"            // 404
-	CodeInvalidRequest      ErrorCode = "INVALID_REQUEST"      // 400
-	CodeInvalidTemplate     ErrorCode = "INVALID_TEMPLATE"     // 422
-	CodeInvalidState        ErrorCode = "INVALID_STATE"        // 409
-	CodeIdempotencyConflict ErrorCode = "IDEMPOTENCY_CONFLICT" // 409
-	CodeQuotaExhausted      ErrorCode = "QUOTA_EXHAUSTED"      // 409
-	CodeQuotaNotConfigured  ErrorCode = "QUOTA_NOT_CONFIGURED" // 409
-	CodeConnectionInUse     ErrorCode = "CONNECTION_IN_USE"    // 409
-	CodeImageStale          ErrorCode = "IMAGE_STALE"          // 409
-	CodeRateLimited         ErrorCode = "RATE_LIMITED"         // 429
-	CodeUnavailable         ErrorCode = "UNAVAILABLE"          // 503
-	CodeInternal            ErrorCode = "INTERNAL"             // 500
+	CodeUnauthenticated      ErrorCode = "UNAUTHENTICATED"         // 401
+	CodeCSRFFailed           ErrorCode = "CSRF_FAILED"             // 403
+	CodeForbidden            ErrorCode = "FORBIDDEN"               // 403
+	CodeNotFound             ErrorCode = "NOT_FOUND"               // 404
+	CodeInvalidRequest       ErrorCode = "INVALID_REQUEST"         // 400
+	CodeInvalidTemplate      ErrorCode = "INVALID_TEMPLATE"        // 422
+	CodeInvalidState         ErrorCode = "INVALID_STATE"           // 409
+	CodeIdempotencyConflict  ErrorCode = "IDEMPOTENCY_CONFLICT"    // 409
+	CodeQuotaExhausted       ErrorCode = "QUOTA_EXHAUSTED"         // 409
+	CodeQuotaNotConfigured   ErrorCode = "QUOTA_NOT_CONFIGURED"    // 409
+	CodeQuotaManagedByConfig ErrorCode = "QUOTA_MANAGED_BY_CONFIG" // 409
+	CodeConnectionInUse      ErrorCode = "CONNECTION_IN_USE"       // 409
+	CodeImageStale           ErrorCode = "IMAGE_STALE"             // 409
+	CodeRateLimited          ErrorCode = "RATE_LIMITED"            // 429
+	CodeUnavailable          ErrorCode = "UNAVAILABLE"             // 503
+	CodeInternal             ErrorCode = "INTERNAL"                // 500
 )
 
 // quotaNotConfiguredMessage is the operator-facing text of
@@ -54,6 +55,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeIdempotencyConflict,
 	CodeQuotaExhausted,
 	CodeQuotaNotConfigured,
+	CodeQuotaManagedByConfig,
 	CodeConnectionInUse,
 	CodeImageStale,
 	CodeRateLimited,
@@ -72,7 +74,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse, CodeImageStale:
+	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeQuotaManagedByConfig, CodeConnectionInUse, CodeImageStale:
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity

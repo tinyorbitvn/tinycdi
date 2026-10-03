@@ -1,10 +1,11 @@
-// Tenant-admin area of the contract mock: GET /v1/me, GET /v1/quota, the
-// `owner` field on records and `?scope=mine|tenant` (+ cursor pagination) on
-// GET /v1/workspaces. Record ownership lives in a per-context Tenancy that
-// data.ts shares for GET /v1/data. Must be registered before the
-// workspaces area in areas.ts: it claims GET /v1/workspaces and
-// GET /v1/workspaces/{id} and hides other users' records from non-admins
-// (contract: 404, never a leak); every other route passes through.
+// Tenant-admin area of the contract mock: GET /v1/me, GET /v1/quota,
+// GET/PUT /v1/admin/tenants/{tenant}/quota, the `owner` field on records and
+// `?scope=mine|tenant` (+ cursor pagination) on GET /v1/workspaces. Record
+// ownership lives in a per-context Tenancy that data.ts shares for GET
+// /v1/data. Must be registered before the workspaces area in areas.ts: it
+// claims GET /v1/workspaces and GET /v1/workspaces/{id} and hides other
+// users' records from non-admins (contract: 404, never a leak); every other
+// route passes through.
 //
 // The default principal is a regular user with no other users' records, so
 // existing specs see the base contract unchanged. Demo mode makes the
@@ -13,7 +14,7 @@
 // Test controls (not part of the contract):
 //   POST /_control/admin/me     {roles?, displayName?}   patch the principal
 //   POST /_control/admin/seed                            add other users' workspaces + disks
-//   POST /_control/admin/quota  {limits?, userLimits?}   patch quota limits (null clears: no quota row / no per-user limit)
+//   POST /_control/admin/quota  {limits?, userLimits?, managed?}   patch quota limits (null clears) / mark the row config-managed
 //   POST /_control/admin/fail   {path, code?, status?}   fail the next GET of `path`
 //
 // Erasable-syntax TypeScript only (Node type-stripping runs it directly).
@@ -157,6 +158,9 @@ export interface Tenancy {
   // undefined = the tenant has no quota row (the API then omits `limits`).
   limits: QuotaAmounts | undefined;
   userLimits: QuotaAmounts | undefined;
+  // True = the tenant is declared in -tenant-quotas: source "config" and
+  // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
+  managed: boolean;
   // Record ID -> owner; records without an entry belong to the principal.
   owners: Map<string, Owner>;
   failNext: Map<string, { status: number; code: string }>;
@@ -193,6 +197,7 @@ export function tenancy(ctx: MockContext): Tenancy {
     me: freshMe(ctx.demo),
     limits: { ...DEFAULT_LIMITS },
     userLimits: { ...DEFAULT_USER_LIMITS },
+    managed: false,
     owners: new Map(),
     failNext: new Map(),
     scopesSeen: [],
@@ -251,6 +256,7 @@ export function adminArea(ctx: MockContext): MockArea {
     t.me = freshMe(ctx.demo);
     t.limits = { ...DEFAULT_LIMITS };
     t.userLimits = { ...DEFAULT_USER_LIMITS };
+    t.managed = false;
     t.owners = new Map();
     t.failNext = new Map();
     t.scopesSeen = [];
@@ -267,7 +273,7 @@ export function adminArea(ctx: MockContext): MockArea {
   // Usage is derived from the shared state: running workspaces consume the
   // template's CPU/memory; Retain workspaces and un-attached retained disks
   // consume storage (Purging keeps its reservation until deletion).
-  function quota(): MockResponse {
+  function quotaBody() {
     const perUser = new Map<string, { owner: Owner; usage: QuotaAmounts }>();
     const bucket = (owner: Owner) => {
       let b = perUser.get(owner.subject);
@@ -300,14 +306,63 @@ export function adminArea(ctx: MockContext): MockArea {
     const users = [...perUser.values()]
       .filter((b) => t.isAdmin() || b.owner.subject === t.me.subject)
       .map((b) => ({ subject: b.owner.subject, displayName: b.owner.displayName, usage: b.usage }));
-    return ok(200, {
+    return {
       tenant: t.me.tenant,
       configured: t.limits !== undefined,
       ...(t.limits ? { limits: t.limits } : {}),
       usage,
-      ...(t.userLimits ? { userLimits: t.userLimits } : {}),
       users,
+    };
+  }
+
+  function quota(): MockResponse {
+    return ok(200, {
+      ...quotaBody(),
+      ...(t.userLimits ? { userLimits: t.userLimits } : {}),
     });
+  }
+
+  // The admin quota view adds `source` — which layer owns the limits row —
+  // and drops userLimits, which no store backs.
+  function adminQuotaBody() {
+    return {
+      ...quotaBody(),
+      source: t.managed ? "config" : t.limits !== undefined ? "api" : "none",
+    };
+  }
+
+  // GET/PUT /v1/admin/tenants/{tenant}/quota — tenant-admin of the named
+  // tenant only; config-managed rows reject writes with the 409.
+  function adminQuota(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant quota administration requires the tenant-admin role", false);
+    }
+    if (req.method === "GET") {
+      const failed = t.takeFailure(req);
+      if (failed) return failed;
+      return ok(200, adminQuotaBody());
+    }
+    if (req.method === "PUT") {
+      if (t.managed) {
+        return err(409, "QUOTA_MANAGED_BY_CONFIG", "quota for this tenant is managed by configuration", false);
+      }
+      const b = req.body as Record<string, unknown> | null;
+      const keys = ["runningWorkspaces", "cpuMillicores", "memoryMib", "storageGib"];
+      const valid =
+        b !== null &&
+        keys.every((k) => Number.isInteger(b[k]) && (b[k] as number) >= 0) &&
+        Object.keys(b).every((k) => keys.includes(k));
+      if (!valid) return err(400, "INVALID_REQUEST", "invalid limits", false);
+      t.limits = {
+        workspaces: 0,
+        runningWorkspaces: b!.runningWorkspaces as number,
+        cpuMillicores: b!.cpuMillicores as number,
+        memoryMib: b!.memoryMib as number,
+        storageGib: b!.storageGib as number,
+      };
+      return ok(200, adminQuotaBody());
+    }
+    return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
   function listWorkspaces(req: MockRequest): MockResponse {
@@ -325,6 +380,8 @@ export function adminArea(ctx: MockContext): MockArea {
 
   function api(req: MockRequest): MockResponse | undefined {
     const { method, path } = req;
+    const mQuota = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/quota$/);
+    if (mQuota) return adminQuota(req, mQuota[1]);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
       const failed = t.takeFailure(req);
       if (failed) return failed;
@@ -361,7 +418,8 @@ export function adminArea(ctx: MockContext): MockArea {
         else if (req.body?.limits) t.limits = { ...(t.limits ?? DEFAULT_LIMITS), ...(req.body.limits as object) };
         if (req.body?.userLimits === null) t.userLimits = undefined;
         else if (req.body?.userLimits) t.userLimits = { ...DEFAULT_USER_LIMITS, ...(req.body.userLimits as object) };
-        return ok(200, { limits: t.limits ?? null, userLimits: t.userLimits ?? null });
+        if (typeof req.body?.managed === "boolean") t.managed = req.body.managed;
+        return ok(200, { limits: t.limits ?? null, userLimits: t.userLimits ?? null, managed: t.managed });
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

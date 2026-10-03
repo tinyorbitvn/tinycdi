@@ -1,10 +1,20 @@
 import { useState } from "react";
-import { Alert, Badge, Button, Card, Grid, Meter, Section, Spinner, Table } from "../design";
+import { Alert, Badge, Button, Card, Dialog, Grid, Input, Meter, Section, Spinner, Table } from "../design";
 import type { Column } from "../design/Table";
 import { IconChevronDown, IconChevronUp, IconRefresh } from "../design/icons";
 import { cx } from "../design/cx";
 import { t } from "../i18n";
-import { fetchQuota, type QuotaAmounts, type QuotaView, type UserUsage } from "./api";
+import type { ApiClient } from "../api/client";
+import { useApi } from "../api/context";
+import {
+  fetchAdminQuota,
+  putAdminQuota,
+  type AdminQuotaLimits,
+  type AdminQuotaView,
+  type QuotaAmounts,
+  type QuotaSource,
+  type UserUsage,
+} from "./api";
 import {
   QUOTA_KEYS,
   formatQuota,
@@ -13,7 +23,7 @@ import {
   usagePercent,
   type QuotaKey,
 } from "./format";
-import { useLoader } from "./hooks";
+import { loadMe, useLoader } from "./hooks";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 
@@ -144,8 +154,176 @@ function SortHeader({
   );
 }
 
-export function QuotaContent({ quota }: { quota: QuotaView }) {
+// The limits row's owner: config rows are read-only here — only the
+// platform configuration may change them — api/none rows are writable.
+function SourceBadge({ source }: { source: QuotaSource }) {
+  switch (source) {
+    case "config":
+      return <Badge tone="info">{t("admin.quota.source.config")}</Badge>;
+    case "api":
+      return <Badge tone="neutral">{t("admin.quota.source.api")}</Badge>;
+    default:
+      return <Badge tone="warning">{t("admin.quota.source.none")}</Badge>;
+  }
+}
+
+interface EditFields {
+  runningWorkspaces: string;
+  cpu: string;
+  memory: string;
+  storage: string;
+}
+
+// The edit dialog speaks in the units the meters render — vCPU for CPU,
+// GiB for memory and storage — and converts back to the contract's
+// millicores/MiB on save.
+function fieldsOf(quota: AdminQuotaView): EditFields {
+  const l = quota.limits;
+  return {
+    runningWorkspaces: l ? String(l.runningWorkspaces) : "",
+    cpu: l ? String(l.cpuMillicores / 1000) : "",
+    memory: l ? String(l.memoryMib / 1024) : "",
+    storage: l ? String(l.storageGib) : "",
+  };
+}
+
+function parseFields(f: EditFields): AdminQuotaLimits | null {
+  const num = (s: string) => (s.trim() === "" ? NaN : Number(s));
+  const slots = num(f.runningWorkspaces);
+  const cpuMillis = num(f.cpu) * 1000;
+  const memoryMib = num(f.memory) * 1024;
+  const storageGib = num(f.storage);
+  const ints = [slots, cpuMillis, memoryMib, storageGib];
+  if (ints.some((n) => !Number.isInteger(n) || n < 0)) return null;
+  return {
+    runningWorkspaces: slots,
+    cpuMillicores: cpuMillis,
+    memoryMib,
+    storageGib,
+  };
+}
+
+export function QuotaEditDialog({
+  quota,
+  open,
+  onClose,
+  onSaved,
+}: {
+  quota: AdminQuotaView;
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const api = useApi();
+  const [fields, setFields] = useState<EditFields>(() => fieldsOf(quota));
+  const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState<unknown>(null);
+  const [invalid, setInvalid] = useState(false);
+
+  function set(k: keyof EditFields) {
+    return (e: React.ChangeEvent<HTMLInputElement>) =>
+      setFields((f) => ({ ...f, [k]: e.target.value }));
+  }
+
+  async function save() {
+    const limits = parseFields(fields);
+    if (!limits) {
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+    setBusy(true);
+    setSaveError(null);
+    try {
+      await putAdminQuota(api, quota.tenant, limits);
+      onSaved();
+      onClose();
+    } catch (e) {
+      setSaveError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+      size="sm"
+      dismissible={!busy}
+      title={t("admin.quota.edit.title")}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            {t("admin.quota.edit.cancel")}
+          </Button>
+          <Button variant="primary" loading={busy} onClick={() => void save()}>
+            {t("admin.quota.edit.save")}
+          </Button>
+        </>
+      }
+    >
+      <p className="tc-admin-muted">{t("admin.quota.edit.description")}</p>
+      <Grid gap={3} min="xs">
+        <Input
+          label={t("admin.quota.edit.field.runningWorkspaces")}
+          name="quota-running"
+          type="number"
+          min={0}
+          step={1}
+          required
+          value={fields.runningWorkspaces}
+          onChange={set("runningWorkspaces")}
+        />
+        <Input
+          label={t("admin.quota.edit.field.cpu")}
+          name="quota-cpu"
+          type="number"
+          min={0}
+          step="any"
+          required
+          value={fields.cpu}
+          onChange={set("cpu")}
+        />
+        <Input
+          label={t("admin.quota.edit.field.memory")}
+          name="quota-memory"
+          type="number"
+          min={0}
+          step="any"
+          required
+          value={fields.memory}
+          onChange={set("memory")}
+        />
+        <Input
+          label={t("admin.quota.edit.field.storage")}
+          name="quota-storage"
+          type="number"
+          min={0}
+          step={1}
+          required
+          value={fields.storage}
+          onChange={set("storage")}
+        />
+      </Grid>
+      {invalid ? <Alert tone="warning">{t("admin.quota.edit.invalid")}</Alert> : null}
+      <ApiErrorAlert error={saveError} />
+    </Dialog>
+  );
+}
+
+export function QuotaContent({
+  quota,
+  onChanged,
+}: {
+  quota: AdminQuotaView;
+  onChanged: () => void;
+}) {
   const [sort, setSort] = useState<UsageSort>(DEFAULT_USAGE_SORT);
+  const [editing, setEditing] = useState(false);
+  const writable = quota.source !== "config";
 
   function onSort(key: UsageSortKey) {
     setSort((s) =>
@@ -173,7 +351,7 @@ export function QuotaContent({ quota }: { quota: QuotaView }) {
         header: <SortHeader label={quotaLabel(k)} columnKey={k} sort={sort} onSort={onSort} />,
         align: "end",
         hideOnMobile: k === "memoryMib" || k === "cpuMillicores",
-        render: (u) => <UsageCell k={k} value={u.usage[k]} limit={quota.userLimits?.[k]} />,
+        render: (u) => <UsageCell k={k} value={u.usage[k]} limit={quota.limits?.[k]} />,
       }),
     ),
   ];
@@ -183,20 +361,24 @@ export function QuotaContent({ quota }: { quota: QuotaView }) {
       <Section
         title={t("admin.quota.limits.title")}
         description={t("admin.quota.limits.description", { tenant: quota.tenant })}
+        actions={
+          writable ? (
+            <Button onClick={() => setEditing(true)}>{t("admin.quota.edit.action")}</Button>
+          ) : undefined
+        }
       >
+        <p>
+          <SourceBadge source={quota.source} />{" "}
+          <span className="tc-admin-muted">
+            {quota.source === "config"
+              ? t("admin.quota.source.configNote")
+              : quota.source === "api"
+                ? t("admin.quota.source.apiNote")
+                : t("admin.quota.source.noneNote")}
+          </span>
+        </p>
         <QuotaMeters configured={quota.configured} limits={quota.limits} usage={quota.usage} />
       </Section>
-      {quota.userLimits ? (
-        <Section title={t("admin.quota.userLimits.title")} headingLevel={3}>
-          <p className="tc-admin-muted">
-            {t("admin.quota.userLimits.body", {
-              limits: QUOTA_KEYS.filter((k) => !isUnlimited(k, quota.userLimits![k]))
-                .map((k) => `${formatQuota(k, quota.userLimits![k])} ${quotaLabel(k).toLowerCase()}`)
-                .join(", "),
-            })}
-          </p>
-        </Section>
-      ) : null}
       <Section title={t("admin.quota.users.title")}>
         <Table
           caption={t("admin.quota.users.caption")}
@@ -207,12 +389,23 @@ export function QuotaContent({ quota }: { quota: QuotaView }) {
           empty={t("admin.quota.users.empty")}
         />
       </Section>
+      <QuotaEditDialog
+        quota={quota}
+        open={editing}
+        onClose={() => setEditing(false)}
+        onSaved={onChanged}
+      />
     </>
   );
 }
 
+async function loadAdminQuota(api: ApiClient): Promise<AdminQuotaView> {
+  const me = await loadMe(api);
+  return fetchAdminQuota(api, me.tenant);
+}
+
 export function QuotaPage() {
-  const q = useLoader(fetchQuota, "quota");
+  const q = useLoader(loadAdminQuota, "admin-quota");
   return (
     <AdminLayout
       title={t("admin.quota.title")}
@@ -229,7 +422,7 @@ export function QuotaPage() {
     >
       <ApiErrorAlert error={q.error} onRetry={q.reload} />
       {q.data ? (
-        <QuotaContent quota={q.data} />
+        <QuotaContent quota={q.data} onChanged={q.reload} />
       ) : q.loading ? (
         <Card>
           <Spinner label={t("admin.quota.loading")} />
