@@ -9,7 +9,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 | `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` (and, for firefox-esr, `build/linux-desktop/Dockerfile` — the desktop image carries the same Firefox pin) + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
-| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
+| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
 
@@ -167,11 +167,15 @@ the same run opens the pin-bump PR via `bump-browser-pin.sh`.
 `linux-desktop`, `browser`) on their own cadence — every main push touching
 `build/linux-base/**`, `build/linux-desktop/**` or `build/browser/**`, weekly, and on
 `workflow_dispatch` — independent of control-plane `v*.*.*` releases.
-Promoted digests get the `rt-YYYYMMDD.N` tag (`N` = run number); the
-train never promotes `main`/`latest` and never builds control-plane
-images. Each publish writes **`runtime-images.json`** and attaches it to
-the GitHub Release **`runtime-YYYY.MM.DD`** (re-uploaded when more than
-one train runs in a day):
+Promoted digests get the `rt-YYYYMMDD.N` tag where `N` is the next free
+number over the day's already-published `rt-*` tags — derived by
+`.github/scripts/next-rt-tag.sh` at promote time, so failed builds and
+non-publishing rehearsals consume no number and the per-day series stays
+consecutive for successful publishes. The train never promotes
+`main`/`latest` and never builds control-plane images. Each publish
+writes **`runtime-images.json`** and attaches it to the GitHub Release
+**`runtime-YYYY.MM.DD`** (re-uploaded when more than one train runs in a
+day):
 
 ```json
 {

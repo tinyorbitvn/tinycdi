@@ -20,7 +20,8 @@
 #                    digest-pinned — the CRD rejects tag-only references.
 #   imageBuiltAt:    -> workspaces.cdi.tinyorbit.vn/image-built-at for literal
 #                    image references (entries using an images key take
-#                    images.<key>.builtAt instead)
+#                    images.<key>.builtAt instead; images.<key>.engines.*
+#                    likewise render as image-chromium/image-firefox)
 #   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   nodeSelector:    -> workspaces.cdi.tinyorbit.vn/node-selector (JSON map)
@@ -58,11 +59,23 @@
 {{- $_ := set $linux "adapter" "" }}
 {{- end }}
 {{- $builtAt := .imageBuiltAt | default "" }}
+{{- $eng := dict }}
 {{- if and .image (hasKey $.Values.images .image) }}
 {{- $builtAt = (index $.Values.images .image).builtAt | default "" }}
+{{- $eng = (index $.Values.images .image).engines | default dict }}
 {{- end }}
 {{- if and $builtAt (not (index $ann "workspaces.cdi.tinyorbit.vn/image-built-at")) }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/image-built-at" $builtAt }}
+{{- end }}
+{{- /* Browser engine versions the image ships (runtime-images.json);
+     rendered as annotations so the template view's stale-image display
+     can show both engines. An explicit annotations: entry wins. */ -}}
+{{- range $engine := list "chromium" "firefox" }}
+{{- $ver := get $eng $engine | toString }}
+{{- $key := printf "workspaces.cdi.tinyorbit.vn/image-%s" $engine }}
+{{- if and $ver (not (index $ann $key)) }}
+{{- $_ := set $ann $key $ver }}
+{{- end }}
 {{- end }}
 {{- if .seccompProfile }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" (printf "localhost/%s" (.seccompProfile | trimPrefix "localhost/")) }}
