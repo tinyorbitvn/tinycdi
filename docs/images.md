@@ -108,6 +108,10 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   | `username` | no | default `kasm_user` |
   | `tls.crt` / `tls.key` | yes | endpoint TLS material |
 
+  One trailing line ending (`\n` or `\r\n`) on `password`/`username` is
+  ignored — the value itself is used verbatim; an empty `password` is
+  rejected.
+
 - Ephemeral credential/config material lives on a writable `/run/tcdi`
   mount (tmpfs/emptyDir), **outside** the persistent home.
 - Home is `/home/workspace` (uid 1000, persistent mount point). On every

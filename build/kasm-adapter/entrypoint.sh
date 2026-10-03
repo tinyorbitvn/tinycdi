@@ -47,9 +47,13 @@ fail() { echo "tcdi-kasm-adapter: $*" >&2; exit 1; }
 export HOME="${TCDI_HOME:-/home/workspace}"
 mkdir -p "$HOME" || fail "home mount $HOME not writable by uid $(id -u)"
 
+# A Secret value written with a line ending carries the same credential:
+# $(cat) drops the trailing newline(s); ${v%$'\r'} drops the CR a CRLF
+# ending leaves behind. Any other whitespace stays part of the value.
 KASMVNC_USER="kasm_user"
 if [ -f "$USER_FILE" ]; then
-  KASMVNC_USER="$(tr -d '[:space:]' < "$USER_FILE")"
+  KASMVNC_USER="$(cat "$USER_FILE")"
+  KASMVNC_USER="${KASMVNC_USER%$'\r'}"
 fi
 [ -n "$KASMVNC_USER" ] || fail "$USER_FILE is empty"
 
@@ -74,8 +78,13 @@ chmod 600 "$RT/tls.key"
 chmod 644 "$RT/tls.crt"
 
 # Single write-only (non-owner) user; never -o (ADR 0001: owner rights unlock
-# the /api/* management surface).
-{ cat "$PASS_FILE"; cat "$PASS_FILE"; } | kasmvncpasswd -u "$KASMVNC_USER" -w "$RT/kasmpasswd" >/dev/null
+# the /api/* management surface). The value is normalized first (one line
+# ending stripped) so a Secret file written '\n'- or '\r\n'-terminated
+# stores the same credential the broker reads (it trims the Secret value).
+PASS="$(cat "$PASS_FILE")"
+PASS="${PASS%$'\r'}"
+[ -n "$PASS" ] || fail "$PASS_FILE is empty"
+{ printf '%s\n' "$PASS"; printf '%s\n' "$PASS"; } | kasmvncpasswd -u "$KASMVNC_USER" -w "$RT/kasmpasswd" >/dev/null
 chmod 600 "$RT/kasmpasswd"
 rm -rf "$HOME/.kasmpasswd"
 ln -s "$RT/kasmpasswd" "$HOME/.kasmpasswd"

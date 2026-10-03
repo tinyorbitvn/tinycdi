@@ -81,6 +81,8 @@ writes the adapter files into the shared volume:
   HTTPS 200 on :8443, logging in with the mounted Secret (an anonymous probe
   is an authentication failure to KasmVNC and blacklists loopback; tolerant of
   KasmVNC 1.4.x's loopback quirk where curl prints the code and exits non-zero).
+  Entrypoint and probe both ignore one trailing line ending (`\n`/`\r\n`) on
+  the Secret values.
 - `xstartup.sh` — with `sessionCmd` set, starts ONLY a window manager
   (`xfwm4`, falling back to `openbox`/`startxfce4`) plus the payload —
   no desktop icons, panel launchers or app menu survive as unsandboxed

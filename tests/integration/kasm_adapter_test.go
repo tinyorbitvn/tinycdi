@@ -490,6 +490,59 @@ func TestKasmAdapterChromium(t *testing.T) {
 		}
 	})
 
+	t.Run("ProbeToleratesSecretLineEnding", func(t *testing.T) {
+		// Same contract as the runtime images: a Secret value written with
+		// a trailing line ending is the same credential. The adapter
+		// normalizes one ending before kasmvncpasswd (a CRLF file would
+		// otherwise store a stray '\r' the broker never sends) and before
+		// the probe's login, so '\n'- and '\r\n'-terminated Secret files
+		// both report ready while an empty/missing password fails closed.
+		secret, password := selfSignedSecret(t)
+		for _, f := range []struct{ name, value string }{
+			{"password", password},
+			{"username", "kasm_user"},
+		} {
+			writeFile(t, filepath.Join(secret, f.name), []byte(f.value+"\r\n"))
+			if err := os.Chmod(filepath.Join(secret, f.name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Probe-side variants ride in as extra mounts read through the
+		// healthcheck's TCDI_SECRET_DIR override — one boot covers all.
+		secLF := probeSecretDir(t, "kasm_user", password, "\n")
+		secEmpty := emptySecretDir(t)
+		secMissing := t.TempDir()
+		if err := os.Chmod(secMissing, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		c := runKasmContainer(t, runID, "crlf", kasmImage, adapterVol(), secret, "",
+			"-v", secLF+":/tmp/sec-lf:ro",
+			"-v", secEmpty+":/tmp/sec-empty:ro",
+			"-v", secMissing+":/tmp/sec-missing:ro")
+		waitHealthyTimeout(t, c, kasmRunTimeout) // HEALTHCHECK probed the CRLF mount
+
+		// The normalized value is the credential; the raw CR form is not.
+		code, err := httpsGet(t, c, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("auth with CRLF-terminated secret: code=%d err=%v, want 200", code, err)
+		}
+		if code, err := httpsGet(t, c, "kasm_user", password+"\r"); err == nil &&
+			code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatalf("CR-bearing password accepted: %d", code)
+		}
+		for _, d := range []string{"/run/secrets/tcdi", "/tmp/sec-lf"} {
+			if _, err := execIn(t, c, "TCDI_SECRET_DIR="+d+" /opt/tcdi/healthcheck.sh"); err != nil {
+				t.Fatalf("probe failed reading Secret dir %s: %v", d, err)
+			}
+		}
+		for _, d := range []string{"/tmp/sec-empty", "/tmp/sec-missing"} {
+			if _, err := execIn(t, c, "TCDI_SECRET_DIR="+d+" /opt/tcdi/healthcheck.sh"); err == nil {
+				t.Fatalf("probe reported ready with Secret dir %s", d)
+			}
+		}
+		assertNoSecret(t, c, password)
+	})
+
 	t.Run("DisplayDeathNotReady", func(t *testing.T) {
 		secret, _ := selfSignedSecret(t)
 		c := runKasmContainer(t, runID, "death", kasmImage, adapterVol(), secret, "")
