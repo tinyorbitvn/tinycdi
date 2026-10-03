@@ -115,6 +115,40 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 	return ev, true
 }
 
+// templateSkipMessages maps each recorded guard-skip token (E2) to its
+// curated message. The token is named verbatim — it is the event's
+// machine-readable cause; raw catalog detail is never forwarded.
+var templateSkipMessages = map[string]string{
+	provisioning.SkipReasonRuntimeChanged:    "The workspace stayed on its recorded template revision (runtime-changed): the newest published revision uses a different runtime.",
+	provisioning.SkipReasonExperienceChanged: "The workspace stayed on its recorded template revision (experience-changed): the newest published revision offers a different experience.",
+	provisioning.SkipReasonDataPolicyChanged: "The workspace stayed on its recorded template revision (data-policy-changed): the newest published revision declares a different data policy.",
+	provisioning.SkipReasonStorageSmaller:    "The workspace stayed on its recorded template revision (storage-smaller): the newest published revision requests less storage.",
+}
+
+// templateSkipEvent surfaces a start intent whose family re-point was
+// refused by the compatibility guard (E2): the skip reason is recorded on
+// the start intent, and the workspace still started — on its recorded
+// revision — so the curated event is emitted alongside StartRequested, not
+// in its place.
+func templateSkipEvent(in IntentRecord) (WorkspaceEvent, bool) {
+	if in.Kind != string(provisioning.IntentStart) {
+		return WorkspaceEvent{}, false
+	}
+	msg, ok := templateSkipMessages[in.Reason]
+	if !ok {
+		return WorkspaceEvent{}, false
+	}
+	ts := in.At
+	return WorkspaceEvent{
+		ID:             fmt.Sprintf("TemplateUpdateSkipped.%d", in.Revision),
+		Type:           "Warning",
+		Reason:         "TemplateUpdateSkipped",
+		Message:        msg,
+		FirstTimestamp: &ts,
+		LastTimestamp:  &ts,
+	}, true
+}
+
 // conditionEvent maps one observed condition state to its curated event.
 // The message comes only from this table — never from the CR's free-text
 // message, which may contain node names, image references or other
@@ -212,6 +246,9 @@ func (h *WorkspaceHandler) Events(w http.ResponseWriter, r *http.Request) {
 	intents, err := h.intentLogHistory(r.Context(), p.TenantID, id)
 	for _, in := range intents {
 		if ev, ok := intentEvent(in); ok {
+			out.Items = append(out.Items, ev)
+		}
+		if ev, ok := templateSkipEvent(in); ok {
 			out.Items = append(out.Items, ev)
 		}
 	}

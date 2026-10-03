@@ -25,6 +25,7 @@ containerd 2.x, Cilium 1.20, and
 | Node security profile | Localhost seccomp `deploy/node-profiles/seccomp/chromium-userns.json` sha256 `c57199218f6ba2e6616f39392f3043b3e057fdfa082ee90f0798170c5715d76a` + AppArmor `deploy/node-profiles/apparmor/tinycdi-browser` sha256 `4f30e96fc396f57ddabbe8b2ac619f47ac7074865d26bd79e0ae693049a2dd56` — required on every browser-capable worker (see conditions; install: `deploy/node-profiles/README.md`) |
 | Firefox ESR fallback | firefox-esr 153.4.0esr-1~deb12u1 (deb.debian.org/debian-security bookworm-security), deb sha256 `a59e034759615e46d3b4071cd79f42642416865419319c0d2c2a35a559db5430` |
 | Desktop environment (`tcdi/linux-desktop`) | XFCE 4.18 from Debian bookworm main (xfce4-session 4.18.1-1, xfwm4 4.18.0-1, xfce4-panel 4.18.2-1, thunar 4.18.4-1 at the 2026-10-03 build) — installed unpinned like the other apt packages of the runtime base (reproducibility comes from the `debian:bookworm-slim` digest, scan-gated on every build). Firefox ESR in the desktop image is the **same** apt pin as the row above, bumped with it. |
+| Runtime fonts (`tcdi/linux-base`) | fonts-dejavu-core + fonts-noto-core trimmed to the Latin/Greek/Cyrillic faces (Vietnamese covered; the ~260 other-script faces are deleted in the Dockerfile) + fonts-wqy-microhei (zh/ja/ko) — unpinned like the other runtime-base apt packages. `fonts-noto-cjk` measured over the browser image's +2 % budget (docs/images.md *Budgets*); switching to it needs a baseline re-issue by decision. |
 
 ## Pending — pinned later
 
@@ -83,3 +84,21 @@ authoritative R1 result: `hostUsers: false` has been the shipped default
 since v0.2 — the chart sets `runtime.hostUsers: false` (the operator's
 `--runtime-host-users=false`), and a template's `spec.linux.hostUsers`
 (D24) still overrides it per workspace.
+
+## Sandboxed runtimes (`runtimeClassName`)
+
+A template's `spec.placement.runtimeClassName` (see `docs/images.md` → the
+WorkspaceTemplate field reference) is a supported
+field: the value is passed through to `pod.spec.runtimeClassName` of the
+workspace pod unchanged. It selects the node's container-runtime handler,
+so it only works when the workspace nodes actually carry a RuntimeClass
+with that name — a missing class fails scheduling.
+
+**No sandboxed runtime has been tested by the project.** Neither gVisor
+(`runsc`) nor Kata has run under the project's gates: the reference
+environment offers only `crun`, `nvidia` and `nvidia-experimental`. The
+E12 sandboxed-runtime matrix is therefore not met in v0.3 and moves to the
+v1.0 list. Setting `runtimeClassName` to a sandboxed handler today is
+operator discretion: expect the Localhost seccomp + AppArmor node-profile
+story (`deploy/node-profiles/`) and the `hostUsers: false` verification
+above to need re-proof under the new handler.

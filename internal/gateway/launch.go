@@ -28,12 +28,14 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 const (
@@ -42,12 +44,18 @@ const (
 	// TicketField is the form field carrying the ticket in the POST body.
 	TicketField = "ticket"
 	// DesktopPath is where the browser is redirected after redemption — no
-	// ticket or session material may appear in it. resize=remote is a static
-	// client setting: the KasmVNC web client otherwise treats a page inside
-	// an iframe as an embedded widget and forces resize=off, which keeps the
+	// ticket or session material may appear in it. The settings are static
+	// client settings (a URL setting wins over the client's initSetting
+	// defaults): the KasmVNC web client otherwise treats a page inside an
+	// iframe as an embedded widget and forces resize=off, which keeps the
 	// remote screen at its old size and leaves large dark regions in a
-	// larger portal frame (FX-R18). It is the default in a top-level tab.
-	DesktopPath = "/?resize=remote"
+	// larger portal frame (FX-R18); enable_webp matches the tab-mode codec
+	// offer; idle_disconnect=1440 pushes the client's own idle cut (default
+	// 20 min) past any template lifecycle timeout — idle policy belongs to
+	// the platform (V3.24 embedded-mode decisions). Clipboard client flags
+	// are not static: the portal sets them per workspace policy on the
+	// navigations it drives.
+	DesktopPath = "/?resize=remote&enable_webp=true&idle_disconnect=1440"
 
 	maxLaunchBody = 4096
 )
@@ -132,6 +140,20 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Validation order is security-significant: every check runs BEFORE
 // redemption so a rejected launch never consumes the ticket.
 func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID string) {
+	// E7: the per-client launch bucket runs first — a refused attempt is
+	// denied before any validation and never reaches RedeemTicket, so a
+	// rate-limited launch leaves the ticket redeemable.
+	if g.cfg.LaunchLimiter != nil {
+		if ok, retry := g.cfg.LaunchLimiter.Allow(ratelimit.ClientKey(r, g.cfg.TrustedProxies)); !ok {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncRateLimited(LaunchPath)
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+			g.audit(r, "launch.redeem", wsID, observability.OutcomeDenied, "rate_limited")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
+	}
 	// Launch origin policy (ADR 0004): the portal↔session POST is
 	// cross-site by design, so CSRF/session-fixation resistance comes from
 	// the one-use ticket bound to the requesting user plus the configured
@@ -236,6 +258,9 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.byLease[lease.ID] = s
 	g.byWorkspace[lease.WorkspaceUID] = s
 	g.mu.Unlock()
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddSessionsActive(1)
+	}
 	if old != nil {
 		g.killSession(old, "takeover")
 	}

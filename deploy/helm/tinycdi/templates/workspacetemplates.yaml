@@ -1,6 +1,9 @@
 # Seeded WorkspaceTemplates — the runtime catalog. spec passes through
-# verbatim — the CRD validates it (digest-pinned image, enum fields, ...)
-# and, once created, CEL makes spec immutable. So every distinct rendered
+# (the CRD validates it: digest-pinned image, enum fields, ...) except
+# two chart fills: spec.linux.image resolves from `image:`/images keys,
+# and spec.linux.adapter is rendered explicitly ("" is the value the API
+# server would store anyway — GitOps diffing then shows no drift). Once
+# created, CEL makes spec immutable. So every distinct rendered
 # content becomes a NEW revision object instead of an in-place mutation:
 # metadata.name is "<name>-<hash8>" where hash8 = sha256 of the rendered
 # spec + effective annotations. A values change renders a new name; helm
@@ -47,6 +50,12 @@
 {{- end }}
 {{- $_ := set $linux "image" $ref }}
 {{- $_ := set $spec "linux" $linux }}
+{{- end }}
+{{- /* spec.linux.adapter defaults to "" on the API server (CRD schema
+     default); render it explicitly so GitOps diffing (Argo CD, Flux)
+     shows no drift on the stored object. */ -}}
+{{- if and (hasKey $spec "linux") (not (hasKey $linux "adapter")) }}
+{{- $_ := set $linux "adapter" "" }}
 {{- end }}
 {{- $builtAt := .imageBuiltAt | default "" }}
 {{- if and .image (hasKey $.Values.images .image) }}

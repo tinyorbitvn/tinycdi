@@ -122,6 +122,13 @@ Order matters — later steps assume earlier ones exist:
    observed runtimes and `retained_data` — the api recovery loop
    (`-recovery-interval`, `internal/provisioning/recovery.go`) settles
    them; `tinycdi_quota_drift` should read 0 before opening to users.
+   Cadence: one pass at every leader acquisition, then every
+   `-recovery-interval` (`<=0` = the single startup pass only); quota
+   settlement is primarily event-driven off the Workspace informer and
+   the tick is the fallback. A reservation whose runtime absence is never
+   proven is held indefinitely by design — quota is released only on
+   positive proof — so a row stuck `held` means the runtime is unproven,
+   not that recovery stopped.
 9. **Access reset.** All pre-loss tickets and leases are invalid by
    construction — they fence on (workspaceUID, runtimeGeneration,
    runtimeUID) of incarnations that no longer exist. Users log in fresh
@@ -131,6 +138,39 @@ Then run the full post-restore invariant checklist in
 `docs/runbooks/backup-restore.md` (retained rows ↔ PVCs 1:1, no pre-restore
 ticket/lease redeeming, held disk quota exact, outbox replays in revision
 order with no double runtimes).
+
+## Postgres outage (failover) — behaviour and measured numbers
+
+Tier 3 above covers Postgres **loss** (data recovery). A Postgres
+**outage** — restart, failover, network cut — is an availability event,
+not a DR event: no data is lost and the platform heals itself when the
+database returns. Fail-closed behaviour was measured in the v0.3 outage
+drill (`tests/integration/postgres_outage_test.go`, `docker stop`/`start`
+of the Postgres container — all connections severed at once, the
+shared-fate failover shape):
+
+| Outage | Open streams | Control-plane API | After recovery |
+|---|---|---|---|
+| **10 s** (shorter than the revoke deadline) | WebSocket stayed open and echoed through the outage and after recovery — no reconnect needed | `GET /v1/workspaces` → **503 `UNAVAILABLE`** in ~1 ms (bound: ≤ 5 s, never a hang) | Lease renewals resume; session unaffected |
+| **45 s** (longer than the deadline) | Socket closed **30.1 s** after the outage began — `session closed reason="renew_deadline"` (30.4 s after the last counted lease renew) | same 503 `UNAVAILABLE`, immediate | Lease row had expired (lease TTL 30 s) → reconnect takes the **re-launch** path: new ticket, fresh stream |
+
+Semantics, for operators planning DB maintenance or running a failover:
+
+- The session gateway survives broker/store failures only for
+  `-revoke-deadline` (default **30 s**) measured from the last lease renew
+  that actually landed. A failover that completes inside ~30 s keeps live
+  desktop streams; **a failover longer than 30 s drops every stream by
+  design** — fail closed beats serving an unverifiable session.
+- While the DB is down the app API answers `503 UNAVAILABLE` fast (~1 ms
+  measured) instead of hanging or answering wrong — callers should retry,
+  not fail.
+- After the DB returns, streams that survived (short outage) continue
+  untouched. Streams that were killed: if the lease row is still active
+  the existing session cookie re-opens a stream; once the lease has
+  expired (TTL 30 s), the user goes back through the ticket/launch flow —
+  measured path in the drill.
+- No operator action is needed on recovery: renewals resume on the next
+  tick and the lease/outbox machinery settles itself.
 
 ## Restore drill — executed
 

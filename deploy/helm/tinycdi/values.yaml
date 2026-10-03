@@ -249,6 +249,14 @@ backend:
   # allowed. Workspace hosts are <label>.<sessionDomain> and never serve
   # the control routes.
   controlHosts: []
+  # CIDRs of the reverse proxies in front of the app/session listeners
+  # whose X-Forwarded-For claims the backend trusts (E7/S18): per-client
+  # rate limits and the runtime-bound forwarded headers derive the client
+  # from the right-most untrusted chain entry. REQUIRED behind an ingress
+  # or Gateway — empty keys every limit on the edge's own address, so all
+  # users share one bucket (the backend logs a startup warning). See the
+  # README "Rate limits and trusted proxies" for Cilium/Traefik examples.
+  trustedProxies: []
   # Ticket audience; defaults to sessionDomain.
   audience: ""
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
@@ -435,6 +443,29 @@ serviceMonitor:
   interval: ""
   scrapeTimeout: ""
   honorLabels: false
+
+# Optional Grafana dashboards (E8) — one ConfigMap per JSON file under
+# files/dashboards/, side-loaded by the Grafana dashboard sidecar.
+# Requires backend.metrics.enabled: every panel reads the tinycdi_*
+# series the backend metrics listener serves.
+dashboards:
+  enabled: false
+  # Labels ON the dashboard ConfigMaps — the sidecar's discovery labels.
+  # kube-prometheus-stack default is grafana_dashboard: "1"; set your
+  # Grafana's label/labelValue here when it differs.
+  labels:
+    grafana_dashboard: "1"
+
+# Optional PrometheusRule (E8) — the platform alert set (README "Alerts").
+# Requires backend.metrics.enabled plus the Prometheus Operator CRDs;
+# pair with serviceMonitor so something actually scrapes the series.
+alerts:
+  enabled: false
+  labels: {}            # e.g. {release: prometheus} — the operator's ruleSelector
+  # TinyCDISessionDropSpike floor: minimum live sessions 5m back required
+  # for the drop alert to fire — keeps a small install draining at night
+  # (2→0) from paging critical. 0 disables the floor.
+  sessionDropFloor: 5
 
 networkPolicy:
   enabled: true

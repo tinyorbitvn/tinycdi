@@ -228,3 +228,99 @@ func TestK8sRunningSource_PolicyFromCatalogRevision(t *testing.T) {
 		t.Fatalf("policy = %+v, want the template's %+v (not the platform defaults)", got[0].Policy, want)
 	}
 }
+
+// A running workspace's expiry budget comes from the template snapshot the
+// operator recorded at admit — never from a template revision published
+// afterwards. The broker owns expiry decisions and must plan on the same
+// contract the operator's backstop uses (V3.25).
+func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
+	kc, scheme, restCfg, ns := brokerEnv(t)
+	ctx := context.Background()
+
+	// The republished catalog revision carries different lifecycle caps;
+	// under the old resolver-based read the planner would have used these.
+	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "linux-desktop-ffff9999", Namespace: ns,
+			Labels: map[string]string{provisioning.LabelCatalogName: "linux-desktop"},
+		},
+		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+			Revision: "r2", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
+			Experience: workspacesv1alpha1.ExperienceDesktop,
+			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 2)},
+			Resources: workspacesv1alpha1.ResourceProfile{
+				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
+			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
+			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
+			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
+			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+				IdleTimeout:       metav1.Duration{Duration: 90 * time.Minute},
+				DisconnectTimeout: metav1.Duration{Duration: 45 * time.Minute},
+				MaxDuration:       metav1.Duration{Duration: 24 * time.Hour},
+				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			},
+		},
+	}
+	if err := kc.Create(ctx, tpl); err != nil {
+		t.Fatal(err)
+	}
+
+	// The admitted snapshot (the annotation the operator writes at first
+	// admit) records the lifecycle the workspace actually runs under.
+	snapJSON, err := json.Marshal(struct {
+		Spec workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
+	}{Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+		Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			IdleTimeout:       metav1.Duration{Duration: 7 * time.Minute},
+			DisconnectTimeout: metav1.Duration{Duration: 2 * time.Minute},
+			MaxDuration:       metav1.Duration{Duration: time.Hour},
+			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snap-pol", Namespace: ns,
+			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_snap-pol"},
+			Annotations: map[string]string{operator.AnnotationTemplateSnapshot: string(snapJSON)},
+		},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "linux-desktop"},
+			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
+			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			RuntimeGeneration: 1, IntentRevision: 1,
+		},
+	}
+	if err := kc.Create(ctx, ws); err != nil {
+		t.Fatal(err)
+	}
+	started := metav1.Now()
+	ws.Status = workspacesv1alpha1.WorkspaceStatus{Phase: workspacesv1alpha1.WorkspacePhaseReady, StartedAt: &started}
+	if err := kc.Status().Update(ctx, ws); err != nil {
+		t.Fatal(err)
+	}
+
+	src := brokerSource(t, scheme, restCfg, ns)
+	var got []broker.RunningWorkspace
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var err error
+		if got, err = src.RunningWorkspaces(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(got) != 1 {
+		t.Fatalf("running = %+v, want one workspace", got)
+	}
+	want := broker.TimeoutPolicy{IdleTimeout: 7 * time.Minute, DisconnectTimeout: 2 * time.Minute, MaxDuration: time.Hour}
+	if got[0].Policy != want {
+		t.Fatalf("policy = %+v, want the recorded snapshot's %+v, not the republished revision", got[0].Policy, want)
+	}
+}

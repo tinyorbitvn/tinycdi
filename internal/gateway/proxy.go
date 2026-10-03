@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
@@ -132,6 +134,17 @@ type Config struct {
 	// InputReportInterval is the minimum spacing between "input" activity
 	// reports per session (default InputReportInterval); injectable.
 	InputReportInterval time.Duration
+	// LaunchLimiter throttles /v1/launch attempts per client key (E7);
+	// nil disables. The key derives like ratelimit.ClientKey: the socket
+	// peer, or the right-most untrusted X-Forwarded-For entry when the
+	// peer sits inside TrustedProxies.
+	LaunchLimiter *ratelimit.Limiter
+	// TrustedProxies lists the CIDRs of reverse proxies in front of the
+	// session listener whose X-Forwarded-For claims are trusted (S18):
+	// it feeds both the launch limiter's client key and the forwarded
+	// headers the runtime sees — client-supplied values are stripped and
+	// rebuilt from the verified chain only.
+	TrustedProxies []netip.Prefix
 	// Now injects a clock for tests.
 	Now func() time.Time
 	// Metrics, Audit and Logger are optional observability sinks; all three
@@ -242,6 +255,9 @@ func (g *Gateway) Close() {
 		g.byLease = map[string]*session{}
 		g.byWorkspace = map[string]*session{}
 		g.mu.Unlock()
+		if g.cfg.Metrics != nil {
+			g.cfg.Metrics.AddSessionsActive(-float64(len(all)))
+		}
 		for _, s := range all {
 			s.kill()
 		}
@@ -281,6 +297,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := g.now()
 	route := "proxy"
 	switch {
+	case r.URL.Path == "/metrics":
+		// E8: metrics live only on the dedicated metrics listener — the
+		// path must not exist on this public listener for any host class.
+		writeJSON(rec, http.StatusNotFound, map[string]string{"error": "not_found"})
 	case r.URL.Path == LaunchPath:
 		route = "launch"
 		if !wsOK {
@@ -310,7 +330,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveProxy(rec, r, wsID)
 	}
 	if g.cfg.Metrics != nil {
-		g.cfg.Metrics.ObserveHTTP(route, r.Method, codeClass(rec.status), g.now().Sub(start))
+		g.cfg.Metrics.ObserveHTTP("session", route, r.Method, codeClass(rec.status), g.now().Sub(start))
 	}
 }
 
@@ -688,6 +708,7 @@ func (g *Gateway) direct(r *http.Request) {
 		r.Header.Del("Authorization")
 	}
 	r.Header.Del("Cookie")
+	g.rewriteForwarded(r)
 	// Upstream quirk: KasmVNC requires the legacy Sec-WebSocket-Origin
 	// header on upgrades; browsers only send Origin. We have already
 	// validated Origin (scheme+exact authority) before proxying, so relay
@@ -697,6 +718,49 @@ func (g *Gateway) direct(r *http.Request) {
 	} else {
 		r.Header.Del("Sec-WebSocket-Origin")
 	}
+}
+
+// rewriteForwarded rebuilds the client-address headers toward the runtime
+// (S18): client-supplied X-Forwarded-For, Forwarded and X-Real-IP are
+// stripped and re-derived from the trusted chain only. The runtime keys
+// its brute-force blacklist on the forwarded address, so a spoofed client
+// value must never reach the pod. The derived client is the same
+// ratelimit.ClientKey result the launch limiter uses: the socket peer, or
+// the right-most untrusted chain entry when the peer is inside
+// TrustedProxies. When the peer itself is the client the header is left
+// unset — the ReverseProxy appends the socket address itself; when the
+// peer is a trusted proxy the derived client is prepended and the proxy
+// still appends the peer, so the runtime sees "<client>, <peer>".
+// Forwarded mirrors that chain in RFC 7239 form and X-Real-IP carries the
+// derived client for runtimes that key on it.
+func (g *Gateway) rewriteForwarded(r *http.Request) {
+	peer := ratelimit.PeerIP(r.RemoteAddr)
+	client := ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+	if _, err := netip.ParseAddr(client); err != nil {
+		// A non-IP right-most entry (spoofed or "unknown") is not a
+		// usable client address: fall back to the verified peer rather
+		// than forward client bytes into a parsed field.
+		client = peer
+	}
+	r.Header.Del("X-Forwarded-For")
+	r.Header.Del("Forwarded")
+	r.Header.Del("X-Real-Ip")
+	if client != peer {
+		r.Header.Set("X-Forwarded-For", client)
+		r.Header.Set("Forwarded", "for="+forwardedFor(client)+", for="+forwardedFor(peer))
+	} else {
+		r.Header.Set("Forwarded", "for="+forwardedFor(peer))
+	}
+	r.Header.Set("X-Real-Ip", client)
+}
+
+// forwardedFor renders an address as an RFC 7239 for= token; IPv6 literals
+// are quoted in brackets per the grammar.
+func forwardedFor(ip string) string {
+	if strings.Contains(ip, ":") {
+		return `"[` + ip + `]"`
+	}
+	return ip
 }
 
 // sessionRoundTripper forwards through the per-session pinned-CA transport.

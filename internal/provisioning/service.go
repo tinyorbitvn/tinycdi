@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -22,11 +23,30 @@ import (
 type Service struct {
 	db       *store.DB
 	retained *RetainedStore
+	// templates resolves template revisions/families for the OnStart
+	// re-point; nil keeps the workspace on its recorded revision (tests).
+	templates TemplateLookup
+	log       *slog.Logger
 }
 
 // NewService wraps db.
 func NewService(db *store.DB) *Service {
 	return &Service{db: db, retained: NewRetainedStore(db)}
+}
+
+// WithTemplateLookup attaches the template catalog the start path consults
+// to re-point a workspace onto the newest published revision of its
+// template family (lifecycle.imageUpdate = OnStart; E1).
+func (s *Service) WithTemplateLookup(l TemplateLookup) *Service {
+	s.templates = l
+	return s
+}
+
+// WithLogger attaches a logger for lifecycle warnings; nil keeps
+// slog.Default.
+func (s *Service) WithLogger(l *slog.Logger) *Service {
+	s.log = l
+	return s
 }
 
 var (
@@ -38,13 +58,17 @@ var (
 	ErrNameTaken = errors.New("workspace name already in use by this owner")
 )
 
-// TemplateInfo is the catalog entry snapshot captured at create time.
+// TemplateInfo is the catalog entry snapshot captured at create time and
+// refreshed by a start that moves the workspace to a newer revision.
 type TemplateInfo struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Revision   int64  `json:"revision"`
-	Runtime    string `json:"runtime"`
-	Experience string `json:"experience"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Revision int64  `json:"revision"`
+	// RevisionLabel is the raw spec.revision identifier ("2026-10-b");
+	// absent on rows written before v0.3.
+	RevisionLabel string `json:"revisionLabel,omitempty"`
+	Runtime       string `json:"runtime"`
+	Experience    string `json:"experience"`
 	// ImageBuiltAt is the template's raw image-built-at annotation value
 	// (RFC 3339 when well formed), snapshotted at create time.
 	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
@@ -353,8 +377,28 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 		}
 		if apply {
 			var genIncr int64
+			var sigSpec *IntentSpec
+			var skipReason string
 			if kind == IntentStart {
 				genIncr = 1
+				// E1: a start may re-point the workspace at the newest
+				// published revision of its template family; the move is
+				// decided and written in this same transaction.
+				if s.templates != nil {
+					next, objName, skipped, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
+					if err != nil {
+						return err
+					}
+					if next != nil {
+						rec.Template = *next
+						sigSpec = &IntentSpec{
+							TemplateName: objName,
+							ImageBuiltAt: next.ImageBuiltAt,
+						}
+					} else {
+						skipReason = skipped
+					}
+				}
 				// A stop releases the running-quota reservation once the
 				// runtime's absence is proven; the restart re-acquires it in
 				// this same transaction so a start intent can never exist
@@ -363,16 +407,29 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 					return err
 				}
 			}
+			tpl, err := json.Marshal(rec.Template)
+			if err != nil {
+				return fmt.Errorf("signal: workspace template snapshot %w", err)
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE workspaces SET desired_state = $3,
 					runtime_generation = runtime_generation + $4,
-					phase = $5, updated_at = now()
+					phase = $5, template = $6, updated_at = now()
 				WHERE id = $1 AND tenant_id = $2`,
-				wsID, tenantID, rec.DesiredState, genIncr, rec.Phase); err != nil {
+				wsID, tenantID, rec.DesiredState, genIncr, rec.Phase, tpl); err != nil {
 				return err
 			}
-			if _, err := appendIntent(ctx, tx, PlatformID(wsID), kind, nil); err != nil {
+			rev, err := appendIntent(ctx, tx, PlatformID(wsID), kind, sigSpec)
+			if err != nil {
 				return err
+			}
+			if skipReason != "" {
+				// E2: the guard refused the family re-point — the cause
+				// stays with the start intent so the workspace events can
+				// name it (TemplateUpdateSkipped).
+				if err := SetIntentReason(ctx, tx, PlatformID(wsID), rev, skipReason); err != nil {
+					return err
+				}
 			}
 			if kind == IntentDelete {
 				if err := markDeleted(ctx, tx, PlatformID(wsID)); err != nil {

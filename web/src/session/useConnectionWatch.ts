@@ -59,6 +59,12 @@ export interface ConnectionWatchOptions {
   requestTicket: () => Promise<LaunchTicket>;
   onEvent: (ev: WatchEvent) => void;
   pollIntervalMs?: number | undefined;
+  /**
+   * Resolves the URL a lease-active frame reload points the iframe at;
+   * defaults to sessionFrameUrl with the current policy options. A function
+   * so the reload picks up a clipboard policy resolved after mount.
+   */
+  frameUrl?: (() => string) | undefined;
 }
 
 export function useConnectionWatch(options: ConnectionWatchOptions): void {
@@ -104,7 +110,9 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       if (!el) return;
       // The session cookie on this host is bound to the live lease, so a
       // plain navigation to the workspace origin resumes the desktop.
-      el.src = sessionFrameUrl(opts.current.workspaceId, opts.current.sessionDomain);
+      el.src =
+        opts.current.frameUrl?.() ??
+        sessionFrameUrl(opts.current.workspaceId, opts.current.sessionDomain);
       opts.current.onEvent({ type: "frame-navigated" });
     };
 

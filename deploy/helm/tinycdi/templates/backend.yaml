@@ -198,6 +198,13 @@ spec:
             # directory is shared, so a per-pod id would split ownership
             # across replicas. Literal value — never the pod name.
             - -gateway-id={{ .Values.backend.gatewayID }}
+            {{- if .Values.backend.trustedProxies }}
+            # CIDRs whose X-Forwarded-For claims are trusted (E7/S18):
+            # rate limits and the runtime-bound headers derive the client
+            # from the right-most untrusted chain entry. Required behind
+            # an ingress/Gateway — empty shares one bucket per edge.
+            - -trusted-proxies={{ join "," .Values.backend.trustedProxies }}
+            {{- end }}
             {{- with .Values.backend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

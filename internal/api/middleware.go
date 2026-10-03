@@ -3,12 +3,17 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // writeError is the package-local convenience wrapper around WriteError
@@ -96,7 +101,17 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			sess, err = a.sessions.Peek(r.Context(), c.Value)
 		}
 		if err != nil {
-			writeError(w, r, CodeUnauthenticated, "session missing or expired")
+			switch {
+			case errors.Is(err, ErrSessionNotFound):
+				writeError(w, r, CodeUnauthenticated, "session missing or expired")
+			case store.IsTransient(err):
+				// The session store could not answer: not "no session".
+				// 503 so the portal retries instead of re-logging in
+				// (fail closed, same shape as the session listener).
+				writeError(w, r, CodeUnavailable, "session store unavailable")
+			default:
+				writeError(w, r, CodeInternal, "internal error")
+			}
 			return
 		}
 		// Fill the outer audit collector (set by AuditWithSink) — context
@@ -215,6 +230,36 @@ func RequireTrustedOrigin(sessionCookieName string, allowedOrigins []string) fun
 }
 
 // ---------------------------------------------------------------------------
+// Rate limiting (E7)
+// ---------------------------------------------------------------------------
+
+// RateLimit throttles a route per client key: requests inside the bucket
+// pass; over the limit the caller gets 429 RATE_LIMITED with a Retry-After
+// in whole seconds and the refusal is counted in
+// tinycdi_rate_limited_total under the matched route template (E8). The
+// key is the socket peer, or the right-most untrusted X-Forwarded-For
+// entry when the peer sits inside trusted — the same derivation the
+// session gateway applies (S18). A nil limiter disables the check
+// entirely; a nil Metrics skips the count.
+func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if l != nil {
+				if ok, retry := l.Allow(ratelimit.ClientKey(r, trusted)); !ok {
+					if m != nil {
+						m.IncRateLimited(strings.TrimPrefix(r.Pattern, r.Method+" "))
+					}
+					w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+					writeError(w, r, CodeRateLimited, "rate limit exceeded")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Audit logging
 // ---------------------------------------------------------------------------
 
@@ -272,11 +317,15 @@ func outcomeFor(status int) observability.AuditOutcome {
 }
 
 // InstrumentHTTP records per-request Prometheus metrics (count + duration)
-// labeled by route template, method and code class. It must wrap the mux
+// labeled by listener, route template, method and code class (E8). A nil
+// Metrics passes requests through unobserved. It must wrap the mux
 // innermost: it relies on ServeMux setting r.Pattern, which is only readable
 // when this middleware passes the same *http.Request down unwrapped.
-func InstrumentHTTP(m *observability.Metrics) func(http.Handler) http.Handler {
+func InstrumentHTTP(m *observability.Metrics, listener string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
+		if m == nil {
+			return next
+		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rec := &statusRecorder{ResponseWriter: w}
 			start := time.Now()
@@ -285,7 +334,7 @@ func InstrumentHTTP(m *observability.Metrics) func(http.Handler) http.Handler {
 			if route == "" {
 				route = "unmatched"
 			}
-			m.ObserveHTTP(route, r.Method, codeClass(statusOrOK(rec.status)), time.Since(start))
+			m.ObserveHTTP(listener, route, r.Method, codeClass(statusOrOK(rec.status)), time.Since(start))
 		})
 	}
 }

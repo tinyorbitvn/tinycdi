@@ -79,6 +79,9 @@ backend:
     existingSecret: tinycdi-extra-ca
   extraPortalOrigins:
     - https://alt.portal.example.net
+  # CIDRs of the edge proxies whose X-Forwarded-For claims are trusted
+  # (per-client rate limits + runtime-bound headers; E7/S18).
+  trustedProxies: ["10.99.0.0/16", "fd00::/8"]
   metrics:
     enabled: true
   # /v1/control/* bearer token (optional — control routes close without it).
