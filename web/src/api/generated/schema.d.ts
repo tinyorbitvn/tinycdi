@@ -981,6 +981,16 @@ export interface components {
              *     active lease.
              */
             streamEpoch: number;
+            /**
+             * @description Opaque per-tab id of the stream currently claimed on the lease
+             *     (128 bits, lowercase hex): the portal mints it per browser tab and
+             *     sends it with its stream claim, so a tab can tell that the live
+             *     stream is its own — even across a backend restart that bumped the
+             *     stream epoch — versus another tab's. Absent when the claim carried
+             *     no id (legacy client) and never served to a principal other than
+             *     the lease's own.
+             */
+            streamOwnerTab?: string;
         };
         CreateConnectionRequest: {
             /**

@@ -9,6 +9,7 @@ import {
   markSessionOwned,
   readSessionMarker,
   sessionFrameName,
+  sessionTabId,
   TICKET_FIELD,
 } from "../../../src/session/launch";
 import { createMockApi, CSRF_TOKEN_VALUE } from "../../mock-api/handler.ts";
@@ -94,7 +95,8 @@ describe("SessionPage", () => {
     // The ticket POST lands inside the frame, never in the top navigation.
     await waitFor(() => expect(submitted).toHaveLength(1));
     expect(submitted[0].target).toBe(sessionFrameName(ws.id));
-    expect(submitted[0].action).toBe(
+    const action = new URL(submitted[0].action);
+    expect(`${action.origin}${action.pathname}`).toBe(
       `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}/v1/launch`,
     );
     const input = submitted[0].querySelector(
@@ -708,5 +710,81 @@ describe("SessionPage reconnecting badge (T5.4)", () => {
       streamEpoch: 3,
     });
     await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
+  });
+});
+
+// ---- FX-R31: ownership evidence decides "elsewhere", not epoch arithmetic ----
+
+describe("SessionPage stream-owner tab (FX-R31)", () => {
+  const MY_TAB = () => sessionTabId(); // the page's own id (same sessionStorage)
+  const OTHER_TAB = "fedcba9876543210fedcba9876543210";
+  const owned = (streamEpoch: number, streamOwnerTab: string, leaseRef = OWN_REF) => ({
+    state: "connected",
+    leaseActive: true,
+    leaseRef,
+    streamEpoch,
+    streamOwnerTab,
+  });
+
+  it("two claims of this tab inside one poll interval stay Connected (rc.2 false positive)", async () => {
+    const { ws, control, submitted } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // The rc.2 failure mode: a backend restart's re-claim bumps the epoch
+    // twice inside one interval — epochs alone read "another tab", but the
+    // owner id says the stream is this tab's.
+    control.connection = () => owned(4, MY_TAB());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
+    expect(submitted).toHaveLength(0);
+  });
+
+  it("a claim with a different tab id shows 'open in another tab'", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Even at an epoch the arithmetic would accept (+1), a foreign owner
+    // id is a takeover — evidence beats the +1 window.
+    control.connection = () => owned(3, OTHER_TAB);
+    expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
+  });
+
+  it("a re-claim at a new epoch with this tab's id is 'ours' (restart/rollout)", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Backend restart: the gateway drained, the client's websocket retry
+    // re-claimed at a higher epoch under the same tab id.
+    control.connection = () => owned(5, MY_TAB());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
+  });
+
+  it("a legacy claim (no owner id) still decides by epoch arithmetic", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // No streamOwnerTab: exactly the pre-FX-R31 behaviour — a newer epoch
+    // on our lease reads as another tab.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+    });
+    expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
+  });
+
+  it("a foreign owner id inside the resume window is a takeover, not our stream", async () => {
+    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    // Our marker and the live lease agree on epoch 1, but the stream on
+    // the lease belongs to another tab — the resume poll must not claim it.
+    control.connection = () => owned(1, OTHER_TAB);
+    expect(
+      await screen.findByText("This session is open in another tab"),
+    ).toBeInTheDocument();
+    expect(ticketPosts()).toHaveLength(0);
   });
 });

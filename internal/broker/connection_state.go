@@ -34,6 +34,11 @@ type ConnectionState struct {
 	LeaseRef string
 	// StreamEpoch is the active lease's stream_epoch (0 without a lease).
 	StreamEpoch uint64
+	// StreamOwnerTab is the tab id the current stream was claimed with
+	// (empty without a lease, or when the claim carried no valid id). It is
+	// populated ONLY when the caller's owner ref is the lease's
+	// principal_subject — another principal never learns it.
+	StreamOwnerTab string
 }
 
 // leaseStaleAfter is the renewal-freshness window: the gateway renews every
@@ -44,7 +49,12 @@ const leaseStaleAfter = 20 * time.Second
 // ConnectionState reports the workspace's connection state from the lease
 // and activity tables. It is a pure read — it never mutates lease state,
 // refreshes expiry, or slides any timer.
-func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (ConnectionState, error) {
+//
+// owner is the caller's owner ref (issuer|subject): StreamOwnerTab is
+// revealed only when it equals the lease's principal_subject — the field
+// tells the caller's OWN tab apart from a foreign one, so it must never be
+// served to another principal (nor appear in logs or metrics labels).
+func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, owner string) (ConnectionState, error) {
 	now := b.now()
 	var (
 		leaseID     string
@@ -52,16 +62,18 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (
 		expiresAt   time.Time
 		lastRenewed *time.Time
 		openStreams int
+		ownerTab    *string
+		principal   string
 	)
 	err := b.db.Pool().QueryRow(ctx, `
 		SELECT l.id, l.stream_epoch, l.expires_at, l.last_renewed_at,
-			COALESCE(a.open_streams, 0)
+			COALESCE(a.open_streams, 0), l.stream_owner_tab, l.principal_subject
 		FROM connection_lease l
 		LEFT JOIN workspace_activity a
 			ON a.workspace_id = l.workspace_id
 			AND a.runtime_generation = l.runtime_generation
 		WHERE l.workspace_id = $1 AND l.state = 'active'`, workspaceUID).
-		Scan(&leaseID, &streamEpoch, &expiresAt, &lastRenewed, &openStreams)
+		Scan(&leaseID, &streamEpoch, &expiresAt, &lastRenewed, &openStreams, &ownerTab, &principal)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConnectionState{State: "none"}, nil
 	}
@@ -79,6 +91,9 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID) (
 		LastRenewedAt: lastRenewed,
 		LeaseRef:      hex.EncodeToString(sum[:])[:16],
 		StreamEpoch:   uint64(streamEpoch),
+	}
+	if ownerTab != nil && principal == owner {
+		st.StreamOwnerTab = *ownerTab
 	}
 	switch {
 	case lastRenewed == nil || now.Sub(*lastRenewed) > leaseStaleAfter:
@@ -109,17 +124,20 @@ type PublicStater struct {
 
 // ConnectionState maps the broker view onto the public response shape. The
 // read cannot produce domain denials — ownership was already enforced by the
-// handler's workspace lookup — so any error is internal.
-func (s PublicStater) ConnectionState(ctx context.Context, workspaceUID string) (api.ConnectionStatus, *api.Error) {
-	st, err := s.B.ConnectionState(ctx, PlatformID(workspaceUID))
+// handler's workspace lookup — so any error is internal. owner is the
+// caller's owner ref; the broker reveals StreamOwnerTab only to the lease's
+// own principal.
+func (s PublicStater) ConnectionState(ctx context.Context, workspaceUID, owner string) (api.ConnectionStatus, *api.Error) {
+	st, err := s.B.ConnectionState(ctx, PlatformID(workspaceUID), owner)
 	if err != nil {
 		return api.ConnectionStatus{}, api.NewError(api.CodeInternal, "internal error")
 	}
 	return api.ConnectionStatus{
-		State:         st.State,
-		LeaseActive:   st.LeaseActive,
-		LastRenewedAt: st.LastRenewedAt,
-		LeaseRef:      st.LeaseRef,
-		StreamEpoch:   st.StreamEpoch,
+		State:          st.State,
+		LeaseActive:    st.LeaseActive,
+		LastRenewedAt:  st.LastRenewedAt,
+		LeaseRef:       st.LeaseRef,
+		StreamEpoch:    st.StreamEpoch,
+		StreamOwnerTab: st.StreamOwnerTab,
 	}, nil
 }

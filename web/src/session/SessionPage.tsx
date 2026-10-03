@@ -31,6 +31,7 @@ import {
   sessionLabel,
   sessionFrameAllow,
   sessionFrameUrl,
+  sessionTabId,
   submitLaunch,
   type SessionEmbedOpts,
   type SessionMarker,
@@ -215,6 +216,22 @@ export function SessionPage({
       const { leaseRef, streamEpoch } = s;
       if (s.state !== "connected" || !s.leaseActive) return "unknown";
       if (leaseRef === undefined || streamEpoch === undefined) return "unknown";
+      // Ownership evidence settles it outright (FX-R31): the id lands on
+      // the lease in the same write as the epoch, so it always names the
+      // CURRENT stream's claimer. OUR id means the live stream is ours —
+      // the epoch arithmetic below never sees two same-tab claims inside
+      // one poll interval (a backend restart's re-claim) as a takeover. A
+      // different id is a foreign tab's claim whatever the epochs say.
+      // Absent (a legacy claim stored NULL) falls back to the epochs.
+      if (s.streamOwnerTab !== undefined) {
+        pending.current = null;
+        remember({ leaseRef, streamEpoch });
+        if (s.streamOwnerTab === sessionTabId()) {
+          owned.current = true;
+          return "ours";
+        }
+        return "elsewhere";
+      }
       const p = pending.current;
       if (p) {
         if (leaseRef !== p.leaseRef && p.leaseRef !== "") {

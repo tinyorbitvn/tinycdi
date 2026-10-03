@@ -93,11 +93,20 @@ func seamlessClipboardOK(ua string) bool {
 // the policy the redeemed ticket recorded (V3.24 — the portal's iframe
 // src params never reach the frame: the ticket POST's 303 is the final
 // navigation, so the redirect must carry them).
-func desktopPath(policy, ua string) string {
+//
+// ownerTab is the claiming tab's id from the launch POST's query: a valid
+// id is re-asserted as the client's `path` setting so every WebSocket the
+// frame opens — first connect and every KasmVNC retry alike — claims the
+// stream under the same tab id (FX-R31). An absent or malformed id leaves
+// `path` unset, which the broker stores as a NULL (legacy) claim.
+func desktopPath(policy, ua, ownerTab string) string {
 	up, down := clipboardDirections(policy)
 	path := fmt.Sprintf("%s&clipboard_up=%t&clipboard_down=%t", DesktopPath, up, down)
 	if up || down {
 		path += fmt.Sprintf("&clipboard_seamless=%t", seamlessClipboardOK(ua))
+	}
+	if broker.ValidStreamOwnerTab(ownerTab) {
+		path += "&path=" + url.QueryEscape("websockify?"+streamOwnerTabParam+"="+ownerTab)
 	}
 	return path
 }
@@ -318,7 +327,7 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeSuccess, "")
 
 	http.SetCookie(w, g.sessionCookie(s.id))
-	w.Header().Set("Location", desktopPath(lease.ClipboardPolicy, r.UserAgent()))
+	w.Header().Set("Location", desktopPath(lease.ClipboardPolicy, r.UserAgent(), r.URL.Query().Get(streamOwnerTabParam)))
 	w.WriteHeader(http.StatusSeeOther)
 }
 

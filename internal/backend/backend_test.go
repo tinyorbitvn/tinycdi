@@ -301,7 +301,7 @@ func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, 
 // fakeConnStater satisfies api.ConnectionStater for route-table tests.
 type fakeConnStater struct{}
 
-func (fakeConnStater) ConnectionState(context.Context, string) (api.ConnectionStatus, *api.Error) {
+func (fakeConnStater) ConnectionState(context.Context, string, string) (api.ConnectionStatus, *api.Error) {
 	return api.ConnectionStatus{State: "none"}, nil
 }
 

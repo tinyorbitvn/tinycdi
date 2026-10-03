@@ -64,7 +64,7 @@ func (r *recordingSurface) LeaseBySession(_ context.Context, gw GatewayIdentity,
 	return Lease{ID: "lease-1"}, r.err
 }
 
-func (r *recordingSurface) ClaimStream(_ context.Context, gw GatewayIdentity, _ string, _ Fence) (uint64, error) {
+func (r *recordingSurface) ClaimStream(_ context.Context, gw GatewayIdentity, _ string, _ Fence, _ string) (uint64, error) {
 	r.gotIDs = append(r.gotIDs, gw)
 	r.calls = append(r.calls, "claim")
 	return 1, r.err
@@ -103,7 +103,7 @@ func TestLocalGateway_PinsIdentity(t *testing.T) {
 	_ = lg.ReportActivity(ctx, spoof, "lease-1", Fence{}, ActivityEvent{Type: ActivityInput})
 	_ = lg.BindSession(ctx, spoof, "lease-1", SessionDigest{})
 	_, _ = lg.LeaseBySession(ctx, spoof, SessionDigest{})
-	_, _ = lg.ClaimStream(ctx, spoof, "lease-1", Fence{})
+	_, _ = lg.ClaimStream(ctx, spoof, "lease-1", Fence{}, "")
 	if len(rs.gotIDs) != 7 {
 		t.Fatalf("calls=%v", rs.calls)
 	}
@@ -137,7 +137,7 @@ func TestLocalGateway_RejectsBadLeaseIDs(t *testing.T) {
 		if err := lg.BindSession(ctx, pinned, id, SessionDigest{}); !errors.Is(err, ErrLeaseInvalid) {
 			t.Errorf("bind %q err=%v", id, err)
 		}
-		if _, err := lg.ClaimStream(ctx, pinned, id, Fence{}); !errors.Is(err, ErrLeaseInvalid) {
+		if _, err := lg.ClaimStream(ctx, pinned, id, Fence{}, ""); !errors.Is(err, ErrLeaseInvalid) {
 			t.Errorf("claim %q err=%v", id, err)
 		}
 	}

@@ -7,14 +7,17 @@ import {
   type ConnectionStatus,
   type WatchEvent,
 } from "../../../src/session/useConnectionWatch";
-import { sessionFrameName, type LaunchTicket } from "../../../src/session/launch";
+import { sessionFrameName, sessionFrameUrl, type LaunchTicket } from "../../../src/session/launch";
 
 const WS = "ws_0123456789abcdef";
 const DOMAIN = "session.example.com";
 const ORIGIN = `https://ws-0123456789abcdef.${DOMAIN}`;
 // Frame navigations load the desktop client with the embedded-parity
 // settings (FX-R18 resize=remote + V3.24); no clipboard policy here.
-const FRAME_URL = `${ORIGIN}/?resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false`;
+// The frame URL includes the tab-id path setting (FX-R31); the id is minted
+// once per test (sessionStorage clears after each), so compare against a
+// same-test call rather than a module constant.
+const frameUrl = () => sessionFrameUrl(WS, DOMAIN);
 
 function ticket(): LaunchTicket {
   return {
@@ -79,7 +82,7 @@ describe("useConnectionWatch (D15)", () => {
     await advanced(RECONNECT_BACKOFF_MS[0] - 1);
     expect(frame.getAttribute("src")).toBeNull();
     await advanced(1);
-    expect(frame.getAttribute("src")).toBe(FRAME_URL);
+    expect(frame.getAttribute("src")).toBe(frameUrl());
     expect(navigated(events)).toHaveLength(1);
 
     // Still disconnected on the next poll: backoff[1] = 2 s.
@@ -128,7 +131,7 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(before);
     await advanced(3_000); // t = 28 s: the 8 s timer still fires
     expect(navigated(events)).toHaveLength(before + 1);
-    expect(frame.getAttribute("src")).toBe(FRAME_URL);
+    expect(frame.getAttribute("src")).toBe(frameUrl());
   });
 
   it("cancels a pending reload when the stream comes back and restarts the backoff", async () => {
@@ -235,7 +238,7 @@ describe("useConnectionWatch (D15)", () => {
     expect(requestTicket).toHaveBeenCalledTimes(1);
     expect(submitted[0].method).toBe("post");
     expect(submitted[0].target).toBe(sessionFrameName(WS));
-    expect(submitted[0].action).toBe(`${ORIGIN}/v1/launch`);
+    expect(submitted[0].action.startsWith(`${ORIGIN}/v1/launch?`)).toBe(true);
     expect(events).toContainEqual({ type: "relaunched" });
   });
 

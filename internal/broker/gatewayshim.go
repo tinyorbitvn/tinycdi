@@ -25,7 +25,7 @@ type GatewaySurface interface {
 	ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ev ActivityEvent) error
 	BindSession(ctx context.Context, gw GatewayIdentity, leaseID string, d SessionDigest) error
 	LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error)
-	ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence) (uint64, error)
+	ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ownerTab string) (uint64, error)
 }
 
 var _ GatewaySurface = (*Broker)(nil)
@@ -143,12 +143,12 @@ func (l *LocalGateway) LeaseBySession(ctx context.Context, _ GatewayIdentity, d 
 }
 
 // ClaimStream claims the next stream epoch on the lease for the pinned
-// identity.
-func (l *LocalGateway) ClaimStream(ctx context.Context, _ GatewayIdentity, leaseID string, fence Fence) (uint64, error) {
+// identity; ownerTab is the claiming tab's id (validated at the broker).
+func (l *LocalGateway) ClaimStream(ctx context.Context, _ GatewayIdentity, leaseID string, fence Fence, ownerTab string) (uint64, error) {
 	if !leaseIDOK(leaseID) {
 		return 0, ErrLeaseInvalid
 	}
-	epoch, err := l.b.ClaimStream(ctx, l.id, leaseID, fence)
+	epoch, err := l.b.ClaimStream(ctx, l.id, leaseID, fence, ownerTab)
 	return epoch, classify("claim", err)
 }
 

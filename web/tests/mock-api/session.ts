@@ -41,6 +41,8 @@ export interface MockConnectionStatus {
   leaseRef?: string;
   /** The lease's stream epoch; advances when a new stream opens. */
   streamEpoch?: number;
+  /** The tab id the current stream was claimed with; absent for a legacy claim (FX-R31). */
+  streamOwnerTab?: string;
 }
 
 /** What the API publishes as leaseRef: SHA-256(lease ID), first 16 hex chars. */
@@ -205,6 +207,9 @@ export function sessionArea(ctx: MockContext): MockArea {
           ...(typeof req.body?.leaseRef === "string" ? { leaseRef: req.body.leaseRef } : {}),
           ...(typeof req.body?.streamEpoch === "number"
             ? { streamEpoch: req.body.streamEpoch }
+            : {}),
+          ...(typeof req.body?.streamOwnerTab === "string"
+            ? { streamOwnerTab: req.body.streamOwnerTab }
             : {}),
         });
         return ok(200, { scripted: id });

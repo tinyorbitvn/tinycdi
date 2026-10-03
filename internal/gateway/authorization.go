@@ -571,12 +571,20 @@ func (g *Gateway) lookupSession(r *http.Request, wsID string) (*session, error) 
 	return g.rehydrate(r, c.Value, wsID)
 }
 
+// streamOwnerTabParam is the query parameter a stream claim carries the
+// owning tab's id in: the portal puts it on the KasmVNC client's `path`
+// setting (path=websockify?tcdi_tab=<id>), so every WebSocket retry from
+// the same frame claims with the same id (FX-R31). It is an opaque
+// correlator, never a credential.
+const streamOwnerTabParam = "tcdi_tab"
+
 // claimStream bumps the lease's stream epoch on an admitted upgrade and
 // remembers it on the session: another replica's renew loop then fences
-// whichever process holds the older epoch.
-func (g *Gateway) claimStream(ctx context.Context, s *session) (uint64, error) {
+// whichever process holds the older epoch. ownerTab is the claiming tab's
+// id, forwarded to the broker for same-UPDATE storage.
+func (g *Gateway) claimStream(ctx context.Context, s *session, ownerTab string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	epoch, err := g.cfg.Sessions.ClaimStream(ctx, g.cfg.Identity, s.leaseID(), s.fenceSnapshot())
+	epoch, err := g.cfg.Sessions.ClaimStream(ctx, g.cfg.Identity, s.leaseID(), s.fenceSnapshot(), ownerTab)
 	cancel()
 	if err != nil {
 		return 0, err
