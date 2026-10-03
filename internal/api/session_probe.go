@@ -34,10 +34,14 @@ func MountSessionProbeRoute(mux *http.ServeMux, authn *Authenticator, wrap ...fu
 
 // SessionProbeHandler answers 200 {"authenticated": true|false}. The session
 // is read with Peek, so the probe never slides the portal idle timer: an
-// unattended tab polling it cannot keep a session alive (P4, D18).
+// unattended tab polling it cannot keep a session alive (P4, D18). A session
+// the rate-limit middleware already verified rides in on the request context
+// and is reused instead of a second store read (FX-R30).
 func (a *Authenticator) SessionProbeHandler(w http.ResponseWriter, r *http.Request) {
 	authenticated := false
-	if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" {
+	if _, ok := SessionFromContext(r.Context()); ok {
+		authenticated = true
+	} else if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" {
 		_, err := a.sessions.Peek(r.Context(), c.Value)
 		authenticated = err == nil
 	}
