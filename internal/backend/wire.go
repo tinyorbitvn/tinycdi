@@ -80,6 +80,7 @@ func (b *Backend) wire(ctx context.Context) error {
 		metrics = observability.NewMetrics(prometheus.DefaultRegisterer,
 			strings.FieldsFunc(cfg.TenantAllowlist, func(r rune) bool { return r == ',' }))
 	}
+	b.metrics = metrics
 
 	// The gateway identity and ticket audience are shared by the session
 	// listener and the internal broker API.
@@ -364,6 +365,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		}
 	})
 
+	// E8: tinycdi_runtime_image_age_seconds{family} — refreshed from the
+	// informer-backed client on every replica so each pod's /metrics carries
+	// the newest published revision's age without costing API-server reads.
+	if metrics != nil {
+		catalog := provisioning.NewK8sTemplateCatalog(cachedKC, tenants)
+		b.bg = append(b.bg, func(ctx context.Context) {
+			runImageAgeSync(ctx, kcache, catalog, tenants, metrics, log)
+		})
+	}
+
 	brk := broker.New(db, bindings,
 		broker.WithGatewayAudience(id.Audience),
 		broker.WithCredentialSource(broker.NewK8sCredentialSource(kc, tenants)))
@@ -416,9 +427,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		tlsCfg.GetCertificate = rel.GetCertificate
 		hotReloadClientCAs(tlsCfg, caPool)
 		b.internalTLSCfg = tlsCfg
-		b.internalHandler = httpapi.NewHandler(httpapi.Config{
+		// E8: the internal mTLS surface is instrumented too, under
+		// listener="internal" — InstrumentHTTP passes through when the
+		// metrics listener is off.
+		b.internalHandler = api.InstrumentHTTP(metrics, "internal")(httpapi.NewHandler(httpapi.Config{
 			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log,
-		})
+		}))
 	} else {
 		log.Warn("internal broker api disabled (-internal-listen unset); remote gateways cannot redeem tickets")
 	}
@@ -552,6 +566,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("oidc: %w", err)
 	}
+	authn.WithMetrics(b.metrics)
 
 	// The session domain maps workspace IDs to per-workspace launch hosts
 	// (D9) — launch URLs resolve to ws-<suffix>.<SessionDomain>/v1/launch.
@@ -605,7 +620,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	loginLimit := api.RateLimit(ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil), trusted)
+	loginLimit := api.RateLimit(ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil), trusted, b.metrics)
 
 	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, loginLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
@@ -634,10 +649,13 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 }
 
 // wrapApp applies the production middleware stack to the app mux: request
-// ID, audit, the trusted-origin CSRF gate and the readiness endpoint.
+// ID, audit, the trusted-origin CSRF gate and the readiness endpoint. E8
+// wraps the mux innermost with the app-listener HTTP metrics (the
+// middleware passes through when the metrics listener is off).
 func (b *Backend) wrapApp(authn *api.Authenticator, mux http.Handler, portalOrigins []string) http.Handler {
 	return b.readyz(api.RequestID(api.Audit(b.log)(
-		api.RequireTrustedOrigin(authn.SessionCookieName(), portalOrigins)(mux))))
+		api.RequireTrustedOrigin(authn.SessionCookieName(), portalOrigins)(
+			api.InstrumentHTTP(b.metrics, "app")(mux)))))
 }
 
 // bind opens every enabled listener and records the servers.

@@ -53,9 +53,9 @@ const (
 	// larger portal frame (FX-R18); enable_webp matches the tab-mode codec
 	// offer; idle_disconnect=1440 pushes the client's own idle cut (default
 	// 20 min) past any template lifecycle timeout — idle policy belongs to
-	// the platform (V3.24 embedded-mode decisions). Clipboard flags are
-	// appended at redirect time by desktopPath from the policy the ticket
-	// recorded at issue.
+	// the platform (V3.24 embedded-mode decisions). Clipboard client flags
+	// are not static: the portal sets them per workspace policy on the
+	// navigations it drives.
 	DesktopPath = "/?resize=remote&enable_webp=true&idle_disconnect=1440"
 
 	maxLaunchBody = 4096
@@ -194,6 +194,9 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	// rate-limited launch leaves the ticket redeemable.
 	if g.cfg.LaunchLimiter != nil {
 		if ok, retry := g.cfg.LaunchLimiter.Allow(ratelimit.ClientKey(r, g.cfg.TrustedProxies)); !ok {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncRateLimited(LaunchPath)
+			}
 			w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
 			g.audit(r, "launch.redeem", wsID, observability.OutcomeDenied, "rate_limited")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
@@ -304,6 +307,9 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.byLease[lease.ID] = s
 	g.byWorkspace[lease.WorkspaceUID] = s
 	g.mu.Unlock()
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddSessionsActive(1)
+	}
 	if old != nil {
 		g.killSession(old, "takeover")
 	}

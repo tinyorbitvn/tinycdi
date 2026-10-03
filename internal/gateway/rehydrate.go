@@ -112,6 +112,18 @@ func (g *Gateway) rehydrate(r *http.Request, cookieValue, wsID string) (*session
 	}()
 
 	c.sess, c.err = g.fetchSession(r, d, cookieValue, wsID)
+	if g.cfg.Metrics != nil {
+		// E8: one count per directory lookup — the requests parked on this
+		// shared call are waiters, not lookups of their own.
+		switch {
+		case c.err != nil:
+			g.cfg.Metrics.IncRehydration("error")
+		case c.sess != nil:
+			g.cfg.Metrics.IncRehydration("ok")
+		default:
+			g.cfg.Metrics.IncRehydration("miss")
+		}
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -158,6 +170,9 @@ func (g *Gateway) fetchSession(r *http.Request, d broker.SessionDigest, cookieVa
 	g.byLease[l.ID] = s
 	g.byWorkspace[l.WorkspaceUID] = s
 	g.mu.Unlock()
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddSessionsActive(1)
+	}
 	go g.renewLoop(s)
 	go g.activitySender(s)
 	return s, nil

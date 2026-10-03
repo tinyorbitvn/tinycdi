@@ -76,7 +76,13 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 			t.Fatalf("read poll saw non-2xx during drain: %d", code)
 		}
 	}
-	t.Logf("upgrade drain-refusal observed: %v", upgrade503.Load())
+	// The refusal half is part of the contract, not a nice-to-have: if the
+	// probe never saw the retryable 503 the drain window is untested, and
+	// that must be a failure — the read-poll side alone would pass against
+	// a build that refused nothing or refused everything.
+	if !upgrade503.Load() {
+		t.Error("upgrade probe never observed the drain's retryable 503")
+	}
 
 	// The sibling serves the same cookie and re-claims the stream (the
 	// epoch bump is the rollout re-claim path).

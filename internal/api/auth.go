@@ -330,6 +330,7 @@ type Authenticator struct {
 	oauth2    oauth2.Config
 	sessions  SessionStore
 	directory Directory
+	metrics   *observability.Metrics
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
@@ -407,6 +408,13 @@ func (a *Authenticator) WithDirectory(d Directory) *Authenticator {
 	return a
 }
 
+// WithMetrics attaches the platform metric set; completed login callbacks
+// count toward tinycdi_logins_total (E8). Nil disables the count.
+func (a *Authenticator) WithMetrics(m *observability.Metrics) *Authenticator {
+	a.metrics = m
+	return a
+}
+
 func (a *Authenticator) SessionStore() SessionStore      { return a.sessions }
 func (a *Authenticator) SessionCookieName() string       { return a.cfg.SessionCookieName }
 func (a *Authenticator) LoginCookieName() string         { return a.cfg.LoginCookieName }
@@ -475,6 +483,18 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 // a fresh rotated session ID.
 func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if a.metrics != nil {
+		// Every completed login attempt counts once under a bounded
+		// outcome derived from the response class (E8): success for the
+		// issue-and-redirect path, error for platform-side failures,
+		// denied for every client-side refusal.
+		rec := &statusRecorder{ResponseWriter: w}
+		w = rec
+		defer func() {
+			a.metrics.IncLogin(loginOutcome(statusOrOK(rec.status)))
+		}()
+	}
 
 	if e := r.URL.Query().Get("error"); e != "" {
 		writeError(w, r, CodeUnauthenticated, "identity provider returned an error")
@@ -606,6 +626,20 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		"tenant", principal.TenantID,
 	)
 	http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
+}
+
+// loginOutcome maps a callback response status to the bounded
+// tinycdi_logins_total outcome: <400 success, >=500 error, anything else
+// denied.
+func loginOutcome(status int) string {
+	switch {
+	case status >= 500:
+		return "error"
+	case status >= 400:
+		return "denied"
+	default:
+		return "success"
+	}
 }
 
 // LogoutResult is the body of POST /v1/logout when the provider session can
