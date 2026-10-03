@@ -119,6 +119,11 @@ const (
 	// ProofRuntimeAbsent means the runtime layer was observed and reported
 	// the workload gone (operator inventory / delete completed).
 	ProofRuntimeAbsent AbsenceProof = "runtime_absent_observed"
+	// ProofQuotaSettled marks a reservation released because every held
+	// dimension reached zero — recorded by the retained-disk quota paths
+	// and the recovery sweep as the row's terminal state. It is never
+	// accepted as input to Release: it carries no absence proof.
+	ProofQuotaSettled AbsenceProof = "quota_settled"
 )
 
 // Valid reports whether p may be passed to Release.

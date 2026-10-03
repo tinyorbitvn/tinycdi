@@ -42,6 +42,20 @@ const (
 	DesiredStateStopped DesiredState = "Stopped"
 )
 
+// ImageUpdatePolicy selects how a workspace picks up newer published
+// revisions of its template family.
+// +kubebuilder:validation:Enum=OnStart;Pinned
+type ImageUpdatePolicy string
+
+const (
+	// ImageUpdateOnStart moves the workspace to the newest published
+	// revision of its template family on every Stopped -> Running start.
+	ImageUpdateOnStart ImageUpdatePolicy = "OnStart"
+	// ImageUpdatePinned keeps the workspace on its recorded template
+	// revision across starts; only a delete + recreate moves it.
+	ImageUpdatePinned ImageUpdatePolicy = "Pinned"
+)
+
 // DataPolicy controls what happens to workspace data on Stop/Delete.
 // +kubebuilder:validation:Enum=Ephemeral;Retain
 type DataPolicy string

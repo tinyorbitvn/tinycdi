@@ -96,6 +96,17 @@ spec:
                       idleTimeout is how long an unused (no input) session may run before the
                       platform stops it.
                     type: string
+                  imageUpdate:
+                    default: OnStart
+                    description: |-
+                      imageUpdate selects how workspaces created from this template pick up
+                      newer published revisions of the same template family: OnStart moves a
+                      workspace to the newest revision on every Stopped -> Running start;
+                      Pinned keeps it on its recorded revision.
+                    enum:
+                    - OnStart
+                    - Pinned
+                    type: string
                   maxDuration:
                     description: maxDuration is the hard cap on a single Running generation.
                     type: string

@@ -122,6 +122,13 @@ Order matters — later steps assume earlier ones exist:
    observed runtimes and `retained_data` — the api recovery loop
    (`-recovery-interval`, `internal/provisioning/recovery.go`) settles
    them; `tinycdi_quota_drift` should read 0 before opening to users.
+   Cadence: one pass at every leader acquisition, then every
+   `-recovery-interval` (`<=0` = the single startup pass only); quota
+   settlement is primarily event-driven off the Workspace informer and
+   the tick is the fallback. A reservation whose runtime absence is never
+   proven is held indefinitely by design — quota is released only on
+   positive proof — so a row stuck `held` means the runtime is unproven,
+   not that recovery stopped.
 9. **Access reset.** All pre-loss tickets and leases are invalid by
    construction — they fence on (workspaceUID, runtimeGeneration,
    runtimeUID) of incarnations that no longer exist. Users log in fresh

@@ -170,19 +170,19 @@ objects. It **keeps**:
 |---|---|---|
 | `ingress.enabled` / `.className` / `.annotations` | `false`/`""`/`{}` | one Ingress per host; pods terminate TLS — use a pass-through backend annotation (e.g. nginx `backend-protocol: "HTTPS"`) |
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
-| `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through |
+| `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through. API-server-defaulted route fields (parentRef `group`/`kind`, rule `matches`, backendRef `group`/`kind`/`weight`) render explicitly so GitOps shows no drift |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
 ### Per-component tuning (`backend`, `operator`, `frontend`)
 
 | Key | Default | Description |
 |---|---|---|
-| `<c>.replicas` | `2` (backend, frontend) / `1` (operator) | |
+| `<c>.replicas` | `2` | `operator` runs leader-elected: one active reconciler, one standby (E4) |
 | `<c>.resources` | set | requests+limits required by chart tests |
 | `<c>.podAnnotations` | `{}` | pod template annotations |
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
-| `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | `backend` on (`minAvailable: 1`), `frontend` off | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
+| `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
 | `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled` |
 
 ### Component-specific highlights
@@ -195,9 +195,10 @@ objects. It **keeps**:
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
 | `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
 | `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
+| `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
-| `operator.leaderElect` / `.webhookPort` | `false` / `-1` | |
+| `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4) |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
 | `operator.clusterCIDRs` | `[]` | this cluster's pod/service/node CIDRs — appended to `--internet-except-cidrs`; **required** (render fails) when any seeded template uses `networkProfile: InternetOnly` |
 | `operator.brokerClient.enabled` | `true` | internal broker wiring (teardown finalizer); `devAllowNoBroker` is dev-only — needs `dev.enabled` |
@@ -269,7 +270,7 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 
 #### Nodes without AppArmor
 
-Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch.
+Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch. The `apparmor` check in `hack/preflight/preflight.sh` (see [preflight README](../../../hack/preflight/README.md)) probes every node workspaces can reach and names the fitting value — run it before install.
 
 - **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
 - **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
@@ -332,6 +333,49 @@ that are not host-network (an external load balancer that preserves the client s
 address, for example) keep working with `ipBlock` — narrow `edgeIngressCIDRs` to the
 load-balancer range. There is no separate "from host network" switch: `edgeIngress` is
 the single option that decides how the edge reaches the public listeners.
+
+### Rate limits and trusted proxies
+
+The backend rate-limits its unauthenticated surface **per client address**:
+`-login-rate` (30/min, burst 10) covers `GET /v1/login`,
+`GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate` (60/min, burst 20)
+covers the session listener's `POST /v1/launch`. A client over its budget gets
+`429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
+(`backend.extraArgs`, e.g. `-login-rate=0`).
+
+The client address is the socket peer — unless the peer is inside
+`backend.trustedProxies`, in which case the right-most untrusted
+`X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value
+is required, not optional**: with it empty every user arriving through the
+same edge keys on the edge's own address — one shared bucket (~30 logins and
+~60 launches per minute for the whole organisation) and a self-inflicted
+outage. The backend logs a startup warning while a limit is on and the list
+is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
+`X-Real-IP` headers the workspace pod sees — client-supplied values are
+stripped and rebuilt from the trusted chain only (S18), so a spoofed address
+can never poison the runtime's brute-force blacklist.
+
+```yaml
+# Cilium Gateway API / Ingress — the edge envoy runs host-network, so the
+# peer the backend sees is the NODE the request lands on. List the node
+# subnet(s) (networkPolicy.edgeIngress stays "cilium" — see above).
+backend:
+  trustedProxies: ["10.10.0.0/24"]      # node CIDR(s) running the gateway envoy
+gatewayApi:
+  enabled: true
+```
+
+```yaml
+# Traefik (or any ingress as pods) — the peer is the proxy pod's address;
+# list the cluster pod CIDR or a tighter range covering the proxy pods.
+backend:
+  trustedProxies: ["10.42.0.0/16"]      # pod CIDR containing the traefik pods
+ingress:
+  enabled: true
+```
+
+Exposing the listeners directly (no L7 proxy) needs nothing: the socket peer
+already is the client.
 
 ### Runtime catalog (`templates[]`)
 

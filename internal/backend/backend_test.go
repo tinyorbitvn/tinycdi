@@ -353,7 +353,7 @@ func testAppHandler(t *testing.T) http.Handler {
 	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota)
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, func(h http.Handler) http.Handler { return h })
 	b := &Backend{log: testLog()}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
