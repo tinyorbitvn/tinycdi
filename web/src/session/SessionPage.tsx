@@ -214,12 +214,32 @@ export function SessionPage({
       if (leaseRef === undefined || streamEpoch === undefined) return "unknown";
       const p = pending.current;
       if (p) {
+        if (leaseRef !== p.leaseRef && p.leaseRef !== "") {
+          // A different lease while we wait for our claim: neither ours
+          // nor stale — the resume poll's target check decides.
+          return "unknown";
+        }
         // streamEpoch 0 means the backend keeps no stream accounting
         // (split mode without a session directory): epochs cannot be
         // compared there, so a leaseRef match is confirmation enough
         // (backlog 3).
-        if (leaseRef === p.leaseRef && streamEpoch !== 0 && streamEpoch <= p.minEpoch)
-          return "stale";
+        if (streamEpoch === 0) {
+          pending.current = null;
+          owned.current = true;
+          remember({ leaseRef, streamEpoch });
+          return "ours";
+        }
+        if (leaseRef === p.leaseRef && streamEpoch <= p.minEpoch) return "stale";
+        // Every claim advances the lease epoch by exactly one: our stream
+        // is the very next claim on the armed baseline. A gap means a
+        // stream we did not open claimed inside the window — foreign
+        // (PR1b). The provisional baseline (""/-1) exempts: its fresh
+        // lease's first claim is ours by construction.
+        if (p.leaseRef !== "" && streamEpoch > p.minEpoch + 1) {
+          pending.current = null;
+          remember({ leaseRef, streamEpoch });
+          return "elsewhere";
+        }
         pending.current = null;
         owned.current = true;
         remember({ leaseRef, streamEpoch });
@@ -378,10 +398,21 @@ export function SessionPage({
           void launch("frame", false);
           return;
         }
-        if (s.state === "connected" && observe(s) !== "stale") {
-          clearResume();
-          dispatch({ type: "resumed" });
-          return;
+        if (s.state === "connected") {
+          const obs = observe(s);
+          // Only OUR claim confirms the resume: a foreign stream claiming
+          // a newer epoch inside the resume window ("elsewhere") is a
+          // takeover, not our confirmation — show it, don't claim it.
+          if (obs === "elsewhere") {
+            clearResume();
+            dispatch({ type: "elsewhere" });
+            return;
+          }
+          if (obs === "ours") {
+            clearResume();
+            dispatch({ type: "resumed" });
+            return;
+          }
         }
       } catch (e) {
         if (!mounted.current || resumeDeadline.current === undefined) return;
