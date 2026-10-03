@@ -180,9 +180,9 @@ func TestAppArmorProfileRejected(t *testing.T) {
 // --- spec.placement (D24) ---------------------------------------------------
 //
 // Placement precedence is per field: the typed template field wins, then the
-// legacy node-selector annotation (nodeSelector only — it predates the typed
-// field and stays for one release), then the operator's Options defaults.
-// A field the template sets REPLACES the default; it is never merged.
+// operator's Options defaults. A field the template sets REPLACES the
+// default; it is never merged. The v0.1 node-selector template annotation is
+// gone (E14) — TestBuildPod_AnnotationNoLongerHonoured pins its removal.
 
 var poolToleration = corev1.Toleration{
 	Key:      "cdi.tinyorbit.vn/workspace",
@@ -252,42 +252,41 @@ func TestBuildPod_PerFieldFallback(t *testing.T) {
 	}
 }
 
-func TestBuildPod_LegacyAnnotationStillWorks(t *testing.T) {
-	// Annotation alone — it must beat the operator default but lose to the
-	// typed spec field (D24: one release of overlap).
-	t.Run("annotation wins over default", func(t *testing.T) {
+func TestBuildPod_AnnotationNoLongerHonoured(t *testing.T) {
+	// The v0.1 workspaces.cdi.tinyorbit.vn/node-selector annotation is gone
+	// (E14): a template carrying it gets the same placement as one without —
+	// operator default below, spec.placement field when set.
+	const legacyAnnotation = "workspaces.cdi.tinyorbit.vn/node-selector"
+	t.Run("annotation loses to operator default", func(t *testing.T) {
 		tpl := testTemplate(map[string]string{
-			AnnotationNodeSelector: `{"workload":"annotated"}`,
+			legacyAnnotation: `{"workload":"annotated"}`,
 		})
 		pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
-		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "annotated"}) {
-			t.Fatalf("nodeSelector = %v, want annotation value", pod.Spec.NodeSelector)
+		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"pool": "default"}) {
+			t.Fatalf("nodeSelector = %v, want operator default — annotation must be ignored", pod.Spec.NodeSelector)
 		}
 	})
-	t.Run("spec field wins over annotation", func(t *testing.T) {
+	t.Run("annotation loses to empty options", func(t *testing.T) {
 		tpl := testTemplate(map[string]string{
-			AnnotationNodeSelector: `{"workload":"annotated"}`,
+			legacyAnnotation: `{"workload":"annotated"}`,
 		})
-		tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
-			NodeSelector: map[string]string{"workload": "typed"},
-		}
 		pod := ensurePodSpecFor(t, tpl, Options{})
-		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "typed"}) {
-			t.Fatalf("nodeSelector = %v, want spec.placement value", pod.Spec.NodeSelector)
+		if len(pod.Spec.NodeSelector) != 0 {
+			t.Fatalf("nodeSelector = %v, want empty — annotation must be ignored", pod.Spec.NodeSelector)
 		}
 	})
-	t.Run("spec placement without selector still honors annotation", func(t *testing.T) {
-		// The template sets only runtimeClassName — nodeSelector falls
-		// through to the legacy annotation.
+	t.Run("annotation does not leak into other fields", func(t *testing.T) {
+		// The annotation never carried tolerations/runtimeClass, but a
+		// template that sets only runtimeClassName must not resurrect it.
 		tpl := testTemplate(map[string]string{
-			AnnotationNodeSelector: `{"workload":"annotated"}`,
+			legacyAnnotation: `{"workload":"annotated"}`,
 		})
 		tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
 			RuntimeClassName: ptr("gvisor"),
 		}
 		pod := ensurePodSpecFor(t, tpl, Options{})
-		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"workload": "annotated"}) {
-			t.Fatalf("nodeSelector = %v, want annotation value", pod.Spec.NodeSelector)
+		if len(pod.Spec.NodeSelector) != 0 {
+			t.Fatalf("nodeSelector = %v, want empty — annotation must be ignored", pod.Spec.NodeSelector)
 		}
 	})
 }

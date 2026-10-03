@@ -31,7 +31,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -75,12 +74,6 @@ const (
 	// automount=false explicitly so identity never depends on the SA's
 	// settings (SEC-30).
 	RuntimeServiceAccount = "tinycdi-runtime"
-
-	// AnnotationNodeSelector is an optional WorkspaceTemplate annotation:
-	// a JSON map[string]string applied to the runtime Pod's nodeSelector.
-	// Deprecated: spec.placement.nodeSelector is the typed replacement and
-	// wins when both are set; the annotation ships for one release (D24).
-	AnnotationNodeSelector = "workspaces.cdi.tinyorbit.vn/node-selector"
 
 	// AnnotationSeccompProfile is an optional WorkspaceTemplate annotation
 	// selecting the container seccomp profile. Only "localhost/<name>" is
@@ -294,9 +287,8 @@ type Options struct {
 	KasmAdapterImage string
 
 	// DefaultPlacement is the operator-wide pod placement applied when a
-	// template sets neither the spec.placement field nor (for nodeSelector)
-	// the deprecated node-selector annotation. Per field the precedence is
-	// template → annotation → this default; a field the template sets
+	// template leaves a spec.placement field unset. Per field the
+	// precedence is template → this default; a field the template sets
 	// replaces the default outright.
 	DefaultPlacement workspacesv1alpha1.PlacementSpec
 
@@ -1052,19 +1044,11 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		})
 	}
-	// Placement, per field: spec.placement → legacy node-selector
-	// annotation (nodeSelector only; deprecated, one release of overlap —
-	// D24) → operator default. A set field replaces the lower layers
-	// outright; nothing is merged.
+	// Placement, per field: spec.placement → operator default. A set field
+	// replaces the default outright; nothing is merged (D24).
 	nodeSelector := opts.DefaultPlacement.NodeSelector
 	tolerations := opts.DefaultPlacement.Tolerations
 	runtimeClass := opts.DefaultPlacement.RuntimeClassName
-	if raw := tpl.Annotations[AnnotationNodeSelector]; raw != "" {
-		var sel map[string]string
-		if json.Unmarshal([]byte(raw), &sel) == nil && len(sel) > 0 {
-			nodeSelector = sel
-		}
-	}
 	if p := tpl.Spec.Placement; p != nil {
 		if len(p.NodeSelector) > 0 {
 			nodeSelector = p.NodeSelector

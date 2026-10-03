@@ -4,8 +4,7 @@ import { IconShield } from "../design/icons";
 import { Link, navigate, usePathname } from "../lib/router";
 import { cx } from "../design/cx";
 import { t, type MessageKey } from "../i18n";
-import { isTenantAdmin } from "./api";
-import { useMe } from "./hooks";
+import { isTenantAdmin, useMeLoaded } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 
 export const ADMIN_SECTIONS = [
@@ -55,7 +54,7 @@ export function AdminLayout({
   actions?: ReactNode;
   children: ReactNode;
 }) {
-  const me = useMe();
+  const me = useMeLoaded();
   const denied = me.data !== undefined && !isTenantAdmin(me.data);
   useEffect(() => {
     if (denied) navigate("/workspaces", { replace: true });

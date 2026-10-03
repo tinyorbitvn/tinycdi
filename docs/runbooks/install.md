@@ -44,8 +44,8 @@ same resolution order `deploy/helm/chart_test.go` uses).
 - Optional cert-manager Certificates for the internal mTLS chain
   (`certManager.enabled`).
 - Optional seeded `WorkspaceTemplate` CRs (digest-pinned images; per
-  -template Localhost seccomp/AppArmor profile, nodeSelector and
-  StorageClass via structured fields or annotations).
+  -template Localhost seccomp/AppArmor profile and StorageClass via
+  structured fields or annotations; pod placement via `spec.placement`).
 - `tinycdi-runtime` ServiceAccount per managed namespace with
   `automountServiceAccountToken: false`.
 

@@ -54,19 +54,6 @@ type AuthConfig struct {
 	// requires it. Secure + HttpOnly + SameSite=Lax, Path=/,
 	// Max-Age=PendingTTL (600 s by default).
 	LoginCookieName string
-	// SessionOriginCookieName defaults to "tcdi_session_origin" — the v0.1
-	// cookie name. In v0.2 the cookie is never set; login and logout only
-	// send a deletion (Max-Age=0) for it so upgraded browsers drop it (D17).
-	SessionOriginCookieName string
-	// SessionOrigin is retained for configuration compatibility only —
-	// v0.2 derives the session origin per workspace from the session domain
-	// and never publishes it in a cookie.
-	SessionOrigin string
-	// CSRFCookieName defaults to "tcdi_csrf" — the v0.1 cookie name. In v0.2
-	// the CSRF token is derived from the session ID (P1) and returned by
-	// GET /v1/me; this cookie is never set, only deleted on login/logout so
-	// upgraded browsers drop it.
-	CSRFCookieName string
 	// CSRFHeader is the header the CSRF middleware reads.
 	// Defaults to "X-CSRF-Token".
 	CSRFHeader string
@@ -131,12 +118,6 @@ func (c *AuthConfig) withDefaults() {
 	if c.LoginCookieName == "" {
 		c.LoginCookieName = "__Host-tcdi_login"
 	}
-	if c.SessionOriginCookieName == "" {
-		c.SessionOriginCookieName = "tcdi_session_origin"
-	}
-	if c.CSRFCookieName == "" {
-		c.CSRFCookieName = "tcdi_csrf"
-	}
 	if c.CSRFHeader == "" {
 		c.CSRFHeader = "X-CSRF-Token"
 	}
@@ -176,13 +157,11 @@ func (c *AuthConfig) withDefaults() {
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID while the
 // session is in flight, but stores persist it only as a SHA-256 digest.
-// CSRFToken is written as "" — since v0.2 the synchronizer token is derived
-// from the session ID (csrfTokenFor, P1) and never stored; the column stays
-// until v0.3.
+// The synchronizer CSRF token is derived from the session ID (csrfTokenFor,
+// P1) and never stored.
 type Session struct {
 	ID        string
 	Principal Principal
-	CSRFToken string
 	// IDToken is the raw OIDC id_token retained so logout can send
 	// id_token_hint (the provider then skips its own confirmation page).
 	// It is only ever persisted AEAD-sealed (store); it is never written to
@@ -245,9 +224,6 @@ func (s *InMemorySessionStore) Save(_ context.Context, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := *sess
-	// Persist the MAC form of the CSRF token like the Postgres store does:
-	// a store read never yields a usable synchronizer token (SEC-27).
-	cp.CSRFToken = csrfTokenMAC(sess.ID, sess.CSRFToken)
 	s.sessions[sessionKey(sess.ID)] = &cp
 	return nil
 }
@@ -415,12 +391,10 @@ func (a *Authenticator) WithMetrics(m *observability.Metrics) *Authenticator {
 	return a
 }
 
-func (a *Authenticator) SessionStore() SessionStore      { return a.sessions }
-func (a *Authenticator) SessionCookieName() string       { return a.cfg.SessionCookieName }
-func (a *Authenticator) LoginCookieName() string         { return a.cfg.LoginCookieName }
-func (a *Authenticator) SessionOriginCookieName() string { return a.cfg.SessionOriginCookieName }
-func (a *Authenticator) CSRFCookieName() string          { return a.cfg.CSRFCookieName }
-func (a *Authenticator) CSRFHeader() string              { return a.cfg.CSRFHeader }
+func (a *Authenticator) SessionStore() SessionStore { return a.sessions }
+func (a *Authenticator) SessionCookieName() string  { return a.cfg.SessionCookieName }
+func (a *Authenticator) LoginCookieName() string    { return a.cfg.LoginCookieName }
+func (a *Authenticator) CSRFHeader() string         { return a.cfg.CSRFHeader }
 
 // LoginHandler starts the authorization-code + PKCE flow: it generates state,
 // nonce and a PKCE verifier, seals them together with the login's expiry into
@@ -468,9 +442,6 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		maxAge = 600
 	}
 	http.SetCookie(w, a.loginCookie(token, maxAge))
-	// Any browser that still carries the v0.1 non-__Host- cookies drops them
-	// on its next login (D17).
-	a.expireLegacyCookies(w)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -591,7 +562,6 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	sess := &Session{
 		ID:         mustRandToken(32),
 		Principal:  principal,
-		CSRFToken:  "", // derived from the session ID on demand (P1); column stays until v0.3
 		IDToken:    rawID,
 		CreatedAt:  a.now(),
 		LastSeenAt: a.now(),
@@ -617,9 +587,6 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	http.SetCookie(w, a.sessionCookie(sess.ID, int(a.cfg.AbsoluteTimeout.Seconds())))
-	// v0.1 published tcdi_csrf / tcdi_session_origin here; browsers upgraded
-	// from v0.1 must drop them (D17).
-	a.expireLegacyCookies(w)
 	a.log.Info("oidc login succeeded",
 		"request_id", RequestIDFromContext(ctx),
 		"actor", observability.ActorRef(principal.Issuer, principal.Subject),
@@ -675,7 +642,6 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		_ = a.sessions.Delete(ctx, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
-	a.expireLegacyCookies(w)
 	endSession := a.endSessionURL(idToken)
 	if endSession == "" {
 		w.WriteHeader(http.StatusNoContent)
@@ -748,23 +714,6 @@ func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
-	}
-}
-
-// expireLegacyCookies deletes the two non-__Host- cookies v0.1 published on
-// the portal origin — tcdi_csrf and tcdi_session_origin (D17). Login and
-// logout both send them so browsers upgraded mid-session drop the legacy
-// names regardless of which flow they take.
-func (a *Authenticator) expireLegacyCookies(w http.ResponseWriter) {
-	for _, name := range []string{a.cfg.CSRFCookieName, a.cfg.SessionOriginCookieName} {
-		http.SetCookie(w, &http.Cookie{
-			Name:     name,
-			Value:    "",
-			Path:     "/",
-			Secure:   *a.cfg.SecureCookies,
-			SameSite: a.cfg.SameSite,
-			MaxAge:   -1,
-		})
 	}
 }
 
@@ -932,20 +881,6 @@ func csrfTokenFor(sessionID string) string {
 	m := hmac.New(sha256.New, []byte(sessionID))
 	m.Write([]byte("tcdi-csrf-v2"))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
-}
-
-// csrfTokenMAC is the stored credential form of a session's synchronizer
-// CSRF token: hex of HMAC-SHA256 keyed by the raw session ID (which is
-// itself never persisted — stores hold only its digest). A store/dump read
-// therefore reveals neither the token nor a way to compute the MAC
-// (SEC-27). Mirrored by internal/store.sessions.go; keep identical.
-// Since v0.2 sessions persist CSRFToken = "" (P1), this MACs the empty
-// token — the column remains until v0.3 and is no longer consulted.
-func csrfTokenMAC(sessionID, token string) string {
-	m := hmac.New(sha256.New, []byte(sessionID))
-	m.Write([]byte("tcdi-csrf-token\x00"))
-	m.Write([]byte(token))
-	return hex.EncodeToString(m.Sum(nil))
 }
 
 func randToken(n int) (string, error) {

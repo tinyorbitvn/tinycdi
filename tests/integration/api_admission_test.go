@@ -5,7 +5,6 @@ package integration
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -584,7 +583,6 @@ func (a *pgSessionAdapter) Save(ctx context.Context, sess *api.Session) error {
 		Subject:    sess.Principal.Subject,
 		TenantID:   sess.Principal.TenantID,
 		Groups:     sess.Principal.Groups,
-		CSRFToken:  sess.CSRFToken,
 		IDToken:    sess.IDToken,
 		CreatedAt:  sess.CreatedAt,
 		LastSeenAt: sess.LastSeenAt,
@@ -606,7 +604,6 @@ func (a *pgSessionAdapter) Get(ctx context.Context, id string) (*api.Session, er
 			Issuer: rec.Issuer, Subject: rec.Subject,
 			TenantID: rec.TenantID, Groups: rec.Groups,
 		},
-		CSRFToken:  rec.CSRFToken,
 		IDToken:    rec.IDToken,
 		CreatedAt:  rec.CreatedAt,
 		LastSeenAt: rec.LastSeenAt,
@@ -628,7 +625,6 @@ func (a *pgSessionAdapter) Peek(ctx context.Context, id string) (*api.Session, e
 			Issuer: rec.Issuer, Subject: rec.Subject,
 			TenantID: rec.TenantID, Groups: rec.Groups,
 		},
-		CSRFToken:  rec.CSRFToken,
 		IDToken:    rec.IDToken,
 		CreatedAt:  rec.CreatedAt,
 		LastSeenAt: rec.LastSeenAt,
@@ -652,7 +648,7 @@ func TestPGSessionStore(t *testing.T) {
 
 	sess := &store.Session{
 		ID: "sess-1", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
-		Groups: []string{"g1"}, CSRFToken: "csrf-1",
+		Groups:    []string{"g1"},
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := ss.Save(ctx, sess); err != nil {
@@ -662,25 +658,16 @@ func TestPGSessionStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	// SEC-27: the raw CSRF token is never persisted — Get returns the
-	// session-ID-keyed HMAC instead (mirrors store.csrfTokenMAC).
-	mac := hmac.New(sha256.New, []byte("sess-1"))
-	mac.Write([]byte("tcdi-csrf-token\x00"))
-	mac.Write([]byte("csrf-1"))
-	wantCSRF := hex.EncodeToString(mac.Sum(nil))
-	if got.CSRFToken != wantCSRF || got.TenantID != "tenant-a" || len(got.Groups) != 1 {
+	if got.TenantID != "tenant-a" || len(got.Groups) != 1 {
 		t.Fatalf("session mismatch: %+v", got)
 	}
 	// ...and the row itself must carry digests, not usable credentials.
 	idSum := sha256.Sum256([]byte("sess-1"))
-	var rowID, rowCSRF string
+	var rowID string
 	if err := db.Pool().QueryRow(ctx,
-		`SELECT id, csrf_token FROM sessions WHERE id = $1`,
-		hex.EncodeToString(idSum[:])).Scan(&rowID, &rowCSRF); err != nil {
+		`SELECT id FROM sessions WHERE id = $1`,
+		hex.EncodeToString(idSum[:])).Scan(&rowID); err != nil {
 		t.Fatalf("digest-keyed lookup: %v", err)
-	}
-	if rowCSRF != wantCSRF || rowCSRF == "csrf-1" {
-		t.Fatalf("csrf_token persisted in usable form: %q", rowCSRF)
 	}
 	var rawRows int
 	if err := db.Pool().QueryRow(ctx,
@@ -738,7 +725,7 @@ func TestSessionEpochRotation(t *testing.T) {
 
 	sess := &store.Session{
 		ID: "sess-epoch", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
-		Groups: []string{"g1"}, CSRFToken: "csrf-epoch",
+		Groups:    []string{"g1"},
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := ss.Save(ctx, sess); err != nil {
@@ -753,9 +740,9 @@ func TestSessionEpochRotation(t *testing.T) {
 	// the session-ID digest (SEC-27) so the epoch check is what rejects it.
 	oldEpochKey := sha256.Sum256([]byte("sess-old-epoch"))
 	if _, err := db.Pool().Exec(ctx, `
-		INSERT INTO sessions (id, issuer, subject, tenant_id, groups, csrf_token,
+		INSERT INTO sessions (id, issuer, subject, tenant_id, groups,
 			created_at, last_seen_at, expires_at, epoch)
-		VALUES ($1, 'iss', 'sub', 'tenant-a', '[]', 'csrf-old',
+		VALUES ($1, 'iss', 'sub', 'tenant-a', '[]',
 			now(), now(), now() + interval '1 hour', 'pre-restore-epoch')`,
 		hex.EncodeToString(oldEpochKey[:])); err != nil {
 		t.Fatalf("insert old-epoch row: %v", err)
