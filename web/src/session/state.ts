@@ -105,6 +105,10 @@ export function sessionReducer(state: SessionState, ev: SessionEvent): SessionSt
     case "external":
       return { status: "external" };
     case "elsewhere":
-      return state.status === "connected" ? { status: "elsewhere" } : state;
+      // From "connecting" too: a foreign claim inside the resume window
+      // is a takeover the user should see (PR1b).
+      return state.status === "connected" || state.status === "connecting"
+        ? { status: "elsewhere" }
+        : state;
   }
 }
