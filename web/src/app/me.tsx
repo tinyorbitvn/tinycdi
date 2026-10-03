@@ -59,10 +59,25 @@ export function parseMe(body: unknown): Me {
   };
 }
 
+/** A non-OK /v1/me response; `status` decides whether a retry can help. */
+export class MeHttpError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`GET /v1/me failed: ${status}`);
+    this.status = status;
+  }
+}
+
+/** Transient /v1/me failures: 429, 5xx, and network errors — never a sign-out. */
+export function isTransientMeError(e: unknown): boolean {
+  if (e instanceof MeHttpError) return e.status === 429 || e.status >= 500;
+  return e instanceof TypeError;
+}
+
 export async function fetchMe(fetchImpl: typeof fetch = fetch): Promise<Me> {
   const res = await fetchImpl("/v1/me", { credentials: "same-origin", headers: { Accept: "application/json" } });
   if (res.status === 404 || res.status === 501) return STUB_ME;
-  if (!res.ok) throw new Error(`GET /v1/me failed: ${res.status}`);
+  if (!res.ok) throw new MeHttpError(res.status);
   return parseMe(await res.json());
 }
 
@@ -83,19 +98,32 @@ export function MeProvider({
   const [state, setState] = useState<MeState>({ status: "loading", me: null });
   useEffect(() => {
     let cancelled = false;
-    load().then(
-      (me) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const attempt = async () => {
+      try {
+        const me = await load();
         if (cancelled) return;
         // The API client reads the token from module state, not from a
         // cookie (D17) — install what /v1/me published.
         setCsrfToken(me.csrfToken);
         setState({ status: "ready", me });
-      },
-      (e: unknown) =>
-        !cancelled && setState({ status: "error", me: null, error: e instanceof Error ? e.message : String(e) }),
-    );
+      } catch (e) {
+        if (cancelled) return;
+        // A backend blip (503 UNAVAILABLE etc.) retries with backoff and
+        // keeps the shell in "loading" — it is never a sign-out (V3.27).
+        if (isTransientMeError(e)) {
+          failures += 1;
+          timer = setTimeout(() => void attempt(), Math.min(1_000 * 2 ** failures, 30_000));
+          return;
+        }
+        setState({ status: "error", me: null, error: e instanceof Error ? e.message : String(e) });
+      }
+    };
+    void attempt();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [load]);
   return <MeContext.Provider value={state}>{children}</MeContext.Provider>;
