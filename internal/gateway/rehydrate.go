@@ -171,6 +171,19 @@ func (g *Gateway) isDraining() bool {
 	return g.draining
 }
 
+// drainRetryAfter is the Retry-After hint on drain refusals: the client
+// should land on a sibling replica within seconds, not back off long.
+const drainRetryAfter = "5"
+
+// writeDraining answers the ONLY requests a draining replica refuses —
+// new launch redemptions and new WebSocket upgrades — with a retryable
+// 503. Every other request keeps serving through the drain window
+// (pre-stop drain, V3.24).
+func writeDraining(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", drainRetryAfter)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "draining"})
+}
+
 // Drain closes every open stream and reports "disconnect" for each, within
 // ctx's deadline. It does not revoke leases, so the same cookie reconnects
 // on another replica. The gateway refuses new upgrades after Drain starts.

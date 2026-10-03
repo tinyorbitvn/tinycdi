@@ -111,6 +111,10 @@ type Config struct {
 	TenantAllowlist     string // bounds metrics label cardinality
 	RenewInterval       time.Duration
 	RevokeDeadline      time.Duration
+	// DrainWindow is the budget for the pre-stop gateway drain: on SIGTERM
+	// the pod keeps serving reads while streams migrate to sibling
+	// replicas; only new launches/upgrades are refused during it.
+	DrainWindow time.Duration
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
 	InternalListen   string // empty disables the internal listener
@@ -214,6 +218,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TenantAllowlist, "tenant-allowlist", envOr(getenv, "TCDI_TENANT_ALLOWLIST", ""), "bounded tenant label values, comma-separated")
 	fs.DurationVar(&c.RenewInterval, "renew-interval", envDur(getenv, "TCDI_RENEW_INTERVAL", gateway.LeaseRenewInterval), "lease renew cadence")
 	fs.DurationVar(&c.RevokeDeadline, "revoke-deadline", envDur(getenv, "TCDI_REVOKE_DEADLINE", gateway.RevokeDeadline), "fail-closed budget after last successful renew")
+	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain budget: streams migrate while reads keep serving")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),

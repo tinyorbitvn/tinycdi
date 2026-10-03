@@ -132,6 +132,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Validation order is security-significant: every check runs BEFORE
 // redemption so a rejected launch never consumes the ticket.
 func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID string) {
+	// A draining replica refuses NEW redemptions with a retryable 503 —
+	// before redemption, like every other check, so the refusal never
+	// consumes the ticket (pre-stop drain, V3.24).
+	if g.isDraining() {
+		writeDraining(w)
+		return
+	}
 	// Launch origin policy (ADR 0004): the portal↔session POST is
 	// cross-site by design, so CSRF/session-fixation resistance comes from
 	// the one-use ticket bound to the requesting user plus the configured

@@ -19,14 +19,15 @@ import (
 )
 
 // Shutdown runs against ONE shared deadline, kept under the pod's
-// terminationGracePeriodSeconds (30 s): drain first (at most drainBudget),
-// then every listener's Shutdown in parallel under whatever remains, then the
-// background loops and closers. Run returns by shutdownDeadline even if a
-// request or stream is still in flight (the listeners are then closed hard).
-const (
-	shutdownDeadline = 24 * time.Second
-	drainBudget      = 10 * time.Second
-)
+// terminationGracePeriodSeconds (30 s): readiness flips first, then the
+// drain window (cfg.DrainWindow, default 8 s) sheds streams while every
+// other request keeps serving — a read poll sees zero non-2xx; only new
+// launch redemptions and WebSocket upgrades are refused (retryable 503).
+// Then every listener's Shutdown in parallel under whatever remains, then
+// the background loops and closers. Run returns by shutdownDeadline even
+// if a request or stream is still in flight (the listeners are then
+// closed hard).
+const shutdownDeadline = 24 * time.Second
 
 // namedServer is one bound listener with its server and optional TLS
 // configuration (nil = plain HTTP).
@@ -194,9 +195,14 @@ func (b *Backend) Run(ctx context.Context) error {
 
 	// 2. Drain the session gateway: close every open stream and report
 	//    disconnect for each, without revoking leases — the same cookie
-	//    reconnects on another replica. At most drainBudget.
+	//    reconnects on another replica. At most cfg.DrainWindow; every
+	//    other request keeps serving through the window.
 	if b.gw != nil {
-		drainCtx, dcancel := context.WithTimeout(shCtx, drainBudget)
+		drainWindow := b.cfg.DrainWindow
+		if drainWindow <= 0 {
+			drainWindow = 8 * time.Second
+		}
+		drainCtx, dcancel := context.WithTimeout(shCtx, drainWindow)
 		b.gw.Drain(drainCtx)
 		dcancel()
 	}

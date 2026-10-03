@@ -464,6 +464,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("login key files: %w", err)
 	}
+	// The same keys seal the retained OIDC ID token at rest (purpose-bound
+	// additional data), so id_token_hint survives across replicas; a key
+	// that stops opening it only loses the hint, never the sign-out.
 	authn, err := api.NewAuthenticator(ctx, api.AuthConfig{
 		Issuer:         cfg.OIDCIssuer,
 		ClientID:       cfg.OIDCClientID,
@@ -475,7 +478,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 
 		EndSession:         cfg.OIDCEndSession,
 		PostLogoutRedirect: cfg.OIDCPostLogoutURL,
-	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
+	}, sessionStoreAdapter{
+		s: store.NewSessionStore(db, cfg.SessionIdle, api.NewIDTokenSealer(sealer)),
+	}, b.log)
 	if err != nil {
 		return fmt.Errorf("oidc: %w", err)
 	}
@@ -635,6 +640,7 @@ func (a sessionStoreAdapter) Save(ctx context.Context, sess *api.Session) error 
 		CSRFToken:   sess.CSRFToken,
 		DisplayName: sess.Principal.DisplayName,
 		Email:       sess.Principal.Email,
+		IDToken:     sess.IDToken,
 		CreatedAt:   sess.CreatedAt,
 		LastSeenAt:  sess.LastSeenAt,
 		ExpiresAt:   sess.ExpiresAt,
@@ -650,6 +656,7 @@ func storeSessionToAPI(rec *store.Session) *api.Session {
 			DisplayName: rec.DisplayName, Email: rec.Email,
 		},
 		CSRFToken:  rec.CSRFToken,
+		IDToken:    rec.IDToken,
 		CreatedAt:  rec.CreatedAt,
 		LastSeenAt: rec.LastSeenAt,
 		ExpiresAt:  rec.ExpiresAt,

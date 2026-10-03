@@ -115,6 +115,36 @@ func decodeKey(b []byte) ([]byte, error) {
 	return nil, fmt.Errorf("key material must be %d raw bytes or base64 decoding to %d bytes", keyLen, keyLen)
 }
 
+// SealData is the generic purpose-bound seal used for values other than
+// login state (the session's retained ID token): aad binds the blob to its
+// exact use so a blob minted for anything else cannot be replayed here.
+// Returns base64url(nonce || AES-256-GCM(pt)).
+func (s *Sealer) SealData(aad string, pt []byte) (string, error) {
+	nonce := make([]byte, nonceLen)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	out := s.seal.Seal(nonce, nonce, pt, []byte(aad))
+	return base64.RawURLEncoding.EncodeToString(out), nil
+}
+
+// OpenData authenticates and decodes a SealData blob, trying every key
+// (newest first — a rotated key still opens blobs it sealed). Tampered,
+// malformed or wrong-purpose: ErrInvalid.
+func (s *Sealer) OpenData(aad, token string) ([]byte, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) < nonceLen+1+s.open[0].Overhead() {
+		return nil, ErrInvalid
+	}
+	nonce, ct := raw[:nonceLen], raw[nonceLen:]
+	for _, gcm := range s.open {
+		if pt, err := gcm.Open(nil, nonce, ct, []byte(aad)); err == nil {
+			return pt, nil
+		}
+	}
+	return nil, ErrInvalid
+}
+
 // Seal returns base64url(nonce || AES-256-GCM(json(st))) with a random
 // 12-byte nonce and additional data "tcdi-login-v1".
 func (s *Sealer) Seal(st State) (string, error) {
@@ -122,30 +152,15 @@ func (s *Sealer) Seal(st State) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	nonce := make([]byte, nonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	out := s.seal.Seal(nonce, nonce, pt, []byte(additionalData))
-	return base64.RawURLEncoding.EncodeToString(out), nil
+	return s.SealData(additionalData, pt)
 }
 
 // Open authenticates and decodes token. Tampered or malformed: ErrInvalid.
 // Past Expires: ErrExpired.
 func (s *Sealer) Open(token string, now time.Time) (State, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || len(raw) < nonceLen+1+s.open[0].Overhead() {
-		return State{}, ErrInvalid
-	}
-	nonce, ct := raw[:nonceLen], raw[nonceLen:]
-	var pt []byte
-	for _, gcm := range s.open {
-		if pt, err = gcm.Open(nil, nonce, ct, []byte(additionalData)); err == nil {
-			break
-		}
-	}
-	if pt == nil {
-		return State{}, ErrInvalid
+	pt, err := s.OpenData(additionalData, token)
+	if err != nil {
+		return State{}, err
 	}
 	var st State
 	if err := json.Unmarshal(pt, &st); err != nil {

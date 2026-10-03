@@ -497,7 +497,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
 	if isUpgrade(r) {
 		if g.isDraining() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+			writeDraining(w)
 			return
 		}
 		if !g.originOK(r) {
