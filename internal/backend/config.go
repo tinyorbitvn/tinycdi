@@ -85,6 +85,8 @@ type Config struct {
 	OIDCClientID         string
 	OIDCClientSecret     string // env only — never a flag value
 	OIDCRedirectURL      string
+	OIDCEndSession       bool   // RP-initiated logout via the discovered end_session_endpoint
+	OIDCPostLogoutURL    string // post_logout_redirect_uri; empty omits it
 	RequiredGroups       groupList
 	DevInsecureDB        bool
 	DBSSLMode            string // resolved sslmode label, for logging
@@ -177,6 +179,10 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.OIDCIssuer, "oidc-issuer", envOr(getenv, "TCDI_OIDC_ISSUER", ""), "OIDC issuer URL")
 	fs.StringVar(&c.OIDCClientID, "oidc-client-id", envOr(getenv, "TCDI_OIDC_CLIENT_ID", ""), "OIDC client ID")
 	fs.StringVar(&c.OIDCRedirectURL, "oidc-redirect-url", envOr(getenv, "TCDI_OIDC_REDIRECT_URL", ""), "OIDC redirect URL")
+	fs.BoolVar(&c.OIDCEndSession, "oidc-end-session", envOr(getenv, "TCDI_OIDC_END_SESSION", "true") != "false",
+		"sign-out also ends the identity provider session when its discovery document has end_session_endpoint (env TCDI_OIDC_END_SESSION; default true)")
+	fs.StringVar(&c.OIDCPostLogoutURL, "oidc-post-logout-redirect", envOr(getenv, "TCDI_OIDC_POST_LOGOUT_REDIRECT", ""),
+		"post_logout_redirect_uri sent to the identity provider at sign-out; must be registered there (empty omits it)")
 	fs.Var(&c.RequiredGroups, "required-groups",
 		"login requires the ID-token groups claim to carry one of these groups (repeatable or CSV; env TCDI_REQUIRED_GROUPS; empty disables the gate)")
 	fs.BoolVar(&c.DevInsecureDB, "dev-insecure-db", envOr(getenv, "TCDI_DEV_INSECURE_DB", "") == "true",

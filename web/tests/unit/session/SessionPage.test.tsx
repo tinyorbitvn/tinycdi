@@ -5,7 +5,6 @@ import { ApiProvider } from "../../../src/api/context";
 import { MeProvider, type Me } from "../../../src/app/me";
 import { SessionPage } from "../../../src/session/SessionPage";
 import {
-  SESSION_FRAME_ALLOW,
   SESSION_FRAME_SANDBOX,
   markSessionOwned,
   readSessionMarker,
@@ -75,7 +74,12 @@ describe("SessionPage", () => {
 
     const frame = await screen.findByTitle(`Desktop: ${ws.name}`);
     expect(frame.getAttribute("sandbox")).toBe(SESSION_FRAME_SANDBOX);
-    expect(frame.getAttribute("allow")).toBe(SESSION_FRAME_ALLOW);
+    // Spelled out: each feature is delegated to this workspace's session origin
+    // by name (the frame has no src attribute, so 'src' would mean the portal).
+    const origin = `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}`;
+    expect(frame.getAttribute("allow")).toBe(
+      `clipboard-read ${origin}; clipboard-write ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+    );
     const tokens = (frame.getAttribute("sandbox") ?? "").split(/\s+/);
     for (const forbidden of ["allow-top-navigation", "allow-popups", "allow-modals"]) {
       expect(tokens).not.toContain(forbidden);

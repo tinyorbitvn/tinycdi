@@ -361,3 +361,29 @@ func TestControlTokenUnsetWarning(t *testing.T) {
 		t.Fatalf("warning must state /v1/control is disabled: %q", controlTokenUnsetWarning)
 	}
 }
+
+// FX-R21: sign-out also ends the identity provider session by default; the
+// post-logout redirect is opt-in.
+func TestParseFlags_SignOut(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OIDCEndSession || cfg.OIDCPostLogoutURL != "" {
+		t.Fatalf("defaults: endSession=%v postLogout=%q, want true and empty", cfg.OIDCEndSession, cfg.OIDCPostLogoutURL)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{
+		"TCDI_OIDC_END_SESSION":          "false",
+		"TCDI_OIDC_POST_LOGOUT_REDIRECT": "https://portal.example/signed-out",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDCEndSession || cfg.OIDCPostLogoutURL != "https://portal.example/signed-out" {
+		t.Fatalf("env: endSession=%v postLogout=%q", cfg.OIDCEndSession, cfg.OIDCPostLogoutURL)
+	}
+	cfg, err = ParseFlags(append(mergedArgs(), "-oidc-end-session=false"), noEnv)
+	if err != nil || cfg.OIDCEndSession {
+		t.Fatalf("flag -oidc-end-session=false: err=%v endSession=%v", err, cfg.OIDCEndSession)
+	}
+}

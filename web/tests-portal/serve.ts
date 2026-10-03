@@ -244,7 +244,21 @@ const upstreamBehavior = { topNav: false, popup: false };
 let upstreamRenders = 0;
 
 function desktopPage(): string {
-  const scripts: string[] = [];
+  // The two probes the KasmVNC 1.5.0 client runs on every load (FX-R22): a
+  // fetch() of a data: URI to test H.264 decoding, and
+  // navigator.keyboard.getLayoutMap() to map non-US layouts. Each outcome is
+  // recorded on <body> for the specs; a failure is also logged the way the
+  // real client does, so it shows up in the console watcher.
+  const scripts: string[] = [
+    `document.body.dataset.cspViolations = "0";`,
+    `document.addEventListener("securitypolicyviolation", function () {` +
+      ` document.body.dataset.cspViolations = String(Number(document.body.dataset.cspViolations) + 1); });`,
+    `fetch("data:application/octet-stream;base64,AAAA").then(function (r) { return r.arrayBuffer(); })` +
+      `.then(function () { document.body.dataset.codecProbe = "ok"; },` +
+      ` function (e) { document.body.dataset.codecProbe = "blocked"; console.error("Failed to detect codecs", String(e)); });`,
+    `navigator.keyboard.getLayoutMap().then(function () { document.body.dataset.layoutProbe = "ok"; },` +
+      ` function (e) { document.body.dataset.layoutProbe = "refused"; document.body.dataset.layoutError = String(e); console.error("getLayoutMap refused", String(e)); });`,
+  ];
   if (upstreamBehavior.topNav) {
     scripts.push(
       `try { window.top.location = "https://example.invalid/"; } catch (e) {}`,

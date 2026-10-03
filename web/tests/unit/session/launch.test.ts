@@ -8,7 +8,7 @@ import {
   sessionOrigin,
   sessionPath,
   submitLaunch,
-  SESSION_FRAME_ALLOW,
+  sessionFrameAllow,
   SESSION_FRAME_SANDBOX,
   TICKET_FIELD,
   type LaunchTicket,
@@ -146,8 +146,17 @@ describe("routes and frame contract", () => {
     for (const forbidden of ["allow-top-navigation", "allow-popups", "allow-modals"]) {
       expect(SESSION_FRAME_SANDBOX.split(" ")).not.toContain(forbidden);
     }
-    // No keyboard-map: the desktop client's getLayoutMap() stays refused in the
-    // frame (FX-R18); granting it needs the gateway Permissions-Policy too.
-    expect(SESSION_FRAME_ALLOW).toBe("clipboard-read; clipboard-write; fullscreen");
+    // keyboard-map (FX-R22): lets the desktop client's getLayoutMap() map
+    // non-US layouts; it only exposes the layout to the session origin, which
+    // the gateway Permissions-Policy grants to self. Every feature names the
+    // session origin: the frame has no src attribute, so a bare feature would
+    // delegate to the portal's own origin and nothing reaches the session.
+    expect(sessionFrameAllow(WS, "session.example.com")).toBe(
+      "clipboard-read https://ws-" + WS.slice(3) + ".session.example.com; " +
+        "clipboard-write https://ws-" + WS.slice(3) + ".session.example.com; " +
+        "fullscreen https://ws-" + WS.slice(3) + ".session.example.com; " +
+        "keyboard-map https://ws-" + WS.slice(3) + ".session.example.com",
+    );
+    expect(sessionFrameAllow(WS, "")).toBe("");
   });
 });

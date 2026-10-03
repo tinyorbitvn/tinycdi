@@ -130,6 +130,53 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/logout:
+    post:
+      operationId: logout
+      summary: Sign out
+      description: |
+        Ends the caller's portal session: the server-side session is deleted
+        and the session cookie is expired. Requires the session cookie and the
+        `X-CSRF-Token` header (`401` without a session, `403` without a valid
+        token).
+
+        When the identity provider advertises an `end_session_endpoint` in its
+        discovery document and the deployment has `oidc.endSession` on
+        (default), the answer is `200` with the URL that ends the provider
+        session too; the portal navigates the browser there. Without that the
+        provider session would survive and the next visit would sign the user
+        straight back in. The URL is assembled only from the provider's
+        discovery document and the deployment configuration — `client_id`
+        always, `post_logout_redirect_uri` only when the deployment sets
+        `oidc.postLogoutRedirect` — never from the request (no open redirect).
+        The session keeps no ID token, so `id_token_hint` is not sent.
+        Otherwise the answer is `204` and the portal stays local.
+      tags: [session]
+      responses:
+        "200":
+          description: Portal session ended; continue at the identity provider.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResult"
+        "204":
+          description: Portal session ended; nothing more to do.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/workspaces:
     get:
       operationId: listWorkspaces
@@ -1340,6 +1387,22 @@ components:
         authenticated:
           type: boolean
           description: True when the request carries a live (not idle- or absolute-expired) session.
+
+    LogoutResult:
+      type: object
+      additionalProperties: false
+      required: [endSessionUrl]
+      description: |
+        Answer of `POST /v1/logout` when the identity provider session can be
+        ended too.
+      properties:
+        endSessionUrl:
+          type: string
+          format: uri
+          description: |
+            The provider's end-session endpoint with `client_id` (and
+            `post_logout_redirect_uri` when configured). Navigate the browser
+            here.
 
     Me:
       type: object

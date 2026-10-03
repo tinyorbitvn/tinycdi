@@ -280,6 +280,60 @@ Check the result — only the leader replica logs the pass:
 $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
 
+## Sign-out and the identity provider
+
+The account menu (top right, on the user's name) has **Sign out**. It ends
+the portal session (`POST /v1/logout`, CSRF-protected, session cookie
+expired) and leaves for a public **Signed out** page that offers
+**Sign in again** and never starts a login by itself.
+
+Ending only the portal session is not enough: the identity provider keeps
+its own browser session, and the next visit would log the user straight
+back in. So, by default, sign-out continues at the provider
+(RP-initiated logout):
+
+- The backend reads `end_session_endpoint` from the provider's discovery
+  document at startup. When it is there and `oidc.endSession` is `true`
+  (default), `POST /v1/logout` answers `200 {"endSessionUrl": ...}` and the
+  portal navigates the browser to that URL, which ends the provider
+  session. Without the endpoint, or with `oidc.endSession: false`, the
+  answer is `204` and the user lands on the Signed out page; the provider
+  session then survives, so **Sign in again** signs in without asking for
+  credentials.
+- The URL carries `client_id` (the `oidc.clientID` value). The portal
+  session does not keep the ID token, so `id_token_hint` is not sent.
+- `post_logout_redirect_uri` is sent only when `oidc.postLogoutRedirect` is
+  set (default empty). The provider only redirects to URIs registered on
+  the client, so register the value first, then set it, for example
+  `https://<portalHost>/signed-out`. Left empty, the provider shows its own
+  logged-out page, which is fine.
+- The target comes only from the discovery document and the chart values.
+  Nothing in the sign-out request (query, body, headers, `Host`) can change
+  it, so it is not an open redirect. A discovered endpoint that is not an
+  absolute `http(s)` URL is ignored and sign-out stays local.
+
+```yaml
+oidc:
+  endSession: true            # default; false = sign-out stays local to the portal
+  postLogoutRedirect: ""      # default; e.g. https://portal.example.com/signed-out
+```
+
+**Keycloak.** Discovery already has `end_session_endpoint`. With only
+`client_id` (no `id_token_hint`) Keycloak asks the user to confirm the
+logout before ending its session. To return to the portal afterwards, add
+`https://<portalHost>/signed-out` under the client's *Valid post logout
+redirect URIs* and set `oidc.postLogoutRedirect` to the same value. Do not
+change the OIDC client ID for this.
+
+**Other providers** that insist on `id_token_hint` reject the request the
+portal sends: set `oidc.endSession: false` there.
+
+The discovery document is read when the backend starts, so after changing
+the provider's configuration restart the backend (`helm upgrade` or a
+rollout restart). Verify with a browser: sign in, choose **Sign out**, then
+open the portal again. You must be asked to sign in (or land on the Signed
+out page), not be signed in silently.
+
 ## Upgrade
 
 ```bash
