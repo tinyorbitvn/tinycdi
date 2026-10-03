@@ -282,7 +282,10 @@ renews the leases, they expire, and each user must start a fresh session.
 5. Check `tinycdi_workspaces_running` — decide whether the maintenance
    window tolerates one stream drop per backend pod, or drain users first
    (stop issuing tickets). A graceful backend stop drains its open streams
-   and reports them closed; clients then reconnect inside their live lease.
+   and reports them closed, then keeps both listeners serving for the rest
+   of the drain window (`-drain-window`, default 8 s) — late reads still
+   answer and new launches/upgrades get a retryable 503 while endpoint
+   removal propagates; clients then reconnect inside their live lease.
 
 ## Procedure
 

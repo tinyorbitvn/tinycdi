@@ -664,6 +664,9 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
+		// The drain window is held for its full length now — keep this
+		// test about the shed mechanics, not the hold.
+		"-drain-window", "250ms",
 		"-broker-url", brokerURL,
 		"-broker-ca", brokerCA,
 		"-mtls-cert", mtlsCert,
@@ -777,6 +780,165 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	}
 	if n := fb.revokeCount(); n != 0 {
 		t.Fatalf("drain revoked %d leases, want 0 (the cookie must survive a restart)", n)
+	}
+}
+
+// TestRun_HoldsDrainWindow: the drain window is a duration, not a shed
+// budget — after ctx cancel the session listener keeps answering for the
+// whole -drain-window (readiness already failed, sockets still land) and
+// Run only returns once the window ends.
+func TestRun_HoldsDrainWindow(t *testing.T) {
+	const window = 600 * time.Millisecond
+	dir := t.TempDir()
+
+	fb := newFakeBrokerClient(t)
+	internalH := httpapi.NewHandler(httpapi.Config{
+		Broker:   internalAdapter{fb},
+		Audience: "session.test",
+		Logger:   testLog(),
+	})
+	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
+
+	sessionCert, sessionKey := writeTestCert(t, dir, "session.test")
+	mtlsCert, mtlsKey := writeTestCert(t, dir, "gw-split")
+	brokerCA := writeFile(t, dir, "broker.ca", brokerCAPEM)
+
+	cfg, err := ParseFlags([]string{
+		"-listen=", "-internal-listen=",
+		"-session-listen", "127.0.0.1:0",
+		"-session-tls-cert", sessionCert,
+		"-session-tls-key", sessionKey,
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
+		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-drain-window", window.String(),
+		"-broker-url", brokerURL,
+		"-broker-ca", brokerCA,
+		"-mtls-cert", mtlsCert,
+		"-mtls-key", mtlsKey,
+		"-gateway-id", "gw-test",
+	}, noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	b, err := New(context.Background(), cfg, testLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	_, sessionAddr, _, _ := b.Addrs()
+	base := "https://" + sessionAddr
+	insecure := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+
+	waitFor(t, 5*time.Second, "session listener serving", func() bool {
+		resp, err := insecure.Get(base + "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	start := time.Now()
+	cancel()
+
+	// Readiness fails at once, but the socket keeps answering for the
+	// whole window — nothing is refused inside it.
+	waitFor(t, window/2, "readiness to drop inside the window", func() bool {
+		resp, err := insecure.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+	select {
+	case <-runDone:
+		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
+	case <-time.After(window - 100*time.Millisecond):
+	}
+	resp, err := insecure.Get(base + "/readyz")
+	if err != nil {
+		t.Fatalf("session listener refused a connection inside the drain window: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain window")
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("Run returned %v after cancel, before the %v drain window ended", d, window)
+	}
+}
+
+// TestRun_HoldsDrainWindowAppOnly: the window hold is not a gateway
+// concern — a backend with no session listener (-session-listen unset)
+// still keeps the app listener answering for the whole -drain-window.
+func TestRun_HoldsDrainWindowAppOnly(t *testing.T) {
+	const window = 400 * time.Millisecond
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{cfg: Config{DrainWindow: window}, log: testLog()}
+	srv := &http.Server{Handler: b.readyz(http.NotFoundHandler())}
+	b.servers = append(b.servers, namedServer{name: "app", srv: srv, ln: ln})
+	b.markCacheSynced()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	base := "http://" + ln.Addr().String()
+	waitFor(t, 5*time.Second, "app listener serving", func() bool {
+		resp, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	start := time.Now()
+	cancel()
+
+	// Inside the window the app listener still answers — readiness is
+	// already false but the socket is not refused.
+	select {
+	case <-runDone:
+		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
+	case <-time.After(window - 100*time.Millisecond):
+	}
+	resp, err := http.Get(base + "/readyz")
+	if err != nil {
+		t.Fatalf("app listener refused a connection inside the drain window: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz inside the drain window = %d, want 503", resp.StatusCode)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain window")
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("Run returned %v after cancel, before the %v drain window ended", d, window)
 	}
 }
 
