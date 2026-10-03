@@ -509,6 +509,40 @@ func TestDrain_RefusesNewUpgrades(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("upgrade after Drain = %d, want 503", resp.StatusCode)
 	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("drain refusal carries no Retry-After hint")
+	}
+}
+
+// TestDrain_RefusesLaunchWithoutConsumingTicket: a draining replica must
+// refuse new launch redemptions with a retryable 503 BEFORE redeeming —
+// the ticket still mints on a sibling replica (pre-stop drain, V3.24).
+func TestDrain_RefusesLaunchWithoutConsumingTicket(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-drain-launch", testWSUID)
+	gwA, srvA := newReplica(t, fb, "gw-A")
+	_, srvB := newReplica(t, fb, "gw-B")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	gwA.Drain(ctx)
+	cancel()
+
+	resp := doLaunch(t, srvA, testHost, "tk-drain-launch", map[string]string{
+		"Origin":         "https://" + testHost,
+		"Sec-Fetch-Site": "same-origin",
+	})
+	defer drain(resp)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("launch on draining replica = %d, want 503", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("launch drain refusal carries no Retry-After hint")
+	}
+	if fb.wasRedeemed("tk-drain-launch") {
+		t.Fatal("drain refusal consumed the launch ticket")
+	}
+	// The same ticket redeems on the sibling.
+	_ = launchOK(t, srvB, testHost, "tk-drain-launch")
 }
 
 // TestActivity_EventsCarryStreamEpoch: the connected and disconnect reports
