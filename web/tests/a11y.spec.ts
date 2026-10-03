@@ -32,11 +32,13 @@ const ROUTES = [
 
 const THEMES = ["light", "dark"] as const;
 
-async function login(page: Page) {
+async function login(page: Page, heading = "Workspaces") {
   await page.goto("/v1/login?returnTo=/");
   await page.getByRole("button", { name: "Log in with SSO" }).click();
   await page.waitForURL("/");
-  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: heading, exact: true }),
+  ).toBeVisible();
 }
 
 // Runs the sweep as a tenant admin so the admin routes render their real
@@ -93,6 +95,47 @@ for (const theme of THEMES) {
     }
   });
 }
+
+// E11: the same axe gate runs for the Vietnamese UI on the two busiest
+// routes. navigator.language=vi-VN is the detection path — no stored
+// preference is set, so the portal picks it up on its own.
+const VI_ROUTES = ["/workspaces", "/admin"] as const;
+
+test.describe("locale: vi", () => {
+  test.use({ locale: "vi-VN" });
+
+  for (const theme of THEMES) {
+    test.describe(`theme: ${theme}`, () => {
+      test.beforeEach(async ({ page, request, context }) => {
+        await page.emulateMedia({ colorScheme: theme });
+        await context.addInitScript(
+          (t) => window.localStorage.setItem("tcdi.theme", t),
+          theme,
+        );
+        await seed(request);
+        await login(page, "Workspace");
+      });
+
+      for (const route of VI_ROUTES) {
+        test(`axe [vi]: ${route} has no serious/critical violations`, async ({ page }) => {
+          await page.goto(route);
+          await settle(page);
+          await expect(page.locator("html")).toHaveAttribute("lang", "vi");
+          const results = await new AxeBuilder({ page }).analyze();
+          const bad = results.violations.filter(
+            (v) => v.impact === "serious" || v.impact === "critical",
+          );
+          expect(
+            bad,
+            `${route} [vi, ${theme}] violations: ${JSON.stringify(
+              bad.map((v) => ({ id: v.id, impact: v.impact, nodes: v.nodes.length })),
+            )}`,
+          ).toEqual([]);
+        });
+      }
+    });
+  }
+});
 
 test.describe("keyboard", () => {
   test("every interactive element on /workspaces is Tab-reachable with a visible focus ring", async ({

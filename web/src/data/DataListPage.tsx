@@ -15,7 +15,8 @@ import { Link, navigate } from "../lib/router";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import { useResource } from "../workspaces/resource";
-import { t, type MessageKey } from "../i18n";
+import { t, formatDateTime, type MessageKey } from "../i18n";
+import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { isTenantAdmin, useMeLoaded } from "../app/me";
@@ -113,7 +114,12 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
       });
     }
     cols.push(
-      { key: "runtime", header: t("data.list.col.runtime"), hideOnMobile: true },
+      {
+        key: "runtime",
+        header: t("data.list.col.runtime"),
+        hideOnMobile: true,
+        render: (r) => runtimeLabel(r.runtime),
+      },
       {
         key: "size",
         header: t("data.list.col.size"),
@@ -129,7 +135,7 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "retainedAt",
         header: t("data.list.col.retainedAt"),
         hideOnMobile: true,
-        render: (r) => new Date(r.retainedAt).toLocaleString(),
+        render: (r) => formatDateTime(r.retainedAt),
       },
       {
         key: "actions",

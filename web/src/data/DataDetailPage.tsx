@@ -11,7 +11,8 @@ import { Link, navigate } from "../lib/router";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import { useResource } from "../workspaces/resource";
-import { t } from "../i18n";
+import { t, formatDateTime } from "../i18n";
+import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { canAttach, canPurge, DataStateBadge, ownerLabel, PURGING_POLL_MS } from "./DataListPage";
@@ -127,11 +128,11 @@ export function DataDetailPage({
           { term: t("data.detail.field.id"), detail: r.id },
           { term: t("data.detail.field.state"), detail: <DataStateBadge state={r.state} /> },
           { term: t("data.detail.field.source"), detail: r.sourceWorkspaceName },
-          { term: t("data.detail.field.runtime"), detail: r.runtime },
+          { term: t("data.detail.field.runtime"), detail: runtimeLabel(r.runtime) },
           { term: t("data.detail.field.size"), detail: t("data.list.sizeGib", { n: r.sizeGib }) },
           {
             term: t("data.detail.field.retainedAt"),
-            detail: new Date(r.retainedAt).toLocaleString(),
+            detail: formatDateTime(r.retainedAt),
           },
           ...(admin && r.owner
             ? [{ term: t("data.detail.field.owner"), detail: ownerLabel(r.owner) }]

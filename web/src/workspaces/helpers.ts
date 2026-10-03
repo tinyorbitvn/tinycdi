@@ -1,5 +1,5 @@
 import type { components } from "../api/generated/schema";
-import type { MessageKey } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 
 type Schemas = components["schemas"];
 
@@ -25,8 +25,15 @@ export function isConnectable(ws: WorkspaceView): boolean {
  * showing (it will never run again), so it renders a dash instead of a stale
  * Running/Stopped value.
  */
+const DESIRED_LABEL: Record<string, MessageKey> = {
+  Running: "workspaces.desired.running",
+  Stopped: "workspaces.desired.stopped",
+};
+
 export function desiredLabel(ws: WorkspaceView): string {
-  return ws.phase === "Terminating" ? "—" : ws.desiredState;
+  if (ws.phase === "Terminating") return "—";
+  const key = DESIRED_LABEL[ws.desiredState];
+  return key ? t(key) : ws.desiredState;
 }
 
 export interface Blocker {

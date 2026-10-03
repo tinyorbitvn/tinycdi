@@ -159,7 +159,9 @@ describe("SessionPage", () => {
 
     // The handoff: this tab opens the session in a new tab; that tab now
     // holds the lease.
-    fireEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
+    const openNewTab = screen.getByRole("button", { name: "Open in new tab" });
+    await waitFor(() => expect(openNewTab).toBeEnabled());
+    fireEvent.click(openNewTab);
     const external = await screen.findByText("Session opened in a new tab");
 
     // "Show here" must go through the CONNECTION_IN_USE path — a fresh

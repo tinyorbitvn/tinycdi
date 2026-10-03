@@ -6,9 +6,10 @@ import { RETAINED_DISK } from "../../mock-api/fixtures.ts";
 
 async function openPurge() {
   const table = await screen.findByRole("table", { name: /retained/i });
-  const row = within(table)
-    .getAllByRole("row")
-    .find((r) => r.textContent?.includes(RETAINED_DISK.id))!;
+  const link = await within(table).findByRole("link", {
+    name: new RegExp(RETAINED_DISK.id),
+  });
+  const row = link.closest("tr")!;
   fireEvent.click(within(row).getByRole("button", { name: /^purge$/i }));
   return screen.findByRole("alertdialog");
 }
