@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
-import { t } from "../i18n";
+import { t, formatTime } from "../i18n";
+import { formatDuration } from "../templates/format";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -1259,7 +1260,7 @@ function LifecycleNotice({
       <IconClock aria-hidden="true" />
       <span>
         {t("session.lifecycle.stopsAfter", { duration: formatDuration(idleTimeoutSeconds) })}
-        {endsAt !== null ? ` · ${t("session.lifecycle.endsBy", { time: formatClock(endsAt) })}` : ""}
+        {endsAt !== null ? ` · ${t("session.lifecycle.endsBy", { time: formatTime(endsAt) })}` : ""}
       </span>
       {warn ? (
         <span role="alert" className="tc-session__warning">
@@ -1339,13 +1340,3 @@ async function loadTemplate(
   }
 }
 
-export function formatDuration(seconds: number): string {
-  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} min`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.round((seconds % 3600) / 60);
-  return m ? `${h} h ${m} min` : `${h} h`;
-}
-
-function formatClock(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}

@@ -9,7 +9,7 @@ import {
 } from "../design";
 import { Link, navigate } from "../lib/router";
 import { isPortalApiError } from "../api/errors";
-import { t } from "../i18n";
+import { t, formatDateTime } from "../i18n";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { canAttach, canPurge, DataStateBadge, ownerLabel } from "./DataListPage";
@@ -107,7 +107,7 @@ export function DataDetailPage({ dataId }: { dataId: string }) {
           { term: t("data.detail.field.size"), detail: t("data.list.sizeGib", { n: r.sizeGib }) },
           {
             term: t("data.detail.field.retainedAt"),
-            detail: new Date(r.retainedAt).toLocaleString(),
+            detail: formatDateTime(r.retainedAt),
           },
           ...(admin && r.owner
             ? [{ term: t("data.detail.field.owner"), detail: ownerLabel(r.owner) }]

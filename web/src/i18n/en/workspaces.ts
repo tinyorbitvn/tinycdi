@@ -64,6 +64,9 @@ export default {
   "workspaces.list.waitingConnection": "(waiting for ConnectionReady)",
   "workspaces.list.manage": "Manage",
 
+  "workspaces.desired.running": "Running",
+  "workspaces.desired.stopped": "Stopped",
+
   "workspaces.phase.pending": "Queued",
   "workspaces.phase.provisioning": "Starting",
   "workspaces.phase.ready": "Ready",

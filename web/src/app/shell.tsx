@@ -6,6 +6,7 @@ import {
   EmptyState,
   IconCheck,
   IconChevronDown,
+  IconGlobe,
   IconLaptop,
   IconLogOut,
   IconMoon,
@@ -30,7 +31,8 @@ import {
 import { DEFAULT_BRANDING, loadBranding, type Branding } from "./branding";
 import { isTenantAdmin, useMe, type Me } from "./me";
 import { useTheme, type ThemePreference } from "./theme";
-import { t, type MessageKey } from "../i18n";
+import { useLocale } from "./locale";
+import { t, LOCALES, type Locale, type MessageKey } from "../i18n";
 
 // --- branding -------------------------------------------------------------
 
@@ -87,6 +89,37 @@ function ThemeMenu() {
         label: t(o.label),
         icon: preference === o.pref ? <IconCheck /> : o.icon,
         onSelect: () => setPreference(o.pref),
+      }))}
+    />
+  );
+}
+
+// --- language menu ---------------------------------------------------------
+
+const LANGUAGE_LABEL: Record<Locale, MessageKey> = {
+  en: "app.language.en",
+  vi: "app.language.vi",
+};
+
+function LanguageMenu() {
+  const { locale, setLocale } = useLocale();
+  return (
+    <Menu
+      label={t("app.language.label")}
+      align="end"
+      trigger={(props) => (
+        <IconButton
+          {...props}
+          size="sm"
+          label={t("app.language.label")}
+          icon={<IconGlobe />}
+        />
+      )}
+      items={LOCALES.map((l) => ({
+        id: l,
+        label: t(LANGUAGE_LABEL[l]),
+        icon: locale === l ? <IconCheck /> : undefined,
+        onSelect: () => setLocale(l),
       }))}
     />
   );
@@ -224,6 +257,7 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
           {showByline ? <span className="tc-topbar__byline">{t("app.shell.byline")}</span> : null}
         </Link>
         <div className="tc-topbar__actions">
+          <LanguageMenu />
           <ThemeMenu />
           {me ? <UserMenu me={me} /> : null}
         </div>

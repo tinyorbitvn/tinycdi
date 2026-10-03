@@ -13,7 +13,7 @@ import {
 } from "../design";
 import { Link, navigate } from "../lib/router";
 import { isPortalApiError } from "../api/errors";
-import { t, type MessageKey } from "../i18n";
+import { t, formatDateTime, type MessageKey } from "../i18n";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import {
@@ -111,7 +111,7 @@ export function DataListPage() {
         key: "retainedAt",
         header: t("data.list.col.retainedAt"),
         hideOnMobile: true,
-        render: (r) => new Date(r.retainedAt).toLocaleString(),
+        render: (r) => formatDateTime(r.retainedAt),
       },
       {
         key: "actions",

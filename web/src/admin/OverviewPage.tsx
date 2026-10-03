@@ -2,6 +2,7 @@ import { Alert, Card, Grid, Section, Spinner, StatusPill } from "../design";
 import type { ApiClient } from "../api/client";
 import { Link } from "../lib/router";
 import { t } from "../i18n";
+import { phaseLabelKey } from "../workspaces/helpers";
 import {
   fetchQuota,
   listScopedWorkspaces,
@@ -74,7 +75,7 @@ export function OverviewPage({ now }: { now?: number }) {
                 {phaseCounts(o.data.workspaces).map(({ phase, count }) => (
                   <Card key={phase} as="div" className="tc-admin-stat">
                     <span className="tc-admin-stat__value">{count}</span>
-                    <StatusPill phase={phase} />
+                    <StatusPill phase={phase} label={t(phaseLabelKey(phase))} />
                   </Card>
                 ))}
               </Grid>
