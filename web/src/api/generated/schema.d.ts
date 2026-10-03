@@ -56,6 +56,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign out
+         * @description Ends the caller's portal session: the server-side session is deleted
+         *     and the session cookie is expired. Requires the session cookie and the
+         *     `X-CSRF-Token` header (`401` without a session, `403` without a valid
+         *     token).
+         *
+         *     When the identity provider advertises an `end_session_endpoint` in its
+         *     discovery document and the deployment has `oidc.endSession` on
+         *     (default), the answer is `200` with the URL that ends the provider
+         *     session too; the portal navigates the browser there. Without that the
+         *     provider session would survive and the next visit would sign the user
+         *     straight back in. The URL is assembled only from the provider's
+         *     discovery document and the deployment configuration — `client_id`
+         *     always, `post_logout_redirect_uri` only when the deployment sets
+         *     `oidc.postLogoutRedirect` — never from the request (no open redirect).
+         *     The session keeps no ID token, so `id_token_hint` is not sent.
+         *     Otherwise the answer is `204` and the portal stays local.
+         */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces": {
         parameters: {
             query?: never;
@@ -438,6 +473,7 @@ export interface components {
          *     | `INVALID_STATE` | 409 | true | phase/record state forbids the op now; retry once it settles to a compatible state |
          *     | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota |
+         *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
@@ -446,7 +482,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "CONNECTION_IN_USE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "CONNECTION_IN_USE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /** @description Uniform error body returned for every 4xx/5xx response. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -711,6 +747,19 @@ export interface components {
         SessionProbe: {
             /** @description True when the request carries a live (not idle- or absolute-expired) session. */
             authenticated: boolean;
+        };
+        /**
+         * @description Answer of `POST /v1/logout` when the identity provider session can be
+         *     ended too.
+         */
+        LogoutResult: {
+            /**
+             * Format: uri
+             * @description The provider's end-session endpoint with `client_id` (and
+             *     `post_logout_redirect_uri` when configured). Navigate the browser
+             *     here.
+             */
+            endSessionUrl: string;
         };
         /**
          * @description Session bootstrap payload returned by `GET /v1/me`: the verified
@@ -1000,8 +1049,9 @@ export interface components {
          * @description State or idempotency conflict — `IDEMPOTENCY_CONFLICT` (key reused with
          *     a different body), `INVALID_STATE` (operation not valid in the current
          *     phase/record state), `CONNECTION_IN_USE` (a live interactive lease
-         *     exists and `takeover` was not set), or `QUOTA_EXHAUSTED` (tenant/user
-         *     quota has no headroom).
+         *     exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
+         *     quota has no headroom), or `QUOTA_NOT_CONFIGURED` (the tenant has no
+         *     quota at all, so creates fail closed).
          */
         Conflict: {
             headers: {
@@ -1134,6 +1184,39 @@ export interface operations {
                     "application/json": components["schemas"]["SessionProbe"];
                 };
             };
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Portal session ended; continue at the identity provider. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogoutResult"];
+                };
+            };
+            /** @description Portal session ended; nothing more to do. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

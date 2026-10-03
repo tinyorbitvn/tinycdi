@@ -119,6 +119,23 @@ Also gather:
    steps live under `deploy/node-profiles/`
    (`seccomp/chromium-userns.json`, `apparmor/tinycdi-browser` — see
    `deploy/node-profiles/README.md`).
+
+   **Nodes without AppArmor.** Runtime pods carry an explicit
+   `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
+   AppArmor (kind; RHEL-family and other SELinux-based distributions)
+   refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
+   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   false` (operator flag `--runtime-apparmor-require-default=false`; the
+   install NOTES print a reminder). This is a supported setting. It omits
+   only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,
+   non-root, no privilege escalation and `hostUsers` are unchanged. What
+   you give up is the fail-closed guarantee: on an AppArmor host the
+   runtime's default profile still applies to non-privileged containers,
+   whereas on a host without AppArmor there is no AppArmor confinement and
+   isolation rests on seccomp, the user namespace and SELinux. Templates
+   that select a Localhost AppArmor profile (the browser templates) always
+   keep it and therefore cannot run on such nodes.
+
 8. **TLS material** for the portal and session edges plus the internal
    mTLS chain — either pre-created Secrets (table below) or
    `certManager.enabled` for the internal chain. The session edge cert
@@ -183,7 +200,8 @@ commit them.
 
 ```bash
 cp deploy/helm/tinycdi/ci/example-values.yaml my-values.yaml
-# edit: portalHost/sessionDomain, managedNamespaces, oidc, database,
+# edit: portalHost/sessionDomain, managedNamespaces (with a quota each — see
+# "Tenant quotas"), oidc, database,
 # images digests, networkPolicy.apiServerPeers, storageClass, templates
 
 # dry-run render first (no cluster access needed):
@@ -212,6 +230,109 @@ $K -n tinycdi-system get deploy,po
 $K get crd | grep workspaces.cdi.tinyorbit.vn
 $K get netpol -A | grep default-deny
 ```
+
+## Tenant quotas
+
+A tenant with **no quota** cannot create anything: admission fails closed,
+and the API answers `409 QUOTA_NOT_CONFIGURED` ("No quota is configured for
+your tenant. Ask an administrator to set one."). Declare each tenant's
+limits in the chart values — no SQL needed:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota:
+      runningWorkspaces: 12   # whole number >= 0
+      cpu: "16"               # cores or millicores: "16", "1.5", "500m"
+      memory: 64Gi            # Kubernetes quantity
+      storage: 200Gi          # Kubernetes quantity (retained + active disks)
+```
+
+The chart renders the entries that carry a `quota` block as the backend
+flag `-tenant-quotas` (JSON). At startup the singleton leader (the replica
+holding the Postgres leader lock) upserts exactly those tenants' `tenant_quota`
+rows, so replicas starting together write once.
+
+- **Idempotent.** A row that already matches is not touched; a changed value
+  is updated in place on the next backend start (`helm upgrade` rolls the
+  backend).
+- **Listed tenants only.** A tenant without a `quota` block, or not in
+  `managedNamespaces`, is left exactly as it is — an existing row (for
+  example one set by SQL, see `capacity.md`) survives. `helm install` /
+  `upgrade` NOTES print a warning for every tenant without a `quota` block
+  because its creates are refused unless a row already exists.
+- **Declared values win.** For a tenant that has a `quota` block, the chart
+  value overwrites a hand-edited row at the next backend start. Change the
+  value in `values.yaml`, not in the database.
+- **Lowering is safe.** A limit below current usage is accepted: running
+  workspaces keep running and keep their reservations, and new creates are
+  refused with `QUOTA_EXHAUSTED` until usage drops under the limit.
+- **Validation.** `values.schema.json` rejects negative or unparsable
+  quantities at lint/template time, and the backend refuses to start on a
+  malformed `-tenant-quotas`, naming the flag.
+- **Sizing.** Keep the sum of the quotas inside what the cluster (and any
+  namespace `ResourceQuota`) can actually schedule — see `capacity.md`.
+
+Check the result — only the leader replica logs the pass:
+
+```bash
+$K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
+```
+
+## Sign-out and the identity provider
+
+The account menu (top right, on the user's name) has **Sign out**. It ends
+the portal session (`POST /v1/logout`, CSRF-protected, session cookie
+expired) and leaves for a public **Signed out** page that offers
+**Sign in again** and never starts a login by itself.
+
+Ending only the portal session is not enough: the identity provider keeps
+its own browser session, and the next visit would log the user straight
+back in. So, by default, sign-out continues at the provider
+(RP-initiated logout):
+
+- The backend reads `end_session_endpoint` from the provider's discovery
+  document at startup. When it is there and `oidc.endSession` is `true`
+  (default), `POST /v1/logout` answers `200 {"endSessionUrl": ...}` and the
+  portal navigates the browser to that URL, which ends the provider
+  session. Without the endpoint, or with `oidc.endSession: false`, the
+  answer is `204` and the user lands on the Signed out page; the provider
+  session then survives, so **Sign in again** signs in without asking for
+  credentials.
+- The URL carries `client_id` (the `oidc.clientID` value). The portal
+  session does not keep the ID token, so `id_token_hint` is not sent.
+- `post_logout_redirect_uri` is sent only when `oidc.postLogoutRedirect` is
+  set (default empty). The provider only redirects to URIs registered on
+  the client, so register the value first, then set it, for example
+  `https://<portalHost>/signed-out`. Left empty, the provider shows its own
+  logged-out page, which is fine.
+- The target comes only from the discovery document and the chart values.
+  Nothing in the sign-out request (query, body, headers, `Host`) can change
+  it, so it is not an open redirect. A discovered endpoint that is not an
+  absolute `http(s)` URL is ignored and sign-out stays local.
+
+```yaml
+oidc:
+  endSession: true            # default; false = sign-out stays local to the portal
+  postLogoutRedirect: ""      # default; e.g. https://portal.example.com/signed-out
+```
+
+**Keycloak.** Discovery already has `end_session_endpoint`. With only
+`client_id` (no `id_token_hint`) Keycloak asks the user to confirm the
+logout before ending its session. To return to the portal afterwards, add
+`https://<portalHost>/signed-out` under the client's *Valid post logout
+redirect URIs* and set `oidc.postLogoutRedirect` to the same value. Do not
+change the OIDC client ID for this.
+
+**Other providers** that insist on `id_token_hint` reject the request the
+portal sends: set `oidc.endSession: false` there.
+
+The discovery document is read when the backend starts, so after changing
+the provider's configuration restart the backend (`helm upgrade` or a
+rollout restart). Verify with a browser: sign in, choose **Sign out**, then
+open the portal again. You must be asked to sign in (or land on the Signed
+out page), not be signed in silently.
 
 ## Upgrade
 

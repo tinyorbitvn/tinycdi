@@ -30,6 +30,21 @@ describe("WorkspaceListPage", () => {
     expect(screen.getByText("No workspaces yet.")).toBeVisible();
   }, 20000);
 
+  it("list: a workspace being deleted shows no desired state", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    const ws = makeWorkspace({ id: "ws_del", name: "going-away", phase: "Terminating", desiredState: "Running" });
+    api.state.workspaces.set(ws.id, ws);
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={60_000} />, api);
+
+    const table = await screen.findByRole("table", { name: "workspaces" });
+    const row = within(table).getByText("going-away").closest("tr") as HTMLElement;
+    expect(within(row).getByText("Deleting")).toBeInTheDocument();
+    expect(within(row).getByText("—")).toBeInTheDocument();
+    expect(within(row).queryByText("Running")).not.toBeInTheDocument();
+  }, 20000);
+
   it("list: each phase maps to a StatusPill with a text label", async () => {
     const api = createMockApi();
     api.state.workspaces.clear();

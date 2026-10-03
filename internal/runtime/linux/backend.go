@@ -109,6 +109,12 @@ const (
 	// AnnotationRetainedPVC: dataset identity is PVC UID + workspace UID,
 	// never the reusable name.
 	AnnotationRetainedPVCUID = "workspaces.cdi.tinyorbit.vn/retained-pvc-uid"
+	// AnnotationRetainedDataRef records the rd_ record the workspace was
+	// created to consume. It is the CR-level statement of intent "my home
+	// is retained data": when present, AnnotationRetainedPVC(+UID) must be
+	// present too, or the backend refuses to build a home at all
+	// (ErrRetainedClaimMissing) instead of falling back to a new empty disk.
+	AnnotationRetainedDataRef = "workspaces.cdi.tinyorbit.vn/retained-data-ref"
 
 	streamingPort int32 = 8443
 
@@ -232,6 +238,23 @@ func (e *templateRejectedError) Error() string {
 }
 func (e *templateRejectedError) Is(target error) bool { return target == ErrTemplateRejected }
 
+// ErrRetainedClaimMissing is returned when a Workspace says it consumes a
+// retained record (retained-data-ref) but carries no retained claim
+// reference (retained-pvc / retained-pvc-uid). Building the default home
+// then would silently mount a NEW EMPTY volume while the record says the
+// disk is attached, so Ensure fails before any child object is created; the
+// operator surfaces the reason on the Degraded condition.
+var ErrRetainedClaimMissing = errors.New("linux backend: workspace consumes retained data but names no retained claim")
+
+// retainedClaimMissing reports whether ws declares retained data without
+// the claim reference that makes the mount unambiguous.
+func retainedClaimMissing(ws *workspacesv1alpha1.Workspace) bool {
+	if ws.Annotations[AnnotationRetainedDataRef] == "" {
+		return false
+	}
+	return ws.Annotations[AnnotationRetainedPVC] == "" || ws.Annotations[AnnotationRetainedPVCUID] == ""
+}
+
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
@@ -274,6 +297,14 @@ type Options struct {
 	// when spec.linux.hostUsers is unset. Nil leaves the pod field nil
 	// (the apiserver default — host user namespace).
 	DefaultHostUsers *bool
+
+	// AppArmorNotRequired (operator --runtime-apparmor-require-default=false)
+	// makes buildPod leave securityContext.appArmorProfile nil wherever it
+	// would have set RuntimeDefault, so runtime pods start on nodes without
+	// AppArmor (kind, SELinux-based distributions). A Localhost profile
+	// requested through the template annotation is always kept. The zero
+	// value keeps today's behaviour: RuntimeDefault is always set.
+	AppArmorNotRequired bool
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -361,6 +392,9 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 		// without it the pod cannot satisfy the runtime contract, so the
 		// template is rejected before ANY child object is created.
 		return runtime.Observation{}, &templateRejectedError{reason: "spec.linux.adapter=kasm requires the operator's --kasm-adapter-image (digest-pinned adapter init image)"}
+	}
+	if retainedClaimMissing(ws) {
+		return runtime.Observation{}, ErrRetainedClaimMissing
 	}
 	if _, err := b.ensureSecret(ctx, ws); err != nil {
 		return runtime.Observation{}, err
@@ -780,6 +814,9 @@ func validAppArmorProfileName(name string) bool {
 }
 
 func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, opts Options) *corev1.Pod {
+	if opts.AppArmorNotRequired && appArmor != nil && appArmor.Type == corev1.AppArmorProfileTypeRuntimeDefault {
+		appArmor = nil
+	}
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
@@ -960,6 +997,12 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		},
 	}
 	if kasm {
+		// The copier's explicit RuntimeDefault follows the same setting as
+		// the desktop container: a host without AppArmor refuses it too.
+		var initAppArmor *corev1.AppArmorProfile
+		if !opts.AppArmorNotRequired {
+			initAppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault}
+		}
 		// The adapter initContainer copies the adapter scripts into the
 		// shared emptyDir — the only mutation the foreign image gets. Its
 		// confinement mirrors the desktop's minus the browser's Localhost
@@ -991,7 +1034,7 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 				ReadOnlyRootFilesystem: ptr(true),
 				Capabilities:           &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				AppArmorProfile:        &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+				AppArmorProfile:        initAppArmor,
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: adapterVolName, MountPath: adapterDir},

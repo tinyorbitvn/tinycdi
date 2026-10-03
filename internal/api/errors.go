@@ -24,11 +24,17 @@ const (
 	CodeInvalidState        ErrorCode = "INVALID_STATE"        // 409
 	CodeIdempotencyConflict ErrorCode = "IDEMPOTENCY_CONFLICT" // 409
 	CodeQuotaExhausted      ErrorCode = "QUOTA_EXHAUSTED"      // 409
+	CodeQuotaNotConfigured  ErrorCode = "QUOTA_NOT_CONFIGURED" // 409
 	CodeConnectionInUse     ErrorCode = "CONNECTION_IN_USE"    // 409
 	CodeRateLimited         ErrorCode = "RATE_LIMITED"         // 429
 	CodeUnavailable         ErrorCode = "UNAVAILABLE"          // 503
 	CodeInternal            ErrorCode = "INTERNAL"             // 500
 )
+
+// quotaNotConfiguredMessage is the operator-facing text of
+// QUOTA_NOT_CONFIGURED: the tenant has no tenant_quota row, so admission
+// fails closed. Clients switch on the code; the web copy mirrors this text.
+const quotaNotConfiguredMessage = "No quota is configured for your tenant. Ask an administrator to set one."
 
 // AllErrorCodes enumerates every code in the contract. Keep in sync with the
 // constants above and the OpenAPI ErrorCode enum.
@@ -42,6 +48,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeInvalidState,
 	CodeIdempotencyConflict,
 	CodeQuotaExhausted,
+	CodeQuotaNotConfigured,
 	CodeConnectionInUse,
 	CodeRateLimited,
 	CodeUnavailable,
@@ -59,7 +66,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeConnectionInUse:
+	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse:
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity

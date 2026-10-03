@@ -133,7 +133,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant}` — tenant namespaces created with `resource-policy: keep`. The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -204,6 +204,8 @@ objects. It **keeps**:
 | `database.tls.mode` | `verify-full` | `PGSSLMODE` on the backend — only `verify-ca`/`verify-full` render without `dev.enabled` (the backend refuses weaker sslmodes at startup, CHTR-8); dev + insecure mode renders `--dev-insecure-db`; DSN `sslmode=` still wins |
 | `database.allowedPeers` | deny-all placeholder | backend→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
 | `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
+| `oidc.endSession` | `true` | sign-out also ends the identity provider session (RP-initiated logout) when its discovery document has `end_session_endpoint` — backend flag `--oidc-end-session`; `false` keeps sign-out local. See the install runbook, "Sign-out and the identity provider" |
+| `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
 | `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
@@ -263,6 +265,15 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.placement.nodeSelector` | `{cdi.tinyorbit.vn/workspace: "true"}` | node labels every runtime pod selects; **must be non-empty** while `allowSharedNodes=false` (render fails otherwise) |
 | `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
+| `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
+
+#### Nodes without AppArmor
+
+Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch.
+
+- **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
+- **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
+- **Localhost profiles still apply:** a template that requests a Localhost AppArmor profile (`appArmorProfile: <name>`, e.g. the browser templates) always sets it, so those pods are refused on such nodes. Run browser templates only on AppArmor nodes (use `nodeProfiles.install` there), or use a template without a Localhost profile.
 
 ### Observability & network
 
@@ -443,11 +454,33 @@ confinement instead of restoring the default), then upgrade with
 nodes (removal verified), set `nodeProfiles.install.enabled=false` (or
 uninstall) to drop the DaemonSet.
 
-### Tenant quota
+### Tenant quotas
 
-The API has **no quota-config endpoint** — `tenant_quota` rows live in
-Postgres and are seeded by SQL (see `docs/runbooks/capacity.md`). The
-chart intentionally does not model quota values.
+Each `managedNamespaces[]` entry may carry a `quota` block. The chart renders
+the entries that have one as the backend flag `-tenant-quotas` (JSON), and the
+singleton backend leader upserts exactly those tenants' `tenant_quota` rows at
+startup:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota:
+      runningWorkspaces: 12   # whole number >= 0
+      cpu: "16"               # cores or millicores: "16", "1.5", "500m"
+      memory: 64Gi            # Kubernetes quantity
+      storage: 200Gi          # Kubernetes quantity
+```
+
+All four fields are required inside a `quota` block. The upsert is
+idempotent (an identical row is not touched), values below current usage are
+accepted (running workspaces keep running; new creates are refused with
+`QUOTA_EXHAUSTED`), and a tenant without a `quota` block is left untouched.
+A tenant with **no** row at all gets `409 QUOTA_NOT_CONFIGURED` on every
+create, so NOTES warns about each entry that has no `quota` block.
+`values.schema.json` rejects negative or unparsable quantities. Declared
+values overwrite a hand-edited row for that tenant at the next backend
+start. See `docs/runbooks/install.md` → "Tenant quotas".
 
 ## Validation & tests
 

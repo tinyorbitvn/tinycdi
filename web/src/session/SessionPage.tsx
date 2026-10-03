@@ -20,7 +20,6 @@ import {
   IconRefresh,
 } from "../design/icons";
 import {
-  SESSION_FRAME_ALLOW,
   SESSION_FRAME_SANDBOX,
   assertLaunchTarget,
   clearSessionOwned,
@@ -28,7 +27,8 @@ import {
   readSessionMarker,
   sessionFrameName,
   sessionLabel,
-  sessionOrigin,
+  sessionFrameAllow,
+  sessionFrameUrl,
   submitLaunch,
   type SessionMarker,
 } from "./launch";
@@ -288,7 +288,7 @@ export function SessionPage({
     armed.current = false;
     armPending();
     dispatch({ type: "resume" });
-    el.src = sessionOrigin(workspaceId, sessionDomain);
+    el.src = sessionFrameUrl(workspaceId, sessionDomain);
     resumeDeadline.current = setTimeout(() => {
       clearResume();
       void launch("frame", false);
@@ -637,7 +637,7 @@ export function SessionPage({
           title={t("session.frame.title", { name })}
           className="tc-session__frame"
           sandbox={SESSION_FRAME_SANDBOX}
-          allow={SESSION_FRAME_ALLOW}
+          allow={sessionFrameAllow(workspaceId, sessionDomain)}
           aria-describedby="tc-session-keyboard-hint"
           inert={!connected}
           onLoad={onFrameLoad}

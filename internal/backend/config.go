@@ -85,10 +85,13 @@ type Config struct {
 	OIDCClientID         string
 	OIDCClientSecret     string // env only — never a flag value
 	OIDCRedirectURL      string
+	OIDCEndSession       bool   // RP-initiated logout via the discovered end_session_endpoint
+	OIDCPostLogoutURL    string // post_logout_redirect_uri; empty omits it
 	RequiredGroups       groupList
 	DevInsecureDB        bool
 	DBSSLMode            string // resolved sslmode label, for logging
 	TenantNamespaces     string
+	TenantQuotas         string // JSON; see provisioning.ParseTenantQuotas
 	SessionIdle          time.Duration
 	Kubeconfig           string
 	ExpiryInterval       time.Duration
@@ -176,11 +179,17 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.OIDCIssuer, "oidc-issuer", envOr(getenv, "TCDI_OIDC_ISSUER", ""), "OIDC issuer URL")
 	fs.StringVar(&c.OIDCClientID, "oidc-client-id", envOr(getenv, "TCDI_OIDC_CLIENT_ID", ""), "OIDC client ID")
 	fs.StringVar(&c.OIDCRedirectURL, "oidc-redirect-url", envOr(getenv, "TCDI_OIDC_REDIRECT_URL", ""), "OIDC redirect URL")
+	fs.BoolVar(&c.OIDCEndSession, "oidc-end-session", envOr(getenv, "TCDI_OIDC_END_SESSION", "true") != "false",
+		"sign-out also ends the identity provider session when its discovery document has end_session_endpoint (env TCDI_OIDC_END_SESSION; default true)")
+	fs.StringVar(&c.OIDCPostLogoutURL, "oidc-post-logout-redirect", envOr(getenv, "TCDI_OIDC_POST_LOGOUT_REDIRECT", ""),
+		"post_logout_redirect_uri sent to the identity provider at sign-out; must be registered there (empty omits it)")
 	fs.Var(&c.RequiredGroups, "required-groups",
 		"login requires the ID-token groups claim to carry one of these groups (repeatable or CSV; env TCDI_REQUIRED_GROUPS; empty disables the gate)")
 	fs.BoolVar(&c.DevInsecureDB, "dev-insecure-db", envOr(getenv, "TCDI_DEV_INSECURE_DB", "") == "true",
 		"allow non-verifying PostgreSQL sslmode (disable/allow/prefer/require); local development only")
 	fs.StringVar(&c.TenantNamespaces, "tenant-namespaces", envOr(getenv, "TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
+	fs.StringVar(&c.TenantQuotas, "tenant-quotas", envOr(getenv, "TCDI_TENANT_QUOTAS", ""),
+		"declared tenant quotas as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; the singleton leader upserts exactly the listed tenants at startup, unlisted tenants are untouched (env TCDI_TENANT_QUOTAS)")
 	fs.DurationVar(&c.SessionIdle, "session-idle", envDur(getenv, "TCDI_SESSION_IDLE", 30*time.Minute), "session idle timeout")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", envOr(getenv, "KUBECONFIG", ""), "kubeconfig path (default: in-cluster)")
 	fs.DurationVar(&c.ExpiryInterval, "expiry-interval", envDur(getenv, "TCDI_EXPIRY_INTERVAL", 30*time.Second),
@@ -278,6 +287,9 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 func (c *Config) validate() error {
 	if c.Listen == "" && c.SessionListen == "" && c.InternalListen == "" && c.MetricsListen == "" {
 		return errors.New("no listeners enabled: at least one of -listen, -session-listen, -internal-listen, -metrics-listen must be set")
+	}
+	if _, err := provisioning.ParseTenantQuotas(c.TenantQuotas); err != nil {
+		return fmt.Errorf("-tenant-quotas: %w", err)
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)

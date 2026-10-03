@@ -144,6 +144,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		return fmt.Errorf("tenant map: %w", err)
 	}
 
+	quotas, err := provisioning.ParseTenantQuotas(cfg.TenantQuotas)
+	if err != nil {
+		return fmt.Errorf("-tenant-quotas: %w", err)
+	}
+	if len(quotas) > 0 {
+		// Declared quotas: written by the singleton leader only, so replicas
+		// starting together do not race (FX-R17).
+		b.singletons = append(b.singletons, tenantQuotaSingleton(log, db, quotas, tenantQuotaRetry, nil))
+	}
+
 	rcfg, err := restConfig(cfg.Kubeconfig)
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
@@ -459,6 +469,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		SessionOrigin:  cfg.sessionOrigin(),
 		RequiredGroups: cfg.RequiredGroups,
 		LoginSealer:    sealer,
+
+		EndSession:         cfg.OIDCEndSession,
+		PostLogoutRedirect: cfg.OIDCPostLogoutURL,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
 	if err != nil {
 		return fmt.Errorf("oidc: %w", err)

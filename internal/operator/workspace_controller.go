@@ -99,6 +99,12 @@ const (
 	ReasonBootDeadlineExceeded    = "BootDeadlineExceeded"
 	ReasonBackendError            = "BackendError"
 	ReasonNominal                 = "Nominal"
+
+	// ReasonRetainedClaimMissing — the Workspace says it consumes retained
+	// data (retained-data-ref) but names no retained claim; the backend
+	// refuses to build a default home in its place, so no runtime children
+	// are created until the claim reference is present (FX-R20).
+	ReasonRetainedClaimMissing = "RetainedClaimMissing"
 )
 
 const (
@@ -215,6 +221,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(ws, FinalizerRuntimeCleanup) {
 			done, err := r.newFinalizer().Run(ctx, ws)
+			if apierrors.IsNotFound(err) {
+				// The object vanished under this reconcile (a previous
+				// reconcile removed the finalizer and the cache still served
+				// the Terminating copy). Gone is the goal of a delete.
+				return ctrl.Result{}, nil
+			}
 			if err != nil {
 				log.Error(err, "workspace teardown blocked; will retry")
 				return ctrl.Result{}, err
@@ -226,7 +238,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			if controllerutil.RemoveFinalizer(ws, FinalizerRuntimeCleanup) {
 				if err := r.Update(ctx, ws); err != nil {
-					return ctrl.Result{}, err
+					return ctrl.Result{}, client.IgnoreNotFound(err)
 				}
 			}
 		}
@@ -363,6 +375,11 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	case errors.Is(berr, linux.ErrNameConflict):
 		statusErr = errors.New(ReasonNameConflict)
 		obs, _ = r.Backend.Observe(ctx, ws)
+	case errors.Is(berr, linux.ErrRetainedClaimMissing):
+		logf.FromContext(ctx).Info("retained claim reference missing; refusing to build a default home",
+			"retainedDataRef", ws.Annotations[linux.AnnotationRetainedDataRef])
+		statusErr = errors.New(ReasonRetainedClaimMissing)
+		obs, _ = r.Backend.Observe(ctx, ws)
 	case errors.Is(berr, linux.ErrTemplateRejected):
 		logf.FromContext(ctx).Info("template rejected by backend", "error", berr)
 		statusErr = errors.New(ReasonTemplateRejected)
@@ -390,13 +407,17 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	// The absolute generation cap (design §8) fires regardless of activity:
 	// once the running generation's age passes the template's MaxDuration the
 	// workspace stops as if an expiry intent had arrived — driven through the
-	// same applied-intent path RequestStop uses.
-	if maxDur := snap.Spec.Lifecycle.MaxDuration.Duration; maxDur > 0 &&
-		ws.Status.StartedAt != nil && !r.now().Before(ws.Status.StartedAt.Add(maxDur)) {
-		logf.FromContext(ctx).Info("max duration reached; applying stop",
-			"runtimeGeneration", applied.RuntimeGeneration,
-			"maxDuration", maxDur)
-		return r.expireRunning(ctx, ws, applied)
+	// same applied-intent path RequestStop uses. The age is measured from
+	// the running incarnation's start: a startedAt left by an ended
+	// incarnation is not a start of this one (FX-R24).
+	if started := incarnationStartedAt(ws); started != nil {
+		maxDur := snap.Spec.Lifecycle.MaxDuration.Duration
+		if maxDur > 0 && !r.now().Before(started.Add(maxDur)) {
+			logf.FromContext(ctx).Info("max duration reached; applying stop",
+				"runtimeGeneration", applied.RuntimeGeneration,
+				"maxDuration", maxDur)
+			return r.expireRunning(ctx, ws, applied)
+		}
 	}
 
 	res := ctrl.Result{}
@@ -405,6 +426,28 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		res.RequeueAfter = requeueNotReady
 	}
 	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr)
+}
+
+// incarnationEnded reports whether phase says the runtime incarnation that
+// status.startedAt described is over.
+func incarnationEnded(phase workspacesv1alpha1.WorkspacePhase) bool {
+	switch phase {
+	case workspacesv1alpha1.WorkspacePhaseStopped,
+		workspacesv1alpha1.WorkspacePhaseStopping,
+		workspacesv1alpha1.WorkspacePhaseFailed:
+		return true
+	}
+	return false
+}
+
+// incarnationStartedAt returns when the running incarnation became Ready,
+// or nil when status.startedAt is unset or was left by an incarnation that
+// has since ended (a workspace written by an operator that never cleared it).
+func incarnationStartedAt(ws *workspacesv1alpha1.Workspace) *metav1.Time {
+	if ws.Status.StartedAt == nil || incarnationEnded(ws.Status.Phase) {
+		return nil
+	}
+	return ws.Status.StartedAt
 }
 
 // incarnationRecord is the persisted first-observation timestamp of one
@@ -502,6 +545,9 @@ func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv
 func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error) error {
 	gen := ws.Generation
 	st := &ws.Status
+	// The persisted phase is read before it is overwritten: a startedAt
+	// recorded under an ended phase must not carry into the next incarnation.
+	priorEnded := incarnationEnded(st.Phase)
 	st.ObservedGeneration = gen
 	st.LastAppliedIntentRevision = applied.Revision
 	st.Phase = phase
@@ -578,7 +624,12 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		setCond(workspacesv1alpha1.ConditionDegraded, metav1.ConditionFalse, ReasonNominal, "")
 	}
 
-	// timestamps
+	// timestamps. startedAt is the running incarnation's start: cleared when
+	// an incarnation ended (now, or at the previous write) and set again when
+	// the next one becomes Ready.
+	if priorEnded || incarnationEnded(phase) {
+		st.StartedAt = nil
+	}
 	if phase == workspacesv1alpha1.WorkspacePhaseReady && st.StartedAt == nil {
 		st.StartedAt = &now
 	}
