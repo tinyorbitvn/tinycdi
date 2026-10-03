@@ -78,10 +78,8 @@ type LinuxRuntimeSpec struct {
 
 // PlacementSpec controls where runtime pods are scheduled. Admin-only,
 // immutable with the spec. Per field the precedence is: template field →
-// legacy annotation (nodeSelector only — the
-// workspaces.cdi.tinyorbit.vn/node-selector annotation is deprecated and
-// ships for one release) → operator default. A field the template sets
-// REPLACES the default; lists/maps are never merged.
+// operator default. A field the template sets REPLACES the default;
+// lists/maps are never merged.
 type PlacementSpec struct {
 	// nodeSelector pins runtime pods to nodes carrying these labels.
 	// +optional

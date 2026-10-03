@@ -284,7 +284,7 @@ function startDefs(ws: WorkspaceView): StepDef[] {
   const defs: StepDef[] = [
     {
       id: "accepted",
-      label: pickedUp ? "progress.step.accepted" : "progress.step.queued",
+      label: pickedUp ? "progress.step.accepted" : "progress.step.scheduling",
       done: pickedUp,
     },
   ];

@@ -30,14 +30,7 @@ import {
 } from "./core.ts";
 import { AREAS } from "./areas.ts";
 
-export {
-  CSRF_COOKIE,
-  CSRF_HEADER,
-  CSRF_TOKEN_VALUE,
-  SESSION_COOKIE,
-  SESSION_ORIGIN_COOKIE,
-  SESSION_PRINCIPAL,
-} from "./core.ts";
+export { CSRF_HEADER, CSRF_TOKEN_VALUE, SESSION_COOKIE, SESSION_PRINCIPAL } from "./core.ts";
 export type { MockArea, MockAreaFactory, MockContext, MockOptions, MockRequest, MockResponse } from "./core.ts";
 
 export function createMockApi(opts: MockOptions & { areas?: readonly MockAreaFactory[] } = {}) {

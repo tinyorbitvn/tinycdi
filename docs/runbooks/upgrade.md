@@ -162,9 +162,7 @@ and `portal` Deployments/Services disappear in the same release.
   `*.<sessionDomain>` wildcard route next to the portal route.
 - A synthetic login → launch → connect round-trip: the session opens on
   a `<label>.<sessionDomain>` host presenting the wildcard certificate,
-  and the portal sets only `__Host-`-prefixed cookies (the backend
-  expires the removed v0.1 `tcdi_csrf`/`tcdi_session_origin` cookies on
-  first login).
+  and the portal sets only `__Host-`-prefixed cookies.
 - `tinycdi_lease_failures_total` back to baseline and
   `tinycdi_quota_drift == 0`, as after any upgrade.
 - `kubectl get pods -o wide` shows new workspace pods on the dedicated
@@ -453,6 +451,13 @@ applies embedded migrations in filename order, idempotently via
 backend before or together with** anything that writes new-shaped rows;
 never run an old backend against a newer schema it cannot read — treat
 "old binary + new schema" as unsupported, and "new binary + old schema" as the supported direction.
+
+v0.2 → v0.3 keeps `sessions.csrf_token` as a **nullable** dead column
+(migration 017 only drops its `NOT NULL`): a still-running v0.2 replica
+names it in every session `SELECT`/`INSERT`, so it survives the
+rolling-upgrade window. Once every backend is v0.3 the column carries
+only NULLs; **v0.4 drops `sessions.csrf_token`** — do not roll back to
+v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
 
 ## Rollback
 

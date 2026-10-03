@@ -87,6 +87,28 @@ pin — lag 4), so a Browser template pinned to it only has option B. See
 `docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
 gate" and `docs/kasm-images.md`.
 
+## Upgrading to 0.3.0
+
+Chart 0.3.0 removes the deprecated `templates[].nodeSelector` entry field
+(the v0.1 knob that rendered the `workspaces.cdi.tinyorbit.vn/node-selector`
+annotation — pod placement has been typed `spec.placement` since v0.2). A
+values file that still sets it **fails the render**, both via the values
+schema (`additionalProperties`) and an explicit check for
+`--skip-schema-validation` renders. Move the selector into the template
+spec before upgrading:
+
+```yaml
+templates:
+  - name: <tpl>
+    spec:
+      placement:               # was: nodeSelector: {workload: runtime}
+        nodeSelector:
+          workload: runtime
+```
+
+WorkspaceTemplate objects already in the cluster keep working — the
+annotation is simply ignored now; only chart-rendered values fail.
+
 ## Upgrading to 0.2.0
 
 Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
@@ -237,7 +259,7 @@ objects. It **keeps**:
 | `database.allowedPeers` | deny-all placeholder | backend→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
 | `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
 | `oidc.endSession` | `true` | sign-out also ends the identity provider session (RP-initiated logout) when its discovery document has `end_session_endpoint` — backend flag `--oidc-end-session`; `false` keeps sign-out local. See the install runbook, "Sign-out and the identity provider" |
-| `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
+| `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider — Keycloak: the client's *Valid post logout redirect URIs*) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
 | `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
@@ -455,8 +477,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (**deprecated** — prefer the typed `spec.placement` block, which also carries `tolerations` and `runtimeClassName`) |
-| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
+| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec — pod placement lives in `spec.placement` (`nodeSelector`, `tolerations`, `runtimeClassName`); the v0.1 `nodeSelector` entry field was removed in v0.3 and fails the render |
 
 ### Kasm workspace images
 

@@ -340,11 +340,10 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 		t.Fatalf("loginstate sealer: %v", err)
 	}
 	authn, err := api.NewAuthenticator(context.Background(), api.AuthConfig{
-		Issuer:        iss.URL(),
-		ClientID:      "tinycdi",
-		RedirectURL:   "https://portal.example.test/auth/callback",
-		SessionOrigin: "https://session.example.test",
-		LoginSealer:   sealer,
+		Issuer:      iss.URL(),
+		ClientID:    "tinycdi",
+		RedirectURL: "https://portal.example.test/auth/callback",
+		LoginSealer: sealer,
 	}, api.NewInMemorySessionStore(time.Minute), testLog())
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)

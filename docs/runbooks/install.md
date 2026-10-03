@@ -44,8 +44,8 @@ same resolution order `deploy/helm/chart_test.go` uses).
 - Optional cert-manager Certificates for the internal mTLS chain
   (`certManager.enabled`).
 - Optional seeded `WorkspaceTemplate` CRs (digest-pinned images; per
-  -template Localhost seccomp/AppArmor profile, nodeSelector and
-  StorageClass via structured fields or annotations).
+  -template Localhost seccomp/AppArmor profile and StorageClass via
+  structured fields or annotations; pod placement via `spec.placement`).
 - `tinycdi-runtime` ServiceAccount per managed namespace with
   `automountServiceAccountToken: false`.
 
@@ -366,8 +366,11 @@ back in. So, by default, sign-out continues at the provider
   answer is `204` and the user lands on the Signed out page; the provider
   session then survives, so **Sign in again** signs in without asking for
   credentials.
-- The URL carries `client_id` (the `oidc.clientID` value). The portal
-  session does not keep the ID token, so `id_token_hint` is not sent.
+- The URL carries `client_id` (the `oidc.clientID` value) and, when the
+  portal session retained the login ID token, `id_token_hint` — the hint is
+  what makes the provider end its session without asking the user to
+  confirm. A session without a retained token (pre-v0.3 row, rotated key)
+  sends `client_id` only.
 - `post_logout_redirect_uri` is sent only when `oidc.postLogoutRedirect` is
   set (default empty). The provider only redirects to URIs registered on
   the client, so register the value first, then set it, for example
@@ -384,15 +387,16 @@ oidc:
   postLogoutRedirect: ""      # default; e.g. https://portal.example.com/signed-out
 ```
 
-**Keycloak.** Discovery already has `end_session_endpoint`. With only
-`client_id` (no `id_token_hint`) Keycloak asks the user to confirm the
-logout before ending its session. To return to the portal afterwards, add
+**Keycloak.** Discovery already has `end_session_endpoint` and
+`id_token_hint` is normally sent, so Keycloak ends its session without a
+confirmation page. To return to the portal afterwards, add
 `https://<portalHost>/signed-out` under the client's *Valid post logout
 redirect URIs* and set `oidc.postLogoutRedirect` to the same value. Do not
 change the OIDC client ID for this.
 
-**Other providers** that insist on `id_token_hint` reject the request the
-portal sends: set `oidc.endSession: false` there.
+**Other providers** that reject an end-session request carrying only
+`client_id` (a session without a retained ID token): set
+`oidc.endSession: false` there.
 
 The discovery document is read when the backend starts, so after changing
 the provider's configuration restart the backend (`helm upgrade` or a

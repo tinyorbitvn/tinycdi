@@ -33,8 +33,8 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 )
 
-// Endpoints of the internal broker contract (separate internal listener of
-// cmd/api, never the public mux).
+// Endpoints of the internal broker contract (the backend's separate
+// internal listener, never the public mux).
 const (
 	redeemPath = "/internal/v1/broker/redeem"
 	leasesPath = "/internal/v1/broker/leases/" // + {id}/renew | {id}/target | {id}/revoke

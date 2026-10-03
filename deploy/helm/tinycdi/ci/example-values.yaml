@@ -153,7 +153,6 @@ templates:
     # be pre-loaded on the nodes — see deploy/node-profiles/README.md).
     seccompProfile: localhost/profiles/chromium-userns.json
     appArmorProfile: tinycdi-browser
-    nodeSelector: {workload: runtime}
     annotations:
       workspaces.cdi.tinyorbit.vn/display-name: "Browser"
     spec:
@@ -161,6 +160,8 @@ templates:
       runtime: LinuxContainer
       experience: Browser
       linux: {}
+      placement:
+        nodeSelector: {workload: runtime}
       resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
       bootDeadline: 5m
       networkProfile: Isolated
