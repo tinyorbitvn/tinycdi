@@ -189,6 +189,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// revision of their template family under imageUpdate=OnStart (E1).
 	svc := provisioning.NewService(db).
 		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants)).
+		WithImageBlockAfter(cfg.ImageBlockAfter).
 		WithLogger(log)
 	outbox := provisioning.NewOutbox(db)
 	retained := provisioning.NewRetainedStore(db)
@@ -583,12 +584,14 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	wsHandler := api.NewWorkspaceHandler(svc, catalog, tenants).
 		WithStatusView(statusView).
 		WithImageStaleAfter(cfg.ImageStaleAfter).
+		WithImageBlockAfter(cfg.ImageBlockAfter).
 		WithImageCatalog(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(cachedKC, tenants)}).
 		WithDirectory(directory).
 		WithIntentLog(api.NewIntentLog(svc)).
 		WithReleaseRetryAfter(b.recoveryTickETA)
 	tplHandler := api.NewTemplateHandler(catalog, tenants).
-		WithImageStaleAfter(cfg.ImageStaleAfter)
+		WithImageStaleAfter(cfg.ImageStaleAfter).
+		WithImageBlockAfter(cfg.ImageBlockAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain).
 		WithClipboardSource(func(ctx context.Context, p api.Principal, wsID string) (string, error) {
 			rec, err := svc.GetWorkspace(ctx, p.TenantID, p.Owner(), wsID)
@@ -861,5 +864,6 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		ImageUpdate:            e.ImageUpdate,
 		PublishedAt:            e.PublishedAt,
 		ImageBuiltAt:           e.ImageBuiltAt,
+		ImageEngines:           e.ImageEngines,
 	}
 }

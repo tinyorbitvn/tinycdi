@@ -86,6 +86,10 @@ type TemplateEntry struct {
 	// ImageBuiltAt is the raw image-built-at annotation value carried by
 	// the resolved WorkspaceTemplate (RFC 3339 when well formed).
 	ImageBuiltAt string
+	// ImageEngines carries the browser engine versions baked into the
+	// runtime image (e.g. {"chromium": "...", "firefox": "..."}); nil when
+	// the template declares none.
+	ImageEngines map[string]string
 }
 
 // ErrTemplateNotFound means templateRef does not resolve in the caller's
@@ -130,8 +134,12 @@ type WorkspaceHandler struct {
 	intentLog    IntentLog
 	maxBody      int64
 	staleAfter   time.Duration
-	now          func() time.Time
-	log          *slog.Logger
+	// blockAfter is the E3 stale-image admission limit
+	// (-image-block-after): creates resolving to a runtime image older
+	// than it are refused 409 IMAGE_STALE. <=0 disables the block.
+	blockAfter time.Duration
+	now        func() time.Time
+	log        *slog.Logger
 	// releaseRetryAfter estimates seconds until the next recovery pass for
 	// the Retry-After header of a release-pending QUOTA_EXHAUSTED. Nil
 	// reports the 30 s cadence ceiling.
@@ -175,6 +183,14 @@ func (h *WorkspaceHandler) WithImageStaleAfter(d time.Duration) *WorkspaceHandle
 	if d > 0 {
 		h.staleAfter = d
 	}
+	return h
+}
+
+// WithImageBlockAfter sets the E3 stale-image admission limit
+// (-image-block-after). d <= 0 disables the block entirely; a handler
+// built without it does not block.
+func (h *WorkspaceHandler) WithImageBlockAfter(d time.Duration) *WorkspaceHandler {
+	h.blockAfter = d
 	return h
 }
 
@@ -456,6 +472,12 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInvalidTemplate, "unknown template")
 		return
 	}
+	// E3: a create resolving to an image older than -image-block-after is
+	// refused; a missing or malformed image-built-at never blocks.
+	if err := provisioning.CheckImageBlock(tpl.ImageBuiltAt, h.blockAfter, h.now(), tpl.Name, false); err != nil {
+		writeImageStale(w, r, err)
+		return
+	}
 	dataPolicy := req.DataPolicy
 	if dataPolicy == "" {
 		dataPolicy = tpl.DataPolicyDefault
@@ -614,6 +636,8 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
 	case provisioning.IsQuotaExceeded(err):
 		writeQuotaExceeded(w, r, err, h.retryAfterSeconds())
+	case provisioning.IsImageStale(err):
+		writeImageStale(w, r, err)
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
 	case errors.Is(err, provisioning.ErrNameTaken):

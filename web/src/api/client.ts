@@ -1,6 +1,6 @@
 import createClient, { type Client, type Middleware } from "openapi-fetch";
 import type { paths } from "./generated/schema";
-import { PortalApiError } from "./errors";
+import { PortalApiError, type ErrorDetails } from "./errors";
 
 export type ApiClient = Client<paths>;
 
@@ -109,7 +109,7 @@ export function unwrap<T>(result: {
         requestId: typeof body.requestId === "string" ? body.requestId : undefined,
         details:
           typeof body.details === "object" && body.details !== null
-            ? (body.details as { reason?: "release_pending" | undefined })
+            ? (body.details as ErrorDetails)
             : undefined,
       },
       retryAfterMs(result.response),

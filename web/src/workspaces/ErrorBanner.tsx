@@ -16,6 +16,7 @@ const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
   IDEMPOTENCY_CONFLICT: "errors.code.idempotencyConflict",
   INVALID_STATE: "errors.code.invalidState",
   CONNECTION_IN_USE: "errors.code.connectionInUse",
+  IMAGE_STALE: "errors.code.imageStale",
   FORBIDDEN: "errors.code.forbidden",
   NOT_FOUND: "errors.code.notFound",
   CSRF_FAILED: "errors.code.csrfFailed",
@@ -30,7 +31,22 @@ function guidance(e: PortalApiError): string {
   // A teardown-pending quota refusal resolves on the next recovery pass —
   // distinct copy from a real exhaustion.
   if (isReleasePending(e)) return t("errors.code.quotaReleasePending");
+  if (e.code === "IMAGE_STALE") return imageStaleGuidance(e);
   return t(GUIDANCE_KEYS[e.code]);
+}
+
+// imageStaleGuidance renders an IMAGE_STALE refusal with the template name
+// and ages from error details; the pinned hint is appended for a workspace
+// that cannot move to a fresher revision.
+function imageStaleGuidance(e: PortalApiError): string {
+  const d = e.details;
+  if (d?.templateName === undefined) return t("errors.code.imageStale");
+  const base = t("errors.code.imageStaleNamed", {
+    template: d.templateName,
+    ageDays: d.ageDays ?? 0,
+    limitDays: d.limitDays ?? 0,
+  });
+  return d.pinned === true ? `${base} ${t("errors.code.imageStalePinned")}` : base;
 }
 
 export function ErrorBanner({

@@ -15,6 +15,9 @@ export default {
   "templates.catalog.stale.badge": "Stale image",
   "templates.catalog.stale.hint":
     "The runtime image was built {date} — older than the freshness window. The workspace still starts; ask an administrator about a refresh.",
+  "templates.catalog.blocked.badge": "Image blocked",
+  "templates.catalog.blocked.hint":
+    "The runtime image was built {date} — older than the freshness limit. Workspaces cannot be created from it; ask an administrator about a refresh.",
 
   "templates.runtime.linuxContainer": "Linux container",
   "templates.runtime.windowsVm": "Windows VM",
@@ -102,6 +105,9 @@ export default {
     "The runtime image was built {date} — older than the freshness window. The workspace still runs; ask an administrator about a refresh.",
   "workspaces.detail.stale.bodyUnknown":
     "The runtime image is older than the freshness window (build date unknown). The workspace still runs; ask an administrator about a refresh.",
+  "workspaces.detail.update.title": "Update available",
+  "workspaces.detail.update.body":
+    "Starts on the updated image — a newer revision of this template is published.",
   "workspaces.detail.events.title": "Events",
   "workspaces.detail.events.empty": "No events recorded yet.",
   "workspaces.detail.events.count": "×{n}",
@@ -130,6 +136,9 @@ export default {
   "workspaces.create.dataPolicyRetain": "Retain — keep disk on stop/delete",
   "workspaces.create.dataPolicyEphemeral":
     "Ephemeral — destroy data on stop/delete",
+  "workspaces.create.blocked.title": "Image too old",
+  "workspaces.create.blocked.body":
+    "This template's runtime image is older than the freshness limit — workspaces cannot be created from it. Ask an administrator about a refresh.",
   "workspaces.create.startNow": "Start immediately",
   "workspaces.create.network": "Network profile: {profile}",
   "workspaces.create.ephemeral.title": "Data is not kept",

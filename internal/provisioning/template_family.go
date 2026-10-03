@@ -46,6 +46,17 @@ const (
 // the start intent so the workspace events can name it; every other
 // keep-recorded outcome returns an empty reason.
 //
+// resolvedBuiltAt is the image-built-at value of the revision the start
+// would actually run on — the newest revision's when the start moves or
+// the workspace already sits on it, else the recorded revision's live
+// annotation (falling back to the create-time snapshot when the revision
+// object is unreadable). The E3 stale-image block judges that value.
+//
+// The bool return marks a workspace that can never move to a fresher
+// revision — imageUpdate Pinned or a move the compatibility guard refused
+// — so the stale-image refusal can say an administrator must publish a
+// fresh image.
+//
 // The imageUpdate policy is read from the workspace's recorded revision;
 // an unreadable revision (deleted by a chart upgrade, or a stale row)
 // falls back to the OnStart default so a workspace whose template object
@@ -56,46 +67,57 @@ const (
 // — the same outcome as a pinned template — because a template lookup is
 // advisory, not part of the lifecycle contract the intent was admitted
 // under.
-func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord, log *slog.Logger) (*TemplateInfo, string, string, error) {
+func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord, log *slog.Logger) (*TemplateInfo, string, string, string, bool, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	family := rec.Template.Name
 	if family == "" {
-		return nil, "", "", nil
+		return nil, "", "", rec.Template.ImageBuiltAt, false, nil
 	}
 	newest, err := cat.NewestInFamily(ctx, tenantID, family)
 	if err != nil {
-		if errors.Is(err, ErrTemplateNotFound) {
-			return nil, "", "", nil
+		if !errors.Is(err, ErrTemplateNotFound) {
+			log.Warn("template family lookup failed; starting on recorded revision",
+				"workspace", rec.ID, "family", family, "error", err)
 		}
-		log.Warn("template family lookup failed; starting on recorded revision",
-			"workspace", rec.ID, "family", family, "error", err)
-		return nil, "", "", nil
+		return nil, "", "", rec.Template.ImageBuiltAt, false, nil
 	}
-	if newest.ID == "" || newest.ID == rec.Template.ID {
-		return nil, "", "", nil // already on the newest published revision
+	if newest.ID == "" {
+		return nil, "", "", rec.Template.ImageBuiltAt, false, nil
+	}
+	if newest.ID == rec.Template.ID {
+		// Already on the newest published revision; the resolved revision
+		// is the live object, not the create-time snapshot.
+		return nil, "", "", newest.ImageBuiltAt, false, nil
 	}
 	cur, err := cat.Get(ctx, tenantID, rec.Template.ID)
 	if err != nil {
 		log.Warn("recorded template revision lookup failed; starting on recorded revision",
 			"workspace", rec.ID, "template", rec.Template.ID, "error", err)
-		return nil, "", "", nil
+		return nil, "", "", rec.Template.ImageBuiltAt, false, nil
 	}
 	if cur != nil {
 		if workspacev1alpha1.ImageUpdatePolicy(cur.ImageUpdate) == workspacev1alpha1.ImageUpdatePinned {
-			return nil, "", "", nil
+			// Pinned: the workspace can never move — the stale-image
+			// refusal must say an admin must publish a fresh image.
+			return nil, "", "", cur.ImageBuiltAt, true, nil
 		}
 		if reason := revisionIncompatible(cur, &newest); reason != "" {
 			log.Info("template update skipped by compatibility guard",
 				"workspace", rec.ID, "family", family,
 				"from", rec.Template.ID, "to", newest.ID, "reason", reason)
-			return nil, "", reason, nil
+			// Guard-refused: the workspace can never move either.
+			return nil, "", reason, cur.ImageBuiltAt, true, nil
 		}
 	}
 	name, ok := TemplateCRName(newest.ID)
 	if !ok {
-		return nil, "", "", nil
+		builtAt := rec.Template.ImageBuiltAt
+		if cur != nil {
+			builtAt = cur.ImageBuiltAt
+		}
+		return nil, "", "", builtAt, false, nil
 	}
 	return &TemplateInfo{
 		ID:            newest.ID,
@@ -105,7 +127,7 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		Runtime:       newest.Runtime,
 		Experience:    newest.Experience,
 		ImageBuiltAt:  newest.ImageBuiltAt,
-	}, name, "", nil
+	}, name, "", newest.ImageBuiltAt, false, nil
 }
 
 // revisionIncompatible is the E2 guard: a start may move a workspace only

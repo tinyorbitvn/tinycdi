@@ -22,6 +22,28 @@ export interface CatalogRow {
   running: number;
 }
 
+// engineLabel names a browser engine for the stale-image view; unknown
+// engines keep their annotation key.
+function engineLabel(name: string): string {
+  switch (name) {
+    case "chromium":
+      return t("admin.templates.engine.chromium");
+    case "firefox":
+      return t("admin.templates.engine.firefox");
+    default:
+      return name;
+  }
+}
+
+// formatEngines renders the image's engine versions — e.g.
+// "Chromium 154.0.8037.92 · Firefox ESR 153.4.0esr" — or "" when absent.
+function formatEngines(engines: Record<string, string> | undefined): string {
+  if (!engines) return "";
+  return Object.entries(engines)
+    .map(([name, version]) => `${engineLabel(name)} ${version}`)
+    .join(" · ");
+}
+
 // Joins the catalog with the tenant's workspaces so admins can see which
 // templates are actually used before retiring one. Workspaces pin a template
 // revision; the join is on the family, which survives a revision bump.
@@ -84,19 +106,29 @@ const columns: Column<CatalogRow>[] = [
     key: "image",
     header: t("admin.templates.column.image"),
     hideOnMobile: true,
-    render: ({ template: tpl }) =>
-      tpl.imageBuiltAt ? (
+    render: ({ template: tpl }) => {
+      const engines = formatEngines(tpl.imageEngines);
+      if (!tpl.imageBuiltAt && engines === "") {
+        return <span className="tc-admin-muted">{t("admin.templates.imageUnknown")}</span>;
+      }
+      return (
         <span className="tc-admin-cell-stack">
-          <time dateTime={tpl.imageBuiltAt}>{formatDateTime(tpl.imageBuiltAt)}</time>
-          {tpl.imageStale === true ? (
+          {tpl.imageBuiltAt ? (
+            <time dateTime={tpl.imageBuiltAt}>{formatDateTime(tpl.imageBuiltAt)}</time>
+          ) : null}
+          {engines !== "" ? <span className="tc-admin-muted">{engines}</span> : null}
+          {tpl.imageBlocked === true ? (
+            <span title={t("admin.templates.imageBlockedHint")}>
+              <Badge tone="danger">{t("admin.templates.imageBlocked")}</Badge>
+            </span>
+          ) : tpl.imageStale === true ? (
             <span title={t("admin.templates.imageStaleHint")}>
               <Badge tone="warning">{t("admin.templates.imageStale")}</Badge>
             </span>
           ) : null}
         </span>
-      ) : (
-        <span className="tc-admin-muted">{t("admin.templates.imageUnknown")}</span>
-      ),
+      );
+    },
   },
   {
     key: "policy",

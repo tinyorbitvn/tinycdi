@@ -248,6 +248,18 @@ chk "runtime-images: never builds control-plane images" "$TRAIN" 'linux-desktop'
 chk "runtime-images: builds the shared base" "$TRAIN" 'build/linux-base/\*\*'
 chk "runtime-images: base is in the scan matrix" "$TRAIN" 'image: \[linux-base, linux-desktop, browser\]'
 chk "runtime-images: manifest reads the desktop firefox pin" "$TRAIN" 'DESKTOP_DOCKERFILE: build/linux-desktop/Dockerfile'
+# V3.22 / backlog 15: the rt-* N numbers successful publishes — derived
+# by next-rt-tag.sh from the day's already-promoted registry tags, once
+# in meta (labels) and again in publish right before promotion so a
+# re-run of an old run cannot repoint a tag a newer train shipped.
+n="$(grep -c 'next-rt-tag\.sh' "$TRAIN")"
+[ "$n" -ge 2 ] \
+  || { echo "FAIL: runtime-images: next-rt-tag.sh wired $n time(s), want meta + publish"; fails=1; }
+chk_absent "runtime-images: rt N is not the run number" "$TRAIN" 'GITHUB_RUN_NUMBER'
+order "runtime-images: rt derive after attest" "$TRAIN" 'cosign attest image SBOMs' 'derive rt tag at publish time'
+order "runtime-images: rt derive before promote" "$TRAIN" 'derive rt tag at publish time' 'name: promote rt tag$'
+[ -x "$ROOT/.github/scripts/next-rt-tag.sh" ] \
+  || { echo "FAIL: next-rt-tag.sh missing/not executable"; fails=1; }
 # V3.26: the desktop and browser images must carry the SAME firefox-esr pin.
 ff_d="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$ROOT/build/linux-desktop/Dockerfile")"
 ff_b="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$ROOT/build/browser/Dockerfile")"
