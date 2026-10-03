@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  elsewhereTransitions,
   longestDisconnectedGapMs,
   parseDurationMs,
   percentile,
@@ -319,6 +320,32 @@ test("R10b: only a non-connected observation within 60 s after the reload counts
   );
 });
 
+test("backlog4: a reload with zero observations is never seamless", () => {
+  const t0 = Date.parse("2026-10-02T01:00:30Z");
+  const at = (ms: number, state: string) => obs(t0 + ms, state);
+  // No observations at all after the reload (e.g. the run stopped there).
+  assert.deepEqual(reloadRecovery([], t0), { reconnectMs: null, seamless: false });
+  assert.deepEqual(reloadRecovery([at(-5_000, "connected")], t0), {
+    reconnectMs: null,
+    seamless: false,
+  });
+  // The next observation lands beyond the 60 s window: still unproven.
+  assert.deepEqual(
+    reloadRecovery([at(61_000, "connected"), at(66_000, "connected")], t0),
+    { reconnectMs: null, seamless: false },
+  );
+  // One connected observation inside the window is enough for seamless.
+  assert.deepEqual(reloadRecovery([at(500, "connected"), at(61_000, "connected")], t0), {
+    reconnectMs: 0,
+    seamless: true,
+  });
+  const report = buildReport(RUN(t0), LAX, [
+    SESSION(t0, [obs(t0 + 1_000, "connected"), obs(t0 + 29_000, "connected")], t0 + 59_500),
+  ]) as { sessions: { reconnectMs: number | null; seamless: boolean }[] };
+  assert.equal(report.sessions[0].seamless, false);
+  assert.equal(report.sessions[0].reconnectMs, null);
+});
+
 test("R10b: a session that was not reloaded has no reconnect and is not seamless", () => {
   const t0 = Date.parse("2026-10-02T01:00:00Z");
   const report = buildReport(RUN(t0), LAX, [
@@ -360,6 +387,53 @@ test("R5d: the full soak duration passes the truncation check", () => {
 
 test("validateReport rejects malformed reports", () => {
   assert.throws(() => validateReport({ version: 1 }), /schema validation/);
+});
+
+test("V3.10: elsewhereTransitions counts only false->true flips", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const e = (ms: number, elsewhere: boolean) => ({ ...obs(t0 + ms, "connected"), elsewhere });
+  assert.equal(elsewhereTransitions([]), 0);
+  assert.equal(elsewhereTransitions([e(1, false), e(2, false)]), 0);
+  assert.equal(elsewhereTransitions([e(1, true), e(2, true), e(3, true)]), 1);
+  assert.equal(elsewhereTransitions([e(1, true), e(2, false), e(3, true)]), 2);
+  // Unsorted input is ordered by timestamp first.
+  assert.equal(elsewhereTransitions([e(3, true), e(1, false), e(2, false)]), 1);
+});
+
+test("V3.10: report rows carry elsewhere transitions, owner and the summary total", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const report = buildReport(
+    RUN(t0, { users: 3 }),
+    LAX,
+    [
+      {
+        ...SESSION(
+          t0,
+          [
+            { ...obs(t0 + 1_000, "connected"), elsewhere: true },
+            obs(t0 + 5_000, "connected"),
+            { ...obs(t0 + 9_000, "connected"), elsewhere: true },
+          ],
+          null,
+        ),
+        owner: "soak07",
+        inputMs: [40, 60, 80],
+      },
+    ],
+  ) as {
+    run: { users: number };
+    sessions: { owner: string; elsewhereTransitions: number }[];
+    summary: {
+      falseElsewhereTransitions: number;
+      inputDispatchMs: { p50: number | null; p95: number | null };
+    };
+  };
+  assert.equal(report.run.users, 3);
+  assert.equal(report.sessions[0].owner, "soak07");
+  assert.equal(report.sessions[0].elsewhereTransitions, 2);
+  assert.equal(report.summary.falseElsewhereTransitions, 2);
+  assert.equal(report.summary.inputDispatchMs.p50, 60);
+  validateReport(report);
 });
 
 // e2e: `soak.ts --dry-run` spawns the contract mock API

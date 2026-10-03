@@ -1,0 +1,16 @@
+{
+  "sessions": 100,
+  "template": "soak-small",
+  "duration": "60m",
+  "inputInterval": "10s",
+  "pollInterval": "5s",
+  "connectTimeout": "120s",
+  "readyTimeout": "15m",
+  "thresholds": {
+    "connectP95Ms": 30000,
+    "reconnectP95Ms": 15000,
+    "maxGapMs": 60000,
+    "maxManualActions": 0,
+    "maxDroppedSessions": 0
+  }
+}

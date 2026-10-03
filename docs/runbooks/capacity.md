@@ -266,3 +266,62 @@ browser pods share one profiled node), and (3) the single gateway replica's CPU 
 the TLS+WS path at higher stream counts. The 50-session probe is
 exploratory only — it finds the bottleneck, it is **not** a release gate
 in the plan and was not run.
+
+## Soak at scale on the dev cluster (E9)
+
+Sizing math for the `soak-small` profile (250 mCPU / 512 MiB / 1 GiB
+ephemeral, `requests = limits`, one `desktop` container per pod,
+`dataPolicy: Ephemeral` so no PVC per session). On the e2e install the
+workspace pods are pinned to `workload-type: infra` — the three infra
+workers — so capacity is their allocatable minus what is already
+requested, not the cluster total.
+
+Measured node state (2026-10-04, idle soak namespaces):
+
+| Node | CPU allocatable | CPU requested | CPU free | Mem free | Pod slots free |
+|---|---|---|---|---|---|
+| worker-01 | 16 | 7.58 (47 %) | 8.42 | ~43.5 GiB | 33 |
+| worker-02 | 16 | 0.91 (6 %) | 15.09 | ~61.2 GiB | 89 |
+| worker-03 | 16 | 8.85 (55 %) | 7.15 | ~40.4 GiB | 34 |
+| **total** | **48** | **17.34** | **~30.7** | **~145 GiB** | **156** |
+
+Per session the binding resource is **CPU requests**: floor(8.42/0.25) +
+floor(15.09/0.25) + floor(7.15/0.25) = 33 + 60 + 28 = **121 pods is the
+schedulable ceiling** on the three infra nodes as they stand. Memory
+(512 MiB each) and pod count are not the limiter at this scale; ephemeral
+storage is ~1 GiB per pod against ~91 GiB allocatable per node.
+
+The advisor's operating rule for shared infra is a **≥ 20 % CPU-request
+headroom per infra node** (keep live, ArgoCD and monitoring unstarved):
+soakable requests per node = free − 0.20 × 16. At the measured state that
+is floor(5.22/0.25) + floor(11.89/0.25) + floor(3.95/0.25) =
+20 + 47 + 15 = **~82 sessions** — recompute against the live
+`Allocated resources` at run time; it moves with whatever else lands on
+the infra pool.
+
+- **~82 sessions** fit inside the 20 % rule (the raw schedulable ceiling
+  is ~121 — do not push to it).
+- **200 sessions** do not fit: 50 CPU of requests needed against ~30.7
+  free, ~21 soakable inside the rule. **Capacity finding:** running 200
+  × 250 mCPU sessions needs ~50 CPU of spare requests on the workload
+  pool → more or larger `workload-type: infra` nodes (or a smaller
+  template request). The limiter is infra-node CPU *requests*, not
+  usage — the measured steady-state draw is ~36 mCPU / ~240 MiB per soak
+  pod (25-run average), so requests run out, not load.
+
+The other two gates to open before a scale run:
+
+- **Tenant quota** is the hard admission gate (Postgres `tenant_quota`,
+  enforced before any pod exists): the seeded e2e quota of 30 running
+  slots / 16 CPU / 32 GiB refuses the 31st soak workspace. An ~82-session
+  run needs ≥ 82 slots / ≥ 21 CPU / ≥ 41 GiB in the tenant row (stage
+  100 slots / 26 CPU / 52 GiB / 110 GiB for headroom, restore after).
+- **Harness host** drives one Chromium tab per session; 25 tabs were
+  unremarkable, 100+ wants a host with several free GiB and is worth a
+  `ps`-level watch during the ramp-up.
+
+Measured baselines: 25 × 60 min on the e2e install (2026-10-03): connect
+p50 5.5 s / p95 5.9 s, reload reconnect p95 5.0 s (poll-quantised), zero
+dropped/manual actions, infra node CPU max 51 % during the 25-pod
+start-up burst, ~20 % steady. The 100- and 200-session numbers land here
+with the v0.3.0-rc.2 soak.
