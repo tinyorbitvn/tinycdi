@@ -2,8 +2,8 @@
 # use <component>.pdb, operator keeps <component>.podDisruptionBudget.
 # The PDB renders when the block's `enabled` is true, or — when no
 # `enabled` key is present — when a sizing key (minAvailable /
-# maxUnavailable) is set; the shipped backend.pdb={minAvailable:1} is
-# therefore ON by default (D22) and frontend.pdb stays off.
+# maxUnavailable) is set; all three ship ON by default with
+# minAvailable:1 (D22 backend, E4 operator+frontend).
 {{- range $component := list "backend" "operator" "frontend" }}
 {{- $cfg := index $.Values $component }}
 {{- $pdb := default dict ($cfg.pdb | default $cfg.podDisruptionBudget) }}
