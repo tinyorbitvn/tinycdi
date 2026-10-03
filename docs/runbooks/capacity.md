@@ -188,6 +188,22 @@ latency in `workspace_provisioning_seconds` (cold node), then session-listener C
 saturation (scale `backend.replicas`; the default two replicas still enforce
 single-writer-per-workspace via broker fencing).
 
+## Postgres outage / failover timing — measured
+
+Dependency-outage behaviour measured in the v0.3 drill
+(`tests/integration/postgres_outage_test.go`; Postgres container
+stop/start, production `-revoke-deadline` 30 s, fast renew cadence):
+
+| Event | Measured | Budget |
+|---|---|---|
+| Short outage (10 s) — stream survival | WebSocket open + echoing during and after outage | survives while < revoke deadline |
+| Long outage (45 s) — stream close | **30.1 s** after outage start (30.4 s after last counted renew; `renew_deadline`) | fail-closed at 30 s; must land 30–40 s |
+| `GET /v1/workspaces` during outage | **503 `UNAVAILABLE` in ~1 ms** | ≤ 5 s, never a hang |
+| Reconnect after 45 s outage | lease expired → new ticket + relaunch | same cookie only while lease row is active |
+
+A database failover longer than the 30 s revoke deadline intentionally
+drops all streams — budget it into DB maintenance windows.
+
 ## The 20-session load gate — measured
 
 > Measured on the v0.1 topology (separate api, gateway and portal
