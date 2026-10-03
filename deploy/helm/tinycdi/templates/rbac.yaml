@@ -68,7 +68,8 @@ rules:
   resources: ["secrets"]
   verbs: ["get"]
 # retained-data flows: attach retargets (patch), the purge sweeper
-# deletes confirmed-Purging volumes, the inventory sync lists
+# deletes confirmed-Purging volumes and strips the pvc-protection
+# finalizer (merge patch — never update), the inventory sync lists
 # retained-labelled PVCs; the sweeper also lists pods to refuse
 # deleting a volume a consumer still binds
 - apiGroups: [""]
