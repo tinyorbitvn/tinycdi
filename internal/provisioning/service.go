@@ -378,13 +378,14 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 		if apply {
 			var genIncr int64
 			var sigSpec *IntentSpec
+			var skipReason string
 			if kind == IntentStart {
 				genIncr = 1
 				// E1: a start may re-point the workspace at the newest
 				// published revision of its template family; the move is
 				// decided and written in this same transaction.
 				if s.templates != nil {
-					next, objName, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
+					next, objName, skipped, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
 					if err != nil {
 						return err
 					}
@@ -394,6 +395,8 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 							TemplateName: objName,
 							ImageBuiltAt: next.ImageBuiltAt,
 						}
+					} else {
+						skipReason = skipped
 					}
 				}
 				// A stop releases the running-quota reservation once the
@@ -416,8 +419,17 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				wsID, tenantID, rec.DesiredState, genIncr, rec.Phase, tpl); err != nil {
 				return err
 			}
-			if _, err := appendIntent(ctx, tx, PlatformID(wsID), kind, sigSpec); err != nil {
+			rev, err := appendIntent(ctx, tx, PlatformID(wsID), kind, sigSpec)
+			if err != nil {
 				return err
+			}
+			if skipReason != "" {
+				// E2: the guard refused the family re-point — the cause
+				// stays with the start intent so the workspace events can
+				// name it (TemplateUpdateSkipped).
+				if err := SetIntentReason(ctx, tx, PlatformID(wsID), rev, skipReason); err != nil {
+					return err
+				}
 			}
 			if kind == IntentDelete {
 				if err := markDeleted(ctx, tx, PlatformID(wsID)); err != nil {
