@@ -44,8 +44,11 @@ async function embedRun(fixtures: {
   // The frame settled on the workspace's own session host and shows the
   // fake desktop the real gateway proxied out of the fake upstream.
   // The gateway redirects the launch POST to the desktop with resize=remote
-  // (KasmVNC forces resize=off inside an iframe otherwise, FX-R18).
-  expect(frame.url()).toBe(`${origin}/?resize=remote`);
+  // (KasmVNC forces resize=off inside an iframe otherwise, FX-R18) plus the
+  // static embedded-parity settings (V3.24).
+  expect(frame.url()).toBe(
+    `${origin}/?resize=remote&enable_webp=true&idle_disconnect=1440`,
+  );
   await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
 
   // FX-R22: the client's two load-time probes both succeed in the frame —

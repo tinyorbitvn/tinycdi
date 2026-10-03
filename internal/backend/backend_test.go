@@ -38,6 +38,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -323,6 +324,13 @@ func (fakeQuotaSource) Report(context.Context, string) (store.QuotaReport, error
 // middleware) with the real OIDC discovery path against the fake issuer.
 func testAppHandler(t *testing.T) http.Handler {
 	t.Helper()
+	return testAppHandlerWithMetrics(t, nil)
+}
+
+// testAppHandlerWithMetrics is testAppHandler with a metric set on the
+// Backend, so the E8 app-listener instrumentation is exercised.
+func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Handler {
+	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
 		t.Fatalf("oidctest issuer: %v", err)
@@ -354,7 +362,7 @@ func testAppHandler(t *testing.T) http.Handler {
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
 	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, func(h http.Handler) http.Handler { return h })
-	b := &Backend{log: testLog()}
+	b := &Backend{log: testLog(), metrics: m}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
 }
