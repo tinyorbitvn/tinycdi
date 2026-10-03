@@ -71,6 +71,12 @@ func (c laggyClient) Get(ctx context.Context, key client.ObjectKey, obj client.O
 // watches, bounded backoff) against the envtest apiserver, restricted to ns.
 func startOperator(t *testing.T, ns string) {
 	t.Helper()
+	startOperatorClock(t, ns, nil)
+}
+
+// startOperatorClock is startOperator with an injectable clock (nil = real).
+func startOperatorClock(t *testing.T, ns string, now func() time.Time) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
@@ -92,6 +98,7 @@ func startOperator(t *testing.T, ns string) {
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Backend: linux.New(mgr.GetClient(), linux.Options{}),
+		Now:     now,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatalf("setup reconciler: %v", err)

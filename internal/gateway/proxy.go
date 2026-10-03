@@ -725,7 +725,10 @@ func (sessionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 //   - style-src 'unsafe-inline': disconnected.html has an inline <style>
 //     block and the markup uses style= attributes.
 //   - img-src data:: the control bar embeds the Kasm logo as a data: URI.
-//   - connect-src wss://<host>: the /websockify desktop socket.
+//   - connect-src wss://<host>: the /websockify desktop socket. data: is
+//     there for the client's H.264 probe, which fetch()es a data: URI; such a
+//     fetch reaches no network, and refused it logs "Failed to detect
+//     codecs" on every load (FX-R22).
 //   - worker-src 'self': decoder and port-relay workers.
 //   - frame-src blob:: the print feature renders a PDF blob in a hidden
 //     iframe.
@@ -746,7 +749,7 @@ func sessionCSP(host string, embedders []string) string {
 		"; style-src 'self' 'unsafe-inline'" +
 		"; img-src 'self' data:" +
 		"; font-src 'self'" +
-		"; connect-src 'self' wss://" + host +
+		"; connect-src 'self' wss://" + host + " data:" +
 		"; worker-src 'self'" +
 		"; media-src 'self'" +
 		"; frame-src blob:" +
@@ -760,6 +763,9 @@ func sessionCSP(host string, embedders []string) string {
 // origin itself and to the embedding portal origins only (the portal's
 // iframe must also delegate them via its allow attribute); powerful
 // features the desktop client never uses are disabled outright.
+// keyboard-map is granted to the session origin alone: it exposes only the
+// keyboard layout, to our own session origin, and lets the client map
+// non-US layouts (FX-R22).
 func sessionPermissionsPolicy(embedders []string) string {
 	allow := "self"
 	for _, e := range embedders {
@@ -768,6 +774,7 @@ func sessionPermissionsPolicy(embedders []string) string {
 	return "clipboard-read=(" + allow + ")" +
 		", clipboard-write=(" + allow + ")" +
 		", fullscreen=(" + allow + ")" +
+		", keyboard-map=(self)" +
 		", camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 }
 

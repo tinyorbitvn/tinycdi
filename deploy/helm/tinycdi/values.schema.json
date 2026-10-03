@@ -76,6 +76,8 @@
         "existingSecret": {"type": "string", "minLength": 1},
         "clientSecretKey": {"type": "string", "minLength": 1},
         "requiredGroups": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}},
+        "endSession": {"type": "boolean"},
+        "postLogoutRedirect": {"type": "string", "pattern": "^(https://\\S+)?$"},
         "egressCIDRs": {"type": "array", "items": {"type": "string", "pattern": "^[^,\\s]+$"}},
         "port": {"type": "integer", "minimum": 1, "maximum": 65535}
       }
@@ -404,7 +406,14 @@
             "tolerations": {"type": "array"}
           }
         },
-        "hostUsers": {"type": ["boolean", "null"]}
+        "hostUsers": {"type": ["boolean", "null"]},
+        "appArmor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requireRuntimeDefault": {"type": "boolean"}
+          }
+        }
       }
     },
     "nodeProfiles": {

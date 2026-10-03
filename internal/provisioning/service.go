@@ -394,21 +394,34 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 }
 
 // reserveForStart re-acquires the running-quota reservation a stopped
-// workspace gave up. Release keeps the granted vector on the row, so
-// re-holding reserves exactly what the original admission granted. A
-// workspace with no reservation row at all cannot have passed admission —
+// workspace gave up. Two shapes exist:
+//   - released row (Ephemeral): Release keeps the granted vector on the row,
+//     so re-holding reserves exactly what the original admission granted;
+//   - disk-only hold (stopped Retain, see convertToDiskOnly): the row is still
+//     held for its disk and the admitted compute sits in restart_*; it is
+//     added back to the same row and the stored vector cleared, so a second
+//     stop copies it again.
+//
+// A workspace with no reservation row at all cannot have passed admission —
 // that is an internal inconsistency, not a grant of zero quota.
 func reserveForStart(ctx context.Context, tx store.Tx, tenantID, workspaceID string) error {
 	var v ResourceVector
+	var state string
+	var rs, rc, rm *int64
 	err := tx.QueryRow(ctx, `
-		SELECT running_slots, cpu_millis, memory_bytes, disk_bytes
+		SELECT running_slots, cpu_millis, memory_bytes, disk_bytes, state,
+		       restart_slots, restart_cpu_millis, restart_memory_bytes
 		FROM quota_reservation WHERE workspace_id = $1`, workspaceID).
-		Scan(&v.RunningSlots, &v.CPUMillis, &v.MemoryBytes, &v.DiskBytes)
+		Scan(&v.RunningSlots, &v.CPUMillis, &v.MemoryBytes, &v.DiskBytes, &state, &rs, &rc, &rm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("start: workspace %s has no reservation row to re-acquire", workspaceID)
 	}
 	if err != nil {
 		return fmt.Errorf("start: read reservation %w", err)
+	}
+	if state == "held" && rs != nil && rc != nil && rm != nil {
+		return reacquireCompute(ctx, tx, tenantID, workspaceID, ResourceVector{
+			RunningSlots: *rs, CPUMillis: *rc, MemoryBytes: *rm})
 	}
 	return Reserve(ctx, tx, tenantID, workspaceID, v)
 }

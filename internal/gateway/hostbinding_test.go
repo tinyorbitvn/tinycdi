@@ -446,34 +446,75 @@ func TestCSP_PerHostConnectSrc(t *testing.T) {
 	}
 }
 
-// TestCSP_KnownBlockedKasmVNCProbes pins two deliberate refusals found while
-// debugging the embedded desktop (FX-R18). The KasmVNC client logs both in
-// the browser console; neither affects rendering:
+// TestCSP_KasmVNCProbesAllowed pins the two KasmVNC client probes the session
+// policy deliberately allows (FX-R22, reversing FX-R18's refusal). Both
+// showed up in the browser console on every embedded load:
 //
-//   - connect-src has no data:. The client's AVC codec probe fetch()es a
-//     data: URI; blocked, it reports "Failed to detect codecs" and keeps
-//     JPEG/WebP. The runtime image has no H.264 encoder (no ffmpeg), so
-//     allowing data: would loosen SEC-07 for no gain.
-//   - Permissions-Policy does not grant keyboard-map. In the portal frame
-//     navigator.keyboard.getLayoutMap() is refused, which only skips
-//     keyboard-layout auto-detection. Granting it means adding it to the
-//     frame's allow attribute too (D13 pins that list), so it is a design
-//     decision, not a side effect.
+//   - connect-src has data:. The client's AVC codec probe fetch()es a data:
+//     URI to see whether H.264 decoding works; a data: fetch reaches no
+//     network, and blocked it reports "Failed to detect codecs".
+//   - Permissions-Policy grants keyboard-map to self only. It exposes the
+//     keyboard layout to our own session origin and lets the client map
+//     non-US layouts; the portal frame's allow attribute delegates it too.
 //
-// Changing either must be a conscious edit of this test.
-func TestCSP_KnownBlockedKasmVNCProbes(t *testing.T) {
-	fb := newFakeBroker(t)
-	fb.scriptTicket("tk-probe", testWSUID)
-	srv := newGateway(t, fb, nil)
-	cookie := launchOK(t, srv, testHost, "tk-probe")
+// Nothing else may loosen: the full header strings are pinned below, so any
+// other change to the CSP or the Permissions-Policy must be a conscious edit
+// of this test.
+func TestCSP_KasmVNCProbesAllowed(t *testing.T) {
+	const portal = "https://portal.example.dev"
+	for name, tc := range map[string]struct {
+		embedders []string
+		ancestors string
+		delegated string
+	}{
+		"no portal origin": {nil, "'none'", "self"},
+		"portal origin":    {[]string{portal}, portal, `self "` + portal + `"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			fb.scriptTicket("tk-probe", testWSUID)
+			srv := newGateway(t, fb, func(c *gateway.Config) { c.PortalOrigins = tc.embedders })
+			cookie := launchOK(t, srv, testHost, "tk-probe")
 
-	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
-	drain(resp)
-	if got, want := cspDirective(t, resp.Header.Get("Content-Security-Policy"), "connect-src"),
-		"connect-src 'self' wss://"+testHost; got != want {
-		t.Fatalf("connect-src = %q, want exactly %q (no data:)", got, want)
+			resp := proxied(t, srv, testHost, "/", cookie, map[string]string{"Origin": testOrigin})
+			drain(resp)
+			if got, want := cspDirective(t, resp.Header.Get("Content-Security-Policy"), "connect-src"),
+				"connect-src 'self' wss://"+testHost+" data:"; got != want {
+				t.Fatalf("connect-src = %q, want exactly %q", got, want)
+			}
+			if got, want := resp.Header.Get("Content-Security-Policy"), pinnedSessionCSP(testHost, tc.ancestors); got != want {
+				t.Fatalf("Content-Security-Policy changed:\n got: %s\nwant: %s", got, want)
+			}
+			if got, want := resp.Header.Get("Permissions-Policy"), pinnedSessionPermissionsPolicy(tc.delegated); got != want {
+				t.Fatalf("Permissions-Policy changed:\n got: %s\nwant: %s", got, want)
+			}
+		})
 	}
-	if pp := resp.Header.Get("Permissions-Policy"); strings.Contains(pp, "keyboard-map") {
-		t.Fatalf("Permissions-Policy %q grants keyboard-map; update the frame allow attribute (D13) and this test together", pp)
-	}
+}
+
+// pinnedSessionCSP and pinnedSessionPermissionsPolicy spell the complete
+// headers out literally — deliberately not built from the production helpers —
+// so a loosened directive cannot slip through a shared code path.
+func pinnedSessionCSP(host, ancestors string) string {
+	return "default-src 'self'" +
+		"; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'" +
+		"; style-src 'self' 'unsafe-inline'" +
+		"; img-src 'self' data:" +
+		"; font-src 'self'" +
+		"; connect-src 'self' wss://" + host + " data:" +
+		"; worker-src 'self'" +
+		"; media-src 'self'" +
+		"; frame-src blob:" +
+		"; frame-ancestors " + ancestors +
+		"; base-uri 'none'" +
+		"; object-src 'none'" +
+		"; form-action 'none'"
+}
+
+func pinnedSessionPermissionsPolicy(delegated string) string {
+	return "clipboard-read=(" + delegated + ")" +
+		", clipboard-write=(" + delegated + ")" +
+		", fullscreen=(" + delegated + ")" +
+		", keyboard-map=(self)" +
+		", camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 }

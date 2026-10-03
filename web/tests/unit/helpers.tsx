@@ -52,8 +52,10 @@ export function stubFetch(api = createMockApi()): typeof fetch {
       ...(body !== undefined ? { body } : {}),
     };
     const resp = api.handle(mreq);
+    // Null-body statuses (204/205/304) must not carry a body, even an empty one.
+    const nullBody = resp.status === 204 || resp.status === 205 || resp.status === 304;
     return new Response(
-      typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body ?? ""),
+      nullBody ? null : typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body ?? ""),
       { status: resp.status, headers: resp.headers as HeadersInit },
     );
   };

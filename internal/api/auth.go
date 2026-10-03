@@ -9,10 +9,12 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +110,18 @@ type AuthConfig struct {
 	// PostLoginRedirect is where the callback sends the browser after a
 	// session is established. Default "/".
 	PostLoginRedirect string
+
+	// EndSession turns on RP-initiated logout (chart oidc.endSession): when
+	// the provider's discovery document advertises end_session_endpoint,
+	// POST /v1/logout answers with the URL that ends the provider session
+	// too. Off, sign-out only ends the portal session.
+	EndSession bool
+	// PostLogoutRedirect is sent as post_logout_redirect_uri on the
+	// end-session URL (chart oidc.postLogoutRedirect). Empty omits it: the
+	// URI must be registered at the provider, so it is opt-in and the
+	// provider then shows its own logged-out page. Must be an absolute
+	// http(s) URL.
+	PostLogoutRedirect string
 }
 
 func (c *AuthConfig) withDefaults() {
@@ -311,6 +325,10 @@ type Authenticator struct {
 	oauth2    oauth2.Config
 	sessions  SessionStore
 	directory Directory
+	// endSessionEndpoint is the provider's discovered end_session_endpoint,
+	// kept only when EndSession is on and the value is a safe absolute URL.
+	// It is the only source of the sign-out navigation target.
+	endSessionEndpoint string
 
 	log *slog.Logger
 	now func() time.Time
@@ -338,9 +356,26 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 	if log == nil {
 		log = slog.Default()
 	}
+	if cfg.PostLogoutRedirect != "" && !isAbsoluteHTTPURL(cfg.PostLogoutRedirect) {
+		return nil, errors.New("api: AuthConfig PostLogoutRedirect must be an absolute http(s) URL")
+	}
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("api: OIDC discovery: %w", err)
+	}
+	var endSession string
+	if cfg.EndSession {
+		var disc struct {
+			EndSessionEndpoint string `json:"end_session_endpoint"`
+		}
+		if err := provider.Claims(&disc); err != nil {
+			return nil, fmt.Errorf("api: OIDC discovery claims: %w", err)
+		}
+		if isAbsoluteHTTPURL(disc.EndSessionEndpoint) {
+			endSession = disc.EndSessionEndpoint
+		} else if disc.EndSessionEndpoint != "" {
+			log.Warn("oidc end_session_endpoint ignored: not an absolute http(s) URL without credentials")
+		}
 	}
 	a := &Authenticator{
 		cfg:      &cfg,
@@ -352,9 +387,10 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 			Endpoint:     provider.Endpoint(),
 			Scopes:       cfg.Scopes,
 		},
-		sessions: sessions,
-		log:      log,
-		now:      time.Now,
+		sessions:           sessions,
+		endSessionEndpoint: endSession,
+		log:                log,
+		now:                time.Now,
 	}
 	return a, nil
 }
@@ -406,7 +442,7 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := a.oauth2.AuthCodeURL(state,
+	authURL := a.oauth2.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce),
 	)
@@ -422,7 +458,7 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// Any browser that still carries the v0.1 non-__Host- cookies drops them
 	// on its next login (D17).
 	a.expireLegacyCookies(w)
-	http.Redirect(w, r, url, http.StatusFound)
+	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 // CallbackHandler completes the flow. It opens the sealed login cookie
@@ -566,8 +602,25 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
 }
 
+// LogoutResult is the body of POST /v1/logout when the provider session can
+// be ended too (openapi LogoutResult).
+type LogoutResult struct {
+	// EndSessionURL is the provider's end-session endpoint with client_id
+	// (and post_logout_redirect_uri when configured). The portal navigates
+	// the browser there.
+	EndSessionURL string `json:"endSessionUrl"`
+}
+
 // LogoutHandler destroys the server-side session and expires all login- and
 // session-scoped cookies. Route it behind RequireAuth + RequireCSRF.
+//
+// RP-initiated logout: when EndSession is on and the provider advertises
+// end_session_endpoint, it answers 200 {"endSessionUrl"} so the portal can
+// continue there and end the provider session — otherwise the next visit
+// signs the user straight back in. Otherwise 204. The URL is built only from
+// discovery and configuration; nothing in the request reaches it (no open
+// redirect). The session keeps no ID token, so the hint is client_id rather
+// than id_token_hint.
 func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" {
@@ -575,7 +628,44 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
 	a.expireLegacyCookies(w)
-	w.WriteHeader(http.StatusNoContent)
+	endSession := a.endSessionURL()
+	if endSession == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(LogoutResult{EndSessionURL: endSession})
+}
+
+// endSessionURL assembles the RP-initiated logout URL, or "" when sign-out
+// should stay local.
+func (a *Authenticator) endSessionURL() string {
+	if a.endSessionEndpoint == "" {
+		return ""
+	}
+	u, err := url.Parse(a.endSessionEndpoint)
+	if err != nil {
+		return ""
+	}
+	q := u.Query()
+	q.Set("client_id", a.cfg.ClientID)
+	if a.cfg.PostLogoutRedirect != "" {
+		q.Set("post_logout_redirect_uri", a.cfg.PostLogoutRedirect)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// isAbsoluteHTTPURL reports whether s is an absolute http(s) URL with a host
+// and no embedded credentials.
+func isAbsoluteHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.Scheme == "https" || u.Scheme == "http"
 }
 
 // sessionCookie builds the host-only session cookie: no Domain attribute

@@ -466,13 +466,17 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	// The absolute generation cap (design §8) fires regardless of activity:
 	// once the running generation's age passes the template's MaxDuration the
 	// workspace stops as if an expiry intent had arrived — driven through the
-	// same applied-intent path RequestStop uses.
-	if maxDur := snap.Spec.Lifecycle.MaxDuration.Duration; maxDur > 0 &&
-		ws.Status.StartedAt != nil && !r.now().Before(ws.Status.StartedAt.Add(maxDur)) {
-		logf.FromContext(ctx).Info("max duration reached; applying stop",
-			"runtimeGeneration", applied.RuntimeGeneration,
-			"maxDuration", maxDur)
-		return r.expireRunning(ctx, ws, applied)
+	// same applied-intent path RequestStop uses. The age is measured from
+	// the running incarnation's start: a startedAt left by an ended
+	// incarnation is not a start of this one (FX-R24).
+	if started := incarnationStartedAt(ws); started != nil {
+		maxDur := snap.Spec.Lifecycle.MaxDuration.Duration
+		if maxDur > 0 && !r.now().Before(started.Add(maxDur)) {
+			logf.FromContext(ctx).Info("max duration reached; applying stop",
+				"runtimeGeneration", applied.RuntimeGeneration,
+				"maxDuration", maxDur)
+			return r.expireRunning(ctx, ws, applied)
+		}
 	}
 
 	res := ctrl.Result{}
@@ -481,6 +485,28 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		res.RequeueAfter = requeueNotReady
 	}
 	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr)
+}
+
+// incarnationEnded reports whether phase says the runtime incarnation that
+// status.startedAt described is over.
+func incarnationEnded(phase workspacesv1alpha1.WorkspacePhase) bool {
+	switch phase {
+	case workspacesv1alpha1.WorkspacePhaseStopped,
+		workspacesv1alpha1.WorkspacePhaseStopping,
+		workspacesv1alpha1.WorkspacePhaseFailed:
+		return true
+	}
+	return false
+}
+
+// incarnationStartedAt returns when the running incarnation became Ready,
+// or nil when status.startedAt is unset or was left by an incarnation that
+// has since ended (a workspace written by an operator that never cleared it).
+func incarnationStartedAt(ws *workspacesv1alpha1.Workspace) *metav1.Time {
+	if ws.Status.StartedAt == nil || incarnationEnded(ws.Status.Phase) {
+		return nil
+	}
+	return ws.Status.StartedAt
 }
 
 // incarnationRecord is the persisted first-observation timestamp of one
@@ -585,6 +611,9 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 	frozen := phase == workspacesv1alpha1.WorkspacePhaseFailed &&
 		st.Phase == workspacesv1alpha1.WorkspacePhaseFailed &&
 		st.LastAppliedIntentRevision == applied.Revision
+	// The persisted phase is read before it is overwritten: a startedAt
+	// recorded under an ended phase must not carry into the next incarnation.
+	priorEnded := incarnationEnded(st.Phase)
 	st.ObservedGeneration = gen
 	st.LastAppliedIntentRevision = applied.Revision
 	st.Phase = phase
@@ -667,7 +696,12 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		setCond(workspacesv1alpha1.ConditionDegraded, metav1.ConditionFalse, ReasonNominal, "")
 	}
 
-	// timestamps
+	// timestamps. startedAt is the running incarnation's start: cleared when
+	// an incarnation ended (now, or at the previous write) and set again when
+	// the next one becomes Ready.
+	if priorEnded || incarnationEnded(phase) {
+		st.StartedAt = nil
+	}
 	if phase == workspacesv1alpha1.WorkspacePhaseReady && st.StartedAt == nil {
 		st.StartedAt = &now
 	}

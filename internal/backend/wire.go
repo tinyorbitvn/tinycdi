@@ -469,6 +469,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		SessionOrigin:  cfg.sessionOrigin(),
 		RequiredGroups: cfg.RequiredGroups,
 		LoginSealer:    sealer,
+
+		EndSession:         cfg.OIDCEndSession,
+		PostLogoutRedirect: cfg.OIDCPostLogoutURL,
 	}, sessionStoreAdapter{s: store.NewSessionStore(db, cfg.SessionIdle)}, b.log)
 	if err != nil {
 		return fmt.Errorf("oidc: %w", err)

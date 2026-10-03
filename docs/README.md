@@ -11,6 +11,8 @@
   versions and digests
 - [development.md](development.md) — repo layout, build & test commands,
   local image builds, screenshot regeneration
+- [quickstart.md](quickstart.md) — TinyCDI on a throwaway kind cluster in
+  one command (dev only)
 
 ## Runbooks
 

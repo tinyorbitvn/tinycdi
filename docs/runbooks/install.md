@@ -56,6 +56,27 @@ secret values — every Secret is a pre-existing object referenced by name
 
 ## Prerequisites check
 
+Run the preflight script first. It checks the Kubernetes version,
+NetworkPolicy enforcement (with a throwaway probe namespace it always
+deletes), a StorageClass, user-namespace support, the workspace node pool,
+wildcard DNS, the session TLS Secret, OIDC discovery and Postgres with TLS
+verification, and prints `PASS`/`WARN`/`FAIL` with a one-line fix for each
+(exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
+not permitted to run is a `WARN`. Flags and the check table are in
+`hack/preflight/README.md`.
+
+```bash
+hack/preflight/preflight.sh \
+  --session-domain session.example.com \
+  --tls-secret tinycdi-system/tinycdi-backend-session-tls \
+  --oidc-issuer https://idp.example.com/realms/tinycdi \
+  --postgres-dsn-secret tinycdi-system/tinycdi-backend-db:url \
+  --host-users-false          # only if runtime.hostUsers=false is wanted
+# on a throwaway cluster add:  --allow-shared-nodes
+```
+
+Checks preflight does not cover (tools and cluster-wide rights):
+
 ```bash
 HELM=helm
 K=kubectl
@@ -119,6 +140,23 @@ Also gather:
    steps live under `deploy/node-profiles/`
    (`seccomp/chromium-userns.json`, `apparmor/tinycdi-browser` — see
    `deploy/node-profiles/README.md`).
+
+   **Nodes without AppArmor.** Runtime pods carry an explicit
+   `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
+   AppArmor (kind; RHEL-family and other SELinux-based distributions)
+   refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
+   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   false` (operator flag `--runtime-apparmor-require-default=false`; the
+   install NOTES print a reminder). This is a supported setting. It omits
+   only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,
+   non-root, no privilege escalation and `hostUsers` are unchanged. What
+   you give up is the fail-closed guarantee: on an AppArmor host the
+   runtime's default profile still applies to non-privileged containers,
+   whereas on a host without AppArmor there is no AppArmor confinement and
+   isolation rests on seccomp, the user namespace and SELinux. Templates
+   that select a Localhost AppArmor profile (the browser templates) always
+   keep it and therefore cannot run on such nodes.
+
 8. **TLS material** for the portal and session edges plus the internal
    mTLS chain — either pre-created Secrets (table below) or
    `certManager.enabled` for the internal chain. The session edge cert
@@ -262,6 +300,60 @@ Check the result — only the leader replica logs the pass:
 ```bash
 $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
+
+## Sign-out and the identity provider
+
+The account menu (top right, on the user's name) has **Sign out**. It ends
+the portal session (`POST /v1/logout`, CSRF-protected, session cookie
+expired) and leaves for a public **Signed out** page that offers
+**Sign in again** and never starts a login by itself.
+
+Ending only the portal session is not enough: the identity provider keeps
+its own browser session, and the next visit would log the user straight
+back in. So, by default, sign-out continues at the provider
+(RP-initiated logout):
+
+- The backend reads `end_session_endpoint` from the provider's discovery
+  document at startup. When it is there and `oidc.endSession` is `true`
+  (default), `POST /v1/logout` answers `200 {"endSessionUrl": ...}` and the
+  portal navigates the browser to that URL, which ends the provider
+  session. Without the endpoint, or with `oidc.endSession: false`, the
+  answer is `204` and the user lands on the Signed out page; the provider
+  session then survives, so **Sign in again** signs in without asking for
+  credentials.
+- The URL carries `client_id` (the `oidc.clientID` value). The portal
+  session does not keep the ID token, so `id_token_hint` is not sent.
+- `post_logout_redirect_uri` is sent only when `oidc.postLogoutRedirect` is
+  set (default empty). The provider only redirects to URIs registered on
+  the client, so register the value first, then set it, for example
+  `https://<portalHost>/signed-out`. Left empty, the provider shows its own
+  logged-out page, which is fine.
+- The target comes only from the discovery document and the chart values.
+  Nothing in the sign-out request (query, body, headers, `Host`) can change
+  it, so it is not an open redirect. A discovered endpoint that is not an
+  absolute `http(s)` URL is ignored and sign-out stays local.
+
+```yaml
+oidc:
+  endSession: true            # default; false = sign-out stays local to the portal
+  postLogoutRedirect: ""      # default; e.g. https://portal.example.com/signed-out
+```
+
+**Keycloak.** Discovery already has `end_session_endpoint`. With only
+`client_id` (no `id_token_hint`) Keycloak asks the user to confirm the
+logout before ending its session. To return to the portal afterwards, add
+`https://<portalHost>/signed-out` under the client's *Valid post logout
+redirect URIs* and set `oidc.postLogoutRedirect` to the same value. Do not
+change the OIDC client ID for this.
+
+**Other providers** that insist on `id_token_hint` reject the request the
+portal sends: set `oidc.endSession: false` there.
+
+The discovery document is read when the backend starts, so after changing
+the provider's configuration restart the backend (`helm upgrade` or a
+rollout restart). Verify with a browser: sign in, choose **Sign out**, then
+open the portal again. You must be asked to sign in (or land on the Signed
+out page), not be signed in silently.
 
 ## Upgrade
 
