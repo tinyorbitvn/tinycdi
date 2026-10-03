@@ -310,15 +310,17 @@ func (s *session) setStreamEpoch(epoch uint64) {
 // fenceStreamsFor applies the cross-replica stream fence on each successful
 // renew: a stream epoch newer than the one this process claimed means
 // another replica admitted the stream, so our conns close — the session
-// itself stays alive and keeps renewing.
-func (s *session) fenceStreamsFor(epoch uint64) {
+// itself stays alive and keeps renewing. It reports whether the fence
+// actually fired, for tinycdi_gateway_streams_fenced_total (E8).
+func (s *session) fenceStreamsFor(epoch uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if epoch <= s.streamEpoch {
-		return
+		return false
 	}
 	s.streamEpoch = epoch
 	s.dropStreamsLocked()
+	return true
 }
 
 // setStreamTrack records which tracked request owns the stream slot.
@@ -496,7 +498,9 @@ func (g *Gateway) renewLoop(s *session) {
 		cancel()
 		if err == nil {
 			s.noteRenewed(l, g.now())
-			s.fenceStreamsFor(l.StreamEpoch)
+			if s.fenceStreamsFor(l.StreamEpoch) && g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncStreamsFenced()
+			}
 			continue
 		}
 		if g.cfg.Metrics != nil {
@@ -520,7 +524,8 @@ func (g *Gateway) killSession(s *session, reason string) {
 	s.kill()
 	leaseID, wsUID := s.leaseID(), s.workspaceUID()
 	g.mu.Lock()
-	if g.sessions[s.id] == s {
+	removed := g.sessions[s.id] == s
+	if removed {
 		delete(g.sessions, s.id)
 	}
 	if g.byLease[leaseID] == s {
@@ -530,6 +535,9 @@ func (g *Gateway) killSession(s *session, reason string) {
 		delete(g.byWorkspace, wsUID)
 	}
 	g.mu.Unlock()
+	if removed && g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddSessionsActive(-1)
+	}
 	if g.cfg.Logger != nil {
 		g.cfg.Logger.Info("session closed", "reason", reason, "request_id", "")
 	}
