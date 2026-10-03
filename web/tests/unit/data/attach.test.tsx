@@ -103,4 +103,86 @@ describe("data attach", () => {
       screen.queryByRole("button", { name: /^purge$/i }),
     ).not.toBeInTheDocument();
   });
+
+  // QS-FLAKE: a quota refusal held only by a workspace still shutting down
+  // (details.reason=release_pending) shows the transient copy, not the
+  // exhaustion guidance — the retry succeeds without further user action.
+  it("shows the release-pending copy on a teardown-held quota refusal", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const origHandle = api.handle;
+    const calls: string[] = [];
+    let refused = true;
+    api.handle = (req) => {
+      if (req.method === "POST" && req.path.endsWith("/attach")) {
+        calls.push(req.headers["idempotency-key"] ?? "");
+        if (refused) {
+          refused = false;
+          return {
+            status: 409,
+            headers: { "content-type": "application/json", "retry-after": "30" },
+            body: {
+              code: "QUOTA_EXHAUSTED",
+              message: "quota exhausted",
+              retryable: true,
+              requestId: "req_rp",
+              details: { reason: "release_pending" },
+            },
+          };
+        }
+      }
+      return origHandle(req);
+    };
+    renderWithApi(<DataListPage />, api);
+
+    await screen.findByRole("table", { name: /retained/i });
+    fireEvent.click(within(retainedRow()).getByRole("button", { name: /^attach$/i }));
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /attach disk/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).toHaveTextContent(
+      "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
+    );
+
+    // Same dialog session, same attempt: the retried submit reuses the key
+    // and succeeds once the release landed.
+    fireEvent.click(within(dialog).getByRole("button", { name: /attach disk/i }));
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/workspaces\/ws_/));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toBeTruthy();
+    expect(calls[1]).toBe(calls[0]);
+  });
+
+  it("shows the exhaustion guidance on a real quota refusal", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const origHandle = api.handle;
+    api.handle = (req) => {
+      if (req.method === "POST" && req.path.endsWith("/attach")) {
+        return {
+          status: 409,
+          headers: { "content-type": "application/json" },
+          body: {
+            code: "QUOTA_EXHAUSTED",
+            message: "quota exhausted",
+            retryable: false,
+            requestId: "req_qe",
+          },
+        };
+      }
+      return origHandle(req);
+    };
+    renderWithApi(<DataListPage />, api);
+
+    await screen.findByRole("table", { name: /retained/i });
+    fireEvent.click(within(retainedRow()).getByRole("button", { name: /^attach$/i }));
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /attach disk/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).not.toHaveTextContent("still shutting down");
+  });
 });

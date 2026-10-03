@@ -6,7 +6,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
 // ErrorCode is a stable, machine-readable code for public API failures.
@@ -92,11 +96,27 @@ func (c ErrorCode) Retryable() bool {
 
 // Error is the uniform body serialized for every 4xx/5xx response.
 type Error struct {
-	Code      ErrorCode `json:"code"`
-	Message   string    `json:"message"`
-	Retryable bool      `json:"retryable"`
-	RequestID string    `json:"requestId"`
+	Code      ErrorCode     `json:"code"`
+	Message   string        `json:"message"`
+	Retryable bool          `json:"retryable"`
+	RequestID string        `json:"requestId"`
+	Details   *ErrorDetails `json:"details,omitempty"`
 }
+
+// ErrorDetails carries machine-readable context a client may switch on
+// alongside the stable code. Optional; absent on most errors.
+type ErrorDetails struct {
+	// ReasonReleasePending marks a QUOTA_EXHAUSTED refusal whose shortfall
+	// is covered by reservations a deleted or stopped workspace still
+	// holds pending the runtime-absence proof — it clears on the next
+	// recovery pass, so the request may be retried (retryable is true and
+	// Retry-After is set).
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReasonReleasePending is the details.reason value of a transient,
+// teardown-pending QUOTA_EXHAUSTED (see ErrorDetails).
+const ReasonReleasePending = "release_pending"
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 
@@ -119,4 +139,32 @@ func WriteError(w http.ResponseWriter, requestID string, e *Error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Code.HTTPStatus())
 	_ = json.NewEncoder(w).Encode(e)
+}
+
+// writeQuotaExceeded maps a quota refusal onto QUOTA_EXHAUSTED. A
+// release-pending refusal (QuotaExceededError.ReleasePending — the shortfall
+// is held by deleted/stopped workspaces whose release is already pending
+// with Recovery) keeps the same code for compatibility but additionally
+// carries retryable=true, details.reason=release_pending and a Retry-After
+// header (retryAfter seconds, clamped to [1, 30]: the recovery cadence is
+// 30 s, so a release can never be further out than that). A genuine
+// over-limit stays the plain non-retryable 409.
+func writeQuotaExceeded(w http.ResponseWriter, r *http.Request, err error, retryAfter int) {
+	var q *provisioning.QuotaExceededError
+	if errors.As(err, &q) && q.ReleasePending {
+		e := NewError(CodeQuotaExhausted, "quota exhausted")
+		e.Retryable = true
+		e.Details = &ErrorDetails{Reason: ReasonReleasePending}
+		secs := retryAfter
+		switch {
+		case secs < 1:
+			secs = 1
+		case secs > 30:
+			secs = 30
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		WriteError(w, RequestIDFromContext(r.Context()), e)
+		return
+	}
+	writeError(w, r, CodeQuotaExhausted, "quota exhausted")
 }

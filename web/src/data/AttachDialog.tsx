@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Dialog, Input, Select, Stack } from "../design";
 import { useApi } from "../api/context";
 import { newIdempotencyKey } from "../api/client";
-import { isPortalApiError } from "../api/errors";
+import { isPortalApiError, isReleasePending } from "../api/errors";
 import { t } from "../i18n";
 import {
   attachRetainedData,
@@ -131,11 +131,13 @@ export function AttachDialog({
         ) : null}
         {error ? (
           <Alert tone="danger" title={isPortalApiError(error) ? error.code : undefined}>
-            {isPortalApiError(error) && error.code === "INVALID_STATE"
-              ? t("data.attach.conflict")
-              : error instanceof Error
-                ? error.message
-                : String(error)}
+            {isReleasePending(error)
+              ? t("errors.code.quotaReleasePending")
+              : isPortalApiError(error) && error.code === "INVALID_STATE"
+                ? t("data.attach.conflict")
+                : error instanceof Error
+                  ? error.message
+                  : String(error)}
           </Alert>
         ) : null}
       </Stack>

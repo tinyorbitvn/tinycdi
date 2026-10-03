@@ -250,6 +250,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			if cfg.RecoveryInterval <= 0 {
 				return
 			}
+			// Publish the next pass so the API can put a real Retry-After
+			// on release-pending QUOTA_EXHAUSTED responses.
+			b.nextRecoveryTick.Store(time.Now().Add(cfg.RecoveryInterval).Unix())
 			select {
 			case <-ctx.Done():
 				return
@@ -495,14 +498,16 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithImageStaleAfter(cfg.ImageStaleAfter).
 		WithImageCatalog(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(cachedKC, tenants)}).
 		WithDirectory(directory).
-		WithIntentLog(api.NewIntentLog(svc))
+		WithIntentLog(api.NewIntentLog(svc)).
+		WithReleaseRetryAfter(b.recoveryTickETA)
 	tplHandler := api.NewTemplateHandler(catalog, tenants).
 		WithImageStaleAfter(cfg.ImageStaleAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain)
 	meHandler := api.NewMeHandler(sessionDomain.String())
 	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
 	dataHandler := api.NewDataHandler(retained, catalog, tenants).
-		WithDirectory(directory)
+		WithDirectory(directory).
+		WithReleaseRetryAfter(b.recoveryTickETA)
 	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
