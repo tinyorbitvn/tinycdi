@@ -13,6 +13,7 @@ export default {
 
   "session.status.loading": "Loading",
   "session.status.notReady": "Not ready",
+  "session.status.starting": "Starting",
   "session.status.requesting": "Connecting",
   "session.status.inUse": "In use elsewhere",
   "session.status.connecting": "Connecting",
@@ -59,8 +60,7 @@ export default {
   "session.disconnected.reconnect": "Reconnect",
 
   "session.ended.title": "Session ended",
-  "session.ended.stopped":
-    "The workspace was stopped. Start it again from the dashboard to reconnect.",
+  "session.ended.stopped": "The workspace was stopped. Start it to reconnect.",
   "session.ended.failed": "The workspace failed. Open its details to see what happened.",
   "session.ended.deleted": "The workspace was deleted.",
   "session.ended.unknown": "The workspace is no longer running.",
@@ -111,7 +111,7 @@ export default {
   "session.lifecycle.warn":
     "Ends in {minutes} min — save your work.",
 
-  "session.blocker.stopped": "The workspace is stopped. Start it from the dashboard first.",
+  "session.blocker.stopped": "The workspace is stopped.",
   "session.blocker.phase": "The workspace is {phase}. Try again once it is ready.",
   "session.blocker.connection": "The desktop's streaming endpoint is not ready yet.",
 } as const;

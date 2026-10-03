@@ -1,0 +1,198 @@
+/*
+ * Lifecycle progress (V3.27 PR-B). One component, three placements:
+ * compact (list row), full (detail page), overlay (session stage).
+ * Tokens come from styles/tokens.css; marks are shape + text so state is
+ * never carried by colour alone.
+ */
+
+.tc-progress {
+  font-size: var(--tc-text-sm);
+  color: var(--tc-color-text);
+}
+
+/* --- compact: one line inside a table cell ---------------------------------- */
+
+.tc-progress--compact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--tc-space-1);
+  color: var(--tc-color-text-muted);
+}
+
+.tc-progress--compact .tc-progress__compactline {
+  color: var(--tc-color-text);
+}
+
+.tc-progress--compact .tc-progress__elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--tc-color-text-muted);
+}
+
+/* --- full / overlay: bordered panel with the step list ----------------------- */
+
+.tc-progress--full,
+.tc-progress--overlay {
+  display: grid;
+  gap: var(--tc-space-3);
+  padding: var(--tc-space-4);
+  background: var(--tc-color-surface);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-lg);
+}
+
+.tc-progress--overlay {
+  width: min(26rem, 90vw);
+  margin-inline: auto;
+  box-shadow: var(--tc-shadow-sm);
+}
+
+.tc-progress__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--tc-space-3);
+}
+
+.tc-progress__title {
+  font-size: var(--tc-text-md);
+  font-weight: var(--tc-weight-semibold);
+  line-height: var(--tc-leading-tight);
+}
+
+.tc-progress__elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--tc-color-text-muted);
+  white-space: nowrap;
+}
+
+.tc-progress__steps {
+  display: grid;
+  gap: var(--tc-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tc-progress__step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--tc-space-2);
+}
+
+.tc-progress__mark {
+  flex: none;
+  width: 1.25em;
+  text-align: center;
+  font-weight: var(--tc-weight-semibold);
+}
+
+.tc-progress__mark[data-state="done"] {
+  color: var(--tc-color-success);
+}
+
+.tc-progress__mark[data-state="active"] {
+  color: var(--tc-color-info);
+  animation: tc-progress-pulse var(--tc-duration-normal) var(--tc-ease) infinite alternate;
+}
+
+.tc-progress__mark[data-state="waiting"],
+.tc-progress__mark[data-state="skipped"] {
+  color: var(--tc-color-text-muted);
+}
+
+.tc-progress__mark[data-state="failed"] {
+  color: var(--tc-color-danger);
+}
+
+@keyframes tc-progress-pulse {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-progress__mark[data-state="active"] {
+    animation: none;
+  }
+}
+
+.tc-progress__step[data-state="waiting"] .tc-progress__label,
+.tc-progress__step[data-state="skipped"] .tc-progress__label {
+  color: var(--tc-color-text-muted);
+}
+
+.tc-progress__step[data-state="done"] .tc-progress__label {
+  color: var(--tc-color-text-subtle);
+}
+
+.tc-progress__step[data-state="failed"] .tc-progress__label {
+  font-weight: var(--tc-weight-medium);
+}
+
+.tc-progress__stepbody {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tc-progress__stepline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--tc-space-2);
+}
+
+.tc-progress__label {
+  line-height: var(--tc-leading-tight);
+}
+
+.tc-progress__meta {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-xs);
+}
+
+.tc-progress__step[data-state="active"] .tc-progress__meta {
+  font-variant-numeric: tabular-nums;
+}
+
+.tc-progress__notice {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-xs);
+}
+
+.tc-progress__step[data-state="failed"] .tc-progress__notice {
+  color: var(--tc-color-danger-text);
+}
+
+.tc-progress__terminal {
+  color: var(--tc-color-danger-text);
+  font-size: var(--tc-text-sm);
+}
+
+.tc-progress__hint {
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-xs);
+}
+
+.tc-progress__hint[data-tone="warn"] {
+  color: var(--tc-color-warning-text);
+}
+
+.tc-progress__retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tc-color-accent-text);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.tc-progress__retry:focus-visible {
+  outline: var(--tc-focus-ring, 2px solid var(--tc-color-focus));
+  outline-offset: 2px;
+  border-radius: var(--tc-radius-sm);
+}

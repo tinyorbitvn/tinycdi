@@ -26,6 +26,7 @@ export default {
 
   "auth.gate.apiUnreachable": "Could not reach the workspace API: {error}",
   "auth.gate.checking": "Checking session…",
+  "auth.gate.retrying": "Could not reach the workspace API ({error}). Retrying…",
 
   "nav.sections": "Sections",
   "nav.workspaces": "Workspaces",

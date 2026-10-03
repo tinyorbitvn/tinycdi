@@ -9,6 +9,8 @@ export class PortalApiError extends Error {
   readonly retryable: boolean;
   readonly requestId: string;
   readonly details: { reason?: "release_pending" | undefined } | undefined;
+  /** Server-asked retry delay (429 Retry-After), in ms, when present. */
+  readonly retryAfterMs: number | undefined;
 
   constructor(
     httpStatus: number,
@@ -19,6 +21,7 @@ export class PortalApiError extends Error {
       requestId?: string | undefined;
       details?: { reason?: "release_pending" | undefined } | undefined;
     },
+    retryAfterMs?: number,
   ) {
     const rawCode = body.code ?? "INTERNAL";
     const known = isErrorCode(rawCode);
@@ -31,6 +34,7 @@ export class PortalApiError extends Error {
     this.retryable = known ? body.retryable === true : true;
     this.requestId = body.requestId ?? "";
     this.details = body.details;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
