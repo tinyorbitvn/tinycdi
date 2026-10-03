@@ -255,6 +255,9 @@ func (g *Gateway) Close() {
 		g.byLease = map[string]*session{}
 		g.byWorkspace = map[string]*session{}
 		g.mu.Unlock()
+		if g.cfg.Metrics != nil {
+			g.cfg.Metrics.AddSessionsActive(-float64(len(all)))
+		}
 		for _, s := range all {
 			s.kill()
 		}
@@ -294,6 +297,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := g.now()
 	route := "proxy"
 	switch {
+	case r.URL.Path == "/metrics":
+		// E8: metrics live only on the dedicated metrics listener — the
+		// path must not exist on this public listener for any host class.
+		writeJSON(rec, http.StatusNotFound, map[string]string{"error": "not_found"})
 	case r.URL.Path == LaunchPath:
 		route = "launch"
 		if !wsOK {
@@ -323,7 +330,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveProxy(rec, r, wsID)
 	}
 	if g.cfg.Metrics != nil {
-		g.cfg.Metrics.ObserveHTTP(route, r.Method, codeClass(rec.status), g.now().Sub(start))
+		g.cfg.Metrics.ObserveHTTP("session", route, r.Method, codeClass(rec.status), g.now().Sub(start))
 	}
 }
 

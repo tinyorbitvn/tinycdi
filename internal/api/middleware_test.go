@@ -204,16 +204,25 @@ func TestInstrumentHTTPEmitsMetricsPerRequest(t *testing.T) {
 	r.Body.Close()
 
 	err := testutil.GatherAndCompare(reg, strings.NewReader(
-		`# HELP tinycdi_http_requests_total HTTP requests handled, by route template, method and response code class.
+		`# HELP tinycdi_http_requests_total HTTP requests handled, by listener, route template, method and response code class.
 # TYPE tinycdi_http_requests_total counter
-tinycdi_http_requests_total{code_class="3xx",method="GET",route="/auth/login"} 1
-tinycdi_http_requests_total{code_class="3xx",method="GET",route="/auth/callback"} 1
-tinycdi_http_requests_total{code_class="2xx",method="GET",route="/v1/me"} 1
-tinycdi_http_requests_total{code_class="4xx",method="GET",route="/v1/me"} 1
-tinycdi_http_requests_total{code_class="4xx",method="GET",route="unmatched"} 1
+tinycdi_http_requests_total{code_class="3xx",listener="app",method="GET",route="/auth/login"} 1
+tinycdi_http_requests_total{code_class="3xx",listener="app",method="GET",route="/auth/callback"} 1
+tinycdi_http_requests_total{code_class="2xx",listener="app",method="GET",route="/v1/me"} 1
+tinycdi_http_requests_total{code_class="4xx",listener="app",method="GET",route="/v1/me"} 1
+tinycdi_http_requests_total{code_class="4xx",listener="app",method="GET",route="unmatched"} 1
 `), "tinycdi_http_requests_total")
 	if err != nil {
 		t.Fatalf("http request metrics mismatch:\n%v", err)
+	}
+
+	// E8: the completed callback counted one successful login.
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(
+		`# HELP tinycdi_logins_total Completed /v1/auth/callback login attempts, by bounded outcome.
+# TYPE tinycdi_logins_total counter
+tinycdi_logins_total{outcome="success"} 1
+`), "tinycdi_logins_total"); err != nil {
+		t.Fatalf("login metrics mismatch:\n%v", err)
 	}
 }
 

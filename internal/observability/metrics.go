@@ -36,6 +36,28 @@ var (
 	provisioningResults = map[string]struct{}{
 		"success": {}, "failure": {},
 	}
+	// httpListeners are the listeners the HTTP request metrics may name.
+	httpListeners = map[string]struct{}{
+		"app": {}, "session": {}, "internal": {},
+	}
+	// rehydrateResults are the session-directory lookup outcomes (E8):
+	// ok = a live session was rebuilt, miss = definitively no session
+	// (unknown/dead/foreign cookie), error = the directory could not answer.
+	rehydrateResults = map[string]struct{}{
+		"ok": {}, "miss": {}, "error": {},
+	}
+	// loginOutcomes are the /v1/auth/callback results: success = session
+	// issued, denied = the caller failed a check (bad state, nonce, group
+	// or tenant, dead code), error = a platform-side failure.
+	loginOutcomes = map[string]struct{}{
+		"success": {}, "denied": {}, "error": {},
+	}
+	// rateLimitRoutes are the bounded route templates whose per-client
+	// limiter may refuse a request (E7) — the login family on the app
+	// listener and launch on the session listener.
+	rateLimitRoutes = map[string]struct{}{
+		"/v1/login": {}, "/v1/auth/callback": {}, "/v1/session": {}, "/v1/launch": {},
+	}
 )
 
 func boundValue(v string, allowed map[string]struct{}) string {
@@ -59,6 +81,12 @@ type Metrics struct {
 	quotaDrift     *prometheus.GaugeVec
 	pvcLeaks       prometheus.Gauge
 	bootDeadline   prometheus.Counter
+	sessionsActive prometheus.Gauge
+	rehydrations   *prometheus.CounterVec
+	streamsFenced  prometheus.Counter
+	logins         *prometheus.CounterVec
+	imageAge       *prometheus.GaugeVec
+	rateLimited    *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -73,13 +101,13 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	m := &Metrics{
 		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "http_requests_total",
-			Help: "HTTP requests handled, by route template, method and response code class.",
-		}, []string{"route", "method", "code_class"}),
+			Help: "HTTP requests handled, by listener, route template, method and response code class.",
+		}, []string{"listener", "route", "method", "code_class"}),
 		httpDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Name: "http_request_duration_seconds",
-			Help:    "HTTP request latency by route template, method and code class.",
+			Help:    "HTTP request latency by listener, route template, method and code class.",
 			Buckets: prometheus.DefBuckets,
-		}, []string{"route", "method", "code_class"}),
+		}, []string{"listener", "route", "method", "code_class"}),
 		provisioning: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Name: "workspace_provisioning_seconds",
 			Help:    "End-to-end workspace provisioning latency by result.",
@@ -113,6 +141,30 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "boot_deadline_exceeded_total",
 			Help: "Workspace runtimes that exceeded their boot deadline.",
 		}),
+		sessionsActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "sessions_active",
+			Help: "Live desktop sessions this gateway replica currently holds.",
+		}),
+		rehydrations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "gateway_rehydrations_total",
+			Help: "Session-directory lookups for cookies this replica never saw, by bounded result.",
+		}, []string{"result"}),
+		streamsFenced: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "gateway_streams_fenced_total",
+			Help: "Streams closed because another replica claimed the lease's stream epoch.",
+		}),
+		logins: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "logins_total",
+			Help: "Completed /v1/auth/callback login attempts, by bounded outcome.",
+		}, []string{"outcome"}),
+		imageAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "runtime_image_age_seconds",
+			Help: "Age of the newest published template revision's runtime image, by catalog family.",
+		}, []string{"family"}),
+		rateLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "rate_limited_total",
+			Help: "Requests refused by the per-client rate limiters, by bounded route template.",
+		}, []string{"route"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -121,6 +173,8 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
+		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
+		m.rateLimited,
 	)
 	return m
 }
@@ -134,9 +188,15 @@ func (m *Metrics) tenant(v string) string {
 }
 
 // ObserveHTTP records one HTTP request. Called by the InstrumentHTTP
-// middleware with the mux route template, method and code class.
-func (m *Metrics) ObserveHTTP(route, method, codeClass string, d time.Duration) {
-	l := prometheus.Labels{"route": route, "method": method, "code_class": codeClass}
+// middleware and the session gateway with the listener name, the mux route
+// template (never a concrete path), method and code class.
+func (m *Metrics) ObserveHTTP(listener, route, method, codeClass string, d time.Duration) {
+	l := prometheus.Labels{
+		"listener":   boundValue(listener, httpListeners),
+		"route":      route,
+		"method":     method,
+		"code_class": codeClass,
+	}
 	m.httpRequests.With(l).Inc()
 	m.httpDuration.With(l).Observe(d.Seconds())
 }
@@ -186,3 +246,44 @@ func (m *Metrics) SetPVCLeaks(v float64) { m.pvcLeaks.Set(v) }
 
 // IncBootDeadlineExceeded counts a runtime that exceeded its boot deadline.
 func (m *Metrics) IncBootDeadlineExceeded() { m.bootDeadline.Inc() }
+
+// AddSessionsActive adjusts the live-session gauge the session gateway
+// maintains for this replica (E8).
+func (m *Metrics) AddSessionsActive(delta float64) { m.sessionsActive.Add(delta) }
+
+// IncRehydration counts one session-directory lookup for an unseen cookie;
+// result is bounded to {ok, miss, error, other}.
+func (m *Metrics) IncRehydration(result string) {
+	m.rehydrations.WithLabelValues(boundValue(result, rehydrateResults)).Inc()
+}
+
+// IncStreamsFenced counts one cross-replica stream fence: a renew observed
+// a stream epoch newer than the one this process claimed, so its streams
+// closed.
+func (m *Metrics) IncStreamsFenced() { m.streamsFenced.Inc() }
+
+// IncLogin counts one completed login-callback outcome; outcome is bounded
+// to {success, denied, error, other}.
+func (m *Metrics) IncLogin(outcome string) {
+	m.logins.WithLabelValues(boundValue(outcome, loginOutcomes)).Inc()
+}
+
+// SetRuntimeImageAge sets the runtime-image-age gauge for a template
+// catalog family — values come from WorkspaceTemplate catalog names, which
+// are administrator-controlled and bounded by the catalog size.
+func (m *Metrics) SetRuntimeImageAge(family string, seconds float64) {
+	m.imageAge.WithLabelValues(family).Set(seconds)
+}
+
+// DeleteRuntimeImageAge drops a family's series when the catalog no longer
+// lists it, so deleted templates do not leave stale gauges behind.
+func (m *Metrics) DeleteRuntimeImageAge(family string) {
+	m.imageAge.DeleteLabelValues(family)
+}
+
+// IncRateLimited counts one rate-limiter refusal; route is bounded to the
+// limited route templates {/v1/login, /v1/auth/callback, /v1/session,
+// /v1/launch, other}.
+func (m *Metrics) IncRateLimited(route string) {
+	m.rateLimited.WithLabelValues(boundValue(route, rateLimitRoutes)).Inc()
+}

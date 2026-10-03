@@ -30,7 +30,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, []string{"tenant-a", "tenant-b"})
 
-	m.ObserveHTTP("/v1/me", "GET", "2xx", 25*time.Millisecond)
+	m.ObserveHTTP("app", "/v1/me", "GET", "2xx", 25*time.Millisecond)
 	m.ObserveProvisioningLatency("success", 30*time.Second)
 	m.SetRunningWorkspaces("tenant-a", 3)
 	m.SetReservedWorkspaces("tenant-b", 1)
@@ -39,6 +39,12 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.SetQuotaDrift("tenant-a", 0)
 	m.SetPVCLeaks(1)
 	m.IncBootDeadlineExceeded()
+	m.AddSessionsActive(2)
+	m.IncRehydration("ok")
+	m.IncStreamsFenced()
+	m.IncLogin("success")
+	m.SetRuntimeImageAge("browser", 3600)
+	m.IncRateLimited("/v1/login")
 
 	want := []string{
 		"tinycdi_http_requests_total",
@@ -51,6 +57,12 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_quota_drift",
 		"tinycdi_pvc_leaks",
 		"tinycdi_boot_deadline_exceeded_total",
+		"tinycdi_sessions_active",
+		"tinycdi_gateway_rehydrations_total",
+		"tinycdi_gateway_streams_fenced_total",
+		"tinycdi_logins_total",
+		"tinycdi_runtime_image_age_seconds",
+		"tinycdi_rate_limited_total",
 	}
 	fams := gatherFamilies(t, reg)
 	for _, name := range want {
@@ -66,7 +78,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 func TestNoForbiddenLabelNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, []string{"tenant-a"})
-	m.ObserveHTTP("/v1/x", "GET", "2xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "GET", "2xx", time.Millisecond)
 	m.SetRunningWorkspaces("tenant-a", 1)
 	m.SetQuotaDrift("tenant-a", 1)
 	m.IncLeaseFailure("denied")

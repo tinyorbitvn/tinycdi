@@ -21,7 +21,7 @@ func TestLogin_RateLimited(t *testing.T) {
 	// -login-rate defaults to 30/min with burst 10; 11 requests from one
 	// client inside the window exhaust it.
 	l := ratelimit.New(30, 10, 100, func() time.Time { return now })
-	srv := httptest.NewServer(RateLimit(l, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(RateLimit(l, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})))
 	defer srv.Close()
@@ -67,7 +67,7 @@ func TestSessionProbe_RateLimited(t *testing.T) {
 	env := newTestEnv(t, nil)
 	l := ratelimit.New(30, 2, 100, nil)
 	mux := http.NewServeMux()
-	MountSessionProbeRoute(mux, env.auth, RateLimit(l, nil))
+	MountSessionProbeRoute(mux, env.auth, RateLimit(l, nil, nil))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

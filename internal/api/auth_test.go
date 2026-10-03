@@ -100,6 +100,7 @@ func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*Au
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
+	a.WithMetrics(metrics)
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
@@ -110,7 +111,7 @@ func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*Au
 
 	var h http.Handler = mux
 	if metrics != nil {
-		h = InstrumentHTTP(metrics)(h)
+		h = InstrumentHTTP(metrics, "app")(h)
 	}
 	srv := httptest.NewServer(RequestID(AuditWithSink(logger, sink)(h)))
 	env := &testEnv{issuer: iss, auth: a, store: store, server: srv, logs: logBuf}
