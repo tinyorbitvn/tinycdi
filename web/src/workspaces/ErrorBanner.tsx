@@ -12,6 +12,8 @@ import {
 const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
   QUOTA_EXHAUSTED: "errors.code.quotaExhausted",
   QUOTA_NOT_CONFIGURED: "errors.code.quotaNotConfigured",
+  QUOTA_MANAGED_BY_CONFIG: "errors.code.generic",
+  PRECONDITION_FAILED: "errors.code.generic",
   INVALID_TEMPLATE: "errors.code.invalidTemplate",
   IDEMPOTENCY_CONFLICT: "errors.code.idempotencyConflict",
   INVALID_STATE: "errors.code.invalidState",

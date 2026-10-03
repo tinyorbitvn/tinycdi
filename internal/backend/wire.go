@@ -453,7 +453,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	// App listener: OIDC login + the public API mux.
 	if cfg.Listen != "" {
-		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, cachedKC, tenants, retained, brk); err != nil {
+		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, cachedKC, tenants, retained, brk, quotas); err != nil {
 			return err
 		}
 	}
@@ -534,7 +534,8 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 // connections + data) and records it on b.
 func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	svc *provisioning.Service, statusView *api.K8sStatusView, kc, cachedKC client.Client,
-	tenants provisioning.TenantNamespaces, retained *provisioning.RetainedStore, brk *broker.Broker) error {
+	tenants provisioning.TenantNamespaces, retained *provisioning.RetainedStore, brk *broker.Broker,
+	declaredQuotas []provisioning.TenantQuota) error {
 
 	// Pending OIDC logins ride in an AEAD-sealed cookie (D20): the first
 	// key file seals, every configured key opens, so a login can start on
@@ -611,6 +612,14 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithReleaseRetryAfter(b.recoveryTickETA)
 	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
 
+	// Tenants declared in -tenant-quotas are config-managed: the admin quota
+	// API reports them but refuses writes with QUOTA_MANAGED_BY_CONFIG.
+	managedQuotas := make(map[string]bool, len(declaredQuotas))
+	for _, q := range declaredQuotas {
+		managedQuotas[q.TenantID] = true
+	}
+	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas)
+
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
 
@@ -624,7 +633,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	}
 	loginLimit := api.RateLimit(ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil), trusted, b.metrics)
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, loginLimit)
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -635,7 +644,8 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // the anonymous login-family routes (E7).
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
-	data *api.DataHandler, quota *api.QuotaHandler, loginLimit func(http.Handler) http.Handler) *http.ServeMux {
+	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
+	loginLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
 	mux.Handle("GET /v1/auth/callback", loginLimit(http.HandlerFunc(authn.CallbackHandler)))
@@ -647,6 +657,9 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	api.MountConnectionStatusRoutes(mux, authn, connStatus)
 	api.MountDataRoutes(mux, authn, data)
 	api.MountQuotaRoutes(mux, authn, quota)
+	if adminQuota != nil {
+		api.MountAdminQuotaRoutes(mux, authn, adminQuota)
+	}
 	return mux
 }
 

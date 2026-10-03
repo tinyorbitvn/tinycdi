@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { makeAdmin, seedTenant, control } from "./helpers";
 import { QuotaPage } from "../../../src/admin/QuotaPage";
@@ -124,5 +124,101 @@ describe("quota: per-user table", () => {
     // Clicking the active column again flips the direction.
     fireEvent.click(within(table).getByRole("button", { name: "Storage" }));
     expect(lastUser()).toContain("Grace Hopper");
+  });
+});
+
+describe("quota: admin edit", () => {
+  it("shows the source and saves new limits through the admin API", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+
+    await screen.findByRole("heading", { name: "Quota" });
+    await screen.findByText("Admin API");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    fireEvent.change(within(dialog).getByLabelText(/Running workspaces/), {
+      target: { value: "12" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const meter = (
+      await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
+    ).closest(".tc-meter")!;
+    expect(meter).toHaveTextContent(/of 12/);
+  });
+
+  it("a config-managed tenant shows the platform source and no edit action", async () => {
+    const api = setup();
+    control(api, "/_control/admin/quota", { managed: true });
+    renderWithApi(<QuotaPage />, api);
+
+    await screen.findByRole("heading", { name: "Quota" });
+    await screen.findByText("Platform configuration");
+    await screen.findByText(/can only change there/);
+    expect(screen.queryByRole("button", { name: "Edit limits" })).not.toBeInTheDocument();
+  });
+
+  it("a 409 QUOTA_MANAGED_BY_CONFIG inside the dialog shows guidance", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await screen.findByRole("heading", { name: "Quota" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    // The row becomes config-managed between open and save (e.g. a deploy).
+    control(api, "/_control/admin/quota", { managed: true });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await within(dialog).findByText(/managed by the platform configuration/);
+  });
+});
+
+describe("quota: optimistic concurrency", () => {
+  it("reopening the dialog shows freshly read values", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await screen.findByRole("heading", { name: "Quota" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    let dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(8);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    // Another actor changed the limits while the dialog was closed.
+    control(api, "/_control/admin/quota", { limits: { runningWorkspaces: 20 } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText(/of 20/);
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20);
+  });
+
+  it("a stale save answers 412: the dialog warns and reloads fresh values", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await screen.findByRole("heading", { name: "Quota" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    // A concurrent write lands between our read and our save.
+    control(api, "/_control/admin/quota", { limits: { runningWorkspaces: 20 } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await within(dialog).findByText(/changed these limits/);
+    // The reload updated the read model — the dialog now shows fresh values.
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20),
+    );
+
+    // Saving again carries the fresh version and lands.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const meter = (
+      await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
+    ).closest(".tc-meter")!;
+    expect(meter).toHaveTextContent(/of 20/);
   });
 });
