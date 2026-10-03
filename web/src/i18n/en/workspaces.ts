@@ -159,4 +159,7 @@ export default {
   "workspaces.delete.confirming": "Deleting…",
 
   "workspaces.connect.action": "Connect",
+  "workspaces.connect.disabledStarting": "Starting…",
+  "workspaces.connect.disabledFailed": "Failed",
+  "workspaces.connect.disabledFinishing": "Finishing the connection…",
 } as const;

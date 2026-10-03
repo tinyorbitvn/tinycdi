@@ -9,12 +9,16 @@ import { ErrorBanner } from "./ErrorBanner";
 // Delete ≠ Purge: deleting a workspace frees the runtime and handles data per
 // its dataPolicy (Retain moves the disk to the retained inventory, Ephemeral
 // destroys it). The confirm dialog names that consequence explicitly.
+//
+// The 202 only STARTS the teardown: the button closes its dialog and hands
+// back via onDeleteStarted; the page keeps showing the workspace until the
+// API drops it (404), which is when the "deleted" toast fires (V3.27).
 export function DeleteWorkspaceButton({
   workspace,
-  onDeleted,
+  onDeleteStarted,
 }: {
   workspace: WorkspaceView;
-  onDeleted: () => void;
+  onDeleteStarted?: () => void;
 }) {
   const api = useApi();
   const [confirming, setConfirming] = useState(false);
@@ -33,7 +37,8 @@ export function DeleteWorkspaceButton({
           },
         }),
       );
-      onDeleted();
+      setConfirming(false);
+      onDeleteStarted?.();
     } catch (e) {
       setError(e);
     } finally {
@@ -41,10 +46,11 @@ export function DeleteWorkspaceButton({
     }
   }
 
+  const terminating = workspace.phase === "Terminating";
   return (
     <>
-      <Button variant="danger" onClick={() => setConfirming(true)}>
-        {t("workspaces.delete.action")}
+      <Button variant="danger" disabled={terminating} onClick={() => setConfirming(true)}>
+        {terminating ? t("workspaces.delete.confirming") : t("workspaces.delete.action")}
       </Button>
       <ConfirmDialog
         open={confirming}

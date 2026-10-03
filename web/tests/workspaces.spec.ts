@@ -50,7 +50,10 @@ test("create -> ready -> session route -> stop -> delete", async ({ page, reques
 
   await page.waitForURL(/\/workspaces\/ws_/);
   const wsId = page.url().split("/").pop()!;
-  await expect(page.getByText("Starting").first()).toBeVisible({ timeout: 15_000 });
+  // The lifecycle step panel takes over while the create runs (V3.27).
+  await expect(page.getByRole("region", { name: "Creating e2e-desktop" })).toBeVisible({
+    timeout: 15_000,
+  });
 
   // The create carried CSRF + an Idempotency-Key.
   const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
@@ -87,7 +90,18 @@ test("create -> ready -> session route -> stop -> delete", async ({ page, reques
   // The confirm dialog names the data consequence (Retain default here).
   await expect(dialog).toContainText("retained inventory");
   await dialog.getByRole("button", { name: "Confirm delete" }).click();
+
+  // The page keeps watching the teardown until the API drops the row —
+  // the delete panel replaces the connectable state (V3.27).
+  await expect(page.getByRole("region", { name: "Deleting e2e-desktop" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await request.delete(`${MOCK}/_control/workspaces/${wsId}`);
   await page.waitForURL("/");
+  await expect(page.getByText("'e2e-desktop' was deleted.")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.getByRole("button", { name: "Your disk is in Retained data" }),
+  ).toBeVisible();
 });
 
 test("stable codes surface: QUOTA_EXHAUSTED and INVALID_TEMPLATE", async ({ page, request }) => {
