@@ -5,8 +5,8 @@
 // the session gateway and the in-process broker on four listeners (app,
 // session, internal mTLS, metrics) with independent TLS configuration.
 //
-// Flag surface follows decisions-2 item 1: app flags are the former cmd/api
-// set, the session flags take a "session-" prefix, the internal/mTLS
+// Flag surface follows decisions-2 item 1: app flags carry their plain
+// names, the session flags take a "session-" prefix, the internal/mTLS
 // listener keeps its names, and -broker-url/-broker-ca/-mtls-cert/-mtls-key
 // select split/test mode (session listener only, remote broker, no DB/OIDC/
 // Kubernetes). Every flag's environment variable is TCDI_<UPPER_SNAKE>;
@@ -94,7 +94,7 @@ func rateLimitsUntrusted(c Config) bool {
 
 // Config is the parsed flag set for the merged backend.
 type Config struct {
-	// App listener (the former cmd/api surface).
+	// App listener (the public REST API surface).
 	Listen               string // empty disables the app listener
 	TLSCert              string // optional; empty serves plain HTTP
 	TLSKey               string
@@ -312,7 +312,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["login-key-file"] {
-		// TCDI_LOGIN_KEY_FILES is the legacy plural the interim cmd/api used.
+		// TCDI_LOGIN_KEY_FILES is a legacy plural still read for compatibility.
 		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
 			_ = c.LoginKeyFiles.Set(v)
 		}
@@ -445,15 +445,6 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
-}
-
-// sessionOrigin derives the https origin the API advertises as the launch
-// POST target from the session domain; empty when no domain is configured.
-func (c Config) sessionOrigin() string {
-	if c.SessionDomain == "" {
-		return ""
-	}
-	return "https://" + c.SessionDomain
 }
 
 // checkDatabaseTLS resolves the TLS configuration pgx will actually apply

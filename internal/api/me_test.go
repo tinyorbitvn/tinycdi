@@ -1,9 +1,10 @@
 package api
 
-// Contract tests for GET /v1/me and the v0.2 session surface (D17, D18, P1):
+// Contract tests for GET /v1/me and the session surface (D18, P1, E14):
 // the CSRF token is derived from the session ID and returned by /v1/me,
-// legacy non-__Host- cookies are deleted at login, and desktop input slides
-// the portal idle timer without ever reviving an expired session.
+// login and logout write only __Host- cookies (no v0.1 legacy names, not
+// even deletions), and desktop input slides the portal idle timer without
+// ever reviving an expired session.
 
 import (
 	"context"
@@ -147,57 +148,57 @@ func TestCSRF_OtherSessionsTokenRejected(t *testing.T) {
 	}
 }
 
-// TestLogin_SetsOnlyHostPrefixedCookies: every cookie the callback writes is
-// either __Host-prefixed or a deletion (Max-Age=0) of a v0.1 legacy name (D17).
-// Callback AND logout must actually emit those deletions — a browser upgraded
-// from v0.1 still holds tcdi_csrf / tcdi_session_origin.
-func TestLogin_SetsOnlyHostPrefixedCookies(t *testing.T) {
+// TestLogin_NoLegacyCookieDeletion: every cookie login and logout write is
+// __Host-prefixed (Secure + HttpOnly). The v0.1 tcdi_csrf and
+// tcdi_session_origin names are gone entirely (E14): neither a live value
+// nor a Max-Age=0 deletion may appear — v0.2 spent a release deleting them,
+// so browsers upgraded since carry nothing to drop.
+func TestLogin_NoLegacyCookieDeletion(t *testing.T) {
 	env := newTestEnv(t, nil)
+
+	// /auth/login redirects to the IdP; it too must leave the legacy names
+	// alone (it set the deletions until v0.3).
+	lr, err := noRedirectClient().Get(env.server.URL + "/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr.Body.Close()
+	assertPortalCookies(t, lr.Header.Values("Set-Cookie"))
+
 	resp, cookies := env.login(t)
 	defer resp.Body.Close()
-
 	assertPortalCookies(t, resp.Header.Values("Set-Cookie"))
 
-	// Logout sends the same deletions, so a browser that never logs in
-	// again still drops the legacy names.
 	sess := findCookie(cookies, env.auth.SessionCookieName())
 	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/auth/logout", nil)
 	req.AddCookie(sess)
 	req.Header.Set(env.auth.CSRFHeader(), csrfTokenFor(sess.Value))
-	lr, err := noRedirectClient().Do(req)
+	out, err := noRedirectClient().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lr.Body.Close()
-	if lr.StatusCode != http.StatusNoContent {
-		t.Fatalf("logout status = %d, want 204", lr.StatusCode)
+	defer out.Body.Close()
+	if out.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", out.StatusCode)
 	}
-	assertPortalCookies(t, lr.Header.Values("Set-Cookie"))
+	assertPortalCookies(t, out.Header.Values("Set-Cookie"))
 }
 
-// assertPortalCookies checks the D17 cookie surface of a login or logout
-// response: every Set-Cookie is either __Host-prefixed (Secure + HttpOnly)
-// or a Max-Age=0 deletion of a v0.1 legacy name — and both legacy names
-// must actually be present as deletions.
+// assertPortalCookies checks the E14 cookie surface of a login or logout
+// response: every Set-Cookie is __Host-prefixed (Secure + HttpOnly), and
+// neither v0.1 legacy name appears at all.
 func assertPortalCookies(t *testing.T, setCookies []string) {
 	t.Helper()
-	legacy := map[string]bool{"tcdi_csrf": false, "tcdi_session_origin": false}
 	for _, h := range setCookies {
 		name, _, _ := strings.Cut(h, "=")
-		if strings.HasPrefix(name, "__Host-") {
-			if !strings.Contains(h, "HttpOnly") || !strings.Contains(h, "Secure") {
-				t.Fatalf("__Host- cookie without Secure/HttpOnly: %q", h)
-			}
-			continue
+		if name == "tcdi_csrf" || name == "tcdi_session_origin" {
+			t.Fatalf("legacy cookie %q still touched: %q", name, h)
 		}
-		if _, ok := legacy[name]; !ok || !strings.Contains(h, "Max-Age=0") {
-			t.Fatalf("non-__Host- live cookie on portal origin: %q", h)
+		if !strings.HasPrefix(name, "__Host-") {
+			t.Fatalf("non-__Host- cookie on portal origin: %q", h)
 		}
-		legacy[name] = true
-	}
-	for name, deleted := range legacy {
-		if !deleted {
-			t.Fatalf("no Max-Age=0 deletion for legacy cookie %q", name)
+		if !strings.Contains(h, "HttpOnly") || !strings.Contains(h, "Secure") {
+			t.Fatalf("__Host- cookie without Secure/HttpOnly: %q", h)
 		}
 	}
 }

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,16 +15,14 @@ import (
 )
 
 // Session is a server-side OIDC session record. It mirrors the API-layer
-// session shape; cmd/api adapts between the two (this package must not
-// import internal/api — that would create an import cycle through
+// session shape; internal/backend adapts between the two (this package must
+// not import internal/api — that would create an import cycle through
 // internal/provisioning).
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID at the Go
 // boundary; the row is keyed by its SHA-256 digest, so a database or backup
-// read never yields a usable session ID. CSRFToken is the raw synchronizer
-// token on Save; it is persisted only as an HMAC keyed by the raw session
-// ID, and Get returns that MAC in CSRFToken — the raw token is never
-// recoverable from a store read.
+// read never yields a usable session ID. The synchronizer CSRF token is
+// derived from the session ID on demand (P1) and never persisted.
 // IDTokenSeal seals the raw OIDC ID token for at-rest storage and opens it
 // on read (api.IDTokenSealer over the login-state keys). A nil sealer
 // stores NULL; an open failure yields an empty token rather than a failed
@@ -37,12 +34,11 @@ type IDTokenSeal interface {
 }
 
 type Session struct {
-	ID        string
-	Issuer    string
-	Subject   string
-	TenantID  string
-	Groups    []string
-	CSRFToken string
+	ID       string
+	Issuer   string
+	Subject  string
+	TenantID string
+	Groups   []string
 	// DisplayName and Email are display-only identity copied from the
 	// verified ID token at login (migration 012); they carry no
 	// authorization meaning.
@@ -66,18 +62,6 @@ var ErrSessionNotFound = errors.New("store: session not found")
 func sessionKey(id string) string {
 	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])
-}
-
-// csrfTokenMAC is the stored form of a session's synchronizer CSRF token:
-// hex of HMAC-SHA256 keyed by the raw session ID. The key is never
-// persisted (only its digest is), so a dump read exposes neither the token
-// nor a way to compute the MAC (SEC-27). Mirrored by internal/api.auth.go;
-// keep identical.
-func csrfTokenMAC(sessionID, token string) string {
-	m := hmac.New(sha256.New, []byte(sessionID))
-	m.Write([]byte("tcdi-csrf-token\x00"))
-	m.Write([]byte(token))
-	return hex.EncodeToString(m.Sum(nil))
 }
 
 // SessionStore is the Postgres-backed session store. Get slides the idle
@@ -116,9 +100,8 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 		expires = &sess.ExpiresAt
 	}
 	// Only digest/sealed forms are persisted (SEC-27): id holds SHA-256 of
-	// the session ID, csrf_token holds the session-ID-keyed HMAC of the raw
-	// synchronizer token, and id_token holds the login-state AEAD seal of
-	// the OIDC ID token — the raw token never reaches the row.
+	// the session ID and id_token holds the login-state AEAD seal of the
+	// OIDC ID token — the raw token never reaches the row.
 	var idToken *string
 	if sess.IDToken != "" && s.seal != nil {
 		sealed, err := s.seal.SealIDToken(sess.IDToken)
@@ -128,31 +111,30 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 		idToken = &sealed
 	}
 	_, err = s.db.Pool().Exec(ctx, `
-		INSERT INTO sessions (id, issuer, subject, tenant_id, groups, csrf_token,
+		INSERT INTO sessions (id, issuer, subject, tenant_id, groups,
 			display_name, email, created_at, last_seen_at, expires_at, epoch, id_token)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-			(SELECT value FROM platform_meta WHERE key = 'session_epoch'), $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			(SELECT value FROM platform_meta WHERE key = 'session_epoch'), $11)
 		ON CONFLICT (id) DO UPDATE SET
 			issuer = EXCLUDED.issuer, subject = EXCLUDED.subject,
 			tenant_id = EXCLUDED.tenant_id, groups = EXCLUDED.groups,
-			csrf_token = EXCLUDED.csrf_token,
 			display_name = EXCLUDED.display_name, email = EXCLUDED.email,
 			created_at = EXCLUDED.created_at,
 			last_seen_at = EXCLUDED.last_seen_at, expires_at = EXCLUDED.expires_at,
 			epoch = EXCLUDED.epoch, id_token = EXCLUDED.id_token`,
 		sessionKey(sess.ID), sess.Issuer, sess.Subject, sess.TenantID, groups,
-		csrfTokenMAC(sess.ID, sess.CSRFToken), sess.DisplayName, sess.Email,
+		sess.DisplayName, sess.Email,
 		sess.CreatedAt, sess.LastSeenAt, expires, idToken)
 	return err
 }
 
 // sessionReturning intentionally does NOT return id: the column holds the
 // session-ID digest, and Session.ID must keep carrying the raw ID the
-// caller looked up (it keys the CSRF MAC).
+// caller looked up.
 const sessionReturning = `
 	RETURNING ` + sessionColumns
 
-const sessionColumns = `issuer, subject, tenant_id, groups, csrf_token,
+const sessionColumns = `issuer, subject, tenant_id, groups,
 	display_name, email, created_at, last_seen_at, expires_at, id_token`
 
 // currentEpochSQL resolves the session epoch in the same statement so a
@@ -195,7 +177,7 @@ func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id str
 	var expires *time.Time
 	var idToken *string
 	err := row.Scan(&sess.Issuer, &sess.Subject, &sess.TenantID, &groups,
-		&sess.CSRFToken, &sess.DisplayName, &sess.Email,
+		&sess.DisplayName, &sess.Email,
 		&sess.CreatedAt, &sess.LastSeenAt, &expires, &idToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if s.idle > 0 {

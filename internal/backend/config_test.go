@@ -203,7 +203,7 @@ func TestParseFlags_RequiredInputs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Ported from cmd/api/main_test.go and cmd/gateway/main_test.go.
+// Session-listener and shared flag coverage of the merged binary.
 // ---------------------------------------------------------------------------
 
 func TestParseFlags_SessionDomain(t *testing.T) {

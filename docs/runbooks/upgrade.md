@@ -162,9 +162,7 @@ and `portal` Deployments/Services disappear in the same release.
   `*.<sessionDomain>` wildcard route next to the portal route.
 - A synthetic login → launch → connect round-trip: the session opens on
   a `<label>.<sessionDomain>` host presenting the wildcard certificate,
-  and the portal sets only `__Host-`-prefixed cookies (the backend
-  expires the removed v0.1 `tcdi_csrf`/`tcdi_session_origin` cookies on
-  first login).
+  and the portal sets only `__Host-`-prefixed cookies.
 - `tinycdi_lease_failures_total` back to baseline and
   `tinycdi_quota_drift == 0`, as after any upgrade.
 - `kubectl get pods -o wide` shows new workspace pods on the dedicated
