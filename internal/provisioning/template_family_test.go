@@ -347,6 +347,126 @@ func TestStart_CatalogErrorKeepsRecorded(t *testing.T) {
 	}
 }
 
+// intentReason reads the recorded reason of the workspace's newest intent
+// — the cause the events endpoint curates (TemplateUpdateSkipped for a
+// guard-refused family re-point).
+func intentReason(t *testing.T, svc *provisioning.Service, wsID string) (string, provisioning.IntentKind) {
+	t.Helper()
+	hist, err := svc.IntentHistory(context.Background(), familyTenant, provisioning.PlatformID(wsID))
+	if err != nil || len(hist) == 0 {
+		t.Fatalf("intent history: %v (n=%d)", err, len(hist))
+	}
+	return hist[0].Reason, hist[0].Kind
+}
+
+// TestUpdate_SkippedWhenStorageSmaller (V3.2/E2): the newest family
+// revision asks for a smaller disk — the start keeps the recorded
+// revision (row, intent and CR templateRef all unchanged) and records the
+// storage-smaller reason on the start intent for the curated
+// TemplateUpdateSkipped event.
+func TestUpdate_SkippedWhenStorageSmaller(t *testing.T) {
+	cat := newFakeTemplateLookup()
+	revA := familyEntry("linuxdesk", "aaaa1111", "2026-10-a", "OnStart")
+	revB := familyEntry("linuxdesk", "bbbb2222", "2026-10-b", "OnStart")
+	revB.DiskBytes = revA.DiskBytes - (1 << 30)
+	cat.put(revA)
+	cat.put(revB)
+	db, svc, ws := familyWorkspace(t, cat)
+
+	res, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "fam-skip-01", provisioning.IntentStart, []byte("{}"))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if res.Template.ID != revA.ID || res.DesiredState != "Running" {
+		t.Fatalf("record = %+v, want recorded revision A running", res)
+	}
+	intents := pendingIntents(t, db, ws)
+	start := intents[len(intents)-1]
+	if start.Kind != provisioning.IntentStart || start.Spec.TemplateName != "" {
+		t.Fatalf("skipped start must not carry a re-point, got %+v", start.Spec)
+	}
+	reason, kind := intentReason(t, svc, ws)
+	if kind != provisioning.IntentStart || reason != provisioning.SkipReasonStorageSmaller {
+		t.Fatalf("newest intent = %s reason %q, want start/%s",
+			kind, reason, provisioning.SkipReasonStorageSmaller)
+	}
+	cr := applyPending(t, db, ws)
+	if cr.Spec.TemplateRef.Name != "linuxdesk" {
+		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	}
+}
+
+// TestUpdate_SkippedWhenDataPolicyDiffers (V3.2/E2): the newest revision
+// declares a different data policy — the start keeps the recorded revision
+// and records data-policy-changed on the start intent.
+func TestUpdate_SkippedWhenDataPolicyDiffers(t *testing.T) {
+	cat := newFakeTemplateLookup()
+	revA := familyEntry("linuxdesk", "aaaa1111", "2026-10-a", "OnStart")
+	revB := familyEntry("linuxdesk", "bbbb2222", "2026-10-b", "OnStart")
+	revB.DataPolicyDefault = "Retain"
+	cat.put(revA)
+	cat.put(revB)
+	db, svc, ws := familyWorkspace(t, cat)
+
+	res, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "fam-skip-02", provisioning.IntentStart, []byte("{}"))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if res.Template.ID != revA.ID || res.DesiredState != "Running" {
+		t.Fatalf("record = %+v, want recorded revision A running", res)
+	}
+	reason, kind := intentReason(t, svc, ws)
+	if kind != provisioning.IntentStart || reason != provisioning.SkipReasonDataPolicyChanged {
+		t.Fatalf("newest intent = %s reason %q, want start/%s",
+			kind, reason, provisioning.SkipReasonDataPolicyChanged)
+	}
+	cr := applyPending(t, db, ws)
+	if cr.Spec.TemplateRef.Name != "linuxdesk" {
+		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	}
+}
+
+// TestUpdate_SkippedReasonMatrix (V3.2/E2): each guard dimension reports
+// its own recorded reason; a compatible move records none.
+func TestUpdate_SkippedReasonMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(e *provisioning.TemplateCatalogEntry)
+		want   string
+	}{
+		{"runtime-changed", func(e *provisioning.TemplateCatalogEntry) { e.Runtime = "WindowsVM" }, provisioning.SkipReasonRuntimeChanged},
+		{"experience-changed", func(e *provisioning.TemplateCatalogEntry) { e.Experience = "Browser" }, provisioning.SkipReasonExperienceChanged},
+		{"data-policy-changed", func(e *provisioning.TemplateCatalogEntry) { e.DataPolicyDefault = "Retain" }, provisioning.SkipReasonDataPolicyChanged},
+		{"storage-smaller", func(e *provisioning.TemplateCatalogEntry) { e.DiskBytes -= 1 << 30 }, provisioning.SkipReasonStorageSmaller},
+		{"compatible", func(e *provisioning.TemplateCatalogEntry) { e.DiskBytes += 1 << 30 }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := newFakeTemplateLookup()
+			revA := familyEntry("linuxdesk", "aaaa1111", "2026-10-a", "OnStart")
+			revB := familyEntry("linuxdesk", "bbbb2222", "2026-10-b", "OnStart")
+			tc.mutate(&revB)
+			cat.put(revA)
+			cat.put(revB)
+			_, svc, ws := familyWorkspace(t, cat)
+
+			res, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "fam-skip-mx", provisioning.IntentStart, []byte("{}"))
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			reason, _ := intentReason(t, svc, ws)
+			if reason != tc.want {
+				t.Fatalf("recorded reason = %q, want %q", reason, tc.want)
+			}
+			if tc.want == "" && res.Template.ID != revB.ID {
+				t.Fatalf("compatible start must move to %s, record = %+v", revB.ID, res.Template)
+			}
+			if tc.want != "" && res.Template.ID != revA.ID {
+				t.Fatalf("skipped start must stay on %s, record = %+v", revA.ID, res.Template)
+			}
+		})
+	}
+}
+
 // TestCatalogNewestInFamily: NewestInFamily resolves the newest published
 // revision of a catalog-name family and singletons by object name;
 // unknown families answer ErrTemplateNotFound.
