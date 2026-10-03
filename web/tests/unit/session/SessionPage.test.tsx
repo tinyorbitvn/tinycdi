@@ -151,6 +151,34 @@ describe("SessionPage", () => {
     expect(submitted[2].target).toBe("_blank");
     expect(submitted[2].rel).toBe("noopener");
   });
+
+  it("clears ownership on tab handoff: 'Show it here instead' asks, not silently takes over", async () => {
+    const { ws, api } = setupPage();
+    const submitted = watchFormSubmits();
+    await waitFor(() => expect(submitted).toHaveLength(1)); // auto-launch
+
+    // The handoff: this tab opens the session in a new tab; that tab now
+    // holds the lease.
+    fireEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
+    const external = await screen.findByText("Session opened in a new tab");
+
+    // "Show here" must go through the CONNECTION_IN_USE path — a fresh
+    // ticket without takeover — so the held lease surfaces the dialog.
+    api.state.leases.set(ws.id, "lease_other");
+    fireEvent.click(
+      within(external.parentElement as HTMLElement).getByRole("button", {
+        name: "Show it here instead",
+      }),
+    );
+    const posts = () =>
+      api.state.requests.filter(
+        (r) => r.path.endsWith("/connections") && r.method === "POST",
+      );
+    await waitFor(() => expect(posts()).toHaveLength(3));
+    expect(JSON.parse(posts()[2].rawBody)).toEqual({ takeover: false });
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("This workspace is open somewhere else");
+  });
 });
 
 // ---- FX-R3: resume, signed-out, relaunch timeout, print hint ----

@@ -285,16 +285,6 @@ export function markSessionOwned(workspaceId: string, marker: SessionMarker): vo
   }
 }
 
-/**
- * Written the moment a launch ticket is minted, before any /connection
- * report can confirm the lease. Without it a reload inside that window
- * finds no marker, asks for a ticket on a live lease and gets the
- * take-over dialog — for its own session (backlog 1).
- */
-export function markSessionProvisional(workspaceId: string): void {
-  markSessionOwned(workspaceId, { leaseRef: "", streamEpoch: -1 });
-}
-
 export function readSessionMarker(workspaceId: string): SessionMarker | null {
   try {
     const raw = sessionStorage.getItem(OWNED_KEY_PREFIX + workspaceId);

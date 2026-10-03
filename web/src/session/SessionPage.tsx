@@ -185,6 +185,7 @@ export function SessionPage({
   const forget = useCallback(() => {
     seen.current = null;
     pending.current = null;
+    owned.current = false;
     clearSessionOwned(workspaceId);
   }, [workspaceId]);
 
@@ -301,7 +302,7 @@ export function SessionPage({
         inflight.current = false;
       }
     },
-    [api, workspaceId, frameName, sessionDomain, armLoadTimer, armPending, fail, forget],
+    [api, workspaceId, frameName, sessionDomain, armLoadTimer, fail, forget],
   );
 
   // Resume our own live session after a reload or an in-portal round trip:
@@ -341,7 +342,6 @@ export function SessionPage({
     const own = marker.leaseRef !== "" && status.leaseRef === marker.leaseRef;
     if (!own) {
       forget();
-      owned.current = false;
     }
 
     clearResume();
@@ -375,7 +375,6 @@ export function SessionPage({
         if (target !== undefined && target !== "" && s.leaseRef !== undefined && s.leaseRef !== target) {
           clearResume();
           forget();
-          owned.current = false;
           void launch("frame", false);
           return;
         }

@@ -163,12 +163,18 @@ export function WorkspaceDetailPage({
   const branding = useBranding();
 
   // The route title is shared with the list; once the workspace is known
-  // the tab should name it (T5.4).
+  // the tab should name it (T5.4). The cleanup leaves the neutral product
+  // title so a workspace name never outlives its page — the shell's own
+  // route-title effect overwrites it in the same commit either way.
   const wsName = ws?.name;
+  const productName = branding?.productName ?? DEFAULT_BRANDING.productName;
   useEffect(() => {
     if (!wsName) return;
-    document.title = `${wsName} · ${branding?.productName ?? DEFAULT_BRANDING.productName}`;
-  }, [wsName, branding]);
+    document.title = `${wsName} · ${productName}`;
+    return () => {
+      document.title = productName;
+    };
+  }, [wsName, productName]);
 
   if (!ws) {
     return (
