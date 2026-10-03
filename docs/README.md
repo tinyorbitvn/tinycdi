@@ -5,6 +5,8 @@
   are tracked in `adr/`
 - [images.md](images.md) — runtime image contract: endpoints, credentials,
   healthcheck, pinned inputs
+- [lifecycle-reasons.md](lifecycle-reasons.md) — workspace condition reasons
+  behind the portal's lifecycle progress
 - [compatibility.md](compatibility.md) — pinned dependency/toolchain
   versions and digests
 - [development.md](development.md) — repo layout, build & test commands,
