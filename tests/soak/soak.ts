@@ -110,6 +110,8 @@ Environment:
                          abort once the ramp-up connect p95 exceeds this
                          (unset: never; the scale runs use 15000)
   SOAK_LOGIN_CONCURRENCY OIDC logins at once during ramp-up (default 4)
+  SOAK_LOGIN_ATTEMPTS    per-lane login tries before the run aborts
+                         (default 3)
   SOAK_MOCK_PORTAL_PORT  dry-run mock portal port (default: a free port)
   SOAK_MOCK_SESSION_PORT dry-run mock session port (default: a free port)
   SOAK_IGNORE_TLS_ERRORS set to 1 for self-signed dev certs
@@ -1209,27 +1211,32 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
 
   try {
     stamp(`login (${opts.dryRun ? "dev login" : "OIDC"}, ${lanes.length} lane${lanes.length === 1 ? "" : "s"})`);
-    // Bounded parallelism: a 25-way OIDC burst can push the IdP form past
-    // the 30 s field deadline. A failed lane is retried once before the
-    // run gives up (the name goes into the error, never the password).
+    // Bounded parallelism: a big OIDC burst can push the IdP form past the
+    // 30 s field deadline. A failed lane is retried twice before the run
+    // gives up (the name goes into the error, never the password).
     const loginConcurrency = Math.max(
       1,
       Number(env("SOAK_LOGIN_CONCURRENCY") ?? "4") || 4,
     );
+    const loginAttempts = Math.max(1, Number(env("SOAK_LOGIN_ATTEMPTS") ?? "3") || 3);
     for (let i = 0; i < lanes.length; i += loginConcurrency) {
       await Promise.all(
         lanes.slice(i, i + loginConcurrency).map(async (lane) => {
           const who = lane.user?.name ?? "default";
-          try {
-            await lane.driver.login();
-          } catch (e) {
-            stamp(`login lane ${who} failed (${(e as Error).message}) — retrying once`);
+          let lastErr: Error | undefined;
+          for (let attempt = 1; attempt <= loginAttempts; attempt++) {
             try {
               await lane.driver.login();
-            } catch (e2) {
-              throw new Error(`login lane ${who}: ${(e2 as Error).message}`);
+              lastErr = undefined;
+              break;
+            } catch (e) {
+              lastErr = e as Error;
+              if (attempt < loginAttempts) {
+                stamp(`login lane ${who} failed attempt ${attempt} (${lastErr.message.split("\n")[0]}) — retrying`);
+              }
             }
           }
+          if (lastErr) throw new Error(`login lane ${who}: ${lastErr.message}`);
         }),
       );
     }
