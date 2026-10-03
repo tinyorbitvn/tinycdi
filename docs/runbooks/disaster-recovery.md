@@ -139,6 +139,39 @@ Then run the full post-restore invariant checklist in
 ticket/lease redeeming, held disk quota exact, outbox replays in revision
 order with no double runtimes).
 
+## Postgres outage (failover) — behaviour and measured numbers
+
+Tier 3 above covers Postgres **loss** (data recovery). A Postgres
+**outage** — restart, failover, network cut — is an availability event,
+not a DR event: no data is lost and the platform heals itself when the
+database returns. Fail-closed behaviour was measured in the v0.3 outage
+drill (`tests/integration/postgres_outage_test.go`, `docker stop`/`start`
+of the Postgres container — all connections severed at once, the
+shared-fate failover shape):
+
+| Outage | Open streams | Control-plane API | After recovery |
+|---|---|---|---|
+| **10 s** (shorter than the revoke deadline) | WebSocket stayed open and echoed through the outage and after recovery — no reconnect needed | `GET /v1/workspaces` → **503 `UNAVAILABLE`** in ~1 ms (bound: ≤ 5 s, never a hang) | Lease renewals resume; session unaffected |
+| **45 s** (longer than the deadline) | Socket closed **30.1 s** after the outage began — `session closed reason="renew_deadline"` (30.4 s after the last counted lease renew) | same 503 `UNAVAILABLE`, immediate | Lease row had expired (lease TTL 30 s) → reconnect takes the **re-launch** path: new ticket, fresh stream |
+
+Semantics, for operators planning DB maintenance or running a failover:
+
+- The session gateway survives broker/store failures only for
+  `-revoke-deadline` (default **30 s**) measured from the last lease renew
+  that actually landed. A failover that completes inside ~30 s keeps live
+  desktop streams; **a failover longer than 30 s drops every stream by
+  design** — fail closed beats serving an unverifiable session.
+- While the DB is down the app API answers `503 UNAVAILABLE` fast (~1 ms
+  measured) instead of hanging or answering wrong — callers should retry,
+  not fail.
+- After the DB returns, streams that survived (short outage) continue
+  untouched. Streams that were killed: if the lease row is still active
+  the existing session cookie re-opens a stream; once the lease has
+  expired (TTL 30 s), the user goes back through the ticket/launch flow —
+  measured path in the drill.
+- No operator action is needed on recovery: renewals resume on the next
+  tick and the lease/outbox machinery settles itself.
+
 ## Restore drill — executed
 
 A release drill executed tier 3 + the volume path on a
