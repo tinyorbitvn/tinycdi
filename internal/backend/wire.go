@@ -33,6 +33,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway/brokerclient"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
@@ -43,6 +44,15 @@ import (
 // redeemed on one can be renewed on another (restart-safe sessions); the
 // per-replica cert-CN derivation only exists in split mode.
 const defaultMergedGatewayID = "backend"
+
+// E7 rate-limit tuning: bursts are fixed per route family (the flags set
+// the per-minute rate only) and buckets are LRU-bounded so a sprayed
+// client-key space cannot grow memory.
+const (
+	loginRateBurst   = 10
+	launchRateBurst  = 20
+	rateLimitMaxKeys = 100_000
+)
 
 // wire resolves secrets, builds every handler, binds every enabled listener
 // and records the background loops and closers on b. On error the caller
@@ -59,6 +69,9 @@ func (b *Backend) wire(ctx context.Context) error {
 	}
 	if cfg.ControlToken == "" {
 		b.log.Warn(controlTokenUnsetWarning)
+	}
+	if rateLimitsUntrusted(cfg) {
+		b.log.Warn(trustedProxiesUnsetWarning)
 	}
 	b.cfg = cfg
 
@@ -341,6 +354,14 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			return fmt.Errorf("internal tls cert: %w", err)
 		}
 		b.reloaders = append(b.reloaders, rel)
+		// The client-CA bundle hot-reloads (E5): each handshake verifies
+		// against the pool's newest parsed bundle, so rotating the file
+		// adds and removes trust without a restart.
+		caPool, err := tlsreload.NewCAPool(cfg.InternalClientCA, tlsreload.WithLogger(log))
+		if err != nil {
+			return fmt.Errorf("internal client ca: %w", err)
+		}
+		b.reloaders = append(b.reloaders, caPool)
 		caPEM, err := os.ReadFile(cfg.InternalClientCA)
 		if err != nil {
 			return fmt.Errorf("internal client ca: %w", err)
@@ -354,9 +375,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			return fmt.Errorf("internal tls config: %w", err)
 		}
 		// Serve the cert through the reloader so rotation lands without a
-		// restart (D21).
+		// restart (D21); client-CA verification reads the pool per
+		// handshake for the same reason (E5).
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
+		hotReloadClientCAs(tlsCfg, caPool)
 		b.internalTLSCfg = tlsCfg
 		b.internalHandler = httpapi.NewHandler(httpapi.Config{
 			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log,
@@ -426,6 +449,10 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 			controlHosts = append(controlHosts, h)
 		}
 	}
+	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("trusted proxies: %w", err)
+	}
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
 		SessionDomain:  dom,
@@ -438,6 +465,8 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		ControlToken:   cfg.ControlToken,
 		RenewInterval:  cfg.RenewInterval,
 		RevokeDeadline: cfg.RevokeDeadline,
+		LaunchLimiter:  ratelimit.New(cfg.LaunchRate, launchRateBurst, rateLimitMaxKeys, nil),
+		TrustedProxies: trusted,
 		Metrics:        metrics,
 		Audit:          observability.NewJSONSink(os.Stdout),
 		Logger:         b.log,
@@ -517,22 +546,33 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler)
+	// E7: the unauthenticated login family shares one per-client bucket —
+	// /v1/login, /v1/auth/callback and the anonymous session probe
+	// (backlog 12). The client key honors -trusted-proxies exactly like
+	// the session gateway's launch limiter.
+	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("trusted proxies: %w", err)
+	}
+	loginLimit := api.RateLimit(ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil), trusted)
+
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, loginLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
 
 // appMux assembles the public API route table. The session surface
 // (launch, control, desktop proxy) is deliberately absent: API routes must
-// not exist on the session listener and vice versa (D7).
+// not exist on the session listener and vice versa (D7). loginLimit wraps
+// the anonymous login-family routes (E7).
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
-	data *api.DataHandler, quota *api.QuotaHandler) *http.ServeMux {
+	data *api.DataHandler, quota *api.QuotaHandler, loginLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("GET /v1/login", http.HandlerFunc(authn.LoginHandler))
-	mux.Handle("GET /v1/auth/callback", http.HandlerFunc(authn.CallbackHandler))
+	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
+	mux.Handle("GET /v1/auth/callback", loginLimit(http.HandlerFunc(authn.CallbackHandler)))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
-	api.MountSessionProbeRoute(mux, authn)
+	api.MountSessionProbeRoute(mux, authn, loginLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
 	api.MountConnectionRoutes(mux, authn, conn)

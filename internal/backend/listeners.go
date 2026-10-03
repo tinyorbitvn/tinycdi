@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // Listener timeout budgets (SEC-23). The app, internal and metrics
@@ -76,4 +78,16 @@ func metricsServer(addr string, h http.Handler) *http.Server {
 // rotation takes effect on the next handshake without a restart (D21).
 func serveTLS(srv *http.Server, ln net.Listener, tlsCfg *tls.Config) error {
 	return srv.Serve(tls.NewListener(ln, tlsCfg))
+}
+
+// hotReloadClientCAs installs a GetConfigForClient on cfg that clones it
+// per handshake with pool's current bundle as ClientCAs (E5): rotating
+// the client-CA file adds and removes trust without a restart. The static
+// ClientCAs on cfg is the boot-time bundle only.
+func hotReloadClientCAs(cfg *tls.Config, pool *tlsreload.CAPool) {
+	cfg.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		c := cfg.Clone()
+		c.ClientCAs = pool.Pool()
+		return c, nil
+	}
 }
