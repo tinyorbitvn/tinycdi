@@ -231,6 +231,10 @@ paths:
         caller (equivalent to `POST /v1/data/{id}/attach`); the retained record
         must be in state `Retained` and is claimed exclusively.
 
+        A template whose runtime image is older than `-image-block-after`
+        (default 45 d) is refused with `409 IMAGE_STALE` (E3); a template
+        without a parseable `imageBuiltAt` never blocks.
+
         Idempotent: same `Idempotency-Key` + same body returns the recorded
         workspace; same key + different body returns `409 IDEMPOTENCY_CONFLICT`.
       tags: [workspaces]
@@ -347,6 +351,13 @@ paths:
         failure); any other phase returns `409 INVALID_STATE`. Repeating start
         with the same `Idempotency-Key` returns the recorded result; a new key
         while already `Running`/`Ready` is a no-op returning the current view.
+
+        When the workspace's template family has a newer published revision
+        (`updateAvailable`), a start under `imageUpdate: OnStart` moves to it
+        (E1/E2). A start that cannot move to a fresher revision and whose
+        resolved image is older than `-image-block-after` is refused with
+        `409 IMAGE_STALE` (E3); `imageUpdate: Pinned` workspaces on a stale
+        image are refused the same way.
       tags: [workspaces]
       security:
         - sessionCookie: []
@@ -984,6 +995,7 @@ components:
         | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
         | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
         | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
+        | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
         | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
         | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
         | `INTERNAL` | 500 | true | unexpected server failure; safe to retry |
@@ -1001,6 +1013,7 @@ components:
         - QUOTA_EXHAUSTED
         - QUOTA_NOT_CONFIGURED
         - CONNECTION_IN_USE
+        - IMAGE_STALE
         - RATE_LIMITED
         - UNAVAILABLE
         - INTERNAL
@@ -1042,6 +1055,24 @@ components:
                 — the response then also carries `retryable: true` and a
                 `Retry-After` header.
               enum: [release_pending]
+            templateName:
+              type: string
+              description: |
+                `IMAGE_STALE` only: the template whose runtime image is
+                over `-image-block-after` — the message names it too.
+            ageDays:
+              type: integer
+              description: "`IMAGE_STALE` only: observed image age in whole days."
+            limitDays:
+              type: integer
+              description: "`IMAGE_STALE` only: configured freshness limit in whole days."
+            pinned:
+              type: boolean
+              description: |
+                `IMAGE_STALE` only: true when the workspace is pinned to the
+                stale revision (`imageUpdate: Pinned` or a guard-refused
+                move) — it can start again only after an administrator
+                publishes a fresh image.
 
     WorkspacePhase:
       type: string
@@ -1216,8 +1247,9 @@ components:
           type: boolean
           description: |
             True when the runtime image is older than the backend's
-            -image-stale-after threshold (default 336h). Advisory only —
-            a stale image never blocks a Start in v0.2.
+            -image-stale-after threshold (default 336h). Advisory; a
+            create or start on an image older than -image-block-after
+            (default 45 d) is refused with 409 IMAGE_STALE (E3).
         templateRevision:
           type: string
           description: |
@@ -1671,8 +1703,27 @@ components:
           type: boolean
           description: |
             True when the runtime image is older than the backend's
-            -image-stale-after threshold (default 336h). Advisory only —
-            a stale image never blocks a Start in v0.2.
+            -image-stale-after threshold (default 336h).
+        imageBlocked:
+          type: boolean
+          description: |
+            True when the runtime image is older than the backend's
+            -image-block-after threshold (default 45 d, E3): a create or a
+            start that cannot move to a fresher revision is refused with
+            409 IMAGE_STALE. Absent when the template carries no parseable
+            image-built-at — a missing annotation never blocks. False when
+            the block is disabled (-image-block-after=0).
+        imageEngines:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Browser engine versions the runtime image was built with (the
+            template's workspaces.cdi.tinyorbit.vn/image-chromium and
+            image-firefox annotations, rendered from
+            `images.<key>.engines.*`), e.g. `{"chromium": "154.0.8037.92",
+            "firefox": "153.4.0esr"}`. Absent when the template declares
+            none.
 
     TemplateList:
       type: object

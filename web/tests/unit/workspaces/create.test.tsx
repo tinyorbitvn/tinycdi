@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { CreateWorkspacePage } from "../../../src/workspaces/CreateWorkspacePage";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
-import { TEMPLATE_LINUX, TEMPLATE_BROWSER } from "../../mock-api/fixtures.ts";
+import { TEMPLATE_LINUX, TEMPLATE_BROWSER, type TemplateFixture } from "../../mock-api/fixtures.ts";
 
 interface CreateCall {
   headers: Record<string, string>;
@@ -160,5 +160,80 @@ describe("CreateWorkspacePage", () => {
       "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
     );
     expect(alert).not.toHaveTextContent("delete an unused workspace");
+  }, 20000);
+
+  // V3.3 (E3): a template over the -image-block-after limit reports
+  // imageBlocked — the create submit is disabled and the reason is shown
+  // before any request goes out.
+  it("create: stale template is disabled with a reason", async () => {
+    const api = createMockApi();
+    api.state.templates.push({
+      ...structuredClone(TEMPLATE_BROWSER),
+      id: "tpl_blockedimg",
+      name: "blocked-browser",
+      imageStale: true,
+      imageBlocked: true,
+      imageBuiltAt: "2026-08-01T00:00:00Z",
+    } as TemplateFixture);
+    loginCookies();
+    const calls = interceptCreates(api, null);
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm("tpl_blockedimg");
+
+    const reason = (await screen.findAllByRole("alert")).find((a) =>
+      a.textContent?.includes("Image too old"),
+    );
+    expect(reason).toBeDefined();
+    expect(reason).toHaveTextContent("older than the freshness limit");
+    expect(screen.getByRole("button", { name: "Create workspace" })).toBeDisabled();
+    expect(calls).toHaveLength(0);
+  }, 20000);
+
+  // V3.3: a server-side IMAGE_STALE refusal (e.g. the image went stale
+  // between catalog load and submit) names the template and its ages from
+  // error details; the pinned hint appears only for pinned workspaces.
+  it.each([
+    ["not pinned", false, /does not mention pinning/],
+    ["pinned", true, /says a fresh image is required/],
+  ])("create: IMAGE_STALE refusal guidance (%s)", async (_label, pinned, _check) => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: {
+        code: "IMAGE_STALE",
+        message: 'template "linux-chromium-browser" runtime image is 60 days old (limit 45 days)',
+        retryable: false,
+        requestId: "r-stale",
+        details: {
+          templateName: "linux-chromium-browser",
+          ageDays: 60,
+          limitDays: 45,
+          pinned,
+        },
+      },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_BROWSER.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    // The Ephemeral-policy notice is an alert too; wait for the error
+    // banner specifically.
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("alert").some((a) => a.textContent?.includes("IMAGE_STALE")),
+      ).toBe(true);
+    });
+    const alert = screen
+      .getAllByRole("alert")
+      .find((a) => a.textContent?.includes("IMAGE_STALE"))!;
+    expect(alert).toHaveTextContent(
+      "Template linux-chromium-browser's runtime image is 60 days old — over the 45-day freshness limit",
+    );
+    if (pinned) {
+      expect(alert).toHaveTextContent("only after an administrator publishes a fresh image");
+    } else {
+      expect(alert).not.toHaveTextContent("only after an administrator publishes a fresh image");
+    }
   }, 20000);
 });

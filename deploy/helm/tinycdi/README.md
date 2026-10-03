@@ -156,6 +156,8 @@ objects. It **keeps**:
 | `images.<name>.tag` | chart `appVersion` | tag; ignored when `digest` is set |
 | `images.<name>.digest` | `""` | `sha256:<64hex>` — digest pinning wins over tag |
 | `images.<name>.pullPolicy` | `IfNotPresent` | per-image pull policy |
+| `images.<name>.builtAt` | `""` | RFC 3339 build time from the runtime train's `runtime-images.json` → `image-built-at` annotation; an image older than `-image-block-after` (45 d default) refuses create/start with 409 IMAGE_STALE (runtime images only) |
+| `images.<name>.engines.{chromium,firefox}` | unset | browser engine versions from `runtime-images.json` → `image-chromium`/`image-firefox` annotations, shown on the template's stale-image view (runtime images only) |
 
 ### Topology
 

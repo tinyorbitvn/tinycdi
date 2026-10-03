@@ -88,6 +88,8 @@ func contractTemplate(clipboard string) templateView {
 		PublishedAt:       built,
 		ImageBuiltAt:      &built,
 		ImageStale:        &stale,
+		ImageBlocked:      &stale,
+		ImageEngines:      map[string]string{"chromium": "154.0.8037.92", "firefox": "153.4.0esr"},
 	}
 }
 

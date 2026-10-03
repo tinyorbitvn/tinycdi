@@ -294,6 +294,11 @@ type TemplateCatalogEntry struct {
 	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339
 	// when well formed); empty when the template carries no annotation.
 	ImageBuiltAt string
+	// ImageEngines carries the browser engine versions baked into the
+	// runtime image (the image-chromium/image-firefox annotations, e.g.
+	// {"chromium": "154.0.8037.92", "firefox": "153.4.0esr"}); nil when the
+	// template declares none.
+	ImageEngines map[string]string
 }
 
 // ErrTemplateNotFound means a template or template family does not resolve
@@ -329,6 +334,15 @@ const AnnotationImageBuiltAt = "workspaces.cdi.tinyorbit.vn/image-built-at"
 // Create copies the template's value so the image age travels with the
 // workspace and survives the template revision being superseded.
 const AnnotationWorkspaceImageBuiltAt = AnnotationImageBuiltAt
+
+// The image-<engine> annotations carry the browser engine versions the
+// runtime image was built with, rendered from images.<key>.engines.*. They
+// surface on the template view as imageEngines so the stale-image view
+// shows both engines (backlog 14).
+const (
+	AnnotationImageChromium = "workspaces.cdi.tinyorbit.vn/image-chromium"
+	AnnotationImageFirefox  = "workspaces.cdi.tinyorbit.vn/image-firefox"
+)
 
 // TemplateCRName converts a public template ID to its CR name; ok=false
 // when id lacks the tpl_ prefix.
@@ -489,6 +503,18 @@ func templateEntry(t *workspacev1alpha1.WorkspaceTemplate) TemplateCatalogEntry 
 	e.ClipboardPolicy = string(t.Spec.ClipboardPolicy)
 	e.NetworkProfile = string(t.Spec.NetworkProfile)
 	e.ImageBuiltAt = t.Annotations[AnnotationImageBuiltAt]
+	if v := t.Annotations[AnnotationImageChromium]; v != "" {
+		if e.ImageEngines == nil {
+			e.ImageEngines = map[string]string{}
+		}
+		e.ImageEngines["chromium"] = v
+	}
+	if v := t.Annotations[AnnotationImageFirefox]; v != "" {
+		if e.ImageEngines == nil {
+			e.ImageEngines = map[string]string{}
+		}
+		e.ImageEngines["firefox"] = v
+	}
 	return e
 }
 
