@@ -84,17 +84,24 @@ datasource.
 alerts:
   enabled: true                 # requires backend.metrics.enabled +
   labels: {release: prometheus} #   the Prometheus Operator CRDs
+  sessionDropFloor: 5           # TinyCDISessionDropSpike fires only if at
+                              # least this many sessions were live 5m ago;
+                              # 0 disables the floor
 ```
 
 Renders one `PrometheusRule` named `tinycdi` (group `tinycdi.platform`).
 `alerts.labels` must match the operator's `ruleSelector` — the same
-convention as `serviceMonitor.labels`. Each rule below states what it
-means and the first thing to check.
+convention as `serviceMonitor.labels`. The ratio alerts
+(`TinyCDISessionDropSpike`, `TinyCDIRehydrationFailures`,
+`TinyCDILoginFailuresHigh`) put the measured ratio first in their
+expression, so the alert description's `$value` is the real drop / miss /
+failure percentage. Each rule below states what it means and the first
+thing to check.
 
 | Alert | Severity | Fires when | First thing to check |
 |---|---|---|---|
 | `TinyCDIBackendReplicaDown` | warning | fewer backend replicas report metrics than `backend.replicas` for 15m | `kubectl -n <release-ns> get pods -l app.kubernetes.io/name=backend` — a replica is down, Pending, or its metrics listener is unreachable (NetworkPolicy) |
-| `TinyCDISessionDropSpike` | critical | >50 % of live sessions vanish inside 5m | backend restarts/rollouts (`kubectl rollout history`), then Postgres health — a failover past the 30 s revoke deadline drops every stream by design (see below) |
+| `TinyCDISessionDropSpike` | critical | >50 % of live sessions vanish inside 5m **and** at least `alerts.sessionDropFloor` (default 5) were live — a small install draining at night (2→0) stays quiet; `0` disables the floor | backend restarts/rollouts (`kubectl rollout history`), then Postgres health — a failover past the 30 s revoke deadline drops every stream by design (see below) |
 | `TinyCDILeaseRenewFailures` | warning | lease failures sustain ≈ >1 per 50 s for 15m | the `reason` label on `tinycdi_lease_failures_total`; gateway↔broker connectivity and fencing |
 | `TinyCDIRehydrationFailures` | warning | >20 % of session rehydrations return miss/error for 15m | backend pod churn — sessions should survive a restart; repeated misses mean the shared session directory is being lost |
 | `TinyCDIRuntimeImageStale` | warning | a catalog family's newest revision is older than `-image-stale-after` (14 d default) for 1h | the runtime-image publish train (`.github/workflows/runtime-images.yml`) — a fresh `rt-*` tag clears it. Threshold mirrors the flag default; if you overrode it via `backend.extraArgs`, edit the rendered rule |
