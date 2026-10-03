@@ -5,8 +5,9 @@
 # + Firefox ESR) and build/linux-desktop (XFCE4 desktop). A custom desktop
 # image does the same (docs/images.md, "Build a custom desktop image").
 # Contents: KasmVNC (X server + HTTPS/websocket endpoint), X utilities,
-# D-Bus, fonts, the entrypoint/healthcheck, the system KasmVNC policy, the
-# non-root workspace user and the setuid/setgid strip. No window manager,
+# D-Bus, fonts (DejaVu, Noto and WenQuanYi, trimmed to the faces below),
+# the entrypoint/healthcheck, the system KasmVNC policy, the non-root
+# workspace user and the setuid/setgid strip. No window manager,
 # no terminal, no browser.
 #
 # Pinned per docs/compatibility.md:
@@ -38,7 +39,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       x11-xserver-utils x11-utils dbus-x11 \
-      fonts-dejavu-core \
+      fontconfig fonts-dejavu-core fonts-noto-core fonts-wqy-microhei \
       perl libswitch-perl libyaml-tiny-perl libhash-merge-simple-perl \
       libscalar-list-utils-perl liblist-moreutils-perl libtry-tiny-perl \
       libdatetime-perl libdatetime-timezone-perl \
@@ -52,6 +53,15 @@ RUN apt-get update \
  && echo "${KASMVNC_DEB_SHA256}  /tmp/kasmvncserver.deb" | sha256sum -c - \
  && apt-get install -y --no-install-recommends /tmp/kasmvncserver.deb \
  && rm -f /tmp/kasmvncserver.deb \
+# fonts-noto-core ships 268 faces covering every Unicode script; keep the
+# Latin/Greek/Cyrillic core (Vietnamese included). CJK is
+# fonts-wqy-microhei: the smallest package covering zh/ja/ko — the Noto
+# CJK faces alone would exceed the browser image's +2 % size budget
+# (docs/images.md). Installed unpinned like the other runtime-base
+# packages.
+ && find /usr/share/fonts/truetype/noto -type f \
+      ! -name 'NotoSans-*.ttf' ! -name 'NotoSerif-*.ttf' -delete \
+ && fc-cache -f >/dev/null \
  && rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem \
           /etc/ssl/private/ssl-cert-snakeoil.key \
  && rm -rf /var/lib/apt/lists/*

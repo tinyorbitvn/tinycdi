@@ -44,7 +44,7 @@ debian:bookworm-slim ─► tcdi/linux-base ─┬─► tcdi/linux-desktop   (X
 
 | Image | Contents | Purpose |
 |---|---|---|
-| `tcdi/linux-base` | `debian:bookworm-slim` (digest-pinned) + KasmVNC 1.5.0 (sha256-verified deb), X utilities, D-Bus, DejaVu fonts, the entrypoint/healthcheck, the system KasmVNC policy, the `workspace` user (uid 1000), the setuid/setgid strip. **No window manager, no terminal, no browser** | the runtime contract (below) and nothing a profile decides; the starting point for custom images |
+| `tcdi/linux-base` | `debian:bookworm-slim` (digest-pinned) + KasmVNC 1.5.0 (sha256-verified deb), X utilities, D-Bus, fontconfig + DejaVu/Noto/WenQuanYi fonts (see *Budgets* for the kept faces), the entrypoint/healthcheck, the system KasmVNC policy, the `workspace` user (uid 1000), the setuid/setgid strip. **No window manager, no terminal, no browser** | the runtime contract (below) and nothing a profile decides; the starting point for custom images |
 | `tcdi/linux-desktop` | `FROM tcdi/linux-base` + XFCE4 (minimal set) + Firefox ESR — see [The desktop profile](#the-desktop-profile-tcdilinux-desktop) | `experience: Desktop` templates |
 | `tcdi/browser` | `FROM tcdi/linux-base` + openbox + xterm + `chromium` + `chromium-sandbox` + `firefox-esr` (apt-pinned) | `experience: Browser` templates — the session launches the browser maximized |
 
@@ -170,7 +170,7 @@ plain `#274060` desktop with a *Home* icon.
 | Archive tool | `xarchiver` | |
 | Image viewer | `ristretto` | **PDFs open in Firefox's built-in viewer** (set in `/etc/xdg/mimeapps.list`): a separate PDF reader (`atril`, `evince`) drags in WebKitGTK, GStreamer and poppler — ~100 more packages — for a viewer Firefox already provides |
 | Browser | `firefox-esr` | the same apt pin as `tcdi/browser` (see *Pinned inputs*); a panel launcher; a policy file (`distribution/policies.json`) switches off the updater, the default-browser prompt, the first-run/post-update pages, telemetry and the sponsored/Pocket tiles |
-| Look | `greybird-gtk-theme`, `adwaita-icon-theme`, DejaVu Sans / Sans Mono | one readable light theme; DejaVu covers Vietnamese |
+| Look | `greybird-gtk-theme`, `adwaita-icon-theme`, DejaVu Sans / Sans Mono, Noto Sans / Serif, WenQuanYi Micro Hei | one readable light theme; the font set covers Latin/Greek/Cyrillic (incl. Vietnamese) and zh/ja/ko |
 | Glue | `xdg-utils` | `xdg-open` for links and *Open with* |
 
 ### Deliberately not installed (and, where the package ships them, removed)
@@ -250,14 +250,33 @@ over, every pre-existing file is byte-identical, and a second stop/start works.
 
 | | old `linux-desktop` (openbox + xterm) | new `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` (new) | `browser` before → after |
 |---|---|---|---|---|
-| Image size (uncompressed / compressed) | 790 MiB / 199 MB | 1188 MiB / 302 MB | 583 MiB / 146 MB | 1.726 GiB → 1.728 GiB (+0.10 %) |
-| Packages (dpkg) | 328 | 381 | 249 | 373 → 373 (identical list) |
+| Image size (uncompressed / compressed) | 790 MiB / 199 MB | 1202 MiB / 289 MB | 598 MiB / 141 MB | 1.726 GiB → 1.783 GiB (+0.90 %) |
+| Packages (dpkg) | 328 | 383 | 252 | 373 → 375 (added `fonts-noto-core`, `fonts-wqy-microhei`) |
 | trivy HIGH/CRITICAL **with a fix** (the gate) | 0 | 0 | 0 | 0 → 0 |
 | trivy HIGH/CRITICAL total (CRITICAL + HIGH, unfixed in bookworm) | 17 + 150 | 16 + 140 | 14 + 94 | 17 + 153 → 17 + 153 |
 | Idle CPU of a fresh session (mean over 60 s, after 45 s) | 14 mCPU | 14 mCPU | — | unchanged |
 | Idle memory (working set) | 37 MiB | 98 MiB | — | unchanged |
 | Time to first frame (container start → panel/`xterm` window mapped) | 2.4 s | 2.3 s | — | unchanged |
 | Time to healthy (the 5 s healthcheck interval dominates) | 5.4 s | 5.4 s | — | unchanged |
+
+**Fonts (added 2026-10-03; the size and package rows above include them,
+the trivy rows predate them — the runtime-train scan re-measures on
+publish).** `linux-base` ships `fontconfig`, `fonts-dejavu-core`,
+`fonts-noto-core` trimmed to the eight Latin/Greek/Cyrillic faces
+(Sans and Serif × Regular/Bold/Italic — Vietnamese included; the
+package's other ~260 script faces are deleted) and `fonts-wqy-microhei`
+for CJK (zh/ja/ko). The CJK choice is a budget decision: image size in
+this table (and in `TestLinuxRuntimeBrowserBaseline`) is
+`docker image inspect .Size`, which on the containerd store counts
+≈1.8× the bytes of added files. Measured against the browser's +2 %
+headroom (~35 MiB over the pre-split baseline): full `fonts-noto-cjk`
+adds ~89 MiB unpacked (~160 MiB on the metric) — far over; the
+`NotoSansCJK-Regular.ttc` face alone adds ~35 MiB (+2.39 % measured —
+just over); `fonts-droid-fallback` has no Korean; `fonts-wqy-microhei`
+adds ~8 MiB and covers zh/ja/ko (CN-flavoured glyph forms for ja/ko —
+correct coverage, not native typography). Proper Noto CJK therefore
+needs a baseline re-issue by decision; the baseline cannot absorb added
+software under its own rule.
 
 Under use (measured on the new desktop): opening a terminal, Thunar and
 Firefox (three tabs) bursts to ~2 CPU for ~40 s while Firefox starts, then
@@ -408,6 +427,11 @@ before changing anything under `build/linux-*`/`build/browser`.
 ## Scan results
 
 ### 2026-10-03 (V3.26: base split + XFCE desktop) — trivy 0.70.0, syft 1.52.0, DB latest
+
+> Later the same day `linux-base` gained three font packages
+> (`fontconfig`, `fonts-noto-core`, `fonts-wqy-microhei` — font data and
+> the fc tools, no new libraries; see *Budgets*). The numbers below
+> predate them; the runtime-train scan job re-measures on publish.
 
 | Image | SBOM packages | HIGH/CRITICAL with a fix (the gate) | CRITICAL / HIGH total (unfixed in bookworm) |
 |---|---|---|---|
