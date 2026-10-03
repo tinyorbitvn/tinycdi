@@ -14,6 +14,7 @@ import {
 import { Link, navigate } from "../lib/router";
 import { isPortalApiError } from "../api/errors";
 import { t, formatDateTime, type MessageKey } from "../i18n";
+import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { isTenantAdmin, useLoader, useMeLoaded } from "../app/me";
@@ -93,7 +94,12 @@ export function DataListPage() {
       });
     }
     cols.push(
-      { key: "runtime", header: t("data.list.col.runtime"), hideOnMobile: true },
+      {
+        key: "runtime",
+        header: t("data.list.col.runtime"),
+        hideOnMobile: true,
+        render: (r) => runtimeLabel(r.runtime),
+      },
       {
         key: "size",
         header: t("data.list.col.size"),

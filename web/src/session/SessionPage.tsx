@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
 import { t, formatTime } from "../i18n";
 import { formatDuration } from "../templates/format";
+import { phaseLabelKey } from "../workspaces/helpers";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
@@ -1299,7 +1300,7 @@ function ClipboardHint({ template }: { template: TemplateView | null }) {
 export function connectBlocker(ws: WorkspaceView): string | null {
   if (ws.desiredState !== "Running") return t("session.blocker.stopped");
   if (ws.phase !== "Ready") {
-    return t("session.blocker.phase", { phase: ws.phase.toLowerCase() });
+    return t("session.blocker.phase", { phase: t(phaseLabelKey(ws.phase)) });
   }
   const conn = ws.conditions.find((c) => c.type === "ConnectionReady");
   if (conn?.status !== "True") return t("session.blocker.connection");

@@ -215,7 +215,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           onChange={(e) => setPhase(e.target.value as WorkspacePhase | "")}
           options={[
             { value: "", label: t("admin.workspaces.phase.all") },
-            ...PHASES.map((p) => ({ value: p, label: p })),
+            ...PHASES.map((p) => ({ value: p, label: t(phaseLabelKey(p)) })),
           ]}
         />
       </Cluster>
