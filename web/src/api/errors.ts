@@ -1,6 +1,10 @@
 import type { components } from "./generated/schema";
 
 export type ErrorCode = components["schemas"]["ErrorCode"];
+
+// The schema-generated Error.details shape (release_pending reason plus
+// the IMAGE_STALE templateName/ageDays/limitDays/pinned context).
+export type ErrorDetails = NonNullable<components["schemas"]["Error"]["details"]>;
 export type ErrorBody = components["schemas"]["Error"];
 
 export class PortalApiError extends Error {
@@ -8,7 +12,7 @@ export class PortalApiError extends Error {
   readonly httpStatus: number;
   readonly retryable: boolean;
   readonly requestId: string;
-  readonly details: { reason?: "release_pending" | undefined } | undefined;
+  readonly details: ErrorDetails | undefined;
 
   constructor(
     httpStatus: number,
@@ -17,7 +21,7 @@ export class PortalApiError extends Error {
       message?: string | undefined;
       retryable?: boolean | undefined;
       requestId?: string | undefined;
-      details?: { reason?: "release_pending" | undefined } | undefined;
+      details?: ErrorDetails | undefined;
     },
   ) {
     const rawCode = body.code ?? "INTERNAL";
@@ -58,6 +62,7 @@ const KNOWN_CODES: ReadonlySet<string> = new Set([
   "QUOTA_EXHAUSTED",
   "QUOTA_NOT_CONFIGURED",
   "CONNECTION_IN_USE",
+  "IMAGE_STALE",
   "RATE_LIMITED",
   "UNAVAILABLE",
   "INTERNAL",

@@ -486,7 +486,7 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
-         *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); a fresh template revision must be published or chosen — a missing `imageBuiltAt` never blocks |
+         *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
          *     | `INTERNAL` | 500 | true | unexpected server failure; safe to retry |
@@ -527,6 +527,22 @@ export interface components {
                  * @enum {string}
                  */
                 reason?: "release_pending";
+                /**
+                 * @description `IMAGE_STALE` only: the template whose runtime image is
+                 *     over `-image-block-after` — the message names it too.
+                 */
+                templateName?: string;
+                /** @description `IMAGE_STALE` only: observed image age in whole days. */
+                ageDays?: number;
+                /** @description `IMAGE_STALE` only: configured freshness limit in whole days. */
+                limitDays?: number;
+                /**
+                 * @description `IMAGE_STALE` only: true when the workspace is pinned to the
+                 *     stale revision (`imageUpdate: Pinned` or a guard-refused
+                 *     move) — it can start again only after an administrator
+                 *     publishes a fresh image.
+                 */
+                pinned?: boolean;
             };
         };
         /**

@@ -67,14 +67,31 @@ func (s *Service) WithLogger(l *slog.Logger) *Service {
 // image is older than -image-block-after. The API maps it to 409
 // IMAGE_STALE.
 type ImageStaleError struct {
+	// TemplateName names the resolved template/catalog entry whose image
+	// is stale — the message always names it.
+	TemplateName string
 	// AgeDays is the resolved image's age in whole days; LimitDays the
 	// configured limit in whole days.
 	AgeDays, LimitDays int
+	// Pinned marks a workspace that cannot move to a fresher revision —
+	// imageUpdate Pinned, or a move the compatibility guard refused — so
+	// it can start again only after an administrator publishes a fresh
+	// image. False on creates (the caller picked the template) and on
+	// starts resolved to the family's newest.
+	Pinned bool
 }
 
 func (e *ImageStaleError) Error() string {
-	return fmt.Sprintf("the resolved runtime image is %d days old; the freshness limit is %d days",
+	msg := fmt.Sprintf("the resolved runtime image is %d days old (limit %d days)",
 		e.AgeDays, e.LimitDays)
+	if e.TemplateName != "" {
+		msg = fmt.Sprintf("template %q runtime image is %d days old (limit %d days)",
+			e.TemplateName, e.AgeDays, e.LimitDays)
+	}
+	if e.Pinned {
+		msg += " — the workspace is pinned to this revision and can start again only after an administrator publishes a fresh image"
+	}
+	return msg
 }
 
 // IsImageStale reports whether err carries an E3 stale-image refusal.
@@ -86,8 +103,10 @@ func IsImageStale(err error) bool {
 // CheckImageBlock parses the raw image-built-at value (RFC 3339) and
 // returns *ImageStaleError when its age exceeds limit. It returns nil when
 // the block is disabled (limit <= 0) or the value is missing or malformed
-// — a missing imageBuiltAt never blocks (E3).
-func CheckImageBlock(raw string, limit time.Duration, now time.Time) error {
+// — a missing imageBuiltAt never blocks (E3). templateName/pinned fill the
+// refusal's context: the template it names and whether the caller cannot
+// move to a fresher revision.
+func CheckImageBlock(raw string, limit time.Duration, now time.Time, templateName string, pinned bool) error {
 	if limit <= 0 || raw == "" {
 		return nil
 	}
@@ -100,8 +119,10 @@ func CheckImageBlock(raw string, limit time.Duration, now time.Time) error {
 		return nil
 	}
 	return &ImageStaleError{
-		AgeDays:   int(age / (24 * time.Hour)),
-		LimitDays: int(limit / (24 * time.Hour)),
+		TemplateName: templateName,
+		AgeDays:      int(age / (24 * time.Hour)),
+		LimitDays:    int(limit / (24 * time.Hour)),
+		Pinned:       pinned,
 	}
 }
 
@@ -187,7 +208,7 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 	}
 	// E3: a create resolving to an image older than -image-block-after is
 	// refused; a missing or malformed image-built-at never blocks.
-	if err := CheckImageBlock(req.Template.ImageBuiltAt, s.blockAfter, time.Now()); err != nil {
+	if err := CheckImageBlock(req.Template.ImageBuiltAt, s.blockAfter, time.Now(), req.Template.Name, false); err != nil {
 		return res, err
 	}
 	dataPolicy := req.DataPolicy
@@ -446,12 +467,14 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				// E1: a start may re-point the workspace at the newest
 				// published revision of its template family; the move is
 				// decided and written in this same transaction.
+				var pinned bool
 				if s.templates != nil {
-					next, objName, skipped, builtAt, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
+					next, objName, skipped, builtAt, immovable, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
 					if err != nil {
 						return err
 					}
 					resolvedBuiltAt = builtAt
+					pinned = immovable
 					if next != nil {
 						rec.Template = *next
 						sigSpec = &IntentSpec{
@@ -465,8 +488,10 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				// E3: a start whose resolved revision's image is older than
 				// -image-block-after is refused here, inside the
 				// transaction — no state change, reservation or intent is
-				// written. The API maps the refusal to 409 IMAGE_STALE.
-				if err := CheckImageBlock(resolvedBuiltAt, s.blockAfter, time.Now()); err != nil {
+				// written. The API maps the refusal to 409 IMAGE_STALE. A
+				// pinned (or guard-refused) start can never move, so the
+				// refusal says an administrator must publish a fresh image.
+				if err := CheckImageBlock(resolvedBuiltAt, s.blockAfter, time.Now(), rec.Template.Name, pinned); err != nil {
 					return err
 				}
 				// A stop releases the running-quota reservation once the

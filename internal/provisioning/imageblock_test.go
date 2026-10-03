@@ -12,6 +12,7 @@ package provisioning_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,21 @@ func TestStart_BlockedWhenPinnedAndStale(t *testing.T) {
 	if stale.AgeDays != 60 || stale.LimitDays != 45 {
 		t.Fatalf("ImageStaleError = %+v, want 60 days over a 45-day limit", stale)
 	}
+	if stale.TemplateName != "linuxdesk" {
+		t.Fatalf("TemplateName = %q, want linuxdesk", stale.TemplateName)
+	}
+	// Pinned: the workspace can never move — the refusal must name the
+	// template and say only a fresh image publication unblocks it.
+	if !stale.Pinned {
+		t.Fatal("Pinned = false, want true for imageUpdate Pinned")
+	}
+	if !strings.Contains(err.Error(), `template "linuxdesk"`) {
+		t.Fatalf("message %q must name the template", err)
+	}
+	if !strings.Contains(err.Error(), "pinned") ||
+		!strings.Contains(err.Error(), "publishes a fresh image") {
+		t.Fatalf("pinned message %q must say a fresh image is required", err)
+	}
 	rec, gerr := svc.GetWorkspace(context.Background(), familyTenant, "", ws)
 	if gerr != nil {
 		t.Fatalf("get: %v", gerr)
@@ -122,8 +138,24 @@ func TestStart_BlockedWhenNewestAlsoStale(t *testing.T) {
 	svc.WithImageBlockAfter(blockTestLimit)
 
 	_, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "block-start-3", provisioning.IntentStart, []byte("{}"))
-	if !provisioning.IsImageStale(err) {
-		t.Fatalf("start error = %v, want ImageStaleError", err)
+	var stale *provisioning.ImageStaleError
+	if !errors.As(err, &stale) {
+		t.Fatalf("start error = %v, want *ImageStaleError", err)
+	}
+	// OnStart with no fresher revision to adopt: the refusal names the
+	// template but carries no pinned sentence — a newly published
+	// revision WOULD be adopted on the next start.
+	if stale.Pinned {
+		t.Fatalf("Pinned = true, want false for an OnStart workspace: %v", stale)
+	}
+	if !strings.Contains(err.Error(), `template "linuxdesk"`) {
+		t.Fatalf("message %q must name the template", err)
+	}
+	if strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("OnStart message %q must not carry the pinned sentence", err)
+	}
+	if stale.AgeDays != 90 {
+		t.Fatalf("AgeDays = %d, want the resolved newest revision's 90", stale.AgeDays)
 	}
 }
 

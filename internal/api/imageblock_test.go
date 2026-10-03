@@ -51,8 +51,18 @@ func TestCreate_BlockedWhenStale(t *testing.T) {
 	if !strings.Contains(e.Message, "46 days") {
 		t.Fatalf("message %q must name the image age in days", e.Message)
 	}
+	if !strings.Contains(e.Message, `template "staleimg"`) {
+		t.Fatalf("message %q must name the template", e.Message)
+	}
 	if e.Retryable {
 		t.Fatal("IMAGE_STALE must not be retryable")
+	}
+	if e.Details == nil || e.Details.TemplateName != "staleimg" ||
+		e.Details.AgeDays != 46 || e.Details.LimitDays != 45 {
+		t.Fatalf("details = %+v, want templateName=staleimg ageDays=46 limitDays=45", e.Details)
+	}
+	if e.Details.Pinned {
+		t.Fatal("details.pinned must be false on a create — the caller picked the template")
 	}
 }
 
@@ -111,10 +121,13 @@ func TestCreate_StaleAdvisoryBelowBlockLimit(t *testing.T) {
 
 // TestStart_BlockedMapsToImageStale: a start refused by the E3 block (the
 // resolved revision is stale and cannot move to a fresher one) surfaces
-// as 409 IMAGE_STALE.
+// as 409 IMAGE_STALE, names the template, and — for a pinned workspace —
+// says it can start again only after a fresh image is published.
 func TestStart_BlockedMapsToImageStale(t *testing.T) {
 	be := newFakeBackend()
-	be.signalErr = &provisioning.ImageStaleError{AgeDays: 60, LimitDays: 45}
+	be.signalErr = &provisioning.ImageStaleError{
+		TemplateName: "linuxdesktop", AgeDays: 60, LimitDays: 45, Pinned: true,
+	}
 	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants(),
 		func(h *WorkspaceHandler) { h.WithImageBlockAfter(testImageBlockAfter) })
 	sess, csrf := login(t, env, "user-a")
@@ -140,6 +153,16 @@ func TestStart_BlockedMapsToImageStale(t *testing.T) {
 	}
 	if !strings.Contains(e.Message, "60 days") {
 		t.Fatalf("message %q must name the image age in days", e.Message)
+	}
+	if !strings.Contains(e.Message, `template "linuxdesktop"`) {
+		t.Fatalf("message %q must name the template", e.Message)
+	}
+	if !strings.Contains(e.Message, "publishes a fresh image") {
+		t.Fatalf("pinned message %q must say a fresh image is required", e.Message)
+	}
+	if e.Details == nil || e.Details.TemplateName != "linuxdesktop" ||
+		e.Details.AgeDays != 60 || e.Details.LimitDays != 45 || !e.Details.Pinned {
+		t.Fatalf("details = %+v, want templateName/ageDays=60/limitDays=45/pinned", e.Details)
 	}
 }
 

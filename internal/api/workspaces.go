@@ -474,8 +474,8 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// E3: a create resolving to an image older than -image-block-after is
 	// refused; a missing or malformed image-built-at never blocks.
-	if err := provisioning.CheckImageBlock(tpl.ImageBuiltAt, h.blockAfter, h.now()); err != nil {
-		writeError(w, r, CodeImageStale, err.Error())
+	if err := provisioning.CheckImageBlock(tpl.ImageBuiltAt, h.blockAfter, h.now(), tpl.Name, false); err != nil {
+		writeImageStale(w, r, err)
 		return
 	}
 	dataPolicy := req.DataPolicy
@@ -637,7 +637,7 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 	case provisioning.IsQuotaExceeded(err):
 		writeQuotaExceeded(w, r, err, h.retryAfterSeconds())
 	case provisioning.IsImageStale(err):
-		writeError(w, r, CodeImageStale, err.Error())
+		writeImageStale(w, r, err)
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
 	case errors.Is(err, provisioning.ErrNameTaken):
