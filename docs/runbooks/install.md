@@ -304,6 +304,41 @@ Check the result — only the leader replica logs the pass:
 $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
 
+## Rate limits and trusted proxies
+
+`GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited
+to 30 requests/min per client address (burst 10); `POST /v1/launch` to
+60/min (burst 20). Over the limit the API answers `429 RATE_LIMITED` with
+`Retry-After`.
+
+The client address is the socket peer unless the peer is inside
+`backend.trustedProxies` — then the right-most untrusted `X-Forwarded-For`
+entry stands in. **Behind any ingress or Gateway, set the value to the
+CIDR(s) your edge sources from.** With it empty every user shares the
+edge's own bucket (~30 logins/min for the whole organisation) and the
+backend logs a startup warning while a limit is on. The same list feeds
+the forwarded headers toward workspace pods — client-supplied values are
+stripped and rebuilt from the trusted chain only.
+
+```yaml
+# Cilium Gateway API / Ingress — edge envoy runs host-network; the peer
+# is the node the request lands on. List the node subnet(s); keep
+# networkPolicy.edgeIngress: cilium (see the chart README).
+backend:
+  trustedProxies: ["10.10.0.0/24"]
+```
+
+```yaml
+# Traefik or another ingress running as pods — the peer is the proxy pod
+# IP; list the cluster pod CIDR (shown: 10.42.0.0/16) or a tighter range.
+backend:
+  trustedProxies: ["10.42.0.0/16"]
+```
+
+No edge proxy at all needs nothing — the peer already is the client.
+Rates are tunable via `backend.extraArgs` (`-login-rate`, `-launch-rate`;
+`0` disables a limit).
+
 ## Sign-out and the identity provider
 
 The account menu (top right, on the user's name) has **Sign out**. It ends
