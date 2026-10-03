@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
-import { unwrap } from "../api/client";
+import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
+import { LifecycleProgress } from "../progress/LifecycleProgress";
+import { opPollMs, startInFlight, withJitter } from "../progress/derive";
 import { useMe } from "../app/me";
 import { defaultLoginRedirect } from "../auth/AuthGate";
 import type { components } from "../api/generated/schema";
@@ -521,6 +523,16 @@ export function SessionPage({
     ),
   });
 
+  // Connectable workspace → the first-load launch path: resume our own
+  // lease when there is one, else request a ticket. Used by the initial
+  // load and by the starting-state poll when the workspace turns Ready.
+  const beginConnect = useCallback(() => {
+    // Resume first; request a ticket only when there is nothing to resume.
+    void resume().then((resuming) => {
+      if (!resuming && mounted.current) void launch("frame", false);
+    });
+  }, [resume, launch]);
+
   const loadWorkspace = useCallback(async () => {
     try {
       const ws = unwrap(
@@ -529,22 +541,20 @@ export function SessionPage({
       if (!mounted.current) return;
       setWorkspace(ws);
       const blocker = connectBlocker(ws);
+      // V3.27: a workspace mid start/create keeps polling on this page and
+      // shows the step list ("starting"); stopped/failed/blocked stay on the
+      // static not-ready overlay.
       dispatch(
         blocker
-          ? { type: "workspace", connectable: false, reason: blocker }
+          ? { type: "workspace", connectable: false, reason: blocker, starting: startInFlight(ws) }
           : { type: "workspace", connectable: true },
       );
-      if (!blocker) {
-        // Resume first; request a ticket only when there is nothing to resume.
-        void resume().then((resuming) => {
-          if (!resuming && mounted.current) void launch("frame", false);
-        });
-      }
+      if (!blocker) beginConnect();
       void loadTemplate(api, ws).then((tpl) => mounted.current && setTemplate(tpl));
     } catch (e) {
       if (mounted.current) fail(e);
     }
-  }, [api, workspaceId, launch, resume, fail]);
+  }, [api, workspaceId, beginConnect, fail]);
 
   // Initial load + automatic first launch. Guarded so React StrictMode's
   // double effect run does not mint two tickets. The launch waits for
@@ -561,6 +571,90 @@ export function SessionPage({
       clearResume();
     };
   }, [loadWorkspace, me]);
+
+  // "starting" (V3.27): the workspace is mid start/create, so poll GET
+  // /v1/workspaces/{id} — the step list needs phase + conditions, not the
+  // /connection stream status. The poll stops when the view becomes
+  // connectable (the usual launch path then runs exactly once), when the
+  // intent settles (Failed/Stopped → not-ready), or on 401/404. It never
+  // runs while connected (D15).
+  useEffect(() => {
+    if (state.status !== "starting") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    let delay = 1_000;
+    const tick = async () => {
+      try {
+        const ws = unwrap(
+          await api.GET("/v1/workspaces/{workspaceId}", { params: { path: { workspaceId } } }),
+        );
+        if (cancelled || !mounted.current) return;
+        failures = 0;
+        setWorkspace(ws);
+        const blocker = connectBlocker(ws);
+        if (!blocker) {
+          dispatch({ type: "workspace", connectable: true });
+          beginConnect();
+          return;
+        }
+        const starting = startInFlight(ws);
+        dispatch({ type: "workspace", connectable: false, starting, reason: blocker });
+        if (!starting) return;
+        timer = setTimeout(
+          () => void tick(),
+          withJitter(opPollMs(Date.parse(ws.updatedAt))),
+        );
+      } catch (e) {
+        if (cancelled || !mounted.current) return;
+        if (isUnauthenticated(e)) {
+          dispatch({ type: "signed-out" });
+          return;
+        }
+        if (isPortalApiError(e) && e.code === "NOT_FOUND") {
+          dispatch({ type: "ended", reason: "deleted" });
+          return;
+        }
+        failures += 1;
+        delay = Math.min(delay * 2 ** failures, 30_000);
+        timer = setTimeout(() => void tick(), delay);
+      }
+    };
+    timer = setTimeout(() => void tick(), delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [state.status, api, workspaceId, beginConnect]);
+
+  // The stopped (or failed) workspace on this page offers Start: post the
+  // intent, then let the starting-state poll pick the workspace up. On an
+  // INVALID_STATE race the reload re-derives the real position.
+  const startWorkspace = useCallback(async () => {
+    try {
+      const ws = unwrap(
+        await api.POST("/v1/workspaces/{workspaceId}/start", {
+          params: {
+            path: { workspaceId },
+            header: { "Idempotency-Key": newIdempotencyKey() },
+          },
+        }),
+      );
+      if (!mounted.current) return;
+      setWorkspace(ws);
+      const blocker = connectBlocker(ws);
+      dispatch(
+        blocker
+          ? { type: "workspace", connectable: false, reason: blocker, starting: startInFlight(ws) }
+          : { type: "workspace", connectable: true },
+      );
+      if (!blocker) beginConnect();
+    } catch (e) {
+      if (!mounted.current) return;
+      if (isPortalApiError(e) && e.code === "INVALID_STATE") void loadWorkspace();
+      else fail(e);
+    }
+  }, [api, workspaceId, beginConnect, loadWorkspace, fail]);
 
   // The lease is no longer (or no longer only) ours: a reload must not try
   // to resume it.
@@ -740,6 +834,8 @@ export function SessionPage({
             onTakeover={() => void launch(lastMode.current, true)}
             onUseHere={() => void useHere()}
             onSignIn={onSignIn}
+            workspace={workspace}
+            onStart={() => void startWorkspace()}
           />
         )}
       </div>
@@ -750,6 +846,7 @@ export function SessionPage({
 const STATUS_KEY: Record<SessionStatus, [Parameters<typeof t>[0], Tone]> = {
   loading: ["session.status.loading", "neutral"],
   "not-ready": ["session.status.notReady", "warning"],
+  starting: ["session.status.starting", "info"],
   requesting: ["session.status.requesting", "info"],
   "in-use": ["session.status.inUse", "warning"],
   connecting: ["session.status.connecting", "info"],
@@ -765,7 +862,7 @@ const STATUS_KEY: Record<SessionStatus, [Parameters<typeof t>[0], Tone]> = {
 
 function StatusBadge({ status, recovering }: { status: SessionStatus; recovering?: boolean }) {
   const [key, tone] = STATUS_KEY[status];
-  const pulse = status === "requesting" || status === "connecting";
+  const pulse = status === "requesting" || status === "connecting" || status === "starting";
   // A watch-driven frame reload keeps the session nominally connected while
   // the desktop stream is re-established: say so instead of a stale
   // "Connected" (T5.4).
@@ -788,6 +885,8 @@ function Overlay({
   onTakeover,
   onUseHere,
   onSignIn,
+  workspace,
+  onStart,
 }: {
   state: SessionState;
   workspaceId: string;
@@ -797,7 +896,13 @@ function Overlay({
   onTakeover: () => void;
   onUseHere: () => void;
   onSignIn: () => void;
+  workspace: WorkspaceView | null;
+  onStart: () => void;
 }) {
+  // A stopped or failed workspace can be started right here — no trip back
+  // to the dashboard (V3.27).
+  const offerStart =
+    workspace !== null && (workspace.phase === "Stopped" || workspace.phase === "Failed");
   const back = (
     <Link to="/" className={buttonClass("secondary", "md")}>
       {t("session.toolbar.back")}
@@ -859,6 +964,19 @@ function Overlay({
           <p>{t("session.elsewhere.body")}</p>
         </OverlayPanel>
       );
+    case "starting":
+      // The lifecycle step panel, centred on the stage; the poll in the
+      // page body keeps it fresh and hands off to the launch path the
+      // moment the workspace turns connectable.
+      return (
+        <div className="tc-session__overlay" data-tone="progress">
+          {workspace ? (
+            <LifecycleProgress workspace={workspace} variant="overlay" />
+          ) : (
+            <Spinner size="lg" decorative />
+          )}
+        </div>
+      );
     case "not-ready":
       return (
         <OverlayPanel
@@ -866,6 +984,13 @@ function Overlay({
           title={t("session.notReady.title")}
           actions={
             <>
+              {offerStart ? (
+                <Button ref={actionRef} variant="primary" onClick={onStart}>
+                  {workspace?.phase === "Failed"
+                    ? t("workspaces.detail.action.retryStart")
+                    : t("workspaces.detail.action.start")}
+                </Button>
+              ) : null}
               {details}
               {back}
             </>
@@ -904,6 +1029,11 @@ function Overlay({
           title={t("session.ended.title")}
           actions={
             <>
+              {state.reason === "stopped" && offerStart ? (
+                <Button ref={actionRef} variant="primary" onClick={onStart}>
+                  {t("workspaces.detail.action.start")}
+                </Button>
+              ) : null}
               {back}
               {details}
             </>

@@ -7,6 +7,7 @@
 export type SessionStatus =
   | "loading" //       fetching the workspace
   | "not-ready" //     workspace exists but is not connectable
+  | "starting" //      a start intent is in flight: progress + workspace poll (V3.27)
   | "requesting" //    launch ticket request in flight
   | "in-use" //        CONNECTION_IN_USE: offer takeover
   | "connecting" //    ticket POSTed into the frame, waiting for it to load
@@ -28,7 +29,8 @@ export interface SessionState {
 }
 
 export type SessionEvent =
-  | { type: "workspace"; connectable: boolean; reason?: string }
+  /** `starting`: the workspace is mid start/create — keep polling it. */
+  | { type: "workspace"; connectable: boolean; reason?: string; starting?: boolean }
   | { type: "request" }
   | { type: "ticket" }
   /** Resuming our own live lease: the frame was pointed at the session origin. */
@@ -56,11 +58,19 @@ export function isLive(s: SessionStatus): boolean {
 export function sessionReducer(state: SessionState, ev: SessionEvent): SessionState {
   switch (ev.type) {
     case "workspace":
-      // Only the initial load decides connectability; later polls report
-      // through "ended" so a live session is never reset by a poll.
-      if (state.status !== "loading" && state.status !== "not-ready") return state;
-      return ev.connectable
-        ? { status: "requesting" }
+      // The initial load and the starting-state polls decide connectability;
+      // everywhere else polls report through "ended" so a live session is
+      // never reset by a poll (V3.27: starting polls keep landing here).
+      if (
+        state.status !== "loading" &&
+        state.status !== "not-ready" &&
+        state.status !== "starting"
+      ) {
+        return state;
+      }
+      if (ev.connectable) return { status: "requesting" };
+      return ev.starting
+        ? { status: "starting" }
         : { status: "not-ready", ...(ev.reason ? { reason: ev.reason } : {}) };
     case "request":
       return { status: "requesting" };
