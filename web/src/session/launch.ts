@@ -37,28 +37,115 @@ export function sessionOrigin(workspaceId: string, sessionDomain: string): strin
   return `https://${sessionLabel(workspaceId)}.${sessionDomain}`;
 }
 
+/** The template's clipboard policy, as published by GET /v1/templates. */
+export type ClipboardPolicy = "Disabled" | "Send" | "Receive" | "Bidirectional";
+
+/** Options the workspace's policy gives the embedded client. */
+export interface SessionEmbedOpts {
+  /**
+   * The workspace template's clipboard policy. `undefined` = not yet known:
+   * least privilege applies until the template resolves.
+   */
+  clipboardPolicy?: ClipboardPolicy | undefined;
+}
+
+/**
+ * Which clipboard directions the policy allows, in the KasmVNC client's
+ * terms: `up` is client→workspace (`Send`), `down` is workspace→client
+ * (`Receive`). Anything not listed stays off.
+ */
+export function clipboardDirections(policy: ClipboardPolicy | undefined): {
+  up: boolean;
+  down: boolean;
+} {
+  switch (policy) {
+    case "Bidirectional":
+      return { up: true, down: true };
+    case "Send":
+      return { up: true, down: false };
+    case "Receive":
+      return { up: false, down: true };
+    default:
+      return { up: false, down: false };
+  }
+}
+
+// clipboard_seamless mirrors the client's own non-embed default: on for
+// Chrome-family browsers, off on Firefox and Safari — upstream disables it
+// there itself (the Firefox "Paste" overlay, Safari's missing
+// navigator.clipboard.read), so the portal only turns it on where the
+// client would have.
+function seamlessClipboardOK(): boolean {
+  const ua = navigator.userAgent;
+  if (/firefox/i.test(ua)) return false;
+  return !(ua.includes("Safari") && !ua.includes("Chrome"));
+}
+
 /**
  * URL the session iframe is pointed at to (re)load the desktop client. The
- * KasmVNC client treats a page inside an iframe as an embedded widget and
- * forces resize=off, so the remote screen would keep its old size and a
- * larger frame shows large dark regions (FX-R18). The query is a static
- * client setting, the same one the gateway puts on its launch redirect.
+ * KasmVNC client treats a page inside an iframe as an embedded widget
+ * (`window.self !== window.top`) and, unless `show_control_bar` is set,
+ * forces `resize=off`, `enable_webp=false` and every clipboard direction
+ * off (FX-R18, client source: initSetting block in ui-*.js). Every URL
+ * setting wins over an initSetting, so the portal re-asserts tab-mode
+ * behaviour it wants:
+ *
+ * - `resize=remote` — the remote screen tracks the frame size; without it a
+ *   frame larger than the remote shows large dark regions.
+ * - `enable_webp` — same codec offer as a top-level tab.
+ * - `idle_disconnect=1440` (minutes, i.e. 24 h): the client's own idle cut
+ *   (default 20 min) would bounce the frame to disconnected.html well
+ *   before the platform lifecycle does. Idle policy belongs to the
+ *   workspace template, not to a second, unsynchronized client timer.
+ * - `clipboard_up`/`clipboard_down`/`clipboard_seamless` — per the
+ *   workspace's clipboard policy, on top of the server-side DLP policy
+ *   (which today denies all directions; client flags gate the client half).
+ *   `clipboard_seamless` only where the browser supports it, like the
+ *   client's own non-embed default.
+ *
+ * `show_control_bar` stays unset deliberately: it would restore ALL
+ * non-embed defaults including the Kasm control bar — a second settings
+ * UI inside the portal's own toolbar (V3.24 decision).
  */
-export function sessionFrameUrl(workspaceId: string, sessionDomain: string): string {
-  return `${sessionOrigin(workspaceId, sessionDomain)}/?resize=remote`;
+export function sessionFrameUrl(
+  workspaceId: string,
+  sessionDomain: string,
+  opts: SessionEmbedOpts = {},
+): string {
+  const { up, down } = clipboardDirections(opts.clipboardPolicy);
+  const q = new URLSearchParams({
+    resize: "remote",
+    enable_webp: "true",
+    idle_disconnect: "1440",
+    clipboard_up: String(up),
+    clipboard_down: String(down),
+  });
+  if ((up || down) && seamlessClipboardOK()) q.set("clipboard_seamless", "true");
+  return `${sessionOrigin(workspaceId, sessionDomain)}/?${q}`;
 }
 
 /** Sandbox flags on the session iframe (D13). Navigation and dialogs stay out. */
 export const SESSION_FRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-pointer-lock";
 
-/** Features delegated to the session frame (clipboard, fullscreen, keyboard layout). */
-export const SESSION_FRAME_FEATURES = [
-  "clipboard-read",
-  "clipboard-write",
-  "fullscreen",
-  "keyboard-map",
-] as const;
+/**
+ * Features delegated to the session frame, least privilege on top of the
+ * server-side clipboard policy: `Send` (client→workspace) needs the frame
+ * to READ the local clipboard (`clipboard-read`), `Receive` needs WRITE
+ * (`clipboard-write`); `Bidirectional` gets both, `Disabled` neither.
+ * Fullscreen and `keyboard-map` always: the client maps non-US layouts
+ * through getLayoutMap() (without it a German Ctrl+Z becomes Ctrl+Y on the
+ * remote — wrong keys, V3.24 layout check).
+ */
+export function sessionFrameFeatures(policy: ClipboardPolicy | undefined): readonly string[] {
+  const { up, down } = clipboardDirections(policy);
+  return [
+    ...(up ? ["clipboard-read"] : []),
+    ...(down ? ["clipboard-write"] : []),
+    "fullscreen",
+    "keyboard-map",
+  ];
+}
 
 /**
  * The iframe's allow attribute. Each feature names the workspace's session
@@ -68,10 +155,16 @@ export const SESSION_FRAME_FEATURES = [
  * getLayoutMap() were all refused inside the frame (FX-R22). Empty until the
  * session domain is known, when nothing can be launched anyway.
  */
-export function sessionFrameAllow(workspaceId: string, sessionDomain: string): string {
+export function sessionFrameAllow(
+  workspaceId: string,
+  sessionDomain: string,
+  opts: SessionEmbedOpts = {},
+): string {
   if (sessionDomain === "") return "";
   const origin = sessionOrigin(workspaceId, sessionDomain);
-  return SESSION_FRAME_FEATURES.map((feature) => `${feature} ${origin}`).join("; ");
+  return sessionFrameFeatures(opts.clipboardPolicy)
+    .map((feature) => `${feature} ${origin}`)
+    .join("; ");
 }
 
 /** sessionDomain naming a loopback listener (mock e2e / dev harness). */
@@ -172,7 +265,15 @@ export function launchInNewTab(
 const OWNED_KEY_PREFIX = "tcdi.session.owned.";
 
 export interface SessionMarker {
+  /**
+   * The confirmed lease, or "" while provisional: the tab minted a launch
+   * ticket and never observed the lease it created (a reload landing inside
+   * the ~seconds between ticket POST and the first connected report). A
+   * provisional marker accepts whichever lease is live on remount — the
+   * ticket only ever creates a lease for this tab.
+   */
   leaseRef: string;
+  /** The confirmed stream epoch, or -1 while provisional. */
   streamEpoch: number;
 }
 
@@ -184,6 +285,16 @@ export function markSessionOwned(workspaceId: string, marker: SessionMarker): vo
   }
 }
 
+/**
+ * Written the moment a launch ticket is minted, before any /connection
+ * report can confirm the lease. Without it a reload inside that window
+ * finds no marker, asks for a ticket on a live lease and gets the
+ * take-over dialog — for its own session (backlog 1).
+ */
+export function markSessionProvisional(workspaceId: string): void {
+  markSessionOwned(workspaceId, { leaseRef: "", streamEpoch: -1 });
+}
+
 export function readSessionMarker(workspaceId: string): SessionMarker | null {
   try {
     const raw = sessionStorage.getItem(OWNED_KEY_PREFIX + workspaceId);
@@ -191,9 +302,12 @@ export function readSessionMarker(workspaceId: string): SessionMarker | null {
     const v: unknown = JSON.parse(raw);
     if (typeof v !== "object" || v === null) return null;
     const { leaseRef, streamEpoch } = v as Partial<SessionMarker>;
-    if (typeof leaseRef !== "string" || leaseRef === "") return null;
+    if (typeof leaseRef !== "string") return null;
     if (typeof streamEpoch !== "number" || !Number.isInteger(streamEpoch)) return null;
-    return { leaseRef, streamEpoch };
+    // Provisional ("" + -1) or confirmed (ref + epoch >= 0); anything else
+    // is corrupt.
+    if (leaseRef === "") return streamEpoch === -1 ? { leaseRef, streamEpoch } : null;
+    return streamEpoch >= 0 ? { leaseRef, streamEpoch } : null;
   } catch {
     return null;
   }

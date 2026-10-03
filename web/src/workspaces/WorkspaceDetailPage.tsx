@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   Badge,
@@ -28,6 +28,9 @@ import {
   networkProfileLabel,
   runtimeLabel,
 } from "../templates/format";
+import { getRetainedData, type ScopedRetainedData } from "../data/api";
+import { useBranding } from "../app/shell";
+import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
 import { blockingReason, desiredLabel, isConnectable } from "./helpers";
@@ -44,6 +47,8 @@ const IDLE_MS = 8000;
 interface DetailData {
   workspace: WorkspaceView;
   events: WorkspaceEvent[];
+  /** The retained disk this workspace consumes, when it has one. */
+  retained?: ScopedRetainedData | null;
 }
 
 function pollDelay(d: DetailData | undefined): number {
@@ -112,7 +117,13 @@ export function WorkspaceDetailPage({
       getWorkspace(api, workspaceId),
       listWorkspaceEvents(api, workspaceId),
     ]);
-    return { workspace, events };
+    // The retained disk this workspace mounts: named so the user can tell
+    // where its home came from (T5.4). Best effort — the record may be
+    // gone or not visible to this caller.
+    const retained = workspace.retainedDataRef
+      ? await getRetainedData(api, workspace.retainedDataRef).catch(() => null)
+      : null;
+    return { workspace, events, retained };
   }, [api, workspaceId]);
   const detail = useResource(load, pollIntervalMs ?? pollDelay);
 
@@ -149,10 +160,26 @@ export function WorkspaceDetailPage({
   const ws = detail.data?.workspace;
   const template = ws ? resolveTemplate(templates.data, ws.template) : undefined;
   const error = actionError ?? detail.error;
+  const branding = useBranding();
+
+  // The route title is shared with the list; once the workspace is known
+  // the tab should name it (T5.4).
+  const wsName = ws?.name;
+  useEffect(() => {
+    if (!wsName) return;
+    document.title = `${wsName} · ${branding?.productName ?? DEFAULT_BRANDING.productName}`;
+  }, [wsName, branding]);
 
   if (!ws) {
     return (
-      <Page title={t("workspaces.detail.loading")} eyebrow={<Link to="/">{t("nav.allWorkspaces")}</Link>}>
+      <Page
+        title={t("workspaces.detail.loading")}
+        eyebrow={
+          <Link to="/">
+            <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
+          </Link>
+        }
+      >
         <ErrorBanner error={error} onRetry={() => void detail.refresh()} onDismiss={detail.clearError} />
         {error ? null : <Spinner label={t("workspaces.detail.loading")} />}
       </Page>
@@ -162,17 +189,41 @@ export function WorkspaceDetailPage({
   const blocker = blockingReason(ws);
   const canStart = ws.phase === "Stopped" || ws.phase === "Failed";
   const canStop = ws.desiredState === "Running" && !TERMINAL.has(ws.phase);
+  // Connect needs a running workspace; on a stopped one the Start action is
+  // the way forward, so the Connect control is not offered (T5.4).
+  const canOfferConnect = ws.desiredState === "Running" && ws.phase !== "Terminating";
 
   const fields = [
     {
       term: t("workspaces.detail.field.template"),
-      detail: t("workspaces.detail.template", {
-        name: ws.template.name,
-        revision: ws.template.revision,
-        runtime: runtimeLabel(ws.template.runtime),
-        experience: experienceLabel(ws.template.experience),
-      }),
+      detail:
+        ws.template.revision > 0
+          ? t("workspaces.detail.template", {
+              name: ws.template.name,
+              revision: ws.template.revision,
+              runtime: runtimeLabel(ws.template.runtime),
+              experience: experienceLabel(ws.template.experience),
+            })
+          : // Revision 0 is "no published revision yet", not a real rev (T5.4).
+            t("workspaces.detail.templateNoRevision", {
+              name: ws.template.name,
+              runtime: runtimeLabel(ws.template.runtime),
+              experience: experienceLabel(ws.template.experience),
+            }),
     },
+    ...(ws.retainedDataRef
+      ? [
+          {
+            term: t("workspaces.detail.field.dataDisk"),
+            detail: detail.data?.retained
+              ? t("workspaces.detail.dataDisk.retained", {
+                  source: detail.data.retained.sourceWorkspaceName,
+                  id: ws.retainedDataRef,
+                })
+              : ws.retainedDataRef,
+          },
+        ]
+      : []),
     ...(ws.owner
       ? [
           {
@@ -210,7 +261,7 @@ export function WorkspaceDetailPage({
     <Page
       eyebrow={
         <Link to="/">
-          <IconArrowLeft size={14} /> {t("nav.allWorkspaces")}
+          <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
         </Link>
       }
       title={
@@ -220,7 +271,7 @@ export function WorkspaceDetailPage({
       }
       actions={
         <Cluster gap={2}>
-          <ConnectButton workspace={ws} disabled={!isConnectable(ws)} />
+          {canOfferConnect ? <ConnectButton workspace={ws} disabled={!isConnectable(ws)} /> : null}
           {canStart ? (
             <Button variant="secondary" loading={busy === "start"} disabled={busy !== null} onClick={() => void act("start")}>
               {busy === "start"

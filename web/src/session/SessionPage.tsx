@@ -30,6 +30,7 @@ import {
   sessionFrameAllow,
   sessionFrameUrl,
   submitLaunch,
+  type SessionEmbedOpts,
   type SessionMarker,
 } from "./launch";
 import {
@@ -114,6 +115,17 @@ export function SessionPage({
   // next connected report is not "another tab": it is judged against what
   // was known before — a different lease, or a higher epoch, is ours.
   const pending = useRef<{ leaseRef: string; minEpoch: number } | null>(null);
+  // The newest lease/stream the /connection poll has reported. Pending
+  // baselines come from this, not only from the marker: the marker can lag
+  // behind a stream that already claimed a higher epoch, and claiming that
+  // stream as "ours" would make our own next claim look like another
+  // tab's (backlog 2).
+  const observed = useRef<{ leaseRef?: string | undefined; streamEpoch?: number | undefined }>(
+    {},
+  );
+  // The watch is reloading the frame to recover the stream: keep the
+  // desktop up but say "Reconnecting" instead of a stale "Connected".
+  const [recovering, setRecovering] = useState(false);
   // This tab holds a live lease of its own: relaunches replace it instead of
   // asking for a takeover.
   const owned = useRef(seen.current !== null);
@@ -123,6 +135,21 @@ export function SessionPage({
   const resumeDeadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const resumePoll = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const frameName = sessionFrameName(workspaceId);
+
+  // The workspace's clipboard policy, resolved once the template lands:
+  // least privilege (no clipboard delegation) until then. Read through a
+  // ref so callbacks (resume, the watch's reload) pick up a policy that
+  // arrives after mount without changing their identity — a recreated
+  // `loadWorkspace` would re-run the mount effect and clear the resume
+  // timers mid-flight.
+  const templateRef = useRef<TemplateView | null>(null);
+  useEffect(() => {
+    templateRef.current = template;
+  }, [template]);
+  const embedOpts = useCallback(
+    (): SessionEmbedOpts => ({ clipboardPolicy: templateRef.current?.clipboardPolicy }),
+    [],
+  );
 
   const clearLoadTimer = () => {
     clearTimeout(loadTimer.current);
@@ -161,10 +188,22 @@ export function SessionPage({
     clearSessionOwned(workspaceId);
   }, [workspaceId]);
 
-  const armPending = useCallback(() => {
-    pending.current = seen.current
-      ? { leaseRef: seen.current.leaseRef, minEpoch: seen.current.streamEpoch }
-      : { leaseRef: "", minEpoch: -1 };
+  // Arm pending against the observed baseline: the live lease and the
+  // highest stream epoch reported on it, or the remembered marker's when
+  // the poll has seen nothing newer. Only a report beyond that baseline is
+  // "ours"; what is already there belongs to whoever connected before us.
+  const armPending = useCallback(
+    (base?: { leaseRef?: string | undefined; streamEpoch?: number | undefined }) => {
+    const b = base ?? observed.current;
+    const s = seen.current;
+    if (b.leaseRef !== undefined && (s === null || s.leaseRef === "" || s.leaseRef !== b.leaseRef)) {
+      pending.current = { leaseRef: b.leaseRef, minEpoch: b.streamEpoch ?? -1 };
+      return;
+    }
+    pending.current = {
+      leaseRef: b.leaseRef ?? s?.leaseRef ?? "",
+      minEpoch: Math.max(b.streamEpoch ?? -1, s?.streamEpoch ?? -1),
+    };
   }, []);
 
   const observe = useCallback(
@@ -174,8 +213,14 @@ export function SessionPage({
       if (leaseRef === undefined || streamEpoch === undefined) return "unknown";
       const p = pending.current;
       if (p) {
-        if (leaseRef === p.leaseRef && streamEpoch <= p.minEpoch) return "stale";
+        // streamEpoch 0 means the backend keeps no stream accounting
+        // (split mode without a session directory): epochs cannot be
+        // compared there, so a leaseRef match is confirmation enough
+        // (backlog 3).
+        if (leaseRef === p.leaseRef && streamEpoch !== 0 && streamEpoch <= p.minEpoch)
+          return "stale";
         pending.current = null;
+        owned.current = true;
         remember({ leaseRef, streamEpoch });
         return "ours";
       }
@@ -191,15 +236,15 @@ export function SessionPage({
     [remember],
   );
 
-  const fetchConnection = useCallback(
-    async (): Promise<ConnectionStatus> =>
-      unwrap(
-        await api.GET("/v1/workspaces/{workspaceId}/connection", {
-          params: { path: { workspaceId } },
-        }),
-      ),
-    [api, workspaceId],
-  );
+  const fetchConnection = useCallback(async (): Promise<ConnectionStatus> => {
+    const s = unwrap(
+      await api.GET("/v1/workspaces/{workspaceId}/connection", {
+        params: { path: { workspaceId } },
+      }),
+    );
+    observed.current = { leaseRef: s.leaseRef, streamEpoch: s.streamEpoch };
+    return s;
+  }, [api, workspaceId]);
 
   // A 401 means the portal login is gone; every API call from here on fails
   // the same way, so say so instead of showing a stale badge or a generic error.
@@ -236,7 +281,13 @@ export function SessionPage({
           dispatch({ type: "external" });
           return;
         }
-        armPending();
+        // The ticket created a lease this tab has not seen yet: mark it
+        // provisionally so a reload inside this window resumes instead of
+        // asking to take over its own session (backlog 1). The pending
+        // baseline accepts the first connected report — a fresh ticket can
+        // only have made this tab's stream.
+        remember({ leaseRef: "", streamEpoch: -1 });
+        pending.current = { leaseRef: "", minEpoch: -1 };
         armed.current = true;
         submitLaunch(ticket, frameName, workspaceId, sessionDomain);
         dispatch({ type: "ticket" });
@@ -277,18 +328,32 @@ export function SessionPage({
     if (!mounted.current) return true;
     const el = frameRef.current;
     if (!status.leaseActive || !el) return false;
-    if (status.leaseRef !== marker.leaseRef) {
-      // Not the lease this tab had: the marker proves nothing any more.
+    // The marker names the lease this tab last owned; "" is the provisional
+    // marker a launch writes (accept the live lease — our ticket made it).
+    // A different live leaseRef is a stale marker: this tab's lease is gone
+    // — but the shared session cookie may still open a stream on the live
+    // one (a duplicate tab of this browser took over or re-launched).
+    // Resume by navigation either way and let the poll prove a NEW stream:
+    // the stream already on the lease is never "ours" — only a claim beyond
+    // the observed epoch is (backlog 2). When the cookie is not bound to
+    // the live lease (another browser holds it), the frame opens no stream
+    // and the deadline below falls back to a ticket without takeover.
+    const own = marker.leaseRef !== "" && status.leaseRef === marker.leaseRef;
+    if (!own) {
       forget();
       owned.current = false;
-      return false;
     }
 
     clearResume();
     armed.current = false;
-    armPending();
+    pending.current = {
+      leaseRef: status.leaseRef ?? "",
+      minEpoch: own
+        ? Math.max(status.streamEpoch ?? marker.streamEpoch, marker.streamEpoch)
+        : (status.streamEpoch ?? -1),
+    };
     dispatch({ type: "resume" });
-    el.src = sessionFrameUrl(workspaceId, sessionDomain);
+    el.src = sessionFrameUrl(workspaceId, sessionDomain, embedOpts());
     resumeDeadline.current = setTimeout(() => {
       clearResume();
       void launch("frame", false);
@@ -304,8 +369,10 @@ export function SessionPage({
           void launch("frame", false);
           return;
         }
-        if (s.leaseRef !== undefined && s.leaseRef !== marker.leaseRef) {
-          // Taken over while we waited.
+        // A different lease appeared while we waited (the frame is on
+        // `target`, the lease we decided to resume onto): taken over.
+        const target = pending.current?.leaseRef;
+        if (target !== undefined && target !== "" && s.leaseRef !== undefined && s.leaseRef !== target) {
           clearResume();
           forget();
           owned.current = false;
@@ -333,7 +400,7 @@ export function SessionPage({
     fetchConnection,
     launch,
     observe,
-    armPending,
+    embedOpts,
     forget,
     workspaceId,
     sessionDomain,
@@ -385,8 +452,13 @@ export function SessionPage({
     active: state.status === "connected",
     pollIntervalMs,
     fetchStatus: fetchConnection,
+    frameUrl: useCallback(
+      () => sessionFrameUrl(workspaceId, sessionDomain, embedOpts()),
+      [workspaceId, sessionDomain, embedOpts],
+    ),
     onObserve: useCallback(
       (status: ConnectionStatus) => {
+        if (status.state === "connected") setRecovering(false);
         if (observe(status) === "elsewhere") dispatch({ type: "elsewhere" });
       },
       [observe],
@@ -408,12 +480,17 @@ export function SessionPage({
       (ev: WatchEvent) => {
         switch (ev.type) {
           case "relaunched":
-            armPending();
+            // A fresh ticket made a lease we have not observed: same as a
+            // launch — mark provisionally so a reload resumes it, and let
+            // the first connected report be ours.
+            remember({ leaseRef: "", streamEpoch: -1 });
+            pending.current = { leaseRef: "", minEpoch: -1 };
             armed.current = true;
             dispatch({ type: "ticket" });
             armLoadTimer();
             break;
           case "exhausted":
+            setRecovering(false);
             dispatch({ type: "offline", reason: "exhausted" });
             void checkEnded();
             break;
@@ -434,12 +511,14 @@ export function SessionPage({
             }
             break;
           case "frame-navigated":
-            // Our own reload opens a new stream: not another tab's.
+            // Our own reload opens a new stream: not another tab's. The
+            // badge says "Reconnecting" until the poll sees it.
             armPending();
+            setRecovering(true);
             break;
         }
       },
-      [checkEnded, armLoadTimer, armPending],
+      [checkEnded, armLoadTimer, armPending, remember],
     ),
   });
 
@@ -489,6 +568,11 @@ export function SessionPage({
   useEffect(() => {
     if (state.status === "ended" || state.status === "external") forget();
   }, [state.status, forget]);
+
+  // "Reconnecting" only qualifies the live badge; leaving connected clears it.
+  useEffect(() => {
+    if (state.status !== "connected") setRecovering(false);
+  }, [state.status]);
 
   // A freshly launched session has no baseline yet: take one right away
   // instead of after the first watch poll, so a reload in between still finds
@@ -594,7 +678,7 @@ export function SessionPage({
           <span className="tc-button__label">{t("session.toolbar.back")}</span>
         </Link>
         <h1 className="tc-session__title">{name}</h1>
-        <StatusBadge status={state.status} />
+        <StatusBadge status={state.status} recovering={recovering} />
         <LifecycleNotice workspace={workspace} template={template} live={isLive(state.status)} />
         <div className="tc-session__controls" role="group" aria-label={t("session.toolbar.controls")}>
           <span className="tc-session__printhint">{t("session.toolbar.printHint")}</span>
@@ -637,7 +721,9 @@ export function SessionPage({
           title={t("session.frame.title", { name })}
           className="tc-session__frame"
           sandbox={SESSION_FRAME_SANDBOX}
-          allow={sessionFrameAllow(workspaceId, sessionDomain)}
+          allow={sessionFrameAllow(workspaceId, sessionDomain, {
+            clipboardPolicy: template?.clipboardPolicy,
+          })}
           aria-describedby="tc-session-keyboard-hint"
           inert={!connected}
           onLoad={onFrameLoad}
@@ -678,13 +764,17 @@ const STATUS_KEY: Record<SessionStatus, [Parameters<typeof t>[0], Tone]> = {
   error: ["session.status.error", "danger"],
 };
 
-function StatusBadge({ status }: { status: SessionStatus }) {
+function StatusBadge({ status, recovering }: { status: SessionStatus; recovering?: boolean }) {
   const [key, tone] = STATUS_KEY[status];
   const pulse = status === "requesting" || status === "connecting";
+  // A watch-driven frame reload keeps the session nominally connected while
+  // the desktop stream is re-established: say so instead of a stale
+  // "Connected" (T5.4).
+  const reconnecting = status === "connected" && recovering === true;
   return (
     <span role="status" aria-live="polite" className="tc-session__status">
-      <Badge tone={tone} dot pulse={pulse}>
-        {t(key)}
+      <Badge tone={reconnecting ? "info" : tone} dot pulse={pulse || reconnecting}>
+        {reconnecting ? t("session.status.reconnecting") : t(key)}
       </Badge>
     </span>
   );
