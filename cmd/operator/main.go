@@ -102,8 +102,8 @@ func parseKasmAdapterImage(v string) (string, error) {
 
 // runtimePlacement carries the operator-wide scheduling defaults for
 // runtime pods, parsed from the --runtime-* flags. The linux backend
-// applies them per field when a template sets neither spec.placement nor
-// the legacy node-selector annotation.
+// applies them per field when a template leaves the matching
+// spec.placement field unset.
 type runtimePlacement struct {
 	nodeSelector map[string]string
 	tolerations  []corev1.Toleration

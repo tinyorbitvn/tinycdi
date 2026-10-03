@@ -23,7 +23,7 @@ import {
   usagePercent,
   type QuotaKey,
 } from "./format";
-import { loadMe, useLoader } from "./hooks";
+import { loadMe, useLoader } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 

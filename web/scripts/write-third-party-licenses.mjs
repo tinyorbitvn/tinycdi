@@ -61,7 +61,7 @@ if (existsSync(licensesDir)) {
 }
 
 const header =
-  "TinyCDI portal (tinycdi-portal) — third-party licenses\n" +
+  "TinyCDI portal (tinycdi-web) — third-party licenses\n" +
   `Generated at build time from package-lock.json (production dependencies only).\n` +
   `The portal itself is MIT-licensed; ${prod.length} production packages ship in dist/.\n` +
   "The TinyOrbit name, wordmark and mark are trademarks of TinyOrbit and are not\n" +

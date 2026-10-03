@@ -4,26 +4,16 @@ import {
   createMockApi,
   SESSION_COOKIE,
   SESSION_PRINCIPAL,
-  CSRF_COOKIE,
   CSRF_TOKEN_VALUE,
-  SESSION_ORIGIN_COOKIE,
   type MockRequest,
 } from "../mock-api/handler.ts";
 import { createApi, setCsrfToken } from "../../src/api/client";
 import { ApiProvider } from "../../src/api/context";
 import { ToastProvider } from "../../src/design";
 
-export {
-  createMockApi,
-  CSRF_TOKEN_VALUE,
-  SESSION_COOKIE,
-  SESSION_PRINCIPAL,
-  CSRF_COOKIE,
-  SESSION_ORIGIN_COOKIE,
-};
+export { createMockApi, CSRF_TOKEN_VALUE, SESSION_COOKIE, SESSION_PRINCIPAL };
 
-// The mock API's session origin — mirrors createMockApi's default and the
-// value the mock login flow publishes in SESSION_ORIGIN_COOKIE.
+// The mock API's session origin — mirrors createMockApi's default.
 export const MOCK_SESSION_ORIGIN = "http://127.0.0.1:4311";
 
 // Turns the shared mock-api handler into a fetch() implementation. Cookies
@@ -71,9 +61,7 @@ export function loginCookies(): void {
 }
 
 export function clearCookies(): void {
-  for (const name of [SESSION_COOKIE, CSRF_COOKIE, SESSION_ORIGIN_COOKIE]) {
-    document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-  }
+  document.cookie = `${SESSION_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 }
 
 export function renderWithApi(ui: ReactElement, api = createMockApi()) {
