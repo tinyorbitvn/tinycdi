@@ -23,10 +23,13 @@ import (
 // drain window (cfg.DrainWindow, default 8 s) sheds streams while every
 // other request keeps serving — a read poll sees zero non-2xx; only new
 // launch redemptions and WebSocket upgrades are refused (retryable 503).
-// Then every listener's Shutdown in parallel under whatever remains, then
-// the background loops and closers. Run returns by shutdownDeadline even
-// if a request or stream is still in flight (the listeners are then
-// closed hard).
+// The window is a duration, not merely a shed budget: both listeners keep
+// serving for its full length — late reads still get 2xx and new work the
+// retryable 503 while endpoint removal propagates — so Shutdown only runs
+// once the window ends. Then every listener's Shutdown in parallel under
+// whatever remains, then the background loops and closers. Run returns by
+// shutdownDeadline even if a request or stream is still in flight (the
+// listeners are then closed hard).
 const shutdownDeadline = 24 * time.Second
 
 // namedServer is one bound listener with its server and optional TLS
@@ -206,17 +209,23 @@ func (b *Backend) Run(ctx context.Context) error {
 
 	// 2. Drain the session gateway: close every open stream and report
 	//    disconnect for each, without revoking leases — the same cookie
-	//    reconnects on another replica. At most cfg.DrainWindow; every
-	//    other request keeps serving through the window.
-	if b.gw != nil {
-		drainWindow := b.cfg.DrainWindow
-		if drainWindow <= 0 {
-			drainWindow = 8 * time.Second
-		}
-		drainCtx, dcancel := context.WithTimeout(shCtx, drainWindow)
-		b.gw.Drain(drainCtx)
-		dcancel()
+	//    reconnects on another replica. Drain returns as soon as every
+	//    session is quiet, but the window is a duration, not just the shed
+	//    budget: EVERY listener keeps serving until drainCtx ends — reads
+	//    still answer and new launches/upgrades still get the retryable
+	//    503 instead of a refused socket while the pod's endpoint removal
+	//    propagates, and a backend without a session listener holds the
+	//    window all the same. A zero window skips the hold.
+	drainWindow := b.cfg.DrainWindow
+	if drainWindow < 0 {
+		drainWindow = 0
 	}
+	drainCtx, dcancel := context.WithTimeout(shCtx, drainWindow)
+	if b.gw != nil {
+		b.gw.Drain(drainCtx)
+	}
+	<-drainCtx.Done()
+	dcancel()
 
 	// 3. Graceful shutdown of every listener, in parallel, under the time
 	//    that remains.

@@ -8,6 +8,7 @@ export default {
 
   "progress.step.accepted": "Request accepted",
   "progress.step.queued": "Waiting for its turn",
+  "progress.step.scheduling": "Scheduling the start",
   "progress.step.disk": "Preparing the disk",
   "progress.step.diskAttach": "Attaching your disk",
   "progress.step.machine": "Finding a machine",
