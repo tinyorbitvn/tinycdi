@@ -87,6 +87,28 @@ pin — lag 4), so a Browser template pinned to it only has option B. See
 `docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
 gate" and `docs/kasm-images.md`.
 
+## Upgrading to 0.3.0
+
+Chart 0.3.0 removes the deprecated `templates[].nodeSelector` entry field
+(the v0.1 knob that rendered the `workspaces.cdi.tinyorbit.vn/node-selector`
+annotation — pod placement has been typed `spec.placement` since v0.2). A
+values file that still sets it **fails the render**, both via the values
+schema (`additionalProperties`) and an explicit check for
+`--skip-schema-validation` renders. Move the selector into the template
+spec before upgrading:
+
+```yaml
+templates:
+  - name: <tpl>
+    spec:
+      placement:               # was: nodeSelector: {workload: runtime}
+        nodeSelector:
+          workload: runtime
+```
+
+WorkspaceTemplate objects already in the cluster keep working — the
+annotation is simply ignored now; only chart-rendered values fail.
+
 ## Upgrading to 0.2.0
 
 Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
