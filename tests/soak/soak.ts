@@ -700,19 +700,13 @@ export class BrowserDriver implements Driver {
     this.api = new PortalApi(context.request, portal);
   }
 
-  /** First visible locator among the candidates, waiting up to timeoutMs. */
-  private async firstMatch(page: Page, selectors: string[], timeoutMs: number) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      for (const selector of selectors) {
-        const loc = page.locator(selector).first();
-        if ((await loc.count()) > 0 && (await loc.isVisible())) return loc;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`no OIDC password field matched: ${selectors.join(", ")}`);
-      }
-      await sleep(250);
+  /** First visible locator among the candidates, or null. */
+  private async tryMatch(page: Page, selectors: string[]) {
+    for (const selector of selectors) {
+      const loc = page.locator(selector).first();
+      if ((await loc.count()) > 0 && (await loc.isVisible())) return loc;
     }
+    return null;
   }
 
   private async fillFirst(page: Page, selectors: string[], value: string): Promise<void> {
@@ -734,19 +728,45 @@ export class BrowserDriver implements Driver {
     }
     const sel = loginSelectors(process.env);
     const page = await this.context.newPage();
+    const hasSession = async () =>
+      (await this.context.request.get(`${this.portal}/v1/workspaces`)).ok();
     try {
+      // A previous attempt that died after the IdP set the SSO cookie but
+      // before the session probe passed already has a login: skip the form.
+      if (await hasSession()) return;
       await page.goto(this.portal, { waitUntil: "domcontentloaded" });
-      // The portal bounces to the IdP; wait for its password field.
-      const pw = await this.firstMatch(page, sel.password, 30_000);
-      await pw.waitFor({ state: "visible", timeout: 30_000 });
-      await this.fillFirst(page, sel.user, user);
-      await pw.fill(password);
-      const submit = page.locator(sel.submit).first();
-      if ((await submit.count()) > 0) await submit.click();
-      else await pw.press("Enter");
-      await page.waitForURL(`${this.portal}/**`, { timeout: 60_000 });
-      const check = await this.context.request.get(`${this.portal}/v1/workspaces`);
-      if (!check.ok()) throw new Error(`login did not yield a session (${check.status()})`);
+      // The portal bounces to the IdP; wait for its password field. If the
+      // redirect chain bounces straight back through an existing SSO
+      // session instead, hasSession() flips and we skip the form.
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const pw = await this.tryMatch(page, sel.password);
+        if (pw) {
+          await this.fillFirst(page, sel.user, user);
+          await pw.fill(password);
+          const submit = page.locator(sel.submit).first();
+          if ((await submit.count()) > 0) await submit.click();
+          else await pw.press("Enter");
+          await page.waitForURL(`${this.portal}/**`, { timeout: 60_000 });
+          break;
+        }
+        if (await hasSession()) return;
+        if (Date.now() > deadline) {
+          throw new Error(`no OIDC password field matched: ${sel.password.join(", ")}`);
+        }
+        await sleep(250);
+      }
+      // The backend session can lag the redirect: probe it for a few
+      // seconds before declaring the login failed.
+      const sessDeadline = Date.now() + 15_000;
+      let status = 0;
+      while (Date.now() <= sessDeadline) {
+        const check = await this.context.request.get(`${this.portal}/v1/workspaces`);
+        if (check.ok()) return;
+        status = check.status();
+        await sleep(1500);
+      }
+      throw new Error(`login did not yield a session (${status})`);
     } finally {
       await page.close();
     }
