@@ -184,10 +184,14 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	}
 
 	// Outbox dispatcher: delivers intents per workspace in revision order.
-	svc := provisioning.NewService(db)
+	// The start path re-points workspaces onto the newest published
+	// revision of their template family under imageUpdate=OnStart (E1).
+	svc := provisioning.NewService(db).
+		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants)).
+		WithLogger(log)
 	outbox := provisioning.NewOutbox(db)
 	retained := provisioning.NewRetainedStore(db)
-	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants), kc, tenants, retained)
+	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants).WithLogger(log), kc, tenants, retained)
 	disp := provisioning.NewDispatcher(outbox, applier,
 		provisioning.WithPollInterval(250*time.Millisecond))
 	b.singletons = append(b.singletons, func(ctx context.Context) {
@@ -754,23 +758,39 @@ func (a catalogAdapter) List(ctx context.Context, tenantID, runtimeFilter, _ str
 	return out, "", nil
 }
 
+// NewestInFamily implements api.FamilyCatalog for the updateAvailable
+// view field; ErrTemplateNotFound maps to an empty entry.
+func (a catalogAdapter) NewestInFamily(ctx context.Context, tenantID, family string) (api.TemplateEntry, error) {
+	e, err := a.c.NewestInFamily(ctx, tenantID, family)
+	if err != nil {
+		if errors.Is(err, provisioning.ErrTemplateNotFound) {
+			return api.TemplateEntry{}, api.ErrTemplateNotFound
+		}
+		return api.TemplateEntry{}, err
+	}
+	return catalogEntry(e), nil
+}
+
 func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 	return api.TemplateEntry{
 		ID:                     e.ID,
 		Name:                   e.Name,
 		Description:            e.Description,
 		Revision:               e.Revision,
+		RevisionLabel:          e.RevisionLabel,
 		Runtime:                e.Runtime,
 		Experience:             e.Experience,
 		CPUMillis:              e.CPUMillis,
 		MemoryMiB:              e.MemoryBytes >> 20,
 		StorageGiB:             e.DiskBytes >> 30,
+		StorageBytes:           e.DiskBytes,
 		IdleTimeoutSeconds:     int64(e.IdleTimeout / time.Second),
 		DisconnectGraceSeconds: int64(e.DisconnectGrace / time.Second),
 		MaxRunningSeconds:      int64(e.MaxRunning / time.Second),
 		DataPolicyDefault:      e.DataPolicyDefault,
 		ClipboardPolicy:        e.ClipboardPolicy,
 		NetworkProfile:         e.NetworkProfile,
+		ImageUpdate:            e.ImageUpdate,
 		PublishedAt:            e.PublishedAt,
 		ImageBuiltAt:           e.ImageBuiltAt,
 	}
