@@ -79,8 +79,6 @@ func TestSessionProbe_SessionKeyedBehindNAT(t *testing.T) {
 	l := ratelimit.New(30, 10, 1000, nil)
 	mux := http.NewServeMux()
 	MountSessionProbeRoute(mux, a, RateLimitWithKey(l, nil, nil, a.SessionRateLimitKey()))
-	mux.Handle("GET /v1/login", RateLimitWithKey(l, nil, nil, a.SessionRateLimitKey())(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusFound) })))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -98,17 +96,52 @@ func TestSessionProbe_SessionKeyedBehindNAT(t *testing.T) {
 				t.Fatalf("user %d probe %d not authenticated", i, j)
 			}
 		}
-		// A signed-in user revisiting /v1/login keys on the session too.
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/login", nil)
-		req.AddCookie(sess)
+	}
+}
+
+// TestLogin_IPKeyedNoStoreRead (FX-R30 review): /v1/login is the anonymous
+// login start — it stays on the plain client-IP key and must not spend a
+// store read on any cookie, valid or forged, before the refusal.
+func TestLogin_IPKeyedNoStoreRead(t *testing.T) {
+	counter := &peekCounter{SessionStore: NewInMemorySessionStore(30 * time.Minute)}
+	now := time.Unix(1_700_000_000, 0)
+	l := ratelimit.New(30, 2, 1000, func() time.Time { return now }) // burst 2, frozen
+	mux := http.NewServeMux()
+	mux.Handle("GET /v1/login", RateLimit(l, nil, nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusFound) })))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	valid := saveSession(t, counter, "sess-login")
+	forged := &http.Cookie{Name: "__Host-tcdi_session", Value: "forged-not-a-session"}
+	// A valid cookie earns nothing on this route and a forged one buys no
+	// store read: all three share the single client-IP bucket — the third
+	// request is refused no matter what it carries.
+	for _, tc := range []struct {
+		name   string
+		cookie *http.Cookie
+		want   int
+	}{
+		{"valid cookie", valid, http.StatusFound},
+		{"forged cookie", forged, http.StatusFound},
+		{"valid cookie again", valid, http.StatusTooManyRequests},
+	} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/login", nil)
+		if err != nil {
+			t.Fatalf("build login: %v", err)
+		}
+		req.AddCookie(tc.cookie)
 		resp, err := noRedirectClient().Do(req)
 		if err != nil {
-			t.Fatalf("user %d login revisit: %v", i, err)
+			t.Fatalf("%s: %v", tc.name, err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusTooManyRequests {
-			t.Fatalf("user %d /v1/login revisit = 429, want pass on the session key", i)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, resp.StatusCode, tc.want)
 		}
+	}
+	if counter.peeks != 0 {
+		t.Fatalf("Peek calls = %d, want 0 — /v1/login must not read the session store", counter.peeks)
 	}
 }
 
@@ -165,7 +198,7 @@ func TestSessionProbe_AbusiveSessionKeyed(t *testing.T) {
 	// Anonymous probes and a forged cookie still share the per-IP budget:
 	// a value that does not verify can never mint a fresh key.
 	forged := &http.Cookie{Name: "__Host-tcdi_session", Value: "forged-not-a-session"}
-	for i, tc := range []struct {
+	for _, tc := range []struct {
 		name   string
 		cookie *http.Cookie
 		want   int
@@ -181,7 +214,6 @@ func TestSessionProbe_AbusiveSessionKeyed(t *testing.T) {
 			t.Fatalf("%s = %d, want %d", tc.name, resp.StatusCode, tc.want)
 		}
 		resp.Body.Close()
-		_ = i
 	}
 
 	if strings.Contains(logBuf.String(), abuser.Value) {
@@ -234,9 +266,10 @@ func TestSessionProbe_ReusesRateLimitLookup(t *testing.T) {
 func TestCallback_StateKeyed(t *testing.T) {
 	env := newTestEnv(t, nil)
 	now := time.Unix(1_700_000_000, 0)
-	l := ratelimit.New(30, 5, 1000, func() time.Time { return now }) // burst 5, frozen
+	l := ratelimit.New(30, 5, 1000, func() time.Time { return now })         // burst 5, frozen
+	ceiling := ratelimit.New(300, 50, 1000, func() time.Time { return now }) // 10x, as wired
 	mux := http.NewServeMux()
-	mux.Handle("GET /auth/callback", RateLimitWithKey(l, nil, nil, env.auth.CallbackRateLimitKey())(
+	mux.Handle("GET /auth/callback", RateLimitWithCeiling(l, ceiling, nil, nil, env.auth.CallbackRateLimitKey())(
 		http.HandlerFunc(env.auth.CallbackHandler)))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -296,5 +329,46 @@ func TestCallback_StateKeyed(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("mismatched-state callback = %d, want 429 — an unvalidated state must fall back to the client-IP key", resp.StatusCode)
+	}
+}
+
+// TestCallback_ValidatedStateCeiling (FX-R30 review): validated states are
+// mintable — each costs one IP-limited login start — so a spray of
+// distinct valid states from ONE client address must still hit the per-IP
+// ceiling instead of scaling without bound.
+func TestCallback_ValidatedStateCeiling(t *testing.T) {
+	env := newTestEnv(t, nil)
+	now := time.Unix(1_700_000_000, 0)
+	l := ratelimit.New(30, 5, 1000, func() time.Time { return now })         // login-family bucket
+	ceiling := ratelimit.New(300, 15, 1000, func() time.Time { return now }) // ceiling burst 15
+	mux := http.NewServeMux()
+	mux.Handle("GET /auth/callback", RateLimitWithCeiling(l, ceiling, nil, nil, env.auth.CallbackRateLimitKey())(
+		http.HandlerFunc(env.auth.CallbackHandler)))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Twenty distinct logins complete their callbacks: each state bucket
+	// has room (own key), but the shared ceiling admits only fifteen —
+	// logins 16-20 pay 429.
+	for i := 0; i < 20; i++ {
+		query, cookies := env.callbackQueryForLogin(t)
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/auth/callback?"+query, nil)
+		if err != nil {
+			t.Fatalf("login %d build callback: %v", i, err)
+		}
+		req.AddCookie(findCookie(cookies, env.auth.LoginCookieName()))
+		resp, err := noRedirectClient().Do(req)
+		if err != nil {
+			t.Fatalf("login %d callback: %v", i, err)
+		}
+		want := http.StatusFound
+		if i >= 15 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.StatusCode != want {
+			resp.Body.Close()
+			t.Fatalf("login %d callback = %d, want %d — valid states must still pass the per-IP ceiling", i, resp.StatusCode, want)
+		}
+		resp.Body.Close()
 	}
 }

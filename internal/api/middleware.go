@@ -253,6 +253,47 @@ func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Me
 	return RateLimitWithKey(l, trusted, m, nil)
 }
 
+// RateLimitWithCeiling is RateLimitWithKey plus a second, client-IP-keyed
+// limiter that a minted (authenticated) key must ALSO pass: a request the
+// resolver keys on validated material is charged both its own bucket in l
+// and the shared IP ceiling. Validated keys are mintable — a callback
+// state costs its holder one IP-limited login start — so the ceiling
+// bounds the amplification a key spray can buy to a fixed multiplier of
+// the IP rate (FX-R30 review). A "" from the resolver means "no
+// authenticated key" and only the client-IP bucket in l applies — the
+// ceiling never subsidizes anonymous requests.
+func RateLimitWithCeiling(l, ceiling *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if l != nil {
+				k := ""
+				if key != nil {
+					k = key(r)
+				}
+				var ok bool
+				var retry time.Duration
+				if k == "" {
+					ok, retry = l.Allow(ratelimit.ClientKey(r, trusted))
+				} else {
+					ok, retry = l.Allow(k)
+					if ok && ceiling != nil {
+						ok, retry = ceiling.Allow(ratelimit.ClientKey(r, trusted))
+					}
+				}
+				if !ok {
+					if m != nil {
+						m.IncRateLimited(strings.TrimPrefix(r.Pattern, r.Method+" "))
+					}
+					w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+					writeError(w, r, CodeRateLimited, "rate limit exceeded")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RateLimitWithKey is RateLimit whose bucket key the key resolver may
 // override per request; a "" from the resolver falls back to the
 // client-IP key (ClientKey). The refusal shape, Retry-After and metrics

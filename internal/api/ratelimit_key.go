@@ -24,9 +24,13 @@ import (
 // SessionRateLimitKey keys a request carrying a VALID session cookie by a
 // digest of the session ID; anything else yields "" so the caller falls
 // back to the client-IP key. Validity is checked with Peek — no idle
-// slide, no write. The verified session is parked on the request context
-// where RequireAuth would put it, so a downstream handler (the session
-// probe) reuses the lookup instead of reading the store twice.
+// slide, no write — so this resolver is wired only where the read is
+// already owed: the session probe Peeks itself, and the verified session
+// is parked on the request context where RequireAuth would put it, so the
+// handler reuses the lookup instead of reading the store twice. /v1/login
+// deliberately does NOT use this resolver: it is the anonymous login
+// start, and keying it by cookie would buy every forged value a store
+// read before the refusal.
 func (a *Authenticator) SessionRateLimitKey() RateLimitKeyFunc {
 	return func(r *http.Request) string {
 		c, err := r.Cookie(a.cfg.SessionCookieName)
@@ -55,7 +59,11 @@ func (a *Authenticator) SessionRateLimitKey() RateLimitKeyFunc {
 // this browser cannot mint a bucket. An absent, unsealable, expired or
 // mismatched state yields "" — the caller falls back to the client-IP
 // key. Open is a pure AEAD decode: no store read, no write, and the
-// handler re-opens and consumes the same cookie itself.
+// handler re-opens and consumes the same cookie itself. A validated state
+// IS mintable — it costs its holder one IP-limited login start — so the
+// caller pairs this resolver with a per-IP ceiling
+// (RateLimitWithCeiling): the key spray buys at most a fixed multiple of
+// the IP budget, never an unbounded one.
 func (a *Authenticator) CallbackRateLimitKey() RateLimitKeyFunc {
 	return func(r *http.Request) string {
 		state := r.URL.Query().Get("state")

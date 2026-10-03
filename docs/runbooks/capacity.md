@@ -156,11 +156,23 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
 The backend throttles its unauthenticated surface **per client IP**:
 `-login-rate` (30/min, burst 10) covers `GET /v1/login`,
 `GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate`
-(60/min, burst 20) covers `POST /v1/launch`. A request that proves a live
-session keys on a digest of that session instead, and a callback on its
-validated OIDC state — so a whole office behind one NAT address keeps
-per-user budgets. Anonymous traffic (login start, unauthenticated probes,
-forged or expired cookies) always keys on the client IP.
+(60/min, burst 20) covers `POST /v1/launch`. Authenticated requests get
+their own keys instead — `GET /v1/session` keys on a digest of the
+*validated* session cookie, `/v1/launch` likewise once the session is
+live on the serving replica (a cookie issued by a sibling and not yet
+rehydrated keys by IP — the limiter never spends a directory lookup), and
+`/v1/auth/callback` keys on its *validated* OIDC state. Anonymous traffic
+— login starts on `/v1/login`, unauthenticated probes, forged or expired
+cookies, unvalidated states — always keys on the client IP, so a whole
+office behind one NAT address keeps per-user budgets everywhere except
+the anonymous sign-in start itself.
+
+One bound to know: a validated state is *mintable* — it costs its holder
+one IP-limited `/v1/login` — so callback keys are additionally gated by a
+per-IP ceiling at **10× the login limits** (300/min, burst 100 by
+default). A spray of minted states cannot amplify callback throughput
+past that multiplier, and a NAT'd org needs >100 concurrent OIDC
+callbacks from one address before the ceiling even engages.
 
 What that means for sizing:
 
@@ -169,11 +181,12 @@ What that means for sizing:
   users behind one NAT who all click sign-in inside a minute need
   `-login-rate` ≥ N **plus** headroom for the anonymous
   `GET /v1/session` probes signed-out tabs poll (`-login-rate=0` disables
-  the limit entirely). Once the session exists, probes and `/v1/login`
-  revisits run on the per-session budget, and each OIDC callback on its
-  own state — the sustained rates need no NAT multiplier.
-- **Launches:** `POST /v1/launch` re-launches carrying a live session
-  cookie are per-session; a *first* launch (no cookie yet) is per-IP —
+  the limit entirely). Once the session exists, probes run on the
+  per-session budget, and each OIDC callback on its own state (within the
+  10× ceiling) — the sustained rates need no NAT multiplier.
+- **Launches:** `POST /v1/launch` re-launches carrying a session cookie
+  that is live on the serving replica are per-session; a *first* launch
+  (no cookie yet, or a cookie only a sibling replica knows) is per-IP —
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
 - The per-key limits and the limiter's key-space bound are unchanged;
   `backend.trustedProxies` must still name the edge's CIDRs or every user
