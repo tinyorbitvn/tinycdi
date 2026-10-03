@@ -142,7 +142,10 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 }
 
 // applySignal forwards desiredState/runtimeGeneration/intentRevision for
-// start and stop, never moving intentRevision backwards.
+// start and stop, never moving intentRevision backwards. A start intent
+// that carries a template name re-points spec.templateRef at the newer
+// revision in the same write — allowed by CEL only while the CR was
+// Stopped — and refreshes the image-built-at annotation to match.
 func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in Intent) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var ws workspacev1alpha1.Workspace
@@ -158,6 +161,14 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 		if int64(in.Revision) <= ws.Spec.IntentRevision {
 			return nil // stale or already applied
 		}
+		if in.Spec.TemplateName != "" && ws.Spec.DesiredState == workspacev1alpha1.DesiredStateStopped {
+			ws.Spec.TemplateRef.Name = in.Spec.TemplateName
+			if in.Spec.ImageBuiltAt != "" {
+				setCRAnnotation(&ws, AnnotationWorkspaceImageBuiltAt, in.Spec.ImageBuiltAt)
+			} else {
+				delete(ws.Annotations, AnnotationWorkspaceImageBuiltAt)
+			}
+		}
 		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
 		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
@@ -165,6 +176,14 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 		ws.Spec.IntentRevision = int64(in.Revision)
 		return a.client.Update(ctx, &ws)
 	})
+}
+
+// setCRAnnotation sets a single annotation on a Workspace CR.
+func setCRAnnotation(ws *workspacev1alpha1.Workspace, key, value string) {
+	if ws.Annotations == nil {
+		ws.Annotations = map[string]string{}
+	}
+	ws.Annotations[key] = value
 }
 
 func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in Intent) error {
@@ -215,10 +234,13 @@ func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Wor
 
 // TemplateCatalogEntry is a published template revision offered to users.
 type TemplateCatalogEntry struct {
-	ID                string // public ID: "tpl_" + CR name
-	Name              string // CR name
-	Description       string
-	Revision          int64
+	ID          string // public ID: "tpl_" + CR name
+	Name        string // catalog (family) name
+	Description string
+	Revision    int64
+	// RevisionLabel is the raw spec.revision identifier ("2026-10-b"); the
+	// numeric Revision above parses only a leading integer prefix.
+	RevisionLabel     string
 	Runtime           string
 	Experience        string
 	CPUMillis         int64
@@ -230,11 +252,19 @@ type TemplateCatalogEntry struct {
 	DataPolicyDefault string
 	ClipboardPolicy   string
 	NetworkProfile    string
-	PublishedAt       time.Time
+	// ImageUpdate is the revision's lifecycle.imageUpdate policy
+	// (OnStart | Pinned); "" on objects published before the field existed,
+	// which callers must read as the OnStart default.
+	ImageUpdate string
+	PublishedAt time.Time
 	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339
 	// when well formed); empty when the template carries no annotation.
 	ImageBuiltAt string
 }
+
+// ErrTemplateNotFound means a template or template family does not resolve
+// in the tenant's catalog.
+var ErrTemplateNotFound = errors.New("template not found")
 
 // K8sTemplateCatalog resolves/list templates from WorkspaceTemplate CRs in
 // the tenant's namespace. Public IDs are "tpl_" + CR name.
@@ -337,6 +367,39 @@ func (c *K8sTemplateCatalog) Get(ctx context.Context, tenantID, id string) (*Tem
 	return &e, nil
 }
 
+// NewestInFamily returns the newest published revision of the template
+// family (catalog name) family belongs to — the same resolution List
+// applies per catalog name, restricted to one family. family is the
+// catalog-name label value; an unlabeled singleton template is its own
+// family and resolves by object name. ErrTemplateNotFound when no live
+// revision of the family exists.
+func (c *K8sTemplateCatalog) NewestInFamily(ctx context.Context, tenantID, family string) (TemplateCatalogEntry, error) {
+	ns, ok := c.tenants.Namespace(tenantID)
+	if !ok {
+		return TemplateCatalogEntry{}, fmt.Errorf("no namespace for tenant %q", tenantID)
+	}
+	var list workspacev1alpha1.WorkspaceTemplateList
+	if err := c.client.List(ctx, &list, client.InNamespace(ns),
+		client.MatchingLabels{LabelCatalogName: family}); err != nil {
+		return TemplateCatalogEntry{}, err
+	}
+	latest := latestRevision(list.Items)
+	if latest == nil {
+		// No labeled revisions: the family may be an unlabeled
+		// admin-published singleton whose object name IS the family.
+		var tpl workspacev1alpha1.WorkspaceTemplate
+		err := c.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: family}, &tpl)
+		switch {
+		case apierrors.IsNotFound(err):
+			return TemplateCatalogEntry{}, fmt.Errorf("%w: family %q", ErrTemplateNotFound, family)
+		case err != nil:
+			return TemplateCatalogEntry{}, err
+		}
+		latest = &tpl
+	}
+	return templateEntry(latest), nil
+}
+
 // List returns the catalog the tenant sees: one entry per logical
 // template — the newest published revision when several immutable
 // revision objects share a catalog name.
@@ -374,12 +437,14 @@ func templateEntry(t *workspacev1alpha1.WorkspaceTemplate) TemplateCatalogEntry 
 	var rev int64
 	fmt.Sscanf(t.Spec.Revision, "%d", &rev)
 	e := TemplateCatalogEntry{
-		ID:          "tpl_" + t.Name,
-		Name:        catalogName(t),
-		Revision:    rev,
-		Runtime:     string(t.Spec.Runtime),
-		Experience:  string(t.Spec.Experience),
-		PublishedAt: t.CreationTimestamp.Time,
+		ID:            "tpl_" + t.Name,
+		Name:          catalogName(t),
+		Revision:      rev,
+		RevisionLabel: t.Spec.Revision,
+		Runtime:       string(t.Spec.Runtime),
+		Experience:    string(t.Spec.Experience),
+		ImageUpdate:   string(t.Spec.Lifecycle.ImageUpdate),
+		PublishedAt:   t.CreationTimestamp.Time,
 	}
 	e.CPUMillis = t.Spec.Resources.CPU.MilliValue()
 	e.MemoryBytes = t.Spec.Resources.Memory.Value()
