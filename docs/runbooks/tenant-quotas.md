@@ -66,7 +66,7 @@ kubectl -n <release-ns> logs -l app.kubernetes.io/name=backend --tail=-1 | grep 
 |---|---|---|---|
 | Tenant has no quota row | `409 QUOTA_NOT_CONFIGURED` | no | admission fails closed; an administrator must declare a quota (chart `quota` block). The user-facing message says exactly that |
 | Over a configured limit | `409 QUOTA_EXHAUSTED` | no | genuine headroom shortage — free resources or raise the limit |
-| Over limit only because of teardown-pending holds | `409 QUOTA_EXHAUSTED` + `details.reason: release_pending` + `Retry-After` | **yes** | a deleted or stopped workspace still holds the reservation pending the runtime-absence proof; the release lands on the next recovery pass (30 s cadence), so the portal can retry automatically |
+| Over limit only because of teardown-pending holds | `409 QUOTA_EXHAUSTED` + `details.reason: release_pending` + `Retry-After` | **yes** | a deleted or stopped workspace still holds the reservation pending the runtime-absence proof; the release is usually within seconds (event-driven settle) and at most ~30 s (the recovery tick is the catch-all), so the portal can retry automatically |
 
 Quota accounting detail: compute (`runningWorkspaces`, `cpu`, `memory`) is
 held while a runtime incarnation exists — from start intent until the pod
@@ -82,7 +82,8 @@ with. Retained disks keep their storage quota until purge.
   Install/upgrade NOTES print a warning for every entry missing `quota`.
 - **Tenant reports `QUOTA_EXHAUSTED`:** check `GET /v1/quota` usage vs
   limits, and whether refusals carry `release_pending` (transient — no
-  action; the hold clears within ~30 s). Otherwise raise the block or have
+  action; the hold usually clears within seconds, at most ~30 s).
+  Otherwise raise the block or have
   the tenant free workspaces.
 - **Quota row looks wrong:** the next backend start rewrites declared
   tenants from values — fix the values, not the row. For undeclared
