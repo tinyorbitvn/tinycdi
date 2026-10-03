@@ -57,10 +57,13 @@ const TenantAdminGroup = "tenant-admin"
 
 // TemplateEntry is a catalog entry resolvable to a templateRef.
 type TemplateEntry struct {
-	ID                     string
-	Name                   string // WorkspaceTemplate CR name
-	Description            string
-	Revision               int64
+	ID          string
+	Name        string // catalog (family) name
+	Description string
+	Revision    int64
+	// RevisionLabel is the raw spec.revision identifier ("2026-10-b");
+	// Revision above parses only a leading integer prefix.
+	RevisionLabel          string
 	Runtime                string
 	Experience             string
 	CPUMillis              int64
@@ -72,7 +75,10 @@ type TemplateEntry struct {
 	DataPolicyDefault      string
 	ClipboardPolicy        string
 	NetworkProfile         string
-	PublishedAt            time.Time
+	// ImageUpdate is the revision's lifecycle.imageUpdate policy
+	// (OnStart | Pinned); "" reads as the OnStart default.
+	ImageUpdate string
+	PublishedAt time.Time
 	// ImageBuiltAt is the raw image-built-at annotation value carried by
 	// the resolved WorkspaceTemplate (RFC 3339 when well formed).
 	ImageBuiltAt string
@@ -86,6 +92,13 @@ var ErrTemplateNotFound = errors.New("template not found")
 type TemplateCatalog interface {
 	Resolve(ctx context.Context, tenantID, templateID string) (TemplateEntry, error)
 	List(ctx context.Context, tenantID, runtimeFilter, cursor string, limit int) ([]TemplateEntry, string, error)
+}
+
+// FamilyCatalog is the optional catalog surface a TemplateCatalog may add
+// to resolve the newest published revision of a template family. When the
+// handler's catalog does not implement it, updateAvailable stays false.
+type FamilyCatalog interface {
+	NewestInFamily(ctx context.Context, tenantID, family string) (TemplateEntry, error)
 }
 
 // workspaceBackend is the provisioning.Service surface the handler needs;
@@ -217,6 +230,12 @@ type WorkspaceView struct {
 	UpdatedAt       time.Time            `json:"updatedAt"`
 	ImageBuiltAt    *time.Time           `json:"imageBuiltAt,omitempty"`
 	ImageStale      *bool                `json:"imageStale,omitempty"`
+	// TemplateRevision is the raw revision identifier of the template the
+	// workspace is on (spec.revision verbatim, e.g. "2026-10-b").
+	TemplateRevision string `json:"templateRevision"`
+	// UpdateAvailable is true when the workspace's template family
+	// published a newer revision a start would move to.
+	UpdateAvailable bool `json:"updateAvailable"`
 }
 
 // WorkspaceList is the paginated list response.
@@ -238,15 +257,29 @@ func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
 			Runtime:    r.Template.Runtime,
 			Experience: r.Template.Experience,
 		},
-		Phase:           r.Phase,
-		Conditions:      []workspaceCondition{},
-		DesiredState:    r.DesiredState,
-		DataPolicy:      r.DataPolicy,
-		RetainedDataRef: r.RetainedDataRef,
-		FailureReason:   r.FailureReason,
-		CreatedAt:       r.CreatedAt,
-		UpdatedAt:       r.UpdatedAt,
+		Phase:            r.Phase,
+		Conditions:       []workspaceCondition{},
+		DesiredState:     r.DesiredState,
+		DataPolicy:       r.DataPolicy,
+		RetainedDataRef:  r.RetainedDataRef,
+		FailureReason:    r.FailureReason,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		TemplateRevision: templateRevisionOf(&r.Template),
 	}
+}
+
+// templateRevisionOf reports the workspace's template revision as the
+// verbatim spec.revision label, falling back to the numeric revision on
+// rows written before v0.3 carried the label.
+func templateRevisionOf(t *provisioning.TemplateInfo) string {
+	if t.RevisionLabel != "" {
+		return t.RevisionLabel
+	}
+	if t.Revision > 0 {
+		return strconv.FormatInt(t.Revision, 10)
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +375,7 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	owners := h.resolveOwnerRefs(r.Context(), p.TenantID, recs)
 	out := WorkspaceList{Items: make([]WorkspaceView, 0, len(recs)), NextPageToken: next}
-	ctx := withImageAgeMemo(r.Context())
+	ctx := withImageAgeMemo(withUpdateCheckMemo(r.Context()))
 	for i := range recs {
 		v := h.viewWithStatus(ctx, &recs[i])
 		v.Owner = owners[recs[i].Owner]
@@ -425,7 +458,8 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	tplInfo := provisioning.TemplateInfo{
 		ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
-		Runtime: tpl.Runtime, Experience: tpl.Experience,
+		RevisionLabel: tpl.RevisionLabel,
+		Runtime:       tpl.Runtime, Experience: tpl.Experience,
 		ImageBuiltAt: tpl.ImageBuiltAt,
 	}
 	vector := provisioning.ResourceVector{
