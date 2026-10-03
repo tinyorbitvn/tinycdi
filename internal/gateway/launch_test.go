@@ -107,12 +107,13 @@ func TestLaunch_SetsHostOnlyCookie(t *testing.T) {
 }
 
 // TestLaunch_RedirectLoadsDesktopWithRemoteResize (FX-R18): the 303 lands the
-// KasmVNC web client with resize=remote. The client treats a page inside an
-// iframe as an embedded widget and silently forces resize=off, which keeps
-// the remote screen at its old size: a larger in-portal frame then shows
-// large dark regions around (or instead of) the desktop. The query is a
-// static, non-secret client setting; it never carries ticket or session
-// material.
+// KasmVNC web client with resize=remote plus the static embedded-parity
+// settings (V3.24: tab-mode WebP offer, no client-side idle cut before the
+// platform lifecycle). The client treats a page inside an iframe as an
+// embedded widget and silently forces resize=off, which keeps the remote
+// screen at its old size: a larger in-portal frame then shows large dark
+// regions around (or instead of) the desktop. The query is a static,
+// non-secret client setting; it never carries ticket or session material.
 func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-1", testWSUID)
@@ -123,7 +124,8 @@ func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("launch status = %d, want 303", resp.StatusCode)
 	}
-	if loc, want := resp.Header.Get("Location"), "/?resize=remote"; loc != want {
+	if loc, want := resp.Header.Get("Location"),
+		"/?resize=remote&enable_webp=true&idle_disconnect=1440"; loc != want {
 		t.Fatalf("redirect Location = %q, want %q", loc, want)
 	}
 }

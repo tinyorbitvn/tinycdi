@@ -7,7 +7,7 @@ import { useApi } from "../api/context";
 import { Link } from "../lib/router";
 import { listWorkspaces } from "./api";
 import type { WorkspaceView } from "./helpers";
-import { desiredLabel, isConnectable, phaseLabelKey } from "./helpers";
+import { desiredLabel, isConnectable, phaseLabelKey, templateRefLabel } from "./helpers";
 import { useResource } from "./resource";
 import { ErrorBanner } from "./ErrorBanner";
 import { dataPolicyLabel } from "../templates/format";
@@ -34,7 +34,7 @@ const COLUMNS: Column<WorkspaceView>[] = [
     key: "template",
     header: t("workspaces.list.col.template"),
     hideOnMobile: true,
-    render: (w) => `${w.template.name}@${w.template.revision}`,
+    render: (w) => templateRefLabel(w.template),
   },
   {
     key: "phase",

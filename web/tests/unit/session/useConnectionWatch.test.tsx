@@ -12,8 +12,9 @@ import { sessionFrameName, type LaunchTicket } from "../../../src/session/launch
 const WS = "ws_0123456789abcdef";
 const DOMAIN = "session.example.com";
 const ORIGIN = `https://ws-0123456789abcdef.${DOMAIN}`;
-// Frame navigations load the desktop client with resize=remote (FX-R18).
-const FRAME_URL = `${ORIGIN}/?resize=remote`;
+// Frame navigations load the desktop client with the embedded-parity
+// settings (FX-R18 resize=remote + V3.24); no clipboard policy here.
+const FRAME_URL = `${ORIGIN}/?resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false`;
 
 function ticket(): LaunchTicket {
   return {

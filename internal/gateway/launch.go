@@ -44,12 +44,18 @@ const (
 	// TicketField is the form field carrying the ticket in the POST body.
 	TicketField = "ticket"
 	// DesktopPath is where the browser is redirected after redemption — no
-	// ticket or session material may appear in it. resize=remote is a static
-	// client setting: the KasmVNC web client otherwise treats a page inside
-	// an iframe as an embedded widget and forces resize=off, which keeps the
+	// ticket or session material may appear in it. The settings are static
+	// client settings (a URL setting wins over the client's initSetting
+	// defaults): the KasmVNC web client otherwise treats a page inside an
+	// iframe as an embedded widget and forces resize=off, which keeps the
 	// remote screen at its old size and leaves large dark regions in a
-	// larger portal frame (FX-R18). It is the default in a top-level tab.
-	DesktopPath = "/?resize=remote"
+	// larger portal frame (FX-R18); enable_webp matches the tab-mode codec
+	// offer; idle_disconnect=1440 pushes the client's own idle cut (default
+	// 20 min) past any template lifecycle timeout — idle policy belongs to
+	// the platform (V3.24 embedded-mode decisions). Clipboard client flags
+	// are not static: the portal sets them per workspace policy on the
+	// navigations it drives.
+	DesktopPath = "/?resize=remote&enable_webp=true&idle_disconnect=1440"
 
 	maxLaunchBody = 4096
 )
