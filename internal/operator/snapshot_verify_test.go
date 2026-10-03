@@ -135,7 +135,7 @@ func assertSnapshotRejected(t *testing.T, c client.Client, ws *workspacesv1alpha
 func TestForgedSnapshotBadHashRejected(t *testing.T) {
 	spec := forgedSpec("attacker.example/miner:latest")
 	ann := forgedSnapshot("does-not-exist", "x", "x", "sha256:00", spec,
-		map[string]string{linux.AnnotationNodeSelector: `{"node-role.kubernetes.io/control-plane":"true"}`})
+		map[string]string{linux.AnnotationSeccompProfile: `localhost/attacker`})
 	ws := forgedWorkspace(ann)
 	c, got := reconcileForged(t, ws)
 	assertSnapshotRejected(t, c, ws, got)

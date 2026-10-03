@@ -16,11 +16,9 @@ import { isPortalApiError } from "../api/errors";
 import { t, formatDateTime, type MessageKey } from "../i18n";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
+import { isTenantAdmin, useLoader, useMeLoaded } from "../app/me";
 import {
-  isTenantAdmin,
   listRetainedData,
-  useLoader,
-  useMe,
   type RetainedDataState,
   type Scope,
   type ScopedRetainedData,
@@ -67,7 +65,7 @@ export function ownerLabel(owner: { subject: string; displayName: string } | und
 }
 
 export function DataListPage() {
-  const me = useMe();
+  const me = useMeLoaded();
   const admin = isTenantAdmin(me.data);
   const [scope, setScope] = useState<Scope>("mine");
   const effectiveScope: Scope = admin ? scope : "mine";

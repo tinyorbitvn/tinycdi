@@ -629,10 +629,6 @@ nodeProfiles:
 # ignored (seccomp) or rejected (apparmor)):
 #   seccompProfile:  <name> -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: <name> -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
-#   nodeSelector:    {k: v}  -> workspaces.cdi.tinyorbit.vn/node-selector (JSON)
-#                    DEPRECATED — prefer the typed spec.placement.nodeSelector;
-#                    the annotation ships for one release and loses to the
-#                    spec field when both are set
 #   storageClass:    <name>  -> workspaces.cdi.tinyorbit.vn/storage-class
 # The node profiles must be PRE-LOADED on the nodes that run these
 # templates (see README prerequisites). Runtime pod placement —

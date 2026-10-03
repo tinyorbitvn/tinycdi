@@ -11,7 +11,7 @@ import {
   type WorkspacePhase,
 } from "./api";
 import { formatAgo, formatDateTime, ownerLabel } from "./format";
-import { useLoader } from "./hooks";
+import { useLoader } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 import { QuotaMeters } from "./QuotaPage";

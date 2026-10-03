@@ -13,16 +13,14 @@ import { t, formatDateTime } from "../i18n";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { canAttach, canPurge, DataStateBadge, ownerLabel } from "./DataListPage";
+import { isTenantAdmin, useLoader, useMeLoaded } from "../app/me";
 import {
   getRetainedData,
-  isTenantAdmin,
-  useLoader,
-  useMe,
   type WorkspaceView,
 } from "./api";
 
 export function DataDetailPage({ dataId }: { dataId: string }) {
-  const me = useMe();
+  const me = useMeLoaded();
   const admin = isTenantAdmin(me.data);
   const detail = useLoader((a) => getRetainedData(a, dataId), `data:${dataId}`);
 
