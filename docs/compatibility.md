@@ -84,3 +84,21 @@ authoritative R1 result: `hostUsers: false` has been the shipped default
 since v0.2 — the chart sets `runtime.hostUsers: false` (the operator's
 `--runtime-host-users=false`), and a template's `spec.linux.hostUsers`
 (D24) still overrides it per workspace.
+
+## Sandboxed runtimes (`runtimeClassName`)
+
+A template's `spec.placement.runtimeClassName` (see `docs/images.md` → the
+WorkspaceTemplate field reference) is a supported
+field: the value is passed through to `pod.spec.runtimeClassName` of the
+workspace pod unchanged. It selects the node's container-runtime handler,
+so it only works when the workspace nodes actually carry a RuntimeClass
+with that name — a missing class fails scheduling.
+
+**No sandboxed runtime has been tested by the project.** Neither gVisor
+(`runsc`) nor Kata has run under the project's gates: the reference
+environment offers only `crun`, `nvidia` and `nvidia-experimental`. The
+E12 sandboxed-runtime matrix is therefore not met in v0.3 and moves to the
+v1.0 list. Setting `runtimeClassName` to a sandboxed handler today is
+operator discretion: expect the Localhost seccomp + AppArmor node-profile
+story (`deploy/node-profiles/`) and the `hostUsers: false` verification
+above to need re-proof under the new handler.

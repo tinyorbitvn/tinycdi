@@ -10,9 +10,12 @@
 //     intentRevision <= the recorded revision is ignored, so a replayed stale
 //     intent can never flip desiredState back;
 //   - the WorkspaceTemplate is resolved once at first admit into the
-//     template-snapshot annotation (spec JSON + sha256 hash) and never
-//     re-read for the life of the workspace — the template object may be
-//     deleted or re-published without touching a running generation;
+//     template-snapshot annotation (spec JSON + sha256 hash); it is re-taken
+//     only when spec.runtimeGeneration advances and spec.templateRef moved
+//     off the snapshot's source (an OnStart family re-point written by the
+//     API's start path). Within one generation the template object is never
+//     re-read — it may be deleted or re-published without touching a
+//     running generation;
 //   - all runtime convergence goes through the backend; status reports
 //     observedRuntimeGeneration + runtimeUID of the CURRENT incarnation, and
 //     Ready is reached only when the runtime's own readiness (healthcheck
@@ -136,7 +139,8 @@ type AppliedIntent struct {
 	AppliedAt         metav1.Time                     `json:"appliedAt"`
 }
 
-// templateSnapshot is the immutable template copy recorded at first admit.
+// templateSnapshot is the template copy recorded at admit, re-recorded when
+// a start's family re-point moves spec.templateRef onto a newer revision.
 type templateSnapshot struct {
 	Name     string `json:"name"`
 	UID      string `json:"uid"`
@@ -150,6 +154,14 @@ type templateSnapshot struct {
 	// storage-class) — the
 	// snapshot must capture them since the template object is never re-read.
 	Annotations map[string]string `json:"annotations,omitempty"`
+	// RuntimeGeneration is the applied spec.runtimeGeneration the snapshot
+	// was recorded under; SourceRef is the spec.templateRef.name it was
+	// taken from (the catalog base name the create path writes, or the
+	// revision object name a carried re-point writes). Both are empty on
+	// snapshots recorded before the re-snapshot machinery existed — the
+	// recorded object name is the fallback source for those.
+	RuntimeGeneration int64  `json:"runtimeGeneration,omitempty"`
+	SourceRef         string `json:"sourceRef,omitempty"`
 }
 
 // WorkspaceReconciler reconciles Workspace objects against a runtime backend.
@@ -371,12 +383,27 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		return r.reconcileFailed(ctx, ws, applied)
 	}
 
-	// --- immutable template snapshot ---------------------------------------
+	// --- template snapshot --------------------------------------------------
+	// Recorded at first admit, and re-recorded when the applied generation
+	// advanced AND spec.templateRef moved off the snapshot's source — the
+	// API's start path re-points the reference only while the CR is Stopped
+	// (CEL) and only when the compatibility guard allowed the move (E1/E2),
+	// so a moved reference under a new generation is the re-snapshot signal.
+	// Within one generation the recorded snapshot is authoritative: a pod
+	// crash/recreate converges on it, never on a re-read of the template.
 	snap, err := templateSnapshotFor(ws)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if snap == nil {
+	resnapshot := snap == nil
+	if !resnapshot {
+		stale, serr := r.snapshotStale(ctx, ws, applied, snap)
+		if serr != nil {
+			return ctrl.Result{}, serr
+		}
+		resnapshot = stale
+	}
+	if resnapshot {
 		tpl, gerr := r.resolveTemplate(ctx, ws)
 		switch {
 		case apierrors.IsNotFound(gerr):
@@ -386,14 +413,22 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		case gerr != nil:
 			return ctrl.Result{}, gerr
 		}
+		prev := snap
 		snap, err = snapshotTemplate(tpl)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		snap.RuntimeGeneration = applied.RuntimeGeneration
+		snap.SourceRef = ws.Spec.TemplateRef.Name
 		raw, _ := json.Marshal(snap)
 		setAnnotation(ws, AnnotationTemplateSnapshot, string(raw))
 		if err := r.Update(ctx, ws); err != nil {
 			return ctrl.Result{}, err
+		}
+		if prev != nil {
+			logf.FromContext(ctx).Info("template snapshot re-recorded on new generation",
+				"from", prev.Name, "to", snap.Name,
+				"runtimeGeneration", applied.RuntimeGeneration)
 		}
 	} else if verr := r.verifySnapshot(ctx, ws, snap); verr != nil {
 		// The annotation is plain object metadata — a principal able to
@@ -750,6 +785,52 @@ func templateSnapshotFor(ws *workspacesv1alpha1.Workspace) (*templateSnapshot, e
 		return nil, fmt.Errorf("corrupt %s annotation: %w", AnnotationTemplateSnapshot, err)
 	}
 	return s, nil
+}
+
+// snapshotStale reports whether the recorded snapshot must be re-taken for
+// the applied intent (E1): the applied spec.runtimeGeneration advanced past
+// the generation the snapshot was recorded under AND spec.templateRef now
+// names a source other than the one the snapshot was taken from.
+//
+// The reference comparison is against the recorded source ref, not the
+// resolved object name: the create path writes the catalog (family) name
+// into templateRef while the snapshot records the resolved revision object,
+// so a bare name comparison would re-resolve the family to its newest
+// member on every generation — silently overriding a guard/pinned stay the
+// API's start path already decided. Only an actual reference move (the
+// carried re-point of a start intent, or an admin edit made while Stopped)
+// re-takes the snapshot.
+//
+// Snapshots recorded before this machinery existed carry no SourceRef:
+// their recorded object name is the fallback source, extended by the
+// catalog-name label while that object still exists, so a legacy workspace
+// whose templateRef still holds the family name keeps its revision while a
+// carried re-point to a sibling revision object re-takes it. Only a clean
+// NotFound on the recorded object counts as "the revision is gone, resolve
+// the reference fresh" — any other read error propagates and the reconcile
+// retries, so a transient catalog miss can never look like a re-point.
+func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, snap *templateSnapshot) (bool, error) {
+	if applied.RuntimeGeneration <= snap.RuntimeGeneration {
+		return false, nil
+	}
+	ref := ws.Spec.TemplateRef.Name
+	if snap.SourceRef != "" {
+		return ref != snap.SourceRef, nil
+	}
+	if ref == snap.Name {
+		return false, nil
+	}
+	live := &workspacesv1alpha1.WorkspaceTemplate{}
+	gerr := r.Get(ctx, types.NamespacedName{Name: snap.Name, Namespace: ws.Namespace}, live)
+	switch {
+	case apierrors.IsNotFound(gerr):
+		// The recorded revision object is gone — the moved reference stands
+		// alone and re-resolves (a deleted revision adopts the newest).
+		return true, nil
+	case gerr != nil:
+		return false, gerr
+	}
+	return live.Labels[provisioning.LabelCatalogName] != ref, nil
 }
 
 // snapshotDigestPattern mirrors the apiserver's Pattern validation on
