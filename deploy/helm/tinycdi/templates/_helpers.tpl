@@ -322,6 +322,25 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if and (not $kaImage.digest) $kaImage.tag -}}
 {{- fail "kasmAdapter.image.tag without .digest is refused — --kasm-adapter-image accepts digest-pinned refs only" -}}
 {{- end -}}
+{{- /* E13: a seeded adapter=kasm template with experience=Browser may only
+        use an image on kasmAdapter.browserAllowlist — allowlist membership
+        is the chart-side binding to the catalog's ≤2-major browser engine
+        gate (check-kasm-catalog.sh keeps the list ⊆ browser-class
+        entries). Non-Browser kasm templates are unaffected (the ≤4 gate). */ -}}
+{{- $browserAllow := (default list (get (default dict .Values.kasmAdapter) "browserAllowlist")) -}}
+{{- range .Values.templates -}}
+{{- $s := default dict .spec -}}
+{{- $l := default dict (get $s "linux") -}}
+{{- if and (eq (printf "%v" (get $l "adapter")) "kasm") (eq (get $s "experience") "Browser") -}}
+{{- $img := (get $l "image") | default .image -}}
+{{- if and $img (hasKey $.Values.images $img) -}}
+{{- $img = include "tinycdi.image" (dict "image" (index $.Values.images $img) "root" $) -}}
+{{- end -}}
+{{- if not (has $img $browserAllow) -}}
+{{- fail (printf "templates[%s]: adapter=kasm + experience=Browser requires the image on kasmAdapter.browserAllowlist (E13: only browser-class catalog entries inside the ≤2-major engine gate qualify — %q is not allowlisted)" .name $img) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- /* SEC-36: dev/privileged surfaces are gated behind dev.enabled. */ -}}
 {{- if not .Values.dev.enabled -}}
 {{- if .Values.operator.devAllowNoBroker -}}

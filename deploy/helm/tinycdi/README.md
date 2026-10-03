@@ -444,6 +444,7 @@ the adapter contract and the per-image onboarding checklist.
 |---|---|---|
 | `kasmAdapter.enabled` | `false` | opt-in switch. The operator gets `--kasm-adapter-image` **only** when this is `true` — a release-stamped `kasmAdapter.image.digest` alone does not turn the adapter on. `enabled: true` without a digest fails the render, and so does a seeded `adapter: kasm` template while `enabled` is `false` (the backend would reject the workspaces anyway) |
 | `kasmAdapter.image.{repository,tag,digest}` | `tinyorbitvn/tinycdi-kasm-adapter` | adapter init image → operator `--kasm-adapter-image` (when enabled). **Digest is required**: the flag only carries a digest-pinned ref, and a `tag` without `digest` fails the render. Release packaging stamps the digest; set it yourself for a self-built or mirrored image |
+| `kasmAdapter.browserAllowlist` | `[]` | the E13 browser gate: a seeded `adapter: kasm` template with `experience: Browser` renders only when its `spec.linux.image` is listed here; every entry must be a digest-pinned **browser-class** `build/kasm-catalog.txt` entry (≤2-major engine gate — CI enforces it). Non-Browser kasm templates ignore the list (≤4 budget). Empty today — no cataloged kasmweb browser image meets the gate |
 
 A seeded kasm template sets `spec.linux.adapter: kasm`, an optional
 `spec.linux.sessionCmd` (the session payload — for Chromium-family images
@@ -453,7 +454,8 @@ binary), and the runtime `image:` as a literal digest-pinned
 from Docker Hub — never mirrored/republished). The digest must be a
 `build/kasm-catalog.txt` entry — CI enforces the catalog (digest pin,
 trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
-ships a complete `kasmweb/chromium` example.
+ships a complete `kasmweb/chromium` example (a **Desktop**-experience
+seed — the image is desktop-class under E13).
 
 ### Node-profile installer (`nodeProfiles.install`) — default OFF
 
