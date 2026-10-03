@@ -70,6 +70,9 @@ func (b *Backend) wire(ctx context.Context) error {
 	if cfg.ControlToken == "" {
 		b.log.Warn(controlTokenUnsetWarning)
 	}
+	if rateLimitsUntrusted(cfg) {
+		b.log.Warn(trustedProxiesUnsetWarning)
+	}
 	b.cfg = cfg
 
 	var metrics *observability.Metrics

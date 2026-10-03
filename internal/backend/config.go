@@ -76,6 +76,22 @@ func (g *groupList) Set(v string) error {
 // it is disabled, not unauthenticated.
 const controlTokenUnsetWarning = "control token unset — /v1/control/* is disabled (fail closed); set -control-token-file or TCDI_CONTROL_TOKEN to enable"
 
+// trustedProxiesUnsetWarning is logged at startup when a per-client rate
+// limit is enabled while -trusted-proxies is empty: behind a shared edge
+// every client then keys on the ingress's own address — one bucket for
+// the whole organisation (advisor review, E7).
+const trustedProxiesUnsetWarning = "rate limits enabled with -trusted-proxies empty — every client behind one ingress shares the ingress address's bucket; set -trusted-proxies to the edge CIDRs"
+
+// rateLimitsUntrusted reports whether a per-client rate limiter is enabled
+// on a listener this config runs while no trusted proxy CIDRs are set —
+// the shared-bucket misconfiguration the startup warning names.
+func rateLimitsUntrusted(c Config) bool {
+	if p, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil || len(p) > 0 {
+		return false
+	}
+	return (c.Listen != "" && c.LoginRate > 0) || (c.SessionListen != "" && c.LaunchRate > 0)
+}
+
 // Config is the parsed flag set for the merged backend.
 type Config struct {
 	// App listener (the former cmd/api surface).
