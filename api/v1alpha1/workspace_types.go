@@ -155,7 +155,11 @@ type WorkspaceStatus struct {
 	// +optional
 	DataRefs []DataReference `json:"dataRefs,omitempty"`
 
-	// startedAt is when the current runtime generation became Ready.
+	// startedAt is when the current runtime incarnation became Ready. It
+	// belongs to that incarnation alone: the maxDuration cap is measured from
+	// it, it is cleared once the incarnation ends (Stopping, Stopped or
+	// Failed) and set again when the next start reaches Ready. It is not the
+	// workspace's first start.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
