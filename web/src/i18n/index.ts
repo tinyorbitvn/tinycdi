@@ -73,14 +73,38 @@ export function t(
 // Date and number formats follow the chosen UI language, not the browser
 // locale (E11): a user who picked English sees English dates even on a vi-VN
 // machine. Intl does the work; the helpers below are the only places the
-// portal formats values.
+// portal formats values. Formatters are expensive to construct, so they are
+// cached per (locale, options) — renders call these on every row.
+
+const dateTimeFormats = new Map<string, Intl.DateTimeFormat>();
+const numberFormats = new Map<string, Intl.NumberFormat>();
+
+function dateTimeFormat(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const cacheKey = `${active}:${JSON.stringify(options)}`;
+  let format = dateTimeFormats.get(cacheKey);
+  if (!format) {
+    format = new Intl.DateTimeFormat(active, options);
+    dateTimeFormats.set(cacheKey, format);
+  }
+  return format;
+}
+
+function numberFormat(options?: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const cacheKey = `${active}:${JSON.stringify(options ?? {})}`;
+  let format = numberFormats.get(cacheKey);
+  if (!format) {
+    format = new Intl.NumberFormat(active, options);
+    numberFormats.set(cacheKey, format);
+  }
+  return format;
+}
 
 /** "Sep 30, 2026" / "30 thg 9, 2026". */
 export function formatDate(
   value: Date | number | string,
   options: Intl.DateTimeFormatOptions = { dateStyle: "medium" },
 ): string {
-  return new Intl.DateTimeFormat(active, options).format(new Date(value));
+  return dateTimeFormat(options).format(new Date(value));
 }
 
 /** Medium date + short time, matching the old toLocaleString() coverage. */
@@ -88,7 +112,7 @@ export function formatDateTime(
   value: Date | number | string,
   options: Intl.DateTimeFormatOptions = { dateStyle: "medium", timeStyle: "short" },
 ): string {
-  return new Intl.DateTimeFormat(active, options).format(new Date(value));
+  return dateTimeFormat(options).format(new Date(value));
 }
 
 /** Clock time only ("14:05" / "2:05 PM"). */
@@ -96,12 +120,12 @@ export function formatTime(
   value: Date | number | string,
   options: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit" },
 ): string {
-  return new Intl.DateTimeFormat(active, options).format(new Date(value));
+  return dateTimeFormat(options).format(new Date(value));
 }
 
 export function formatNumber(
   value: number,
   options?: Intl.NumberFormatOptions,
 ): string {
-  return new Intl.NumberFormat(active, options).format(value);
+  return numberFormat(options).format(value);
 }
