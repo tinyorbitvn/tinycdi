@@ -1298,6 +1298,36 @@ func TestTemplateBuiltAtAnnotation(t *testing.T) {
 	}
 }
 
+// TestTemplateEngineAnnotations (backlog 14): images.<key>.engines.*
+// render as image-chromium/image-firefox annotations so the stale-image
+// view shows both engine versions; unset values render no annotation, and
+// an explicit templates[].annotations entry wins.
+func TestTemplateEngineAnnotations(t *testing.T) {
+	docs := renderArgs(t, "-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "images.browser.engines.chromium=154.0.8037.92",
+		"--set", "images.browser.engines.firefox=153.4.0esr",
+		"--set", "templates[1].annotations.workspaces\\.cdi\\.tinyorbit\\.vn/image-firefox=9.9.9esr")
+	annByCatalog := map[string]map[string]any{}
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		cn, _ := lbls["workspaces.cdi.tinyorbit.vn/catalog-name"].(string)
+		ann, _ := m["annotations"].(map[string]any)
+		annByCatalog[cn] = ann
+	}
+	const ckey = "workspaces.cdi.tinyorbit.vn/image-chromium"
+	const fkey = "workspaces.cdi.tinyorbit.vn/image-firefox"
+	if got := annByCatalog["browser01"][ckey]; got != "154.0.8037.92" {
+		t.Errorf("browser01 %s = %v, want images.browser.engines.chromium", ckey, got)
+	}
+	if got := annByCatalog["browser01"][fkey]; got != "9.9.9esr" {
+		t.Errorf("browser01 %s = %v, want the entry's own annotation to win over images.browser.engines", fkey, got)
+	}
+	if _, ok := annByCatalog["linuxdesk1"][ckey]; ok {
+		t.Errorf("linuxdesk1: %s must be absent while images.linuxDesktop.engines is unset", ckey)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // nodeProfiles.install — the optional per-node browser-sandbox profile
 // installer (seccomp + AppArmor Localhost profiles).

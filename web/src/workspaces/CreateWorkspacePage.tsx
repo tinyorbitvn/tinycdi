@@ -130,6 +130,11 @@ export function CreateWorkspacePage() {
               </option>
             ))}
           </Select>
+          {selected?.imageBlocked === true ? (
+            <Alert tone="danger" title={t("workspaces.create.blocked.title")}>
+              {t("workspaces.create.blocked.body")}
+            </Alert>
+          ) : null}
           {selected?.networkProfile ? (
             <p className="tc-field__hint">
               {t("workspaces.create.network", {
@@ -159,7 +164,7 @@ export function CreateWorkspacePage() {
             type="submit"
             variant="primary"
             loading={busy}
-            disabled={!name.trim() || !templateRef}
+            disabled={!name.trim() || !templateRef || selected?.imageBlocked === true}
           >
             {busy ? t("workspaces.create.submitting") : t("workspaces.create.submit")}
           </Button>

@@ -45,6 +45,33 @@ describe("templates: stale image column", () => {
       .closest("tr")!;
     expect(within(browserRow).getByText("Unknown")).toBeInTheDocument();
   });
+
+  // V3.3 backlog 14: the stale-image view shows both engine versions
+  // carried by the runtime image (runtime-images.json fields rendered as
+  // template annotations -> TemplateView.imageEngines).
+  it("shows both engine versions next to the image age and the blocked badge", async () => {
+    const api = createMockApi({ areas: [adminArea, templatesStubArea] });
+    loginCookies();
+    makeAdmin(api);
+    seedTenant(api);
+    api.state.templates.push({
+      ...structuredClone(TEMPLATE_BROWSER),
+      imageBuiltAt: "2026-08-10T00:00:00Z",
+      imageStale: true,
+      imageBlocked: true,
+      imageEngines: { chromium: "154.0.8037.92", firefox: "153.4.0esr" },
+    } as TemplateFixture);
+    renderWithApi(<TemplatesPage />, api);
+
+    const table = await screen.findByRole("table", { name: "Template catalog" });
+    const row = within(table)
+      .getByRole("rowheader", { name: /linux-chromium-browser/ })
+      .closest("tr")!;
+    expect(within(row).getByText(/Chromium 154\.0\.8037\.92/)).toBeInTheDocument();
+    expect(within(row).getByText(/Firefox ESR 153\.4\.0esr/)).toBeInTheDocument();
+    expect(within(row).getByText("Blocked")).toBeInTheDocument();
+    expect(within(row).queryByText("Stale")).not.toBeInTheDocument();
+  });
 });
 
 describe("templates: usage join", () => {
