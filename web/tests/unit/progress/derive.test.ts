@@ -38,13 +38,49 @@ const active = (m: ReturnType<typeof deriveProgress>) => m!.steps[m!.current];
 
 describe("deriveProgress — op detection", () => {
   it("idle states derive nothing", () => {
-    expect(deriveProgress(ws({ phase: "Ready" }), undefined, NOW)).toBeNull();
+    expect(
+      deriveProgress(
+        ws({ phase: "Ready", conditions: [cond("ConnectionReady", "True", "Ready")] }),
+        undefined,
+        NOW,
+      ),
+    ).toBeNull();
     expect(
       deriveProgress(ws({ phase: "Stopped", desiredState: "Stopped" }), undefined, NOW),
     ).toBeNull();
     expect(
-      deriveProgress(ws({ phase: "Ready", desiredState: "Running" }), undefined, NOW),
+      deriveProgress(
+        ws({
+          phase: "Ready",
+          desiredState: "Running",
+          conditions: [cond("ConnectionReady", "True", "Ready")],
+        }),
+        undefined,
+        NOW,
+      ),
     ).toBeNull();
+  });
+
+  it("the Ready→ConnectionReady gap stays in-flight on the connect step (R-V3b M1)", () => {
+    // phase Ready but the stream endpoint has not registered yet.
+    const gap = ws({
+      phase: "Ready",
+      conditions: [
+        cond("Admitted", "True", "QuotaReserved"),
+        cond("StorageReady", "True", "VolumeBound"),
+        cond("RuntimeReady", "True", "Ready"),
+        cond("ConnectionReady", "False", "StreamDown"),
+      ],
+    });
+    const m = deriveProgress(gap, undefined, NOW);
+    expect(m?.op).toBe("start");
+    expect(active(m).id).toBe("connect");
+    expect(active(m).reason).toBe("StreamDown");
+    expect(startInFlight(gap)).toBe(true);
+    // A missing condition is the same gap (endpoint never published).
+    const missing = ws({ phase: "Ready", conditions: [] });
+    expect(deriveProgress(missing, undefined, NOW)).not.toBeNull();
+    expect(startInFlight(missing)).toBe(true);
   });
 
   it("create: Pending with desiredState Running and createdAt==updatedAt", () => {
@@ -399,7 +435,11 @@ describe("polling cadence and elapsed", () => {
   it("workspacePollMs picks the op cadence and falls back to idle", () => {
     expect(workspacePollMs(ws({}), 8_000, NOW)).toBe(1_500);
     expect(
-      workspacePollMs(ws({ phase: "Ready" }), 8_000, NOW),
+      workspacePollMs(
+        ws({ phase: "Ready", conditions: [cond("ConnectionReady", "True", "Ready")] }),
+        8_000,
+        NOW,
+      ),
     ).toBe(8_000);
     expect(
       workspacePollMs(ws({ phase: "Failed", failureReason: "BootDeadlineExceeded" }), 8_000, NOW),
@@ -423,7 +463,11 @@ describe("polling cadence and elapsed", () => {
     expect(startInFlight(ws({}))).toBe(true);
     expect(startInFlight(ws({ phase: "Failed" }))).toBe(false);
     expect(startInFlight(ws({ phase: "Terminating" }))).toBe(false);
-    expect(startInFlight(ws({ phase: "Ready" }))).toBe(false);
+    expect(
+      startInFlight(
+        ws({ phase: "Ready", conditions: [cond("ConnectionReady", "True", "Ready")] }),
+      ),
+    ).toBe(false);
     expect(startInFlight(ws({ phase: "Stopped", desiredState: "Stopped" }))).toBe(false);
   });
 

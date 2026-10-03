@@ -98,6 +98,7 @@ export function SessionPage({
   const sessionDomain = me?.sessionDomain ?? "";
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [pollFailures, setPollFailures] = useState(0);
   const [template, setTemplate] = useState<TemplateView | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
@@ -591,6 +592,7 @@ export function SessionPage({
         );
         if (cancelled || !mounted.current) return;
         failures = 0;
+        setPollFailures(0);
         setWorkspace(ws);
         const blocker = connectBlocker(ws);
         if (!blocker) {
@@ -616,6 +618,7 @@ export function SessionPage({
           return;
         }
         failures += 1;
+        setPollFailures(failures);
         delay = Math.min(delay * 2 ** failures, 30_000);
         timer = setTimeout(() => void tick(), delay);
       }
@@ -835,6 +838,7 @@ export function SessionPage({
             onUseHere={() => void useHere()}
             onSignIn={onSignIn}
             workspace={workspace}
+            pollFailures={pollFailures}
             onStart={() => void startWorkspace()}
           />
         )}
@@ -886,6 +890,7 @@ function Overlay({
   onUseHere,
   onSignIn,
   workspace,
+  pollFailures,
   onStart,
 }: {
   state: SessionState;
@@ -897,6 +902,7 @@ function Overlay({
   onUseHere: () => void;
   onSignIn: () => void;
   workspace: WorkspaceView | null;
+  pollFailures: number;
   onStart: () => void;
 }) {
   // A stopped or failed workspace can be started right here — no trip back
@@ -971,7 +977,11 @@ function Overlay({
       return (
         <div className="tc-session__overlay" data-tone="progress">
           {workspace ? (
-            <LifecycleProgress workspace={workspace} variant="overlay" />
+            <LifecycleProgress
+              workspace={workspace}
+              variant="overlay"
+              refreshError={pollFailures > 0 ? pollFailures : undefined}
+            />
           ) : (
             <Spinner size="lg" decorative />
           )}

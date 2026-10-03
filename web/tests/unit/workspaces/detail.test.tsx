@@ -142,6 +142,7 @@ describe("WorkspaceDetailPage", () => {
 
     const connect = await screen.findByRole("button", { name: "Connect" });
     expect(connect).toHaveAttribute("aria-disabled", "true");
+    expect(connect).toHaveAttribute("title", "Finishing the connection…");
     await screen.findByText(/no ConnectionReady|ConnectionReady=False/);
   }, 20000);
 

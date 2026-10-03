@@ -115,6 +115,31 @@ describe("session page — starting state (V3.27)", () => {
     expect(control.workspaceGets).toBe(atConnect);
   }, 25_000);
 
+  it("keeps polling through the Ready→ConnectionReady gap, then launches once (R-V3b M1)", async () => {
+    // The phase flipped to Ready but the stream endpoint has not registered:
+    // still "starting", still polling — not a static not-ready dead end.
+    const ws = readyWorkspace({
+      updatedAt: new Date().toISOString(),
+      conditions: [
+        cond("Admitted", "True", "QuotaReserved"),
+        cond("StorageReady", "True", "VolumeBound"),
+        cond("RuntimeReady", "True", "Ready"),
+        cond("ConnectionReady", "False", "StreamDown"),
+      ],
+    });
+    const { api, control, submitted } = setup(ws);
+
+    await screen.findByRole("region", { name: /Starting|Creating/ });
+    await screen.findByText("Ready to connect");
+    const gets = control.workspaceGets;
+    await new Promise((r) => setTimeout(r, 3_000));
+    expect(control.workspaceGets).toBeGreaterThan(gets);
+    expect(submitted).toHaveLength(0);
+
+    api.state.workspaces.set(ws.id, readyWorkspace({ id: ws.id, name: ws.name }));
+    await waitFor(() => expect(submitted).toHaveLength(1), { timeout: 20_000 });
+  }, 25_000);
+
   it("offers Start on the stopped overlay and moves to starting", async () => {
     const ws = makeWorkspace({ phase: "Stopped", desiredState: "Stopped" });
     const { api } = setup(ws);

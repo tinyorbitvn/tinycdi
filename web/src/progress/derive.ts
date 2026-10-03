@@ -237,7 +237,13 @@ function opOf(ws: WorkspaceView): ProgressOp | null {
   }
   if (
     ws.desiredState === "Running" &&
-    (ws.phase === "Stopped" || ws.phase === "Pending" || ws.phase === "Provisioning")
+    (ws.phase === "Stopped" ||
+      ws.phase === "Pending" ||
+      ws.phase === "Provisioning" ||
+      // The phase flips to Ready a few seconds before the stream endpoint
+      // registers: still in-flight on the connect step until
+      // ConnectionReady is True (R-V3b M1).
+      (ws.phase === "Ready" && cond(ws, "ConnectionReady")?.status !== "True"))
   ) {
     return ws.createdAt === ws.updatedAt ? "create" : "start";
   }

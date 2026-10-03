@@ -20,7 +20,7 @@ export function ConnectButton({ workspace }: { workspace: WorkspaceView }) {
         ? t("workspaces.connect.disabledFailed")
         : workspace.phase !== "Ready"
           ? t("workspaces.connect.disabledStarting")
-          : undefined;
+          : t("workspaces.connect.disabledFinishing");
     return (
       <button
         type="button"
