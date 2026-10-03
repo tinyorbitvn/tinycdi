@@ -2,9 +2,11 @@ import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 
 // DEV-ONLY credentials of the throwaway Keycloak realm inside the kind
-// cluster (hack/quickstart/realm-export.json, printed by up.sh).
+// cluster (hack/quickstart/realm-export.json, printed by up.sh). The
+// noquota user maps to a tenant with no quota row (B5.4).
 const USER = process.env.TCDI_QS_USER ?? "demo";
 const PASSWORD = process.env.TCDI_QS_PASSWORD ?? "tcdi-demo-dev-only";
+const NOQUOTA_USER = process.env.TCDI_QS_NOQUOTA_USER ?? "demo-noquota";
 const SESSION_DOMAIN =
   process.env.TCDI_QS_SESSION_DOMAIN ??
   `session.${process.env.TCDI_QS_DOMAIN ?? "tcdi.localtest.me"}`;
@@ -16,11 +18,11 @@ const TENANT_NAMESPACE = process.env.TCDI_QS_TENANT_NAMESPACE ?? "tinycdi-tenant
 const HOME_DIR = "/home/workspace";
 
 // Anonymous visit -> portal login -> dev Keycloak -> back on the portal.
-async function login(page: Page) {
+async function login(page: Page, user = USER) {
   await page.goto("/");
   await expect(page.locator("#username")).toBeVisible();
   await expect(page).toHaveURL(/^https:\/\/keycloak\./);
-  await page.locator("#username").fill(USER);
+  await page.locator("#username").fill(user);
   await page.locator("#password").fill(PASSWORD);
   await page.locator("#kc-login").click();
   await expect(page.getByRole("heading", { name: "Workspaces", exact: true })).toBeVisible();
@@ -121,6 +123,87 @@ test("log in, create a browser workspace and see the session frame load", async 
   await expect(frame!.locator("canvas:visible").first()).toBeVisible({ timeout: 120_000 });
   await expect(page.getByText("Connected", { exact: true })).toBeVisible({ timeout: 120_000 });
   await page.screenshot({ path: "test-results/session.png" });
+
+  // B5.4 (permanent): the embedded session must hold for 120 seconds — no
+  // second launch ticket and the same lease throughout; the FX-R18-era
+  // churn showed extra tickets and lease flips inside this window. The
+  // badge may briefly read "Reconnecting" while the watch reloads the
+  // frame after a transient drop; the lease is the durable check.
+  const tickets: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && /\/v1\/workspaces\/[^/]+\/connections$/.test(r.url())) {
+      tickets.push(r.url());
+    }
+  });
+  const connectionState = () =>
+    page.evaluate(async (id) => {
+      const r = await fetch(`/v1/workspaces/${encodeURIComponent(id)}/connection`);
+      return (r.ok ? ((await r.json()) as { leaseActive?: boolean; leaseRef?: string }) : null);
+    }, workspaceId);
+  const start = await connectionState();
+  expect(start?.leaseActive, "live lease at the start of the hold").toBe(true);
+  const holdDeadline = Date.now() + 120_000;
+  const status = page.locator(".tc-session__status");
+  while (Date.now() < holdDeadline) {
+    await expect(status).toContainText(/Connect/);
+    await page.waitForTimeout(5_000);
+  }
+  const end = await connectionState();
+  expect(end?.leaseRef, "lease must not change during a steady session").toBe(start?.leaseRef);
+  expect(end?.leaseActive, "lease still live at the end of the hold").toBe(true);
+  await expect(status).toHaveText(/Connected/);
+  expect(tickets, "no second launch ticket in 120 s").toEqual([]);
+});
+
+// B5.4 (permanent): a fresh install can create workspaces — the seeded
+// tenant's quota covers the creates above — while a tenant WITHOUT a quota
+// row is refused every create with 409 QUOTA_NOT_CONFIGURED and the
+// administrator message. The dev realm's demo-noquota user maps to
+// tenant-noquota, which has no row (realm-export.json).
+test("a tenant without quota is refused with the administrator message", async ({
+  browser,
+  baseURL,
+}) => {
+  // A separate browser context: the quota outcome depends on which user
+  // logs in, and the realm user attribute decides the tenant.
+  const context = await browser.newContext({
+    baseURL,
+    ignoreHTTPSErrors: true,
+  });
+  const page = await context.newPage();
+  try {
+    await login(page, NOQUOTA_USER);
+
+    await page.getByRole("link", { name: "New workspace" }).click();
+    await page.waitForURL("**/workspaces/new");
+    await page.locator('input[name="name"]').fill(`noquota-${Date.now().toString(36)}`);
+    const browserTemplate = page
+      .locator('select[name="template"] option', { hasText: /browser/i })
+      .first();
+    await expect(browserTemplate).toBeAttached();
+    await page
+      .locator('select[name="template"]')
+      .selectOption((await browserTemplate.getAttribute("value")) ?? "");
+    const [resp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().endsWith("/v1/workspaces") && r.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Create workspace" }).click(),
+    ]);
+    expect(resp.status(), "create must be refused").toBe(409);
+    const body = (await resp.json().catch(() => null)) as { code?: string } | null;
+    expect(body?.code).toBe("QUOTA_NOT_CONFIGURED");
+    // The portal surfaces the API's actionable message, not a generic
+    // error (the page also warns about the template's data policy — scope
+    // to the quota alert).
+    await expect(
+      page.getByRole("alert").filter({ hasText: "No quota is configured" }),
+    ).toContainText(
+      "No quota is configured for your tenant. Ask an administrator to set one.",
+    );
+  } finally {
+    await context.close();
+  }
 });
 
 // FX-R20: the retained-data promise end to end. Write a file into a Retain

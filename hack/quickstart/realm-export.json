@@ -77,6 +77,26 @@
           "temporary": false
         }
       ]
+    },
+    {
+      "username": "demo-noquota",
+      "email": "demo-noquota@tcdi.localtest.me",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "NoQuota",
+      "enabled": true,
+      "attributes": {
+        "tenant_id": [
+          "tenant-noquota"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "@DEMO_PASSWORD@",
+          "temporary": false
+        }
+      ]
     }
   ],
   "components": {
