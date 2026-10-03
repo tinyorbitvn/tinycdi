@@ -188,8 +188,7 @@ func (r *Recovery) PendingRecovery(ctx context.Context) ([]string, error) {
 		UNION
 		SELECT qr.workspace_id
 		FROM quota_reservation qr JOIN workspaces w ON w.id = qr.workspace_id
-		WHERE qr.state = 'held' AND `+holdsComputeSQL+`
-		  AND (w.state = 'deleted' OR w.desired_state = 'Stopped')
+		WHERE `+settleCandidateSQL+`
 		ORDER BY 1`)
 	if err != nil {
 		return nil, err
@@ -245,6 +244,18 @@ func (r *Recovery) SettleQuota(ctx context.Context, tenantID string, workspaceUI
 		}
 	}
 	return r.db.WithTx(ctx, func(tx store.Tx) error {
+		var policy, state string
+		if err := tx.QueryRow(ctx, `SELECT data_policy, state FROM workspaces WHERE id = $1`,
+			workspaceUID).Scan(&policy, &state); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("settle: read workspace %s: %w", workspaceUID, err)
+		}
+		if state == "active" && policy == "Retain" {
+			// A stopped Retain workspace keeps its volume: compute is free
+			// on the absence proof, the home disk stays held on the same
+			// reservation and a start re-acquires the compute.
+			_, err := convertToDiskOnly(ctx, tx, tenantID, string(workspaceUID))
+			return err
+		}
 		if err := Release(ctx, tx, tenantID, string(workspaceUID), proof); err != nil {
 			return err
 		}
@@ -253,6 +264,16 @@ func (r *Recovery) SettleQuota(ctx context.Context, tenantID string, workspaceUI
 		return holdRetainedDisk(ctx, tx, tenantID, string(workspaceUID))
 	})
 }
+
+// settleCandidateSQL selects the reservations Recovery settles (qr and w are
+// the quota_reservation and workspaces aliases): a held reservation that
+// still holds compute on a deleted or stopped workspace, plus the disk-only
+// hold of a stopped Retain workspace that was then deleted (it carries a
+// stored restart vector, which separates it from the retained-disk hold of
+// a deleted workspace that must not be released again).
+const settleCandidateSQL = `qr.state = 'held' AND (
+	(` + holdsComputeSQL + ` AND (w.state = 'deleted' OR w.desired_state = 'Stopped'))
+	OR (qr.restart_slots IS NOT NULL AND w.state = 'deleted'))`
 
 // holdsComputeSQL selects reservations that still hold compute (qr = the
 // quota_reservation alias). A disk-only hold — the retained disk of a deleted
@@ -429,8 +450,7 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 	rows, err := r.db.Pool().Query(ctx, `
 		SELECT qr.workspace_id, qr.tenant_id
 		FROM quota_reservation qr JOIN workspaces w ON w.id = qr.workspace_id
-		WHERE qr.state = 'held' AND `+holdsComputeSQL+`
-		  AND (w.state = 'deleted' OR w.desired_state = 'Stopped')
+		WHERE `+settleCandidateSQL+`
 		ORDER BY qr.workspace_id`)
 	if err != nil {
 		return actions, err
