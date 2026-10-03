@@ -49,15 +49,44 @@ describe("session host mapping", () => {
     );
   });
 
-  // FX-R18: KasmVNC forces resize=off when it runs inside an iframe, so the
-  // portal loads it with resize=remote on every frame navigation.
-  it("sessionFrameUrl asks the desktop client to resize the remote screen", () => {
+  // FX-R18 + V3.24 embedded parity: KasmVNC forces resize=off, webp off and a
+  // 20-minute client idle cut when it runs inside an iframe; the portal
+  // re-asserts tab-mode settings on every frame navigation, and the
+  // clipboard client flags follow the workspace policy.
+  it("sessionFrameUrl carries the embedded-mode settings", () => {
+    const base =
+      "resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false";
     expect(sessionFrameUrl(WS, "session.example.com")).toBe(
-      "https://ws-0123456789abcdef.session.example.com/?resize=remote",
+      `https://ws-0123456789abcdef.session.example.com/?${base}`,
     );
     expect(sessionFrameUrl(WS, "session.example.com:8443")).toBe(
-      "https://ws-0123456789abcdef.session.example.com:8443/?resize=remote",
+      `https://ws-0123456789abcdef.session.example.com:8443/?${base}`,
     );
+    // show_control_bar stays out: the portal owns session chrome.
+    expect(sessionFrameUrl(WS, "session.example.com")).not.toContain("control_bar");
+  });
+
+  it("sessionFrameUrl sets the clipboard client flags per workspace policy", () => {
+    const url = (policy?: string) =>
+      new URL(
+        sessionFrameUrl(WS, "session.example.com", {
+          clipboardPolicy: policy as "Disabled" | "Send" | "Receive" | "Bidirectional" | undefined,
+        }),
+      );
+    expect(url().searchParams.get("clipboard_up")).toBe("false");
+    expect(url().searchParams.get("clipboard_down")).toBe("false");
+    expect(url("Disabled").searchParams.get("clipboard_up")).toBe("false");
+    expect(url("Disabled").searchParams.get("clipboard_down")).toBe("false");
+    expect(url("Send").searchParams.get("clipboard_up")).toBe("true");
+    expect(url("Send").searchParams.get("clipboard_down")).toBe("false");
+    expect(url("Receive").searchParams.get("clipboard_up")).toBe("false");
+    expect(url("Receive").searchParams.get("clipboard_down")).toBe("true");
+    expect(url("Bidirectional").searchParams.get("clipboard_up")).toBe("true");
+    expect(url("Bidirectional").searchParams.get("clipboard_down")).toBe("true");
+    // Seamless paste is enabled only where the client would enable it
+    // itself: jsdom's UA is Chrome-family, so an enabled policy gets it.
+    expect(url("Bidirectional").searchParams.get("clipboard_seamless")).toBe("true");
+    expect(url("Disabled").searchParams.get("clipboard_seamless")).toBeNull();
   });
 
   it("sessionLabel maps underscores to dashes", () => {
@@ -146,16 +175,29 @@ describe("routes and frame contract", () => {
     for (const forbidden of ["allow-top-navigation", "allow-popups", "allow-modals"]) {
       expect(SESSION_FRAME_SANDBOX.split(" ")).not.toContain(forbidden);
     }
-    // keyboard-map (FX-R22): lets the desktop client's getLayoutMap() map
-    // non-US layouts; it only exposes the layout to the session origin, which
-    // the gateway Permissions-Policy grants to self. Every feature names the
-    // session origin: the frame has no src attribute, so a bare feature would
-    // delegate to the portal's own origin and nothing reaches the session.
+    // keyboard-map (FX-R22, kept by the V3.24 layout check): lets the desktop
+    // client's getLayoutMap() map non-US layouts — without it a German
+    // Ctrl+Z reaches the remote as Ctrl+Y. It only exposes the layout to the
+    // session origin, which the gateway Permissions-Policy grants to self.
+    // Every feature names the session origin: the frame has no src
+    // attribute, so a bare feature would delegate to the portal's own
+    // origin and nothing reaches the session. Clipboard features follow
+    // the workspace's policy (least privilege): none until it is known.
+    const origin = `https://ws-${WS.slice(3)}.session.example.com`;
     expect(sessionFrameAllow(WS, "session.example.com")).toBe(
-      "clipboard-read https://ws-" + WS.slice(3) + ".session.example.com; " +
-        "clipboard-write https://ws-" + WS.slice(3) + ".session.example.com; " +
-        "fullscreen https://ws-" + WS.slice(3) + ".session.example.com; " +
-        "keyboard-map https://ws-" + WS.slice(3) + ".session.example.com",
+      `fullscreen ${origin}; keyboard-map ${origin}`,
+    );
+    expect(sessionFrameAllow(WS, "session.example.com", { clipboardPolicy: "Bidirectional" })).toBe(
+      `clipboard-read ${origin}; clipboard-write ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+    );
+    expect(sessionFrameAllow(WS, "session.example.com", { clipboardPolicy: "Send" })).toBe(
+      `clipboard-read ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+    );
+    expect(sessionFrameAllow(WS, "session.example.com", { clipboardPolicy: "Receive" })).toBe(
+      `clipboard-write ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+    );
+    expect(sessionFrameAllow(WS, "session.example.com", { clipboardPolicy: "Disabled" })).toBe(
+      `fullscreen ${origin}; keyboard-map ${origin}`,
     );
     expect(sessionFrameAllow(WS, "")).toBe("");
   });

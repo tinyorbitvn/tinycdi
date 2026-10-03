@@ -76,9 +76,15 @@ describe("SessionPage", () => {
     expect(frame.getAttribute("sandbox")).toBe(SESSION_FRAME_SANDBOX);
     // Spelled out: each feature is delegated to this workspace's session origin
     // by name (the frame has no src attribute, so 'src' would mean the portal).
+    // Until the template resolves the policy is unknown: least privilege is
+    // fullscreen + keyboard-map only (V3.24).
     const origin = `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}`;
-    expect(frame.getAttribute("allow")).toBe(
-      `clipboard-read ${origin}; clipboard-write ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+    // The fixture template is Bidirectional: clipboard delegation lands once
+    // the template fetch resolves.
+    await waitFor(() =>
+      expect(frame.getAttribute("allow")).toBe(
+        `clipboard-read ${origin}; clipboard-write ${origin}; fullscreen ${origin}; keyboard-map ${origin}`,
+      ),
     );
     const tokens = (frame.getAttribute("sandbox") ?? "").split(/\s+/);
     for (const forbidden of ["allow-top-navigation", "allow-popups", "allow-modals"]) {
@@ -144,6 +150,34 @@ describe("SessionPage", () => {
     await waitFor(() => expect(submitted).toHaveLength(3));
     expect(submitted[2].target).toBe("_blank");
     expect(submitted[2].rel).toBe("noopener");
+  });
+
+  it("clears ownership on tab handoff: 'Show it here instead' asks, not silently takes over", async () => {
+    const { ws, api } = setupPage();
+    const submitted = watchFormSubmits();
+    await waitFor(() => expect(submitted).toHaveLength(1)); // auto-launch
+
+    // The handoff: this tab opens the session in a new tab; that tab now
+    // holds the lease.
+    fireEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
+    const external = await screen.findByText("Session opened in a new tab");
+
+    // "Show here" must go through the CONNECTION_IN_USE path — a fresh
+    // ticket without takeover — so the held lease surfaces the dialog.
+    api.state.leases.set(ws.id, "lease_other");
+    fireEvent.click(
+      within(external.parentElement as HTMLElement).getByRole("button", {
+        name: "Show it here instead",
+      }),
+    );
+    const posts = () =>
+      api.state.requests.filter(
+        (r) => r.path.endsWith("/connections") && r.method === "POST",
+      );
+    await waitFor(() => expect(posts()).toHaveLength(3));
+    expect(JSON.parse(posts()[2].rawBody)).toEqual({ takeover: false });
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("This workspace is open somewhere else");
   });
 });
 
@@ -217,15 +251,29 @@ function setupScripted(
 
 const originOf = (id: string) =>
   `https://ws-${id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}`;
-// Frame navigations load the desktop client with resize=remote (FX-R18).
-const frameUrlOf = (id: string) => `${originOf(id)}/?resize=remote`;
+// Frame navigations load the desktop client with the embedded-parity
+// settings (FX-R18 resize=remote + V3.24). The clipboard flags depend on
+// when the template lands, so tests match the leading, deterministic part.
+const frameUrlPrefixOf = (id: string) => `${originOf(id)}/?resize=remote`;
 
 describe("SessionPage resume (R3c)", () => {
   it("mount with an active lease loads the frame without a ticket request", async () => {
-    const { ws, submitted, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
 
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
-    await waitFor(() => expect(frame.getAttribute("src")).toBe(frameUrlOf(ws.id)));
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
+    // The previous stream (epoch 1) is not ours: the page keeps waiting
+    // until the reloaded frame's own stream claims the next epoch.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 2,
+    });
     // The poll confirms the stream: the overlay goes away, badge says connected.
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
     expect(screen.queryByRole("alertdialog")).toBeNull();
@@ -246,7 +294,9 @@ describe("SessionPage resume (R3c)", () => {
     });
 
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
-    await waitFor(() => expect(frame.getAttribute("src")).toBe(frameUrlOf(ws.id)));
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
     expect(ticketPosts()).toHaveLength(0);
 
     await waitFor(() => expect(ticketPosts()).toHaveLength(1));
@@ -270,10 +320,29 @@ describe("SessionPage resume (R3c)", () => {
   });
 });
 
+// Reach "Connected" through the resume path: after the frame navigation the
+// reloaded client's own stream claims the next epoch (what the real backend
+// does when the fresh websocket opens).
+async function connectViaResume(ws: { id: string; name: string }, control: {
+  connection?: (() => unknown) | undefined;
+}, epoch = 2) {
+  const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+  await waitFor(() =>
+    expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+  );
+  control.connection = () => ({
+    state: "connected",
+    leaseActive: true,
+    leaseRef: leaseRefOf("lease_own"),
+    streamEpoch: epoch,
+  });
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+}
+
 describe("SessionPage signed out (R3d)", () => {
   it("a 401 from the poll shows the signed-out state and stops polling", async () => {
-    const { control, onSignIn } = setupScripted({ props: { pollIntervalMs: 20 } });
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    const { ws, control, onSignIn } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
 
     control.unauthenticated = (m, p) => m === "GET" && p.endsWith("/connection");
     const alert = await screen.findByRole("alert");
@@ -305,7 +374,7 @@ describe("SessionPage relaunch timeout (R3e)", () => {
     const { api, ws, control, submitted } = setupScripted({
       props: { pollIntervalMs: 20, loadTimeoutMs: 120 },
     });
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    await connectViaResume(ws, control);
 
     // The lease disappears: the watch mints a ticket and submits it into the
     // frame. jsdom never fires the frame's load, like a blocked embed.
@@ -338,28 +407,64 @@ const badge = () => document.querySelector(".tc-session__status");
 const OTHER_REF = leaseRefOf("lease_taken_over");
 
 describe("SessionPage resume marker (R8a)", () => {
-  it("skips the resume when /connection reports another lease, and asks before taking over", async () => {
-    const { ws, submitted, ticketPosts } = setupScripted({
+  it("a stale marker still tries the session cookie before asking to take over", async () => {
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      marker: { leaseRef: OTHER_REF, streamEpoch: 4 },
+      props: { pollIntervalMs: 20, resumeTimeoutMs: 200 },
+    });
+
+    // The live lease is not the remembered one. The portal still tries a
+    // cookie-resume (the lease may belong to a duplicate tab of this
+    // browser): the frame navigates, but the already-running stream is not
+    // ours — the page waits for a claim that never lands.
+    const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
+    expect(ticketPosts()).toHaveLength(0);
+    expect(readSessionMarker(ws.id)).toBeNull();
+
+    // Cookie not bound to that lease (another browser's session): the
+    // deadline falls back to a ticket without takeover and the dialog asks.
+    await screen.findByRole("alertdialog");
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1));
+    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+    expect(submitted).toHaveLength(0);
+    expect(screen.getByRole("status")).not.toHaveTextContent("Connected");
+    expect(control.connectionGets).toBeGreaterThan(0);
+  });
+
+  it("a stale marker resumes onto the live lease when the cookie is bound to it", async () => {
+    // Backlog 2: a stale-marker tab reloaded while a duplicate of this
+    // browser is connected — the shared session cookie opens a stream on
+    // that lease, no take-over dialog for ourselves.
+    const { ws, control, submitted, ticketPosts } = setupScripted({
       marker: { leaseRef: OTHER_REF, streamEpoch: 4 },
       props: { pollIntervalMs: 20 },
     });
+    const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
 
-    // Someone took the session over: the marker is stale, so the normal
-    // ticket request runs without takeover and the dialog shows.
-    await screen.findByRole("alertdialog");
-    const frame = screen.getByTitle(`Desktop: ${ws.name}`) as HTMLIFrameElement;
-    expect(frame.getAttribute("src")).toBeNull();
-    expect(ticketPosts()).toHaveLength(1);
-    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+    // Our reloaded frame claimed the next stream on the live lease.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 2,
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(ticketPosts()).toHaveLength(0);
     expect(submitted).toHaveLength(0);
-    expect(readSessionMarker(ws.id)).toBeNull();
-    expect(screen.getByRole("status")).not.toHaveTextContent("Connected");
+    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: leaseRefOf("lease_own"), streamEpoch: 2 });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
-  it("a Reconnect after the skipped resume still asks (no inherited ownership)", async () => {
+  it("a Reconnect after a foreign lease still asks (no inherited ownership)", async () => {
     const { ticketPosts } = setupScripted({
       marker: { leaseRef: OTHER_REF, streamEpoch: 4 },
-      props: { pollIntervalMs: 20 },
+      props: { pollIntervalMs: 20, resumeTimeoutMs: 200 },
     });
     await screen.findByRole("alertdialog");
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
@@ -368,9 +473,19 @@ describe("SessionPage resume marker (R8a)", () => {
   });
 
   it("stores the lease and stream epoch this tab saw connected", async () => {
-    const { ws } = setupScripted({ props: { pollIntervalMs: 20 } });
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 2,
+    });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
-    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: OWN_REF, streamEpoch: 1 });
+    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: OWN_REF, streamEpoch: 2 });
   });
 
   it("does not take a stream at or below the remembered epoch for the resumed one", async () => {
@@ -412,13 +527,12 @@ describe("SessionPage duplicate tab (R8c)", () => {
     const { ws, control, submitted, ticketPosts } = setupScripted({
       props: { pollIntervalMs: 20 },
     });
-    control.connection = () => status(1);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    await connectViaResume(ws, control);
     const frame = screen.getByTitle(`Desktop: ${ws.name}`) as HTMLIFrameElement;
     const srcBefore = frame.getAttribute("src");
 
     // Another tab with the same cookie opened a stream on our lease.
-    control.connection = () => status(2);
+    control.connection = () => status(3);
     expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use here" })).toBeInTheDocument();
 
@@ -435,15 +549,16 @@ describe("SessionPage duplicate tab (R8c)", () => {
   });
 
   it("'Use here' brings the desktop back into this tab and does not flag our own new stream", async () => {
-    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
-    control.connection = () => status(1);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
-    control.connection = () => status(2);
+    const { ws, control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+    control.connection = () => status(3);
     await screen.findByText("This session is open in another tab");
 
     fireEvent.click(screen.getByRole("button", { name: "Use here" }));
-    // The reloaded frame opens its own stream (epoch 3), which is ours.
-    control.connection = () => status(3);
+    // The resume baseline is taken when it reads /connection: wait for it
+    // to be armed, then the reloaded frame's own stream claims epoch 4.
+    await waitFor(() => expect(badge()).toHaveTextContent("Connecting"));
+    control.connection = () => status(4);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
     await new Promise((r) => setTimeout(r, 200));
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
@@ -452,22 +567,113 @@ describe("SessionPage duplicate tab (R8c)", () => {
   });
 
   it("a stream epoch advance caused by this tab's own frame reload is not 'another tab'", async () => {
-    const { control } = setupScripted({ props: { pollIntervalMs: 20 } });
-    control.connection = () => status(1);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
 
     // The stream drops with the lease alive: the watch reloads the frame
-    // after its first backoff step, which opens stream 2.
+    // after its first backoff step, which opens stream 3.
     control.connection = () => ({
       state: "disconnected",
       leaseActive: true,
       leaseRef: OWN_REF,
-      streamEpoch: 1,
+      streamEpoch: 2,
     });
     await new Promise((r) => setTimeout(r, 1_300));
-    control.connection = () => status(2);
+    control.connection = () => status(3);
     await new Promise((r) => setTimeout(r, 300));
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("Connected");
+  });
+});
+
+// ---- V3.24: provisional marker, split-mode epoch, reconnecting badge ----
+
+describe("SessionPage provisional marker (backlog 1)", () => {
+  it("a launch writes a provisional marker so an early reload resumes, not takes over", async () => {
+    // First tab: auto-launch mints a ticket and marks the lease provisional.
+    const { ws, submitted } = setupScripted({ lease: false, marker: false });
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: "", streamEpoch: -1 });
+  });
+
+  it("reload inside the launch window resumes the just-minted lease", async () => {
+    // The reload finds only the provisional marker: the live lease is the
+    // one our ticket created — resume by navigation, confirm by the poll.
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      marker: { leaseRef: "", streamEpoch: -1 },
+      props: { pollIntervalMs: 20 },
+    });
+    const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
+    // No ticket is minted for our own lease.
+    expect(ticketPosts()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 2,
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(readSessionMarker(ws.id)).toEqual({ leaseRef: OWN_REF, streamEpoch: 2 });
+  });
+
+  it("a provisional marker on a dead lease launches fresh without takeover", async () => {
+    const { submitted, ticketPosts } = setupScripted({
+      marker: { leaseRef: "", streamEpoch: -1 },
+      lease: false,
+    });
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+  });
+});
+
+describe("SessionPage split-mode resume (backlog 3)", () => {
+  it("streamEpoch 0 cannot fence: a leaseRef match confirms the resume", async () => {
+    const { ws, control, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
+    // Split mode without a session directory reports streamEpoch 0.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: leaseRefOf("lease_own"),
+      streamEpoch: 0,
+    });
+    const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
+    await waitFor(() =>
+      expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
+    );
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(ticketPosts()).toHaveLength(0);
+  });
+});
+
+describe("SessionPage reconnecting badge (T5.4)", () => {
+  it("the badge says Reconnecting while the watch reloads the frame", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // The stream drops with the lease alive: the watch reloads the frame
+    // and the badge shows the recovery, not a stale "Connected".
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 2,
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 2_000 });
+
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
   });
 });
