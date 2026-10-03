@@ -2493,6 +2493,84 @@ func TestBackendDefaults(t *testing.T) {
 	}
 }
 
+// TestOperatorDefaultsHA: E4 — the operator Deployment ships HA defaults:
+// 2 replicas, leader election enabled, and a PodDisruptionBudget with
+// minAvailable 1 so a voluntary disruption keeps a live reconciler.
+func TestOperatorDefaultsHA(t *testing.T) {
+	docs := render(t, "minimal-values.yaml")
+	dep := deployment(docs, "operator")
+	if dep == nil {
+		t.Fatal("no operator Deployment rendered")
+	}
+	spec, _ := dep["spec"].(map[string]any)
+	if spec["replicas"] != 2 {
+		t.Errorf("operator replicas = %v, want 2 (E4)", spec["replicas"])
+	}
+	var leaderElect bool
+	for _, a := range firstContainerArgs(dep) {
+		if a == "--leader-elect=true" {
+			leaderElect = true
+		}
+	}
+	if !leaderElect {
+		t.Errorf("operator args lack --leader-elect=true (E4): %v", firstContainerArgs(dep))
+	}
+	var pdb doc
+	for _, d := range selectDocs(docs, "PodDisruptionBudget") {
+		if n, _ := meta(d); n == "operator" {
+			pdb = d
+		}
+	}
+	if pdb == nil {
+		t.Fatal("no operator PodDisruptionBudget rendered by default (E4)")
+	}
+	pspec, _ := pdb["spec"].(map[string]any)
+	if pspec["minAvailable"] != 1 {
+		t.Errorf("operator PDB minAvailable = %v, want 1", pspec["minAvailable"])
+	}
+	sel, _ := pspec["selector"].(map[string]any)
+	ml, _ := sel["matchLabels"].(map[string]any)
+	if ml["app.kubernetes.io/name"] != "operator" {
+		t.Errorf("operator PDB must select operator pods, got %v", ml)
+	}
+}
+
+// TestFrontendPDBAndRollout: E4 — the frontend ships a PDB and a
+// restart-safe rollout (rollingUpdate maxUnavailable 0 / maxSurge 1, the
+// D22 shape) so the portal survives a rolling restart and a single pod
+// loss.
+func TestFrontendPDBAndRollout(t *testing.T) {
+	docs := render(t, "minimal-values.yaml")
+	dep := deployment(docs, "frontend")
+	if dep == nil {
+		t.Fatal("no frontend Deployment rendered")
+	}
+	spec, _ := dep["spec"].(map[string]any)
+	strategy, _ := spec["strategy"].(map[string]any)
+	ru, _ := strategy["rollingUpdate"].(map[string]any)
+	if ru["maxUnavailable"] != 0 {
+		t.Errorf("frontend rollingUpdate.maxUnavailable = %v, want 0 (E4)", ru["maxUnavailable"])
+	}
+	if ru["maxSurge"] != 1 {
+		t.Errorf("frontend rollingUpdate.maxSurge = %v, want 1 (E4)", ru["maxSurge"])
+	}
+	var pdb doc
+	for _, d := range selectDocs(docs, "PodDisruptionBudget") {
+		if n, _ := meta(d); n == "frontend" {
+			pdb = d
+		}
+	}
+	if pdb == nil {
+		t.Fatal("no frontend PodDisruptionBudget rendered by default (E4)")
+	}
+	pspec, _ := pdb["spec"].(map[string]any)
+	sel, _ := pspec["selector"].(map[string]any)
+	ml, _ := sel["matchLabels"].(map[string]any)
+	if ml["app.kubernetes.io/name"] != "frontend" {
+		t.Errorf("frontend PDB must select frontend pods, got %v", ml)
+	}
+}
+
 // TestBackendGatewayIDIsStatic: every backend pod in the Deployment shares
 // ONE gateway identity — -gateway-id is a literal from
 // backend.gatewayID (default tinycdi-backend), never a downward-API pod

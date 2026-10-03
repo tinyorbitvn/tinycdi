@@ -283,8 +283,12 @@ backend:
   extraVolumeMounts: []
 
 operator:
-  replicas: 1
-  leaderElect: false
+  # E4: two replicas with leader election — one active reconciler and one
+  # standby; the standby takes over the leader-election Lease when the
+  # leader goes away. Single-replica installs may set replicas: 1;
+  # leaderElect can stay true (one replica simply holds the lease).
+  replicas: 2
+  leaderElect: true
   webhookPort: -1           # -1 disables the webhook server
   # Operator metrics are not exposed: controller-runtime's secure mode
   # (HTTPS + authn/authz filter) needs cluster-scoped TokenReview and
@@ -327,8 +331,10 @@ operator:
   affinity: {}
   podSecurityContext: {}
   securityContext: {}
+  # PodDisruptionBudget — ON by default (E4): minAvailable 1 keeps a
+  # reconciler live through voluntary disruption.
   podDisruptionBudget:
-    enabled: false
+    enabled: true
     minAvailable: 1
     maxUnavailable: null
   extraArgs: []
@@ -349,9 +355,10 @@ frontend:
     configMap: ""
   service:
     annotations: {}
-  # PodDisruptionBudget — off by default; enabled: true renders one.
+  # PodDisruptionBudget — ON by default (E4): minAvailable 1 keeps a
+  # portal replica serving through voluntary disruption.
   pdb:
-    enabled: false
+    enabled: true
     minAvailable: 1
     maxUnavailable: null
   resources:
