@@ -77,8 +77,10 @@ writes the adapter files into the shared volume:
   then runs `kasmvncserver :1 -xstartup /opt/tcdi/xstartup.sh
   -select-de manual -SecurityTypes None -websocketPort 8443 -interface
   0.0.0.0 -sslOnly` and supervises Xvnc.
-- `healthcheck.sh` — readiness gate: `xdpyinfo` on :1 AND an HTTPS answer
-  on :8443 (tolerant of KasmVNC 1.4.x's loopback blacklist quirk).
+- `healthcheck.sh` — readiness gate: `xdpyinfo` on :1 AND an authenticated
+  HTTPS 200 on :8443, logging in with the mounted Secret (an anonymous probe
+  is an authentication failure to KasmVNC and blacklists loopback; tolerant of
+  KasmVNC 1.4.x's loopback quirk where curl prints the code and exits non-zero).
 - `xstartup.sh` — with `sessionCmd` set, starts ONLY a window manager
   (`xfwm4`, falling back to `openbox`/`startxfce4`) plus the payload —
   no desktop icons, panel launchers or app menu survive as unsandboxed

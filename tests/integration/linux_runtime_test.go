@@ -450,6 +450,56 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		assertNoSecret(t, c, password)
 	})
 
+	t.Run("ReadinessProbeIsNotAnAuthFailure", func(t *testing.T) {
+		// The runtime's readiness exec probe runs every few seconds for the
+		// life of the pod. An anonymous probe is an authentication failure
+		// to KasmVNC: it logs "Authentication attempt failed" and, past the
+		// brute_force_protection threshold, blacklists 127.0.0.1 - dropping
+		// any real client that reaches KasmVNC as loopback (sidecar proxy,
+		// port-forward, hostNetwork ingress). The probe must authenticate
+		// with the mounted Secret instead. The password carries a quote and a
+		// backslash: the probe's credential quoting must survive them.
+		secret, _ := selfSignedSecret(t)
+		password := `pw"with\quote and space`
+		writeFile(t, filepath.Join(secret, "password"), []byte(password+"\n"))
+		if err := os.Chmod(filepath.Join(secret, "password"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c := runContainer(t, runID, "probe", baseImage, secret, "")
+		waitHealthy(t, c)
+
+		for i := 0; i < 20; i++ {
+			if _, err := execIn(t, c, "/opt/tcdi/healthcheck.sh"); err != nil {
+				t.Fatalf("probe cycle %d not ready: %v", i+1, err)
+			}
+		}
+		// The password never shows in a process listing while probing.
+		if ps := mustExec(t, c, "ps -eo args"); strings.Contains(ps, "quote") {
+			t.Fatalf("probe leaked the password into argv:\n%s", ps)
+		}
+		log := mustExec(t, c, "cat /home/workspace/.vnc/*.log")
+		for _, bad := range []string{"blacklisted", "Authentication attempt failed"} {
+			if strings.Contains(log, bad) {
+				t.Fatalf("20 probe cycles (plus the image HEALTHCHECK) left %q in the KasmVNC log:\n%s", bad, log)
+			}
+		}
+		// Loopback still answers, authenticated.
+		code := strings.TrimSpace(mustExec(t, c,
+			`curl -sk -o /dev/null -w '%{http_code}' -u "kasm_user:$(cat /run/secrets/tcdi/password)" https://127.0.0.1:8443/`))
+		if code != "200" {
+			t.Fatalf("loopback after probing: got %s, want 200", code)
+		}
+		assertNoSecret(t, c, password)
+
+		// Control: the marker this test looks for is real. Eight anonymous
+		// requests (what the old probe sent) DO get loopback blacklisted.
+		mustExec(t, c, `for i in 1 2 3 4 5 6 7 8; do curl -sk -o /dev/null https://127.0.0.1:8443/; done; true`)
+		log = mustExec(t, c, "cat /home/workspace/.vnc/*.log")
+		if !strings.Contains(log, "blacklisted") {
+			t.Fatalf("control failed: anonymous requests did not trigger the lockout, so this test proves nothing:\n%s", log)
+		}
+	})
+
 	t.Run("DisplayDeathNotReady", func(t *testing.T) {
 		secret, _ := selfSignedSecret(t)
 		c := runContainer(t, runID, "death", desktopImage, secret, "")

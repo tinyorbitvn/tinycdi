@@ -89,7 +89,16 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   `/api/*` management routes therefore deny every request.
 - `HEALTHCHECK` (`/opt/tcdi/healthcheck.sh`) succeeds only while **both** the
   X display (`xdpyinfo -display :1`) and the endpoint answer. If the display
-  dies the container goes unhealthy, then exits for restart semantics.
+  dies the container goes unhealthy, then exits for restart semantics. The
+  probe logs in with the mounted Secret (read from `/run/secrets/tcdi`, passed
+  to `curl` on stdin — never in argv, never printed): an anonymous probe would
+  count as an authentication failure to KasmVNC and trip its
+  brute-force protection, blacklisting `127.0.0.1` and dropping any real
+  client that arrives as loopback (sidecar proxy, port-forward, hostNetwork
+  ingress). `TestLinuxRuntimeReadinessAndHome/ReadinessProbeIsNotAnAuthFailure`
+  runs 20 probe cycles and asserts no `blacklisted` / `Authentication attempt
+  failed` line in the KasmVNC log and that loopback still answers 200; the
+  kasm adapter's healthcheck has the same shape and the same test.
 - Credentials come from a **mounted Secret as files** under
   `/run/secrets/tcdi/` — never env, never logged:
 
