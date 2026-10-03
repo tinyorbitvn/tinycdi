@@ -11,7 +11,7 @@ import (
 // leaseFor issues and redeems a ticket, returning the live lease.
 func leaseFor(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool) broker.Lease {
 	t.Helper()
-	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover)
+	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestLease_StaleRuntimeUID(t *testing.T) {
 		t.Fatalf("renew with stale runtimeUID = %v, want ErrStaleBinding", err)
 	}
 	// A new ticket binds the NEW incarnation and reconnects cleanly.
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", true)
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, "")
 	if err != nil {
 		t.Fatalf("IssueTicket for reconnect: %v", err)
 	}

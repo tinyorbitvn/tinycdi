@@ -279,7 +279,11 @@ func requestID(ctx context.Context) string {
 // observed state is stale, and ErrConnectionInUse when a live lease exists and
 // takeover is false. With takeover the ticket may supersede the live lease at
 // redemption, fencing the old socket before the new session works.
-func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool) (Ticket, error) {
+// clipboardPolicy is the workspace template's policy as resolved by the
+// API at issue: it is recorded on the ticket row so the gateway's
+// post-redemption redirect can re-assert the client's clipboard flags
+// (V3.24). "" records NULL — a ticket with no policy appends nothing.
+func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, clipboardPolicy string) (Ticket, error) {
 	now := b.now()
 
 	// Ownership check against the authoritative workspace row: cross-tenant
@@ -346,15 +350,19 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 		return Ticket{}, fmt.Errorf("broker: mint ticket: %w", err)
 	}
 	expires := now.Add(b.ticketTTL)
+	var policy *string
+	if clipboardPolicy != "" {
+		policy = &clipboardPolicy
+	}
 	if _, err := b.db.Pool().Exec(ctx,
 		`INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience, takeover,
-			 request_id, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			 request_id, expires_at, clipboard_policy)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		ticketHash(token), workspaceUID, tenantID, owner,
 		int64(binding.RuntimeGeneration), binding.RuntimeUID,
-		b.audience, takeover, requestID(ctx), expires); err != nil {
+		b.audience, takeover, requestID(ctx), expires, policy); err != nil {
 		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
 	}
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil
@@ -375,13 +383,15 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			takeover                                       bool
 			expiresAt                                      time.Time
 			consumedAt, revokedAt                          *time.Time
+			policy                                         *string
 		)
 		err := tx.QueryRow(ctx,
 			`SELECT workspace_id, tenant_id, principal_subject, runtime_generation,
-				runtime_uid, audience, takeover, expires_at, consumed_at, revoked_at
+				runtime_uid, audience, takeover, expires_at, consumed_at, revoked_at,
+				clipboard_policy
 			 FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`, hash).
 			Scan(&wsUID, &tenantID, &subject, &gen, &runtimeUID, &audience,
-				&takeover, &expiresAt, &consumedAt, &revokedAt)
+				&takeover, &expiresAt, &consumedAt, &revokedAt, &policy)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return ErrTicketInvalid
@@ -478,6 +488,9 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			FencingVersion:    fencing,
 			GatewayID:         gw.ID,
 			ExpiresAt:         now.Add(b.leaseTTL),
+		}
+		if policy != nil {
+			lease.ClipboardPolicy = *policy
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO connection_lease

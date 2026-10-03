@@ -79,7 +79,7 @@ func TestTouchPrincipal_UsesIndex(t *testing.T) {
 // containing '|' still matches its own sessions — and only those.
 func TestTouchPrincipal_SplitsAtFirstSeparator(t *testing.T) {
 	db := newDB(t)
-	ss := store.NewSessionStore(db, time.Hour)
+	ss := store.NewSessionStore(db, time.Hour, nil)
 	ctx := context.Background()
 	old := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Millisecond)
 	save := func(id, iss, sub string) {

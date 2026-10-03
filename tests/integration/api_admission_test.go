@@ -585,6 +585,7 @@ func (a *pgSessionAdapter) Save(ctx context.Context, sess *api.Session) error {
 		TenantID:   sess.Principal.TenantID,
 		Groups:     sess.Principal.Groups,
 		CSRFToken:  sess.CSRFToken,
+		IDToken:    sess.IDToken,
 		CreatedAt:  sess.CreatedAt,
 		LastSeenAt: sess.LastSeenAt,
 		ExpiresAt:  sess.ExpiresAt,
@@ -606,6 +607,7 @@ func (a *pgSessionAdapter) Get(ctx context.Context, id string) (*api.Session, er
 			TenantID: rec.TenantID, Groups: rec.Groups,
 		},
 		CSRFToken:  rec.CSRFToken,
+		IDToken:    rec.IDToken,
 		CreatedAt:  rec.CreatedAt,
 		LastSeenAt: rec.LastSeenAt,
 		ExpiresAt:  rec.ExpiresAt,
@@ -627,6 +629,7 @@ func (a *pgSessionAdapter) Peek(ctx context.Context, id string) (*api.Session, e
 			TenantID: rec.TenantID, Groups: rec.Groups,
 		},
 		CSRFToken:  rec.CSRFToken,
+		IDToken:    rec.IDToken,
 		CreatedAt:  rec.CreatedAt,
 		LastSeenAt: rec.LastSeenAt,
 		ExpiresAt:  rec.ExpiresAt,
@@ -643,7 +646,7 @@ func (a *pgSessionAdapter) Delete(ctx context.Context, id string) error {
 
 func TestPGSessionStore(t *testing.T) {
 	db := newDB(t)
-	ss := store.NewSessionStore(db, 60*time.Second)
+	ss := store.NewSessionStore(db, 60*time.Second, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -701,7 +704,7 @@ func TestPGSessionStore(t *testing.T) {
 	}
 
 	// idle expiry
-	short := store.NewSessionStore(db, 30*time.Millisecond)
+	short := store.NewSessionStore(db, 30*time.Millisecond, nil)
 	sess.ID, sess.ExpiresAt = "sess-idle", now.Add(time.Hour)
 	if err := short.Save(ctx, sess); err != nil {
 		t.Fatal(err)
@@ -729,7 +732,7 @@ func TestPGSessionStore(t *testing.T) {
 // current epoch keep working across plain restarts.
 func TestSessionEpochRotation(t *testing.T) {
 	db := newDB(t)
-	ss := store.NewSessionStore(db, 60*time.Second)
+	ss := store.NewSessionStore(db, 60*time.Second, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -772,7 +775,7 @@ func TestSessionEpochRotation(t *testing.T) {
 
 	// A fresh login under the new epoch works — and survives "restarts"
 	// (a new store instance over the same DB).
-	ss2 := store.NewSessionStore(db, 60*time.Second)
+	ss2 := store.NewSessionStore(db, 60*time.Second, nil)
 	sess.ID = "sess-new-epoch"
 	if err := ss2.Save(ctx, sess); err != nil {
 		t.Fatalf("save new epoch: %v", err)
@@ -838,7 +841,7 @@ func newHTTPEnv(t *testing.T, db *store.DB, dispatch bool) *httpEnv {
 	}
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, nil))
-	sessions := &pgSessionAdapter{s: store.NewSessionStore(db, 30*time.Minute)}
+	sessions := &pgSessionAdapter{s: store.NewSessionStore(db, 30*time.Minute, nil)}
 	authn, err := api.NewAuthenticator(context.Background(), api.AuthConfig{
 		Issuer:      iss.URL(),
 		ClientID:    iss.ClientID,

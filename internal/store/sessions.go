@@ -26,6 +26,16 @@ import (
 // token on Save; it is persisted only as an HMAC keyed by the raw session
 // ID, and Get returns that MAC in CSRFToken — the raw token is never
 // recoverable from a store read.
+// IDTokenSeal seals the raw OIDC ID token for at-rest storage and opens it
+// on read (api.IDTokenSealer over the login-state keys). A nil sealer
+// stores NULL; an open failure yields an empty token rather than a failed
+// read — logout then falls back to a client_id-only end-session URL
+// (V3.24).
+type IDTokenSeal interface {
+	SealIDToken(raw string) (string, error)
+	OpenIDToken(blob string) (string, error)
+}
+
 type Session struct {
 	ID        string
 	Issuer    string
@@ -38,9 +48,13 @@ type Session struct {
 	// authorization meaning.
 	DisplayName string
 	Email       string
-	CreatedAt   time.Time
-	LastSeenAt  time.Time
-	ExpiresAt   time.Time // zero = no absolute expiry
+	// IDToken is the raw OIDC id_token retained for RP-initiated logout
+	// (id_token_hint); the row holds only its AEAD-sealed form, never the
+	// raw token (migration 015).
+	IDToken    string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time // zero = no absolute expiry
 }
 
 // ErrSessionNotFound is returned for unknown or expired session IDs.
@@ -72,12 +86,15 @@ func csrfTokenMAC(sessionID, token string) string {
 type SessionStore struct {
 	db   *DB
 	idle time.Duration
+	seal IDTokenSeal // nil = id_token column stays NULL
 	now  func() time.Time
 }
 
 // NewSessionStore returns a SessionStore with the sliding idle timeout.
-func NewSessionStore(db *DB, idle time.Duration) *SessionStore {
-	return &SessionStore{db: db, idle: idle, now: time.Now}
+// seal persists the retained OIDC ID token AEAD-sealed; nil keeps the
+// column NULL (logout then falls back to client_id only).
+func NewSessionStore(db *DB, idle time.Duration, seal IDTokenSeal) *SessionStore {
+	return &SessionStore{db: db, idle: idle, seal: seal, now: time.Now}
 }
 
 // WithClock overrides the clock; tests only.
@@ -98,14 +115,23 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 	if !sess.ExpiresAt.IsZero() {
 		expires = &sess.ExpiresAt
 	}
-	// Only digest forms are persisted (SEC-27): id holds SHA-256 of the
-	// session ID and csrf_token holds the session-ID-keyed HMAC of the raw
-	// synchronizer token.
+	// Only digest/sealed forms are persisted (SEC-27): id holds SHA-256 of
+	// the session ID, csrf_token holds the session-ID-keyed HMAC of the raw
+	// synchronizer token, and id_token holds the login-state AEAD seal of
+	// the OIDC ID token — the raw token never reaches the row.
+	var idToken *string
+	if sess.IDToken != "" && s.seal != nil {
+		sealed, err := s.seal.SealIDToken(sess.IDToken)
+		if err != nil {
+			return fmt.Errorf("session id_token seal: %w", err)
+		}
+		idToken = &sealed
+	}
 	_, err = s.db.Pool().Exec(ctx, `
 		INSERT INTO sessions (id, issuer, subject, tenant_id, groups, csrf_token,
-			display_name, email, created_at, last_seen_at, expires_at, epoch)
+			display_name, email, created_at, last_seen_at, expires_at, epoch, id_token)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-			(SELECT value FROM platform_meta WHERE key = 'session_epoch'))
+			(SELECT value FROM platform_meta WHERE key = 'session_epoch'), $12)
 		ON CONFLICT (id) DO UPDATE SET
 			issuer = EXCLUDED.issuer, subject = EXCLUDED.subject,
 			tenant_id = EXCLUDED.tenant_id, groups = EXCLUDED.groups,
@@ -113,10 +139,10 @@ func (s *SessionStore) Save(ctx context.Context, sess *Session) error {
 			display_name = EXCLUDED.display_name, email = EXCLUDED.email,
 			created_at = EXCLUDED.created_at,
 			last_seen_at = EXCLUDED.last_seen_at, expires_at = EXCLUDED.expires_at,
-			epoch = EXCLUDED.epoch`,
+			epoch = EXCLUDED.epoch, id_token = EXCLUDED.id_token`,
 		sessionKey(sess.ID), sess.Issuer, sess.Subject, sess.TenantID, groups,
 		csrfTokenMAC(sess.ID, sess.CSRFToken), sess.DisplayName, sess.Email,
-		sess.CreatedAt, sess.LastSeenAt, expires)
+		sess.CreatedAt, sess.LastSeenAt, expires, idToken)
 	return err
 }
 
@@ -127,7 +153,7 @@ const sessionReturning = `
 	RETURNING ` + sessionColumns
 
 const sessionColumns = `issuer, subject, tenant_id, groups, csrf_token,
-	display_name, email, created_at, last_seen_at, expires_at`
+	display_name, email, created_at, last_seen_at, expires_at, id_token`
 
 // currentEpochSQL resolves the session epoch in the same statement so a
 // rotation takes effect on the very next read — no cached copy can go stale.
@@ -167,9 +193,10 @@ func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id str
 	var sess Session
 	var groups []byte
 	var expires *time.Time
+	var idToken *string
 	err := row.Scan(&sess.Issuer, &sess.Subject, &sess.TenantID, &groups,
 		&sess.CSRFToken, &sess.DisplayName, &sess.Email,
-		&sess.CreatedAt, &sess.LastSeenAt, &expires)
+		&sess.CreatedAt, &sess.LastSeenAt, &expires, &idToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if s.idle > 0 {
 			_, _ = s.db.Pool().Exec(ctx, `
@@ -195,6 +222,13 @@ func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id str
 	}
 	if expires != nil {
 		sess.ExpiresAt = *expires
+	}
+	// The sealed ID token opens to the raw token; a key that no longer
+	// opens it yields "" — logout then falls back rather than failing.
+	if idToken != nil && s.seal != nil {
+		if raw, err := s.seal.OpenIDToken(*idToken); err == nil {
+			sess.IDToken = raw
+		}
 	}
 	return &sess, nil
 }
