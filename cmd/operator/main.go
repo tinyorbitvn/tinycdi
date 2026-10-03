@@ -135,6 +135,18 @@ func bindRuntimePlacementFlags(fs *flag.FlagSet, pf *runtimePlacementFlags) {
 			"leaves pod.spec.hostUsers unset. Default for spec.linux.hostUsers.")
 }
 
+// bindRuntimeAppArmorFlag registers --runtime-apparmor-require-default. True
+// (the default) keeps today's behaviour: every runtime container carries an
+// explicit RuntimeDefault AppArmor profile, which a node without AppArmor
+// refuses. False omits it (a Localhost profile from a template is still
+// set) — the supported setting for kind and SELinux-based distributions.
+func bindRuntimeAppArmorFlag(fs *flag.FlagSet, requireDefault *bool) {
+	fs.BoolVar(requireDefault, "runtime-apparmor-require-default", true,
+		"Set securityContext.appArmorProfile=RuntimeDefault on runtime containers. "+
+			"Set false on nodes without AppArmor (kind, SELinux-based distributions); "+
+			"a Localhost profile requested by a template is always still set.")
+}
+
 // parse validates the --runtime-* flag strings. Every error names the
 // offending flag — main() exits non-zero on any of them, so a typo can
 // never silently drop placement (a missing selector on a dedicated pool
@@ -268,6 +280,7 @@ func main() {
 	var leaderElectionNamespace string
 	var bf brokerFlags
 	var pf runtimePlacementFlags
+	var appArmorRequireDefault bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -319,6 +332,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	bindBrokerFlags(flag.CommandLine, &bf, os.Getenv)
 	bindRuntimePlacementFlags(flag.CommandLine, &pf)
+	bindRuntimeAppArmorFlag(flag.CommandLine, &appArmorRequireDefault)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -473,7 +487,8 @@ func main() {
 				NodeSelector: placement.nodeSelector,
 				Tolerations:  placement.tolerations,
 			},
-			DefaultHostUsers: placement.hostUsers,
+			DefaultHostUsers:    placement.hostUsers,
+			AppArmorNotRequired: !appArmorRequireDefault,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.

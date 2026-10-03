@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -211,6 +212,7 @@ func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (
 		if completed[step] {
 			continue
 		}
+		f.markStep(ctx, ws, step)
 		var serr error
 		switch step {
 		case StepBlockConnects:
@@ -251,6 +253,42 @@ func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (
 		}
 	}
 	return true, nil
+}
+
+// teardownStepReason is the RuntimeReady reason shown while a teardown step
+// runs. The finalizer's own checkpoint lives in an annotation the API never
+// serves; these tokens are how the portal tells the delete steps apart.
+func teardownStepReason(step FinalizerStep) string {
+	switch step {
+	case StepBlockConnects:
+		return "BlockingConnects"
+	case StepRevokeLeases:
+		return "RevokingLeases"
+	case StepDrainStreams:
+		return "DrainingStreams"
+	case StepStopRuntime:
+		return "StoppingRuntime"
+	case StepRetention:
+		return "ApplyingRetention"
+	case StepCleanup:
+		return "CleaningUp"
+	}
+	return "Terminating"
+}
+
+// markStep records the step about to run on RuntimeReady=False. It is
+// progress display only, so it is best effort: a failed write never blocks
+// or fails the teardown (the next step's mark, or the final delete, makes
+// it right). Re-running the same step (a drain requeue) writes nothing.
+func (f *Finalizer) markStep(ctx context.Context, ws *workspacesv1alpha1.Workspace, step FinalizerStep) {
+	reason := teardownStepReason(step)
+	if cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionRuntimeReady); cur != nil &&
+		cur.Status == metav1.ConditionFalse && cur.Reason == reason {
+		return
+	}
+	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
+		metav1.ConditionFalse, reason, "teardown step "+string(step)+" in progress", f.now())
+	_ = f.Client.Status().Update(ctx, ws)
 }
 
 // probe routes backend-owned steps through the internal test hook when one

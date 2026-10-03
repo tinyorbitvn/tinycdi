@@ -56,6 +56,27 @@ secret values — every Secret is a pre-existing object referenced by name
 
 ## Prerequisites check
 
+Run the preflight script first. It checks the Kubernetes version,
+NetworkPolicy enforcement (with a throwaway probe namespace it always
+deletes), a StorageClass, user-namespace support, the workspace node pool,
+wildcard DNS, the session TLS Secret, OIDC discovery and Postgres with TLS
+verification, and prints `PASS`/`WARN`/`FAIL` with a one-line fix for each
+(exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
+not permitted to run is a `WARN`. Flags and the check table are in
+`hack/preflight/README.md`.
+
+```bash
+hack/preflight/preflight.sh \
+  --session-domain session.example.com \
+  --tls-secret tinycdi-system/tinycdi-backend-session-tls \
+  --oidc-issuer https://idp.example.com/realms/tinycdi \
+  --postgres-dsn-secret tinycdi-system/tinycdi-backend-db:url \
+  --host-users-false          # only if runtime.hostUsers=false is wanted
+# on a throwaway cluster add:  --allow-shared-nodes
+```
+
+Checks preflight does not cover (tools and cluster-wide rights):
+
 ```bash
 HELM=helm
 K=kubectl
@@ -122,6 +143,23 @@ Also gather:
    steps live under `deploy/node-profiles/`
    (`seccomp/chromium-userns.json`, `apparmor/tinycdi-browser` — see
    `deploy/node-profiles/README.md`).
+
+   **Nodes without AppArmor.** Runtime pods carry an explicit
+   `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
+   AppArmor (kind; RHEL-family and other SELinux-based distributions)
+   refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
+   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   false` (operator flag `--runtime-apparmor-require-default=false`; the
+   install NOTES print a reminder). This is a supported setting. It omits
+   only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,
+   non-root, no privilege escalation and `hostUsers` are unchanged. What
+   you give up is the fail-closed guarantee: on an AppArmor host the
+   runtime's default profile still applies to non-privileged containers,
+   whereas on a host without AppArmor there is no AppArmor confinement and
+   isolation rests on seccomp, the user namespace and SELinux. Templates
+   that select a Localhost AppArmor profile (the browser templates) always
+   keep it and therefore cannot run on such nodes.
+
 8. **TLS material** for the portal and session edges plus the internal
    mTLS chain — either pre-created Secrets (table below) or
    `certManager.enabled` for the internal chain. The session edge cert

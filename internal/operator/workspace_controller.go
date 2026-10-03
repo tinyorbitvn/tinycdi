@@ -105,6 +105,14 @@ const (
 	// refuses to build a default home in its place, so no runtime children
 	// are created until the claim reference is present (FX-R20).
 	ReasonRetainedClaimMissing = "RetainedClaimMissing"
+
+	// ReasonWaitingForDisk — the Workspace names its retained claim but the
+	// volume has not been retargeted to it yet (the attach is between
+	// stamping the CR and relabelling the claim). Transient: shown as the
+	// disk step on StorageReady, never as a backend error (V3.27). Distinct
+	// from ReasonRetainedClaimMissing, which is the refusal when the claim
+	// is not named at all.
+	ReasonWaitingForDisk = "WaitingForDisk"
 )
 
 const (
@@ -208,6 +216,50 @@ func (r *WorkspaceReconciler) now() time.Time {
 	return time.Now()
 }
 
+// backendErrorMessage is the fixed condition text for ReasonBackendError.
+// Like every tenant-visible message it never carries the raw error (SEC-I6):
+// quota, admission and API-server text stays in the operator logs.
+const backendErrorMessage = "the platform could not complete a runtime step; retrying - detail in the operator logs"
+
+// recordBackendError surfaces a failed backend call on the object so the
+// portal does not show a frozen workspace until the boot deadline: it sets
+// RuntimeReady=False/BackendError and nothing else (no phase change, no
+// Degraded - the reconcile is still retrying). The caller still returns the
+// error so controller-runtime backs off. Optimistic-lock conflicts and
+// cancelled contexts are routine and write nothing. keepReady leaves a Ready
+// workspace alone: its runtime is up, and a transient control-plane error
+// must not flicker the condition. Best effort: a failed status write is
+// logged, never returned over the original error.
+func (r *WorkspaceReconciler) recordBackendError(ctx context.Context, ws *workspacesv1alpha1.Workspace, err error, keepReady bool) {
+	r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionRuntimeReady, ReasonBackendError,
+		backendErrorMessage, err, keepReady)
+}
+
+// waitingForDiskMessage is the fixed text for ReasonWaitingForDisk.
+const waitingForDiskMessage = "waiting for the retained disk to be handed over to this workspace"
+
+// recordStepStatus is the best-effort write behind recordBackendError and
+// the WaitingForDisk step: condition typ is set False with reason/msg and
+// nothing else changes. The caller returns err itself.
+func (r *WorkspaceReconciler) recordStepStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, typ, reason, msg string, err error, keepReady bool) {
+	if err == nil || apierrors.IsConflict(err) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	if keepReady && ws.Status.Phase == workspacesv1alpha1.WorkspacePhaseReady {
+		return
+	}
+	cur := meta.FindStatusCondition(ws.Status.Conditions, typ)
+	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == reason &&
+		cur.ObservedGeneration == ws.Generation {
+		return
+	}
+	SetWorkspaceCondition(ws, typ, metav1.ConditionFalse, reason, msg, r.now())
+	if uerr := r.Status().Update(ctx, ws); uerr != nil {
+		logf.FromContext(ctx).Error(uerr, "record step status", "condition", typ, "reason", reason)
+	}
+}
+
 // Reconcile converges a Workspace toward its last applied intent.
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -290,10 +342,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // dataPolicy.
 func (r *WorkspaceReconciler) reconcileStopped(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
 	if err := r.Backend.Stop(ctx, ws); err != nil && !errors.Is(err, linux.ErrNameConflict) {
+		r.recordBackendError(ctx, ws, err, false)
 		return ctrl.Result{}, err
 	}
 	obs, err := r.Backend.Observe(ctx, ws)
 	if err != nil {
+		r.recordBackendError(ctx, ws, err, false)
 		return ctrl.Result{}, err
 	}
 
@@ -384,7 +438,12 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		logf.FromContext(ctx).Info("template rejected by backend", "error", berr)
 		statusErr = errors.New(ReasonTemplateRejected)
 		obs, _ = r.Backend.Observe(ctx, ws)
+	case errors.Is(berr, linux.ErrRetainedNotClaimed):
+		r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionStorageReady, ReasonWaitingForDisk,
+			waitingForDiskMessage, berr, true)
+		return ctrl.Result{}, berr
 	default:
+		r.recordBackendError(ctx, ws, berr, true)
 		return ctrl.Result{}, berr
 	}
 
@@ -545,6 +604,13 @@ func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv
 func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error) error {
 	gen := ws.Generation
 	st := &ws.Status
+	// A workspace that already latched Failed on this intent keeps its step
+	// conditions as they were: they record which step stalled, and the
+	// incarnation cleanup would otherwise overwrite them with "Provisioning"
+	// once the pod is gone.
+	frozen := phase == workspacesv1alpha1.WorkspacePhaseFailed &&
+		st.Phase == workspacesv1alpha1.WorkspacePhaseFailed &&
+		st.LastAppliedIntentRevision == applied.Revision
 	// The persisted phase is read before it is overwritten: a startedAt
 	// recorded under an ended phase must not carry into the next incarnation.
 	priorEnded := incarnationEnded(st.Phase)
@@ -578,22 +644,28 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 			"IntentApplied", "stop intent applied")
 	}
 
+	// Step conditions: skipped while frozen (see above).
+	setStep := func(typ string, status metav1.ConditionStatus, reason, msg string) {
+		if !frozen {
+			setCond(typ, status, reason, msg)
+		}
+	}
 	switch {
 	case obs.StorageReady:
-		setCond(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionTrue, ReasonReady, "")
+		setStep(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionTrue, ReasonReady, "")
 	default:
-		setCond(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionFalse,
+		setStep(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionFalse,
 			ReasonProvisioning, "waiting for volumes")
 	}
 
 	switch {
 	case applied.DesiredState == workspacesv1alpha1.DesiredStateStopped:
-		setCond(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
+		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
 			ReasonStopped, "runtime stopped by intent")
-		setCond(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse,
+		setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse,
 			ReasonStopped, "runtime stopped by intent")
 	case obs.RuntimeReady:
-		setCond(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionTrue, ReasonReady, "")
+		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionTrue, ReasonReady, "")
 	default:
 		reason := obs.Reason
 		if reason == "" {
@@ -602,17 +674,17 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		if statusErr != nil && statusErr.Error() == ReasonBootDeadlineExceeded {
 			reason = ReasonBootDeadlineExceeded
 		}
-		setCond(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse, reason, "")
+		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse, reason, "")
 	}
 	if applied.DesiredState == workspacesv1alpha1.DesiredStateRunning {
 		if obs.ConnectionReady {
-			setCond(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionTrue, ReasonReady, "")
+			setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionTrue, ReasonReady, "")
 		} else {
 			reason := obs.Reason
 			if reason == "" || reason == "Ready" {
 				reason = ReasonProvisioning
 			}
-			setCond(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse, reason, "")
+			setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse, reason, "")
 		}
 	}
 

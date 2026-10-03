@@ -255,6 +255,13 @@ func retainedClaimMissing(ws *workspacesv1alpha1.Workspace) bool {
 	return ws.Annotations[AnnotationRetainedPVC] == "" || ws.Annotations[AnnotationRetainedPVCUID] == ""
 }
 
+// ErrRetainedNotClaimed is returned by Ensure while the Workspace names its
+// retained claim but that claim has not been retargeted to it yet — the
+// short window between the attach stamping the CR and relabelling the
+// volume. It is transient: the operator reports it as the WaitingForDisk
+// step instead of a backend error and retries.
+var ErrRetainedNotClaimed = errors.New("linux backend: retained claim not yet claimed by this workspace")
+
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
@@ -297,6 +304,14 @@ type Options struct {
 	// when spec.linux.hostUsers is unset. Nil leaves the pod field nil
 	// (the apiserver default — host user namespace).
 	DefaultHostUsers *bool
+
+	// AppArmorNotRequired (operator --runtime-apparmor-require-default=false)
+	// makes buildPod leave securityContext.appArmorProfile nil wherever it
+	// would have set RuntimeDefault, so runtime pods start on nodes without
+	// AppArmor (kind, SELinux-based distributions). A Localhost profile
+	// requested through the template annotation is always kept. The zero
+	// value keeps today's behaviour: RuntimeDefault is always set.
+	AppArmorNotRequired bool
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -650,7 +665,7 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspac
 			return nil, &conflictError{kind: "PersistentVolumeClaim", name: ref}
 		}
 		if pvc.Labels[LabelWorkspaceUID] != string(uid) {
-			return nil, fmt.Errorf("linux backend: retained PVC %q not yet claimed by workspace %s", ref, string(uid))
+			return nil, fmt.Errorf("retained PVC %q not yet claimed by workspace %s: %w", ref, string(uid), ErrRetainedNotClaimed)
 		}
 		return pvc, nil
 	}
@@ -806,6 +821,9 @@ func validAppArmorProfileName(name string) bool {
 }
 
 func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, opts Options) *corev1.Pod {
+	if opts.AppArmorNotRequired && appArmor != nil && appArmor.Type == corev1.AppArmorProfileTypeRuntimeDefault {
+		appArmor = nil
+	}
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
@@ -986,6 +1004,12 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		},
 	}
 	if kasm {
+		// The copier's explicit RuntimeDefault follows the same setting as
+		// the desktop container: a host without AppArmor refuses it too.
+		var initAppArmor *corev1.AppArmorProfile
+		if !opts.AppArmorNotRequired {
+			initAppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault}
+		}
 		// The adapter initContainer copies the adapter scripts into the
 		// shared emptyDir — the only mutation the foreign image gets. Its
 		// confinement mirrors the desktop's minus the browser's Localhost
@@ -1017,7 +1041,7 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 				ReadOnlyRootFilesystem: ptr(true),
 				Capabilities:           &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				AppArmorProfile:        &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+				AppArmorProfile:        initAppArmor,
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: adapterVolName, MountPath: adapterDir},
@@ -1235,7 +1259,8 @@ func podReady(pod *corev1.Pod) bool {
 
 // podReason derives the machine-readable observation reason from pod state:
 // scheduling failures, container waits, terminal phases, else
-// provisioning/ready.
+// provisioning/ready. The tokens are the contract the portal's lifecycle
+// progress reads (docs/lifecycle-reasons.md).
 func podReason(pod *corev1.Pod) string {
 	if !pod.DeletionTimestamp.IsZero() {
 		return "Terminating"
@@ -1246,9 +1271,16 @@ func podReason(pod *corev1.Pod) string {
 	case corev1.PodSucceeded:
 		return "PodExited"
 	}
+	// An init container that cannot start is reported before the main
+	// container's generic PodInitializing.
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" {
+			return refineWaiting(pod, w.Reason)
+		}
+	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if w := cs.State.Waiting; w != nil && w.Reason != "" {
-			return w.Reason // ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError...
+			return refineWaiting(pod, w.Reason) // ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError...
 		}
 	}
 	for _, c := range pod.Status.Conditions {
@@ -1265,7 +1297,40 @@ func podReason(pod *corev1.Pod) string {
 	if pod.Status.Phase == corev1.PodRunning {
 		return "NotReady"
 	}
+	// Scheduled, but the kubelet has not finished the sandbox yet.
+	if podCondition(pod, corev1.PodScheduled) == corev1.ConditionTrue &&
+		podCondition(pod, corev1.PodReadyToStartContainers) == corev1.ConditionFalse {
+		return "PreparingPod"
+	}
 	return "Provisioning"
+}
+
+// refineWaiting splits the kubelet's catch-all ContainerCreating wait using
+// the PodReadyToStartContainers condition: not yet true means the sandbox,
+// network and volumes are still being prepared (PreparingPod); true means
+// the kubelet is on to the image (PullingImage). A kubelet that does not
+// report the condition keeps the original token.
+func refineWaiting(pod *corev1.Pod, reason string) string {
+	if reason != "ContainerCreating" {
+		return reason
+	}
+	switch podCondition(pod, corev1.PodReadyToStartContainers) {
+	case corev1.ConditionFalse:
+		return "PreparingPod"
+	case corev1.ConditionTrue:
+		return "PullingImage"
+	}
+	return reason
+}
+
+// podCondition returns the status of a pod condition, or "" when absent.
+func podCondition(pod *corev1.Pod, t corev1.PodConditionType) corev1.ConditionStatus {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == t {
+			return c.Status
+		}
+	}
+	return ""
 }
 
 func ptr[T any](v T) *T { return &v }
