@@ -297,6 +297,14 @@ type Options struct {
 	// when spec.linux.hostUsers is unset. Nil leaves the pod field nil
 	// (the apiserver default — host user namespace).
 	DefaultHostUsers *bool
+
+	// AppArmorNotRequired (operator --runtime-apparmor-require-default=false)
+	// makes buildPod leave securityContext.appArmorProfile nil wherever it
+	// would have set RuntimeDefault, so runtime pods start on nodes without
+	// AppArmor (kind, SELinux-based distributions). A Localhost profile
+	// requested through the template annotation is always kept. The zero
+	// value keeps today's behaviour: RuntimeDefault is always set.
+	AppArmorNotRequired bool
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -806,6 +814,9 @@ func validAppArmorProfileName(name string) bool {
 }
 
 func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, opts Options) *corev1.Pod {
+	if opts.AppArmorNotRequired && appArmor != nil && appArmor.Type == corev1.AppArmorProfileTypeRuntimeDefault {
+		appArmor = nil
+	}
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
@@ -986,6 +997,12 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		},
 	}
 	if kasm {
+		// The copier's explicit RuntimeDefault follows the same setting as
+		// the desktop container: a host without AppArmor refuses it too.
+		var initAppArmor *corev1.AppArmorProfile
+		if !opts.AppArmorNotRequired {
+			initAppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault}
+		}
 		// The adapter initContainer copies the adapter scripts into the
 		// shared emptyDir — the only mutation the foreign image gets. Its
 		// confinement mirrors the desktop's minus the browser's Localhost
@@ -1017,7 +1034,7 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 				ReadOnlyRootFilesystem: ptr(true),
 				Capabilities:           &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				AppArmorProfile:        &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+				AppArmorProfile:        initAppArmor,
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: adapterVolName, MountPath: adapterDir},

@@ -406,7 +406,14 @@
             "tolerations": {"type": "array"}
           }
         },
-        "hostUsers": {"type": ["boolean", "null"]}
+        "hostUsers": {"type": ["boolean", "null"]},
+        "appArmor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requireRuntimeDefault": {"type": "boolean"}
+          }
+        }
       }
     },
     "nodeProfiles": {

@@ -482,6 +482,18 @@ runtime:
   # null leaves the field unset (the apiserver default — host user
   # namespace); a template's spec.linux.hostUsers overrides either way.
   hostUsers: false
+  # AppArmor for runtime pods (--runtime-apparmor-require-default). true
+  # (default): every runtime container carries an explicit
+  # securityContext.appArmorProfile=RuntimeDefault. Set false on nodes
+  # WITHOUT AppArmor (kind, RHEL-family/SELinux-based distributions): the
+  # kubelet refuses a pod that names an AppArmor profile there ("Cannot
+  # enforce AppArmor: AppArmor is not enabled on the host"). false omits
+  # the RuntimeDefault field only — seccomp, capabilities, runAsNonRoot,
+  # allowPrivilegeEscalation and hostUsers are unchanged. A template with a
+  # Localhost AppArmor profile (e.g. browser templates) is still set and
+  # cannot run on such nodes. See install.md "Nodes without AppArmor".
+  appArmor:
+    requireRuntimeDefault: true
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must

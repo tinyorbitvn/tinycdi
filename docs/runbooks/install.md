@@ -119,6 +119,23 @@ Also gather:
    steps live under `deploy/node-profiles/`
    (`seccomp/chromium-userns.json`, `apparmor/tinycdi-browser` — see
    `deploy/node-profiles/README.md`).
+
+   **Nodes without AppArmor.** Runtime pods carry an explicit
+   `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
+   AppArmor (kind; RHEL-family and other SELinux-based distributions)
+   refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
+   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   false` (operator flag `--runtime-apparmor-require-default=false`; the
+   install NOTES print a reminder). This is a supported setting. It omits
+   only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,
+   non-root, no privilege escalation and `hostUsers` are unchanged. What
+   you give up is the fail-closed guarantee: on an AppArmor host the
+   runtime's default profile still applies to non-privileged containers,
+   whereas on a host without AppArmor there is no AppArmor confinement and
+   isolation rests on seccomp, the user namespace and SELinux. Templates
+   that select a Localhost AppArmor profile (the browser templates) always
+   keep it and therefore cannot run on such nodes.
+
 8. **TLS material** for the portal and session edges plus the internal
    mTLS chain — either pre-created Secrets (table below) or
    `certManager.enabled` for the internal chain. The session edge cert
