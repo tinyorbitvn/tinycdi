@@ -79,7 +79,7 @@
       ]
     },
     {
-      "username": "demo-noquota",
+      "username": "@NOQUOTA_USER@",
       "email": "demo-noquota@tcdi.localtest.me",
       "emailVerified": true,
       "firstName": "Demo",

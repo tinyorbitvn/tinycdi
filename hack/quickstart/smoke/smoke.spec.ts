@@ -127,8 +127,11 @@ test("log in, create a browser workspace and see the session frame load", async 
   // B5.4 (permanent): the embedded session must hold for 120 seconds — no
   // second launch ticket and the same lease throughout; the FX-R18-era
   // churn showed extra tickets and lease flips inside this window. The
-  // badge may briefly read "Reconnecting" while the watch reloads the
-  // frame after a transient drop; the lease is the durable check.
+  // badge is sampled, not awaited: expect().toContainText would retry for
+  // up to 30 s and mask a drop, so each sample reads innerText once and
+  // fails on the first state that is not exactly "Connected" (the badge's
+  // real states are Connecting/Connected/Disconnected/Ended/In another
+  // tab — none may appear mid-hold).
   const tickets: string[] = [];
   page.on("request", (r) => {
     if (r.method() === "POST" && /\/v1\/workspaces\/[^/]+\/connections$/.test(r.url())) {
@@ -145,7 +148,8 @@ test("log in, create a browser workspace and see the session frame load", async 
   const holdDeadline = Date.now() + 120_000;
   const status = page.locator(".tc-session__status");
   while (Date.now() < holdDeadline) {
-    await expect(status).toContainText(/Connect/);
+    const badge = await status.innerText();
+    expect(badge, `badge inside the 120 s hold`).toBe("Connected");
     await page.waitForTimeout(5_000);
   }
   const end = await connectionState();
