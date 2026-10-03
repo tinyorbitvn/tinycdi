@@ -303,6 +303,9 @@ func (i *RetentionInventory) Purge(ctx context.Context, disk RetainedDisk) error
 // once deletion has been requested, so the object actually disappears on
 // clusters where the PV protection controller is absent (envtest) or the
 // volume is already unused (ordered teardown / verified-detached purge).
+// The strip is a merge patch — identical to the backend purge sweeper,
+// whose Role grants no update verb — and only ever runs on a PVC that is
+// already terminating.
 func finishPVCDelete(ctx context.Context, c client.Client, pvc *corev1.PersistentVolumeClaim) error {
 	cur := &corev1.PersistentVolumeClaim{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(pvc), cur)
@@ -312,6 +315,11 @@ func finishPVCDelete(ctx context.Context, c client.Client, pvc *corev1.Persisten
 	if err != nil {
 		return err
 	}
+	if cur.DeletionTimestamp.IsZero() {
+		// Not terminating: pvc-protection is doing its job — leave it.
+		return nil
+	}
+	orig := cur.DeepCopy()
 	keep := cur.Finalizers[:0]
 	for _, f := range cur.Finalizers {
 		if f != pvcProtectionFinalizer {
@@ -322,7 +330,7 @@ func finishPVCDelete(ctx context.Context, c client.Client, pvc *corev1.Persisten
 		return nil
 	}
 	cur.Finalizers = keep
-	return c.Update(ctx, cur)
+	return c.Patch(ctx, cur, client.MergeFrom(orig))
 }
 
 // volumeAttached reports whether any live consumer mounts the claim: a

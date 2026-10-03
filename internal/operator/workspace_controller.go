@@ -150,9 +150,9 @@ type templateSnapshot struct {
 	SpecHash string                                   `json:"specHash"`
 	Spec     workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
 	// Annotations carries the admin-controlled template annotations the
-	// backend honors (node-selector, seccomp-profile, apparmor-profile,
-	// storage-class) — the
-	// snapshot must capture them since the template object is never re-read.
+	// backend honors (seccomp-profile, apparmor-profile, storage-class) —
+	// the snapshot must capture them since the template object is never
+	// re-read.
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// RuntimeGeneration is the applied spec.runtimeGeneration the snapshot
 	// was recorded under; SourceRef is the spec.templateRef.name it was

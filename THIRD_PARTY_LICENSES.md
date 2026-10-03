@@ -52,7 +52,7 @@ portal bundle.
 **All dependencies incl. dev** (192 packages):
 MIT ×163, Apache-2.0 ×9, ISC ×9, MIT-0 ×2, BSD-2-Clause ×2, BSD-3-Clause
 ×2, plus one each of Python-2.0, CC-BY-4.0, BlueOak-1.0.0, CC0-1.0,
-(MIT OR CC0-1.0). `tinycdi-portal` itself is **MIT** — the project's
+(MIT OR CC0-1.0). `tinycdi-web` itself is **MIT** — the project's
 own license (see LICENSE; declared in `web/package.json`). The
 production bundle ships `web/dist/THIRD_PARTY_LICENSES.txt`, generated
 at build time.

@@ -144,9 +144,6 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   reduced isolation (seccomp-bpf only, no userns layer).
 - Pod placement is set by the template's typed `spec.placement` fields
   (`nodeSelector`, `tolerations`, `runtimeClassName`) and `spec.linux.hostUsers`.
-  The `workspaces.cdi.tinyorbit.vn/node-selector` template annotation is
-  **deprecated**: it is honored for one release and loses to
-  `spec.placement.nodeSelector` when both are set.
 
 ## The desktop profile (`tcdi/linux-desktop`)
 

@@ -253,6 +253,9 @@ GEN="$STATE_DIR/values-generated.yaml"
   echo "sessionDomain: ${SESSION_DOMAIN}"
   echo "oidc:"
   echo "  issuer: https://${KEYCLOAK_HOST}/realms/tinycdi"
+  # Back to the portal's signed-out page after the IdP session ends;
+  # realm-export.json registers exactly this post-logout redirect URI.
+  echo "  postLogoutRedirect: https://${PORTAL_HOST}/signed-out"
   echo "networkPolicy:"
   echo "  apiServerPort: ${api_port}"
   echo "  apiServerPeers:"

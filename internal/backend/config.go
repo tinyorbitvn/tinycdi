@@ -5,8 +5,8 @@
 // the session gateway and the in-process broker on four listeners (app,
 // session, internal mTLS, metrics) with independent TLS configuration.
 //
-// Flag surface follows decisions-2 item 1: app flags are the former cmd/api
-// set, the session flags take a "session-" prefix, the internal/mTLS
+// Flag surface follows decisions-2 item 1: app flags carry their plain
+// names, the session flags take a "session-" prefix, the internal/mTLS
 // listener keeps its names, and -broker-url/-broker-ca/-mtls-cert/-mtls-key
 // select split/test mode (session listener only, remote broker, no DB/OIDC/
 // Kubernetes). Every flag's environment variable is TCDI_<UPPER_SNAKE>;
@@ -94,7 +94,7 @@ func rateLimitsUntrusted(c Config) bool {
 
 // Config is the parsed flag set for the merged backend.
 type Config struct {
-	// App listener (the former cmd/api surface).
+	// App listener (the public REST API surface).
 	Listen               string // empty disables the app listener
 	TLSCert              string // optional; empty serves plain HTTP
 	TLSKey               string
@@ -131,9 +131,11 @@ type Config struct {
 	TenantAllowlist     string // bounds metrics label cardinality
 	RenewInterval       time.Duration
 	RevokeDeadline      time.Duration
-	// DrainWindow is the budget for the pre-stop gateway drain: on SIGTERM
-	// the pod keeps serving reads while streams migrate to sibling
-	// replicas; only new launches/upgrades are refused during it.
+	// DrainWindow is the duration of the pre-stop gateway drain: on
+	// SIGTERM the pod keeps serving reads while streams migrate to
+	// sibling replicas and only new launches/upgrades are refused —
+	// listeners shut down when the window ends, not when the shed
+	// finishes; 0 shuts down immediately.
 	DrainWindow time.Duration
 	LaunchRate  int // per-client launches/min on /v1/launch; 0 disables
 
@@ -258,7 +260,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TenantAllowlist, "tenant-allowlist", envOr(getenv, "TCDI_TENANT_ALLOWLIST", ""), "bounded tenant label values, comma-separated")
 	fs.DurationVar(&c.RenewInterval, "renew-interval", envDur(getenv, "TCDI_RENEW_INTERVAL", gateway.LeaseRenewInterval), "lease renew cadence")
 	fs.DurationVar(&c.RevokeDeadline, "revoke-deadline", envDur(getenv, "TCDI_REVOKE_DEADLINE", gateway.RevokeDeadline), "fail-closed budget after last successful renew")
-	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain budget: streams migrate while reads keep serving")
+	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain window: listeners keep serving reads and refuse new launches/upgrades until it ends (0 shuts down immediately)")
 	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 60),
 		"per-client launches/minute on /v1/launch (burst 20); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 
@@ -315,7 +317,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["login-key-file"] {
-		// TCDI_LOGIN_KEY_FILES is the legacy plural the interim cmd/api used.
+		// TCDI_LOGIN_KEY_FILES is a legacy plural still read for compatibility.
 		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
 			_ = c.LoginKeyFiles.Set(v)
 		}
@@ -345,6 +347,9 @@ func (c *Config) validate() error {
 	}
 	if c.LoginRate < 0 || c.LaunchRate < 0 {
 		return errors.New("-login-rate and -launch-rate must be >= 0 (0 disables the limit)")
+	}
+	if c.DrainWindow < 0 {
+		return errors.New("-drain-window must be >= 0 (0 shuts down immediately, without a drain hold)")
 	}
 	if _, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil {
 		return fmt.Errorf("-trusted-proxies: %w", err)
@@ -448,15 +453,6 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
-}
-
-// sessionOrigin derives the https origin the API advertises as the launch
-// POST target from the session domain; empty when no domain is configured.
-func (c Config) sessionOrigin() string {
-	if c.SessionDomain == "" {
-		return ""
-	}
-	return "https://" + c.SessionDomain
 }
 
 // checkDatabaseTLS resolves the TLS configuration pgx will actually apply

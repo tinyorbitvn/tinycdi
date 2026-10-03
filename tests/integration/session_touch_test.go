@@ -85,7 +85,7 @@ func TestTouchPrincipal_SplitsAtFirstSeparator(t *testing.T) {
 	save := func(id, iss, sub string) {
 		t.Helper()
 		if err := ss.Save(ctx, &store.Session{
-			ID: id, Issuer: iss, Subject: sub, TenantID: "tenant-a", CSRFToken: "c",
+			ID: id, Issuer: iss, Subject: sub, TenantID: "tenant-a",
 			CreatedAt: old, LastSeenAt: old, ExpiresAt: time.Now().Add(time.Hour),
 		}); err != nil {
 			t.Fatalf("save %s: %v", id, err)

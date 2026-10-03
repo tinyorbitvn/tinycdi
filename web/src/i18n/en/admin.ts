@@ -44,8 +44,6 @@ export default {
   "admin.quota.loading": "Loading quota",
   "admin.quota.limits.title": "Tenant limits",
   "admin.quota.limits.description": "Current usage against the limits of tenant {tenant}.",
-  "admin.quota.userLimits.title": "Per-user limits",
-  "admin.quota.userLimits.body": "Each user may hold at most {limits}.",
   "admin.quota.users.title": "Usage by user",
   "admin.quota.users.caption": "Usage by user",
   "admin.quota.users.empty": "No usage recorded.",
@@ -60,6 +58,26 @@ export default {
   "admin.quota.notConfigured":
     "No quota configured. New workspaces are refused until a tenant quota is set.",
   "admin.quota.noLimit": "{used} used · No limit",
+  "admin.quota.source.config": "Platform configuration",
+  "admin.quota.source.api": "Admin API",
+  "admin.quota.source.none": "Not configured",
+  "admin.quota.source.configNote":
+    "These limits are declared in the platform configuration and can only change there.",
+  "admin.quota.source.apiNote": "These limits were set through the admin API.",
+  "admin.quota.source.noneNote":
+    "No quota is set. New workspaces are refused until limits are saved.",
+  "admin.quota.edit.action": "Edit limits",
+  "admin.quota.edit.title": "Set tenant limits",
+  "admin.quota.edit.description":
+    "Limits below current usage are allowed: running workspaces keep their reservations and new ones are refused.",
+  "admin.quota.edit.field.runningWorkspaces": "Running workspaces",
+  "admin.quota.edit.field.cpu": "CPU (vCPU)",
+  "admin.quota.edit.field.memory": "Memory (GiB)",
+  "admin.quota.edit.field.storage": "Storage (GiB)",
+  "admin.quota.edit.save": "Save limits",
+  "admin.quota.edit.cancel": "Cancel",
+  "admin.quota.edit.invalid":
+    "Enter numbers of 0 or more; running workspaces and storage must be whole numbers.",
 
   // Template catalog page.
   "admin.templates.title": "Template catalog",
@@ -148,6 +166,10 @@ export default {
     "That template is unavailable or does not match the disk's runtime. Pick another template.",
   "admin.errors.quotaExhausted": "Quota exhausted. Free resources or raise the quota first.",
   "admin.errors.quotaNotConfigured": "No quota is configured for your tenant. Ask an administrator to set one.",
+  "admin.errors.quotaManagedByConfig":
+    "This tenant's quota is managed by the platform configuration and cannot be changed here.",
+  "admin.errors.preconditionFailed":
+    "Someone else changed these limits. The current values were reloaded — review them and save again.",
   "admin.errors.idempotencyConflict":
     "This conflicted with an earlier attempt. Refresh and check before retrying.",
   "admin.errors.csrfFailed": "Your session token expired. Reload the page and try again.",

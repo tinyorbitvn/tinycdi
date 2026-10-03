@@ -317,26 +317,48 @@ func (s *PurgeSweeper) purgeOne(ctx context.Context, rec *RetainedRecord) error 
 	}
 	// Finish the delete: the admission-added pvc-protection finalizer can
 	// hold the object on clusters without the PV protection controller
-	// (envtest) — the purge already proved the volume is detached.
+	// (envtest). The strip is a merge patch, never Update — the
+	// retained-data Role grants get/list/patch/delete only — and it runs
+	// only while the volume is verifiably terminating AND detached: the
+	// finalizer exists to hold a volume a pod still mounts, so a consumer
+	// that appeared between the detach check and the strip (or while the
+	// volume was already terminating) keeps its protection.
 	cur := &corev1.PersistentVolumeClaim{}
 	err = s.Client.Get(ctx, client.ObjectKey{Namespace: rec.PVCNamespace, Name: rec.PVCName}, cur)
 	switch {
 	case apierrors.IsNotFound(err):
+		return s.completePurge(ctx, rec)
 	case err != nil:
 		return err
-	default:
-		var keep []string
-		for _, f := range cur.Finalizers {
-			if f != "kubernetes.io/pvc-protection" {
-				keep = append(keep, f)
-			}
+	case string(cur.UID) != rec.PVCUID:
+		// Replaced between the two reads: the recorded volume is gone and
+		// the foreign object is never ours to touch.
+		return s.completePurge(ctx, rec)
+	case cur.DeletionTimestamp.IsZero():
+		// The delete did not land — retry next sweep instead of finishing
+		// a live object.
+		return fmt.Errorf("pvc %s/%s: delete did not mark the volume terminating", rec.PVCNamespace, rec.PVCName)
+	}
+	keep := make([]string, 0, len(cur.Finalizers))
+	for _, f := range cur.Finalizers {
+		if f != "kubernetes.io/pvc-protection" {
+			keep = append(keep, f)
 		}
-		if len(keep) != len(cur.Finalizers) {
-			cur.Finalizers = keep
-			if err := s.Client.Update(ctx, cur); err != nil {
-				return err
-			}
-		}
+	}
+	if len(keep) == len(cur.Finalizers) {
+		return s.completePurge(ctx, rec)
+	}
+	attached, err := s.attached(ctx, rec)
+	if err != nil {
+		return err
+	}
+	if attached {
+		return fmt.Errorf("pvc %s/%s still attached to a consumer; keeping pvc-protection", rec.PVCNamespace, rec.PVCName)
+	}
+	orig := cur.DeepCopy()
+	cur.Finalizers = keep
+	if err := s.Client.Patch(ctx, cur, client.MergeFrom(orig)); err != nil {
+		return err
 	}
 	return s.completePurge(ctx, rec)
 }
