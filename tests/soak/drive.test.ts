@@ -489,6 +489,42 @@ test("V3.10: --users-file / SOAK_USERS_FILE populate the lane users", () => {
   }
 });
 
+test("V3.10: the run aborts once dropped sessions exceed the abort share", async () => {
+  const driver = new FakeDriver();
+  // Two of three sessions never connect -> both drop past the relaunch
+  // bound; 2/3 = 66% > the 1% advisor rule, so the soak aborts at once.
+  driver.stateFor = (id) => (id === "ws_ok" ? "connected" : "none");
+  const sessions = ["ws_ok", "ws_bad1", "ws_bad2"].map((id) => newSession(id, id));
+  const out = await driveSessions(
+    {
+      ...FAST,
+      durationMs: 5_000,
+      connectTimeoutMs: 200,
+      abortDroppedPct: 1,
+    },
+    sessions,
+    driver,
+    () => false,
+  );
+  assert.equal(out.completed, false);
+  assert.match(out.failures.join(";"), /dropped sessions exceed 1%/);
+});
+
+test("V3.10: a slow ramp-up aborts on the connect-p95 rule", async () => {
+  const driver = new FakeDriver();
+  driver.openDelayMs = 120; // every connect takes ~120 ms
+  const sessions = ["a", "b"].map((id) => newSession(`ws_${id}`, id));
+  const out = await driveSessions(
+    { ...FAST, durationMs: 1_000, abortConnectP95Ms: 50 },
+    sessions,
+    driver,
+    () => false,
+  );
+  assert.equal(out.completed, false);
+  assert.equal(out.soakStartedAt, null);
+  assert.match(out.failures.join(";"), /connect p95 .* exceeds 50ms/);
+});
+
 test("V3.10: profiles provide defaults that flags override", () => {
   assert.equal(loadProfile("soak-100").sessions, 100);
   assert.equal(loadProfile("soak-200").sessions, 200);

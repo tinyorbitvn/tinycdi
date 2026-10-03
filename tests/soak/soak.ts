@@ -29,7 +29,7 @@ import {
   type BrowserContext,
   type Page,
 } from "playwright";
-import { parseDurationMs, type Observation } from "./metrics.ts";
+import { parseDurationMs, percentile, type Observation } from "./metrics.ts";
 import { buildReport, type SessionResult, type Thresholds } from "./report.ts";
 
 // ---- pinned API shapes (PLAN.md T2.3 / T2.5; internal/api/openapi.yaml) ----
@@ -104,6 +104,11 @@ Environment:
                          round-robin over these users (multi-user runs)
   SOAK_PROFILE           profile name under tests/soak/profiles/ (e.g.
                          soak-100); flags and other env vars override it
+  SOAK_ABORT_DROPPED_PCT abort the run once dropped sessions exceed this
+                         share of the total, in percent (default 1)
+  SOAK_ABORT_CONNECT_P95_MS
+                         abort once the ramp-up connect p95 exceeds this
+                         (unset: never; the scale runs use 15000)
   SOAK_MOCK_PORTAL_PORT  dry-run mock portal port (default: a free port)
   SOAK_MOCK_SESSION_PORT dry-run mock session port (default: a free port)
   SOAK_IGNORE_TLS_ERRORS set to 1 for self-signed dev certs
@@ -928,6 +933,10 @@ export interface DriveOptions {
   pollIntervalMs: number;
   connectTimeoutMs: number;
   verbose: boolean;
+  /** Abort the soak once dropped sessions exceed this share of the total (%). */
+  abortDroppedPct?: number;
+  /** Abort once the ramp-up connect p95 exceeds this budget (ms). */
+  abortConnectP95Ms?: number | null;
 }
 
 export interface DriveOutcome {
@@ -963,6 +972,13 @@ export async function driveSessions(
   const stopPoll = { v: false };
   const pollers: Promise<void>[] = [];
   const drv = (s: SessionCtx): Driver => s.lane?.driver ?? driver;
+  // Advisor stop rules: the monitor handles the cluster-side ones; these
+  // are the harness-side aborts (dropped share, ramp-up connect p95).
+  let aborted: string | null = null;
+  const droppedShareExceeded = (): boolean =>
+    opts.abortDroppedPct !== undefined &&
+    (sessions.filter((s) => s.dropped).length / sessions.length) * 100 >
+      opts.abortDroppedPct;
 
   const watch = async (s: SessionCtx): Promise<void> => {
     while (!stopPoll.v) {
@@ -1003,6 +1019,10 @@ export async function driveSessions(
           s.dropped = true;
           s.manualActions++;
           console.error(`${s.id} dropped after ${MAX_AUTO_RELAUNCH} auto-relaunches`);
+          if (aborted === null && droppedShareExceeded()) {
+            aborted = `dropped sessions exceed ${opts.abortDroppedPct}% of the fleet`;
+            console.error(`aborting: ${aborted}`);
+          }
         }
       }
       await sleep(Math.max(10, opts.pollIntervalMs - (Date.now() - t0)));
@@ -1020,17 +1040,39 @@ export async function driveSessions(
     // Soak clock: every session connected at least once (or given up on).
     while (
       !shouldStop() &&
+      aborted === null &&
       !sessions.every((s) => s.lastConnectedAt !== null || s.dropped)
     ) {
       await sleep(Math.min(100, opts.pollIntervalMs));
     }
     if (shouldStop()) return { soakStartedAt: null, completed: false, failures };
+    if (aborted !== null) {
+      failures.push(`aborted: ${aborted}`);
+      return { soakStartedAt: null, completed: false, failures };
+    }
+    // Ramp-up quality gate: if connecting the fleet was already too slow,
+    // an hour of soaking adds nothing — abort now (advisor stop rule).
+    if (opts.abortConnectP95Ms !== undefined && opts.abortConnectP95Ms !== null) {
+      const connects = sessions
+        .map((s) => {
+          const first = s.observations.find((o) => o.state === "connected");
+          return first !== undefined && s.launchedAt !== null ? first.at - s.launchedAt : null;
+        })
+        .filter((v): v is number => v !== null);
+      const p95 = percentile(connects, 95);
+      if (p95 !== null && p95 > opts.abortConnectP95Ms) {
+        aborted = `ramp-up connect p95 ${p95}ms exceeds ${opts.abortConnectP95Ms}ms`;
+        console.error(`aborting: ${aborted}`);
+        failures.push(`aborted: ${aborted}`);
+        return { soakStartedAt: null, completed: false, failures };
+      }
+    }
     const soakStartedAt = Date.now();
     const deadline = soakStartedAt + opts.durationMs;
     const reloadAt = soakStartedAt + opts.durationMs / 2;
     let reloaded = false;
 
-    while (Date.now() < deadline && !shouldStop()) {
+    while (Date.now() < deadline && !shouldStop() && aborted === null) {
       if (!reloaded && Date.now() >= reloadAt) {
         reloaded = true;
         stamp("mid-run reload of every session");
@@ -1063,7 +1105,12 @@ export async function driveSessions(
       }
       await sleep(Math.min(1_000, opts.inputIntervalMs));
     }
-    return { soakStartedAt, completed: Date.now() >= deadline, failures };
+    if (aborted !== null) failures.push(`aborted: ${aborted}`);
+    return {
+      soakStartedAt,
+      completed: Date.now() >= deadline && aborted === null,
+      failures,
+    };
   } finally {
     stopPoll.v = true;
     await Promise.allSettled(pollers);
@@ -1185,7 +1232,22 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     }
 
     stamp("opening sessions");
-    outcome = await driveSessions(opts, sessions, lanes[0].driver, shouldStop);
+    outcome = await driveSessions(
+      {
+        ...opts,
+        abortDroppedPct:
+          env("SOAK_ABORT_DROPPED_PCT") !== undefined
+            ? nonNegativeNumber("SOAK_ABORT_DROPPED_PCT", env("SOAK_ABORT_DROPPED_PCT")!)
+            : 1,
+        abortConnectP95Ms:
+          env("SOAK_ABORT_CONNECT_P95_MS") !== undefined
+            ? nonNegativeNumber("SOAK_ABORT_CONNECT_P95_MS", env("SOAK_ABORT_CONNECT_P95_MS")!)
+            : null,
+      },
+      sessions,
+      lanes[0].driver,
+      shouldStop,
+    );
   } catch (e) {
     runError = e as Error;
     console.error(`run aborted: ${runError.message}`);
