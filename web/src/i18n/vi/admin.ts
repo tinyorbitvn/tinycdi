@@ -43,8 +43,6 @@ export default {
   "admin.quota.loading": "Đang tải hạn mức",
   "admin.quota.limits.title": "Giới hạn tenant",
   "admin.quota.limits.description": "Mức dùng hiện tại so với giới hạn của tenant {tenant}.",
-  "admin.quota.userLimits.title": "Giới hạn mỗi người dùng",
-  "admin.quota.userLimits.body": "Mỗi người dùng được giữ tối đa {limits}.",
   "admin.quota.users.title": "Mức dùng theo người dùng",
   "admin.quota.users.caption": "Mức dùng theo người dùng",
   "admin.quota.users.empty": "Chưa ghi nhận mức dùng nào.",
@@ -59,6 +57,26 @@ export default {
   "admin.quota.notConfigured":
     "Chưa cấu hình hạn mức. Workspace mới bị từ chối cho tới khi tenant có hạn mức.",
   "admin.quota.noLimit": "Đã dùng {used} · Không giới hạn",
+  "admin.quota.source.config": "Cấu hình nền tảng",
+  "admin.quota.source.api": "API quản trị",
+  "admin.quota.source.none": "Chưa cấu hình",
+  "admin.quota.source.configNote":
+    "Các hạn mức này được khai báo trong cấu hình nền tảng và chỉ có thể thay đổi ở đó.",
+  "admin.quota.source.apiNote": "Các hạn mức này được đặt qua API quản trị.",
+  "admin.quota.source.noneNote":
+    "Chưa đặt hạn mức. Workspace mới sẽ bị từ chối cho đến khi hạn mức được lưu.",
+  "admin.quota.edit.action": "Sửa hạn mức",
+  "admin.quota.edit.title": "Đặt hạn mức tenant",
+  "admin.quota.edit.description":
+    "Được phép đặt hạn mức thấp hơn mức dùng hiện tại: các workspace đang chạy giữ nguyên phần đã đặt trước và workspace mới sẽ bị từ chối.",
+  "admin.quota.edit.field.runningWorkspaces": "Workspace đang chạy",
+  "admin.quota.edit.field.cpu": "CPU (vCPU)",
+  "admin.quota.edit.field.memory": "Bộ nhớ (GiB)",
+  "admin.quota.edit.field.storage": "Lưu trữ (GiB)",
+  "admin.quota.edit.save": "Lưu hạn mức",
+  "admin.quota.edit.cancel": "Huỷ",
+  "admin.quota.edit.invalid":
+    "Nhập số từ 0 trở lên; số workspace đang chạy và dung lượng lưu trữ phải là số nguyên.",
 
   // Template catalog page.
   "admin.templates.title": "Danh mục template",
@@ -147,6 +165,10 @@ export default {
     "Template đó không khả dụng hoặc không khớp runtime của đĩa. Chọn template khác.",
   "admin.errors.quotaExhausted": "Hết hạn mức. Giải phóng tài nguyên hoặc tăng hạn mức trước.",
   "admin.errors.quotaNotConfigured": "Tenant của bạn chưa được cấu hình hạn mức. Nhờ quản trị viên thiết lập.",
+  "admin.errors.quotaManagedByConfig":
+    "Hạn mức của tenant này do cấu hình nền tảng quản lý và không thể thay đổi ở đây.",
+  "admin.errors.preconditionFailed":
+    "Có người khác vừa thay đổi các hạn mức này. Giá trị hiện tại đã được tải lại — hãy kiểm tra rồi lưu lại.",
   "admin.errors.idempotencyConflict":
     "Yêu cầu này xung đột với một lần thử trước. Làm mới và kiểm tra trước khi thử lại.",
   "admin.errors.csrfFailed": "Token phiên của bạn đã hết hạn. Tải lại trang rồi thử lại.",
