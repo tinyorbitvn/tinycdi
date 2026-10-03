@@ -287,6 +287,52 @@ Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs 
 | `networkPolicy.prometheusPeers` | `[]` | metrics-scrape ingress peers — **required** (render fails) when `backend.metrics.enabled` is set; scope to your monitoring namespace/pods |
 | `networkPolicy.edgeIngress` / `.edgeIngressCIDRs` | `ipBlock` / `[0.0.0.0/0]` | how edge traffic reaches the public listeners (backend :8443/:8444, frontend :8443) — `ipBlock` needs non-empty CIDRs (empty fails closed), `any` admits every source on the TLS ports, `cilium` renders `*-edge-ingress` CiliumNetworkPolicies instead |
 
+### Host-network gateways (Cilium Gateway API / cilium-envoy)
+
+**Symptom.** On Cilium, with a Gateway API or Ingress edge whose envoy runs in the
+host network namespace (Cilium's own Gateway API and Ingress controllers do), every
+request through the edge returns `503` while the pods are Ready and
+`kubectl port-forward` works. This was GitHub issue #13.
+
+**Cause.** The default edge rule (`edgeIngress: ipBlock`, `edgeIngressCIDRs:
+[0.0.0.0/0]`) is a plain `NetworkPolicy` `ipBlock` peer. Under Cilium's default
+`policy-cidr-match-mode` (empty), CIDR selectors only match traffic from *outside*
+the cluster. Traffic from a host-network envoy does not carry a world identity: it
+carries the `ingress`, `host` or `remote-node` identity of the node it came from, so
+no `ipBlock` — not even `0.0.0.0/0` — ever matches it, and the backend/frontend
+default-deny drops the connection. Widening the CIDRs cannot fix it; select the
+identities instead (below).
+
+**Fix.** Set `networkPolicy.edgeIngress: cilium`. The chart then renders no edge peers
+in the plain `NetworkPolicy` objects and instead renders two
+`CiliumNetworkPolicy` objects in the release namespace:
+
+| Policy | Selects | Admits |
+|---|---|---|
+| `backend-edge-ingress` | `app.kubernetes.io/name: backend` | `fromEntities: [ingress, host, remote-node]` on TCP `8443` (app) and `8444` (session) |
+| `frontend-edge-ingress` | `app.kubernetes.io/name: frontend` | the same entities on TCP `8443` |
+
+Neither policy ever admits the internal mTLS listener (`9443`, operator only) or the
+metrics port (`9090`, `networkPolicy.prometheusPeers` only); the chart tests assert it
+for every edge mode. The in-cluster control surface on `8444` (release namespace) and
+the operator's `9443` rule are plain `NetworkPolicy` rules and are unchanged.
+
+```yaml
+# values.yaml — Cilium CNI with a Cilium Gateway API / Ingress edge
+networkPolicy:
+  edgeIngress: cilium     # edgeIngressCIDRs is ignored in this mode
+gatewayApi:
+  enabled: true
+```
+
+`edgeIngress: cilium` needs the `cilium.io/v2` `CiliumNetworkPolicy` CRD, which any
+cluster running Cilium provides — Helm does not check for it, so applying the release
+on a cluster without it fails at install time; do not select it on other CNIs. Edges
+that are not host-network (an external load balancer that preserves the client source
+address, for example) keep working with `ipBlock` — narrow `edgeIngressCIDRs` to the
+load-balancer range. There is no separate "from host network" switch: `edgeIngress` is
+the single option that decides how the edge reaches the public listeners.
+
 ### Runtime catalog (`templates[]`)
 
 Seeded `WorkspaceTemplate` objects, published as immutable `<name>-<hash8>`
