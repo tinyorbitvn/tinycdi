@@ -4,6 +4,9 @@
 //   - the operator ClusterRole is bound ONLY via RoleBindings in the release
 //     namespace and the managed namespace allowlist (never a
 //     ClusterRoleBinding),
+//   - the backend Role grants every verb the retained-data code paths use
+//     (purge sweep, attach, inventory sync) and stays least-privilege — no
+//     pvc "update" (the finalizer strip is a merge patch),
 //   - runtime ServiceAccounts have automountServiceAccountToken=false,
 //   - a default-deny NetworkPolicy exists in every namespace the chart owns,
 //   - every container in every Deployment has resources, a readiness probe
@@ -519,6 +522,88 @@ func TestOperatorClusterRoleBoundPerManagedNamespace(t *testing.T) {
 	}
 	if len(bound) != len(managedNamespaces) {
 		t.Errorf("operator bound in unexpected namespaces: %v", bound)
+	}
+}
+
+// TestBackendRoleCoversRetainedDataVerbs: the backend ClusterRole is the
+// ONLY RBAC the control plane's retained-data code paths run under, so
+// every Kubernetes verb they issue must be granted — table-driven,
+// code path -> verb. persistentvolumeclaims carries NO "update" on
+// purpose: the purge sweeper strips the pvc-protection finalizer with a
+// merge patch (FX-R27); re-adding update would widen the role just to
+// mask a regression to client.Update.
+func TestBackendRoleCoversRetainedDataVerbs(t *testing.T) {
+	type grant struct{ group, resource, verb string }
+	required := []struct {
+		path string
+		g    grant
+	}{
+		{"attach: verify claim by PVC UID", grant{"", "persistentvolumeclaims", "get"}},
+		{"attach: retarget consumer labels", grant{"", "persistentvolumeclaims", "patch"}},
+		{"attach: read consuming Workspace CR", grant{"workspaces.cdi.tinyorbit.vn", "workspaces", "get"}},
+		{"attach: stamp claim annotations", grant{"workspaces.cdi.tinyorbit.vn", "workspaces", "patch"}},
+		{"purge sweep: read recorded volume", grant{"", "persistentvolumeclaims", "get"}},
+		{"purge sweep: delete confirmed volume", grant{"", "persistentvolumeclaims", "delete"}},
+		{"purge sweep: strip pvc-protection finalizer", grant{"", "persistentvolumeclaims", "patch"}},
+		{"purge sweep: consumer check (pods)", grant{"", "pods", "list"}},
+		{"purge sweep: consumer check (Workspace CRs)", grant{"workspaces.cdi.tinyorbit.vn", "workspaces", "list"}},
+		{"inventory sync: list retained-labelled PVCs", grant{"", "persistentvolumeclaims", "list"}},
+	}
+	for _, vf := range lintValues {
+		docs := render(t, vf)
+		var role doc
+		for _, d := range selectDocs(docs, "ClusterRole") {
+			name, _ := meta(d)
+			if strings.HasSuffix(name, "-backend-role") {
+				role = d
+			}
+		}
+		if role == nil {
+			t.Fatalf("%s: no *-backend-role ClusterRole rendered", vf)
+		}
+		granted := map[grant]bool{}
+		pvcVerbs := map[string]bool{}
+		for _, r := range toSlice(role["rules"]) {
+			rm, _ := r.(map[string]any)
+			var groups, resources, verbs []string
+			for _, g := range toSlice(rm["apiGroups"]) {
+				s, _ := g.(string)
+				groups = append(groups, s)
+			}
+			for _, rs := range toSlice(rm["resources"]) {
+				s, _ := rs.(string)
+				resources = append(resources, s)
+			}
+			for _, v := range toSlice(rm["verbs"]) {
+				s, _ := v.(string)
+				verbs = append(verbs, s)
+				if s == "*" {
+					t.Errorf("%s: backend Role must stay least-privilege, found wildcard verb", vf)
+				}
+			}
+			for _, g := range groups {
+				for _, res := range resources {
+					if res == "*" {
+						t.Errorf("%s: backend Role must stay least-privilege, found wildcard resource", vf)
+					}
+					for _, v := range verbs {
+						granted[grant{g, res, v}] = true
+						if g == "" && res == "persistentvolumeclaims" {
+							pvcVerbs[v] = true
+						}
+					}
+				}
+			}
+		}
+		for _, req := range required {
+			if !granted[req.g] {
+				t.Errorf("%s: %s needs %s %s %q but the backend Role does not grant it",
+					vf, req.path, req.g.group, req.g.resource, req.g.verb)
+			}
+		}
+		if pvcVerbs["update"] {
+			t.Errorf("%s: backend Role must not grant pvc update — the sweeper strips finalizers via patch", vf)
+		}
 	}
 }
 
