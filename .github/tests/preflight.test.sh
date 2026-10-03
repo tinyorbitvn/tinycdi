@@ -33,6 +33,12 @@ case "$args" in
       *"kind: Pod"*)
         [ -n "${STUB_POD_FORBIDDEN:-}" ] && forbidden pods
         case "$body" in
+          *"appArmorProfile"*)
+            [ -n "${STUB_AA_REJECT:-}" ] && { echo 'error: error validating data: unknown object field appArmorProfile' >&2; exit 1; }
+            pn="$(printf '%s' "$body" | sed -n 's/^  name: //p' | head -n1)"
+            nn="$(printf '%s' "$body" | sed -n 's/^  nodeName: //p' | head -n1)"
+            echo "aa-pod $pn $nn" >> "$STUB_LOG"
+            [ -n "${STUB_AA_MAP:-}" ] && echo "$pn $nn" >> "$STUB_AA_MAP" ;;
           *"hostUsers: false"*) echo "userns-pod-created" >> "$STUB_LOG"
             [ -n "${STUB_USERNS_REJECT:-}" ] && { echo "unknown field hostUsers" >&2; exit 1; }
             case "$body" in *nodeSelector*) echo "userns-pod-on-pool" >> "$STUB_LOG" ;; esac ;;
@@ -47,9 +53,32 @@ case "$args" in
   *"get pod probe-client-allow"*) echo "${STUB_BASELINE_PHASE:-Succeeded}" ;;
   *"get pod probe-client-deny"*) echo "${STUB_DENY_PHASE:-Failed}" ;;
   *"get pod probe-userns"*) echo Pending ;;
+  *"get pod probe-aa-"*)
+    pod="${args#*get pod }"; pod="${pod%% *}"
+    node=""
+    if [ -n "${STUB_AA_MAP:-}" ] && [ -f "$STUB_AA_MAP" ]; then
+      node="$(awk -v p="$pod" '$1 == p {print $2; exit}' "$STUB_AA_MAP")"
+    fi
+    st=""
+    [ -n "$node" ] && st="$(printf '%s' "${STUB_AA_STATE:-}" | tr ';' '\n' | sed -n "s|^$node=||p" | head -n1)"
+    case "${st:-${STUB_AA_DEFAULT:-ok}}" in
+      ok)       printf 'Succeeded\t|\t\n' ;;
+      noaa)     printf 'Failed\tAppArmor|Cannot enforce AppArmor: AppArmor is not enabled on the host\t\n' ;;
+      noaa-cri) printf 'Pending\t|\tCreateContainerError|Error: failed to create containerd container: apparmor is not enabled on the host;\n' ;;
+      failed)   printf 'Failed\tUnexpectedAdmissionError|node under pressure\t\n' ;;
+      image)    printf 'Pending\t|\tImagePullBackOff|Back-off pulling image;\n' ;;
+      *)        printf 'Pending\t|\tContainerCreating|;\n' ;;
+    esac ;;
+  *"get events"*) printf '%b' "${STUB_EVENTS-}" ;;
   *"get storageclass"*)
     [ -n "${STUB_SC_FORBIDDEN:-}" ] && forbidden storageclasses
     printf '%b' "${STUB_SC-standard\ttrue\n}" ;;
+  *"get nodes"*"nodeInfo.operatingSystem"*)
+    [ -n "${STUB_NODES_FORBIDDEN:-}" ] && forbidden nodes
+    case "$args" in
+      *" -l "*) printf '%b' "${STUB_AA_NODES_LABELED-n1|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\nn2|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\n}" ;;
+      *)        printf '%b' "${STUB_AA_NODES_ALL-n1|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\nn2|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\n}" ;;
+    esac ;;
   *"get nodes"*)
     [ -n "${STUB_NODES_FORBIDDEN:-}" ] && forbidden nodes
     printf '%b' "${STUB_NODES-n1\tcdi.tinyorbit.vn/workspace;\nn2\tcdi.tinyorbit.vn/workspace;\n}" ;;
@@ -112,7 +141,7 @@ OUT="" RC=0
 run() {
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  : > "$LOG"; rm -f "$D/dsn-seen" "$D/dsn-seen.env"
+  : > "$LOG"; rm -f "$D/dsn-seen" "$D/dsn-seen.env" "$D/aamap"
   OUT="$(env -i PATH="$SHIM:/usr/bin:/bin" HOME="$D" STUB_LOG="$LOG" STUB_PSQL_ARGV="$D/dsn-seen" \
     TCDI_PREFLIGHT_POLL=0.05 TCDI_PREFLIGHT_PROPAGATE=0 TCDI_PREFLIGHT_POD_TIMEOUT=2 \
     "${envs[@]}" bash "$SCRIPT" "$@" 2>&1)"
@@ -147,15 +176,15 @@ run -- --node-label foo;  expect_rc "--node-label without = exits 2" 2
 echo "== all green"
 run -- "${ALL[@]}" --host-users-false
 expect_rc "all green exits 0" 0
-for c in k8s-version netpol storageclass host-users node-pool dns tls-secret oidc postgres; do
+for c in k8s-version netpol storageclass host-users node-pool apparmor dns tls-secret oidc postgres; do
   expect "all green: $c" PASS "$c"
 done
-expect_out "summary line" '^preflight: 9 PASS, 0 WARN, 0 FAIL$'
+expect_out "summary line" '^preflight: 10 PASS, 0 WARN, 0 FAIL$'
 expect_log "probe namespace deleted" 'delete namespace tcdi-preflight-[0-9a-f]{6}'
 expect_log "userns probe pinned to the workspace pool" 'userns-pod-on-pool'
 # Only probe objects are created or deleted; nothing is applied/patched/labeled.
-if grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^curl|^psql' "$LOG" | grep -q .; then
-  bad "unexpected kubectl verbs: $(grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^curl|^psql' "$LOG" | head -3)"
+if grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^aa-pod|^curl|^psql' "$LOG" | grep -q .; then
+  bad "unexpected kubectl verbs: $(grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^aa-pod|^curl|^psql' "$LOG" | head -3)"
 else ok "only get/auth/create/wait and probe-namespace delete are used"; fi
 expect_no_out "DSN password never printed" 'SECRETPW|app:'
 expect_no_out "DSN host never printed" 'db\.internal'
@@ -236,11 +265,65 @@ run STUB_NODES= -- "${ALL[@]}";                         expect "no labeled node 
 run STUB_NODES='n1\tcdi.tinyorbit.vn/workspace;\nn2\t\n' -- "${ALL[@]}";  expect "untainted node warns" WARN node-pool
 expect_out "untainted node is named" 'not tainted .*: n2'
 run STUB_NODES= -- "${ALL[@]}" --allow-shared-nodes;    expect "shared-node opt-out passes" PASS node-pool
-expect_no_log "opt-out does not list nodes" 'get nodes'
+expect_no_log "opt-out does not label-select nodes" 'get nodes -l'
 run STUB_NODES_FORBIDDEN=1 -- "${ALL[@]}";               expect "list forbidden warns" WARN node-pool
 run STUB_NODES='n1\tpool/gpu;\n' -- "${ALL[@]}" --node-label pool=gpu --node-taint pool/gpu
 expect "custom label and taint pass" PASS node-pool
 expect_log "custom label is the selector" 'get nodes -l pool=gpu'
+
+echo "== 5b. AppArmor on the workspace nodes"
+run -- "${ALL[@]}"
+expect "all nodes enforce AppArmor" PASS apparmor
+expect_out "true is named the fitting value" 'runtime\.appArmor\.requireRuntimeDefault=true'
+expect_log "one probe pod per target node" 'aa-pod probe-aa-0 n1'
+expect_log "second target node probed" 'aa-pod probe-aa-1 n2'
+run STUB_AA_MAP="$D/aamap" STUB_AA_STATE='n2=noaa' -- "${ALL[@]}"
+expect "a node without AppArmor warns" WARN apparmor
+expect_out "the unprotected node is named" 'no AppArmor: n2'
+expect_out "false is named the fitting value" 'requireRuntimeDefault=false'
+expect_fix "fix lines"
+run STUB_AA_MAP="$D/aamap" STUB_AA_STATE='n1=noaa;n2=noaa-cri' -- "${ALL[@]}"
+expect "AppArmor on no node warns" WARN apparmor
+expect_out "both nodes are named" 'no AppArmor: n1 n2'
+expect_out "false is named the fitting value" 'requireRuntimeDefault=false'
+# The placement selector narrows the checked set; taints, cordons and
+# non-Linux nodes a workspace pod could never reach are left out.
+AA_ALL='w1|linux||\nw2|linux||\nm1|linux||node-role.kubernetes.io/control-plane:NoSchedule;\nw3|windows||\nw4|linux|true|\nw5|linux||gpu:NoSchedule;\nw6|linux||spot:PreferNoSchedule;\n'
+AA_LAB='w1|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\nw2|linux||cdi.tinyorbit.vn/workspace:NoSchedule;gpu:NoSchedule;\nw9|linux||cdi.tinyorbit.vn/workspace:NoSchedule;\n'
+run STUB_AA_MAP="$D/aamap" STUB_AA_NODES_LABELED="$AA_LAB" STUB_AA_NODES_ALL="$AA_ALL" STUB_AA_STATE='w9=noaa' -- "${ALL[@]}"
+expect "labeled nodes only are probed" WARN apparmor
+expect_out "the labeled node without AppArmor is named" 'no AppArmor: w9'
+expect_log "pool node w1 probed" 'aa-pod probe-aa-0 w1'
+expect_log "pool node w9 probed" 'aa-pod probe-aa-1 w9'
+expect_no_log "a second untolerated taint excludes w2" 'aa-pod probe-aa-2'
+run STUB_AA_MAP="$D/aamap" STUB_AA_NODES_LABELED="$AA_LAB" STUB_AA_NODES_ALL="$AA_ALL" STUB_AA_STATE='w2=noaa' -- "${ALL[@]}" --allow-shared-nodes
+expect "shared nodes: every schedulable untainted Linux node is probed" WARN apparmor
+expect_out "the shared node without AppArmor is named" 'no AppArmor: w2'
+expect_log "w1 probed" 'aa-pod probe-aa-0 w1'
+expect_log "w2 probed" 'aa-pod probe-aa-1 w2'
+expect_log "PreferNoSchedule node w6 probed" 'aa-pod probe-aa-2 w6'
+expect_no_log "tainted, cordoned and non-Linux nodes are skipped" 'aa-pod probe-aa-3'
+run STUB_NODES_FORBIDDEN=1 -- "${ALL[@]}"
+expect "node list forbidden warns" WARN apparmor
+run STUB_AA_NODES_LABELED= -- "${ALL[@]}"
+expect "no target node warns" WARN apparmor
+expect_no_log "no probe pod without a target" 'aa-pod'
+run -- "${ALL[@]}" --no-probe
+expect "--no-probe warns" WARN apparmor
+expect_no_log "--no-probe creates no AppArmor probe" 'aa-pod'
+run STUB_CANI_NS=no -- "${ALL[@]}"
+expect "no namespace permission warns" WARN apparmor
+expect_no_log "no AppArmor probe without a namespace" 'aa-pod'
+run STUB_POD_FORBIDDEN=1 -- "${ALL[@]}"
+expect "pod create forbidden warns" WARN apparmor
+run STUB_AA_REJECT=1 -- "${ALL[@]}"
+expect "apiserver without the appArmorProfile field warns" WARN apparmor
+run STUB_AA_MAP="$D/aamap" STUB_AA_STATE='n2=pending' -- "${ALL[@]}"
+expect "an undetermined node warns" WARN apparmor
+expect_out "the undetermined node is named" 'not determined: n2'
+run STUB_AA_MAP="$D/aamap" STUB_AA_STATE='n1=failed' STUB_EVENTS='probe-aa-0|FailedCreate|Cannot enforce AppArmor: AppArmor is not enabled on the host;' -- "${ALL[@]}"
+expect "a refusal visible only in events still warns" WARN apparmor
+expect_out "the events-only refusal names its node" 'no AppArmor: n1'
 
 echo "== 6. wildcard DNS"
 run -- "${ALL[@]}";                                     expect "resolves passes" PASS dns
