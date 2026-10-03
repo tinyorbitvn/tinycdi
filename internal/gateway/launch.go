@@ -176,6 +176,28 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// launchClientKey derives the /v1/launch bucket key (FX-R30): a request
+// carrying a session cookie that maps to a LIVE session on this replica is
+// keyed by the session digest — the same SHA-256 derivative the session
+// directory stores (D19), never the raw value — so users reconnecting
+// from behind one NAT address keep their own launch budgets. Validity is
+// the cheap in-memory check only: a cookie this replica does not hold is
+// not resolved through the session directory (a lookup inside the limiter
+// would let a cookie spray spend a directory read per request), so an
+// unknown, dead or forged cookie falls back to the client-IP key with the
+// rest of the anonymous surface.
+func (g *Gateway) launchClientKey(r *http.Request) string {
+	if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
+		g.mu.Lock()
+		s := g.sessions[c.Value]
+		g.mu.Unlock()
+		if s != nil && s.live(g) {
+			return ratelimit.KeyDigest("sess:", c.Value)
+		}
+	}
+	return ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+}
+
 // handleLaunch redeems a launch ticket on a workspace host (wsID is the
 // workspace the request Host names): POST body ticket=<opaque> ->
 // broker.RedeemTicket -> host binding -> __Host- cookie -> 303 clean URL.
@@ -193,7 +215,7 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	// denied before any validation and never reaches RedeemTicket, so a
 	// rate-limited launch leaves the ticket redeemable.
 	if g.cfg.LaunchLimiter != nil {
-		if ok, retry := g.cfg.LaunchLimiter.Allow(ratelimit.ClientKey(r, g.cfg.TrustedProxies)); !ok {
+		if ok, retry := g.cfg.LaunchLimiter.Allow(g.launchClientKey(r)); !ok {
 			if g.cfg.Metrics != nil {
 				g.cfg.Metrics.IncRateLimited(LaunchPath)
 			}

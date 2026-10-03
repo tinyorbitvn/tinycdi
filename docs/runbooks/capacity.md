@@ -151,6 +151,37 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
   loss kills its runtime pods and users must reconnect (new incarnation,
   new ticket). Reserve quota accordingly.
 
+## Sign-in rate limits and NAT
+
+The backend throttles its unauthenticated surface **per client IP**:
+`-login-rate` (30/min, burst 10) covers `GET /v1/login`,
+`GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate`
+(60/min, burst 20) covers `POST /v1/launch`. A request that proves a live
+session keys on a digest of that session instead, and a callback on its
+validated OIDC state — so a whole office behind one NAT address keeps
+per-user budgets. Anonymous traffic (login start, unauthenticated probes,
+forged or expired cookies) always keys on the client IP.
+
+What that means for sizing:
+
+- **Sign-in bursts share the IP budget only until the cookie exists.** In
+  a 9:00 rush every user's *first* `GET /v1/login` is anonymous, so N
+  users behind one NAT who all click sign-in inside a minute need
+  `-login-rate` ≥ N **plus** headroom for the anonymous
+  `GET /v1/session` probes signed-out tabs poll (`-login-rate=0` disables
+  the limit entirely). Once the session exists, probes and `/v1/login`
+  revisits run on the per-session budget, and each OIDC callback on its
+  own state — the sustained rates need no NAT multiplier.
+- **Launches:** `POST /v1/launch` re-launches carrying a live session
+  cookie are per-session; a *first* launch (no cookie yet) is per-IP —
+  20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
+- The per-key limits and the limiter's key-space bound are unchanged;
+  `backend.trustedProxies` must still name the edge's CIDRs or every user
+  collapses into the edge's own IP bucket regardless.
+
+Set the flags through `backend.extraArgs`
+(`deploy/helm/tinycdi/README.md`, "Rate limits and trusted proxies").
+
 ## What to watch (metrics)
 
 `internal/observability/metrics.go` defines the `tinycdi_*` series

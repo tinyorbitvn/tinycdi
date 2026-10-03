@@ -233,6 +233,14 @@ func RequireTrustedOrigin(sessionCookieName string, allowedOrigins []string) fun
 // Rate limiting (E7)
 // ---------------------------------------------------------------------------
 
+// RateLimitKeyFunc resolves a request to its rate-limit bucket key when
+// the key is something other than the client address: an authenticated
+// request keys on a digest of its session, and /v1/auth/callback on its
+// validated OIDC state, so users sharing one NAT address keep their own
+// budgets (FX-R30). A "" result means "no authenticated key" — the
+// client-IP key applies exactly as before.
+type RateLimitKeyFunc func(r *http.Request) string
+
 // RateLimit throttles a route per client key: requests inside the bucket
 // pass; over the limit the caller gets 429 RATE_LIMITED with a Retry-After
 // in whole seconds and the refusal is counted in
@@ -242,10 +250,25 @@ func RequireTrustedOrigin(sessionCookieName string, allowedOrigins []string) fun
 // session gateway applies (S18). A nil limiter disables the check
 // entirely; a nil Metrics skips the count.
 func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics) func(http.Handler) http.Handler {
+	return RateLimitWithKey(l, trusted, m, nil)
+}
+
+// RateLimitWithKey is RateLimit whose bucket key the key resolver may
+// override per request; a "" from the resolver falls back to the
+// client-IP key (ClientKey). The refusal shape, Retry-After and metrics
+// are identical either way — only the bucket changes.
+func RateLimitWithKey(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if l != nil {
-				if ok, retry := l.Allow(ratelimit.ClientKey(r, trusted)); !ok {
+				k := ""
+				if key != nil {
+					k = key(r)
+				}
+				if k == "" {
+					k = ratelimit.ClientKey(r, trusted)
+				}
+				if ok, retry := l.Allow(k); !ok {
 					if m != nil {
 						m.IncRateLimited(strings.TrimPrefix(r.Pattern, r.Method+" "))
 					}

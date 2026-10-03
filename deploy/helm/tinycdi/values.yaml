@@ -271,6 +271,9 @@ backend:
   # or Gateway — empty keys every limit on the edge's own address, so all
   # users share one bucket (the backend logs a startup warning). See the
   # README "Rate limits and trusted proxies" for Cilium/Traefik examples.
+  # Authenticated traffic keys per session, not per client IP; only the
+  # anonymous surface (login start, unauthenticated probes) shares the IP
+  # bucket — tune -login-rate/-launch-rate via backend.extraArgs.
   trustedProxies: []
   # Ticket audience; defaults to sessionDomain.
   audience: ""

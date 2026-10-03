@@ -433,6 +433,19 @@ covers the session listener's `POST /v1/launch`. A client over its budget gets
 `429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
 (`backend.extraArgs`, e.g. `-login-rate=0`).
 
+Requests that prove a live session are **not** keyed on the address:
+`/v1/session`, `/v1/login` and `/v1/launch` carrying a valid session cookie
+run on a per-session budget (a digest of the session, never the raw value),
+and `/v1/auth/callback` on its validated OIDC state. So an office of 20+
+users behind one NAT keeps per-user limits — but the *anonymous* starts
+still share the IP budget: in a 9:00-style rush where N users behind one
+NAT all sign in inside a minute, size `-login-rate` ≥ N (plus headroom for
+signed-out probe polls); first-ever launches likewise count against
+`-launch-rate` until the cookie exists. Forged, expired or unverifiable
+cookies and states always fall back to the client-IP key, so they cannot
+mint fresh buckets. See `docs/runbooks/capacity.md` ("Sign-in rate limits
+and NAT").
+
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
 `X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value
