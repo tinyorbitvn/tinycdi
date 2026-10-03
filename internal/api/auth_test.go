@@ -274,10 +274,11 @@ func TestOIDCLoginFlowSucceeds(t *testing.T) {
 	if sess.Path != "/" {
 		t.Fatalf("session cookie Path = %q, want /", sess.Path)
 	}
-	// v0.2 publishes no CSRF cookie: the token is derived from the session
-	// ID and read from GET /v1/me (P1, D17). The v0.1 name is deleted.
-	if csrf := findCookie(cookies, env.auth.CSRFCookieName()); csrf != nil && csrf.MaxAge > 0 {
-		t.Fatalf("live non-__Host- CSRF cookie set: %q", csrf.Name)
+	// The CSRF token is derived from the session ID and read from
+	// GET /v1/me (P1) — the v0.1 tcdi_csrf cookie name is gone entirely
+	// (E14): no live cookie and no Max-Age=0 deletion for it.
+	if csrf := findCookie(cookies, "tcdi_csrf"); csrf != nil {
+		t.Fatalf("legacy CSRF cookie touched at login: %q", csrf.Name)
 	}
 
 	resp2 := env.authedGet(t, sess, "/v1/me")
@@ -398,7 +399,6 @@ func TestSessionFixationPrevented(t *testing.T) {
 	planted := &Session{
 		ID:         "attacker-fixed-session-id",
 		Principal:  Principal{Issuer: env.issuer.URL(), Subject: "nobody", TenantID: "tenant-a"},
-		CSRFToken:  "x",
 		CreatedAt:  time.Now(),
 		LastSeenAt: time.Now(),
 		ExpiresAt:  time.Now().Add(time.Hour),

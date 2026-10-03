@@ -7,14 +7,13 @@ import {
   loginCookies,
   SESSION_COOKIE,
   SESSION_PRINCIPAL,
-  CSRF_COOKIE,
   CSRF_TOKEN_VALUE,
 } from "../helpers";
 import { RETAINED_DISK, type RetainedFixture } from "../../mock-api/fixtures.ts";
 
 function authHeaders() {
   return {
-    cookie: `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; ${CSRF_COOKIE}=${CSRF_TOKEN_VALUE}`,
+    cookie: `${SESSION_COOKIE}=${SESSION_PRINCIPAL}`,
     "x-csrf-token": CSRF_TOKEN_VALUE,
   };
 }

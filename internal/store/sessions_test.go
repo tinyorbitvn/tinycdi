@@ -23,19 +23,3 @@ func TestSessionKeyIsDigest(t *testing.T) {
 		t.Fatal("raw session ID used as key")
 	}
 }
-
-func TestCSRFTokenMACIsKeyedBySessionID(t *testing.T) {
-	m := csrfTokenMAC("sess-abc", "csrf-xyz")
-	if !hexDigest.MatchString(m) {
-		t.Fatalf("csrfTokenMAC %q is not a 64-hex digest", m)
-	}
-	if m == csrfTokenMAC("sess-other", "csrf-xyz") {
-		t.Fatal("MAC not bound to the session ID")
-	}
-	if m == csrfTokenMAC("sess-abc", "csrf-other") {
-		t.Fatal("MAC not bound to the token")
-	}
-	if m == "csrf-xyz" {
-		t.Fatal("raw CSRF token returned")
-	}
-}

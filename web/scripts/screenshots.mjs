@@ -97,7 +97,7 @@ async function api(method, p, body) {
     method,
     headers: {
       "content-type": "application/json",
-      cookie: "tcdi_session=session-01J4ZD; tcdi_csrf=csrf-token-01J4ZD",
+      cookie: "tcdi_session=session-01J4ZD",
       "x-csrf-token": "csrf-token-01J4ZD",
       ...(method === "POST" ? { "idempotency-key": `shots-${randomBytes(8).toString("hex")}` } : {}),
     },

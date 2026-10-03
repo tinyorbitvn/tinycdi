@@ -175,9 +175,9 @@ and an update to this file.
    not stored: recomputed as
    `HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")` and compared in
    constant time — and must pass `RequireTrustedOrigin`. The JS-readable
-   `tcdi_csrf` and `tcdi_session_origin` cookies are removed; the SPA
+   `tcdi_csrf` and `tcdi_session_origin` cookies are gone; the SPA
    reads `csrfToken` and `sessionDomain` from `GET /v1/me` and keeps them
-   in memory, so every portal cookie can carry `__Host-`
+   in memory, so every portal cookie carries `__Host-`
    *(v0.2 design)*.
    *Enforced:* `TestCSRF*`, `TestOriginAllowlist`,
    `TestOriginMultipleHeadersRejected`, `TestCSRFChainForgedOriginRejected`.

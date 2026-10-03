@@ -4,10 +4,10 @@ import { useApi } from "../api/context";
 import { newIdempotencyKey } from "../api/client";
 import { isPortalApiError, isReleasePending } from "../api/errors";
 import { t } from "../i18n";
+import { useLoader } from "../app/me";
 import {
   attachRetainedData,
   listTemplates,
-  useLoader,
   type ScopedRetainedData,
   type WorkspaceView,
 } from "./api";
