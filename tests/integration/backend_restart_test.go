@@ -841,17 +841,27 @@ func (f *restartFixture) launch(t *testing.T, r *replica, ticket string) string 
 // listener.
 func (f *restartFixture) sessionGet(t *testing.T, r *replica, path, cookie string) *http.Response {
 	t.Helper()
+	resp, err := f.sessionGetTry(t, r, path, cookie)
+	if err != nil {
+		t.Fatalf("session GET %s: %v", path, err)
+	}
+	return resp
+}
+
+// sessionGetTry is sessionGet without the fatal — a poll across a replica's
+// shutdown tolerates transport errors (the socket is gone by then).
+func (f *restartFixture) sessionGetTry(t *testing.T, r *replica, path, cookie string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, r.sessURL+path, nil)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	req.Host = f.sessionHost(t)
 	req.Header.Set("Cookie", restartSessionCookie+"="+cookie)
 	resp, err := r.client.Do(req)
 	if err != nil {
-		t.Fatalf("session GET %s: %v", path, err)
+		return nil, err
 	}
-	return resp
+	return resp, nil
 }
 
 // wsOpen opens a websocket upgrade on the replica's session listener,

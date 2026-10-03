@@ -70,6 +70,8 @@ DESKTOP_BUILT_AT="2026-10-02T11:02:50Z"
 # These credentials exist ONLY inside the kind cluster's dev Keycloak realm.
 DEMO_USER="demo"
 DEMO_PASSWORD="tcdi-demo-dev-only"
+# A second dev user whose tenant has no quota row (B5.4 refusal check).
+NOQUOTA_USER="${NOQUOTA_USER:-demo-noquota}"
 
 log() { printf '==> %s\n' "$*" >&2; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }

@@ -111,6 +111,12 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 // scriptTicket makes ticket redeemable into a lease for wsUID and resolves
 // the lease's target to the fake broker's TLS upstream.
 func (f *fakeBroker) scriptTicket(ticket, wsUID string) {
+	f.scriptTicketPolicy(ticket, wsUID, "")
+}
+
+// scriptTicketPolicy is scriptTicket with the clipboard policy the ticket
+// recorded at issue (broker carries it on the redeemed lease).
+func (f *fakeBroker) scriptTicketPolicy(ticket, wsUID, policy string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var rnd [4]byte
@@ -126,6 +132,7 @@ func (f *fakeBroker) scriptTicket(ticket, wsUID string) {
 		GatewayID:         "gw-test",
 		ExpiresAt:         time.Now().Add(broker.LeaseTTL),
 	}
+	l.ClipboardPolicy = policy
 	f.leases[ticket] = l
 	f.resolveT[l.ID] = targetFor(f.upstream)
 }

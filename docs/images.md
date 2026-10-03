@@ -172,7 +172,7 @@ plain `#274060` desktop with a *Home* icon.
 | Archive tool | `xarchiver` | |
 | Image viewer | `ristretto` | **PDFs open in Firefox's built-in viewer** (set in `/etc/xdg/mimeapps.list`): a separate PDF reader (`atril`, `evince`) drags in WebKitGTK, GStreamer and poppler — ~100 more packages — for a viewer Firefox already provides |
 | Browser | `firefox-esr` | the same apt pin as `tcdi/browser` (see *Pinned inputs*); a panel launcher; a policy file (`distribution/policies.json`) switches off the updater, the default-browser prompt, the first-run/post-update pages, telemetry and the sponsored/Pocket tiles |
-| Look | `greybird-gtk-theme`, `adwaita-icon-theme`, DejaVu Sans / Sans Mono, Noto Sans / Serif, WenQuanYi Micro Hei | one readable light theme; the font set covers Latin/Greek/Cyrillic (incl. Vietnamese) and zh/ja/ko |
+| Look | `greybird-gtk-theme`, `adwaita-icon-theme`, DejaVu Sans / Sans Mono, Noto Sans / Serif / Sans Mono (the default monospace — the only installed mono face covering Vietnamese), WenQuanYi Micro Hei | one readable light theme; the font set covers Latin/Greek/Cyrillic (incl. Vietnamese) and zh/ja/ko |
 | Glue | `xdg-utils` | `xdg-open` for links and *Open with* |
 
 ### Deliberately not installed (and, where the package ships them, removed)
@@ -252,8 +252,8 @@ over, every pre-existing file is byte-identical, and a second stop/start works.
 
 | | old `linux-desktop` (openbox + xterm) | new `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` (new) | `browser` before → after |
 |---|---|---|---|---|
-| Image size (uncompressed / compressed) | 790 MiB / 199 MB | 1202 MiB / 289 MB | 598 MiB / 141 MB | 1.726 GiB → 1.783 GiB (+0.90 %) |
-| Packages (dpkg) | 328 | 383 | 252 | 373 → 375 (added `fonts-noto-core`, `fonts-wqy-microhei`) |
+| Image size (uncompressed / compressed) | 790 MiB / 199 MB | 1204 MiB / 290 MB | 599 MiB / 142 MB | 1.726 GiB → 1.743 GiB (+0.99 %) |
+| Packages (dpkg) | 328 | 384 | 253 | 373 → 376 (added `fonts-noto-core`, `fonts-noto-mono`, `fonts-wqy-microhei`) |
 | trivy HIGH/CRITICAL **with a fix** (the gate) | 0 | 0 | 0 | 0 → 0 |
 | trivy HIGH/CRITICAL total (CRITICAL + HIGH, unfixed in bookworm) | 17 + 150 | 16 + 140 | 14 + 94 | 17 + 153 → 17 + 153 |
 | Idle CPU of a fresh session (mean over 60 s, after 45 s) | 14 mCPU | 14 mCPU | — | unchanged |
@@ -266,12 +266,18 @@ the trivy rows predate them — the runtime-train scan re-measures on
 publish).** `linux-base` ships `fontconfig`, `fonts-dejavu-core`,
 `fonts-noto-core` trimmed to the eight Latin/Greek/Cyrillic faces
 (Sans and Serif × Regular/Bold/Italic — Vietnamese included; the
-package's other ~260 script faces are deleted) and `fonts-wqy-microhei`
-for CJK (zh/ja/ko). The CJK choice is a budget decision: image size in
+package's other ~260 script faces are deleted), `fonts-noto-mono`
+(Noto Sans Mono + Noto Mono) and `fonts-wqy-microhei`
+for CJK (zh/ja/ko). Noto Sans Mono is the Vietnamese monospace fix:
+DejaVu Sans Mono lacks the Vietnamese block (U+1EA0-1EF9), so
+`monospace:lang=vi` used to resolve to the proportional DejaVu Sans;
+with `fonts-noto-mono` it resolves to Noto Sans Mono, which also
+becomes the default `monospace` face. The CJK choice is a budget decision: image size in
 this table (and in `TestLinuxRuntimeBrowserBaseline`) is
 `docker image inspect .Size`, which on the containerd store counts
 ≈1.8× the bytes of added files. Measured against the browser's +2 %
-headroom (~35 MiB over the pre-split baseline): full `fonts-noto-cjk`
+headroom (~35 MiB over the pre-split baseline then; `fonts-noto-mono`
+left ~18 MiB): full `fonts-noto-cjk`
 adds ~89 MiB unpacked (~160 MiB on the metric) — far over; the
 `NotoSansCJK-Regular.ttc` face alone adds ~35 MiB (+2.39 % measured —
 just over); `fonts-droid-fallback` has no Korean; `fonts-wqy-microhei`
@@ -430,10 +436,11 @@ before changing anything under `build/linux-*`/`build/browser`.
 
 ### 2026-10-03 (V3.26: base split + XFCE desktop) — trivy 0.70.0, syft 1.52.0, DB latest
 
-> Later the same day `linux-base` gained three font packages
-> (`fontconfig`, `fonts-noto-core`, `fonts-wqy-microhei` — font data and
-> the fc tools, no new libraries; see *Budgets*). The numbers below
-> predate them; the runtime-train scan job re-measures on publish.
+> Later the same day `linux-base` gained four font packages
+> (`fontconfig`, `fonts-noto-core`, `fonts-noto-mono`,
+> `fonts-wqy-microhei` — font data and the fc tools, no new libraries;
+> see *Budgets*). The numbers below predate them; the runtime-train scan
+> job re-measures on publish.
 
 | Image | SBOM packages | HIGH/CRITICAL with a fix (the gate) | CRITICAL / HIGH total (unfixed in bookworm) |
 |---|---|---|---|

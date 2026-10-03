@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,6 +60,47 @@ const (
 
 	maxLaunchBody = 4096
 )
+
+// clipboardDirections maps a template clipboard policy to the KasmVNC
+// client's direction flags (mirrors the portal's clipboardDirections:
+// Send is client→workspace, Receive is workspace→client, Disabled is
+// neither; "" — a ticket with no recorded policy — is least privilege).
+func clipboardDirections(policy string) (up, down bool) {
+	switch policy {
+	case "Send":
+		up = true
+	case "Receive":
+		down = true
+	case "Bidirectional":
+		up, down = true, true
+	}
+	return
+}
+
+// seamlessClipboardOK mirrors the client's own non-embed default the
+// portal applies: seamless clipboard on Chrome-family only — upstream
+// disables it on Firefox (Paste overlay) and Safari (no
+// navigator.clipboard.read) itself.
+func seamlessClipboardOK(ua string) bool {
+	if strings.Contains(strings.ToLower(ua), "firefox") {
+		return false
+	}
+	return !(strings.Contains(ua, "Safari") && !strings.Contains(ua, "Chrome"))
+}
+
+// desktopPath is the post-redemption URL the session frame actually
+// loads: the static DesktopPath settings plus the clipboard flags for
+// the policy the redeemed ticket recorded (V3.24 — the portal's iframe
+// src params never reach the frame: the ticket POST's 303 is the final
+// navigation, so the redirect must carry them).
+func desktopPath(policy, ua string) string {
+	up, down := clipboardDirections(policy)
+	path := fmt.Sprintf("%s&clipboard_up=%t&clipboard_down=%t", DesktopPath, up, down)
+	if up || down {
+		path += fmt.Sprintf("&clipboard_seamless=%t", seamlessClipboardOK(ua))
+	}
+	return path
+}
 
 // launchRequest is the parsed POST body; Ticket is never read from the URL.
 type launchRequest struct {
@@ -140,6 +182,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Validation order is security-significant: every check runs BEFORE
 // redemption so a rejected launch never consumes the ticket.
 func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID string) {
+	// A draining replica refuses NEW redemptions with a retryable 503 —
+	// before redemption, like every other check, so the refusal never
+	// consumes the ticket (pre-stop drain, V3.24).
+	if g.isDraining() {
+		writeDraining(w)
+		return
+	}
 	// E7: the per-client launch bucket runs first — a refused attempt is
 	// denied before any validation and never reaches RedeemTicket, so a
 	// rate-limited launch leaves the ticket redeemable.
@@ -269,7 +318,7 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeSuccess, "")
 
 	http.SetCookie(w, g.sessionCookie(s.id))
-	w.Header().Set("Location", DesktopPath)
+	w.Header().Set("Location", desktopPath(lease.ClipboardPolicy, r.UserAgent()))
 	w.WriteHeader(http.StatusSeeOther)
 }
 

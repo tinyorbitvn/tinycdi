@@ -138,7 +138,7 @@ func TestRevokeWorkspaceLeases_BlocksTicketsAndRedeems(t *testing.T) {
 	markRunning(t, db, "ws-1", 5)
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 5, "rt-5", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false)
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -156,14 +156,14 @@ func TestRevokeWorkspaceLeases_BlocksTicketsAndRedeems(t *testing.T) {
 		t.Fatalf("redeem under revocation = %v, want ErrRevoked", err)
 	}
 	// New issues for the revoked generation are denied.
-	if _, err := b.IssueTicket(ctx, alice, "ws-1", false); !errors.Is(err, broker.ErrDenied) {
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, ""); !errors.Is(err, broker.ErrDenied) {
 		t.Fatalf("issue under revocation = %v, want ErrDenied", err)
 	}
 
 	// A restarted generation is NOT covered: it reconnects normally.
 	markRunning(t, db, "ws-1", 6)
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 6, "rt-6", clock.Now()))
-	if _, err := b.IssueTicket(ctx, alice, "ws-1", false); err != nil {
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, ""); err != nil {
 		t.Fatalf("issue for newer generation = %v, want nil", err)
 	}
 }

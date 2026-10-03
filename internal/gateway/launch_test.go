@@ -125,8 +125,45 @@ func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
 		t.Fatalf("launch status = %d, want 303", resp.StatusCode)
 	}
 	if loc, want := resp.Header.Get("Location"),
-		"/?resize=remote&enable_webp=true&idle_disconnect=1440"; loc != want {
+		"/?resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false"; loc != want {
 		t.Fatalf("redirect Location = %q, want %q", loc, want)
+	}
+}
+
+// TestLaunch_RedirectCarriesRecordedClipboardPolicy (V3.24): the 303 is
+// the URL the session frame actually loads — the ticket POST's redirect
+// supersedes the portal's iframe-src params — so the redirect re-asserts
+// the client's clipboard flags from the policy the ticket recorded at
+// issue. clipboard_seamless follows the client's own non-embed default:
+// Chrome-family only (Firefox/Safari disable it upstream).
+func TestLaunch_RedirectCarriesRecordedClipboardPolicy(t *testing.T) {
+	chrome := "Mozilla/5.0 Chrome/120.0 Safari/537.36"
+	firefox := "Mozilla/5.0 Firefox/121.0"
+	for _, tc := range []struct {
+		policy, ua, want string
+	}{
+		{"Bidirectional", chrome, "clipboard_up=true&clipboard_down=true&clipboard_seamless=true"},
+		{"Bidirectional", firefox, "clipboard_up=true&clipboard_down=true&clipboard_seamless=false"},
+		{"Send", chrome, "clipboard_up=true&clipboard_down=false&clipboard_seamless=true"},
+		{"Receive", chrome, "clipboard_up=false&clipboard_down=true&clipboard_seamless=true"},
+		{"Disabled", chrome, "clipboard_up=false&clipboard_down=false"},
+		{"", chrome, "clipboard_up=false&clipboard_down=false"},
+	} {
+		fb := newFakeBroker(t)
+		fb.scriptTicketPolicy("tk-1", testWSUID, tc.policy)
+		srv := newGateway(t, fb, nil)
+		resp := doLaunch(t, srv, testHost, "tk-1", map[string]string{
+			"Origin":     testOrigin,
+			"User-Agent": tc.ua,
+		})
+		loc := resp.Header.Get("Location")
+		drain(resp)
+		if resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("policy %q: launch status = %d, want 303", tc.policy, resp.StatusCode)
+		}
+		if !strings.HasSuffix(loc, tc.want) {
+			t.Fatalf("policy %q UA %q: Location %q missing %q", tc.policy, tc.ua, loc, tc.want)
+		}
 	}
 }
 
