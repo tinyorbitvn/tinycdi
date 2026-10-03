@@ -1184,6 +1184,22 @@ func TestBackendPortalOriginAllowlist(t *testing.T) {
 	}
 }
 
+// TestBackendTrustedProxies (E7/S18): backend.trustedProxies renders the
+// -trusted-proxies flag as a CSV — absent entirely when the list is empty
+// so the binary keeps its own default (untrusted socket peer only).
+func TestBackendTrustedProxies(t *testing.T) {
+	args := strings.Join(firstContainerArgs(deployment(render(t, "example-values.yaml"), "backend")), "\n")
+	if !strings.Contains(args, "-trusted-proxies=10.99.0.0/16,fd00::/8") {
+		t.Errorf("example render: -trusted-proxies missing or wrong\nargs:\n%s", args)
+	}
+	for _, vf := range []string{"minimal-values.yaml", "gateway-api-values.yaml"} {
+		args := strings.Join(firstContainerArgs(deployment(render(t, vf), "backend")), "\n")
+		if strings.Contains(args, "-trusted-proxies") {
+			t.Errorf("%s: empty trustedProxies must not render the flag\nargs:\n%s", vf, args)
+		}
+	}
+}
+
 func toSlice(v any) []any {
 	s, _ := v.([]any)
 	return s
