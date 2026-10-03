@@ -5,6 +5,7 @@ import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
+import { IconArrowLeft } from "../design/icons";
 import { useTemplates } from "../templates/useTemplates";
 import { dataPolicyLabel, networkProfileLabel } from "../templates/format";
 import type { DataPolicy } from "../templates/types";
@@ -83,7 +84,11 @@ export function CreateWorkspacePage() {
     <Page
       title={t("workspaces.create.title")}
       width="narrow"
-      eyebrow={<Link to="/">{t("nav.allWorkspaces")}</Link>}
+      eyebrow={
+        <Link to="/">
+          <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
+        </Link>
+      }
     >
       <ErrorBanner error={templates.error ?? error} onDismiss={() => setError(null)} />
       {templates.loading && !templates.data ? (
@@ -112,11 +117,16 @@ export function CreateWorkspacePage() {
             </option>
             {(templates.data ?? []).map((tpl) => (
               <option key={tpl.id} value={tpl.id}>
-                {t("workspaces.create.templateOption", {
-                  name: tpl.name,
-                  revision: tpl.revision,
-                  runtime: tpl.runtime,
-                })}
+                {tpl.revision > 0
+                  ? t("workspaces.create.templateOption", {
+                      name: tpl.name,
+                      revision: tpl.revision,
+                      runtime: tpl.runtime,
+                    })
+                  : t("workspaces.create.templateOptionNoRevision", {
+                      name: tpl.name,
+                      runtime: tpl.runtime,
+                    })}
               </option>
             ))}
           </Select>

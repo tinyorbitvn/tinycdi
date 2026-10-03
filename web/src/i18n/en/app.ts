@@ -33,5 +33,5 @@ export default {
   "nav.newWorkspace": "New workspace",
   "nav.templates": "Template catalog",
   "nav.data": "Retained data",
-  "nav.allWorkspaces": "← All workspaces",
+  "nav.allWorkspaces": "All workspaces",
 } as const;

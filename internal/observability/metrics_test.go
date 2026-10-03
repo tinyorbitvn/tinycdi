@@ -30,7 +30,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, []string{"tenant-a", "tenant-b"})
 
-	m.ObserveHTTP("/v1/me", "GET", "2xx", 25*time.Millisecond)
+	m.ObserveHTTP("app", "/v1/me", "GET", "2xx", 25*time.Millisecond)
 	m.ObserveProvisioningLatency("success", 30*time.Second)
 	m.SetRunningWorkspaces("tenant-a", 3)
 	m.SetReservedWorkspaces("tenant-b", 1)
@@ -39,6 +39,12 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.SetQuotaDrift("tenant-a", 0)
 	m.SetPVCLeaks(1)
 	m.IncBootDeadlineExceeded()
+	m.AddSessionsActive(2)
+	m.IncRehydration("ok")
+	m.IncStreamsFenced()
+	m.IncLogin("success")
+	m.SetRuntimeImageAge("browser", 3600)
+	m.IncRateLimited("/v1/login")
 
 	want := []string{
 		"tinycdi_http_requests_total",
@@ -51,6 +57,12 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_quota_drift",
 		"tinycdi_pvc_leaks",
 		"tinycdi_boot_deadline_exceeded_total",
+		"tinycdi_sessions_active",
+		"tinycdi_gateway_rehydrations_total",
+		"tinycdi_gateway_streams_fenced_total",
+		"tinycdi_logins_total",
+		"tinycdi_runtime_image_age_seconds",
+		"tinycdi_rate_limited_total",
 	}
 	fams := gatherFamilies(t, reg)
 	for _, name := range want {
@@ -66,7 +78,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 func TestNoForbiddenLabelNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, []string{"tenant-a"})
-	m.ObserveHTTP("/v1/x", "GET", "2xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "GET", "2xx", time.Millisecond)
 	m.SetRunningWorkspaces("tenant-a", 1)
 	m.SetQuotaDrift("tenant-a", 1)
 	m.IncLeaseFailure("denied")
@@ -123,6 +135,56 @@ func TestTenantLabelBounded(t *testing.T) {
 		default:
 			t.Fatalf("unbounded tenant label value leaked: %q", v)
 		}
+	}
+}
+
+// TestMethodLabelBounded: a client-sent method must never mint a new
+// label value — anything outside the known verbs collapses to "other".
+func TestMethodLabelBounded(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, nil)
+
+	m.ObserveHTTP("app", "/v1/x", "GET", "2xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "FOO", "4xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "descriptors", "4xx", time.Millisecond)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "tinycdi_http_requests_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() != "method" {
+					continue
+				}
+				switch l.GetValue() {
+				case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "other":
+				default:
+					t.Fatalf("unbounded method label value: %q", l.GetValue())
+				}
+			}
+		}
+	}
+	// FOO/descriptors must have collapsed into one "other" series.
+	var other float64
+	for _, mf := range mfs {
+		if mf.GetName() != "tinycdi_http_requests_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() == "method" && l.GetValue() == "other" {
+					other += met.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	if other != 2 {
+		t.Fatalf("method=other count = %v, want 2 (FOO + descriptors)", other)
 	}
 }
 
