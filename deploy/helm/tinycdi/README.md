@@ -269,7 +269,7 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 
 #### Nodes without AppArmor
 
-Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch.
+Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch. The `apparmor` check in `hack/preflight/preflight.sh` (see [preflight README](../../../hack/preflight/README.md)) probes every node workspaces can reach and names the fitting value — run it before install.
 
 - **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
 - **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
