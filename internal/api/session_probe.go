@@ -20,9 +20,16 @@ type sessionProbeView struct {
 }
 
 // MountSessionProbeRoute registers GET /v1/session. It needs no
-// authentication, no CSRF token and sets no cookie.
-func MountSessionProbeRoute(mux *http.ServeMux, authn *Authenticator) {
-	mux.Handle("GET /v1/session", http.HandlerFunc(authn.SessionProbeHandler))
+// authentication, no CSRF token and sets no cookie. Optional middleware
+// wraps the handler (the production mount applies the login rate limit —
+// the probe is anonymous and needs a limit like the rest of the
+// unauthenticated surface, backlog 12).
+func MountSessionProbeRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+	var h http.Handler = http.HandlerFunc(authn.SessionProbeHandler)
+	for _, w := range wrap {
+		h = w(h)
+	}
+	mux.Handle("GET /v1/session", h)
 }
 
 // SessionProbeHandler answers 200 {"authenticated": true|false}. The session

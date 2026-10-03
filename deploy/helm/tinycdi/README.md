@@ -195,6 +195,7 @@ objects. It **keeps**:
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
 | `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
 | `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
+| `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4) |
@@ -269,7 +270,7 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 
 #### Nodes without AppArmor
 
-Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch.
+Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch. The `apparmor` check in `hack/preflight/preflight.sh` (see [preflight README](../../../hack/preflight/README.md)) probes every node workspaces can reach and names the fitting value — run it before install.
 
 - **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
 - **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
@@ -332,6 +333,49 @@ that are not host-network (an external load balancer that preserves the client s
 address, for example) keep working with `ipBlock` — narrow `edgeIngressCIDRs` to the
 load-balancer range. There is no separate "from host network" switch: `edgeIngress` is
 the single option that decides how the edge reaches the public listeners.
+
+### Rate limits and trusted proxies
+
+The backend rate-limits its unauthenticated surface **per client address**:
+`-login-rate` (30/min, burst 10) covers `GET /v1/login`,
+`GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate` (60/min, burst 20)
+covers the session listener's `POST /v1/launch`. A client over its budget gets
+`429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
+(`backend.extraArgs`, e.g. `-login-rate=0`).
+
+The client address is the socket peer — unless the peer is inside
+`backend.trustedProxies`, in which case the right-most untrusted
+`X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value
+is required, not optional**: with it empty every user arriving through the
+same edge keys on the edge's own address — one shared bucket (~30 logins and
+~60 launches per minute for the whole organisation) and a self-inflicted
+outage. The backend logs a startup warning while a limit is on and the list
+is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
+`X-Real-IP` headers the workspace pod sees — client-supplied values are
+stripped and rebuilt from the trusted chain only (S18), so a spoofed address
+can never poison the runtime's brute-force blacklist.
+
+```yaml
+# Cilium Gateway API / Ingress — the edge envoy runs host-network, so the
+# peer the backend sees is the NODE the request lands on. List the node
+# subnet(s) (networkPolicy.edgeIngress stays "cilium" — see above).
+backend:
+  trustedProxies: ["10.10.0.0/24"]      # node CIDR(s) running the gateway envoy
+gatewayApi:
+  enabled: true
+```
+
+```yaml
+# Traefik (or any ingress as pods) — the peer is the proxy pod's address;
+# list the cluster pod CIDR or a tighter range covering the proxy pods.
+backend:
+  trustedProxies: ["10.42.0.0/16"]      # pod CIDR containing the traefik pods
+ingress:
+  enabled: true
+```
+
+Exposing the listeners directly (no L7 proxy) needs nothing: the socket peer
+already is the client.
 
 ### Runtime catalog (`templates[]`)
 

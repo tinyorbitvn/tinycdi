@@ -18,6 +18,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,4 +232,118 @@ func TestGatewayCertRejected(t *testing.T) {
 	if !errors.As(err, &oe) || oe.Status != http.StatusForbidden {
 		t.Fatalf("revoke err = %v, want 403", err)
 	}
+}
+
+// TestOpClient_PresentsRotatedCert (E5): rotating the client cert files
+// makes the next request on a fresh connection present the new
+// certificate, with no client restart.
+func TestOpClient_PresentsRotatedCert(t *testing.T) {
+	p := newPKI(t)
+	var seen atomic.Value // peer leaf serial, recorded per request
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) > 0 {
+			seen.Store(r.TLS.PeerCertificates[0].SerialNumber.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openStreams":0,"drained":true}`))
+	}))
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{p.issue(t, "broker-internal", true)},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    p.pool,
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "tls.crt")
+	keyFile := filepath.Join(dir, "tls.key")
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p.caCert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	certA := p.issue(t, httpapi.DefaultOperatorCN, false)
+	writeClientPair(t, certFile, keyFile, certA)
+
+	c, err := opclient.New(opclient.Config{
+		BaseURL:        srv.URL,
+		CertFile:       certFile,
+		KeyFile:        keyFile,
+		CAFile:         caFile,
+		ReloadInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("opclient.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go c.Run(ctx)
+
+	if _, _, err := c.DrainStatus(context.Background(), "ws-1"); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if got, want := seen.Load(), leafSerial(t, certA); got != want {
+		t.Fatalf("initial peer serial = %v, want %v (certA)", got, want)
+	}
+
+	certB := p.issue(t, httpapi.DefaultOperatorCN, false)
+	serialB := leafSerial(t, certB)
+	writeClientPair(t, certFile, keyFile, certB)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		// Keep-alive conns keep their handshake identity, so a new
+		// request on a fresh connection is what observes the rotation.
+		srv.CloseClientConnections()
+		if _, _, err := c.DrainStatus(context.Background(), "ws-1"); err != nil {
+			t.Fatalf("drain after rotation: %v", err)
+		}
+		if seen.Load() == serialB {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("new connections still present the pre-rotation certificate")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// writeClientPair PEM-encodes cert and writes cert+key via temp-file +
+// rename so the reloader never observes a partial file.
+func writeClientPair(t *testing.T, certFile, keyFile string, cert tls.Certificate) {
+	t.Helper()
+	var certPEM []byte
+	for _, der := range cert.Certificate {
+		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(cert.PrivateKey.(*ecdsa.PrivateKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	for path, data := range map[string][]byte{certFile: certPEM, keyFile: keyPEM} {
+		tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tmp.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := tmp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// leafSerial returns the serial of cert's leaf certificate.
+func leafSerial(t *testing.T, cert tls.Certificate) string {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf.SerialNumber.String()
 }

@@ -620,6 +620,63 @@ func TestWorkspaceUpdateValidation(t *testing.T) {
 	})
 }
 
+// TestTemplateRef_ImmutableWhileRunning: spec.templateRef is fixed while
+// the workspace is wanted Running; the platform may re-point it to a newer
+// revision of the family only while desiredState is Stopped — including in
+// the same write that flips the workspace back to Running.
+func TestTemplateRef_ImmutableWhileRunning(t *testing.T) {
+	if _, err := create(t, wsGVR, workspace("ws-tplref")); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	// Running: a direct patch of templateRef is rejected by CEL.
+	running := get(t, wsGVR, "ws-tplref")
+	spec := live(running.Object, "spec")
+	spec["templateRef"] = map[string]interface{}{"name": "other-template"}
+	if _, err := update(t, wsGVR, running); err == nil {
+		t.Fatal("templateRef mutation on a Running workspace was accepted")
+	} else if !strings.Contains(err.Error(), "templateRef") {
+		t.Fatalf("rejected but for wrong reason; want 'templateRef' in: %v", err)
+	}
+
+	// Stop it, then re-point while Stopped: accepted.
+	stopped := get(t, wsGVR, "ws-tplref")
+	spec = live(stopped.Object, "spec")
+	spec["desiredState"] = "Stopped"
+	spec["intentRevision"] = int64(2)
+	if _, err := update(t, wsGVR, stopped); err != nil {
+		t.Fatalf("stop intent: %v", err)
+	}
+	stopped = get(t, wsGVR, "ws-tplref")
+	spec = live(stopped.Object, "spec")
+	spec["templateRef"] = map[string]interface{}{"name": "other-template"}
+	if _, err := update(t, wsGVR, stopped); err != nil {
+		t.Fatalf("templateRef move while Stopped must be accepted: %v", err)
+	}
+
+	// The real start shape: templateRef, desiredState and the fencing
+	// numbers move in ONE update — oldSelf was Stopped, so it passes.
+	restart := get(t, wsGVR, "ws-tplref")
+	spec = live(restart.Object, "spec")
+	spec["templateRef"] = map[string]interface{}{"name": "newest-revision"}
+	spec["desiredState"] = "Running"
+	spec["runtimeGeneration"] = int64(2)
+	spec["intentRevision"] = int64(3)
+	if _, err := update(t, wsGVR, restart); err != nil {
+		t.Fatalf("start re-pointing templateRef while Stopped must be accepted: %v", err)
+	}
+
+	// And again: once Running the reference is fixed.
+	running = get(t, wsGVR, "ws-tplref")
+	spec = live(running.Object, "spec")
+	spec["templateRef"] = map[string]interface{}{"name": "another"}
+	if _, err := update(t, wsGVR, running); err == nil {
+		t.Fatal("templateRef mutation on a Running workspace was accepted after restart")
+	} else if !strings.Contains(err.Error(), "templateRef") {
+		t.Fatalf("rejected but for wrong reason; want 'templateRef' in: %v", err)
+	}
+}
+
 // TestWorkspaceRejectsRawPodSpec proves there is no way to smuggle a raw
 // PodSpec into a Workspace: the CRD has preserveUnknownFields=false
 // (structural schema), so spec.podSpec is silently pruned, never stored.
