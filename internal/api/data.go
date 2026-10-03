@@ -383,7 +383,8 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name,
 		Template: provisioning.TemplateInfo{
 			ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
-			Runtime: tpl.Runtime, Experience: tpl.Experience,
+			RevisionLabel: tpl.RevisionLabel,
+			Runtime:       tpl.Runtime, Experience: tpl.Experience,
 			ImageBuiltAt: tpl.ImageBuiltAt,
 		},
 		Vector: provisioning.ResourceVector{

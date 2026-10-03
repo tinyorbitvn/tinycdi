@@ -341,6 +341,7 @@ func (h *WorkspaceHandler) viewWithStatus(ctx context.Context, rec *provisioning
 	}
 	mergeObservedStatus(&v, rec, obs)
 	h.mergeImageFreshness(ctx, &v, rec, obs)
+	v.UpdateAvailable = h.updateAvailable(ctx, rec)
 	return v
 }
 
@@ -363,6 +364,133 @@ func (h *WorkspaceHandler) mergeImageFreshness(ctx context.Context, v *Workspace
 	}
 	v.ImageBuiltAt, v.ImageStale = imageFreshness(h.log, raw, h.staleAfter, h.now(),
 		"workspace", rec.ID, "template", rec.Template.ID)
+}
+
+// ---------------------------------------------------------------------------
+// Template family / updateAvailable
+// ---------------------------------------------------------------------------
+
+// updateCheckMemo remembers the family-newest and current-revision lookups
+// resolved during one request — including failures — so a page of
+// workspaces costs one catalog read per distinct family and revision.
+type updateCheckMemo struct {
+	mu     sync.Mutex
+	newest map[string]*TemplateEntry // tenantID/family -> newest revision (nil: none/error)
+	cur    map[string]curRevision    // tenantID/templateID -> recorded revision
+}
+
+// curRevision is the memoized lookup of a workspace's recorded revision:
+// entry==nil && !failed means the revision object is gone (a start adopts
+// the newest); failed means the catalog read errored and no update is
+// reported.
+type curRevision struct {
+	entry  *TemplateEntry
+	failed bool
+}
+
+type updateCheckMemoKey struct{}
+
+// withUpdateCheckMemo scopes an update-check memo to ctx (one request).
+func withUpdateCheckMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, updateCheckMemoKey{}, &updateCheckMemo{
+		newest: map[string]*TemplateEntry{},
+		cur:    map[string]curRevision{},
+	})
+}
+
+func (h *WorkspaceHandler) updateCheckCtx(ctx context.Context) *updateCheckMemo {
+	memo, _ := ctx.Value(updateCheckMemoKey{}).(*updateCheckMemo)
+	if memo == nil {
+		memo = &updateCheckMemo{newest: map[string]*TemplateEntry{}, cur: map[string]curRevision{}}
+	}
+	return memo
+}
+
+// familyNewest resolves the newest published revision of a family once per
+// request; nil means the family has no resolvable revision or the catalog
+// read failed (no update is reported for either).
+func (h *WorkspaceHandler) familyNewest(ctx context.Context, fc FamilyCatalog, tenantID, family string) *TemplateEntry {
+	memo := h.updateCheckCtx(ctx)
+	key := tenantID + "/" + family
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if e, ok := memo.newest[key]; ok {
+		return e
+	}
+	var entry *TemplateEntry
+	e, err := fc.NewestInFamily(ctx, tenantID, family)
+	if err == nil && e.ID != "" {
+		entry = &e
+	}
+	memo.newest[key] = entry
+	return entry
+}
+
+// recordedRevision resolves the workspace's recorded template revision once
+// per request. ErrTemplateNotFound means the object was deleted (entry nil,
+// failed false); any other error reports failed so no update is claimed on
+// unverifiable state.
+func (h *WorkspaceHandler) recordedRevision(ctx context.Context, cat TemplateCatalog, tenantID, templateID string) curRevision {
+	memo := h.updateCheckCtx(ctx)
+	key := tenantID + "/" + templateID
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if r, ok := memo.cur[key]; ok {
+		return r
+	}
+	var r curRevision
+	e, err := cat.Resolve(ctx, tenantID, templateID)
+	switch {
+	case err == nil:
+		r.entry = &e
+	case errors.Is(err, ErrTemplateNotFound):
+		// deleted revision object: a start adopts the newest (OnStart
+		// default) — entry stays nil.
+	default:
+		r.failed = true
+	}
+	memo.cur[key] = r
+	return r
+}
+
+// updateAvailable reports whether a Stopped -> Running start would move the
+// workspace to a newer published revision of its template family: the
+// family must resolve to a revision newer than the recorded one, the
+// recorded revision must not pin the image, and the newest revision must
+// pass the compatibility guard (same runtime/experience/data policy,
+// storage not smaller; E1/E2). A recorded revision whose object was
+// deleted counts as updatable — the start adopts the newest. Lookups are
+// memoized per request and read through the informer-backed catalog in
+// production (WithImageCatalog); they never fail the request.
+func (h *WorkspaceHandler) updateAvailable(ctx context.Context, rec *provisioning.WorkspaceRecord) bool {
+	cat := h.imageCatalog
+	if cat == nil {
+		cat = h.catalog
+	}
+	fc, ok := cat.(FamilyCatalog)
+	if !ok || rec.Template.Name == "" || rec.Template.ID == "" {
+		return false
+	}
+	newest := h.familyNewest(ctx, fc, rec.TenantID, rec.Template.Name)
+	if newest == nil || newest.ID == rec.Template.ID {
+		return false
+	}
+	cur := h.recordedRevision(ctx, cat, rec.TenantID, rec.Template.ID)
+	if cur.failed {
+		return false
+	}
+	if cur.entry != nil {
+		if cur.entry.ImageUpdate == "Pinned" {
+			return false
+		}
+		if cur.entry.Runtime != newest.Runtime ||
+			cur.entry.Experience != newest.Experience ||
+			cur.entry.DataPolicyDefault != newest.DataPolicyDefault ||
+			newest.StorageBytes < cur.entry.StorageBytes {
+			return false
+		}
+	}
+	return true
 }
 
 // imageAgeMemo remembers the template image ages resolved during one

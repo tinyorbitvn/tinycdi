@@ -518,7 +518,13 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := ctrl.SetupSignalHandler()
+	if bkc != nil {
+		// Hot-reload the operator mTLS client certificate (E5); the
+		// loop ends when the manager's signal context is cancelled.
+		go bkc.Run(ctx)
+	}
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

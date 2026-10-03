@@ -30,6 +30,7 @@ Needs `kubectl` plus, for the matching checks, `openssl`, `curl`, `psql` and
 | `storageclass` | a default class (or `--storage-class NAME`) exists | not permitted to list | none default / named class absent |
 | `host-users` | not requested, or a `hostUsers: false` pod starts | probe could not run (no permission, `--no-probe`) | the pod is rejected or never starts |
 | `node-pool` | nodes carry `--node-label` and the `--node-taint` key, or `--allow-shared-nodes` | labeled but untainted nodes; not permitted to list nodes | no node has the label |
+| `apparmor` | every workspace node accepted a probe pod carrying `appArmorProfile: RuntimeDefault`: `runtime.appArmor.requireRuntimeDefault=true` fits | a node refused the probe (no AppArmor — the node names are printed and `=false` is named the fitting value), the state could not be determined, nodes could not be listed, or the probe could not run (`--no-probe`, no permission) | never — a wrong value is fixable in values.yaml before install |
 | `dns` | `preflight-<random>.<sessionDomain>` resolves | no `--session-domain`, no `getent` | does not resolve |
 | `tls-secret` | the certificate in the Secret covers `*.<sessionDomain>` and is valid for 14+ days | no ref given, not permitted to read, no `openssl`, expires within 14 days | missing Secret, wrong SANs, expired, unreadable PEM |
 | `oidc` | `<issuer>/.well-known/openid-configuration` answers with the same `issuer` | no issuer given, no `curl`, plain `http` issuer | no answer, or the issuer differs |
@@ -43,11 +44,13 @@ from a workstation: run preflight from a pod, or through
 ## What it creates
 
 Only a throwaway namespace `tcdi-preflight-<random>` (Pod Security
-`restricted`) holding up to six short-lived probe pods and one deny-ingress
-NetworkPolicy. The namespace is created lazily, only for `netpol` and
-`host-users`, and an `EXIT`/`INT`/`TERM` trap deletes it, also after an
-error. If the delete itself fails the script says so and exits `1`. With
-`--no-probe` nothing is created and those two checks `WARN`. Everything else
+`restricted`) holding short-lived probe pods (five for `netpol` and
+`host-users`, plus one per workspace node for `apparmor`) and one
+deny-ingress NetworkPolicy. The namespace is created lazily, only for
+`netpol`, `host-users` and `apparmor`, and an `EXIT`/`INT`/`TERM` trap
+deletes it, also after an error. If the delete itself fails the script says
+so and exits `1`. With `--no-probe` nothing is created and those three checks
+`WARN`. Everything else
 is read-only (`get`, `auth can-i`). The probe pods run `--probe-image`
 (default `registry.k8s.io/e2e-test-images/agnhost:2.53`); point it at a
 mirror on an air-gapped cluster.
@@ -55,6 +58,28 @@ mirror on an air-gapped cluster.
 With `--host-users-false` the probe pod also runs on the workspace node pool
 (label and toleration from `--node-label`/`--node-taint`) unless
 `--allow-shared-nodes` is set, because that is where workspaces will run.
+
+## How `apparmor` decides
+
+The chart sets `securityContext.appArmorProfile: RuntimeDefault` on runtime
+containers (`runtime.appArmor.requireRuntimeDefault`, default `true`), and a
+node without AppArmor refuses such pods. Node status carries no AppArmor
+signal, so the check creates one short-lived probe pod per target node —
+pinned to it with `spec.nodeName`, tolerating every taint — that requests the
+same `RuntimeDefault` profile. A kubelet/container-runtime refusal ("Cannot
+enforce AppArmor") is the exact failure a workspace pod would hit, so it is
+the definitive read-only signal; it is read from the pod status, with the
+pod's events as fallback. `PASS` means `requireRuntimeDefault=true` (the
+chart default) fits; `WARN` names the nodes and says `false` fits.
+
+The target set is the placement the chart would use: the `--node-label`
+nodes a workspace pod can actually reach (skipping unschedulable nodes and
+taints the default `runtime.placement.tolerations` do not cover) or, with
+`--allow-shared-nodes`, every schedulable Linux node free of
+`NoSchedule`/`NoExecute` taints — shared-mode pods carry no tolerations. A
+node whose state cannot be determined (probe never ran, image not pullable,
+refusal absent) is listed as undetermined; check it by hand with
+`cat /sys/module/apparmor/parameters/enabled` on the node (`Y`/`N`).
 
 ## Secrets
 

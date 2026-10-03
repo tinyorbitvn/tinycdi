@@ -634,6 +634,23 @@ export interface components {
              *     a stale image never blocks a Start in v0.2.
              */
             imageStale?: boolean;
+            /**
+             * @description Verbatim revision identifier (`spec.revision`) of the template
+             *     revision the workspace is on. Refreshed when a start moves the
+             *     workspace to a newer revision of its template family. Rows
+             *     written before v0.3 do not carry the label and fall back to
+             *     the numeric `template.revision`; empty when neither exists.
+             * @example 2026-10-b
+             */
+            templateRevision: string;
+            /**
+             * @description True when the workspace's template family published a newer
+             *     revision a Stopped -> Running start would move to: the recorded
+             *     revision is not the newest, its imageUpdate policy is not
+             *     Pinned, and the newest revision is runtime/experience/data-
+             *     policy/storage compatible.
+             */
+            updateAvailable: boolean;
         };
         /**
          * @description One curated workspace event. `message` is a fixed catalog string —

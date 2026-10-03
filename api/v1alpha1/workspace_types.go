@@ -67,7 +67,10 @@ type DataReference struct {
 // transactions. The CRD-level rules below are the last line of defense for
 // when cluster admins use kubectl.
 type WorkspaceSpec struct {
-	// templateRef is the immutable WorkspaceTemplate this workspace runs from.
+	// templateRef is the WorkspaceTemplate this workspace runs from. It is
+	// fixed while the runtime is wanted Running; the platform API may
+	// re-point it to a newer revision of the same template family only
+	// while desiredState is Stopped (the CEL rule below).
 	// +required
 	TemplateRef TemplateReference `json:"templateRef"`
 
@@ -185,7 +188,7 @@ type Workspace struct {
 
 	// spec defines the desired state of Workspace
 	// +required
-	// +kubebuilder:validation:XValidation:rule="self.templateRef == oldSelf.templateRef",message="spec.templateRef is immutable"
+	// +kubebuilder:validation:XValidation:rule="self.templateRef == oldSelf.templateRef || oldSelf.desiredState == 'Stopped'",message="spec.templateRef may change only while desiredState is Stopped"
 	// +kubebuilder:validation:XValidation:rule="self.ownerSubject == oldSelf.ownerSubject",message="spec.ownerSubject is immutable"
 	// +kubebuilder:validation:XValidation:rule="self.dataPolicy == oldSelf.dataPolicy",message="spec.dataPolicy is immutable"
 	// +kubebuilder:validation:XValidation:rule="self.runtimeGeneration >= oldSelf.runtimeGeneration",message="spec.runtimeGeneration must not decrease"

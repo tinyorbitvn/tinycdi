@@ -170,6 +170,15 @@ type LifecycleDefaults struct {
 	// template.
 	// +required
 	DataPolicy DataPolicy `json:"dataPolicy"`
+
+	// imageUpdate selects how workspaces created from this template pick up
+	// newer published revisions of the same template family: OnStart moves a
+	// workspace to the newest revision on every Stopped -> Running start;
+	// Pinned keeps it on its recorded revision.
+	// +optional
+	// +kubebuilder:validation:Enum=OnStart;Pinned
+	// +kubebuilder:default=OnStart
+	ImageUpdate ImageUpdatePolicy `json:"imageUpdate,omitempty"`
 }
 
 // WorkspaceTemplateSpec describes one immutable template revision. Templates

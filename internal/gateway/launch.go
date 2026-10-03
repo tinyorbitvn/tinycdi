@@ -28,12 +28,14 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 const (
@@ -132,6 +134,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Validation order is security-significant: every check runs BEFORE
 // redemption so a rejected launch never consumes the ticket.
 func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID string) {
+	// E7: the per-client launch bucket runs first — a refused attempt is
+	// denied before any validation and never reaches RedeemTicket, so a
+	// rate-limited launch leaves the ticket redeemable.
+	if g.cfg.LaunchLimiter != nil {
+		if ok, retry := g.cfg.LaunchLimiter.Allow(ratelimit.ClientKey(r, g.cfg.TrustedProxies)); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+			g.audit(r, "launch.redeem", wsID, observability.OutcomeDenied, "rate_limited")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
+	}
 	// Launch origin policy (ADR 0004): the portal↔session POST is
 	// cross-site by design, so CSRF/session-fixation resistance comes from
 	// the one-use ticket bound to the requesting user plus the configured

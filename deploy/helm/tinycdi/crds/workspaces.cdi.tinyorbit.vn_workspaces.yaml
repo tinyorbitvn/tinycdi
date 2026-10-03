@@ -105,8 +105,11 @@ spec:
                 minimum: 0
                 type: integer
               templateRef:
-                description: templateRef is the immutable WorkspaceTemplate this workspace
-                  runs from.
+                description: |-
+                  templateRef is the WorkspaceTemplate this workspace runs from. It is
+                  fixed while the runtime is wanted Running; the platform API may
+                  re-point it to a newer revision of the same template family only
+                  while desiredState is Stopped (the CEL rule below).
                 properties:
                   name:
                     description: name of the WorkspaceTemplate in the same namespace.
@@ -124,8 +127,9 @@ spec:
             - templateRef
             type: object
             x-kubernetes-validations:
-            - message: spec.templateRef is immutable
-              rule: self.templateRef == oldSelf.templateRef
+            - message: spec.templateRef may change only while desiredState is Stopped
+              rule: self.templateRef == oldSelf.templateRef || oldSelf.desiredState
+                == 'Stopped'
             - message: spec.ownerSubject is immutable
               rule: self.ownerSubject == oldSelf.ownerSubject
             - message: spec.dataPolicy is immutable

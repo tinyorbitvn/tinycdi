@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -122,31 +121,14 @@ func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1
 	return pol
 }
 
-// template finds the WorkspaceTemplate a workspace references: the exact
-// object first, else the newest revision of that catalog name; nil when
-// neither exists.
+// template finds the WorkspaceTemplate a workspace references through the
+// shared by-name resolver (exact object, else newest catalog-name
+// revision); nil when neither exists or the lookup errors — a broken
+// reference falls back to DefaultTimeoutPolicy rather than disabling caps.
 func (s *K8sRunningSource) template(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.WorkspaceTemplate {
-	var tpl workspacesv1alpha1.WorkspaceTemplate
-	err := s.cache.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Spec.TemplateRef.Name}, &tpl)
-	if err == nil {
-		return &tpl
-	}
-	if !apierrors.IsNotFound(err) {
+	tpl, err := provisioning.ResolveTemplateByName(ctx, s.cache, ws.Namespace, ws.Spec.TemplateRef.Name)
+	if err != nil {
 		return nil
 	}
-	var list workspacesv1alpha1.WorkspaceTemplateList
-	if err := s.cache.List(ctx, &list, client.InNamespace(ws.Namespace),
-		client.MatchingLabels{provisioning.LabelCatalogName: ws.Spec.TemplateRef.Name}); err != nil {
-		return nil
-	}
-	var latest *workspacesv1alpha1.WorkspaceTemplate
-	for i := range list.Items {
-		t := &list.Items[i]
-		if latest == nil ||
-			t.CreationTimestamp.After(latest.CreationTimestamp.Time) ||
-			(t.CreationTimestamp.Equal(&latest.CreationTimestamp) && t.Name > latest.Name) {
-			latest = t
-		}
-	}
-	return latest
+	return tpl
 }
