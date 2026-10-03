@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Badge, Button, Card, Dialog, Grid, Input, Meter, Section, Spinner, Table } from "../design";
 import type { Column } from "../design/Table";
 import { IconChevronDown, IconChevronUp, IconRefresh } from "../design/icons";
@@ -15,6 +15,7 @@ import {
   type QuotaSource,
   type UserUsage,
 } from "./api";
+import { isPortalApiError } from "../api/errors";
 import {
   QUOTA_KEYS,
   formatQuota,
@@ -219,6 +220,20 @@ export function QuotaEditDialog({
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [invalid, setInvalid] = useState(false);
+  // The version the dialog's fields were read from — sent as If-Match so a
+  // concurrent write 412s instead of being silently overwritten.
+  const versionRef = useRef(quota.version);
+
+  // The dialog stays mounted while closed, so state must be reset when it
+  // reopens or when the quota changed underneath it — otherwise a reopen
+  // shows (and would re-save) stale limits.
+  useEffect(() => {
+    if (!open) return;
+    setFields(fieldsOf(quota));
+    versionRef.current = quota.version;
+    setInvalid(false);
+    setSaveError(null);
+  }, [open, quota]);
 
   function set(k: keyof EditFields) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -235,11 +250,14 @@ export function QuotaEditDialog({
     setBusy(true);
     setSaveError(null);
     try {
-      await putAdminQuota(api, quota.tenant, limits);
+      await putAdminQuota(api, quota.tenant, limits, versionRef.current);
       onSaved();
       onClose();
     } catch (e) {
       setSaveError(e);
+      // 412 PRECONDITION_FAILED: someone else wrote first — pull the fresh
+      // values in so the retry is reviewed against them.
+      if (isPortalApiError(e) && e.code === "PRECONDITION_FAILED") onSaved();
     } finally {
       setBusy(false);
     }

@@ -168,6 +168,8 @@ export default {
   "admin.errors.quotaNotConfigured": "No quota is configured for your tenant. Ask an administrator to set one.",
   "admin.errors.quotaManagedByConfig":
     "This tenant's quota is managed by the platform configuration and cannot be changed here.",
+  "admin.errors.preconditionFailed":
+    "Someone else changed these limits. The current values were reloaded — review them and save again.",
   "admin.errors.idempotencyConflict":
     "This conflicted with an earlier attempt. Refresh and check before retrying.",
   "admin.errors.csrfFailed": "Your session token expired. Reload the page and try again.",

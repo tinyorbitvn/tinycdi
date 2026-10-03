@@ -30,6 +30,7 @@ const (
 	CodeQuotaExhausted       ErrorCode = "QUOTA_EXHAUSTED"         // 409
 	CodeQuotaNotConfigured   ErrorCode = "QUOTA_NOT_CONFIGURED"    // 409
 	CodeQuotaManagedByConfig ErrorCode = "QUOTA_MANAGED_BY_CONFIG" // 409
+	CodePreconditionFailed   ErrorCode = "PRECONDITION_FAILED"     // 412
 	CodeConnectionInUse      ErrorCode = "CONNECTION_IN_USE"       // 409
 	CodeImageStale           ErrorCode = "IMAGE_STALE"             // 409
 	CodeRateLimited          ErrorCode = "RATE_LIMITED"            // 429
@@ -56,6 +57,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeQuotaExhausted,
 	CodeQuotaNotConfigured,
 	CodeQuotaManagedByConfig,
+	CodePreconditionFailed,
 	CodeConnectionInUse,
 	CodeImageStale,
 	CodeRateLimited,
@@ -78,6 +80,8 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity
+	case CodePreconditionFailed:
+		return http.StatusPreconditionFailed
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
 	case CodeUnavailable:

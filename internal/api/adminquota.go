@@ -5,23 +5,40 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
+
+// ErrQuotaVersionMismatch is returned by AdminQuotaSource.SetLimits when
+// the If-Match version does not name the current limits row — the quota
+// changed between the client's read and its write.
+var ErrQuotaVersionMismatch = errors.New("quota version mismatch")
+
+// IfMatchCreate is the If-Match value a client sends to create a quota row
+// for a tenant that has none (GET then reports no version). It is the only
+// accepted precondition on a missing row — an existing row requires its
+// exact current version, so a bare "*" can never skip the concurrency check.
+const IfMatchCreate = "*"
 
 // AdminQuotaSource is the read/write seam behind
 // /v1/admin/tenants/{tenant}/quota; the Postgres implementation is
 // adminQuotaStore.
 type AdminQuotaSource interface {
 	Report(ctx context.Context, tenantID string) (store.QuotaReport, error)
-	// SetLimits upserts the tenant's configured limits. Limits below
-	// current usage are accepted: held reservations stay, new ones are
-	// refused (same rule as provisioning.UpsertQuota).
-	SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector) error
+	// SetLimits writes the tenant's configured limits under optimistic
+	// concurrency: ifMatch must name the row's current version (QuotaReport.
+	// Version) or be IfMatchCreate when no row exists. A stale or wrong
+	// precondition answers ErrQuotaVersionMismatch. Limits below current
+	// usage are accepted: held reservations stay, new ones are refused
+	// (same rule as provisioning.UpsertQuota).
+	SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector, ifMatch string) error
 }
 
 // adminQuotaStore is the Postgres AdminQuotaSource: reads share the
@@ -37,10 +54,36 @@ func (s *adminQuotaStore) Report(ctx context.Context, tenantID string) (store.Qu
 	return s.q.Report(ctx, tenantID)
 }
 
-func (s *adminQuotaStore) SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector) error {
+// SetLimits performs the conditional write in one statement so the version
+// check and the write cannot be raced: an existing row updates only when its
+// xmin still equals If-Match; "*" inserts only when no row exists. Zero rows
+// affected means the precondition failed, whatever the reason.
+func (s *adminQuotaStore) SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector, ifMatch string) error {
 	return s.db.WithTx(ctx, func(tx store.Tx) error {
-		_, err := provisioning.UpsertQuota(ctx, tx, tenantID, v)
-		return err
+		var tag pgconn.CommandTag
+		var err error
+		if ifMatch == IfMatchCreate {
+			tag, err = tx.Exec(ctx, `
+				INSERT INTO tenant_quota (tenant_id, max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (tenant_id) DO NOTHING`,
+				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes)
+		} else {
+			tag, err = tx.Exec(ctx, `
+				UPDATE tenant_quota SET
+					max_running_slots = $2, max_cpu_millis = $3,
+					max_memory_bytes  = $4, max_disk_bytes = $5,
+					updated_at        = now()
+				WHERE tenant_id = $1 AND xmin::text = $6`,
+				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes, ifMatch)
+		}
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrQuotaVersionMismatch
+		}
+		return nil
 	})
 }
 
@@ -113,11 +156,14 @@ func (l adminQuotaLimits) toVector() (provisioning.ResourceVector, string) {
 }
 
 // adminQuotaView is the admin quota snapshot (openapi AdminQuotaView) —
-// QuotaView plus `source`, which names the layer that owns the limits row.
+// QuotaView plus `source`, which names the layer that owns the limits row,
+// and `version`, the opaque change token PUT echoes in If-Match (absent
+// when the tenant has no quota row).
 type adminQuotaView struct {
 	Tenant     string        `json:"tenant"`
 	Configured bool          `json:"configured"`
 	Source     string        `json:"source"`
+	Version    string        `json:"version,omitempty"`
 	Limits     *quotaAmounts `json:"limits,omitempty"`
 	Usage      quotaAmounts  `json:"usage"`
 	Users      []userUsage   `json:"users"`
@@ -191,6 +237,7 @@ func (h *AdminQuotaHandler) view(ctx context.Context, tenantID string) (adminQuo
 		Tenant:     tenantID,
 		Configured: rep.HasLimits,
 		Source:     source,
+		Version:    rep.Version,
 		Usage:      mapQuotaAmounts(rep.Usage),
 		Users:      make([]userUsage, 0, len(rep.Owners)),
 	}
@@ -224,9 +271,12 @@ func (h *AdminQuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Put handles PUT /v1/admin/tenants/{tenant}/quota: it replaces the
 // tenant's limits, provided the tenant is not declared in -tenant-quotas
-// (config-managed rows answer 409 QUOTA_MANAGED_BY_CONFIG). Limits below
-// current usage are accepted — held reservations stay, new ones are
-// refused — so a lowered limit takes effect immediately without force.
+// (config-managed rows answer 409 QUOTA_MANAGED_BY_CONFIG) and the caller
+// names the current version in If-Match (optimistic concurrency — a stale
+// version answers 412 PRECONDITION_FAILED; the header is required, and
+// IfMatchCreate "*" creates only a missing row). Limits below current
+// usage are accepted — held reservations stay, new ones are refused — so
+// a lowered limit takes effect immediately without force.
 func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.adminPrincipal(w, r); !ok {
 		return
@@ -235,6 +285,11 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 	if h.managed[tenant] {
 		writeError(w, r, CodeQuotaManagedByConfig,
 			"quota for this tenant is managed by configuration; change it through the platform configuration")
+		return
+	}
+	ifMatch := r.Header.Get("If-Match")
+	if ifMatch == "" {
+		writeError(w, r, CodeInvalidRequest, "If-Match header required")
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBody))
@@ -253,7 +308,12 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 			"limits must set non-negative runningWorkspaces, cpuMillicores, memoryMib and storageGib ("+field+")")
 		return
 	}
-	if err := h.source.SetLimits(r.Context(), tenant, v); err != nil {
+	if err := h.source.SetLimits(r.Context(), tenant, v, ifMatch); err != nil {
+		if errors.Is(err, ErrQuotaVersionMismatch) {
+			writeError(w, r, CodePreconditionFailed,
+				"the quota changed since it was read; reload and retry")
+			return
+		}
 		writeError(w, r, CodeInternal, "internal error")
 		return
 	}

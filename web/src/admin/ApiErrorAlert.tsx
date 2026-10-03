@@ -14,6 +14,7 @@ const GUIDANCE: Partial<Record<ErrorCode, MessageKey>> = {
   QUOTA_EXHAUSTED: "admin.errors.quotaExhausted",
   QUOTA_NOT_CONFIGURED: "admin.errors.quotaNotConfigured",
   QUOTA_MANAGED_BY_CONFIG: "admin.errors.quotaManagedByConfig",
+  PRECONDITION_FAILED: "admin.errors.preconditionFailed",
   IDEMPOTENCY_CONFLICT: "admin.errors.idempotencyConflict",
   CSRF_FAILED: "admin.errors.csrfFailed",
   UNAUTHENTICATED: "admin.errors.unauthenticated",

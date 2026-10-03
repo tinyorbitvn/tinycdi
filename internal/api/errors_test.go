@@ -97,6 +97,7 @@ func TestErrorCodeTableCoverage(t *testing.T) {
 		CodeQuotaExhausted:       http.StatusConflict,
 		CodeQuotaNotConfigured:   http.StatusConflict,
 		CodeQuotaManagedByConfig: http.StatusConflict,
+		CodePreconditionFailed:   http.StatusPreconditionFailed,
 		CodeConnectionInUse:      http.StatusConflict,
 		CodeImageStale:           http.StatusConflict,
 		CodeRateLimited:          http.StatusTooManyRequests,

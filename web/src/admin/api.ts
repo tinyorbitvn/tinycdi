@@ -38,14 +38,18 @@ export async function fetchAdminQuota(api: ApiClient, tenant: string): Promise<A
   );
 }
 
+// `version` is the change token the GET returned — sent as If-Match so a
+// concurrent write lands as 412 PRECONDITION_FAILED, not a silent clobber.
+// Pass "*" when the GET reported no row (version absent) to create it.
 export async function putAdminQuota(
   api: ApiClient,
   tenant: string,
   limits: AdminQuotaLimits,
+  version: string | undefined,
 ): Promise<AdminQuotaView> {
   return unwrap(
     await api.PUT("/v1/admin/tenants/{tenant}/quota", {
-      params: { path: { tenant } },
+      params: { path: { tenant }, header: { "If-Match": version ?? "*" } },
       body: limits,
     }),
   );

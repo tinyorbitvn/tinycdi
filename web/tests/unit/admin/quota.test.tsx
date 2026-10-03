@@ -174,3 +174,51 @@ describe("quota: admin edit", () => {
     await within(dialog).findByText(/managed by the platform configuration/);
   });
 });
+
+describe("quota: optimistic concurrency", () => {
+  it("reopening the dialog shows freshly read values", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await screen.findByRole("heading", { name: "Quota" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    let dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(8);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    // Another actor changed the limits while the dialog was closed.
+    control(api, "/_control/admin/quota", { limits: { runningWorkspaces: 20 } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText(/of 20/);
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20);
+  });
+
+  it("a stale save answers 412: the dialog warns and reloads fresh values", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await screen.findByRole("heading", { name: "Quota" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit limits" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set tenant limits" });
+    // A concurrent write lands between our read and our save.
+    control(api, "/_control/admin/quota", { limits: { runningWorkspaces: 20 } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+
+    await within(dialog).findByText(/changed these limits/);
+    // The reload updated the read model — the dialog now shows fresh values.
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20),
+    );
+
+    // Saving again carries the fresh version and lands.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const meter = (
+      await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
+    ).closest(".tc-meter")!;
+    expect(meter).toHaveTextContent(/of 20/);
+  });
+});

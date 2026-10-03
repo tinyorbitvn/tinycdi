@@ -161,6 +161,9 @@ export interface Tenancy {
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
   managed: boolean;
+  // Limits-row change token — bumps on every quota write; PUT echoes it via
+  // If-Match (optimistic concurrency).
+  version: number;
   // Record ID -> owner; records without an entry belong to the principal.
   owners: Map<string, Owner>;
   failNext: Map<string, { status: number; code: string }>;
@@ -198,6 +201,7 @@ export function tenancy(ctx: MockContext): Tenancy {
     limits: { ...DEFAULT_LIMITS },
     userLimits: { ...DEFAULT_USER_LIMITS },
     managed: false,
+    version: 1,
     owners: new Map(),
     failNext: new Map(),
     scopesSeen: [],
@@ -257,6 +261,7 @@ export function adminArea(ctx: MockContext): MockArea {
     t.limits = { ...DEFAULT_LIMITS };
     t.userLimits = { ...DEFAULT_USER_LIMITS };
     t.managed = false;
+    t.version = 1;
     t.owners = new Map();
     t.failNext = new Map();
     t.scopesSeen = [];
@@ -328,11 +333,14 @@ export function adminArea(ctx: MockContext): MockArea {
     return {
       ...quotaBody(),
       source: t.managed ? "config" : t.limits !== undefined ? "api" : "none",
+      ...(t.limits !== undefined ? { version: String(t.version) } : {}),
     };
   }
 
   // GET/PUT /v1/admin/tenants/{tenant}/quota — tenant-admin of the named
-  // tenant only; config-managed rows reject writes with the 409.
+  // tenant only; config-managed rows reject writes with the 409. PUT is
+  // optimistic-concurrency: If-Match names the reported version ("*" only
+  // creates a missing row) or the write answers 412 PRECONDITION_FAILED.
   function adminQuota(req: MockRequest, tenant: string): MockResponse {
     if (!t.isAdmin() || tenant !== t.me.tenant) {
       return err(403, "FORBIDDEN", "tenant quota administration requires the tenant-admin role", false);
@@ -346,6 +354,8 @@ export function adminArea(ctx: MockContext): MockArea {
       if (t.managed) {
         return err(409, "QUOTA_MANAGED_BY_CONFIG", "quota for this tenant is managed by configuration", false);
       }
+      const ifMatch = req.headers["if-match"];
+      if (!ifMatch) return err(400, "INVALID_REQUEST", "If-Match header required", false);
       const b = req.body as Record<string, unknown> | null;
       const keys = ["runningWorkspaces", "cpuMillicores", "memoryMib", "storageGib"];
       const valid =
@@ -353,6 +363,11 @@ export function adminArea(ctx: MockContext): MockArea {
         keys.every((k) => Number.isInteger(b[k]) && (b[k] as number) >= 0) &&
         Object.keys(b).every((k) => keys.includes(k));
       if (!valid) return err(400, "INVALID_REQUEST", "invalid limits", false);
+      const match = t.limits === undefined ? ifMatch === "*" : ifMatch === String(t.version);
+      if (!match) {
+        return err(412, "PRECONDITION_FAILED", "the quota changed since it was read", false);
+      }
+      t.version += 1;
       t.limits = {
         workspaces: 0,
         runningWorkspaces: b!.runningWorkspaces as number,
@@ -415,7 +430,10 @@ export function adminArea(ctx: MockContext): MockArea {
         return ok(200, { seeded: true });
       case "/_control/admin/quota":
         if (req.body?.limits === null) t.limits = undefined;
-        else if (req.body?.limits) t.limits = { ...(t.limits ?? DEFAULT_LIMITS), ...(req.body.limits as object) };
+        else if (req.body?.limits) {
+          t.limits = { ...(t.limits ?? DEFAULT_LIMITS), ...(req.body.limits as object) };
+          t.version += 1;
+        }
         if (req.body?.userLimits === null) t.userLimits = undefined;
         else if (req.body?.userLimits) t.userLimits = { ...DEFAULT_USER_LIMITS, ...(req.body.userLimits as object) };
         if (typeof req.body?.managed === "boolean") t.managed = req.body.managed;

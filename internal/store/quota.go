@@ -33,8 +33,12 @@ type OwnerUsage struct {
 type QuotaReport struct {
 	HasLimits bool
 	Limits    QuotaAmounts // Workspaces is always 0: there is no count limit
-	Usage     QuotaAmounts
-	Owners    []OwnerUsage // ordered by owner reference
+	// Version is the limits row's change token (the row's xmin): it changes
+	// on every update and is empty when no row exists. Admin writes compare
+	// it under If-Match for optimistic concurrency.
+	Version string
+	Usage   QuotaAmounts
+	Owners  []OwnerUsage // ordered by owner reference
 }
 
 // QuotaReader reads quota reports (GET /v1/quota).
@@ -49,9 +53,11 @@ func NewQuotaReader(db *DB) *QuotaReader { return &QuotaReader{db: db} }
 func (q *QuotaReader) Report(ctx context.Context, tenantID string) (QuotaReport, error) {
 	var rep QuotaReport
 	err := q.db.Pool().QueryRow(ctx, `
-		SELECT max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes
+		SELECT max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes,
+		       xmin::text
 		FROM tenant_quota WHERE tenant_id = $1`, tenantID).
-		Scan(&rep.Limits.RunningSlots, &rep.Limits.CPUMillis, &rep.Limits.MemoryBytes, &rep.Limits.DiskBytes)
+		Scan(&rep.Limits.RunningSlots, &rep.Limits.CPUMillis, &rep.Limits.MemoryBytes, &rep.Limits.DiskBytes,
+			&rep.Version)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:

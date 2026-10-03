@@ -381,7 +381,12 @@ export interface paths {
          *     platform configuration. Limits below current usage are accepted:
          *     held reservations stay, new ones are refused — a lowered limit
          *     therefore takes effect without forcing a release. Requires the
-         *     tenant-admin role on the named tenant and the `X-CSRF-Token` header.
+         *     tenant-admin role on the named tenant, the `X-CSRF-Token` header
+         *     and an `If-Match` precondition: the `version` returned by GET
+         *     (optimistic concurrency — a stale version answers
+         *     `412 PRECONDITION_FAILED`), or the literal `*` when the tenant has
+         *     no quota row yet. `If-Match: *` is not a bypass on an existing row —
+         *     it too answers 412.
          */
         put: operations["putAdminTenantQuota"];
         post?: never;
@@ -522,6 +527,7 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
+         *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale quota version; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -531,7 +537,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /** @description Uniform error body returned for every 4xx/5xx response. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -841,6 +847,8 @@ export interface components {
          *     absent when the tenant has no quota row (`configured: false`,
          *     `source: none` — or `config` while a declared row is still pending
          *     the startup upsert). `users` lists every owner with usage.
+         *     `version` is the opaque change token of the limits row — PUT echoes
+         *     it in `If-Match`; it is absent when no row exists.
          */
         AdminQuotaView: {
             tenant: string;
@@ -851,6 +859,12 @@ export interface components {
              */
             configured: boolean;
             source: components["schemas"]["QuotaSource"];
+            /**
+             * @description Opaque change token of the limits row (its storage version);
+             *     changes on every write. Absent when the tenant has no quota row
+             *     — PUT then uses `If-Match: *`.
+             */
+            version?: string;
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
             users: components["schemas"]["UserUsage"][];
@@ -1235,6 +1249,20 @@ export interface components {
          *     with the retained disk's runtime).
          */
         UnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description Optimistic-concurrency failure — `PRECONDITION_FAILED`: the
+         *     `If-Match` value does not name the current state of the resource
+         *     (a concurrent write landed first). Reload and retry with the fresh
+         *     version.
+         */
+        PreconditionFailed: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1801,7 +1829,13 @@ export interface operations {
     putAdminTenantQuota: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /**
+                 * @description Change token from the GET response's `version`, or `*` to create
+                 *     a row for a tenant that has none.
+                 */
+                "If-Match": string;
+            };
             path: {
                 /**
                  * @description Tenant identifier. Callers may only administer their own tenant —
@@ -1831,6 +1865,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
+            412: components["responses"]["PreconditionFailed"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
