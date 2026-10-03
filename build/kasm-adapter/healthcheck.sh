@@ -21,13 +21,20 @@ xdpyinfo -display ":$DISPLAY_NUM" >/dev/null 2>&1 || exit 1
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 # Fail closed: a runtime whose password file is missing/unreadable cannot serve a session either, so NotReady is the truth.
 [ -r "$SECRET_DIR/password" ] || exit 1
+# A Secret value written with a line ending carries the same credential:
+# $(cat) drops the trailing newline(s); ${v%$'\r'} drops the CR a CRLF
+# ending leaves behind. Any other whitespace stays part of the value.
 user="kasm_user"
 if [ -r "$SECRET_DIR/username" ]; then
-  user="$(tr -d '[:space:]' < "$SECRET_DIR/username")"
+  user="$(cat "$SECRET_DIR/username")"
+  user="${user%$'\r'}"
 fi
 [ -n "$user" ] || exit 1
+pass="$(cat "$SECRET_DIR/password")"
+pass="${pass%$'\r'}"
+[ -n "$pass" ] || exit 1
 # curl config quoting: escape backslash and double quote.
-cred="$(printf '%s:%s' "$user" "$(cat "$SECRET_DIR/password")" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+cred="$(printf '%s:%s' "$user" "$pass" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 
 # KasmVNC 1.4.x loopback quirk: when 127.0.0.1 IS blacklisted curl prints
 # the code it saw AND exits non-zero (yielding e.g. "200000"). Take the

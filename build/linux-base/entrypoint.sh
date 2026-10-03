@@ -30,9 +30,13 @@ fail() { echo "tcdi-entrypoint: $*" >&2; exit 1; }
 [ -f "$KEY_FILE" ]  || fail "mounted Secret file missing: $KEY_FILE"
 [ -d "$RT" ] && [ -w "$RT" ] || fail "$RT is not a writable mount (need tmpfs/emptyDir owned by uid $(id -u))"
 
+# A Secret value written with a line ending carries the same credential:
+# $(cat) drops the trailing newline(s); ${v%$'\r'} drops the CR a CRLF
+# ending leaves behind. Any other whitespace stays part of the value.
 KASMVNC_USER="kasm_user"
 if [ -f "$USER_FILE" ]; then
-  KASMVNC_USER="$(tr -d '[:space:]' < "$USER_FILE")"
+  KASMVNC_USER="$(cat "$USER_FILE")"
+  KASMVNC_USER="${KASMVNC_USER%$'\r'}"
 fi
 [ -n "$KASMVNC_USER" ] || fail "$USER_FILE is empty"
 
@@ -46,11 +50,16 @@ chmod 600 "$RT/tls.key"
 chmod 644 "$RT/tls.crt"
 
 # kasmvncpasswd prompts twice; feed the mounted secret on stdin so the value
-# never lands in argv or logs.
+# never lands in argv or logs. The value is normalized first (one line
+# ending stripped) so a Secret file written '\n'- or '\r\n'-terminated
+# stores the same credential the broker reads (it trims the Secret value).
+PASS="$(cat "$PASS_FILE")"
+PASS="${PASS%$'\r'}"
+[ -n "$PASS" ] || fail "$PASS_FILE is empty"
 # NOTE: no -o - the runtime user must NOT be an owner. Owner rights unlock
 # the management/API surface (port relay, upload/download); with a write-only
 # user those endpoints deny every request.
-{ cat "$PASS_FILE"; cat "$PASS_FILE"; } | kasmvncpasswd -u "$KASMVNC_USER" -w "$RT/kasmpasswd" >/dev/null
+{ printf '%s\n' "$PASS"; printf '%s\n' "$PASS"; } | kasmvncpasswd -u "$KASMVNC_USER" -w "$RT/kasmpasswd" >/dev/null
 chmod 600 "$RT/kasmpasswd"
 
 # The launcher's "any users configured" check reads $HOME/.kasmpasswd before

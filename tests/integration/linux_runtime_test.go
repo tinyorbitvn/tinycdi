@@ -208,6 +208,41 @@ func writeFile(t *testing.T, path string, data []byte) {
 	}
 }
 
+// probeSecretDir builds a minimal Secret dir (username + password only —
+// the probe reads nothing else) whose files carry the given line ending,
+// with pod-Secret-volume permissions. A probe run can then be pointed at
+// it via the healthcheck's TCDI_SECRET_DIR override.
+func probeSecretDir(t *testing.T, user, password, ending string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "password"), []byte(password+ending))
+	writeFile(t, filepath.Join(dir, "username"), []byte(user+ending))
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"password", "username"} {
+		if err := os.Chmod(filepath.Join(dir, f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// emptySecretDir builds a Secret dir whose password file exists but is
+// empty — the probe must fail closed on it.
+func emptySecretDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "password"), nil)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "password"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // containerRunArgs records each container's docker run argv so a dead
 // container's diagnostics can show exactly how it was launched.
 var containerRunArgs = map[string]string{}
@@ -498,6 +533,65 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		if !strings.Contains(log, "blacklisted") {
 			t.Fatalf("control failed: anonymous requests did not trigger the lockout, so this test proves nothing:\n%s", log)
 		}
+	})
+
+	t.Run("ProbeToleratesSecretLineEnding", func(t *testing.T) {
+		// A Secret value written with a trailing line ending is the same
+		// credential: the entrypoint normalizes it before kasmvncpasswd (a
+		// CRLF file would otherwise store a stray '\r' the broker never
+		// sends) and the probe strips one ending before logging in. The
+		// boot mount carries '\r\n' — the regression case — while the
+		// probe-side variants get their own mounts read via the
+		// TCDI_SECRET_DIR override, so one boot covers every ending.
+		secret, password := selfSignedSecret(t)
+		for _, f := range []struct{ name, value string }{
+			{"password", password},
+			{"username", "kasm_user"},
+		} {
+			writeFile(t, filepath.Join(secret, f.name), []byte(f.value+"\r\n"))
+			if err := os.Chmod(filepath.Join(secret, f.name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		secLF := probeSecretDir(t, "kasm_user", password, "\n")
+		secEmpty := emptySecretDir(t)
+		secMissing := t.TempDir()
+		if err := os.Chmod(secMissing, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		c := runContainer(t, runID, "crlf", baseImage, secret, "",
+			"-v", secLF+":/tmp/sec-lf:ro",
+			"-v", secEmpty+":/tmp/sec-empty:ro",
+			"-v", secMissing+":/tmp/sec-missing:ro")
+		waitHealthy(t, c) // the image HEALTHCHECK already probed the CRLF mount
+
+		// The normalized value is the credential: 'password' authenticates,
+		// the raw CR-bearing form does not.
+		code, err := httpsGet(t, c, "kasm_user", password)
+		if err != nil || code != http.StatusOK {
+			t.Fatalf("auth with CRLF-terminated secret: code=%d err=%v, want 200", code, err)
+		}
+		if code, err := httpsGet(t, c, "kasm_user", password+"\r"); err == nil &&
+			code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatalf("CR-bearing password accepted: %d", code)
+		}
+
+		// Probe passes on the '\r\n' boot mount (also via waitHealthy) and
+		// on an '\n'-terminated dir; both endings are the same credential.
+		if _, err := execIn(t, c, "/opt/tcdi/healthcheck.sh"); err != nil {
+			t.Fatalf("probe failed on CRLF-terminated Secret mount: %v", err)
+		}
+		if _, err := execIn(t, c, "TCDI_SECRET_DIR=/tmp/sec-lf /opt/tcdi/healthcheck.sh"); err != nil {
+			t.Fatalf("probe failed on LF-terminated Secret dir: %v", err)
+		}
+		// Fail closed: an empty or missing password file is NotReady, even
+		// while the real endpoint is up and serving.
+		for _, d := range []string{"/tmp/sec-empty", "/tmp/sec-missing"} {
+			if _, err := execIn(t, c, "TCDI_SECRET_DIR="+d+" /opt/tcdi/healthcheck.sh"); err == nil {
+				t.Fatalf("probe reported ready with Secret dir %s", d)
+			}
+		}
+		assertNoSecret(t, c, password)
 	})
 
 	t.Run("DisplayDeathNotReady", func(t *testing.T) {
