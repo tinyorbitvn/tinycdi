@@ -12,11 +12,13 @@
 # a dispatch from another ref builds + scans but pushes nothing, which
 # also serves as the dry-run rehearsal for the train.
 #
-# A publish run promotes the signed digests to the rt-YYYYMMDD.N tag
-# (N = run number), writes runtime-images.json and attaches it to the
-# GitHub Release runtime-YYYY.MM.DD (created on first run of the day,
-# manifest re-uploaded on later runs). It never promotes :main or
-# :latest — those belong to the control-plane pipelines.
+# A publish run promotes the signed digests to the rt-YYYYMMDD.N tag —
+# N is the next free number over the day's already-promoted rt-* tags
+# (.github/scripts/next-rt-tag.sh), so failed and dry runs consume no
+# number — writes runtime-images.json and attaches it to the GitHub
+# Release runtime-YYYY.MM.DD (created on first run of the day, manifest
+# re-uploaded on later runs). It never promotes :main or :latest —
+# those belong to the control-plane pipelines.
 #
 # Pipeline shape (SEC-04/SEC-05, same as images.yml/release.yml):
 #   1. build jobs   — docker/build-push-action pushes BY DIGEST ONLY
@@ -105,17 +107,36 @@ env:
 jobs:
   meta:
     # One date stamp per run so the OCI labels, the rt-* tag and the
-    # release tag can never disagree across a midnight boundary.
+    # release tag can never disagree across a midnight boundary. The
+    # tag's N counts successful publishes (next-rt-tag.sh); the publish
+    # job re-derives it at promote time, so this value is only the
+    # build-time label/identifier for the run.
     name: runtime train tags
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read  # list the day's rt-* tags for the next number
     outputs:
       rt_tag: ${{ steps.t.outputs.rt_tag }}
+      rt_date: ${{ steps.t.outputs.rt_date }}
       release_tag: ${{ steps.t.outputs.release_tag }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone: false
+          sparse-checkout: |
+            .github/scripts
       - id: t
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "rt_tag=rt-$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=runtime-$(date -u +%Y.%m.%d)" >> "$GITHUB_OUTPUT"
+          d="$(date -u +%Y%m%d)"
+          {
+            echo "rt_date=$d"
+            echo "rt_tag=$(.github/scripts/next-rt-tag.sh --date "$d")"
+            echo "release_tag=runtime-$(date -u +%Y.%m.%d)"
+          } >> "$GITHUB_OUTPUT"
 
   base:
     # linux-base is the base of both runtime profiles (linux-base,
@@ -711,11 +732,33 @@ jobs:
               --predicate "sboms/sbom-$name.spdx.json" "$ref"
           done
 
-      - name: promote rt tag ($RT_TAG)
+      - name: derive rt tag at publish time
+        # Backlog 15: N numbers successful publishes, not run attempts —
+        # it is the next free number over the day's already-promoted
+        # rt-<date>.* tags. Derived again HERE, just before promotion,
+        # because the tag must reflect what is free at promote time:
+        # the concurrency group serializes main runs end to end, but a
+        # "re-run failed jobs" of an old run would otherwise repoint a
+        # tag a newer train already shipped. Equals meta's tag on a
+        # normal run; a difference only means a publish landed in
+        # between (or an earlier attempt half-promoted).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RT_DATE: ${{ needs.meta.outputs.rt_date }}
+          META_TAG: ${{ needs.meta.outputs.rt_tag }}
+        run: |
+          tag="$(.github/scripts/next-rt-tag.sh --date "$RT_DATE")"
+          echo "RT_TAG=$tag" >> "$GITHUB_ENV"
+          if [ "$tag" != "$META_TAG" ]; then
+            echo "::notice::rt tag moved $META_TAG -> $tag"
+          fi
+
+      - name: promote rt tag
         # SUPR-13: last mutation — the digests are already signed +
         # attested. Only the rt tag is promoted: :main/:latest belong to
         # the control-plane pipelines (D27).
         run: |
+          echo "promoting $RT_TAG"
           for f in refs/*.ref; do
             ref="$(tr -d '[:space:]' < "$f")"
             base="${ref%@*}"
