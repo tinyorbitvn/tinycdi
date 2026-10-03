@@ -82,6 +82,12 @@ export interface RunInfo {
   /** The --duration the soak was asked to observe, counted from soakStartedAt. */
   requestedDurationMs: number;
   sessionsRequested: number;
+  /** Sessions actually created; lower than sessionsRequested when a lane was skipped. */
+  sessionsEffective?: number;
+  /** Lanes that exhausted their login attempts and were skipped (their share of sessions dropped). */
+  skippedLanes?: { user: string; error: string }[];
+  /** Per-lane tallies: HTTP 429 responses and the skip flag. */
+  lanes?: { user: string; rateLimited429: number; skipped: boolean }[];
   /** How many distinct users the sessions were spread over (>= 1). */
   users?: number;
   inputIntervalSeconds: number;
@@ -175,6 +181,13 @@ export function buildReport(
         : {}),
       requestedDurationSeconds: run.requestedDurationMs / 1000,
       sessionsRequested: run.sessionsRequested,
+      ...(run.sessionsEffective !== undefined
+        ? { sessionsEffective: run.sessionsEffective }
+        : {}),
+      ...(run.skippedLanes !== undefined && run.skippedLanes.length > 0
+        ? { skippedLanes: run.skippedLanes }
+        : {}),
+      ...(run.lanes !== undefined ? { lanes: run.lanes } : {}),
       ...(run.users !== undefined ? { users: run.users } : {}),
       inputIntervalSeconds: run.inputIntervalSeconds,
       pollIntervalSeconds: run.pollIntervalSeconds,

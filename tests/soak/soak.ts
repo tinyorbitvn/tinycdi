@@ -25,6 +25,7 @@ import {
   chromium,
   request,
   type APIRequestContext,
+  type APIResponse,
   type Browser,
   type BrowserContext,
   type Page,
@@ -385,6 +386,24 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function stamp(msg: string): void {
   console.log(`${new Date().toISOString()} ${msg}`);
+}
+
+/**
+ * Counts HTTP 429s on an APIRequestContext. `context.request` calls do not
+ * emit BrowserContext "response" events, so the methods are wrapped.
+ */
+function patchRateLimitCounter(
+  reqCtx: APIRequestContext,
+  lane: { rateLimited429: number },
+): void {
+  for (const m of ["get", "post", "delete", "put", "patch", "head", "fetch"] as const) {
+    const orig = reqCtx[m].bind(reqCtx) as (...a: unknown[]) => Promise<APIResponse>;
+    (reqCtx as unknown as Record<string, unknown>)[m] = async (...args: unknown[]) => {
+      const r = await orig(...args);
+      if (r.status() === 429) lane.rateLimited429++;
+      return r;
+    };
+  }
 }
 
 // ---- small testable helpers ----
@@ -909,6 +928,13 @@ export interface Lane {
   user?: SoakUser;
   api: PortalApi;
   driver: Driver;
+  /** Login attempts exhausted: the lane's share of sessions is dropped and
+   *  the run continues without it (advisor skip-lane rule). */
+  skipped?: boolean;
+  /** First line of the final login error when the lane was skipped. */
+  loginError?: string;
+  /** HTTP 429 responses observed on the lane's page traffic and API calls. */
+  rateLimited429: number;
   dispose(): Promise<void>;
 }
 
@@ -1180,12 +1206,15 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
       const ctx = await request.newContext({
         ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
       });
-      lanes.push({
+      const lane: Lane = {
         ...(user !== undefined ? { user } : {}),
         api: new PortalApi(ctx, portalUrl),
         driver: new ApiDriver(ctx, portalUrl, true),
+        rateLimited429: 0,
         dispose: () => ctx.dispose(),
-      });
+      };
+      lanes.push(lane);
+      patchRateLimitCounter(ctx, lane);
     }
   } else {
     browser = await chromium.launch(chromiumLaunchOptions(env("SOAK_HEADFUL") !== "1"));
@@ -1195,18 +1224,24 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
         ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
       });
       const driver = new BrowserDriver(context, portalUrl, user);
-      lanes.push({
+      const lane: Lane = {
         ...(user !== undefined ? { user } : {}),
         api: driver.api,
         driver,
+        rateLimited429: 0,
         dispose: () => driver.dispose(),
+      };
+      context.on("response", (r) => {
+        if (r.status() === 429) lane.rateLimited429++;
       });
+      patchRateLimitCounter(context.request, lane);
+      lanes.push(lane);
     }
   }
 
   const cleanup = async () => {
     for (const s of sessions) {
-      const lane = s.lane ?? lanes[0];
+      const lane = s.lane ?? lanes.find((l) => !l.skipped) ?? lanes[0];
       try {
         await lane.driver.closeSession(s.id);
         await lane.api.deleteWorkspace(s.id);
@@ -1256,12 +1291,26 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
               }
             }
           }
-          if (lastErr) throw new Error(`login lane ${who}: ${lastErr.message}`);
+          if (lastErr) {
+            // Advisor skip-lane rule: a lane that exhausts its login attempts
+            // is dropped (its share of sessions is never created) instead of
+            // aborting the run; skipped lanes are reported below.
+            lane.skipped = true;
+            lane.loginError = lastErr.message.split("\n")[0];
+            stamp(`login lane ${who} skipped after ${loginAttempts} attempts (${lane.loginError})`);
+          }
         }),
       );
     }
+    const activeLanes = lanes.filter((l) => !l.skipped);
+    if (activeLanes.length !== lanes.length) {
+      stamp(`${lanes.length - activeLanes.length} lane(s) skipped; continuing with ${activeLanes.length}`);
+    }
+    if (activeLanes.length === 0) {
+      throw new Error(`every login lane failed (${lanes.length} skipped)`);
+    }
 
-    const templates = await lanes[0].api.listTemplates();
+    const templates = await activeLanes[0].api.listTemplates();
     const tpl = opts.template
       ? (templates.find((t) => t.id === opts.template || t.name === opts.template)?.id ??
         opts.template)
@@ -1271,6 +1320,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     stamp(`creating ${opts.sessions} workspaces on template ${tpl}`);
     for (let i = 0; i < opts.sessions && !shouldStop(); i++) {
       const lane = lanes[i % lanes.length];
+      if (lane.skipped) continue; // skipped lane's share of sessions is dropped
       const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
       const id = await lane.api.createWorkspace(name, tpl);
       const s = newSession(id, name);
@@ -1300,7 +1350,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
             : null,
       },
       sessions,
-      lanes[0].driver,
+      activeLanes[0].driver,
       shouldStop,
     );
   } catch (e) {
@@ -1321,7 +1371,20 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
         soakStartedAt: outcome?.soakStartedAt ?? null,
         requestedDurationMs: opts.durationMs,
         sessionsRequested: opts.sessions,
+        sessionsEffective: sessions.length,
         users: lanes.length,
+        ...(lanes.some((l) => l.skipped)
+          ? {
+              skippedLanes: lanes
+                .filter((l) => l.skipped)
+                .map((l) => ({ user: l.user?.name ?? "default", error: l.loginError ?? "" })),
+            }
+          : {}),
+        lanes: lanes.map((l) => ({
+          user: l.user?.name ?? "default",
+          rateLimited429: l.rateLimited429,
+          skipped: l.skipped === true,
+        })),
         inputIntervalSeconds: opts.inputIntervalMs / 1000,
         pollIntervalSeconds: opts.pollIntervalMs / 1000,
       },

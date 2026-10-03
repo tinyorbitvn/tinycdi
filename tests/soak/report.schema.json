@@ -47,6 +47,42 @@
           "description": "The soak duration that was asked for, counted from soakStartedAt; a run that ends sooner is truncated and fails."
         },
         "sessionsRequested": { "type": "integer", "minimum": 0 },
+        "sessionsEffective": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sessions actually created; lower than sessionsRequested when a lane was skipped."
+        },
+        "skippedLanes": {
+          "type": "array",
+          "description": "Lanes that exhausted their login attempts and were skipped (advisor skip-lane rule); their share of sessions was dropped.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["user", "error"],
+            "properties": {
+              "user": { "type": "string" },
+              "error": { "type": "string" }
+            }
+          }
+        },
+        "lanes": {
+          "type": "array",
+          "description": "Per-lane tallies for the run.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["user", "rateLimited429", "skipped"],
+            "properties": {
+              "user": { "type": "string" },
+              "rateLimited429": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "HTTP 429 (rate limited) responses seen on the lane's page traffic and API calls."
+              },
+              "skipped": { "type": "boolean" }
+            }
+          }
+        },
         "users": {
           "type": "integer",
           "minimum": 1,

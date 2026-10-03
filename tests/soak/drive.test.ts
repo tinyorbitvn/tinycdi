@@ -416,6 +416,7 @@ test("V3.10: each session drives through its own lane", async () => {
   const lane = (d: FakeDriver) => ({
     api: {} as never,
     driver: d,
+    rateLimited429: 0,
     dispose: () => Promise.resolve(),
   });
   const a = newSession("ws_a", "a");
