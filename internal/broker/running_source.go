@@ -2,12 +2,14 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -48,6 +50,44 @@ func (s *K8sRunningSource) RunningWorkspaces(ctx context.Context) ([]RunningWork
 			RuntimeGeneration: uint64(ws.Status.ObservedRuntimeGeneration),
 			StartedAt:         ws.Status.StartedAt.Time,
 			Policy:            s.policyFor(ctx, ws),
+		})
+	}
+	return out, nil
+}
+
+// OperatorStoppedWorkspaces implements OperatorStoppedSource: workspaces whose
+// CR still holds the Running intent the row pinned but whose applied intent
+// the operator flipped to Stopped (its max-duration backstop).
+func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]OperatorStopped, error) {
+	var list workspacesv1alpha1.WorkspaceList
+	if err := s.cache.List(ctx, &list,
+		client.HasLabels{provisioning.LabelWorkspaceUID}); err != nil {
+		return nil, fmt.Errorf("broker: list operator-stopped workspaces: %w", err)
+	}
+	var out []OperatorStopped
+	for i := range list.Items {
+		ws := &list.Items[i]
+		if ws.Spec.DesiredState != workspacesv1alpha1.DesiredStateRunning ||
+			ws.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+			continue
+		}
+		raw := ws.Annotations[operator.AnnotationAppliedIntent]
+		if raw == "" {
+			continue
+		}
+		var applied operator.AppliedIntent
+		if err := json.Unmarshal([]byte(raw), &applied); err != nil {
+			continue
+		}
+		if applied.DesiredState != workspacesv1alpha1.DesiredStateStopped ||
+			applied.Revision != ws.Spec.IntentRevision ||
+			ws.Status.LastAppliedIntentRevision != applied.Revision {
+			continue
+		}
+		out = append(out, OperatorStopped{
+			WorkspaceUID:      provisioning.PlatformID(ws.Labels[provisioning.LabelWorkspaceUID]),
+			RuntimeGeneration: uint64(ws.Spec.RuntimeGeneration),
+			IntentRevision:    uint64(ws.Spec.IntentRevision),
 		})
 	}
 	return out, nil

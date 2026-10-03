@@ -61,6 +61,10 @@ const (
 	StopReasonMaxDuration StopReason = "max_duration"
 	// StopReasonRequested — explicit stop (user or admin action).
 	StopReasonRequested StopReason = "requested"
+	// StopReasonOperatorStopped — the operator stopped the current intent on
+	// its own (its max-duration backstop) and the workspaces row is brought
+	// in line with the Workspace CR.
+	StopReasonOperatorStopped StopReason = "operator_stopped"
 )
 
 // TimeoutPolicy is the per-workspace lifecycle budget, taken from the
@@ -393,6 +397,25 @@ type RunningSource interface {
 	RunningWorkspaces(ctx context.Context) ([]RunningWorkspace, error)
 }
 
+// OperatorStopped is a workspace whose operator stopped the applied intent
+// on its own: the Workspace CR still carries the Running intent the
+// workspaces row pinned (spec.intentRevision == the applied record's
+// revision) but the applied record says Stopped. The workspaces row never
+// heard about it, so without reconciliation it stays Running with the quota
+// reservation held and a Start is a no-op.
+type OperatorStopped struct {
+	WorkspaceUID      PlatformID
+	RuntimeGeneration uint64
+	// IntentRevision is the outbox revision the CR was last handed.
+	IntentRevision uint64
+}
+
+// OperatorStoppedSource is implemented by a RunningSource that can also list
+// workspaces the operator stopped out-of-band (production: K8sRunningSource).
+type OperatorStoppedSource interface {
+	OperatorStoppedWorkspaces(ctx context.Context) ([]OperatorStopped, error)
+}
+
 // ExpiryPlanner turns recorded activity into stop intents. It shares the
 // broker's store and clock, so tests drive it with the same fake clock as
 // ReportActivity. It is pure evaluation — it never mutates a runtime.
@@ -549,6 +572,57 @@ func (p *ExpiryPlanner) Sweep(ctx context.Context, src RunningSource) (int, erro
 		if err != nil {
 			return emitted, fmt.Errorf("broker: emit stop %s gen %d: %w",
 				in.WorkspaceUID, in.RuntimeGeneration, err)
+		}
+		if ok {
+			emitted++
+		}
+	}
+	if oss, ok := src.(OperatorStoppedSource); ok {
+		n, err := p.reconcileOperatorStops(ctx, oss)
+		emitted += n
+		if err != nil {
+			return emitted, err
+		}
+	}
+	return emitted, nil
+}
+
+// reconcileOperatorStops brings the workspaces row in line with a stop the
+// operator applied by itself. It goes through emitStop, so the row flips to
+// Stopped and the stop intent is appended in one transaction, fenced on the
+// row still being Running at the same runtime generation: a Stop, Start or
+// Delete that landed in the meantime changes desired_state, the generation
+// or the state and wins. On top of that, the row's intent revision must
+// still be the one the CR holds: an intent appended but not yet dispatched
+// wins too.
+func (p *ExpiryPlanner) reconcileOperatorStops(ctx context.Context, src OperatorStoppedSource) (int, error) {
+	stopped, err := src.OperatorStoppedWorkspaces(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("broker: list operator-stopped workspaces: %w", err)
+	}
+	emitted := 0
+	for _, os := range stopped {
+		var latest int64
+		if err := p.b.db.Pool().QueryRow(ctx,
+			`SELECT intent_revision FROM workspaces WHERE id = $1`,
+			os.WorkspaceUID).Scan(&latest); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return emitted, fmt.Errorf("broker: intent revision %s: %w", os.WorkspaceUID, err)
+		}
+		if latest != int64(os.IntentRevision) {
+			continue // the row moved on; the CR is not at the head
+		}
+		ok, err := p.b.emitStop(ctx, StopIntent{
+			WorkspaceUID:      os.WorkspaceUID,
+			RuntimeGeneration: os.RuntimeGeneration,
+			Reason:            StopReasonOperatorStopped,
+			Deadline:          p.b.now(),
+		})
+		if err != nil {
+			return emitted, fmt.Errorf("broker: emit stop %s gen %d: %w",
+				os.WorkspaceUID, os.RuntimeGeneration, err)
 		}
 		if ok {
 			emitted++
