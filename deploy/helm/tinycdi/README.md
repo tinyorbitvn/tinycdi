@@ -61,6 +61,32 @@ Seeded WorkspaceTemplates are immutable `<name>-<hash8>` revision objects —
 a spec change creates a new revision and removes the superseded one, so
 upgrades and rollbacks never hit the CEL immutability wall.
 
+**Kasm note (E13):** a seeded `adapter: kasm` template with
+`experience: Browser` **fails the render** after this upgrade until its
+image is on `kasmAdapter.browserAllowlist` or the template is re-classed
+as `experience: Desktop` — the allowlist is the chart-side binding to the
+catalog's tightened ≤2-major browser engine gate (non-browser templates
+keep the ≤4 budget). Both options:
+
+```yaml
+# Option A — the image meets the ≤2 gate: allowlist it (it must be a
+# browser-class build/kasm-catalog.txt entry or the catalog check fails).
+kasmAdapter:
+  browserAllowlist:
+    - kasmweb/<app>@sha256:<digest>
+
+# Option B — the image misses the gate: keep it for non-browser use.
+templates:
+  - name: <tpl>
+    spec:
+      experience: Desktop    # was: Browser
+```
+
+`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
+pin — lag 4), so a Browser template pinned to it only has option B. See
+`docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
+gate" and `docs/kasm-images.md`.
+
 ## Upgrading to 0.2.0
 
 Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
