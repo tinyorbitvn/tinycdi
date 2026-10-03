@@ -313,27 +313,16 @@ func (c *K8sTemplateCatalog) Get(ctx context.Context, tenantID, id string) (*Tem
 	if !ok {
 		return nil, nil
 	}
-	var tpl workspacev1alpha1.WorkspaceTemplate
-	err := c.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &tpl)
+	// Not a live object name: the shared resolver falls back to the
+	// catalog-name label so tpl_<name> resolves through revision churn.
+	tpl, err := ResolveTemplateByName(ctx, c.client, ns, name)
 	switch {
-	case err == nil:
-		e := templateEntry(&tpl)
-		return &e, nil
-	case !apierrors.IsNotFound(err):
-		return nil, err
-	}
-	// Not a live object name: try the catalog-name label so tpl_<name>
-	// resolves through revision churn.
-	var list workspacev1alpha1.WorkspaceTemplateList
-	if err := c.client.List(ctx, &list, client.InNamespace(ns),
-		client.MatchingLabels{LabelCatalogName: name}); err != nil {
-		return nil, err
-	}
-	latest := latestRevision(list.Items)
-	if latest == nil {
+	case apierrors.IsNotFound(err):
 		return nil, nil
+	case err != nil:
+		return nil, err
 	}
-	e := templateEntry(latest)
+	e := templateEntry(tpl)
 	return &e, nil
 }
 
