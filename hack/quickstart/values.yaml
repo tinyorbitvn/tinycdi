@@ -16,6 +16,12 @@ managedNamespaces:
       cpu: "4"
       memory: 8Gi
       storage: 20Gi
+  # No quota on purpose (B5.4 smoke): a PROVISIONED tenant without a quota
+  # row — its creates must be refused 409 QUOTA_NOT_CONFIGURED with the
+  # administrator message, not silently allowed. The dev realm's
+  # demo-noquota user maps here (realm-export.json).
+  - name: tinycdi-tenant-noquota
+    tenant: tenant-noquota
 
 # *.tcdi.localtest.me resolves to 127.0.0.1 on the public DNS, including
 # ws-<hex>.session.tcdi.localtest.me. portalHost sits outside sessionDomain.
@@ -129,6 +135,29 @@ templates:
       runtime: LinuxContainer
       experience: Desktop
       linux: {}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  # Same catalog entry in the no-quota tenant's namespace (B5.4): the
+  # template list is tenant-scoped, so demo-noquota needs a template to
+  # submit a create and hit the quota refusal.
+  - name: browser
+    namespace: tinycdi-tenant-noquota
+    image: browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        command: [env, TCDI_BROWSER=firefox, /opt/tcdi/entrypoint.sh]
       resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
       bootDeadline: 10m
       networkProfile: Isolated
