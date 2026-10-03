@@ -45,9 +45,11 @@ async function embedRun(fixtures: {
   // fake desktop the real gateway proxied out of the fake upstream.
   // The gateway redirects the launch POST to the desktop with resize=remote
   // (KasmVNC forces resize=off inside an iframe otherwise, FX-R18) plus the
-  // static embedded-parity settings (V3.24).
+  // static embedded-parity settings (V3.24) and the clipboard flags from
+  // the policy recorded on the ticket — none here, so least privilege.
   expect(frame.url()).toBe(
-    `${origin}/?resize=remote&enable_webp=true&idle_disconnect=1440`,
+    `${origin}/?resize=remote&enable_webp=true&idle_disconnect=1440` +
+      `&clipboard_up=false&clipboard_down=false`,
   );
   await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
 
