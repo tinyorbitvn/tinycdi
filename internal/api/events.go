@@ -21,6 +21,8 @@ type IntentRecord struct {
 	Kind     string
 	Revision uint64
 	At       time.Time
+	// Reason is the recorded cause of a platform-initiated stop.
+	Reason string
 }
 
 // IntentLog is the read seam over a workspace's recorded lifecycle intents.
@@ -44,7 +46,7 @@ func (l serviceIntentLog) IntentHistory(ctx context.Context, tenantID, workspace
 	}
 	out := make([]IntentRecord, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, IntentRecord{Kind: string(r.Kind), Revision: r.Revision, At: r.CreatedAt})
+		out = append(out, IntentRecord{Kind: string(r.Kind), Revision: r.Revision, At: r.CreatedAt, Reason: r.Reason})
 	}
 	return out, nil
 }
@@ -101,6 +103,9 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 		ev.Reason, ev.Message = "StartRequested", "Starting the workspace was requested."
 	case string(provisioning.IntentStop):
 		ev.Reason, ev.Message = "StopRequested", "Stopping the workspace was requested."
+		if in.Reason == "max_duration" {
+			ev.Reason, ev.Message = "MaxDurationReached", "The workspace reached its maximum running time and was stopped."
+		}
 	case string(provisioning.IntentDelete):
 		ev.Reason, ev.Message = "DeleteRequested", "Deleting the workspace was requested."
 	default:

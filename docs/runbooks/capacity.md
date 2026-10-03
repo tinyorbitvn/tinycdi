@@ -89,6 +89,25 @@ never open, and the API reports `409 QUOTA_NOT_CONFIGURED` (distinct from
 `QUOTA_EXHAUSTED`, which means a configured limit has no headroom). Lowering a limit below current usage does not kill running
 workspaces; it only blocks new reservations until held < limit.
 
+### Stopped Retain workspaces and quota
+
+A reservation is released only on a positive proof that the runtime is gone:
+no pod and no PVC labelled to the workspace other than a platform-retained
+one (`workspaces.cdi.tinyorbit.vn/data-retained=true`). A **Retain** workspace's
+own home volume carries that label only once the workspace is deleted, so
+while it is merely stopped the volume still counts as a live runtime object
+and the reservation stays held (Ephemeral workspaces keep no volume and
+release within about a minute). A stopped Retain workspace therefore keeps its
+slot, CPU and memory in the tenant's quota until it is deleted. A second home
+volume labelled to the same workspace (a stray default home left behind by an
+older attach) blocks the proof the same way. Check with:
+
+```sql
+SELECT w.name, w.desired_state, q.state FROM workspaces w
+JOIN quota_reservation q ON q.workspace_id = w.id
+WHERE w.desired_state = 'Stopped' AND q.state = 'held' AND w.state = 'active';
+```
+
 ## Cluster sizing
 
 Size compute workers for the session profile; the worked examples below

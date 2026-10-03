@@ -156,9 +156,10 @@ func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Worksp
 		}
 		consider(anchor.Add(snap.Spec.BootDeadline.Duration))
 	}
-	if ws.Status.StartedAt != nil && snap.Spec.Lifecycle.MaxDuration.Duration > 0 {
-		// Absolute generation cap — input never extends it.
-		consider(ws.Status.StartedAt.Add(snap.Spec.Lifecycle.MaxDuration.Duration))
+	if started := incarnationStartedAt(ws); started != nil && snap.Spec.Lifecycle.MaxDuration.Duration > 0 {
+		// Absolute generation cap — input never extends it. Measured from
+		// the running incarnation's start, never an ended one's.
+		consider(started.Add(snap.Spec.Lifecycle.MaxDuration.Duration))
 	}
 	if earliest.IsZero() {
 		return 0
