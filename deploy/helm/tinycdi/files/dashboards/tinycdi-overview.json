@@ -1,0 +1,212 @@
+{
+  "uid": "tinycdi-overview",
+  "title": "TinyCDI Overview",
+  "description": "Request, session and login health of the TinyCDI backend (tinycdi_* metric set).",
+  "tags": ["tinycdi"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "regex": "",
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "annotations": {"list": []},
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Live sessions",
+      "description": "Desktop sessions currently held across all backend replicas.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(tinycdi_sessions_active)",
+          "legendFormat": "sessions"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "5xx rate",
+      "description": "Server-error responses per second across all listeners.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(tinycdi_http_requests_total{code_class=\"5xx\"}[$__rate_interval]))",
+          "legendFormat": "5xx/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.1}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Login refusals / 5m",
+      "description": "Denied or errored /v1/auth/callback completions.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(increase(tinycdi_logins_total{outcome!=\"success\"}[5m]))",
+          "legendFormat": "refusals"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 10}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Request rate by listener",
+      "description": "Requests per second on the app, session and internal listeners.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (listener) (rate(tinycdi_http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{listener}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "5xx responses by listener",
+      "description": "Server-error responses per second, split by listener.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (listener) (rate(tinycdi_http_requests_total{code_class=\"5xx\"}[$__rate_interval]))",
+          "legendFormat": "{{listener}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Request latency p95 by route",
+      "description": "95th-percentile request duration per listener and mux route template.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "histogram_quantile(0.95, sum by (le, listener, route) (rate(tinycdi_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{listener}} {{route}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Logins by outcome",
+      "description": "Completed /v1/auth/callback attempts per second.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 21},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (outcome) (rate(tinycdi_logins_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Session rehydrations by result",
+      "description": "Session-directory lookups for cookies this replica never saw: ok = session rebuilt, miss = no session, error = directory failure.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 21},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (result) (rate(tinycdi_gateway_rehydrations_total[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Stream fences and rate-limit refusals",
+      "description": "Streams closed on cross-replica lease fences, and requests refused by the per-client rate limiters.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 21},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(tinycdi_gateway_streams_fenced_total[$__rate_interval]))",
+          "legendFormat": "streams fenced"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(tinycdi_rate_limited_total[$__rate_interval]))",
+          "legendFormat": "rate limited"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    }
+  ]
+}
