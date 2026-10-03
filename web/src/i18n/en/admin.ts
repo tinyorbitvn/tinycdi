@@ -83,6 +83,11 @@ export default {
   "admin.templates.badge.network": "Network: {value}",
   "admin.templates.imageStale": "Stale",
   "admin.templates.imageStaleHint": "The runtime image is older than the freshness SLO.",
+  "admin.templates.imageBlocked": "Blocked",
+  "admin.templates.imageBlockedHint":
+    "The runtime image is over the block limit — creates and starts are refused (409 IMAGE_STALE).",
+  "admin.templates.engine.chromium": "Chromium",
+  "admin.templates.engine.firefox": "Firefox ESR",
   "admin.templates.imageUnknown": "Unknown",
 
   // Tenant workspaces page.

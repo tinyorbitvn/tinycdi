@@ -73,8 +73,10 @@ the manifest `runtime-images.json` (three images; the profiles also record the
 engine versions they carry) is attached to the GitHub Release
 `runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
 the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
-from that manifest — values are GitOps-owned and never written back by
-the train; a new desktop image reaches a deployment by bumping
+from that manifest — the GitOps bump copies the engine versions from it
+too (`images.<key>.engines.chromium`/`.firefox`), so the template's
+stale-image view shows both — values are GitOps-owned and never written
+back by the train; a new desktop image reaches a deployment by bumping
 `images.linuxDesktop` (and the base digest, if it keeps one) in its values.
 `runtime-freshness.yml` keeps the chromium and firefox-esr pins current
 (daily check + auto PR; the desktop's Firefox pin is checked against the
@@ -142,9 +144,6 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   reduced isolation (seccomp-bpf only, no userns layer).
 - Pod placement is set by the template's typed `spec.placement` fields
   (`nodeSelector`, `tolerations`, `runtimeClassName`) and `spec.linux.hostUsers`.
-  The `workspaces.cdi.tinyorbit.vn/node-selector` template annotation is
-  **deprecated**: it is honored for one release and loses to
-  `spec.placement.nodeSelector` when both are set.
 
 ## The desktop profile (`tcdi/linux-desktop`)
 

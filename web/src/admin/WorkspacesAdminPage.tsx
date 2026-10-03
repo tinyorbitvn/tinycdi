@@ -8,7 +8,7 @@ import { Link } from "../lib/router";
 import { t } from "../i18n";
 import { listScopedWorkspaces, type ScopedWorkspace, type WorkspacePhase } from "./api";
 import { formatAge, formatDateTime, ownerLabel } from "./format";
-import { useLoader } from "./hooks";
+import { useLoader } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 

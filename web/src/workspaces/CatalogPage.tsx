@@ -1,4 +1,4 @@
-import { Alert, Badge, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Spinner } from "../design";
+import { Alert, Badge, Button, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Spinner } from "../design";
 import { IconGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
 import { isPortalApiError } from "../api/errors";
@@ -21,6 +21,11 @@ import { ErrorBanner } from "./ErrorBanner";
 /** Warning badge for a template whose runtime image is stale. */
 function StaleBadge() {
   return <Badge tone="warning">{t("templates.catalog.stale.badge")}</Badge>;
+}
+
+/** Danger badge for a template whose runtime image is over the block limit. */
+function BlockedBadge() {
+  return <Badge tone="danger">{t("templates.catalog.blocked.badge")}</Badge>;
 }
 
 export function TemplateCard({ template }: { template: TemplateView }) {
@@ -51,14 +56,32 @@ export function TemplateCard({ template }: { template: TemplateView }) {
         </>
       }
       description={template.description}
-      actions={template.imageStale === true ? <StaleBadge /> : undefined}
+      actions={
+        template.imageBlocked === true ? (
+          <BlockedBadge />
+        ) : template.imageStale === true ? (
+          <StaleBadge />
+        ) : undefined
+      }
       footer={
-        <Link to={`/workspaces/new?template=${template.id}`} className={buttonClass("primary", "sm")}>
-          <IconPlus size={16} /> {t("templates.catalog.create")}
-        </Link>
+        template.imageBlocked === true ? (
+          <Button variant="primary" size="sm" disabled>
+            <IconPlus size={16} /> {t("templates.catalog.create")}
+          </Button>
+        ) : (
+          <Link to={`/workspaces/new?template=${template.id}`} className={buttonClass("primary", "sm")}>
+            <IconPlus size={16} /> {t("templates.catalog.create")}
+          </Link>
+        )
       }
     >
-      {template.imageStale === true ? (
+      {template.imageBlocked === true ? (
+        <Alert tone="danger">
+          {template.imageBuiltAt
+            ? t("templates.catalog.blocked.hint", { date: formatDate(template.imageBuiltAt) })
+            : t("templates.catalog.blocked.badge")}
+        </Alert>
+      ) : template.imageStale === true ? (
         <Alert tone="warning">
           {template.imageBuiltAt
             ? t("templates.catalog.stale.hint", { date: formatDate(template.imageBuiltAt) })

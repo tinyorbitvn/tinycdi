@@ -273,6 +273,16 @@ func TestSchemaRejectsBadValues(t *testing.T) {
 	}
 }
 
+// TestLegacyNodeSelectorRejected: the v0.1 templates[].nodeSelector field
+// is gone (E14) — a values file still carrying it fails the render
+// (values.schema.json's additionalProperties or the template's fail).
+func TestLegacyNodeSelectorRejected(t *testing.T) {
+	out := renderBad(t, "legacy-nodeselector-values.yaml")
+	if !strings.Contains(out, "nodeSelector") {
+		t.Errorf("render failure should name the removed field, got: %s", out)
+	}
+}
+
 // TestExposureToggles: ingress renders Ingress and no HTTPRoute; gatewayApi
 // renders HTTPRoute and no Ingress; both enabled is a render-time error.
 func TestExposureToggles(t *testing.T) {
@@ -420,12 +430,33 @@ func TestImageDigestPinning(t *testing.T) {
 	for _, want := range []string{
 		"workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/profiles/chromium-userns.json",
 		"workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/tinycdi-browser",
-		"workspaces.cdi.tinyorbit.vn/node-selector",
 		"workspaces.cdi.tinyorbit.vn/storage-class: longhorn",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("seeded templates missing %q", want)
 		}
+	}
+	// Pod placement lives in the typed spec.placement block — the v0.1
+	// node-selector annotation is gone (E14) and must not be rendered.
+	if strings.Contains(s, "workspaces.cdi.tinyorbit.vn/node-selector") {
+		t.Errorf("legacy node-selector annotation must not render:\n%s", s)
+	}
+	var browser doc
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		if lbls["workspaces.cdi.tinyorbit.vn/catalog-name"] == "browser01" {
+			browser = d
+		}
+	}
+	if browser == nil {
+		t.Fatal("browser01 template not rendered")
+	}
+	spec, _ := browser["spec"].(map[string]any)
+	placement, _ := spec["placement"].(map[string]any)
+	sel, _ := placement["nodeSelector"].(map[string]any)
+	if sel["workload"] != "runtime" {
+		t.Errorf("browser01 spec.placement.nodeSelector = %v, want {workload: runtime}", placement["nodeSelector"])
 	}
 }
 
@@ -1380,6 +1411,36 @@ func TestTemplateBuiltAtAnnotation(t *testing.T) {
 	}
 	if _, ok := annByCatalog["linuxdesk1"][key]; ok {
 		t.Errorf("linuxdesk1: %s must be absent while images.linuxDesktop.builtAt is unset", key)
+	}
+}
+
+// TestTemplateEngineAnnotations (backlog 14): images.<key>.engines.*
+// render as image-chromium/image-firefox annotations so the stale-image
+// view shows both engine versions; unset values render no annotation, and
+// an explicit templates[].annotations entry wins.
+func TestTemplateEngineAnnotations(t *testing.T) {
+	docs := renderArgs(t, "-f", filepath.Join("tinycdi", "ci", "example-values.yaml"),
+		"--set", "images.browser.engines.chromium=154.0.8037.92",
+		"--set", "images.browser.engines.firefox=153.4.0esr",
+		"--set", "templates[1].annotations.workspaces\\.cdi\\.tinyorbit\\.vn/image-firefox=9.9.9esr")
+	annByCatalog := map[string]map[string]any{}
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		m, _ := d["metadata"].(map[string]any)
+		lbls, _ := m["labels"].(map[string]any)
+		cn, _ := lbls["workspaces.cdi.tinyorbit.vn/catalog-name"].(string)
+		ann, _ := m["annotations"].(map[string]any)
+		annByCatalog[cn] = ann
+	}
+	const ckey = "workspaces.cdi.tinyorbit.vn/image-chromium"
+	const fkey = "workspaces.cdi.tinyorbit.vn/image-firefox"
+	if got := annByCatalog["browser01"][ckey]; got != "154.0.8037.92" {
+		t.Errorf("browser01 %s = %v, want images.browser.engines.chromium", ckey, got)
+	}
+	if got := annByCatalog["browser01"][fkey]; got != "9.9.9esr" {
+		t.Errorf("browser01 %s = %v, want the entry's own annotation to win over images.browser.engines", fkey, got)
+	}
+	if _, ok := annByCatalog["linuxdesk1"][ckey]; ok {
+		t.Errorf("linuxdesk1: %s must be absent while images.linuxDesktop.engines is unset", ckey)
 	}
 }
 

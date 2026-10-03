@@ -87,6 +87,28 @@ pin — lag 4), so a Browser template pinned to it only has option B. See
 `docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
 gate" and `docs/kasm-images.md`.
 
+## Upgrading to 0.3.0
+
+Chart 0.3.0 removes the deprecated `templates[].nodeSelector` entry field
+(the v0.1 knob that rendered the `workspaces.cdi.tinyorbit.vn/node-selector`
+annotation — pod placement has been typed `spec.placement` since v0.2). A
+values file that still sets it **fails the render**, both via the values
+schema (`additionalProperties`) and an explicit check for
+`--skip-schema-validation` renders. Move the selector into the template
+spec before upgrading:
+
+```yaml
+templates:
+  - name: <tpl>
+    spec:
+      placement:               # was: nodeSelector: {workload: runtime}
+        nodeSelector:
+          workload: runtime
+```
+
+WorkspaceTemplate objects already in the cluster keep working — the
+annotation is simply ignored now; only chart-rendered values fail.
+
 ## Upgrading to 0.2.0
 
 Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
@@ -156,6 +178,8 @@ objects. It **keeps**:
 | `images.<name>.tag` | chart `appVersion` | tag; ignored when `digest` is set |
 | `images.<name>.digest` | `""` | `sha256:<64hex>` — digest pinning wins over tag |
 | `images.<name>.pullPolicy` | `IfNotPresent` | per-image pull policy |
+| `images.<name>.builtAt` | `""` | RFC 3339 build time from the runtime train's `runtime-images.json` → `image-built-at` annotation; an image older than `-image-block-after` (45 d default) refuses create/start with 409 IMAGE_STALE (runtime images only) |
+| `images.<name>.engines.{chromium,firefox}` | unset | browser engine versions from `runtime-images.json` → `image-chromium`/`image-firefox` annotations, shown on the template's stale-image view (runtime images only) |
 
 ### Topology
 
@@ -453,8 +477,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `nodeSelector` | map → `workspaces.cdi.tinyorbit.vn/node-selector` JSON annotation (**deprecated** — prefer the typed `spec.placement` block, which also carries `tolerations` and `runtimeClassName`) |
-| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec |
+| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec — pod placement lives in `spec.placement` (`nodeSelector`, `tolerations`, `runtimeClassName`); the v0.1 `nodeSelector` entry field was removed in v0.3 and fails the render |
 
 ### Kasm workspace images
 

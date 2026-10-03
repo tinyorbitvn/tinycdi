@@ -50,7 +50,7 @@ func TestPGSessionStore_IDTokenSealedRoundTrip(t *testing.T) {
 	raw := "header.payload.signature-id-token"
 	sess := &store.Session{
 		ID: "sess-idtok", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
-		CSRFToken: "csrf", IDToken: raw,
+		IDToken:   raw,
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := ss.Save(ctx, sess); err != nil {
@@ -96,7 +96,7 @@ func TestPGSessionStore_IDTokenRotationFallback(t *testing.T) {
 
 	if err := sealOld.Save(ctx, &store.Session{
 		ID: "sess-rot", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
-		CSRFToken: "csrf", IDToken: "raw-id-token",
+		IDToken:   "raw-id-token",
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("save: %v", err)
@@ -133,7 +133,6 @@ func TestPGSessionStore_IDTokenLegacyNull(t *testing.T) {
 
 	if err := ss.Save(ctx, &store.Session{
 		ID: "sess-legacy", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
-		CSRFToken: "csrf",
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("save: %v", err)

@@ -30,6 +30,7 @@ const (
 	CodeQuotaExhausted      ErrorCode = "QUOTA_EXHAUSTED"      // 409
 	CodeQuotaNotConfigured  ErrorCode = "QUOTA_NOT_CONFIGURED" // 409
 	CodeConnectionInUse     ErrorCode = "CONNECTION_IN_USE"    // 409
+	CodeImageStale          ErrorCode = "IMAGE_STALE"          // 409
 	CodeRateLimited         ErrorCode = "RATE_LIMITED"         // 429
 	CodeUnavailable         ErrorCode = "UNAVAILABLE"          // 503
 	CodeInternal            ErrorCode = "INTERNAL"             // 500
@@ -54,6 +55,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeQuotaExhausted,
 	CodeQuotaNotConfigured,
 	CodeConnectionInUse,
+	CodeImageStale,
 	CodeRateLimited,
 	CodeUnavailable,
 	CodeInternal,
@@ -70,7 +72,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse:
+	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse, CodeImageStale:
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity
@@ -112,6 +114,15 @@ type ErrorDetails struct {
 	// recovery pass, so the request may be retried (retryable is true and
 	// Retry-After is set).
 	Reason string `json:"reason,omitempty"`
+	// TemplateName, AgeDays, LimitDays and Pinned carry an IMAGE_STALE
+	// refusal's context: the template whose runtime image is over
+	// -image-block-after, the observed vs allowed age in whole days, and
+	// whether the workspace is pinned to the stale revision (it can start
+	// again only after an administrator publishes a fresh image).
+	TemplateName string `json:"templateName,omitempty"`
+	AgeDays      int    `json:"ageDays,omitempty"`
+	LimitDays    int    `json:"limitDays,omitempty"`
+	Pinned       bool   `json:"pinned,omitempty"`
 }
 
 // ReasonReleasePending is the details.reason value of a transient,
@@ -167,4 +178,23 @@ func writeQuotaExceeded(w http.ResponseWriter, r *http.Request, err error, retry
 		return
 	}
 	writeError(w, r, CodeQuotaExhausted, "quota exhausted")
+}
+
+// writeImageStale renders an E3 stale-image refusal: the message names the
+// template (and says a pinned workspace can start again only after an
+// administrator publishes a fresh image); details carry
+// templateName/ageDays/limitDays/pinned for clients that render their own
+// copy.
+func writeImageStale(w http.ResponseWriter, r *http.Request, err error) {
+	e := NewError(CodeImageStale, err.Error())
+	var ise *provisioning.ImageStaleError
+	if errors.As(err, &ise) {
+		e.Details = &ErrorDetails{
+			TemplateName: ise.TemplateName,
+			AgeDays:      ise.AgeDays,
+			LimitDays:    ise.LimitDays,
+			Pinned:       ise.Pinned,
+		}
+	}
+	WriteError(w, RequestIDFromContext(r.Context()), e)
 }

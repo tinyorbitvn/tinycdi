@@ -19,13 +19,9 @@ import type {
 } from "./fixtures.ts";
 
 export const SESSION_COOKIE = "tcdi_session";
-export const CSRF_COOKIE = "tcdi_csrf";
 export const CSRF_HEADER = "x-csrf-token";
 export const CSRF_TOKEN_VALUE = "csrf-token-01J4ZD";
 export const SESSION_PRINCIPAL = "session-01J4ZD";
-// Mirrors SESSION_ORIGIN_COOKIE in src/api/client.ts: the login flow
-// publishes the configured session origin so the SPA can pin launchUrl.
-export const SESSION_ORIGIN_COOKIE = "tcdi_session_origin";
 
 export interface MockRequest {
   method: string;

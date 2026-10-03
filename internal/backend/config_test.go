@@ -12,6 +12,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/api"
 )
 
 // noEnv is a getenv that answers empty for everything.
@@ -102,6 +105,28 @@ func TestParseFlags_Defaults(t *testing.T) {
 	}
 	if cfg.SessionCookieMode != "lax" {
 		t.Fatalf("SessionCookieMode = %q, want lax", cfg.SessionCookieMode)
+	}
+	if cfg.ImageBlockAfter != api.DefaultImageBlockAfter {
+		t.Fatalf("ImageBlockAfter = %v, want the 1080h default", cfg.ImageBlockAfter)
+	}
+}
+
+// TestParseFlags_ImageBlockAfter (E3): the flag takes the 45-day default,
+// honors TCDI_IMAGE_BLOCK_AFTER, and 0 disables the stale-image block.
+func TestParseFlags_ImageBlockAfter(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_IMAGE_BLOCK_AFTER": "720h"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.ImageBlockAfter != 720*time.Hour {
+		t.Fatalf("env ImageBlockAfter = %v, want 720h", cfg.ImageBlockAfter)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-image-block-after", "0"), envMap(map[string]string{"TCDI_IMAGE_BLOCK_AFTER": "720h"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.ImageBlockAfter != 0 {
+		t.Fatalf("flag ImageBlockAfter = %v, want 0 (disabled)", cfg.ImageBlockAfter)
 	}
 }
 
@@ -203,7 +228,7 @@ func TestParseFlags_RequiredInputs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Ported from cmd/api/main_test.go and cmd/gateway/main_test.go.
+// Session-listener and shared flag coverage of the merged binary.
 // ---------------------------------------------------------------------------
 
 func TestParseFlags_SessionDomain(t *testing.T) {

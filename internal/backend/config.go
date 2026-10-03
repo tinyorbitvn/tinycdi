@@ -5,8 +5,8 @@
 // the session gateway and the in-process broker on four listeners (app,
 // session, internal mTLS, metrics) with independent TLS configuration.
 //
-// Flag surface follows decisions-2 item 1: app flags are the former cmd/api
-// set, the session flags take a "session-" prefix, the internal/mTLS
+// Flag surface follows decisions-2 item 1: app flags carry their plain
+// names, the session flags take a "session-" prefix, the internal/mTLS
 // listener keeps its names, and -broker-url/-broker-ca/-mtls-cert/-mtls-key
 // select split/test mode (session listener only, remote broker, no DB/OIDC/
 // Kubernetes). Every flag's environment variable is TCDI_<UPPER_SNAKE>;
@@ -94,7 +94,7 @@ func rateLimitsUntrusted(c Config) bool {
 
 // Config is the parsed flag set for the merged backend.
 type Config struct {
-	// App listener (the former cmd/api surface).
+	// App listener (the public REST API surface).
 	Listen               string // empty disables the app listener
 	TLSCert              string // optional; empty serves plain HTTP
 	TLSKey               string
@@ -116,7 +116,8 @@ type Config struct {
 	RetainedSyncInterval time.Duration
 	RecoveryInterval     time.Duration
 	ImageStaleAfter      time.Duration
-	LoginRate            int // per-client requests/min on the login-family routes; 0 disables
+	ImageBlockAfter      time.Duration // 0 disables the stale-image admission block (E3)
+	LoginRate            int           // per-client requests/min on the login-family routes; 0 disables
 
 	// Session listener (the former cmd/gateway surface).
 	SessionListen       string // empty disables the session listener
@@ -239,6 +240,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 			"by design (env TCDI_RECOVERY_INTERVAL)")
 	fs.DurationVar(&c.ImageStaleAfter, "image-stale-after", envDur(getenv, "TCDI_IMAGE_STALE_AFTER", api.DefaultImageStaleAfter),
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
+	fs.DurationVar(&c.ImageBlockAfter, "image-block-after", envDur(getenv, "TCDI_IMAGE_BLOCK_AFTER", api.DefaultImageBlockAfter),
+		"runtime image age that blocks create/start with 409 IMAGE_STALE (E3); a missing imageBuiltAt never blocks; 0 disables (env TCDI_IMAGE_BLOCK_AFTER)")
 	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
 		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10); over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
@@ -312,7 +315,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["login-key-file"] {
-		// TCDI_LOGIN_KEY_FILES is the legacy plural the interim cmd/api used.
+		// TCDI_LOGIN_KEY_FILES is a legacy plural still read for compatibility.
 		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
 			_ = c.LoginKeyFiles.Set(v)
 		}
@@ -445,15 +448,6 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
-}
-
-// sessionOrigin derives the https origin the API advertises as the launch
-// POST target from the session domain; empty when no domain is configured.
-func (c Config) sessionOrigin() string {
-	if c.SessionDomain == "" {
-		return ""
-	}
-	return "https://" + c.SessionDomain
 }
 
 // checkDatabaseTLS resolves the TLS configuration pgx will actually apply
