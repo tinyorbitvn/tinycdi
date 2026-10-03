@@ -138,6 +138,56 @@ func TestTenantLabelBounded(t *testing.T) {
 	}
 }
 
+// TestMethodLabelBounded: a client-sent method must never mint a new
+// label value — anything outside the known verbs collapses to "other".
+func TestMethodLabelBounded(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, nil)
+
+	m.ObserveHTTP("app", "/v1/x", "GET", "2xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "FOO", "4xx", time.Millisecond)
+	m.ObserveHTTP("app", "/v1/x", "descriptors", "4xx", time.Millisecond)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "tinycdi_http_requests_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() != "method" {
+					continue
+				}
+				switch l.GetValue() {
+				case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "other":
+				default:
+					t.Fatalf("unbounded method label value: %q", l.GetValue())
+				}
+			}
+		}
+	}
+	// FOO/descriptors must have collapsed into one "other" series.
+	var other float64
+	for _, mf := range mfs {
+		if mf.GetName() != "tinycdi_http_requests_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() == "method" && l.GetValue() == "other" {
+					other += met.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	if other != 2 {
+		t.Fatalf("method=other count = %v, want 2 (FOO + descriptors)", other)
+	}
+}
+
 func TestReasonAndResultLabelsBounded(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, nil)

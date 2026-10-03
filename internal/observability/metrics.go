@@ -40,6 +40,12 @@ var (
 	httpListeners = map[string]struct{}{
 		"app": {}, "session": {}, "internal": {},
 	}
+	// httpMethods are the methods the HTTP request metrics may name — a
+	// client-sent method must never mint a new label value.
+	httpMethods = map[string]struct{}{
+		"GET": {}, "HEAD": {}, "POST": {}, "PUT": {}, "PATCH": {},
+		"DELETE": {}, "OPTIONS": {},
+	}
 	// rehydrateResults are the session-directory lookup outcomes (E8):
 	// ok = a live session was rebuilt, miss = definitively no session
 	// (unknown/dead/foreign cookie), error = the directory could not answer.
@@ -194,7 +200,7 @@ func (m *Metrics) ObserveHTTP(listener, route, method, codeClass string, d time.
 	l := prometheus.Labels{
 		"listener":   boundValue(listener, httpListeners),
 		"route":      route,
-		"method":     method,
+		"method":     boundValue(method, httpMethods),
 		"code_class": codeClass,
 	}
 	m.httpRequests.With(l).Inc()
