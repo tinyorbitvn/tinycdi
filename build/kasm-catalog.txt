@@ -1,24 +1,38 @@
 # Kasm image catalog — the supported kasmweb/* workspace images for
 # spec.linux.adapter=kasm (docs/kasm-images.md).
 #
-# Format per line:  <repo>@sha256:<digest>  <engine>  <min-engine-major>  [ref]
+# Format per line:  <repo>@sha256:<digest>  <engine>  <min-engine-major>  <class>  [ref]
 #   engine:           chromium | firefox | none  (none = no bundled browser)
 #   min-engine-major: freshness floor for the bundled engine (KASM-2).
-#                     It must be >= the major version of build/browser's
-#                     CHROMIUM_APT_VERSION minus 4 (~4 upstream release
-#                     cycles of tolerated lag on Debian/Ubuntu rebuilds);
-#                     .github/scripts/check-kasm-catalog.sh enforces that
-#                     binding, and scan-kasm-catalog.sh re-proves the
-#                     installed engine and the trivy release gate.
+#   class:            browser | desktop — which template experiences may
+#                     reference the image (E13, v0.3):
+#                     - browser entries may back spec.experience=Browser
+#                       templates; their floor must be >= the major version
+#                       of build/browser's CHROMIUM_APT_VERSION minus 2
+#                       (the tightened browser gate — KASM-2's old ≤4
+#                       acceptance ended with E13). Browser class requires
+#                       a real engine (chromium | firefox).
+#                     - desktop entries may back non-Browser templates only;
+#                       their floor must be >= CHROMIUM_APT_VERSION minus 4
+#                       (~4 upstream release cycles of tolerated lag on
+#                       Debian/Ubuntu rebuilds).
+#                     .github/scripts/check-kasm-catalog.sh enforces both
+#                     bindings, and scan-kasm-catalog.sh re-proves the
+#                     installed engine and the trivy release gate. The
+#                     chart's kasmAdapter.browserAllowlist may only list
+#                     browser-class entries.
 #
 # Rules:
 #   - Every kasmweb/* image reference in tracked files (chart ci values,
 #     docs, examples) MUST appear here verbatim, digest-pinned.
 #   - Digests track the upstream <ver>-rolling-weekly tags; bump via PR.
-#   - Images that fail the trivy gate or the engine floor are NOT catalog
-#     entries. Known-failing images are listed under "unsupported" below
-#     and must not be referenced by tracked files.
-kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0  chromium  150  # 1.18.0-rolling-weekly 2026-09-29; seeded by deploy/helm/tinycdi/ci/example-values.yaml
+#   - Images that fail the trivy gate or their class's engine floor are NOT
+#     catalog entries. Known-failing images are listed under "unsupported"
+#     below and must not be referenced by tracked files.
+kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0  chromium  150  desktop  # 1.18.0-rolling-weekly 2026-09-29; Chromium 150.0.7871.100 — 4 behind the native pin (154), outside the ≤2 browser gate (E13): desktop class only, seeded by deploy/helm/tinycdi/ci/example-values.yaml
 
 # unsupported (fail the gates — do not reference in tracked files):
 #   kasmweb/ubuntu-noble-desktop — 27 CRITICAL / 396 HIGH fixable (trivy, 2026-10)
+#   kasmweb/chromium for experience=Browser — Chromium 150 vs native 154,
+#     lag 4 > 2 (E13). Candidate refill: kasmweb/chrome rolling-weekly
+#     carries Chrome 154 (lag 0) but is not onboarded yet.

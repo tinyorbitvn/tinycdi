@@ -8,6 +8,7 @@ import workspaces from "./en/workspaces";
 import session from "./en/session";
 import admin from "./en/admin";
 import data from "./en/data";
+import progress from "./en/progress";
 
 export const en = {
   ...common,
@@ -16,4 +17,5 @@ export const en = {
   ...session,
   ...admin,
   ...data,
+  ...progress,
 } as const;

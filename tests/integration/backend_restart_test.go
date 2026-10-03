@@ -667,8 +667,22 @@ func (r *replica) stop(t *testing.T) {
 	if r.stopped {
 		return
 	}
+	r.beginStop(t)
+	r.waitStopped(t)
+}
+
+// beginStop cancels the replica's context and returns while the drain is
+// still running, so a test can probe inside the drain window; waitStopped
+// then collects Run's result.
+func (r *replica) beginStop(t *testing.T) {
+	t.Helper()
 	r.stopped = true
 	r.cancel()
+}
+
+// waitStopped waits for Run to return after beginStop.
+func (r *replica) waitStopped(t *testing.T) {
+	t.Helper()
 	select {
 	case err := <-r.done:
 		if err != nil {
@@ -960,6 +974,28 @@ func (f *restartFixture) activeLeaseID(t *testing.T) string {
 		t.Fatalf("lease query: %v", err)
 	}
 	return id
+}
+
+// holdLeaseLock takes a FOR UPDATE row lock on the workspace's active
+// connection_lease row and returns an idempotent release func. While held,
+// the broker's activity write for that lease (recordActivity locks the row
+// inside its transaction) cannot land, so a draining gateway keeps the
+// session non-quiet: the drain window stays open instead of collapsing
+// once the stream conns close.
+func (f *restartFixture) holdLeaseLock(t *testing.T, leaseID string) (release func()) {
+	t.Helper()
+	tx, err := f.db.Pool().Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lease lock tx: %v", err)
+	}
+	var id string
+	if err := tx.QueryRow(context.Background(),
+		`SELECT id FROM connection_lease WHERE id = $1 AND state = 'active' FOR UPDATE`,
+		leaseID).Scan(&id); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("lock lease %s: %v", leaseID, err)
+	}
+	return func() { _ = tx.Rollback(context.Background()) }
 }
 
 func (f *restartFixture) ticketCount(t *testing.T) int {

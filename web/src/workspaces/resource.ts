@@ -31,6 +31,8 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
   const epoch = useRef(0);
   const dataRef = useRef<T | undefined>(undefined);
   const failures = useRef(0);
+  // A server-asked delay (429 Retry-After) beats the local backoff once.
+  const retryAfterMs = useRef<number | null>(null);
   const intervalRef = useRef(interval);
   useEffect(() => {
     intervalRef.current = interval;
@@ -43,11 +45,14 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
       if (started !== epoch.current) return;
       dataRef.current = d;
       failures.current = 0;
+      retryAfterMs.current = null;
       setData(d);
       setError(null);
     } catch (e) {
       if (started !== epoch.current) return;
       failures.current += 1;
+      const ra = (e as { retryAfterMs?: unknown }).retryAfterMs;
+      retryAfterMs.current = typeof ra === "number" && Number.isFinite(ra) ? ra : null;
       setError(e);
     } finally {
       if (started === epoch.current) setLoading(false);
@@ -68,6 +73,7 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
       const iv = intervalRef.current;
       const base = typeof iv === "function" ? iv(dataRef.current) : iv;
       if (base === null) return null;
+      if (retryAfterMs.current !== null) return retryAfterMs.current;
       return failures.current > 0 ? Math.min(base * 2 ** failures.current, MAX_BACKOFF_MS) : base;
     };
     const schedule = () => {

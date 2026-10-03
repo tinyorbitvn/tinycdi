@@ -172,13 +172,20 @@ templates:
         dataPolicy: Ephemeral
   # Approach A (docs/kasm-images.md): an UNMODIFIED kasmweb/* image behind
   # the injected adapter. The image ref is a literal digest pin (Docker
-  # Hub path — NOT resolved through .Values.images), sessionCmd points
-  # past the image's --no-sandbox chromium wrapper at the real binary,
-  # and the same Localhost seccomp/AppArmor node profiles the tcdi
-  # browser template uses apply (must be pre-loaded on the nodes). The
-  # digest must stay a build/kasm-catalog.txt entry — the catalog gate
-  # (trivy + browser-engine freshness floor) applies
-  # (.github/scripts/check-kasm-catalog.sh).
+  # Hub path — NOT resolved through .Values.images), and the same
+  # Localhost seccomp/AppArmor node profiles the tcdi browser template
+  # uses apply (the bundled engine still needs its sandbox; profiles must
+  # be pre-loaded on the nodes). The digest must stay a
+  # build/kasm-catalog.txt entry — the catalog gate (trivy + engine
+  # freshness floor) applies (.github/scripts/check-kasm-catalog.sh).
+  #
+  # E13: this is a Desktop-experience seed — kasmweb/chromium carries
+  # Chromium 150 vs the native 154 pin, so it left the browser allowlist
+  # (kasmAdapter.browserAllowlist) when the ≤2-major browser gate
+  # replaced the old ≤4 acceptance. A seeded adapter=kasm template with
+  # experience=Browser whose image is not on the allowlist fails the
+  # render. Without sessionCmd the image's own session runs; a real
+  # desktop payload is the intended non-browser use anyway.
   - name: kasm-chromium
     namespace: tinycdi-tenant-a
     # kasmweb/chromium:1.18.0-rolling-weekly @ 2026-09-29 — re-resolve on
@@ -191,10 +198,9 @@ templates:
     spec:
       revision: "2026-10-a"
       runtime: LinuxContainer
-      experience: Browser
+      experience: Desktop
       linux:
         adapter: kasm
-        sessionCmd: "/usr/bin/chromium-orig --start-maximized https://start.lab.example.net"
       resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
       bootDeadline: 5m
       networkProfile: Isolated

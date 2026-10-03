@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { WorkspaceDetailPage } from "../../../src/workspaces/WorkspaceDetailPage";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
 import { readyWorkspace } from "../../mock-api/fixtures.ts";
@@ -141,7 +141,42 @@ describe("WorkspaceDetailPage", () => {
     renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
 
     const connect = await screen.findByRole("button", { name: "Connect" });
-    expect(connect).toBeDisabled();
+    expect(connect).toHaveAttribute("aria-disabled", "true");
+    expect(connect).toHaveAttribute("title", "Finishing the connection…");
     await screen.findByText(/no ConnectionReady|ConnectionReady=False/);
+  }, 20000);
+
+  it("detail: Connect is aria-disabled with 'Starting…' while provisioning (V3.27)", async () => {
+    const api = createMockApi();
+    api.state.workspaces.set(
+      WS_ID,
+      readyWorkspace({ id: WS_ID, phase: "Provisioning", desiredState: "Running" }),
+    );
+    loginCookies();
+    window.history.pushState({}, "", `/workspaces/${WS_ID}`);
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+
+    const connect = await screen.findByRole("button", { name: "Connect" });
+    expect(connect).toHaveAttribute("aria-disabled", "true");
+    expect(connect).toHaveAttribute("title", "Starting…");
+    fireEvent.click(connect);
+    expect(window.location.pathname).toBe(`/workspaces/${WS_ID}`);
+  }, 20000);
+
+  it("detail: Connect is aria-disabled with 'Failed' on a failed workspace (V3.27)", async () => {
+    const api = createMockApi();
+    api.state.workspaces.set(
+      WS_ID,
+      readyWorkspace({ id: WS_ID, phase: "Failed", failureReason: "BootDeadlineExceeded" }),
+    );
+    loginCookies();
+    window.history.pushState({}, "", `/workspaces/${WS_ID}`);
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+
+    const connect = await screen.findByRole("button", { name: "Connect" });
+    expect(connect).toHaveAttribute("aria-disabled", "true");
+    expect(connect).toHaveAttribute("title", "Failed");
+    fireEvent.click(connect);
+    expect(window.location.pathname).toBe(`/workspaces/${WS_ID}`);
   }, 20000);
 });

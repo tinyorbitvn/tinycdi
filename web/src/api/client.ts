@@ -80,6 +80,16 @@ export function newIdempotencyKey(): string {
 
 // openapi-fetch resolves with { data, error, response }; unwrap to data or
 // throw a PortalApiError carrying the stable error code.
+// Retry-After carries seconds or an HTTP date; anything else is ignored.
+function retryAfterMs(response: Response): number | undefined {
+  const raw = response.headers.get("retry-after");
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(raw);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+}
+
 export function unwrap<T>(result: {
   data?: T;
   error?: unknown;
@@ -90,16 +100,20 @@ export function unwrap<T>(result: {
       typeof result.error === "object" && result.error !== null
         ? (result.error as Record<string, unknown>)
         : {};
-    throw new PortalApiError(result.response.status, {
-      code: typeof body.code === "string" ? body.code : undefined,
-      message: typeof body.message === "string" ? body.message : undefined,
-      retryable: typeof body.retryable === "boolean" ? body.retryable : undefined,
-      requestId: typeof body.requestId === "string" ? body.requestId : undefined,
-      details:
-        typeof body.details === "object" && body.details !== null
-          ? (body.details as { reason?: "release_pending" | undefined })
-          : undefined,
-    });
+    throw new PortalApiError(
+      result.response.status,
+      {
+        code: typeof body.code === "string" ? body.code : undefined,
+        message: typeof body.message === "string" ? body.message : undefined,
+        retryable: typeof body.retryable === "boolean" ? body.retryable : undefined,
+        requestId: typeof body.requestId === "string" ? body.requestId : undefined,
+        details:
+          typeof body.details === "object" && body.details !== null
+            ? (body.details as { reason?: "release_pending" | undefined })
+            : undefined,
+      },
+      retryAfterMs(result.response),
+    );
   }
   return result.data as T;
 }

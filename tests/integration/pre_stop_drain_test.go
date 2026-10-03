@@ -7,7 +7,6 @@ package integration
 
 import (
 	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,12 +25,13 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 
 	sess, csrf := f.portalLogin(t, a, a)
 	cookie := f.launch(t, a, f.issueTicket(t, a, sess, csrf))
+	// The stream stays open into the drain: its conn's disconnect report is
+	// what holds the drain window open below.
 	stream := f.wsOpen(t, a, cookie)
-	stream.Body.Close()
+	defer stream.Body.Close()
 
 	done := make(chan struct{})
 	codes := make(chan int, 512)
-	var upgrade503 atomic.Bool
 	// Read poll: every completed GET through the whole shutdown must be 2xx.
 	go func() {
 		defer close(codes)
@@ -48,27 +48,80 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}()
-	// Upgrade probe: the ONLY refusal a drain may give a read-adjacent
-	// client is the retryable 503 on a new stream.
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if resp := f.wsTry(a, cookie); resp != nil {
-				if resp.StatusCode == http.StatusServiceUnavailable &&
-					resp.Header.Get("Retry-After") != "" {
-					upgrade503.Store(true)
-				}
-				drainBody(resp)
-			}
-			time.Sleep(30 * time.Millisecond)
-		}
-	}()
 
-	a.stop(t)
+	// Drain returns as soon as every session is quiet — with nothing left
+	// to shed the refusal window collapses inside one poll tick, which is
+	// what let a free-running probe miss the 503 entirely. Hold the window
+	// open deterministically: the still-open stream's disconnect report
+	// must lock the lease row FOR UPDATE before the broker records it, so
+	// while the test holds that row the report cannot land, the session
+	// stays non-quiet and the session listener keeps serving.
+	release := f.holdLeaseLock(t, f.activeLeaseID(t))
+	defer release()
+
+	a.beginStop(t)
+
+	// Readiness flips first on SIGTERM: /readyz answering 503 is the
+	// drain-started barrier — the probe provably lands inside the window
+	// and never before it.
+	eventually(t, "replica a reports draining", 5*time.Second, func() bool {
+		resp, err := a.client.Get(a.appURL + "/readyz")
+		if err != nil {
+			return false
+		}
+		drainBody(resp)
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+
+	// Inside the held window a new WebSocket upgrade MUST get the
+	// retryable 503 + Retry-After — the only refusal a drain may give a
+	// read-adjacent client. An upgrade admitted in the gap before Drain
+	// flipped still gets 101; close it and probe again — the held window
+	// outlasts this bound by orders of magnitude.
+	var sawRefusal bool
+	for deadline := time.Now().Add(3 * time.Second); !sawRefusal && time.Now().Before(deadline); {
+		resp := f.wsTry(a, cookie)
+		if resp == nil {
+			t.Fatal("session listener closed while the drain window was still held open")
+		}
+		code := resp.StatusCode
+		switch code {
+		case http.StatusSwitchingProtocols:
+			// Admitted just ahead of the drain flip — do not park on the
+			// live socket, close it and probe again.
+			resp.Body.Close()
+		case http.StatusServiceUnavailable:
+			retryAfter := resp.Header.Get("Retry-After")
+			drainBody(resp)
+			if retryAfter == "" {
+				t.Fatal("drain refusal carried no Retry-After hint")
+			}
+			sawRefusal = true
+		default:
+			drainBody(resp)
+			t.Fatalf("upgrade inside the drain window = %d, want 503", code)
+		}
+	}
+	// The refusal half is part of the contract, not a nice-to-have: if the
+	// probe never saw the retryable 503 the drain window is untested, and
+	// that must be a failure — the read-poll side alone would pass against
+	// a build that refused nothing or refused everything.
+	if !sawRefusal {
+		t.Error("upgrade probe never observed the drain's retryable 503")
+	}
+
+	// Reads keep serving inside the window: the drain refuses only new
+	// launches and upgrades.
+	resp := f.sessionGet(t, a, "/", cookie)
+	drainBody(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / inside the drain window = %d, want 200", resp.StatusCode)
+	}
+
+	// Let the disconnect report land: the session goes quiet, Drain
+	// returns and Run completes.
+	release()
+	a.waitStopped(t)
 	close(done)
 
 	for code := range codes {
@@ -76,17 +129,10 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 			t.Fatalf("read poll saw non-2xx during drain: %d", code)
 		}
 	}
-	// The refusal half is part of the contract, not a nice-to-have: if the
-	// probe never saw the retryable 503 the drain window is untested, and
-	// that must be a failure — the read-poll side alone would pass against
-	// a build that refused nothing or refused everything.
-	if !upgrade503.Load() {
-		t.Error("upgrade probe never observed the drain's retryable 503")
-	}
 
 	// The sibling serves the same cookie and re-claims the stream (the
 	// epoch bump is the rollout re-claim path).
-	resp := f.sessionGet(t, b, "/", cookie)
+	resp = f.sessionGet(t, b, "/", cookie)
 	drainBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / on sibling after drain = %d, want 200", resp.StatusCode)

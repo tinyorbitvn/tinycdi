@@ -11,6 +11,7 @@ import {
 } from "../mock-api/handler.ts";
 import { createApi, setCsrfToken } from "../../src/api/client";
 import { ApiProvider } from "../../src/api/context";
+import { ToastProvider } from "../../src/design";
 
 export {
   createMockApi,
@@ -77,6 +78,10 @@ export function clearCookies(): void {
 
 export function renderWithApi(ui: ReactElement, api = createMockApi()) {
   const client = createApi(stubFetch(api));
-  const utils = render(<ApiProvider client={client}>{ui}</ApiProvider>);
+  const utils = render(
+    <ApiProvider client={client}>
+      <ToastProvider>{ui}</ToastProvider>
+    </ApiProvider>,
+  );
   return { api, client, ...utils };
 }
