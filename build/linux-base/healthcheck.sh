@@ -17,6 +17,7 @@ xdpyinfo -display ":$DISPLAY_NUM" >/dev/null 2>&1 || exit 1
 # (sidecar proxy, port-forward, hostNetwork ingress). A valid login is not
 # a failure, so the probe is invisible to the lockout.
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
+# Fail closed: a runtime whose password file is missing/unreadable cannot serve a session either, so NotReady is the truth.
 [ -r "$SECRET_DIR/password" ] || exit 1
 user="kasm_user"
 if [ -r "$SECRET_DIR/username" ]; then
