@@ -395,7 +395,14 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	resnapshot := snap == nil || r.snapshotStale(ctx, ws, applied, snap)
+	resnapshot := snap == nil
+	if !resnapshot {
+		stale, serr := r.snapshotStale(ctx, ws, applied, snap)
+		if serr != nil {
+			return ctrl.Result{}, serr
+		}
+		resnapshot = stale
+	}
 	if resnapshot {
 		tpl, gerr := r.resolveTemplate(ctx, ws)
 		switch {
@@ -798,24 +805,32 @@ func templateSnapshotFor(ws *workspacesv1alpha1.Workspace) (*templateSnapshot, e
 // their recorded object name is the fallback source, extended by the
 // catalog-name label while that object still exists, so a legacy workspace
 // whose templateRef still holds the family name keeps its revision while a
-// carried re-point to a sibling revision object re-takes it.
-func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, snap *templateSnapshot) bool {
+// carried re-point to a sibling revision object re-takes it. Only a clean
+// NotFound on the recorded object counts as "the revision is gone, resolve
+// the reference fresh" — any other read error propagates and the reconcile
+// retries, so a transient catalog miss can never look like a re-point.
+func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, snap *templateSnapshot) (bool, error) {
 	if applied.RuntimeGeneration <= snap.RuntimeGeneration {
-		return false
+		return false, nil
 	}
 	ref := ws.Spec.TemplateRef.Name
 	if snap.SourceRef != "" {
-		return ref != snap.SourceRef
+		return ref != snap.SourceRef, nil
 	}
 	if ref == snap.Name {
-		return false
+		return false, nil
 	}
 	live := &workspacesv1alpha1.WorkspaceTemplate{}
-	if err := r.Get(ctx, types.NamespacedName{Name: snap.Name, Namespace: ws.Namespace}, live); err == nil &&
-		live.Labels[provisioning.LabelCatalogName] == ref {
-		return false // ref is the recorded revision's family name
+	gerr := r.Get(ctx, types.NamespacedName{Name: snap.Name, Namespace: ws.Namespace}, live)
+	switch {
+	case apierrors.IsNotFound(gerr):
+		// The recorded revision object is gone — the moved reference stands
+		// alone and re-resolves (a deleted revision adopts the newest).
+		return true, nil
+	case gerr != nil:
+		return false, gerr
 	}
-	return true
+	return live.Labels[provisioning.LabelCatalogName] != ref, nil
 }
 
 // snapshotDigestPattern mirrors the apiserver's Pattern validation on

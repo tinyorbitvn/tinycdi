@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -22,8 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -343,6 +346,191 @@ func TestForgedSnapshotStillRejected(t *testing.T) {
 		}
 		if snap.SpecHash != want.SpecHash || snap.Name != "tpl-live" {
 			t.Fatalf("snapshot after re-snapshot = %+v, want honest record of tpl-live", snap)
+		}
+	})
+}
+
+// legacySnapshotAnnotation renders the annotation exactly as a pre-V3.2
+// operator recorded it: sourceRef/runtimeGeneration omitted.
+func legacySnapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate) string {
+	t.Helper()
+	s, err := snapshotTemplate(tpl)
+	if err != nil {
+		t.Fatalf("snapshotTemplate: %v", err)
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	return string(raw)
+}
+
+// legacyWorkspace seeds a Running workspace carrying a pre-V3.2 snapshot
+// (no sourceRef) of the recorded revision object.
+func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspace {
+	return &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ws-legacy", Namespace: "tinycdi-tenant-a", UID: uid,
+			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_legacy"},
+			Annotations: map[string]string{AnnotationTemplateSnapshot: ann},
+		},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: ref},
+			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
+			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			RuntimeGeneration: 1,
+			IntentRevision:    1,
+		},
+	}
+}
+
+// recordedRevision builds the revision-A object a legacy snapshot would have
+// been taken from — catalog-name labeled fam32.
+func recordedRevision(uid types.UID) *workspacesv1alpha1.WorkspaceTemplate {
+	return &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fam32-aaaa1111", Namespace: "tinycdi-tenant-a", UID: uid,
+			Labels: map[string]string{provisioning.LabelCatalogName: "fam32"},
+		},
+		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+			Revision: "2026-10-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
+			Experience: workspacesv1alpha1.ExperienceDesktop,
+			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: resnapImageA},
+			Resources: workspacesv1alpha1.ResourceProfile{
+				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"),
+				Storage: resource.MustParse("5Gi"),
+			},
+			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
+			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+		},
+	}
+}
+
+// TestSnapshot_LegacySourceRefFallback (review PR #56): the SourceRef==""
+// branch of snapshotStale — a pre-V3.2 snapshot has no recorded source, so
+// the reference is compared against the recorded object name extended by
+// its catalog-name label.
+func TestSnapshot_LegacySourceRefFallback(t *testing.T) {
+	newest := func() *workspacesv1alpha1.WorkspaceTemplate {
+		b := recordedRevision(types.UID("uid-b"))
+		b.Name = "fam32-bbbb2222"
+		b.Spec.Revision = "2026-10-b"
+		b.Spec.Linux.Image = resnapImageB
+		return b
+	}
+	reconciled := func(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.Workspace {
+		t.Helper()
+		r := &WorkspaceReconciler{Client: c, Scheme: snapScheme(t), Backend: linux.New(c, linux.Options{})}
+		key := client.ObjectKeyFromObject(ws)
+		reconcile(t, r, key)
+		reconcile(t, r, key)
+		got := &workspacesv1alpha1.Workspace{}
+		if err := c.Get(context.Background(), key, got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	podImage := func(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace) string {
+		t.Helper()
+		pod := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKey{
+			Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
+			t.Fatalf("pod: %v", err)
+		}
+		return pod.Spec.Containers[0].Image
+	}
+
+	// The reference names the recorded revision object itself: not stale.
+	t.Run("ref is the recorded object name", func(t *testing.T) {
+		s := snapScheme(t)
+		rec := recordedRevision(types.UID("uid-a"))
+		ann := legacySnapshotAnnotation(t, rec)
+		ws := legacyWorkspace("fam32-aaaa1111", ann, types.UID("ws-legacy-a"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws, rec).WithStatusSubresource(ws).Build()
+		got := reconciled(t, c, ws)
+		if got.Annotations[AnnotationTemplateSnapshot] != ann {
+			t.Fatal("snapshot rewritten although the reference still names the recorded object")
+		}
+		if img := podImage(t, c, ws); img != resnapImageA {
+			t.Fatalf("pod image = %s, want recorded revision A %s", img, resnapImageA)
+		}
+	})
+
+	// The reference holds the family (catalog) name and the recorded object
+	// still exists to prove membership: keep the snapshot — a pinned or
+	// guard-skipped start must not re-resolve the family.
+	t.Run("family ref + live recorded object keeps", func(t *testing.T) {
+		s := snapScheme(t)
+		rec := recordedRevision(types.UID("uid-a"))
+		ann := legacySnapshotAnnotation(t, rec)
+		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-b"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws, rec, newest()).WithStatusSubresource(ws).Build()
+		got := reconciled(t, c, ws)
+		if got.Annotations[AnnotationTemplateSnapshot] != ann {
+			t.Fatal("snapshot rewritten although the family reference is unchanged")
+		}
+		if img := podImage(t, c, ws); img != resnapImageA {
+			t.Fatalf("pod image = %s, want recorded revision A %s", img, resnapImageA)
+		}
+	})
+
+	// The recorded object is gone (chart upgrade deleted it): the family
+	// reference re-resolves to the newest published revision — the V3.1
+	// adopt-newest contract.
+	t.Run("family ref + deleted recorded object adopts newest", func(t *testing.T) {
+		s := snapScheme(t)
+		ann := legacySnapshotAnnotation(t, recordedRevision(types.UID("uid-a")))
+		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-c"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws, newest()).WithStatusSubresource(ws).Build()
+		got := reconciled(t, c, ws)
+		snap := snapshotOf(t, got)
+		if snap.Name != "fam32-bbbb2222" || snap.SourceRef != "fam32" || snap.RuntimeGeneration != 1 {
+			t.Fatalf("snapshot = %+v, want re-recorded fam32-bbbb2222", snap)
+		}
+		if img := podImage(t, c, ws); img != resnapImageB {
+			t.Fatalf("pod image = %s, want adopted newest revision B %s", img, resnapImageB)
+		}
+	})
+
+	// A transient read error on the recorded object is not a NotFound: the
+	// reconcile must retry with the recorded snapshot untouched — never a
+	// silent adopt-newest.
+	t.Run("recorded object read error requeues, snapshot kept", func(t *testing.T) {
+		s := snapScheme(t)
+		rec := recordedRevision(types.UID("uid-a"))
+		ann := legacySnapshotAnnotation(t, rec)
+		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-d"))
+		boom := errors.New("apiserver unavailable")
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws, rec, newest()).WithStatusSubresource(ws).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*workspacesv1alpha1.WorkspaceTemplate); ok {
+						return boom
+					}
+					return cl.Get(ctx, key, obj, opts...)
+				},
+			}).Build()
+		r := &WorkspaceReconciler{Client: c, Scheme: s, Backend: linux.New(c, linux.Options{})}
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)})
+		if !errors.Is(err, boom) {
+			t.Fatalf("reconcile err = %v, want the catalog read error propagated (retry, no silent re-point)", err)
+		}
+		got := &workspacesv1alpha1.Workspace{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Annotations[AnnotationTemplateSnapshot] != ann {
+			t.Fatal("snapshot rewritten on a transient catalog error")
+		}
+		pod := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKey{
+			Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err == nil {
+			t.Fatalf("pod created while the catalog read was failing: %s", pod.Spec.Containers[0].Image)
 		}
 	})
 }
