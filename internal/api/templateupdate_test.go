@@ -86,7 +86,7 @@ func TestWorkspaceView_UpdateAvailable(t *testing.T) {
 	cat.add(TemplateEntry{
 		ID: "tpl_linuxdesk-aaaa1111", Name: "linuxdesk", Revision: 1,
 		RevisionLabel: "2026-10-a", Runtime: "LinuxContainer", Experience: "Desktop",
-		DataPolicyDefault: "Ephemeral", StorageGiB: 5, ImageUpdate: "OnStart",
+		DataPolicyDefault: "Ephemeral", StorageGiB: 5, StorageBytes: 5 << 30, ImageUpdate: "OnStart",
 	})
 	env := newWorkspaceEnv(t, be, cat, defaultTenants())
 	sess, csrf := login(t, env, "user-a")
@@ -104,7 +104,7 @@ func TestWorkspaceView_UpdateAvailable(t *testing.T) {
 	cat.add(TemplateEntry{
 		ID: "tpl_linuxdesk-bbbb2222", Name: "linuxdesk", Revision: 2,
 		RevisionLabel: "2026-10-b", Runtime: "LinuxContainer", Experience: "Desktop",
-		DataPolicyDefault: "Ephemeral", StorageGiB: 5, ImageUpdate: "OnStart",
+		DataPolicyDefault: "Ephemeral", StorageGiB: 5, StorageBytes: 5 << 30, ImageUpdate: "OnStart",
 	})
 	if v := familyView("ws_upd0000001", be, env, sess, csrf, t); !v.UpdateAvailable {
 		t.Fatal("updateAvailable false with a newer published revision, want true")
@@ -115,7 +115,7 @@ func TestWorkspaceView_UpdateAvailable(t *testing.T) {
 	cat.byID["tpl_linuxdesk-cccc3333"] = TemplateEntry{
 		ID: "tpl_linuxdesk-cccc3333", Name: "linuxdesk", Revision: 0,
 		RevisionLabel: "2026-09-p", Runtime: "LinuxContainer", Experience: "Desktop",
-		DataPolicyDefault: "Ephemeral", StorageGiB: 5, ImageUpdate: "Pinned",
+		DataPolicyDefault: "Ephemeral", StorageGiB: 5, StorageBytes: 5 << 30, ImageUpdate: "Pinned",
 	}
 	if v := familyView("ws_upd0000002", be, env, sess, csrf, t); v.UpdateAvailable {
 		t.Fatal("updateAvailable on a pinned workspace, want false")
@@ -126,5 +126,18 @@ func TestWorkspaceView_UpdateAvailable(t *testing.T) {
 	seedFamilyWorkspace(be, owner, "user-a", "ws_upd0000003", "tpl_linuxdesk-dead9999", "2026-08-z")
 	if v := familyView("ws_upd0000003", be, env, sess, csrf, t); !v.UpdateAvailable {
 		t.Fatal("updateAvailable false on a deleted recorded revision, want true")
+	}
+
+	// The guard compares bytes, not truncated GiB: a recorded revision
+	// whose disk is 5GiB+1MiB must not report an update to a 5GiB-newest.
+	seedFamilyWorkspace(be, owner, "user-a", "ws_upd0000004", "tpl_linuxdesk-dddd4444", "2026-09-x")
+	cat.byID["tpl_linuxdesk-dddd4444"] = TemplateEntry{
+		ID: "tpl_linuxdesk-dddd4444", Name: "linuxdesk", Revision: 0,
+		RevisionLabel: "2026-09-x", Runtime: "LinuxContainer", Experience: "Desktop",
+		DataPolicyDefault: "Ephemeral", StorageGiB: 5, StorageBytes: 5<<30 + 1<<20,
+		ImageUpdate: "OnStart",
+	}
+	if v := familyView("ws_upd0000004", be, env, sess, csrf, t); v.UpdateAvailable {
+		t.Fatal("updateAvailable true on a sub-GiB storage shrink, want false")
 	}
 }

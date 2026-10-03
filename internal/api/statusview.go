@@ -486,7 +486,7 @@ func (h *WorkspaceHandler) updateAvailable(ctx context.Context, rec *provisionin
 		if cur.entry.Runtime != newest.Runtime ||
 			cur.entry.Experience != newest.Experience ||
 			cur.entry.DataPolicyDefault != newest.DataPolicyDefault ||
-			newest.StorageGiB < cur.entry.StorageGiB {
+			newest.StorageBytes < cur.entry.StorageBytes {
 			return false
 		}
 	}

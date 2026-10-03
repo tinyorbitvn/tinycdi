@@ -6,6 +6,7 @@ package provisioning
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 )
@@ -35,7 +36,16 @@ type TemplateLookup interface {
 // an unreadable revision (deleted by a chart upgrade, or a stale row)
 // falls back to the OnStart default so a workspace whose template object
 // vanished adopts the newest published revision instead of wedging.
-func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord) (*TemplateInfo, string, error) {
+//
+// A catalog read failure (not a clean NotFound) never fails the user's
+// start: it logs a warning and keeps the recorded revision for that start
+// — the same outcome as a pinned template — because a template lookup is
+// advisory, not part of the lifecycle contract the intent was admitted
+// under.
+func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord, log *slog.Logger) (*TemplateInfo, string, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	family := rec.Template.Name
 	if family == "" {
 		return nil, "", nil
@@ -45,14 +55,18 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		if errors.Is(err, ErrTemplateNotFound) {
 			return nil, "", nil
 		}
-		return nil, "", err
+		log.Warn("template family lookup failed; starting on recorded revision",
+			"workspace", rec.ID, "family", family, "error", err)
+		return nil, "", nil
 	}
 	if newest.ID == "" || newest.ID == rec.Template.ID {
 		return nil, "", nil // already on the newest published revision
 	}
 	cur, err := cat.Get(ctx, tenantID, rec.Template.ID)
 	if err != nil {
-		return nil, "", err
+		log.Warn("recorded template revision lookup failed; starting on recorded revision",
+			"workspace", rec.ID, "template", rec.Template.ID, "error", err)
+		return nil, "", nil
 	}
 	if cur != nil {
 		if workspacev1alpha1.ImageUpdatePolicy(cur.ImageUpdate) == workspacev1alpha1.ImageUpdatePinned {

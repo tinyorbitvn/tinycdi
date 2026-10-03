@@ -11,6 +11,7 @@ package provisioning_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,8 +30,10 @@ const familyTenant = "tenant-fam"
 // in-memory catalog entries; a missing entry means the revision object is
 // gone (nil, nil), a missing family answers ErrTemplateNotFound.
 type fakeTemplateLookup struct {
-	byID   map[string]*provisioning.TemplateCatalogEntry
-	newest map[string]*provisioning.TemplateCatalogEntry
+	byID    map[string]*provisioning.TemplateCatalogEntry
+	newest  map[string]*provisioning.TemplateCatalogEntry
+	newestE error // when set, NewestInFamily fails (catalog read error)
+	getErr  error // when set, Get fails
 }
 
 func newFakeTemplateLookup() *fakeTemplateLookup {
@@ -47,10 +50,16 @@ func (f *fakeTemplateLookup) put(e provisioning.TemplateCatalogEntry) {
 }
 
 func (f *fakeTemplateLookup) Get(_ context.Context, _, id string) (*provisioning.TemplateCatalogEntry, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.byID[id], nil
 }
 
 func (f *fakeTemplateLookup) NewestInFamily(_ context.Context, _, family string) (provisioning.TemplateCatalogEntry, error) {
+	if f.newestE != nil {
+		return provisioning.TemplateCatalogEntry{}, f.newestE
+	}
 	e, ok := f.newest[family]
 	if !ok {
 		return provisioning.TemplateCatalogEntry{}, provisioning.ErrTemplateNotFound
@@ -295,6 +304,49 @@ func TestFamily_DeletedOldRevision(t *testing.T) {
 	}
 }
 
+// TestStart_CatalogErrorKeepsRecorded: a catalog read failure (not a clean
+// NotFound) never fails the start — the workspace starts on its recorded
+// revision exactly as a pinned one would, with a WARN logged.
+func TestStart_CatalogErrorKeepsRecorded(t *testing.T) {
+	cat := newFakeTemplateLookup()
+	cat.newestE = errors.New("apiserver unreachable")
+	db, svc, ws := familyWorkspace(t, cat)
+
+	genBefore := runtimeGeneration(t, db, ws)
+	res, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "fam-start-05", provisioning.IntentStart, []byte("{}"))
+	if err != nil {
+		t.Fatalf("catalog error must not fail the start: %v", err)
+	}
+	if res.Template.ID != "tpl_linuxdesk-aaaa1111" || res.DesiredState != "Running" {
+		t.Fatalf("record = %+v, want recorded revision running", res)
+	}
+	if got := runtimeGeneration(t, db, ws); got != genBefore+1 {
+		t.Fatalf("runtime_generation = %d, want %d", got, genBefore+1)
+	}
+	intents := pendingIntents(t, db, ws)
+	if start := intents[len(intents)-1]; start.Spec.TemplateName != "" {
+		t.Fatalf("degraded start must not carry a re-point, got %+v", start.Spec)
+	}
+
+	// Same for a failure reading the recorded revision after the family
+	// resolved.
+	cat2 := newFakeTemplateLookup()
+	cat2.put(familyEntry("linuxdesk", "bbbb2222", "2026-10-b", "OnStart"))
+	cat2.getErr = errors.New("leader election")
+	db2, svc2, ws2 := familyWorkspace(t, cat2)
+	res, err = svc2.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws2, "fam-start-06", provisioning.IntentStart, []byte("{}"))
+	if err != nil {
+		t.Fatalf("recorded-revision lookup error must not fail the start: %v", err)
+	}
+	if res.Template.ID != "tpl_linuxdesk-aaaa1111" {
+		t.Fatalf("record = %+v, want recorded revision", res)
+	}
+	intents = pendingIntents(t, db2, ws2)
+	if start := intents[len(intents)-1]; start.Spec.TemplateName != "" {
+		t.Fatalf("degraded start must not carry a re-point, got %+v", start.Spec)
+	}
+}
+
 // TestCatalogNewestInFamily: NewestInFamily resolves the newest published
 // revision of a catalog-name family and singletons by object name;
 // unknown families answer ErrTemplateNotFound.
@@ -359,18 +411,41 @@ func TestK8sApplierStartRepointsTemplateRef(t *testing.T) {
 	if ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt] != "2026-10-02T00:00:00Z" {
 		t.Fatalf("image-built-at annotation = %q", ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt])
 	}
+}
 
-	// A re-point intent arriving while the CR is already wanted Running
-	// must not touch templateRef (CEL only allows the move while Stopped).
-	if err := applier.Apply(ctx, provisioning.Intent{
-		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 3,
+// TestK8sApplierRepointRefusedWhileRunning: a start intent carrying a
+// re-point that finds the CR wanted Running is refused with the typed
+// error — the CR keeps every field and a replayed delivery refuses the
+// same way, so the intent stays undispatched for the recovery/quarantine
+// path instead of silently diverging.
+func TestK8sApplierRepointRefusedWhileRunning(t *testing.T) {
+	c, applier := newFakeK8sApplier(t)
+	ctx := context.Background()
+	uid := provisioning.PlatformID("ws_aaaabbbbccccdddd0000111122223333")
+	// The CR is wanted Running out of band (e.g. an admin write).
+	in := createIntent(uid, "req-1", 1)
+	if err := applier.Apply(ctx, in); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	repoint := provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 2,
 		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 2,
 		Spec: provisioning.IntentSpec{TemplateName: "tmpl-linux-3"},
-	}); err != nil {
-		t.Fatalf("second start: %v", err)
+	}
+	if err := applier.Apply(ctx, repoint); !errors.Is(err, provisioning.ErrTemplateRepointBlocked) {
+		t.Fatalf("apply on Running CR = %v, want ErrTemplateRepointBlocked", err)
+	}
+	ws := getWorkspace(t, c, "ns-a", provisioning.WorkspaceCRName(uid))
+	if ws.Spec.TemplateRef.Name != "tmpl-linux" || ws.Spec.IntentRevision != 1 {
+		t.Fatalf("refused apply changed the CR: %+v", ws.Spec)
+	}
+	// Replay (the intent was never marked dispatched): refuses identically,
+	// still no CR write.
+	if err := applier.Apply(ctx, repoint); !errors.Is(err, provisioning.ErrTemplateRepointBlocked) {
+		t.Fatalf("replayed apply = %v, want ErrTemplateRepointBlocked", err)
 	}
 	ws = getWorkspace(t, c, "ns-a", provisioning.WorkspaceCRName(uid))
-	if ws.Spec.TemplateRef.Name != "tmpl-linux-2" {
-		t.Fatalf("running CR templateRef moved to %q", ws.Spec.TemplateRef.Name)
+	if ws.Spec.TemplateRef.Name != "tmpl-linux" || ws.Spec.IntentRevision != 1 {
+		t.Fatalf("replayed apply changed the CR: %+v", ws.Spec)
 	}
 }

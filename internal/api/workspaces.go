@@ -63,12 +63,15 @@ type TemplateEntry struct {
 	Revision    int64
 	// RevisionLabel is the raw spec.revision identifier ("2026-10-b");
 	// Revision above parses only a leading integer prefix.
-	RevisionLabel          string
-	Runtime                string
-	Experience             string
-	CPUMillis              int64
-	MemoryMiB              int64
-	StorageGiB             int64
+	RevisionLabel string
+	Runtime       string
+	Experience    string
+	CPUMillis     int64
+	MemoryMiB     int64
+	StorageGiB    int64
+	// StorageBytes is the untruncated disk size; StorageGiB is the same
+	// value rounded down for the public view.
+	StorageBytes           int64
 	IdleTimeoutSeconds     int64
 	DisconnectGraceSeconds int64
 	MaxRunningSeconds      int64

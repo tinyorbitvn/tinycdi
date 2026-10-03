@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -47,6 +48,14 @@ type PlatformID string
 // workspaces must never silently adopt foreign resources).
 var ErrCRConflict = errors.New("workspace CR exists with different request ID")
 
+// ErrTemplateRepointBlocked is returned when a start intent carries a
+// template re-point but the Workspace CR is not Stopped: the CEL rule
+// allows the move only from Stopped, so the apply is refused — the intent
+// retries (a later stop makes the CR Stopped) or quarantines visibly via
+// MaxIntentApplyAttempts — rather than silently dropped, which would
+// diverge the row (already on the new revision) from the CR.
+var ErrTemplateRepointBlocked = errors.New("template re-point refused: workspace CR is not Stopped")
+
 // WorkspaceCRName is the deterministic, DNS-1123-safe CR name for a
 // platform workspace ID (ws_<hex> -> ws-<hex>).
 func WorkspaceCRName(workspaceUID PlatformID) string {
@@ -60,11 +69,19 @@ func WorkspaceCRName(workspaceUID PlatformID) string {
 type K8sApplier struct {
 	client  client.Client
 	tenants TenantNamespaces
+	log     *slog.Logger
 }
 
 // NewK8sApplier builds an applier; tenants maps tenantID -> namespace.
 func NewK8sApplier(c client.Client, tenants TenantNamespaces) *K8sApplier {
 	return &K8sApplier{client: c, tenants: tenants}
+}
+
+// WithLogger attaches a logger for apply-time refusals; nil keeps
+// slog.Default.
+func (a *K8sApplier) WithLogger(l *slog.Logger) *K8sApplier {
+	a.log = l
+	return a
 }
 
 // Apply implements WorkspaceApplier. All operations are idempotent:
@@ -161,7 +178,24 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 		if int64(in.Revision) <= ws.Spec.IntentRevision {
 			return nil // stale or already applied
 		}
-		if in.Spec.TemplateName != "" && ws.Spec.DesiredState == workspacev1alpha1.DesiredStateStopped {
+		if in.Kind == IntentStart && in.Spec.TemplateName != "" {
+			if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped {
+				// CEL forbids the move while the CR is wanted Running —
+				// refuse (retry) rather than drop it silently: the row is
+				// already on the carried revision, so a quiet no-op would
+				// diverge row and CR permanently.
+				log := a.log
+				if log == nil {
+					log = slog.Default()
+				}
+				log.Error("template re-point refused: workspace CR not Stopped",
+					"workspace", key.String(),
+					"intentRevision", in.Revision, "crIntentRevision", ws.Spec.IntentRevision,
+					"carriedTemplate", in.Spec.TemplateName,
+					"currentTemplateRef", ws.Spec.TemplateRef.Name,
+					"desiredState", ws.Spec.DesiredState)
+				return ErrTemplateRepointBlocked
+			}
 			ws.Spec.TemplateRef.Name = in.Spec.TemplateName
 			if in.Spec.ImageBuiltAt != "" {
 				setCRAnnotation(&ws, AnnotationWorkspaceImageBuiltAt, in.Spec.ImageBuiltAt)
@@ -362,6 +396,16 @@ func (c *K8sTemplateCatalog) Get(ctx context.Context, tenantID, id string) (*Tem
 // catalog-name label value; an unlabeled singleton template is its own
 // family and resolves by object name. ErrTemplateNotFound when no live
 // revision of the family exists.
+//
+// Precedence differs from ResolveTemplateByName on purpose: family
+// membership is defined by the catalog-name label, so labeled revisions
+// are considered first and the exact-named object is only the
+// unlabeled-singleton fallback — while ResolveTemplateByName (what
+// spec.templateRef points at) prefers the exact object name. The two
+// diverge only when an unlabeled object shares its name with a labeled
+// family (object "linuxdesk" next to labeled "linuxdesk-*" revisions):
+// templateRef resolves the singleton, the family resolves the newest
+// labeled revision. The chart never renders that collision.
 func (c *K8sTemplateCatalog) NewestInFamily(ctx context.Context, tenantID, family string) (TemplateCatalogEntry, error) {
 	ns, ok := c.tenants.Namespace(tenantID)
 	if !ok {

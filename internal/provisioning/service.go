@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type Service struct {
 	// templates resolves template revisions/families for the OnStart
 	// re-point; nil keeps the workspace on its recorded revision (tests).
 	templates TemplateLookup
+	log       *slog.Logger
 }
 
 // NewService wraps db.
@@ -37,6 +39,13 @@ func NewService(db *store.DB) *Service {
 // template family (lifecycle.imageUpdate = OnStart; E1).
 func (s *Service) WithTemplateLookup(l TemplateLookup) *Service {
 	s.templates = l
+	return s
+}
+
+// WithLogger attaches a logger for lifecycle warnings; nil keeps
+// slog.Default.
+func (s *Service) WithLogger(l *slog.Logger) *Service {
+	s.log = l
 	return s
 }
 
@@ -375,7 +384,7 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				// published revision of its template family; the move is
 				// decided and written in this same transaction.
 				if s.templates != nil {
-					next, objName, err := startTemplateTarget(ctx, s.templates, tenantID, rec)
+					next, objName, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
 					if err != nil {
 						return err
 					}

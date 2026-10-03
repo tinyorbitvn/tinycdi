@@ -637,8 +637,9 @@ export interface components {
             /**
              * @description Verbatim revision identifier (`spec.revision`) of the template
              *     revision the workspace is on. Refreshed when a start moves the
-             *     workspace to a newer revision of its template family; empty on
-             *     rows that predate revision tracking.
+             *     workspace to a newer revision of its template family. Rows
+             *     written before v0.3 do not carry the label and fall back to
+             *     the numeric `template.revision`; empty when neither exists.
              * @example 2026-10-b
              */
             templateRevision: string;

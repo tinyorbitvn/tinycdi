@@ -174,10 +174,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// The start path re-points workspaces onto the newest published
 	// revision of their template family under imageUpdate=OnStart (E1).
 	svc := provisioning.NewService(db).
-		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants))
+		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants)).
+		WithLogger(log)
 	outbox := provisioning.NewOutbox(db)
 	retained := provisioning.NewRetainedStore(db)
-	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants), kc, tenants, retained)
+	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants).WithLogger(log), kc, tenants, retained)
 	disp := provisioning.NewDispatcher(outbox, applier,
 		provisioning.WithPollInterval(250*time.Millisecond))
 	b.singletons = append(b.singletons, func(ctx context.Context) {
@@ -742,6 +743,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		CPUMillis:              e.CPUMillis,
 		MemoryMiB:              e.MemoryBytes >> 20,
 		StorageGiB:             e.DiskBytes >> 30,
+		StorageBytes:           e.DiskBytes,
 		IdleTimeoutSeconds:     int64(e.IdleTimeout / time.Second),
 		DisconnectGraceSeconds: int64(e.DisconnectGrace / time.Second),
 		MaxRunningSeconds:      int64(e.MaxRunning / time.Second),
