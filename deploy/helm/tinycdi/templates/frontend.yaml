@@ -12,6 +12,12 @@ metadata:
     {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.frontend.replicas }}
+  strategy:
+    rollingUpdate:
+      # Never drop below the replica count: surge first, then drain the
+      # old pod — the portal stays available at every step (E4/D22).
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: {{ .Release.Name }}}
   template:

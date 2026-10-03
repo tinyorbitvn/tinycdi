@@ -91,6 +91,8 @@ export const WORKSPACE_STOPPED: WorkspaceFixture = {
   dataPolicy: "Retain",
   createdAt: "2026-09-30T09:00:00Z",
   updatedAt: "2026-09-30T10:05:00Z",
+  templateRevision: String(TEMPLATE_LINUX.revision),
+  updateAvailable: false,
 };
 
 export const RETAINED_DISK: RetainedFixture = {

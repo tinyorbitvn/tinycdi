@@ -2,6 +2,7 @@ package provisioning_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -258,5 +259,55 @@ func TestK8sApplierCreateCopiesImageBuiltAt(t *testing.T) {
 	ws2 := getWorkspace(t, c, "ns-a", provisioning.WorkspaceCRName(in2.WorkspaceUID))
 	if _, ok := ws2.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]; ok {
 		t.Fatalf("annotation present without a template age: %v", ws2.Annotations)
+	}
+}
+
+// TestK8sApplierSameRevisionTwice pins backlog 10: delivery is
+// at-least-once (a crash between Apply and the dispatch ack replays the
+// intent), so the applier itself must make a second delivery of the SAME
+// intent revision a successful no-op — for every intent kind.
+func TestK8sApplierSameRevisionTwice(t *testing.T) {
+	c, applier := newFakeK8sApplier(t)
+	ctx := context.Background()
+	uid := provisioning.PlatformID("ws_b10b10b10b10b10b10b10b10b10b10b1")
+	name := provisioning.WorkspaceCRName(uid)
+
+	applyTwiceNoChange := func(in provisioning.Intent) {
+		t.Helper()
+		if err := applier.Apply(ctx, in); err != nil {
+			t.Fatalf("apply %s rev %d: %v", in.Kind, in.Revision, err)
+		}
+		before := getWorkspace(t, c, "ns-a", name)
+		if err := applier.Apply(ctx, in); err != nil {
+			t.Fatalf("re-apply %s rev %d: %v", in.Kind, in.Revision, err)
+		}
+		after := getWorkspace(t, c, "ns-a", name)
+		if before.ResourceVersion != after.ResourceVersion || !reflect.DeepEqual(before.Spec, after.Spec) {
+			t.Fatalf("%s rev %d second apply mutated the CR: %+v -> %+v",
+				in.Kind, in.Revision, before.Spec, after.Spec)
+		}
+	}
+
+	applyTwiceNoChange(createIntent(uid, "req-b10", 1))
+	applyTwiceNoChange(provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 2,
+		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 1,
+	})
+	applyTwiceNoChange(provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 3,
+		Kind: provisioning.IntentStop, DesiredState: "Stopped", RuntimeGeneration: 1,
+	})
+
+	// Delete: the first apply removes the CR; the replay finds it gone and
+	// is a no-op by construction.
+	del := provisioning.Intent{WorkspaceUID: uid, TenantID: "tenant-a", Revision: 4, Kind: provisioning.IntentDelete}
+	if err := applier.Apply(ctx, del); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := applier.Apply(ctx, del); err != nil {
+		t.Fatalf("re-apply delete: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "ns-a", Name: name}, &workspacev1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("CR present after delete replay: %v", err)
 	}
 }

@@ -6,6 +6,18 @@
 # Gateway listener must terminate TLS and re-encrypt to the backend (e.g.
 # a BackendTLSPolicy per Service, or your implementation's equivalent);
 # plain HTTP forwarding to these Services will not work.
+#
+# Every field the HTTPRoute CRD defaults on the API server is rendered
+# explicitly (parentRefs group/kind, rules[].matches and backendRefs
+# group/kind/weight) so GitOps diffing (Argo CD, Flux) does not report
+# false drift on an unstructured CR.
+{{- $parentRefs := list }}
+{{- range .Values.gatewayApi.parentRefs }}
+{{- $pr := deepCopy . }}
+{{- if not (hasKey $pr "group") }}{{- $_ := set $pr "group" "gateway.networking.k8s.io" }}{{- end }}
+{{- if not (hasKey $pr "kind") }}{{- $_ := set $pr "kind" "Gateway" }}{{- end }}
+{{- $parentRefs = append $parentRefs $pr }}
+{{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -19,7 +31,7 @@ metadata:
   {{- end }}
 spec:
   parentRefs:
-    {{- toYaml .Values.gatewayApi.parentRefs | nindent 4 }}
+    {{- toYaml $parentRefs | nindent 4 }}
   hostnames: [{{ .Values.portalHost | quote }}]
   rules:
     # PathPrefix matches per path element: /v1 matches /v1 and /v1/...,
@@ -27,13 +39,11 @@ spec:
     - matches:
         - path: {type: PathPrefix, value: /v1}
       backendRefs:
-        - name: backend
-          port: 8443
+        - {group: "", kind: Service, name: backend, port: 8443, weight: 1}
     - matches:
         - path: {type: PathPrefix, value: /}
       backendRefs:
-        - name: frontend
-          port: 8443
+        - {group: "", kind: Service, name: frontend, port: 8443, weight: 1}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -48,10 +58,13 @@ metadata:
   {{- end }}
 spec:
   parentRefs:
-    {{- toYaml .Values.gatewayApi.parentRefs | nindent 4 }}
+    {{- toYaml $parentRefs | nindent 4 }}
   hostnames: [{{ printf "*.%s" .Values.sessionDomain | quote }}]
   rules:
-    - backendRefs:
-        - name: backend
-          port: 8444
+    # The API server defaults a missing matches list to PathPrefix / —
+    # rendered here verbatim.
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - {group: "", kind: Service, name: backend, port: 8444, weight: 1}
 {{- end }}
