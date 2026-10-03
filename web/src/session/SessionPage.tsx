@@ -216,7 +216,10 @@ export function SessionPage({
       if (p) {
         if (leaseRef !== p.leaseRef && p.leaseRef !== "") {
           // A different lease while we wait for our claim: neither ours
-          // nor stale — the resume poll's target check decides.
+          // nor stale. The resume poll filters lease swaps on its own
+          // before observe() ever runs; this branch stays for the other
+          // callers (the connected baseline fetch, the watch), where a
+          // pending-armed report on a different lease must not be claimed.
           return "unknown";
         }
         // streamEpoch 0 means the backend keeps no stream accounting
@@ -230,10 +233,21 @@ export function SessionPage({
           return "ours";
         }
         if (leaseRef === p.leaseRef && streamEpoch <= p.minEpoch) return "stale";
-        // Every claim advances the lease epoch by exactly one: our stream
-        // is the very next claim on the armed baseline. A gap means a
-        // stream we did not open claimed inside the window — foreign
-        // (PR1b). The provisional baseline (""/-1) exempts: its fresh
+        // Every claim advances the lease epoch by exactly one, so ours is
+        // the very next epoch on the armed baseline — never more. A gap
+        // means a stream we did not open claimed inside the window:
+        // foreign (PR1b). Deliberately no +2 tolerance: a widened window
+        // would absorb exactly the takeover we are trying to catch.
+        // Residuals, accepted conservatively:
+        //   (a) a foreign claim landing at exactly baseline+1 still reads
+        //       "ours" once — indistinguishable from our own claim — then
+        //       self-corrects: the next report past it flips the page to
+        //       "elsewhere";
+        //   (b) two claims of ours landing inside one poll interval (e.g.
+        //       a reload racing itself) reads baseline+2 — a false
+        //       "elsewhere" the user recovers via "Use here" rather than
+        //       a silent takeover.
+        // The provisional baseline (""/-1) stays exempt: its fresh
         // lease's first claim is ours by construction.
         if (p.leaseRef !== "" && streamEpoch > p.minEpoch + 1) {
           pending.current = null;
