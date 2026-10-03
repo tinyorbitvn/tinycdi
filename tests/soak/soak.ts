@@ -16,7 +16,7 @@
 // Erasable-syntax TypeScript only: run with
 //   node --disable-warning=ExperimentalWarning soak.ts ...
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -404,6 +404,46 @@ function patchRateLimitCounter(
       return r;
     };
   }
+}
+
+/**
+ * Per-node CPU-requests percentage from `kubectl describe node` (the
+ * advisor's worst-node guard): used to stop adding soak workspaces once
+ * any guarded node would exceed the cap. kubectl is a debug-time tool —
+ * when SOAK_NODE_GUARD is unset this never runs.
+ */
+function nodeRequestPcts(nodes: string[]): Record<string, number> {
+  const kubectl = env("SOAK_NODE_KUBECTL") ?? "kubectl";
+  const kcArgs = env("SOAK_NODE_KUBECONFIG")
+    ? ["--kubeconfig", env("SOAK_NODE_KUBECONFIG")!]
+    : [];
+  const out: Record<string, number> = {};
+  for (const n of nodes) {
+    const desc = execFileSync(kubectl, [...kcArgs, "describe", "node", n], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const m = /^ {2}cpu\s+\S+m \((\d+)%\)/m.exec(desc);
+    if (!m) throw new Error(`cannot parse cpu requests of node ${n}`);
+    out[n] = Number(m[1]);
+  }
+  return out;
+}
+
+/** Soak pods per node in the workspace namespace (placement record). */
+function soakPodsPerNode(ns: string): Record<string, number> {
+  const kubectl = env("SOAK_NODE_KUBECTL") ?? "kubectl";
+  const kcArgs = env("SOAK_NODE_KUBECONFIG")
+    ? ["--kubeconfig", env("SOAK_NODE_KUBECONFIG")!]
+    : [];
+  const json = execFileSync(
+    kubectl,
+    [...kcArgs, "-n", ns, "get", "pods", "-o", "jsonpath={range .items[*]}{.spec.nodeName}{\"\\n\"}{end}"],
+    { encoding: "utf8", timeout: 30_000 },
+  );
+  const out: Record<string, number> = {};
+  for (const n of json.split("\n").filter(Boolean)) out[n] = (out[n] ?? 0) + 1;
+  return out;
 }
 
 // ---- small testable helpers ----
@@ -1079,11 +1119,24 @@ export async function driveSessions(
   };
 
   try {
-    for (const s of sessions) {
-      if (shouldStop()) break;
-      s.launchedAt = Date.now();
-      await drv(s).openSession(s.id);
-      pollers.push(watch(s));
+    // Sessions open in waves (advisor msg_7d6860d0d212): a bounded burst
+    // keeps the per-IP launch limiter and the ramp healthy; a pause between
+    // waves lets the tail settle before the next batch.
+    const openWave = Math.max(1, Number(env("SOAK_OPEN_WAVE") ?? "10") || 10);
+    const openWavePauseMs = Math.max(
+      0,
+      Number(env("SOAK_OPEN_WAVE_PAUSE_MS") ?? "15000") || 0,
+    );
+    for (let w = 0; w < sessions.length && !shouldStop(); w += openWave) {
+      const wave = sessions.slice(w, w + openWave);
+      await Promise.all(
+        wave.map(async (s) => {
+          s.launchedAt = Date.now();
+          await drv(s).openSession(s.id);
+          pollers.push(watch(s));
+        }),
+      );
+      if (w + openWave < sessions.length) await sleep(openWavePauseMs);
     }
 
     // Soak clock: every session connected at least once (or given up on).
@@ -1318,17 +1371,50 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     if (!tpl) throw new Error("no templates listed");
 
     stamp(`creating ${opts.sessions} workspaces on template ${tpl}`);
-    for (let i = 0; i < opts.sessions && !shouldStop(); i++) {
-      const lane = lanes[i % lanes.length];
-      if (lane.skipped) continue; // skipped lane's share of sessions is dropped
-      const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
-      const id = await lane.api.createWorkspace(name, tpl);
-      const s = newSession(id, name);
-      s.lane = lane;
-      if (lane.user !== undefined) s.owner = lane.user.name;
-      else if (!opts.dryRun && env("SOAK_USER") !== undefined) s.owner = env("SOAK_USER");
-      sessions.push(s);
-      if (lane.driver instanceof ApiDriver) await lane.driver.forceReady(id);
+    // Advisor per-node guard (msg_7d6860d0d212): workspaces are created in
+    // waves; between waves the guarded nodes' CPU-request share is checked
+    // and creation stops when any would reach the cap. Effective N is what
+    // actually got created (sessionsEffective in the report).
+    const guardNodes = (env("SOAK_NODE_GUARD") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const guardPct = Math.max(1, Number(env("SOAK_NODE_GUARD_PCT") ?? "80") || 80);
+    const createWave = Math.max(1, Number(env("SOAK_CREATE_WAVE") ?? "10") || 10);
+    for (let w = 0; w < opts.sessions && !shouldStop(); w += createWave) {
+      if (guardNodes.length) {
+        const over = Object.entries(nodeRequestPcts(guardNodes)).filter(
+          ([, p]) => p >= guardPct,
+        );
+        if (over.length) {
+          stamp(
+            `node-request guard: ${over.map(([n, p]) => `${n} ${p}%`).join(", ")} ` +
+              `>= ${guardPct}% — stopping creation at ${sessions.length} sessions`,
+          );
+          break;
+        }
+      }
+      for (let i = w; i < Math.min(w + createWave, opts.sessions) && !shouldStop(); i++) {
+        const lane = lanes[i % lanes.length];
+        if (lane.skipped) continue; // skipped lane's share of sessions is dropped
+        const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
+        const id = await lane.api.createWorkspace(name, tpl);
+        const s = newSession(id, name);
+        s.lane = lane;
+        if (lane.user !== undefined) s.owner = lane.user.name;
+        else if (!opts.dryRun && env("SOAK_USER") !== undefined) s.owner = env("SOAK_USER");
+        sessions.push(s);
+        if (lane.driver instanceof ApiDriver) await lane.driver.forceReady(id);
+      }
+    }
+    if (guardNodes.length && sessions.length > 0 && env("SOAK_GUARD_NS")) {
+      const placement = soakPodsPerNode(env("SOAK_GUARD_NS")!);
+      stamp(
+        `workspace placement by node: ${Object.entries(placement)
+          .sort()
+          .map(([n, c]) => `${n}=${c}`)
+          .join(" ")}`,
+      );
     }
     if (!opts.dryRun) {
       await Promise.all(
