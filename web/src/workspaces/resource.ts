@@ -37,6 +37,11 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
   useEffect(() => {
     intervalRef.current = interval;
   }, [interval]);
+  // Re-arms a stopped poll from refresh(): the interval effect owns the
+  // timer, so a refresh that discovers transitional data can resume
+  // polling. Only fires when no tick is currently scheduled — an armed
+  // poll is untouched, so always-on consumers are unchanged.
+  const scheduleRef = useRef<() => void>(() => {});
 
   const run = useCallback(async () => {
     const started = epoch.current;
@@ -62,6 +67,7 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
+    let armed = false;
     // A new loader (e.g. a different workspace id) starts from scratch.
     epoch.current += 1;
     dataRef.current = undefined;
@@ -79,9 +85,11 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
     const schedule = () => {
       if (stopped) return;
       clearTimeout(timer);
+      armed = false;
       const delay = nextDelay();
       if (delay === null || document.visibilityState === "hidden") return;
       timer = setTimeout(() => void tick(), delay);
+      armed = true;
     };
     const tick = async () => {
       await run();
@@ -89,7 +97,13 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") void tick();
-      else clearTimeout(timer);
+      else {
+        clearTimeout(timer);
+        armed = false;
+      }
+    };
+    scheduleRef.current = () => {
+      if (!armed) schedule();
     };
     void tick();
     document.addEventListener("visibilitychange", onVisible);
@@ -97,6 +111,7 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
       stopped = true;
       epoch.current += 1;
       clearTimeout(timer);
+      scheduleRef.current = () => {};
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [run]);
@@ -111,7 +126,7 @@ export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T>
 
   const refresh = useCallback(() => {
     epoch.current += 1;
-    return run();
+    return run().then(() => scheduleRef.current());
   }, [run]);
 
   const clearError = useCallback(() => setError(null), []);

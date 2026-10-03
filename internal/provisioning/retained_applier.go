@@ -357,7 +357,13 @@ func (s *PurgeSweeper) purgeOne(ctx context.Context, rec *RetainedRecord) error 
 	}
 	orig := cur.DeepCopy()
 	cur.Finalizers = keep
-	if err := s.Client.Patch(ctx, cur, client.MergeFrom(orig)); err != nil {
+	err = s.Client.Patch(ctx, cur, client.MergeFrom(orig))
+	switch {
+	case apierrors.IsNotFound(err):
+		// The volume vanished between the second Get and the strip —
+		// same completion proof as the NotFound branches above.
+		return s.completePurge(ctx, rec)
+	case err != nil:
 		return err
 	}
 	return s.completePurge(ctx, rec)
