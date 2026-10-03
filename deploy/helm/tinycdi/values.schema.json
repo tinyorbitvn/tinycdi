@@ -378,6 +378,23 @@
         "honorLabels": {"type": "boolean"}
       }
     },
+    "dashboards": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "labels": {"type": "object"}
+      }
+    },
+    "alerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "labels": {"type": "object"},
+        "sessionDropFloor": {"type": "integer", "minimum": 0}
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
