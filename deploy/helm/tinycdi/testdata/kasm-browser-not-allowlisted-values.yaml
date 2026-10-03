@@ -1,0 +1,58 @@
+# Invalid: a seeded adapter=kasm template with experience=Browser whose
+# image is not on kasmAdapter.browserAllowlist — E13 limits browser
+# templates to browser-class catalog entries inside the ≤2-major engine
+# gate. The adapter itself is correctly enabled + digest-pinned, so the
+# allowlist is the only thing this render can fail on.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+
+kasmAdapter:
+  enabled: true
+  image:
+    repository: tinycdi/kasm-adapter
+    digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
+
+runtime:
+  placement:
+    allowSharedNodes: true
+
+templates:
+  - name: kasm-chromium
+    namespace: tinycdi-tenant-a
+    # kasmweb/chromium is a desktop-class catalog entry — Chromium 150 vs
+    # the native 154 pin, outside the ≤2 browser gate (E13).
+    image: kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        adapter: kasm
+        sessionCmd: "/usr/bin/chromium-orig --start-maximized https://start.lab.example.net"
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
