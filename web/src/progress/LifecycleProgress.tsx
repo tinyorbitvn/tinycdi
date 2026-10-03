@@ -173,11 +173,6 @@ export function LifecycleProgress({
           <StepRow key={s.id} step={s} elapsedMs={model.stepElapsedMs} />
         ))}
       </ol>
-      {model.terminal === "failed" ? (
-        <p className="tc-progress__terminal" role="alert">
-          {cur?.notice ? t(cur.notice, { reason: cur.reason ?? "" }) : t("progress.failed.generic")}
-        </p>
-      ) : null}
       {model.delayed ? <p className="tc-progress__hint">{t("progress.delayed")}</p> : null}
       {model.stalled ? (
         <p className="tc-progress__hint" data-tone="warn">

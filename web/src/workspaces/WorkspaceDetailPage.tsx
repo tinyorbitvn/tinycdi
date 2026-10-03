@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Badge,
@@ -35,7 +35,7 @@ import { useBranding } from "../app/shell";
 import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
-import { blockingReason, desiredLabel, isConnectable } from "./helpers";
+import { blockingReason, desiredLabel } from "./helpers";
 import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
 import { ConditionsTable, PhasePill } from "./StatusBits";
@@ -58,6 +58,30 @@ interface DetailData {
 // backing off with age); the idle 8 s otherwise.
 function pollDelay(d: DetailData | undefined): number {
   return withJitter(workspacePollMs(d?.workspace, IDLE_MS));
+}
+
+// The failure field reads in plain language for the causes we can name;
+// the raw token stays as secondary text (and the hover title) so the detail
+// is never lost. Unknown causes render raw only — never hidden.
+const FAILURE_COPY: Record<string, Parameters<typeof t>[0]> = {
+  BootDeadlineExceeded: "progress.failed.deadline",
+  ImagePullBackOff: "progress.failed.imagePull",
+  ErrImagePull: "progress.failed.imagePull",
+  CrashLoopBackOff: "progress.notice.retry",
+};
+
+function failureDetail(reason: string): ReactNode {
+  const token = reason.split(":")[0].trim();
+  const key = FAILURE_COPY[token];
+  if (!key) return reason;
+  return (
+    <>
+      {t(key)}{" "}
+      <span className="tc-field__hint" title={reason}>
+        {reason}
+      </span>
+    </>
+  );
 }
 
 const EVENT_TONE = { Normal: "neutral", Warning: "warning" } as const;
@@ -294,7 +318,9 @@ export function WorkspaceDetailPage({
     ...(ws.imageBuiltAt
       ? [{ term: t("workspaces.detail.field.imageBuilt"), detail: formatDateTime(ws.imageBuiltAt) }]
       : []),
-    ...(ws.failureReason ? [{ term: t("workspaces.detail.field.failure"), detail: ws.failureReason }] : []),
+    ...(ws.failureReason
+      ? [{ term: t("workspaces.detail.field.failure"), detail: failureDetail(ws.failureReason) }]
+      : []),
     { term: t("workspaces.detail.field.created"), detail: formatDateTime(ws.createdAt) },
     { term: t("workspaces.detail.field.updated"), detail: formatDateTime(ws.updatedAt) },
     { term: t("workspaces.detail.field.id"), detail: ws.id },
@@ -314,7 +340,7 @@ export function WorkspaceDetailPage({
       }
       actions={
         <Cluster gap={2}>
-          {canOfferConnect ? <ConnectButton workspace={ws} disabled={!isConnectable(ws)} /> : null}
+          {canOfferConnect ? <ConnectButton workspace={ws} /> : null}
           {canStart ? (
             <Button variant="secondary" loading={busy === "start"} disabled={busy !== null} onClick={() => void act("start")}>
               {busy === "start"
