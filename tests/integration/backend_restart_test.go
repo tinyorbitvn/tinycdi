@@ -602,6 +602,9 @@ func (f *restartFixture) flags(replica string) []string {
 		"-gateway-audience", restartGatewayAud,
 		"-renew-interval", "500ms",
 		"-revoke-deadline", "5s",
+		// The drain window is held for its full length on every stop —
+		// 1 s keeps the drill fast while staying a real duration.
+		"-drain-window", "1s",
 		"-internal-listen", "",
 		"-metrics-listen", "",
 	}
