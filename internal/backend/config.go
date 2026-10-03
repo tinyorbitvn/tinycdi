@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
@@ -74,6 +76,22 @@ func (g *groupList) Set(v string) error {
 // it is disabled, not unauthenticated.
 const controlTokenUnsetWarning = "control token unset — /v1/control/* is disabled (fail closed); set -control-token-file or TCDI_CONTROL_TOKEN to enable"
 
+// trustedProxiesUnsetWarning is logged at startup when a per-client rate
+// limit is enabled while -trusted-proxies is empty: behind a shared edge
+// every client then keys on the ingress's own address — one bucket for
+// the whole organisation (advisor review, E7).
+const trustedProxiesUnsetWarning = "rate limits enabled with -trusted-proxies empty — every client behind one ingress shares the ingress address's bucket; set -trusted-proxies to the edge CIDRs"
+
+// rateLimitsUntrusted reports whether a per-client rate limiter is enabled
+// on a listener this config runs while no trusted proxy CIDRs are set —
+// the shared-bucket misconfiguration the startup warning names.
+func rateLimitsUntrusted(c Config) bool {
+	if p, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil || len(p) > 0 {
+		return false
+	}
+	return (c.Listen != "" && c.LoginRate > 0) || (c.SessionListen != "" && c.LaunchRate > 0)
+}
+
 // Config is the parsed flag set for the merged backend.
 type Config struct {
 	// App listener (the former cmd/api surface).
@@ -98,6 +116,7 @@ type Config struct {
 	RetainedSyncInterval time.Duration
 	RecoveryInterval     time.Duration
 	ImageStaleAfter      time.Duration
+	LoginRate            int // per-client requests/min on the login-family routes; 0 disables
 
 	// Session listener (the former cmd/gateway surface).
 	SessionListen       string // empty disables the session listener
@@ -115,6 +134,7 @@ type Config struct {
 	// the pod keeps serving reads while streams migrate to sibling
 	// replicas; only new launches/upgrades are refused during it.
 	DrainWindow time.Duration
+	LaunchRate  int // per-client launches/min on /v1/launch; 0 disables
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
 	InternalListen   string // empty disables the internal listener
@@ -132,6 +152,7 @@ type Config struct {
 	GatewayID       string
 	GatewayAudience string
 	LoginKeyFiles   stringList // first file seals; all open (rotation)
+	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/S18)
 
 	// Split/test mode: session listener over a remote mTLS broker.
 	BrokerURL string
@@ -160,6 +181,17 @@ func envDur(getenv func(string) string, key string, def time.Duration) time.Dura
 		if v := getenv(key); v != "" {
 			if d, err := time.ParseDuration(v); err == nil {
 				return d
+			}
+		}
+	}
+	return def
+}
+
+func envInt(getenv func(string) string, key string, def int) int {
+	if getenv != nil {
+		if v := getenv(key); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
 			}
 		}
 	}
@@ -201,9 +233,14 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.RetainedSyncInterval, "retained-sync-interval", envDur(getenv, "TCDI_RETAINED_SYNC_INTERVAL", 30*time.Second),
 		"retained-inventory PVC->record sync interval; <=0 disables (env TCDI_RETAINED_SYNC_INTERVAL)")
 	fs.DurationVar(&c.RecoveryInterval, "recovery-interval", envDur(getenv, "TCDI_RECOVERY_INTERVAL", 30*time.Second),
-		"quota/intent recovery pass interval; <=0 runs a single startup pass (env TCDI_RECOVERY_INTERVAL)")
+		"quota/intent recovery pass interval; one pass runs at every leader acquisition, then every interval; "+
+			"<=0 runs the single startup pass only. Quota settlement is event-driven (Workspace informer) with "+
+			"this tick as the fallback — a reservation whose runtime absence is never proven waits indefinitely "+
+			"by design (env TCDI_RECOVERY_INTERVAL)")
 	fs.DurationVar(&c.ImageStaleAfter, "image-stale-after", envDur(getenv, "TCDI_IMAGE_STALE_AFTER", api.DefaultImageStaleAfter),
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
+	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
+		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10); over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
 	// Session listener.
 	fs.StringVar(&c.SessionListen, "session-listen", envOr(getenv, "TCDI_SESSION_LISTEN", ":8444"),
@@ -219,6 +256,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.RenewInterval, "renew-interval", envDur(getenv, "TCDI_RENEW_INTERVAL", gateway.LeaseRenewInterval), "lease renew cadence")
 	fs.DurationVar(&c.RevokeDeadline, "revoke-deadline", envDur(getenv, "TCDI_REVOKE_DEADLINE", gateway.RevokeDeadline), "fail-closed budget after last successful renew")
 	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain budget: streams migrate while reads keep serving")
+	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 60),
+		"per-client launches/minute on /v1/launch (burst 20); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),
@@ -243,6 +282,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"audience launch tickets bind to (default: session domain)")
 	fs.Var(&c.LoginKeyFiles, "login-key-file",
 		"OIDC login-state sealing key file (repeatable or CSV; env TCDI_LOGIN_KEY_FILE; first file seals, all open; required when the app listener is on)")
+	fs.StringVar(&c.TrustedProxies, "trusted-proxies", envOr(getenv, "TCDI_TRUSTED_PROXIES", ""),
+		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For claims are trusted; empty trusts only the socket peer (env TCDI_TRUSTED_PROXIES)")
 
 	// Split/test mode.
 	fs.StringVar(&c.BrokerURL, "broker-url", envOr(getenv, "TCDI_BROKER_URL", ""), "remote broker base URL (https); split/test mode only — requires -listen= and -internal-listen=")
@@ -298,6 +339,12 @@ func (c *Config) validate() error {
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)
+	}
+	if c.LoginRate < 0 || c.LaunchRate < 0 {
+		return errors.New("-login-rate and -launch-rate must be >= 0 (0 disables the limit)")
+	}
+	if _, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil {
+		return fmt.Errorf("-trusted-proxies: %w", err)
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return errors.New("-tls-cert and -tls-key must be set together")

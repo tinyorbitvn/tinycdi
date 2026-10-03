@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -98,55 +97,74 @@ func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]Ope
 	return out, nil
 }
 
-// policyFor resolves the template lifecycle snapshot for one workspace. A
-// reference to a catalog base name resolves, like the operator's
-// resolveTemplate, to the newest revision carrying the catalog-name label:
-// the seeded revision objects are named "<name>-<hash8>", so a plain Get by
-// the reference alone misses them and silently falls back to the platform
-// defaults (a 5 m disconnectTimeout would run as 10 m).
+// snapshotPolicy is the lifecycle slice of the operator's recorded
+// template-snapshot annotation (operator.AnnotationTemplateSnapshot).
+// Only the spec's lifecycle matters here — the admitted revision's caps.
+type snapshotPolicy struct {
+	Spec struct {
+		Lifecycle workspacesv1alpha1.LifecycleDefaults `json:"lifecycle"`
+	} `json:"spec"`
+}
+
+// policyFor resolves the lifecycle budget the expiry planner enforces on
+// one workspace. The broker owns expiry decisions and plans them from the
+// workspace's OWN recorded contract: the template snapshot the operator
+// recorded at first admit. A template re-published after admit must not
+// change a running generation's caps — that is also the input the
+// operator's max-duration backstop converges on, so the two owners of the
+// stop decision can never disagree. A workspace without a recorded
+// snapshot (never admitted, or the annotation was lost) resolves its
+// templateRef through the shared by-name resolver — a reference to a
+// catalog base name resolves to the newest revision — and a missing or
+// unresolvable template falls back to DefaultTimeoutPolicy, so a broken
+// reference never disables the caps.
 func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) TimeoutPolicy {
+	lc := s.lifecycleFor(ctx, ws)
 	pol := DefaultTimeoutPolicy
-	tpl := s.template(ctx, ws)
-	if tpl == nil {
+	if lc == nil {
 		return pol
 	}
-	if d := tpl.Spec.Lifecycle.IdleTimeout.Duration; d > 0 {
+	if d := lc.IdleTimeout.Duration; d > 0 {
 		pol.IdleTimeout = d
 	}
-	if d := tpl.Spec.Lifecycle.DisconnectTimeout.Duration; d > 0 {
+	if d := lc.DisconnectTimeout.Duration; d > 0 {
 		pol.DisconnectTimeout = d
 	}
-	if d := tpl.Spec.Lifecycle.MaxDuration.Duration; d > 0 {
+	if d := lc.MaxDuration.Duration; d > 0 {
 		pol.MaxDuration = d
 	}
 	return pol
 }
 
-// template finds the WorkspaceTemplate a workspace references: the exact
-// object first, else the newest revision of that catalog name; nil when
-// neither exists.
-func (s *K8sRunningSource) template(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.WorkspaceTemplate {
-	var tpl workspacesv1alpha1.WorkspaceTemplate
-	err := s.cache.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Spec.TemplateRef.Name}, &tpl)
-	if err == nil {
-		return &tpl
-	}
-	if !apierrors.IsNotFound(err) {
-		return nil
-	}
-	var list workspacesv1alpha1.WorkspaceTemplateList
-	if err := s.cache.List(ctx, &list, client.InNamespace(ws.Namespace),
-		client.MatchingLabels{provisioning.LabelCatalogName: ws.Spec.TemplateRef.Name}); err != nil {
-		return nil
-	}
-	var latest *workspacesv1alpha1.WorkspaceTemplate
-	for i := range list.Items {
-		t := &list.Items[i]
-		if latest == nil ||
-			t.CreationTimestamp.After(latest.CreationTimestamp.Time) ||
-			(t.CreationTimestamp.Equal(&latest.CreationTimestamp) && t.Name > latest.Name) {
-			latest = t
+// lifecycleFor returns the recorded snapshot lifecycle, else the resolved
+// template's, else nil. A corrupt snapshot annotation resolves the live
+// template rather than failing closed — an unplannable workspace must
+// never silently drop its caps.
+func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.LifecycleDefaults {
+	if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
+		var snap snapshotPolicy
+		// An all-zero lifecycle — e.g. a snapshot written without the key —
+		// carries no recorded contract; resolve the live template instead.
+		if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
+			snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+			lc := snap.Spec.Lifecycle
+			return &lc
 		}
 	}
-	return latest
+	if tpl := s.template(ctx, ws); tpl != nil {
+		return &tpl.Spec.Lifecycle
+	}
+	return nil
+}
+
+// template finds the WorkspaceTemplate a workspace references through the
+// shared by-name resolver (exact object, else newest catalog-name
+// revision); nil when neither exists or the lookup errors — a broken
+// reference falls back to DefaultTimeoutPolicy rather than disabling caps.
+func (s *K8sRunningSource) template(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.WorkspaceTemplate {
+	tpl, err := provisioning.ResolveTemplateByName(ctx, s.cache, ws.Namespace, ws.Spec.TemplateRef.Name)
+	if err != nil {
+		return nil
+	}
+	return tpl
 }

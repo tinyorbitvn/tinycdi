@@ -245,6 +245,52 @@ its template merges**:
   `spec.linux.sessionCmd` (only with `adapter=kasm`; `spec.linux.command`
   is forbidden with `adapter=kasm` — the adapter supplies the command).
 
+## Embedded client (portal iframe)
+
+The KasmVNC 1.5.0 web client detects embed mode with
+`window.self !== window.top` and, unless `show_control_bar` is set,
+forces `resize=off`, `enable_webp=false`, all clipboard directions off
+and the control bar hidden (its `initSetting` block; a URL setting wins
+over an `initSetting` default). The portal's session page owns the
+session chrome, so `show_control_bar` stays unset and the gateway launch
+redirect plus every portal-driven frame navigation re-assert the tab-mode
+behaviour it wants (V3.24 decisions, `internal/gateway.DesktopPath` and
+`web/src/session/launch.ts`):
+
+- `resize=remote` — the remote screen tracks the frame (FX-R18 fix for
+  the dark regions in a larger iframe).
+- `enable_webp=true` — same codec offer as a top-level tab.
+- `idle_disconnect=1440` — pushes the client's own idle cut (default
+  20 min) past any template lifecycle timeout; idle policy belongs to
+  the platform, not to a second, unsynchronized client timer.
+- `clipboard_up`/`clipboard_down`/`clipboard_seamless` — set by the
+  portal per workspace clipboard policy on the navigations it drives;
+  `clipboard_seamless` only on Chrome-family browsers, mirroring the
+  client's own non-embed guard (upstream disables it on Firefox and
+  Safari). These client flags sit on top of the server-side DLP policy,
+  which today denies every direction.
+- The iframe `allow` attribute delegates `clipboard-read`/`clipboard-write`
+  per the same policy (Send → read, Receive → write, Bidirectional →
+  both), plus `fullscreen` and `keyboard-map` always: the client maps
+  non-US layouts through `getLayoutMap()` — without it the Ctrl-shortcut
+  remap sends the wrong keysym (e.g. a German Ctrl+Z reaches the remote
+  as Ctrl+Y). Delegation is least privilege on top of the gateway's
+  Permissions-Policy and never broader than the template policy.
+
+### VideoFrame console warning
+
+Browsers may log `"A VideoFrame was garbage collected without being
+closed"` under load. The origin is upstream client code: the
+`VideoDecoder` output callback hands frames to a render queue; frames
+dropped on queue overrun or forwarded for secondary displays
+(`_processRectScreens`/`vid` path) are not always `close()`d. Normal
+render consumption closes its frames, so this is a bounded upstream
+leak — cosmetic console noise and modest GPU memory churn, observed on
+rc.5, not reproduced on rc.6. No 1.5.x fix exists at the time of
+writing; accepted as upstream behaviour (V3.24). If a later client bump
+changes the decoder path, re-check the queue-drop and secondary-display
+branches.
+
 ## Known limitations
 
 - The pod-level composition is what CI proves via the docker-based

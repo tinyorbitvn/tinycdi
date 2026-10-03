@@ -59,8 +59,10 @@ secret values — every Secret is a pre-existing object referenced by name
 Run the preflight script first. It checks the Kubernetes version,
 NetworkPolicy enforcement (with a throwaway probe namespace it always
 deletes), a StorageClass, user-namespace support, the workspace node pool,
-wildcard DNS, the session TLS Secret, OIDC discovery and Postgres with TLS
-verification, and prints `PASS`/`WARN`/`FAIL` with a one-line fix for each
+AppArmor on the workspace nodes (it names the fitting
+`runtime.appArmor.requireRuntimeDefault` value), wildcard DNS, the session
+TLS Secret, OIDC discovery and Postgres with TLS verification, and prints
+`PASS`/`WARN`/`FAIL` with a one-line fix for each
 (exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
 not permitted to run is a `WARN`. Flags and the check table are in
 `hack/preflight/README.md`.
@@ -148,7 +150,9 @@ Also gather:
    `appArmorProfile: RuntimeDefault`, which a node that cannot enforce
    AppArmor (kind; RHEL-family and other SELinux-based distributions)
    refuses with `Cannot enforce AppArmor: AppArmor is not enabled on the
-   host`. On such a pool set `runtime.appArmor.requireRuntimeDefault:
+   host`. The preflight `apparmor` check probes every node workspaces can
+   reach and names the fitting value. On such a pool set
+   `runtime.appArmor.requireRuntimeDefault:
    false` (operator flag `--runtime-apparmor-require-default=false`; the
    install NOTES print a reminder). This is a supported setting. It omits
    only the RuntimeDefault AppArmor field — seccomp, dropped capabilities,
@@ -303,6 +307,41 @@ Check the result — only the leader replica logs the pass:
 ```bash
 $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
+
+## Rate limits and trusted proxies
+
+`GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited
+to 30 requests/min per client address (burst 10); `POST /v1/launch` to
+60/min (burst 20). Over the limit the API answers `429 RATE_LIMITED` with
+`Retry-After`.
+
+The client address is the socket peer unless the peer is inside
+`backend.trustedProxies` — then the right-most untrusted `X-Forwarded-For`
+entry stands in. **Behind any ingress or Gateway, set the value to the
+CIDR(s) your edge sources from.** With it empty every user shares the
+edge's own bucket (~30 logins/min for the whole organisation) and the
+backend logs a startup warning while a limit is on. The same list feeds
+the forwarded headers toward workspace pods — client-supplied values are
+stripped and rebuilt from the trusted chain only.
+
+```yaml
+# Cilium Gateway API / Ingress — edge envoy runs host-network; the peer
+# is the node the request lands on. List the node subnet(s); keep
+# networkPolicy.edgeIngress: cilium (see the chart README).
+backend:
+  trustedProxies: ["10.10.0.0/24"]
+```
+
+```yaml
+# Traefik or another ingress running as pods — the peer is the proxy pod
+# IP; list the cluster pod CIDR (shown: 10.42.0.0/16) or a tighter range.
+backend:
+  trustedProxies: ["10.42.0.0/16"]
+```
+
+No edge proxy at all needs nothing — the peer already is the client.
+Rates are tunable via `backend.extraArgs` (`-login-rate`, `-launch-rate`;
+`0` disables a limit).
 
 ## Sign-out and the identity provider
 

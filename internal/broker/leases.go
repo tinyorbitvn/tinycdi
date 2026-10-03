@@ -26,16 +26,21 @@ type Fence struct {
 // workspace (unique index in migration 002). It expires unless renewed every
 // ~10 s and must be treated as dead once revoked, superseded or past expiry.
 type Lease struct {
-	ID                string    `json:"leaseId"`
-	WorkspaceUID      string    `json:"workspaceUID"`
-	TenantID          string    `json:"tenantId"`
-	PrincipalSubject  string    `json:"principalSubject"`
-	RuntimeGeneration uint64    `json:"runtimeGeneration"`
-	RuntimeUID        string    `json:"runtimeUID"`
-	FencingVersion    uint64    `json:"fencingVersion"`
-	GatewayID         string    `json:"gatewayId"`
-	StreamEpoch       uint64    `json:"streamEpoch"`
-	ExpiresAt         time.Time `json:"expiresAt"`
+	ID                string `json:"leaseId"`
+	WorkspaceUID      string `json:"workspaceUID"`
+	TenantID          string `json:"tenantId"`
+	PrincipalSubject  string `json:"principalSubject"`
+	RuntimeGeneration uint64 `json:"runtimeGeneration"`
+	RuntimeUID        string `json:"runtimeUID"`
+	FencingVersion    uint64 `json:"fencingVersion"`
+	GatewayID         string `json:"gatewayId"`
+	StreamEpoch       uint64 `json:"streamEpoch"`
+	// ClipboardPolicy is the workspace template's clipboard policy as
+	// recorded on the ticket at issue — populated only on redemption, so
+	// the gateway's post-redemption redirect can re-assert the client's
+	// clipboard flags (V3.24). "" on every other lease read.
+	ClipboardPolicy string    `json:"clipboardPolicy,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
 }
 
 // loadLease fetches the lease row including its lifecycle state.

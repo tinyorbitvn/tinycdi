@@ -5,10 +5,13 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 // writeError is the package-local convenience wrapper around WriteError
@@ -206,6 +209,31 @@ func RequireTrustedOrigin(sessionCookieName string, allowedOrigins []string) fun
 			default:
 				if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" {
 					writeError(w, r, CodeCSRFFailed, "cross-origin request rejected")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting (E7)
+// ---------------------------------------------------------------------------
+
+// RateLimit throttles a route per client key: requests inside the bucket
+// pass; over the limit the caller gets 429 RATE_LIMITED with a Retry-After
+// in whole seconds. The key is the socket peer, or the right-most
+// untrusted X-Forwarded-For entry when the peer sits inside trusted — the
+// same derivation the session gateway applies (S18). A nil limiter
+// disables the check entirely.
+func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if l != nil {
+				if ok, retry := l.Allow(ratelimit.ClientKey(r, trusted)); !ok {
+					w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+					writeError(w, r, CodeRateLimited, "rate limit exceeded")
 					return
 				}
 			}

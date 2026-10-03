@@ -251,9 +251,11 @@ EOF
   fi
 }
 
-# probe_pod NAME [extra-spec-yaml-fragment-file] — restricted-PSS pod; $3 = command args (yaml list body)
-probe_pod() { # probe_pod NAME ARGS_YAML [EXTRA_SPEC]
-  local name="$1" args="$2" extra="${3:-}"
+# probe_pod NAME ARGS_YAML [EXTRA_SPEC] [EXTRA_CONTAINER_SC] — restricted-PSS
+# pod; $2 is the args yaml list body, $3 spec-level yaml, $4 is inserted into
+# the container's securityContext block.
+probe_pod() { # probe_pod NAME ARGS_YAML [EXTRA_SPEC] [EXTRA_CONTAINER_SC]
+  local name="$1" args="$2" extra="${3:-}" csc="${4:-}"
   kq -n "$PROBE_NS" create -f - <<EOF
 apiVersion: v1
 kind: Pod
@@ -279,6 +281,7 @@ ${args}
     securityContext:
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
+${csc}
       capabilities:
         drop: [ALL]
     resources:
@@ -482,6 +485,162 @@ check_node_pool() {
     report WARN node-pool "$n labeled node(s); not tainted $tk:$untainted" \
       "kubectl taint node <node> $tk:NoSchedule so unrelated workloads stay off the pool"
   fi
+}
+
+# ---- 5b. AppArmor on the workspace nodes ----------------------------------
+# The chart sets securityContext.appArmorProfile=RuntimeDefault on runtime
+# containers (runtime.appArmor.requireRuntimeDefault, default true); a node
+# without AppArmor refuses such pods, so the value must fit the nodes that
+# will run workspaces. Node status reports no AppArmor signal, so each target
+# node gets one short-lived probe pod, pinned to it with spec.nodeName and
+# tolerating every taint, that asks for the same RuntimeDefault profile. The
+# kubelet/container-runtime refusal on a host without AppArmor ("Cannot
+# enforce AppArmor") is the exact failure a workspace pod would hit — the
+# definitive read-only signal — and it lands in the pod status or events.
+AA_EVENTS=""
+AA_EVENTS_FETCHED=0
+aa_event_apparmor() { # aa_event_apparmor POD — 0 when POD's events mention AppArmor
+  local pod="$1"
+  if [ "$AA_EVENTS_FETCHED" = 0 ]; then
+    AA_EVENTS_FETCHED=1
+    kq -n "$PROBE_NS" get events -o 'jsonpath={range .items[*]}{.involvedObject.name}{"|"}{.reason}{"|"}{.message}{";"}{end}' && AA_EVENTS="$KOUT"
+  fi
+  printf '%s' "$AA_EVENTS" | tr ';' '\n' | grep -iF "$pod|" | grep -qi apparmor
+}
+
+# aa_pod_state POD -> ok | noaa | failed | pending
+aa_pod_state() {
+  local pod="$1" out ph
+  if ! kq -n "$PROBE_NS" get pod "$pod" -o 'jsonpath={.status.phase}{"\t"}{.status.reason}{"|"}{.status.message}{"\t"}{range .status.containerStatuses[*]}{.state.waiting.reason}{"|"}{.state.waiting.message}{";"}{end}'; then
+    printf 'pending'; return
+  fi
+  out="$KOUT"; ph="${out%%$'\t'*}"
+  case "$ph" in Succeeded|Running) printf 'ok'; return ;; esac
+  case "$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')" in
+    *apparmor*) printf 'noaa'; return ;;
+  esac
+  case "$ph" in
+    Failed) printf 'failed'; return ;;
+  esac
+  # A container-create refusal without the word AppArmor stays inconclusive:
+  # the cause may only sit in the pod's events (checked once at the end).
+  case "$out" in
+    *CreateContainerError*|*CreatePodSandboxError*|*RunContainerError*) printf 'failed'; return ;;
+  esac
+  printf 'pending'
+}
+
+check_apparmor() {
+  local lines name os unsched taints tk tkey teff taint skip i s
+  local -a nodes=() pods=() st=()
+  tk="${NODE_TAINT%%=*}"; tk="${tk%%:*}"
+  # The target set is the placement the chart would use: with a dedicated
+  # pool the labeled nodes (runtime.placement.nodeSelector), skipping nodes
+  # a workspace pod could not reach (unschedulable, or a NoSchedule/NoExecute
+  # taint the runtime tolerations do not cover); with --allow-shared-nodes
+  # every schedulable untainted Linux node, since runtime pods then carry no
+  # tolerations at all.
+  # Field separator is |, not a tab: empty unschedulable/taint fields must not
+  # collapse, which IFS whitespace would do.
+  if [ "$ALLOW_SHARED" = 1 ]; then
+    kq get nodes -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.operatingSystem}{"|"}{.spec.unschedulable}{"|"}{range .spec.taints[*]}{.key}{":"}{.effect}{";"}{end}{"\n"}{end}'
+  else
+    kq get nodes -l "$NODE_LABEL" -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.operatingSystem}{"|"}{.spec.unschedulable}{"|"}{range .spec.taints[*]}{.key}{":"}{.effect}{";"}{end}{"\n"}{end}'
+  fi
+  if [ "$KRC" != 0 ]; then
+    if [ "$KFORBID" = 1 ]; then
+      report WARN apparmor "not permitted to list nodes" "grant list on nodes, or check AppArmor on each workspace node by hand"
+    else
+      report WARN apparmor "could not list nodes" "see kubectl error output; check AppArmor on each workspace node by hand"
+    fi
+    return
+  fi
+  lines="$(printf '%s\n' "$KOUT" | sed '/^$/d')"
+  while IFS='|' read -r name os unsched taints; do
+    [ -z "$name" ] && continue
+    [ "$os" = linux ] || continue
+    [ "$unsched" = true ] && continue
+    skip=0
+    for taint in ${taints//;/ }; do
+      tkey="${taint%%:*}"; teff="${taint##*:}"
+      case "$teff" in
+        # Only the workspace taint key's NoSchedule effect is covered by the
+        # chart's default runtime.placement.tolerations; shared-node pods
+        # carry no tolerations at all, and NoExecute is never covered.
+        NoSchedule)
+          if [ "$ALLOW_SHARED" = 1 ] || [ "$tkey" != "$tk" ]; then skip=1; fi ;;
+        NoExecute) skip=1 ;;
+      esac
+    done
+    [ "$skip" = 0 ] && nodes+=("$name")
+  done <<<"$lines"
+  if [ "${#nodes[@]}" = 0 ]; then
+    if [ "$ALLOW_SHARED" = 1 ]; then
+      report WARN apparmor "no schedulable untainted Linux node found" "check the nodes by hand: cat /sys/module/apparmor/parameters/enabled"
+    else
+      report WARN apparmor "no schedulable node carries $NODE_LABEL" "fix the node pool first (see node-pool), or pass --allow-shared-nodes"
+    fi
+    return
+  fi
+  ensure_probe_ns
+  case "$PROBE_STATE" in
+    noprobe|noperm|error)
+      report WARN apparmor "AppArmor not probed on ${#nodes[@]} workspace node(s): $PROBE_REASON" \
+        "check each workspace node by hand: cat /sys/module/apparmor/parameters/enabled; if any lacks AppArmor set runtime.appArmor.requireRuntimeDefault=false"
+      return ;;
+  esac
+  for name in "${nodes[@]}"; do
+    if ! probe_pod "probe-aa-${#pods[@]}" "    - entrypoint-tester" \
+"  nodeName: $name
+  tolerations:
+  - operator: Exists" \
+"      appArmorProfile:
+        type: RuntimeDefault"; then
+      if [ "$KFORBID" = 1 ]; then
+        report WARN apparmor "not permitted to create probe pods" "grant create on pods in a throwaway namespace, or check AppArmor per node by hand"
+      else
+        case "$KERR" in
+          *appArmorProfile*|*apparmor*)
+            report WARN apparmor "the API server rejected securityContext.appArmorProfile (the field needs Kubernetes >= 1.30)" \
+              "check AppArmor on each workspace node by hand: cat /sys/module/apparmor/parameters/enabled" ;;
+          *)
+            report WARN apparmor "AppArmor probe pod rejected" "see kubectl error output; check AppArmor per node by hand" ;;
+        esac
+      fi
+      return
+    fi
+    pods+=("probe-aa-${#pods[@]}")
+  done
+  # Poll all pods in parallel until each resolves or the deadline passes.
+  local deadline=$((SECONDS + POD_TIMEOUT)) pending=1
+  while [ "$pending" = 1 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    pending=0
+    for i in "${!pods[@]}"; do
+      [ -n "${st[$i]:-}" ] && continue
+      s="$(aa_pod_state "${pods[$i]}")"
+      if [ "$s" = pending ]; then pending=1; else st[i]="$s"; fi
+    done
+    [ "$pending" = 1 ] && [ "$SECONDS" -lt "$deadline" ] && sleep "$POLL"
+  done
+  local ok="" noaa="" unknown=""
+  for i in "${!pods[@]}"; do
+    case "${st[$i]:-timeout}" in
+      ok)   ok="$ok ${nodes[$i]}" ;;
+      noaa) noaa="$noaa ${nodes[$i]}" ;;
+      *)
+        if aa_event_apparmor "${pods[$i]}"; then noaa="$noaa ${nodes[$i]}"; else unknown="$unknown ${nodes[$i]}"; fi ;;
+    esac
+  done
+  ok="${ok# }"; noaa="${noaa# }"; unknown="${unknown# }"
+  if [ -z "$noaa" ] && [ -z "$unknown" ]; then
+    report PASS apparmor "AppArmor on all ${#nodes[@]} workspace node(s): runtime.appArmor.requireRuntimeDefault=true (the chart default) fits"
+    return
+  fi
+  local detail=""
+  [ -n "$noaa" ] && detail="no AppArmor: $noaa"
+  [ -n "$unknown" ] && detail="${detail:+$detail; }AppArmor not determined: $unknown"
+  report WARN apparmor "$detail" \
+    "set runtime.appArmor.requireRuntimeDefault=false (nodes without AppArmor refuse the RuntimeDefault profile — see the chart README); when every workspace node has AppArmor, true fits"
 }
 
 # ---- 6. wildcard DNS ------------------------------------------------------
@@ -842,6 +1001,7 @@ check_netpol
 check_storage_class
 check_host_users
 check_node_pool
+check_apparmor
 check_dns
 check_tls
 check_oidc

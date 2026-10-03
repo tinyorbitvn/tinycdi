@@ -8,7 +8,7 @@ export {
   sessionOrigin,
   sessionPath,
   submitLaunch,
-  SESSION_FRAME_FEATURES,
+  sessionFrameFeatures,
   sessionFrameAllow,
   SESSION_FRAME_SANDBOX,
   TICKET_FIELD,

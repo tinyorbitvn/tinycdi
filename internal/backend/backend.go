@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
-	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // Shutdown runs against ONE shared deadline, kept under the pod's
@@ -38,6 +37,13 @@ type namedServer struct {
 	tlsCfg *tls.Config
 }
 
+// fileReloader is the Run contract of the tlsreload file watchers the
+// backend drives: Reloader (certificates) and CAPool (the internal
+// listener's client-CA bundle).
+type fileReloader interface {
+	Run(ctx context.Context)
+}
+
 // Backend owns the four listeners (app, session, internal, metrics) and the
 // lifecycle of everything behind them: store, Kubernetes cache, provisioning
 // loops, broker, session gateway.
@@ -58,7 +64,7 @@ type Backend struct {
 
 	gw        *gateway.Gateway // nil when the session listener is off
 	servers   []namedServer    // bound in New, served in Run
-	reloaders []*tlsreload.Reloader
+	reloaders []fileReloader
 
 	// Handlers built by wire; a nil handler means the listener is off.
 	appHandler      http.Handler

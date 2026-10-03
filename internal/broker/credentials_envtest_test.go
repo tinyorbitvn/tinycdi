@@ -185,7 +185,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 
 	alice := api.Principal{Issuer: "https://idp.example", Subject: "alice", TenantID: "tenant-a"}
 	gw := broker.GatewayIdentity{ID: "gw-1", Audience: broker.DefaultGatewayAudience}
-	tk, err := b.IssueTicket(ctx, alice, wsUID, false)
+	tk, err := b.IssueTicket(ctx, alice, wsUID, false, "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
