@@ -485,17 +485,26 @@ func TestPGOutage_LongClosesStreams(t *testing.T) {
 	elapsed := closeAt.Sub(t0)
 	t.Logf("long outage: stream closed %.2f s after docker stop, %.2f s after last counted renew",
 		elapsed.Seconds(), sinceRenew.Seconds())
-	killLogged := false
-	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, "session closed") {
-			t.Logf("gateway log: %s", line)
-			if strings.Contains(line, "renew_deadline") {
-				killLogged = true
+	// killSession closes the conn before logging — the record can land a
+	// beat after the client observed EOF, so wait for it.
+	var killLine string
+	deadline := time.Now().Add(3 * time.Second)
+	for killLine == "" && time.Now().Before(deadline) {
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, `"session closed"`) {
+				killLine = line
 			}
 		}
+		if killLine == "" {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
-	if !killLogged {
-		t.Fatal("session was not torn down by the renew deadline")
+	if killLine == "" {
+		t.Fatal("gateway never logged the session close")
+	}
+	t.Logf("gateway log: %s", killLine)
+	if !strings.Contains(killLine, "renew_deadline") {
+		t.Fatalf("session torn down by %q, want renew_deadline", killLine)
 	}
 	// Fail-closed: the kill lands strictly after the 30 s budget expires at
 	// the last counted renew (renew_deadline) — the spec's 30–40 s window
