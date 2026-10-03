@@ -9,13 +9,24 @@ it would create an owner-capable VNC account, bake a self-signed cert,
 listen on :6901, and start side services (audio, upload, gamepad, webcam,
 printer, smartcard) that must not exist in a locked-down runtime.
 
-> **Status: preview.** `kasmweb/*` browser images are a preview feature,
-> not a parity alternative to the native images: the bundled engine lags
-> upstream by up to 4 major versions (the tolerated budget in the
-> freshness floor below), so a kasm browser is inherently behind on
-> web-engine security fixes. For browsing untrusted sites use the native
+> **Status: preview.** `kasmweb/*` images are a preview feature, not a
+> parity alternative to the native images: the bundled engine lags
+> upstream (the tolerated budgets in the freshness floor below — **≤2
+> majors** for images backing `experience: Browser` templates, **≤4** for
+> non-browser use), so a kasm browser is inherently behind on web-engine
+> security fixes. For browsing untrusted sites use the native
 > `tinycdi-browser` image, which tracks the Debian chromium-security pin.
 > Kasm images exist for the apps/desktops that have no native equivalent.
+>
+> **Browser allowlist currently empty.** No cataloged `kasmweb/*` browser
+> image is within 2 majors of the native pin today: `kasmweb/chromium`
+> carries Chromium 150 vs the native 154 (lag 4). Seeded `adapter: kasm`
+> templates with `experience: Browser` need their image on
+> `kasmAdapter.browserAllowlist`, which ships empty — the render refuses
+> anything else. The image stays cataloged for non-browser templates
+> (class `desktop`). Upstream `kasmweb/chrome` rolling-weekly builds a
+> Google-built engine at major 154 (lag 0) and is a candidate to refill
+> the allowlist once it clears the onboarding checklist below.
 
 The adapter is a ~200-line shim delivered **into** the pod, not into the
 image:
@@ -136,12 +147,13 @@ Notable deltas vs the tcdi/* images (all proven on
 
 The catalog is `build/kasm-catalog.txt` — every `kasmweb/*` image
 referenced anywhere in tracked files (chart ci values, docs, examples)
-must appear there, digest-pinned, with an engine + freshness floor.
-`.github/scripts/check-kasm-catalog.sh` enforces that in every PR; the
-heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy gate + engine
-extraction) and the adapter contract test run in the `kasm-contract`
-ci.yml job — weekly, on dispatch, on main pushes, and on PRs touching
-the adapter/catalog surface.
+must appear there, digest-pinned, with an engine + freshness floor +
+class (`browser` | `desktop`: which template experiences may use it —
+E13, v0.3). `.github/scripts/check-kasm-catalog.sh` enforces that in
+every PR; the heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy
+gate + engine extraction) and the adapter contract test run in the
+`kasm-contract` ci.yml job — weekly, on dispatch, on main pushes, and on
+PRs touching the adapter/catalog surface.
 
 Every `kasmweb/<app>` added to the catalog must clear this list **before
 its template merges**:
@@ -168,14 +180,19 @@ its template merges**:
    browser engine reliably (a Debian chromium inside an Ubuntu base
    reports 0 vulns) — the freshness floor below is the engine gate.
 4. **Engine freshness floor.** The catalog entry's `min-engine-major`
-   must be >= the major of `build/browser`'s `CHROMIUM_APT_VERSION`
-   minus 4 (~4 upstream release cycles of tolerated lag on Debian/Ubuntu
-   rebuilds), and the installed engine must meet it. This is a blocking
-   CI gate and stays blocking — the ≤4-major lag is the accepted
-   residual risk of the preview, not a target to grow. The seeded
+   must meet the budget for its class, measured against the major of
+   `build/browser`'s `CHROMIUM_APT_VERSION`: **browser-class entries pin−2**
+   (E13 — the old pin−4 acceptance ended in v0.3; only such images may
+   back `experience: Browser` templates or sit on the chart's
+   `kasmAdapter.browserAllowlist`), **desktop-class entries pin−4** (~4
+   upstream release cycles of tolerated lag on Debian/Ubuntu rebuilds),
+   and the installed engine must meet the declared floor. This is a
+   blocking CI gate and stays blocking — the lag is the accepted
+   residual risk of the preview, not a target to grow. The cataloged
    `kasmweb/chromium` carries Chromium 150 vs the native pin's 154 —
-   inside the budget; a stale digest (e.g. the Oct-2025 pin, Chromium
-   139) is rejected.
+   inside the non-browser budget (class `desktop`), outside the browser
+   gate; a stale digest (e.g. the Oct-2025 pin, Chromium 139) is
+   rejected outright.
 5. **Contract test.** Run the adapter contract suite against the image:
    `TCDI_IT_KASM_IMAGE=<repo>@sha256:<digest> go test -tags=integration
    ./tests/integration -run TestKasmAdapterChromium` — it proves the
@@ -233,6 +250,17 @@ its template merges**:
   template requires `enabled: true`. See `deploy/helm/tinycdi/README.md`
   ("Kasm workspace images") and `ci/example-values.yaml` for a complete
   seeded `kasmweb/chromium` template.
+- `kasmAdapter.browserAllowlist` (default `[]`) is the E13 browser gate:
+  a seeded `adapter: kasm` template with `experience: Browser` renders
+  only when its `spec.linux.image` is listed, and
+  check-kasm-catalog.sh verifies every listed ref is a **browser-class**
+  catalog entry (floor ≥ pin−2). Non-Browser kasm templates ignore the
+  list (their images stay under the ≤4 desktop budget). Today the list
+  is empty — see the preview note above.
+- `ci/example-values.yaml` seeds `kasm-chromium` as a **Desktop**
+  experience (the image is desktop-class under E13); it is also the
+  reference for the Localhost profile annotations a Chromium-family
+  kasm image needs.
 
   To enable it:
 

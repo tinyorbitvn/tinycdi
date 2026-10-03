@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Badge,
@@ -9,12 +9,14 @@ import {
   Section,
   Spinner,
   Table,
+  useToast,
 } from "../design";
 import type { Column } from "../design/Table";
 import { IconArrowLeft } from "../design/icons";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
+import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
 import { resolveTemplate } from "../templates/family";
 import { useTemplates } from "../templates/useTemplates";
@@ -33,15 +35,16 @@ import { useBranding } from "../app/shell";
 import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
-import { blockingReason, desiredLabel, isConnectable } from "./helpers";
+import { blockingReason, desiredLabel } from "./helpers";
 import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
 import { ConditionsTable, PhasePill } from "./StatusBits";
 import { DeleteWorkspaceButton } from "./DeleteWorkspaceButton";
 import { ErrorBanner } from "./ErrorBanner";
+import { LifecycleProgress } from "../progress/LifecycleProgress";
+import { workspacePollMs, withJitter } from "../progress/derive";
 
 const TERMINAL = new Set(["Stopped", "Failed"]);
-const BUSY_MS = 1500;
 const IDLE_MS = 8000;
 
 interface DetailData {
@@ -51,11 +54,34 @@ interface DetailData {
   retained?: ScopedRetainedData | null;
 }
 
+// Operation cadence while a lifecycle intent is in flight (fast when young,
+// backing off with age); the idle 8 s otherwise.
 function pollDelay(d: DetailData | undefined): number {
-  const p = d?.workspace.phase;
-  return p === "Pending" || p === "Provisioning" || p === "Stopping" || p === "Terminating"
-    ? BUSY_MS
-    : IDLE_MS;
+  return withJitter(workspacePollMs(d?.workspace, IDLE_MS));
+}
+
+// The failure field reads in plain language for the causes we can name;
+// the raw token stays as secondary text (and the hover title) so the detail
+// is never lost. Unknown causes render raw only — never hidden.
+const FAILURE_COPY: Record<string, Parameters<typeof t>[0]> = {
+  BootDeadlineExceeded: "progress.failed.deadline",
+  ImagePullBackOff: "progress.failed.imagePull",
+  ErrImagePull: "progress.failed.imagePull",
+  CrashLoopBackOff: "progress.notice.retry",
+};
+
+function failureDetail(reason: string): ReactNode {
+  const token = reason.split(":")[0].trim();
+  const key = FAILURE_COPY[token];
+  if (!key) return reason;
+  return (
+    <>
+      {t(key)}{" "}
+      <span className="tc-field__hint" title={reason}>
+        {reason}
+      </span>
+    </>
+  );
 }
 
 const EVENT_TONE = { Normal: "neutral", Warning: "warning" } as const;
@@ -126,6 +152,41 @@ export function WorkspaceDetailPage({
     return { workspace, events, retained };
   }, [api, workspaceId]);
   const detail = useResource(load, pollIntervalMs ?? pollDelay);
+  const { toast } = useToast();
+  // A delete "completes" when the API drops the row (FX-R19 hides finalised
+  // workspaces): the page stays on the teardown progress until the GET
+  // 404s. Set either by this page's own Delete or by a row that arrived
+  // already Terminating.
+  const deleteSeen = useRef(false);
+  const deletedDone = useRef(false);
+
+  useEffect(() => {
+    if (detail.data?.workspace.phase === "Terminating") deleteSeen.current = true;
+    const e = detail.error;
+    if (
+      deletedDone.current ||
+      !deleteSeen.current ||
+      !isPortalApiError(e) ||
+      e.httpStatus !== 404
+    ) {
+      return;
+    }
+    deletedDone.current = true;
+    const gone = detail.data?.workspace;
+    toast({
+      tone: "success",
+      title: t("progress.deleted.toast", { name: gone?.name ?? workspaceId }),
+      ...(gone?.dataPolicy === "Retain"
+        ? {
+            action: {
+              label: t("progress.deleted.retainedLink"),
+              onClick: () => navigate("/data"),
+            },
+          }
+        : {}),
+    });
+    navigate("/");
+  }, [detail.error, detail.data, toast, workspaceId]);
 
   async function act(kind: "start" | "stop") {
     const ws = detail.data?.workspace;
@@ -257,7 +318,9 @@ export function WorkspaceDetailPage({
     ...(ws.imageBuiltAt
       ? [{ term: t("workspaces.detail.field.imageBuilt"), detail: formatDateTime(ws.imageBuiltAt) }]
       : []),
-    ...(ws.failureReason ? [{ term: t("workspaces.detail.field.failure"), detail: ws.failureReason }] : []),
+    ...(ws.failureReason
+      ? [{ term: t("workspaces.detail.field.failure"), detail: failureDetail(ws.failureReason) }]
+      : []),
     { term: t("workspaces.detail.field.created"), detail: formatDateTime(ws.createdAt) },
     { term: t("workspaces.detail.field.updated"), detail: formatDateTime(ws.updatedAt) },
     { term: t("workspaces.detail.field.id"), detail: ws.id },
@@ -277,7 +340,7 @@ export function WorkspaceDetailPage({
       }
       actions={
         <Cluster gap={2}>
-          {canOfferConnect ? <ConnectButton workspace={ws} disabled={!isConnectable(ws)} /> : null}
+          {canOfferConnect ? <ConnectButton workspace={ws} /> : null}
           {canStart ? (
             <Button variant="secondary" loading={busy === "start"} disabled={busy !== null} onClick={() => void act("start")}>
               {busy === "start"
@@ -287,7 +350,8 @@ export function WorkspaceDetailPage({
                   : t("workspaces.detail.action.start")}
             </Button>
           ) : null}
-          {canStop || ws.phase === "Ready" || ws.phase === "Provisioning" ? (
+          {ws.phase !== "Terminating" &&
+          (canStop || ws.phase === "Ready" || ws.phase === "Provisioning") ? (
             <Button
               variant="secondary"
               loading={busy === "stop"}
@@ -297,7 +361,13 @@ export function WorkspaceDetailPage({
               {busy === "stop" ? t("workspaces.detail.action.stopping") : t("workspaces.detail.action.stop")}
             </Button>
           ) : null}
-          <DeleteWorkspaceButton workspace={ws} onDeleted={() => navigate("/")} />
+          <DeleteWorkspaceButton
+            workspace={ws}
+            onDeleteStarted={() => {
+              deleteSeen.current = true;
+              void detail.refresh();
+            }}
+          />
         </Cluster>
       }
     >
@@ -314,6 +384,12 @@ export function WorkspaceDetailPage({
             : t("workspaces.detail.stale.bodyUnknown")}
         </Alert>
       ) : null}
+      <LifecycleProgress
+        workspace={ws}
+        variant="full"
+        refreshError={detail.error}
+        onRetry={() => void detail.refresh()}
+      />
       <Section>
         <DescriptionList items={fields} />
       </Section>

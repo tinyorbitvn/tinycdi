@@ -1,8 +1,11 @@
 import { unwrap, type ApiClient } from "../api/client";
+import { noteServerDateHeader } from "../progress/derive";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
 
 // Workspace-area API calls against the generated schema (GET
-// /v1/workspaces?scope=…, GET /v1/workspaces/{id}/events).
+// /v1/workspaces?scope=…, GET /v1/workspaces/{id}/events). Each response's
+// Date header feeds the progress module's skew correction — the elapsed
+// counters anchor on server-side updated_at, not the client clock.
 
 const MAX_PAGES = 10;
 
@@ -11,24 +14,24 @@ export async function listWorkspaces(api: ApiClient): Promise<WorkspaceView[]> {
   const items: WorkspaceView[] = [];
   let pageToken: string | undefined;
   for (let i = 0; i < MAX_PAGES; i++) {
-    const res = unwrap(
-      await api.GET("/v1/workspaces", {
-        params: { query: { scope: "mine", limit: 200, ...(pageToken ? { pageToken } : {}) } },
-      }),
-    );
-    items.push(...res.items);
-    pageToken = res.nextPageToken;
+    const res = await api.GET("/v1/workspaces", {
+      params: { query: { scope: "mine", limit: 200, ...(pageToken ? { pageToken } : {}) } },
+    });
+    noteServerDateHeader(res.response.headers.get("date"));
+    const page = unwrap(res);
+    items.push(...page.items);
+    pageToken = page.nextPageToken;
     if (!pageToken) break;
   }
   return items;
 }
 
 export async function getWorkspace(api: ApiClient, workspaceId: string): Promise<WorkspaceView> {
-  return unwrap(
-    await api.GET("/v1/workspaces/{workspaceId}", {
-      params: { path: { workspaceId } },
-    }),
-  );
+  const res = await api.GET("/v1/workspaces/{workspaceId}", {
+    params: { path: { workspaceId } },
+  });
+  noteServerDateHeader(res.response.headers.get("date"));
+  return unwrap(res);
 }
 
 /** Curated workspace events, newest first (API order is the render order). */

@@ -82,11 +82,11 @@
   box-shadow: var(--tc-shadow-xs);
 }
 
-.tc-button--primary:hover:not(:disabled) {
+.tc-button--primary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--tc-color-accent-hover);
 }
 
-.tc-button--primary:active:not(:disabled) {
+.tc-button--primary:active:not(:disabled):not([aria-disabled="true"]) {
   background: var(--tc-color-accent-active);
 }
 
@@ -97,7 +97,7 @@
   box-shadow: var(--tc-shadow-xs);
 }
 
-.tc-button--secondary:hover:not(:disabled) {
+.tc-button--secondary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--tc-color-bg-subtle);
 }
 
@@ -106,7 +106,7 @@
   color: var(--tc-color-text-muted);
 }
 
-.tc-button--ghost:hover:not(:disabled) {
+.tc-button--ghost:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--tc-color-bg-subtle);
   color: var(--tc-color-text);
 }
@@ -117,7 +117,7 @@
   box-shadow: var(--tc-shadow-xs);
 }
 
-.tc-button--danger:hover:not(:disabled) {
+.tc-button--danger:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--tc-color-danger-hover);
 }
 
@@ -832,7 +832,7 @@
   color: var(--tc-color-text-subtle);
 }
 
-.tc-input:hover:not(:disabled) {
+.tc-input:hover:not(:disabled):not([aria-disabled="true"]) {
   border-color: var(--tc-color-text-subtle);
 }
 
@@ -1016,7 +1016,7 @@
   white-space: nowrap;
 }
 
-.tc-tabs__tab:hover:not(:disabled) {
+.tc-tabs__tab:hover:not(:disabled):not([aria-disabled="true"]) {
   color: var(--tc-color-text);
 }
 

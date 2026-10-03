@@ -398,6 +398,35 @@ fail-closed changes — `helm template`/`upgrade` fails until values comply:
   revert the release namespace PSS exemption if you added one — baseline
   suffices.
 
+### Kasm browser templates — the E13 engine gate (fail-closed)
+
+A seeded `adapter: kasm` template with `experience: Browser` **fails the
+render** after this upgrade until its image is on
+`kasmAdapter.browserAllowlist` or the template is re-classed as
+`experience: Desktop`. The allowlist is the chart-side binding to the
+catalog's tightened ≤2-major browser engine gate — only browser-class
+`build/kasm-catalog.txt` entries may be listed
+(`.github/scripts/check-kasm-catalog.sh` enforces it); non-browser kasm
+templates keep the ≤4 budget and ignore the list.
+
+```yaml
+# Option A — the image meets the ≤2 gate: allowlist the digest-pinned ref.
+kasmAdapter:
+  browserAllowlist:
+    - kasmweb/<app>@sha256:<digest>
+
+# Option B — the image misses the gate: keep it for non-browser use.
+templates:
+  - name: <tpl>
+    spec:
+      experience: Desktop    # was: Browser
+```
+
+`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
+pin — lag 4), so a Browser template pinned to it only has option B. If no
+cataloged browser image meets the gate the allowlist stays empty — see
+`docs/kasm-images.md`.
+
 ## Running workspaces and images — read this before bumping template images
 
 - A Workspace records an **immutable template snapshot** at first admit

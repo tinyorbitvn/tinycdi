@@ -9,8 +9,11 @@
 //     digest-pinned image (a tag is refused),
 //   - a seeded template with spec.linux.adapter=kasm REQUIRES the adapter
 //     to be enabled and pinned or the render fails,
+//   - a seeded adapter=kasm template with experience=Browser REQUIRES its
+//     image on kasmAdapter.browserAllowlist (E13: the catalog's ≤2-major
+//     browser engine gate; non-Browser kasm templates keep the ≤4 gate),
 //   - the seeded kasm template carries the digest-pinned kasmweb image,
-//     the adapter marker and the sessionCmd verbatim.
+//     the adapter marker and the Desktop experience verbatim.
 package chart_test
 
 import (
@@ -170,8 +173,10 @@ func TestKasmAdapterTagWithoutDigestRefused(t *testing.T) {
 
 // TestKasmTemplateRendersVerbatim: the seeded adapter=kasm template
 // carries the digest-pinned kasmweb image, the adapter enum and the
-// sessionCmd verbatim through spec pass-through, plus the Localhost
-// profile annotations.
+// Desktop experience verbatim through spec pass-through, plus the
+// Localhost profile annotations. It is also the positive control for the
+// E13 allowlist: a non-Browser kasm template renders with an EMPTY
+// kasmAdapter.browserAllowlist (the ≤2 gate does not apply).
 func TestKasmTemplateRendersVerbatim(t *testing.T) {
 	docs := render(t, "example-values.yaml")
 	var kasm doc
@@ -185,6 +190,9 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 		t.Fatal("no kasm-chromium-* WorkspaceTemplate rendered")
 	}
 	spec, _ := kasm["spec"].(map[string]any)
+	if spec["experience"] != "Desktop" {
+		t.Errorf("spec.experience = %v, want Desktop — the seeded image left the E13 browser allowlist", spec["experience"])
+	}
 	linux, _ := spec["linux"].(map[string]any)
 	if linux["adapter"] != "kasm" {
 		t.Errorf("spec.linux.adapter = %v, want kasm", linux["adapter"])
@@ -193,9 +201,8 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 		"kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0" {
 		t.Errorf("spec.linux.image = %q, want the cataloged digest-pinned kasmweb/chromium ref", img)
 	}
-	if cmd, _ := linux["sessionCmd"].(string); cmd !=
-		"/usr/bin/chromium-orig --start-maximized https://start.lab.example.net" {
-		t.Errorf("spec.linux.sessionCmd = %q", cmd)
+	if _, ok := linux["sessionCmd"]; ok {
+		t.Errorf("spec.linux.sessionCmd = %v, want unset — the desktop seed runs the image's own session", linux["sessionCmd"])
 	}
 	ann, _ := kasm["metadata"].(map[string]any)["annotations"].(map[string]any)
 	for k, want := range map[string]string{
@@ -205,5 +212,32 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 		if ann[k] != want {
 			t.Errorf("annotation %s = %v, want %q", k, ann[k], want)
 		}
+	}
+}
+
+// TestKasmBrowserTemplateNeedsFreshEngine: E13 — a seeded adapter=kasm
+// template with experience=Browser must draw its image from
+// kasmAdapter.browserAllowlist (the chart-side binding to the catalog's
+// ≤2-major browser engine gate). A desktop-class catalog entry —
+// kasmweb/chromium lags the native pin by 4 majors — is outside the
+// allowlist and fails the render; allowlisting the ref renders it.
+func TestKasmBrowserTemplateNeedsFreshEngine(t *testing.T) {
+	const ref = "kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0"
+	out := renderBad(t, "kasm-browser-not-allowlisted-values.yaml")
+	if !strings.Contains(out, "kasmAdapter.browserAllowlist") {
+		t.Fatalf("expected render to fail naming kasmAdapter.browserAllowlist, got: %s", out)
+	}
+	// The same template renders once the image is allowlisted.
+	docs := renderArgs(t, "-f", "tinycdi/testdata/kasm-browser-not-allowlisted-values.yaml",
+		"--set", "kasmAdapter.browserAllowlist[0]="+ref)
+	var kasm doc
+	for _, d := range selectDocs(docs, "WorkspaceTemplate") {
+		name, _ := meta(d)
+		if strings.HasPrefix(name, "kasm-chromium-") {
+			kasm = d
+		}
+	}
+	if kasm == nil {
+		t.Fatal("no kasm-chromium-* WorkspaceTemplate rendered with the image allowlisted")
 	}
 }

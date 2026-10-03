@@ -85,6 +85,14 @@ images:
 # — they are pulled by the nodes straight from Docker Hub.
 kasmAdapter:
   enabled: false
+  # Images allowed to back a seeded adapter=kasm template with
+  # spec.experience=Browser (E13). Every entry must be a digest-pinned
+  # browser-class build/kasm-catalog.txt entry — the catalog binds
+  # browser-class images to the tightened ≤2-major engine-lag gate
+  # (docs/kasm-images.md); check-kasm-catalog.sh refuses any allowlist
+  # entry that is not browser-class. EMPTY today: no kasmweb browser
+  # image is within 2 majors of the native Chromium pin.
+  browserAllowlist: []
   image:
     registry: ""
     repository: tinyorbitvn/tinycdi-kasm-adapter
