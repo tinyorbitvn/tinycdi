@@ -73,6 +73,12 @@ func TestSweep_OperatorStoppedFlipsRow(t *testing.T) {
 	if desired != "Stopped" || phase != "Stopping" || stops != 1 {
 		t.Fatalf("row = %s/%s with %d stop intents; want Stopped/Stopping with 1", desired, phase, stops)
 	}
+	// The cause stays with the stop intent for the workspace events.
+	var reason string
+	if err := db.Pool().QueryRow(context.Background(),
+		`SELECT payload->>'reason' FROM outbox_intent WHERE workspace_id='ws-op' AND kind='stop'`).Scan(&reason); err != nil || reason != "max_duration" {
+		t.Fatalf("stop intent reason = %q, err %v; want max_duration", reason, err)
+	}
 	// Idempotent: the row is Stopped now, a second sweep emits nothing.
 	if n, err := p.Sweep(context.Background(), src); err != nil || n != 0 {
 		t.Fatalf("second Sweep = %d, %v; want 0", n, err)

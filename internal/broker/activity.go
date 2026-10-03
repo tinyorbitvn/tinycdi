@@ -61,10 +61,6 @@ const (
 	StopReasonMaxDuration StopReason = "max_duration"
 	// StopReasonRequested — explicit stop (user or admin action).
 	StopReasonRequested StopReason = "requested"
-	// StopReasonOperatorStopped — the operator stopped the current intent on
-	// its own (its max-duration backstop) and the workspaces row is brought
-	// in line with the Workspace CR.
-	StopReasonOperatorStopped StopReason = "operator_stopped"
 )
 
 // TimeoutPolicy is the per-workspace lifecycle budget, taken from the
@@ -617,7 +613,7 @@ func (p *ExpiryPlanner) reconcileOperatorStops(ctx context.Context, src Operator
 		ok, err := p.b.emitStop(ctx, StopIntent{
 			WorkspaceUID:      os.WorkspaceUID,
 			RuntimeGeneration: os.RuntimeGeneration,
-			Reason:            StopReasonOperatorStopped,
+			Reason:            StopReasonMaxDuration,
 			Deadline:          p.b.now(),
 		})
 		if err != nil {
@@ -651,9 +647,16 @@ func (b *Broker) emitStop(ctx context.Context, in StopIntent) (bool, error) {
 		if tag.RowsAffected() == 0 {
 			return nil // already stopped/deleted or a newer generation runs
 		}
-		_, err = provisioning.AppendIntent(ctx, tx, in.WorkspaceUID, provisioning.IntentStop)
+		rev, err := provisioning.AppendIntent(ctx, tx, in.WorkspaceUID, provisioning.IntentStop)
 		if err != nil {
 			return err
+		}
+		// The cause stays with the intent so the workspace events can say
+		// why the workspace stopped.
+		if in.Reason != "" {
+			if err := provisioning.SetIntentReason(ctx, tx, in.WorkspaceUID, rev, string(in.Reason)); err != nil {
+				return err
+			}
 		}
 		emitted = true
 		return nil

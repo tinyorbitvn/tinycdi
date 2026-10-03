@@ -317,3 +317,26 @@ func TestEvents_StaleInformer(t *testing.T) {
 		t.Fatalf("fresh informer: no ConnectionReady event in %+v", fresh.Items)
 	}
 }
+
+// TestEvents_MaxDurationStop (FX-R24): a stop the platform recorded with the
+// max_duration cause reads as MaxDurationReached; a user stop stays
+// StopRequested.
+func TestEvents_MaxDurationStop(t *testing.T) {
+	be := newFakeBackend()
+	base := time.Now().Add(-time.Hour)
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: base},
+		{Kind: "stop", Revision: 2, At: base.Add(10 * time.Minute)},
+		{Kind: "stop", Revision: 3, At: base.Add(20 * time.Minute), Reason: "max_duration"},
+	}}
+	env := newEventsEnv(t, be, &fakeStatusView{}, il)
+	created, sess, csrf := eventsFixture(t, env, "key-evt-fxr24-1")
+
+	got := map[string]bool{}
+	for _, ev := range getEvents(t, env, sess, csrf, created.ID).Items {
+		got[ev.ID] = true
+	}
+	if !got["MaxDurationReached.3"] || !got["StopRequested.2"] {
+		t.Fatalf("event ids = %v, want MaxDurationReached.3 and StopRequested.2", got)
+	}
+}
