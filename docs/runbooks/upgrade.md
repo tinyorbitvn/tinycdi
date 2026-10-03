@@ -179,6 +179,23 @@ release back (`helm upgrade` with the v0.1 chart and the pre-upgrade
 values file) **and** restore the pre-upgrade database dump per
 `docs/runbooks/backup-restore.md`. Re-run the post-checks afterwards.
 
+## Upgrading to 0.2.0-rc.6
+
+Migration 014 adds three nullable columns to `quota_reservation`
+(`restart_slots`, `restart_cpu_millis`, `restart_memory_bytes`). It is
+additive and idempotent. Take a `pg_dump` first
+(`docs/runbooks/backup-restore.md`).
+
+On the first recovery pass after the upgrade, every stopped **Retain**
+workspace whose pod is gone converts to a disk-only quota hold: its running
+slot, CPU and memory are released with no user action, and its disk stays
+held. A start re-acquires the admitted compute from the stored vector
+(`docs/runbooks/capacity.md` → "Stopped Retain workspaces and quota").
+
+**No rollback below rc.6 after the first recovery pass; restore from the
+pg_dump instead.** An older binary would see held rows with a zero compute
+vector and `reserveForStart` would re-reserve zero.
+
 ## What is safe to upgrade while sessions run
 
 | Component | Effect of a restart/upgrade | Session impact |

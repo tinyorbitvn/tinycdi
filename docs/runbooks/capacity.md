@@ -63,6 +63,11 @@ Quota is enforced in Postgres, not by cluster capacity:
   is actually gone — quota is never released early
   (`internal/provisioning/recovery.go`).
 
+**Quota model.** Running slots, CPU and memory are held exactly while a
+runtime incarnation exists (from the start intent to the proven absence of
+the pod); disk is held while the volume exists, whatever the workspace
+state.
+
 ### Setting quota
 
 Declare quota in the chart: `managedNamespaces[].quota` (`runningWorkspaces`,
@@ -88,6 +93,32 @@ A tenant with no `tenant_quota` row gets `ErrNoQuota` — creates fail closed,
 never open, and the API reports `409 QUOTA_NOT_CONFIGURED` (distinct from
 `QUOTA_EXHAUSTED`, which means a configured limit has no headroom). Lowering a limit below current usage does not kill running
 workspaces; it only blocks new reservations until held < limit.
+
+### Stopped Retain workspaces and quota
+
+The absence proof is "no pod for the workspace"; volumes never block it. When
+a **Retain** workspace stops and its pod is gone, Recovery converts its
+reservation in place into a **disk-only hold**: running slot, CPU and memory
+are released, the home disk's `disk_bytes` stay held, and the admitted compute
+vector is kept in `quota_reservation.restart_*` (migration 014). A start
+re-acquires exactly that vector on the same row (and fails
+`409 QUOTA_EXHAUSTED` if the compute no longer fits, leaving the disk hold
+untouched). Existing stopped Retain rows convert on the next recovery pass
+with no manual write. A stray second home volume labelled to the workspace
+does not delay the release.
+
+**Delete after stop.** The disk hold moves to the retained-data hold once:
+the converted row is released and the retained dataset's real size is held
+against it, so the admitted disk and the dataset are never counted together.
+**Ephemeral** workspaces are unchanged: the whole reservation is released on
+the absence proof. Check the hold with:
+
+```sql
+SELECT w.name, q.running_slots, q.cpu_millis, q.disk_bytes, q.restart_slots
+FROM workspaces w JOIN quota_reservation q ON q.workspace_id = w.id
+WHERE w.desired_state = 'Stopped' AND w.data_policy = 'Retain' AND q.state = 'held';
+-- a converted row shows running_slots = 0 and restart_slots >= 0
+```
 
 ## Cluster sizing
 
