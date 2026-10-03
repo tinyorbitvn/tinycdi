@@ -109,6 +109,7 @@ Environment:
   SOAK_ABORT_CONNECT_P95_MS
                          abort once the ramp-up connect p95 exceeds this
                          (unset: never; the scale runs use 15000)
+  SOAK_LOGIN_CONCURRENCY OIDC logins at once during ramp-up (default 4)
   SOAK_MOCK_PORTAL_PORT  dry-run mock portal port (default: a free port)
   SOAK_MOCK_SESSION_PORT dry-run mock session port (default: a free port)
   SOAK_IGNORE_TLS_ERRORS set to 1 for self-signed dev certs
@@ -1147,8 +1148,12 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
   // Without a users file there is a single lane on SOAK_USER/SOAK_PASSWORD.
   const lanes: Lane[] = [];
   let browser: Browser | undefined;
+  // More users than sessions is pointless: lane i only ever receives
+  // session i mod laneCount, so cap the lanes at the session count.
+  const laneUsers = (opts: Options): (SoakUser | undefined)[] =>
+    opts.users.length ? opts.users.slice(0, opts.sessions) : [undefined];
   if (opts.dryRun) {
-    const users = opts.users.length ? opts.users : [undefined];
+    const users = laneUsers(opts);
     for (const user of users) {
       const ctx = await request.newContext({
         ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
@@ -1162,7 +1167,7 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     }
   } else {
     browser = await chromium.launch(chromiumLaunchOptions(env("SOAK_HEADFUL") !== "1"));
-    const users = opts.users.length ? opts.users : [undefined];
+    const users = laneUsers(opts);
     for (const user of users) {
       const context = await browser.newContext({
         ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
@@ -1204,7 +1209,30 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
 
   try {
     stamp(`login (${opts.dryRun ? "dev login" : "OIDC"}, ${lanes.length} lane${lanes.length === 1 ? "" : "s"})`);
-    await Promise.all(lanes.map((lane) => lane.driver.login()));
+    // Bounded parallelism: a 25-way OIDC burst can push the IdP form past
+    // the 30 s field deadline. A failed lane is retried once before the
+    // run gives up (the name goes into the error, never the password).
+    const loginConcurrency = Math.max(
+      1,
+      Number(env("SOAK_LOGIN_CONCURRENCY") ?? "4") || 4,
+    );
+    for (let i = 0; i < lanes.length; i += loginConcurrency) {
+      await Promise.all(
+        lanes.slice(i, i + loginConcurrency).map(async (lane) => {
+          const who = lane.user?.name ?? "default";
+          try {
+            await lane.driver.login();
+          } catch (e) {
+            stamp(`login lane ${who} failed (${(e as Error).message}) — retrying once`);
+            try {
+              await lane.driver.login();
+            } catch (e2) {
+              throw new Error(`login lane ${who}: ${(e2 as Error).message}`);
+            }
+          }
+        }),
+      );
+    }
 
     const templates = await lanes[0].api.listTemplates();
     const tpl = opts.template
