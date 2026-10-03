@@ -232,7 +232,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// undispatched outbox intents and release held quota reservations, but
 	// only on positive proof the runtime is gone (K8sRuntimeObserver reads
 	// the Workspace CR and its labeled children; ambiguity never frees
-	// quota). Runs once at startup, then every -recovery-interval.
+	// quota). Runs once on every leader acquisition, then every
+	// -recovery-interval (<=0 = the single startup pass only). A held
+	// reservation whose absence is never proven waits indefinitely by
+	// design — fail-safe beats prompt — and stays visible through the
+	// per-action log lines below.
 	recovery := provisioning.NewRecovery(db, provisioning.NewK8sRuntimeObserver(kc, tenants))
 	b.singletons = append(b.singletons, func(ctx context.Context) {
 		for {
@@ -244,8 +248,15 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			actions, err := recovery.Recover(ctx, applier)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				log.Error("recovery pass", "err", err)
-			} else if len(actions) > 0 {
-				log.Info("recovery pass complete", "actions", len(actions))
+			} else {
+				for _, a := range actions {
+					log.Info("recovery action",
+						"workspace", string(a.WorkspaceUID),
+						"kind", string(a.Kind), "detail", a.Detail)
+				}
+				if len(actions) > 0 {
+					log.Info("recovery pass complete", "actions", len(actions))
+				}
 			}
 			if cfg.RecoveryInterval <= 0 {
 				return
@@ -281,6 +292,29 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("binding source: %w", err)
 	}
+	// Event-driven quota settle: the operator writes its observed runtime
+	// absence into Workspace CR status (or the CR's deletion); every event
+	// enqueues the platform id, and the leader-gated worker re-checks the
+	// recovery predicate and settles — the positive-absence proof still
+	// gates the release. The periodic recovery pass above remains the
+	// catch-all, so a lost event or an early leader change only delays the
+	// release back to the tick.
+	settle := provisioning.NewSettleTrigger()
+	wsInformer, err := kcache.GetInformer(ctx, &workspacev1alpha1.Workspace{})
+	if err != nil {
+		return fmt.Errorf("workspace informer: %w", err)
+	}
+	if _, err := wsInformer.AddEventHandler(settle.Handler()); err != nil {
+		return fmt.Errorf("settle trigger: %w", err)
+	}
+	settleWorker := &provisioning.SettleWorker{
+		DB: db, Rec: recovery, Trigger: settle, Log: log,
+	}
+	b.singletons = append(b.singletons, func(ctx context.Context) {
+		if err := settleWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("quota settle worker exited", "err", err)
+		}
+	})
 	// Workspace status view: shares the same informer cache so
 	// /v1/workspaces projects observed CR phase + conditions (design §6 —
 	// without it the API only ever reports the intent-side DB phase and the
