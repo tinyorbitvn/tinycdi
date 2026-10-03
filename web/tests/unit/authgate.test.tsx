@@ -104,13 +104,14 @@ describe("AuthGate", () => {
     expect(screen.queryByText("secret content")).not.toBeInTheDocument();
   });
 
-  it("shows the unreachable alert when the probe fails", async () => {
-    clearCookies();
+  it("retries with backoff when the probe 503s — never a sign-out (V3.27)", async () => {
+    loginCookies();
     const base = createMockApi();
+    let meHealthy = false;
     const api = {
       ...base,
       handle: (req: Parameters<typeof base.handle>[0]) =>
-        req.path === "/v1/session"
+        req.path === "/v1/session" && !meHealthy
           ? { status: 503, headers: { "content-type": "application/json" }, body: { code: "UNAVAILABLE", message: "down", retryable: true } }
           : base.handle(req),
     };
@@ -121,10 +122,40 @@ describe("AuthGate", () => {
       </AuthGate>,
       api,
     );
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(/Retrying/);
     expect(onUnauthenticated).not.toHaveBeenCalled();
     expect(screen.queryByText("secret content")).not.toBeInTheDocument();
-  });
+
+    meHealthy = true;
+    expect(await screen.findByText("secret content", {}, { timeout: 15_000 })).toBeInTheDocument();
+    expect(onUnauthenticated).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it("a 503 on /v1/me retries with backoff, never signs out, recovers on 200 (V3.27)", async () => {
+    loginCookies();
+    const base = createMockApi();
+    let meHealthy = false;
+    const api = {
+      ...base,
+      handle: (req: Parameters<typeof base.handle>[0]) =>
+        req.path === "/v1/me" && !meHealthy
+          ? { status: 503, headers: { "content-type": "application/json" }, body: { code: "UNAVAILABLE", message: "database restarting", retryable: true } }
+          : base.handle(req),
+    };
+    const onUnauthenticated = vi.fn();
+    renderWithApi(
+      <AuthGate onUnauthenticated={onUnauthenticated}>
+        <div>secret content</div>
+      </AuthGate>,
+      api,
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(/Retrying/);
+    expect(onUnauthenticated).not.toHaveBeenCalled();
+
+    meHealthy = true;
+    expect(await screen.findByText("secret content", {}, { timeout: 15_000 })).toBeInTheDocument();
+    expect(onUnauthenticated).not.toHaveBeenCalled();
+  }, 20_000);
 
   it.each([404, 501])(
     "does not open the gate on a %i from /v1/me (every backend ships /v1/me)",
