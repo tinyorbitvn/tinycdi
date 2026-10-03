@@ -46,8 +46,13 @@ images:
   # builtAt is the image build timestamp (RFC 3339) from the runtime
   # release train's runtime-images.json; it renders as the template's
   # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
-  # report imageBuiltAt/imageStale on templates and workspaces (warning
-  # only — a stale image never blocks a launch).
+  # report imageBuiltAt/imageStale on templates and workspaces. A stale
+  # image past -image-block-after (45 d default) refuses create/start with
+  # 409 IMAGE_STALE.
+  # engines.{chromium,firefox} record the browser engine versions the image
+  # ships (same runtime-images.json fields); they render as the template's
+  # image-chromium/image-firefox annotations so the stale-image view can
+  # show both engines.
   # linuxBase is the base layer set both runtime profiles build FROM
   # (docs/images.md). No template references it: it is here so the release
   # pins its digest next to the profiles', for custom desktop images built
@@ -66,6 +71,7 @@ images:
     digest: ""
     pullPolicy: ""
     builtAt: ""
+    engines: {}
   browser:
     registry: ""
     repository: tinyorbitvn/tinycdi-browser
@@ -73,6 +79,7 @@ images:
     digest: ""
     pullPolicy: ""
     builtAt: ""
+    engines: {}
 
 # Kasm workspace adapter (spec.linux.adapter=kasm — docs/kasm-images.md):
 # the initContainer image that delivers the adapter scripts into pods of

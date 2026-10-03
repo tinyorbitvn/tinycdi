@@ -30,6 +30,7 @@ const (
 	CodeQuotaExhausted      ErrorCode = "QUOTA_EXHAUSTED"      // 409
 	CodeQuotaNotConfigured  ErrorCode = "QUOTA_NOT_CONFIGURED" // 409
 	CodeConnectionInUse     ErrorCode = "CONNECTION_IN_USE"    // 409
+	CodeImageStale          ErrorCode = "IMAGE_STALE"          // 409
 	CodeRateLimited         ErrorCode = "RATE_LIMITED"         // 429
 	CodeUnavailable         ErrorCode = "UNAVAILABLE"          // 503
 	CodeInternal            ErrorCode = "INTERNAL"             // 500
@@ -54,6 +55,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeQuotaExhausted,
 	CodeQuotaNotConfigured,
 	CodeConnectionInUse,
+	CodeImageStale,
 	CodeRateLimited,
 	CodeUnavailable,
 	CodeInternal,
@@ -70,7 +72,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse:
+	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeConnectionInUse, CodeImageStale:
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity

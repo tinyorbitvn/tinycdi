@@ -26,7 +26,11 @@ type Service struct {
 	// templates resolves template revisions/families for the OnStart
 	// re-point; nil keeps the workspace on its recorded revision (tests).
 	templates TemplateLookup
-	log       *slog.Logger
+	// blockAfter is the E3 stale-image admission limit
+	// (-image-block-after): a start whose resolved revision's image is
+	// older fails with *ImageStaleError. <=0 disables the block.
+	blockAfter time.Duration
+	log        *slog.Logger
 }
 
 // NewService wraps db.
@@ -42,11 +46,63 @@ func (s *Service) WithTemplateLookup(l TemplateLookup) *Service {
 	return s
 }
 
+// WithImageBlockAfter sets the E3 stale-image admission limit
+// (-image-block-after): a start resolving to a runtime image older than d
+// fails with *ImageStaleError (the API maps it to 409 IMAGE_STALE).
+// d <= 0 disables the block.
+func (s *Service) WithImageBlockAfter(d time.Duration) *Service {
+	s.blockAfter = d
+	return s
+}
+
 // WithLogger attaches a logger for lifecycle warnings; nil keeps
 // slog.Default.
 func (s *Service) WithLogger(l *slog.Logger) *Service {
 	s.log = l
 	return s
+}
+
+// ImageStaleError is the E3 admission refusal: create, and a start that
+// cannot move to a fresher revision, fail when the resolved template's
+// image is older than -image-block-after. The API maps it to 409
+// IMAGE_STALE.
+type ImageStaleError struct {
+	// AgeDays is the resolved image's age in whole days; LimitDays the
+	// configured limit in whole days.
+	AgeDays, LimitDays int
+}
+
+func (e *ImageStaleError) Error() string {
+	return fmt.Sprintf("the resolved runtime image is %d days old; the freshness limit is %d days",
+		e.AgeDays, e.LimitDays)
+}
+
+// IsImageStale reports whether err carries an E3 stale-image refusal.
+func IsImageStale(err error) bool {
+	var e *ImageStaleError
+	return errors.As(err, &e)
+}
+
+// CheckImageBlock parses the raw image-built-at value (RFC 3339) and
+// returns *ImageStaleError when its age exceeds limit. It returns nil when
+// the block is disabled (limit <= 0) or the value is missing or malformed
+// — a missing imageBuiltAt never blocks (E3).
+func CheckImageBlock(raw string, limit time.Duration, now time.Time) error {
+	if limit <= 0 || raw == "" {
+		return nil
+	}
+	built, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil
+	}
+	age := now.Sub(built)
+	if age <= limit {
+		return nil
+	}
+	return &ImageStaleError{
+		AgeDays:   int(age / (24 * time.Hour)),
+		LimitDays: int(limit / (24 * time.Hour)),
+	}
 }
 
 var (
@@ -128,6 +184,11 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 	}
 	if desired != "Running" && desired != "Stopped" {
 		return res, fmt.Errorf("create: bad desiredState %q: %w", desired, ErrInvalidState)
+	}
+	// E3: a create resolving to an image older than -image-block-after is
+	// refused; a missing or malformed image-built-at never blocks.
+	if err := CheckImageBlock(req.Template.ImageBuiltAt, s.blockAfter, time.Now()); err != nil {
+		return res, err
 	}
 	dataPolicy := req.DataPolicy
 	if dataPolicy == "" {
@@ -381,14 +442,16 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 			var skipReason string
 			if kind == IntentStart {
 				genIncr = 1
+				resolvedBuiltAt := rec.Template.ImageBuiltAt
 				// E1: a start may re-point the workspace at the newest
 				// published revision of its template family; the move is
 				// decided and written in this same transaction.
 				if s.templates != nil {
-					next, objName, skipped, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
+					next, objName, skipped, builtAt, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
 					if err != nil {
 						return err
 					}
+					resolvedBuiltAt = builtAt
 					if next != nil {
 						rec.Template = *next
 						sigSpec = &IntentSpec{
@@ -398,6 +461,13 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 					} else {
 						skipReason = skipped
 					}
+				}
+				// E3: a start whose resolved revision's image is older than
+				// -image-block-after is refused here, inside the
+				// transaction — no state change, reservation or intent is
+				// written. The API maps the refusal to 409 IMAGE_STALE.
+				if err := CheckImageBlock(resolvedBuiltAt, s.blockAfter, time.Now()); err != nil {
+					return err
 				}
 				// A stop releases the running-quota reservation once the
 				// runtime's absence is proven; the restart re-acquires it in

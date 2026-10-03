@@ -120,6 +120,10 @@ export interface paths {
          *     caller (equivalent to `POST /v1/data/{id}/attach`); the retained record
          *     must be in state `Retained` and is claimed exclusively.
          *
+         *     A template whose runtime image is older than `-image-block-after`
+         *     (default 45 d) is refused with `409 IMAGE_STALE` (E3); a template
+         *     without a parseable `imageBuiltAt` never blocks.
+         *
          *     Idempotent: same `Idempotency-Key` + same body returns the recorded
          *     workspace; same key + different body returns `409 IDEMPOTENCY_CONFLICT`.
          */
@@ -177,6 +181,13 @@ export interface paths {
          *     failure); any other phase returns `409 INVALID_STATE`. Repeating start
          *     with the same `Idempotency-Key` returns the recorded result; a new key
          *     while already `Running`/`Ready` is a no-op returning the current view.
+         *
+         *     When the workspace's template family has a newer published revision
+         *     (`updateAvailable`), a start under `imageUpdate: OnStart` moves to it
+         *     (E1/E2). A start that cannot move to a fresher revision and whose
+         *     resolved image is older than `-image-block-after` is refused with
+         *     `409 IMAGE_STALE` (E3); `imageUpdate: Pinned` workspaces on a stale
+         *     image are refused the same way.
          */
         post: operations["startWorkspace"];
         delete?: never;
@@ -475,6 +486,7 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
+         *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); a fresh template revision must be published or chosen — a missing `imageBuiltAt` never blocks |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
          *     | `INTERNAL` | 500 | true | unexpected server failure; safe to retry |
@@ -482,7 +494,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "CONNECTION_IN_USE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /** @description Uniform error body returned for every 4xx/5xx response. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -630,8 +642,9 @@ export interface components {
             imageBuiltAt?: string;
             /**
              * @description True when the runtime image is older than the backend's
-             *     -image-stale-after threshold (default 336h). Advisory only —
-             *     a stale image never blocks a Start in v0.2.
+             *     -image-stale-after threshold (default 336h). Advisory; a
+             *     create or start on an image older than -image-block-after
+             *     (default 45 d) is refused with 409 IMAGE_STALE (E3).
              */
             imageStale?: boolean;
             /**
@@ -966,10 +979,29 @@ export interface components {
             imageBuiltAt?: string;
             /**
              * @description True when the runtime image is older than the backend's
-             *     -image-stale-after threshold (default 336h). Advisory only —
-             *     a stale image never blocks a Start in v0.2.
+             *     -image-stale-after threshold (default 336h).
              */
             imageStale?: boolean;
+            /**
+             * @description True when the runtime image is older than the backend's
+             *     -image-block-after threshold (default 45 d, E3): a create or a
+             *     start that cannot move to a fresher revision is refused with
+             *     409 IMAGE_STALE. Absent when the template carries no parseable
+             *     image-built-at — a missing annotation never blocks. False when
+             *     the block is disabled (-image-block-after=0).
+             */
+            imageBlocked?: boolean;
+            /**
+             * @description Browser engine versions the runtime image was built with (the
+             *     template's workspaces.cdi.tinyorbit.vn/image-chromium and
+             *     image-firefox annotations, rendered from
+             *     `images.<key>.engines.*`), e.g. `{"chromium": "154.0.8037.92",
+             *     "firefox": "153.4.0esr"}`. Absent when the template declares
+             *     none.
+             */
+            imageEngines?: {
+                [key: string]: string;
+            };
         };
         TemplateList: {
             items: components["schemas"]["TemplateView"][];

@@ -314,6 +314,11 @@ export function WorkspaceDetailPage({
             : t("workspaces.detail.stale.bodyUnknown")}
         </Alert>
       ) : null}
+      {ws.updateAvailable === true && (ws.phase === "Stopped" || ws.phase === "Failed") ? (
+        <Alert tone="info" title={t("workspaces.detail.update.title")}>
+          {t("workspaces.detail.update.body")}
+        </Alert>
+      ) : null}
       <Section>
         <DescriptionList items={fields} />
       </Section>

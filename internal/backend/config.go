@@ -116,7 +116,8 @@ type Config struct {
 	RetainedSyncInterval time.Duration
 	RecoveryInterval     time.Duration
 	ImageStaleAfter      time.Duration
-	LoginRate            int // per-client requests/min on the login-family routes; 0 disables
+	ImageBlockAfter      time.Duration // 0 disables the stale-image admission block (E3)
+	LoginRate            int           // per-client requests/min on the login-family routes; 0 disables
 
 	// Session listener (the former cmd/gateway surface).
 	SessionListen       string // empty disables the session listener
@@ -235,6 +236,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 			"by design (env TCDI_RECOVERY_INTERVAL)")
 	fs.DurationVar(&c.ImageStaleAfter, "image-stale-after", envDur(getenv, "TCDI_IMAGE_STALE_AFTER", api.DefaultImageStaleAfter),
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
+	fs.DurationVar(&c.ImageBlockAfter, "image-block-after", envDur(getenv, "TCDI_IMAGE_BLOCK_AFTER", api.DefaultImageBlockAfter),
+		"runtime image age that blocks create/start with 409 IMAGE_STALE (E3); a missing imageBuiltAt never blocks; 0 disables (env TCDI_IMAGE_BLOCK_AFTER)")
 	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
 		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10); over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
