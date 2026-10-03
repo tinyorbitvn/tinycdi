@@ -69,6 +69,20 @@
   color: var(--tc-color-text-muted);
   font-size: var(--tc-text-sm);
   margin-right: var(--tc-space-2);
+  white-space: nowrap;
+}
+
+/* Below ~1440 px the print hint is the first thing to go; the toolbar then
+ * still wraps only when genuinely out of room (T5.4: it wrapped at
+ * 1440 px). */
+@media (max-width: 96rem) {
+  .tc-session__printhint {
+    display: none;
+  }
+
+  .tc-session__title {
+    max-width: 18ch;
+  }
 }
 
 /* Right-align the controls; when the lifecycle notice is present it takes

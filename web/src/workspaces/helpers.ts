@@ -68,3 +68,11 @@ export function phaseLabelKey(phase: WorkspacePhase): MessageKey {
 export function sessionPath(workspaceId: string): string {
   return `/workspaces/${encodeURIComponent(workspaceId)}/session`;
 }
+
+/**
+ * "name@rev" for the template a workspace points at; revision 0 means "no
+ * published revision yet" and is dropped rather than shown as "@0" (T5.4).
+ */
+export function templateRefLabel(template: WorkspaceView["template"]): string {
+  return template.revision > 0 ? `${template.name}@${template.revision}` : template.name;
+}

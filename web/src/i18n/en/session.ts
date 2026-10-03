@@ -17,6 +17,7 @@ export default {
   "session.status.inUse": "In use elsewhere",
   "session.status.connecting": "Connecting",
   "session.status.connected": "Connected",
+  "session.status.reconnecting": "Reconnecting",
   "session.status.disconnected": "Disconnected",
   "session.status.ended": "Ended",
   "session.status.blocked": "Blocked",
