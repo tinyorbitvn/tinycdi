@@ -102,15 +102,16 @@ means and the first thing to check.
 
 ## Reading the signals during a Postgres outage
 
-Fail-closed is intentional, not a bug: an outage shorter than the
-~30 s revoke deadline keeps live streams; a longer one closes them, and
-users reconnect with the same cookie while the lease row is still live —
-else they re-launch. During the outage itself `/v1/*` answers
-`503 UNAVAILABLE` within milliseconds rather than hanging. Measured
-numbers and the recovery procedure are in `disaster-recovery.md` →
-"Postgres outage" and `capacity.md` (v0.3 drill results land with
-[tinycdi#57](https://github.com/tinyorbitvn/tinycdi/pull/57)). Expect
-`TinyCDISessionDropSpike` exactly then.
+Fail-closed is intentional, not a bug — measured in the v0.3 outage drill
+(`tests/integration/postgres_outage_test.go`): a 10 s outage kept the
+session WebSocket open and echoing; a 45 s outage closed it **30.1 s**
+after the outage began (`renew_deadline`, inside the 30–40 s window);
+`/v1/*` answered `503 UNAVAILABLE` in ~1 ms throughout, never a hang.
+With the lease row expired, reconnect takes the re-launch path. Full
+table and recovery procedure: `disaster-recovery.md` → "Postgres outage
+(failover)"; the same numbers in `capacity.md` → "Postgres outage /
+failover timing". Expect `TinyCDISessionDropSpike` exactly then — a
+failover past the 30 s revoke deadline drops every stream by design.
 
 ## Probes
 
