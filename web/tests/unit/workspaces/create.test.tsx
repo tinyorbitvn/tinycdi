@@ -103,4 +103,34 @@ describe("CreateWorkspacePage", () => {
     await waitFor(() => expect(calls).toHaveLength(1));
     await waitFor(() => expect(window.location.pathname).toMatch(/^\/workspaces\/ws_/));
   }, 20000);
+
+  // FX-R17: the two quota refusals read differently — real exhaustion tells
+  // the user to free resources; a tenant with no quota at all tells them to
+  // ask an administrator to set one.
+  it.each([
+    [
+      "QUOTA_EXHAUSTED",
+      "Quota exhausted — delete an unused workspace or ask an administrator for more quota.",
+    ],
+    [
+      "QUOTA_NOT_CONFIGURED",
+      "No quota is configured for your tenant. Ask an administrator to set one.",
+    ],
+  ])("create: %s shows its own guidance", async (code, message) => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: { code, message: "server detail", retryable: false, requestId: "r-quota" },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(code);
+    expect(alert).toHaveTextContent(message);
+    // Neither refusal is retryable: no Retry button.
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  }, 20000);
 });

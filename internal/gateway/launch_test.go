@@ -106,6 +106,28 @@ func TestLaunch_SetsHostOnlyCookie(t *testing.T) {
 	}
 }
 
+// TestLaunch_RedirectLoadsDesktopWithRemoteResize (FX-R18): the 303 lands the
+// KasmVNC web client with resize=remote. The client treats a page inside an
+// iframe as an embedded widget and silently forces resize=off, which keeps
+// the remote screen at its old size: a larger in-portal frame then shows
+// large dark regions around (or instead of) the desktop. The query is a
+// static, non-secret client setting; it never carries ticket or session
+// material.
+func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-1", testWSUID)
+	srv := newGateway(t, fb, nil)
+
+	resp := doLaunch(t, srv, testHost, "tk-1", map[string]string{"Origin": testOrigin})
+	defer drain(resp)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("launch status = %d, want 303", resp.StatusCode)
+	}
+	if loc, want := resp.Header.Get("Location"), "/?resize=remote"; loc != want {
+		t.Fatalf("redirect Location = %q, want %q", loc, want)
+	}
+}
+
 // TestLaunch_BadHostRejected_NoConsume: a Host outside the allowlist is
 // rejected and — critically — the ticket is NOT consumed (bad-host
 // launch must not burn the ticket).

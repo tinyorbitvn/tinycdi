@@ -2349,6 +2349,62 @@ func TestRuntimeHostUsersDefault(t *testing.T) {
 	}
 }
 
+// V3.11a: runtime.appArmor.requireRuntimeDefault defaults to true and then
+// renders NO flag (the operator flag's own default is true), so the operator
+// Deployment is identical to the pre-V3.11a render. false renders
+// --runtime-apparmor-require-default=false and a NOTES notice.
+func TestRuntimeAppArmorRequireDefault(t *testing.T) {
+	minimal := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
+	hasFlag := func(docs []doc) (string, bool) {
+		op := deployment(docs, "operator")
+		if op == nil {
+			t.Fatal("no operator Deployment rendered")
+		}
+		for _, a := range firstContainerArgs(op) {
+			if strings.HasPrefix(a, "--runtime-apparmor-require-default") {
+				return a, true
+			}
+		}
+		return "", false
+	}
+
+	if a, ok := hasFlag(renderArgs(t, "-f", minimal)); ok {
+		t.Errorf("default render must carry no apparmor flag, got %q", a)
+	}
+	if a, ok := hasFlag(renderArgs(t, "-f", minimal,
+		"--set", "runtime.appArmor.requireRuntimeDefault=true")); ok {
+		t.Errorf("explicit true must carry no apparmor flag, got %q", a)
+	}
+	if notes := renderNotes(t, "-f", minimal); strings.Contains(notes, "requireRuntimeDefault") {
+		t.Errorf("default NOTES must not mention requireRuntimeDefault:\n%s", notes)
+	}
+
+	off := []string{"-f", minimal, "--set", "runtime.appArmor.requireRuntimeDefault=false"}
+	a, ok := hasFlag(renderArgs(t, off...))
+	if !ok || a != "--runtime-apparmor-require-default=false" {
+		t.Errorf("false must render --runtime-apparmor-require-default=false, got %q (present=%v)", a, ok)
+	}
+	if notes := renderNotes(t, off...); !strings.Contains(notes, "requireRuntimeDefault=false") {
+		t.Errorf("false NOTES must carry the notice, got:\n%s", notes)
+	}
+}
+
+// V3.11a: the value is boolean only — a string or null is a schema error.
+func TestRuntimeAppArmorRequireDefaultSchema(t *testing.T) {
+	minimal := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
+	for _, v := range []string{`"false"`, `0`, `"yes"`, `[]`} {
+		out := renderErrArgs(t, "-f", minimal,
+			"--set-json", `runtime.appArmor.requireRuntimeDefault=`+v)
+		if !strings.Contains(out, "requireRuntimeDefault") {
+			t.Errorf("value %s must be rejected naming requireRuntimeDefault, got: %s", v, out)
+		}
+	}
+	out := renderErrArgs(t, "-f", minimal, "--set", "runtime.appArmor.bogus=true")
+	if !strings.Contains(out, "bogus") && !strings.Contains(out, "appArmor") {
+		t.Errorf("unknown runtime.appArmor key must be rejected, got: %s", out)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // T1.7 — the 0.2.0 control plane: backend (API + session gateway + broker
 // in one Deployment, D6/D7) and frontend (static SPA server) replace the

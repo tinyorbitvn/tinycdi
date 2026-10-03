@@ -37,12 +37,42 @@ export function sessionOrigin(workspaceId: string, sessionDomain: string): strin
   return `https://${sessionLabel(workspaceId)}.${sessionDomain}`;
 }
 
+/**
+ * URL the session iframe is pointed at to (re)load the desktop client. The
+ * KasmVNC client treats a page inside an iframe as an embedded widget and
+ * forces resize=off, so the remote screen would keep its old size and a
+ * larger frame shows large dark regions (FX-R18). The query is a static
+ * client setting, the same one the gateway puts on its launch redirect.
+ */
+export function sessionFrameUrl(workspaceId: string, sessionDomain: string): string {
+  return `${sessionOrigin(workspaceId, sessionDomain)}/?resize=remote`;
+}
+
 /** Sandbox flags on the session iframe (D13). Navigation and dialogs stay out. */
 export const SESSION_FRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-pointer-lock";
 
-/** Permissions delegated to the session frame (clipboard + fullscreen). */
-export const SESSION_FRAME_ALLOW = "clipboard-read; clipboard-write; fullscreen";
+/** Features delegated to the session frame (clipboard, fullscreen, keyboard layout). */
+export const SESSION_FRAME_FEATURES = [
+  "clipboard-read",
+  "clipboard-write",
+  "fullscreen",
+  "keyboard-map",
+] as const;
+
+/**
+ * The iframe's allow attribute. Each feature names the workspace's session
+ * origin explicitly: the frame has no src attribute (the launch form POST
+ * navigates it), so the bare-feature default, 'src', resolves to the portal's
+ * own origin and delegated nothing to the session — clipboard, fullscreen and
+ * getLayoutMap() were all refused inside the frame (FX-R22). Empty until the
+ * session domain is known, when nothing can be launched anyway.
+ */
+export function sessionFrameAllow(workspaceId: string, sessionDomain: string): string {
+  if (sessionDomain === "") return "";
+  const origin = sessionOrigin(workspaceId, sessionDomain);
+  return SESSION_FRAME_FEATURES.map((feature) => `${feature} ${origin}`).join("; ");
+}
 
 /** sessionDomain naming a loopback listener (mock e2e / dev harness). */
 function isLoopbackDomain(sessionDomain: string): boolean {

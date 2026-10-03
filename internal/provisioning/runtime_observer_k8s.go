@@ -3,8 +3,9 @@ package provisioning
 // Production RuntimeObserver (design §8): proof of runtime absence is read
 // from the cluster itself. A workspace's runtime is gone when no compute is
 // left — i.e. the Workspace CR is gone (or carries no live children) AND no
-// Pods or in-use PVCs carrying the workspace's labels remain in its
-// namespace. Ambiguity (API errors, unknown tenants, duplicate CRs) always
+// Pods carrying the workspace's labels remain in its namespace. Volumes never
+// block the proof: quota model — compute is held while a runtime incarnation
+// exists, disk while the volume exists. Ambiguity (API errors, unknown tenants, duplicate CRs) always
 // answers "not gone" — Recovery never releases quota on a maybe.
 //
 // Label note: runtime children are stamped by the Linux backend with
@@ -93,28 +94,15 @@ func (o *K8sRuntimeObserver) RuntimeGone(ctx context.Context, workspaceUID Platf
 	return true, nil
 }
 
-// noChildren reports whether no Pods and no in-use (non-retained) PVCs
-// carry the given labels in ns. Retained volumes are data inventory, not
-// compute — they never block quota release.
+// noChildren reports whether no Pods carry the given labels in ns. Volumes
+// are disk, not compute: a PVC — retained or not, stray or not — never blocks
+// the proof; the disk stays held by the quota reservation while it exists.
 func (o *K8sRuntimeObserver) noChildren(ctx context.Context, ns string, sel client.MatchingLabels) (bool, error) {
 	var pods corev1.PodList
 	if err := o.client.List(ctx, &pods, client.InNamespace(ns), sel); err != nil {
 		return false, fmt.Errorf("observer: list pods in %s: %w", ns, err)
 	}
-	if len(pods.Items) > 0 {
-		return false, nil
-	}
-	var pvcs corev1.PersistentVolumeClaimList
-	if err := o.client.List(ctx, &pvcs, client.InNamespace(ns), sel); err != nil {
-		return false, fmt.Errorf("observer: list pvcs in %s: %w", ns, err)
-	}
-	for i := range pvcs.Items {
-		if pvcs.Items[i].Labels[linux.LabelDataRetained] == "true" {
-			continue
-		}
-		return false, nil
-	}
-	return true, nil
+	return len(pods.Items) == 0, nil
 }
 
 // compile-time assertion.

@@ -93,6 +93,10 @@ spec:
             {{- if not (kindIs "invalid" .Values.runtime.hostUsers) }}
             - --runtime-host-users={{ .Values.runtime.hostUsers }}
             {{- end }}
+            {{- /* The operator flag defaults to true, so only false renders. */}}
+            {{- if eq (printf "%v" (dig "appArmor" "requireRuntimeDefault" true .Values.runtime)) "false" }}
+            - --runtime-apparmor-require-default=false
+            {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
             {{- end }}

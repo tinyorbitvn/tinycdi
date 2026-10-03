@@ -442,7 +442,9 @@ func (h *DataHandler) writeDataError(w http.ResponseWriter, r *http.Request, err
 		writeError(w, r, CodeInvalidTemplate, "template runtime does not match the retained disk")
 	case errors.Is(err, provisioning.ErrBadCursor):
 		writeError(w, r, CodeInvalidRequest, "bad pageToken")
-	case provisioning.IsQuotaExceeded(err), errors.Is(err, provisioning.ErrNoQuota):
+	case errors.Is(err, provisioning.ErrNoQuota):
+		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
+	case provisioning.IsQuotaExceeded(err):
 		writeError(w, r, CodeQuotaExhausted, "quota exhausted")
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")

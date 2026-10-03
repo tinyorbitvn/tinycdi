@@ -85,9 +85,21 @@ kasmAdapter:
 # labels each with workspaces.cdi.tinyorbit.vn/tenant=<tenant>, installs the
 # default-deny NetworkPolicy baseline, a tinycdi-runtime ServiceAccount
 # (automountServiceAccountToken=false) and the per-namespace RoleBindings.
+#
+# quota (per entry) declares the tenant's limits. The backend renders them as
+# -tenant-quotas and its singleton leader upserts exactly the listed tenants'
+# tenant_quota rows at startup (idempotent; unlisted tenants and entries
+# without a quota block are left untouched). A tenant WITHOUT a quota row has
+# every create refused with 409 QUOTA_NOT_CONFIGURED, and NOTES warns about it.
+#   runningWorkspaces  whole number >= 0 (concurrently running workspaces)
+#   cpu                cores or millicores: "16", "1.5", "500m"
+#   memory, storage    Kubernetes quantities: "64Gi", "200G", 107374182400
+# Values below current usage are accepted: running workspaces keep running
+# and new creates are refused until usage drops.
 managedNamespaces: []
   # - name: tinycdi-tenant-a
   #   tenant: tenant-a
+  #   quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
 
 # Public entry points. Every workspace session is served on its own
 # <label>.<sessionDomain> host (D9): the edge carries ONE wildcard route
@@ -114,6 +126,19 @@ oidc:
   # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
   # login open to every IdP account — tighten this in production.
   requiredGroups: []
+  # Sign-out also ends the identity provider session (RP-initiated logout)
+  # when the provider's discovery document has end_session_endpoint. Without
+  # it the provider session survives and the next visit signs the user
+  # straight back in. false keeps sign-out local to the portal.
+  # Rendered as --oidc-end-session=<bool>.
+  endSession: true
+  # Where the provider sends the browser after it ended its session
+  # (post_logout_redirect_uri), e.g. https://<portalHost>/signed-out. The URI
+  # must be registered at the provider (Keycloak: client "Valid post logout
+  # redirect URIs"), so it is empty by default; the provider then shows its
+  # own logged-out page. https only. Rendered as
+  # --oidc-post-logout-redirect=<url> when set.
+  postLogoutRedirect: ""
   # backend -> IdP egress. Narrow to the IdP address space when known.
   egressCIDRs: ["0.0.0.0/0"]
   port: 443
@@ -457,6 +482,18 @@ runtime:
   # null leaves the field unset (the apiserver default — host user
   # namespace); a template's spec.linux.hostUsers overrides either way.
   hostUsers: false
+  # AppArmor for runtime pods (--runtime-apparmor-require-default). true
+  # (default): every runtime container carries an explicit
+  # securityContext.appArmorProfile=RuntimeDefault. Set false on nodes
+  # WITHOUT AppArmor (kind, RHEL-family/SELinux-based distributions): the
+  # kubelet refuses a pod that names an AppArmor profile there ("Cannot
+  # enforce AppArmor: AppArmor is not enabled on the host"). false omits
+  # the RuntimeDefault field only — seccomp, capabilities, runAsNonRoot,
+  # allowPrivilegeEscalation and hostUsers are unchanged. A template with a
+  # Localhost AppArmor profile (e.g. browser templates) is still set and
+  # cannot run on such nodes. See install.md "Nodes without AppArmor".
+  appArmor:
+    requireRuntimeDefault: true
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must

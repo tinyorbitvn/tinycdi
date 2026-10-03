@@ -44,7 +44,21 @@
         "additionalProperties": false,
         "properties": {
           "name": {"type": "string", "minLength": 1},
-          "tenant": {"type": "string", "minLength": 1}
+          "tenant": {"type": "string", "minLength": 1},
+          "quota": {
+            "type": "object",
+            "required": ["runningWorkspaces", "cpu", "memory", "storage"],
+            "additionalProperties": false,
+            "properties": {
+              "runningWorkspaces": {"type": "integer", "minimum": 0},
+              "cpu": {"anyOf": [
+                {"type": "number", "minimum": 0},
+                {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?|\\.[0-9]+|[0-9]+m)$"}
+              ]},
+              "memory": {"$ref": "#/$defs/byteQuantity"},
+              "storage": {"$ref": "#/$defs/byteQuantity"}
+            }
+          }
         }
       }
     },
@@ -62,6 +76,8 @@
         "existingSecret": {"type": "string", "minLength": 1},
         "clientSecretKey": {"type": "string", "minLength": 1},
         "requiredGroups": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}},
+        "endSession": {"type": "boolean"},
+        "postLogoutRedirect": {"type": "string", "pattern": "^(https://\\S+)?$"},
         "egressCIDRs": {"type": "array", "items": {"type": "string", "pattern": "^[^,\\s]+$"}},
         "port": {"type": "integer", "minimum": 1, "maximum": 65535}
       }
@@ -390,7 +406,14 @@
             "tolerations": {"type": "array"}
           }
         },
-        "hostUsers": {"type": ["boolean", "null"]}
+        "hostUsers": {"type": ["boolean", "null"]},
+        "appArmor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requireRuntimeDefault": {"type": "boolean"}
+          }
+        }
       }
     },
     "nodeProfiles": {
@@ -462,6 +485,13 @@
     }
   },
   "$defs": {
+    "byteQuantity": {
+      "description": "Kubernetes quantity of bytes: a non-negative number, or a decimal with an optional Ki..Ei / k..E suffix.",
+      "anyOf": [
+        {"type": "number", "minimum": 0},
+        {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?|\\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$"}
+      ]
+    },
     "image": {
       "type": "object",
       "required": ["repository"],

@@ -12,6 +12,8 @@ import { sessionFrameName, type LaunchTicket } from "../../../src/session/launch
 const WS = "ws_0123456789abcdef";
 const DOMAIN = "session.example.com";
 const ORIGIN = `https://ws-0123456789abcdef.${DOMAIN}`;
+// Frame navigations load the desktop client with resize=remote (FX-R18).
+const FRAME_URL = `${ORIGIN}/?resize=remote`;
 
 function ticket(): LaunchTicket {
   return {
@@ -76,7 +78,7 @@ describe("useConnectionWatch (D15)", () => {
     await advanced(RECONNECT_BACKOFF_MS[0] - 1);
     expect(frame.getAttribute("src")).toBeNull();
     await advanced(1);
-    expect(frame.getAttribute("src")).toBe(ORIGIN);
+    expect(frame.getAttribute("src")).toBe(FRAME_URL);
     expect(navigated(events)).toHaveLength(1);
 
     // Still disconnected on the next poll: backoff[1] = 2 s.
@@ -125,7 +127,7 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(before);
     await advanced(3_000); // t = 28 s: the 8 s timer still fires
     expect(navigated(events)).toHaveLength(before + 1);
-    expect(frame.getAttribute("src")).toBe(ORIGIN);
+    expect(frame.getAttribute("src")).toBe(FRAME_URL);
   });
 
   it("cancels a pending reload when the stream comes back and restarts the backoff", async () => {

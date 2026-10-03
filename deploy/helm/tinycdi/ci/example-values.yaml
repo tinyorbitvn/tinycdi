@@ -5,6 +5,7 @@
 managedNamespaces:
   - name: tinycdi-tenant-a
     tenant: tenant-a
+    quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
   - name: tinycdi-tenant-b
     tenant: tenant-b
 

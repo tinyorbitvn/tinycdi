@@ -13,6 +13,17 @@ export default {
   "app.theme.dark": "Dark",
   "app.theme.system": "System",
 
+  "app.user.menu": "Account menu for {name}",
+  "app.user.signedInAs": "Signed in as {name}",
+  "app.user.tenant": "Tenant {tenant}",
+  "app.user.signOut": "Sign out",
+  "app.user.signOutFailed.title": "Could not sign out",
+  "app.user.signOutFailed.body": "Try again. If it keeps failing, close this browser window.",
+
+  "auth.signedOut.title": "You have signed out",
+  "auth.signedOut.body": "Your session has ended. Close this window or sign in again.",
+  "auth.signedOut.action": "Sign in again",
+
   "auth.gate.apiUnreachable": "Could not reach the workspace API: {error}",
   "auth.gate.checking": "Checking session…",
 

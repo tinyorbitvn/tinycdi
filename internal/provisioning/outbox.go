@@ -52,6 +52,9 @@ type intentPayload struct {
 	DesiredState      string     `json:"desiredState,omitempty"`
 	RuntimeGeneration int64      `json:"runtimeGeneration,omitempty"`
 	Spec              IntentSpec `json:"spec,omitempty"`
+	// Reason is the machine-readable cause of a platform-initiated stop
+	// (the broker's max_duration, idle_timeout, ...). Empty for user intents.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Intent is one outbox record delivered to the runtime side. Revision is
@@ -71,6 +74,12 @@ type Intent struct {
 	DesiredState      string
 	RuntimeGeneration int64
 	Spec              IntentSpec
+	// CRAnnotations are extra annotations the applier stamps on the
+	// Workspace CR IN THE SAME WRITE that creates it. They are never read
+	// from or written to the outbox: a wrapping applier (RetainedApplier)
+	// sets them after verifying what they assert, so the operator never
+	// sees a CR that lacks them (FX-R20).
+	CRAnnotations map[string]string
 }
 
 var (
@@ -139,6 +148,19 @@ func appendIntent(ctx context.Context, tx store.Tx, workspaceUID PlatformID, kin
 		return 0, fmt.Errorf("append intent: insert %w", err)
 	}
 	return rev, nil
+}
+
+// SetIntentReason records why a platform-initiated intent was appended; it
+// runs in the same transaction as AppendIntent and is read back by
+// IntentHistory for the workspace events.
+func SetIntentReason(ctx context.Context, tx store.Tx, workspaceUID PlatformID, revision uint64, reason string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE outbox_intent SET payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{reason}', to_jsonb($3::text))
+		WHERE workspace_id = $1 AND revision = $2`,
+		workspaceUID, int64(revision), reason); err != nil {
+		return fmt.Errorf("set intent reason: %w", err)
+	}
+	return nil
 }
 
 // markDeleted flips the workspace row to deleted inside tx; called after
@@ -480,6 +502,9 @@ type IntentRecord struct {
 	Kind      IntentKind
 	Revision  uint64
 	CreatedAt time.Time
+	// Reason is the recorded cause of a platform-initiated stop; empty for
+	// user-requested intents.
+	Reason string
 }
 
 // IntentHistory returns the workspace's recorded intents newest first,
@@ -487,7 +512,7 @@ type IntentRecord struct {
 // caller can never read another tenant's history by guessing a UID.
 func (s *Service) IntentHistory(ctx context.Context, tenantID string, workspaceUID PlatformID) ([]IntentRecord, error) {
 	rows, err := s.db.Pool().Query(ctx, `
-		SELECT kind, revision, created_at
+		SELECT kind, revision, created_at, COALESCE(payload->>'reason', '')
 		FROM outbox_intent
 		WHERE workspace_id = $1 AND tenant_id = $2
 		ORDER BY revision DESC
@@ -500,7 +525,7 @@ func (s *Service) IntentHistory(ctx context.Context, tenantID string, workspaceU
 	for rows.Next() {
 		var rec IntentRecord
 		var kind string
-		if err := rows.Scan(&kind, &rec.Revision, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&kind, &rec.Revision, &rec.CreatedAt, &rec.Reason); err != nil {
 			return nil, fmt.Errorf("intent history: %w", err)
 		}
 		rec.Kind = IntentKind(kind)

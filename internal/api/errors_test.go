@@ -95,6 +95,7 @@ func TestErrorCodeTableCoverage(t *testing.T) {
 		CodeInvalidState:        http.StatusConflict,
 		CodeIdempotencyConflict: http.StatusConflict,
 		CodeQuotaExhausted:      http.StatusConflict,
+		CodeQuotaNotConfigured:  http.StatusConflict,
 		CodeConnectionInUse:     http.StatusConflict,
 		CodeRateLimited:         http.StatusTooManyRequests,
 		CodeUnavailable:         http.StatusServiceUnavailable,

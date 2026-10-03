@@ -420,6 +420,43 @@ func TestCreateWorkspaceErrorMapping(t *testing.T) {
 	r.Body.Close()
 }
 
+// TestCreateQuotaNotConfigured: a tenant with no quota row (admission fails
+// closed with ErrNoQuota) is 409 QUOTA_NOT_CONFIGURED with the actionable
+// message — distinct from QUOTA_EXHAUSTED, which stays for a real over-limit
+// (FX-R17). The start path shares the mapping.
+func TestCreateQuotaNotConfigured(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+	body := `{"name":"x","templateRef":"tpl_linuxdesktop"}`
+
+	be.createErr = fmt.Errorf("reserve: %w", provisioning.ErrNoQuota)
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,
+		map[string]string{"Idempotency-Key": "key-noquota-0"})
+	if r.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", r.StatusCode)
+	}
+	e := errBody(t, r)
+	if e.Code != CodeQuotaNotConfigured {
+		t.Fatalf("code=%s, want QUOTA_NOT_CONFIGURED", e.Code)
+	}
+	if want := "No quota is configured for your tenant. Ask an administrator to set one."; e.Message != want {
+		t.Fatalf("message=%q, want %q", e.Message, want)
+	}
+	if e.Retryable {
+		t.Fatal("QUOTA_NOT_CONFIGURED must not be retryable")
+	}
+
+	// A real over-limit stays QUOTA_EXHAUSTED.
+	be.createErr = &provisioning.QuotaExceededError{TenantID: "tenant-a", Dimension: "runningSlots", Limit: 1, Used: 1, Requested: 1}
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,
+		map[string]string{"Idempotency-Key": "key-noquota-1"})
+	if r.StatusCode != http.StatusConflict || decodeError(t, r) != string(CodeQuotaExhausted) {
+		t.Fatalf("over limit: status=%d, want 409 QUOTA_EXHAUSTED", r.StatusCode)
+	}
+	r.Body.Close()
+}
+
 // TestStartQuotaExhaustedMapping covers defect F7: a start that cannot
 // re-acquire its running-quota reservation surfaces as
 // 409 QUOTA_EXHAUSTED, not a generic error.
@@ -571,6 +608,7 @@ func TestCreateRetainedDataRef_ErrorMapping(t *testing.T) {
 		{provisioning.ErrRuntimeMismatch, http.StatusUnprocessableEntity, CodeInvalidTemplate},
 		{provisioning.ErrIdempotencyConflict, http.StatusConflict, CodeIdempotencyConflict},
 		{&provisioning.QuotaExceededError{TenantID: "tenant-a", Dimension: "runningSlots"}, http.StatusConflict, CodeQuotaExhausted},
+		{provisioning.ErrNoQuota, http.StatusConflict, CodeQuotaNotConfigured},
 	} {
 		be.attachErr = tc.err
 		r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,

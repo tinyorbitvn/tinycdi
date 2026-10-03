@@ -23,6 +23,17 @@ Managed namespaces:
   NONE — set managedNamespaces or the platform manages nothing.
 {{- end }}
 
+{{- $unquoted := list }}
+{{- range .Values.managedNamespaces }}{{ if not .quota }}{{ $unquoted = append $unquoted .tenant }}{{ end }}{{ end }}
+{{- if $unquoted }}
+
+Tenant quotas: WARNING — no managedNamespaces[].quota for tenant(s)
+  {{ join ", " $unquoted }}
+  Workspace creates for them are refused with QUOTA_NOT_CONFIGURED (409)
+  unless a tenant_quota row already exists. Set quota: {runningWorkspaces,
+  cpu, memory, storage} on each entry — see install.md "Tenant quotas".
+{{- end }}
+
 {{- $placement := (default dict (default dict .Values.runtime).placement) }}
 {{- if $placement.allowSharedNodes }}
 
@@ -39,6 +50,11 @@ Runtime placement: dedicated pool — runtime pods (and the node-profile
   and tainted to match runtime.placement.tolerations. Label + taint the
   pool BEFORE launching workspaces or pods stay Pending — see install.md
   "Workspace node pool".
+{{- end }}
+
+{{- if eq (printf "%v" (dig "appArmor" "requireRuntimeDefault" true .Values.runtime)) "false" }}
+
+AppArmor: runtime.appArmor.requireRuntimeDefault=false — runtime pods omit the RuntimeDefault AppArmor profile (nodes without AppArmor); templates with a Localhost AppArmor profile cannot run on such nodes.
 {{- end }}
 
 {{- if .Values.certManager.enabled }}
