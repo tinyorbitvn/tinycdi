@@ -3,10 +3,9 @@
 
 package provisioning_test
 
-// FX-R24 addendum: why the runtime-absence proof never succeeds for a stopped
-// Retain workspace. These tests pin the CURRENT behaviour of
-// K8sRuntimeObserver so the finding is reproducible; they are the place to
-// flip once the design decision on stopped-Retain quota release lands.
+// FX-R24 characterised why the runtime-absence proof never succeeded for a
+// stopped Retain workspace; FX-R25 flipped these tests with the quota model:
+// only a pod is a live runtime incarnation, volumes never block the proof.
 
 import (
 	"context"
@@ -49,9 +48,8 @@ func retainTemplate(ns string) *workspacev1alpha1.WorkspaceTemplate {
 
 // (b) A plain Retain workspace, run then stopped through the real Linux
 // backend: Stop deletes the pod and leaves the home PVC, which carries no
-// data-retained label until the workspace is DELETED. The observer counts
-// that PVC as "in use", so the proof never succeeds while the workspace
-// stays stopped. An Ephemeral workspace (emptyDir home) is proven gone at once.
+// data-retained label until the workspace is DELETED. The PVC is disk, not
+// compute, so the proof succeeds as for an Ephemeral workspace.
 func TestK8sRuntimeObserver_StoppedRetainWorkspace(t *testing.T) {
 	ctx := context.Background()
 	const ns, platformUID = "ns-a", "ws_retain0001"
@@ -62,7 +60,7 @@ func TestK8sRuntimeObserver_StoppedRetainWorkspace(t *testing.T) {
 		wantGone bool
 	}{
 		{workspacev1alpha1.DataPolicyEphemeral, true},
-		{workspacev1alpha1.DataPolicyRetain, false}, // the finding
+		{workspacev1alpha1.DataPolicyRetain, true},
 	} {
 		t.Run(string(tc.policy), func(t *testing.T) {
 			ws := obsCR(provisioning.WorkspaceCRName(platformUID), ns, platformUID, "cr-uid-r")
@@ -90,9 +88,7 @@ func TestK8sRuntimeObserver_StoppedRetainWorkspace(t *testing.T) {
 
 // (a) t54-attached's shape after the retained-attach: the workspace UID labels
 // TWO home PVCs — the retained one the pod mounts and a stray default home
-// created before the attach annotations landed. The stray has no
-// data-retained label, so it alone blocks the proof; with only the retained
-// claim the proof succeeds.
+// created before the attach annotations landed. Neither blocks the proof.
 func TestK8sRuntimeObserver_RetainWithStrayHome(t *testing.T) {
 	ctx := context.Background()
 	const ns, platformUID = "ns-a", "ws_attached01"
@@ -106,7 +102,7 @@ func TestK8sRuntimeObserver_RetainWithStrayHome(t *testing.T) {
 		t.Fatalf("retained claim only: gone=%v err=%v, want true", gone, err)
 	}
 	c = fake.NewClientBuilder().WithScheme(observerScheme(t)).WithObjects(cr, retained, stray).Build()
-	if gone, err := provisioning.NewK8sRuntimeObserver(c, tenants).RuntimeGone(ctx, platformUID); err != nil || gone {
-		t.Fatalf("retained claim + stray home: gone=%v err=%v, want false (the stray blocks the proof)", gone, err)
+	if gone, err := provisioning.NewK8sRuntimeObserver(c, tenants).RuntimeGone(ctx, platformUID); err != nil || !gone {
+		t.Fatalf("retained claim + stray home: gone=%v err=%v, want true (a stray volume is disk, not compute)", gone, err)
 	}
 }
