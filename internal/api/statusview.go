@@ -78,7 +78,8 @@ type StatusView interface {
 
 // K8sStatusView implements StatusView over a controller-runtime informer
 // cache scoped to the managed tenant namespaces — in production the same
-// cache the broker's BindingSource runs (cmd/api). Like K8sBindingSource it
+// cache the broker's BindingSource runs (in the backend). Like
+// K8sBindingSource it
 // treats the watch event stream as a heartbeat: the projection is Fresh only
 // while the informer has synced and an event arrived within maxObservedStale.
 //
