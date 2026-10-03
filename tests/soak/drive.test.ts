@@ -15,9 +15,12 @@ import {
   BrowserDriver,
   chromiumLaunchOptions,
   driveSessions,
+  elsewhereDialogVisible,
+  loadProfile,
   loginSelectors,
   newSession,
   parseArgs,
+  parseUsersFile,
   takeoverDialogVisible,
   type Driver,
   type SessionProbe,
@@ -403,4 +406,107 @@ test("R5f: --help prints usage without script internals", () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Usage:/);
   assert.match(r.stdout, /SOAK_PASSWORD_SELECTOR/);
+});
+
+// ---- V3.10: lanes, users file, profiles, elsewhere count ----------------
+
+test("V3.10: each session drives through its own lane", async () => {
+  const dA = new FakeDriver();
+  const dB = new FakeDriver();
+  const lane = (d: FakeDriver) => ({
+    api: {} as never,
+    driver: d,
+    dispose: () => Promise.resolve(),
+  });
+  const a = newSession("ws_a", "a");
+  a.lane = lane(dA);
+  const b = newSession("ws_b", "b");
+  b.lane = lane(dB);
+  await driveSessions({ ...FAST, durationMs: 400 }, [a, b], dA, () => false);
+  assert.deepEqual(dA.opened.map((o) => o.id), ["ws_a"]);
+  assert.deepEqual(dB.opened.map((o) => o.id), ["ws_b"]);
+  // The mid-run reload is routed per lane too.
+  assert.deepEqual(dA.reloads, ["ws_a"]);
+  assert.deepEqual(dB.reloads, ["ws_b"]);
+  assert.ok(a.observations.length > 0 && b.observations.length > 0);
+});
+
+test("V3.10: an elsewhere probe is recorded on the observation", async () => {
+  const driver = new FakeDriver();
+  let flip = false;
+  driver.probe = (id) => {
+    flip = !flip;
+    return Promise.resolve({ state: "connected", source: "api", ...(flip ? { elsewhere: true } : {}) });
+  };
+  const s = newSession("ws_e", "e");
+  await driveSessions({ ...FAST, durationMs: 300 }, [s], driver, () => false);
+  const flagged = s.observations.filter((o) => o.elsewhere === true).length;
+  assert.ok(flagged > 0, "elsewhere observations recorded");
+});
+
+test("V3.10: elsewhereDialogVisible detects the 'open in another tab' view", async () => {
+  const page = (n: number) => ({
+    getByText: (text: string) => {
+      assert.equal(text, "This session is open in another tab");
+      return { count: () => Promise.resolve(n) };
+    },
+  });
+  assert.equal(await elsewhereDialogVisible(page(1) as never), true);
+  assert.equal(await elsewhereDialogVisible(page(0) as never), false);
+});
+
+test("V3.10: parseUsersFile reads user,password lanes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-soak-users-"));
+  const file = path.join(dir, "users.csv");
+  fs.writeFileSync(file, "# comment\nsoak01,pw-1\n\nsoak02,p,w,2\n");
+  assert.deepEqual(parseUsersFile(file), [
+    { name: "soak01", password: "pw-1" },
+    { name: "soak02", password: "p,w,2" },
+  ]);
+  fs.writeFileSync(file, "soak01,a\nsoak01,b\n");
+  assert.throws(() => parseUsersFile(file), /duplicate/);
+  fs.writeFileSync(file, "not-a-pair\n");
+  assert.throws(() => parseUsersFile(file), /user,password/);
+  fs.writeFileSync(file, "# only comments\n");
+  assert.throws(() => parseUsersFile(file), /no users/);
+  assert.throws(() => parseUsersFile(path.join(dir, "missing.csv")), /cannot read/);
+});
+
+test("V3.10: --users-file / SOAK_USERS_FILE populate the lane users", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-soak-users-"));
+  const file = path.join(dir, "users.csv");
+  fs.writeFileSync(file, "u1,p1\nu2,p2\nu3,p3\n");
+  const o = parseArgs(["--users-file", file]);
+  assert.equal(o.users.length, 3);
+  assert.equal(o.users[2].name, "u3");
+  const prev = process.env.SOAK_USERS_FILE;
+  process.env.SOAK_USERS_FILE = file;
+  try {
+    assert.equal(parseArgs([]).users.length, 3);
+  } finally {
+    if (prev === undefined) delete process.env.SOAK_USERS_FILE;
+    else process.env.SOAK_USERS_FILE = prev;
+  }
+});
+
+test("V3.10: profiles provide defaults that flags override", () => {
+  assert.equal(loadProfile("soak-100").sessions, 100);
+  assert.equal(loadProfile("soak-200").sessions, 200);
+  assert.throws(() => loadProfile("../secrets"), /bad profile name/);
+  assert.throws(() => loadProfile("does-not-exist"), /cannot load profile/);
+  const o = parseArgs(["--profile", "soak-100"]);
+  assert.equal(o.sessions, 100);
+  assert.equal(o.template, "soak-small");
+  assert.equal(o.durationMs, 3_600_000);
+  assert.equal(o.thresholds.reconnectP95Ms, 15_000);
+  const over = parseArgs(["--profile", "soak-100", "--sessions", "7"]);
+  assert.equal(over.sessions, 7, "a flag beats the profile");
+  const prev = process.env.SOAK_SESSIONS;
+  process.env.SOAK_SESSIONS = "9";
+  try {
+    assert.equal(parseArgs(["--profile", "soak-100"]).sessions, 9, "env beats the profile");
+  } finally {
+    if (prev === undefined) delete process.env.SOAK_SESSIONS;
+    else process.env.SOAK_SESSIONS = prev;
+  }
 });

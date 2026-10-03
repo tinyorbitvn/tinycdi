@@ -9,6 +9,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import type { ErrorObject, ValidateFunction } from "ajv";
 import {
+  elsewhereTransitions,
   longestDisconnectedGapMs,
   percentile,
   reloadRecovery,
@@ -51,6 +52,8 @@ export interface Thresholds {
 export interface SessionResult {
   workspaceId: string;
   workspaceName?: string;
+  /** Username of the soak lane that owns this session (multi-user runs). */
+  owner?: string;
   observations: Observation[];
   /** Launch click timestamp (epoch ms), or null when launch never happened. */
   launchedAt: number | null;
@@ -58,6 +61,8 @@ export interface SessionResult {
   reloadedAt: number | null;
   manualActions: number;
   inputEvents: number;
+  /** Wall-clock ms of each scripted input dispatch (harness-side latency). */
+  inputMs?: number[];
   dropped: boolean;
   runEndAt: number;
 }
@@ -77,6 +82,8 @@ export interface RunInfo {
   /** The --duration the soak was asked to observe, counted from soakStartedAt. */
   requestedDurationMs: number;
   sessionsRequested: number;
+  /** How many distinct users the sessions were spread over (>= 1). */
+  users?: number;
   inputIntervalSeconds: number;
   pollIntervalSeconds: number;
 }
@@ -100,12 +107,14 @@ export function buildReport(
     return {
       workspaceId: s.workspaceId,
       ...(s.workspaceName !== undefined ? { workspaceName: s.workspaceName } : {}),
+      ...(s.owner !== undefined ? { owner: s.owner } : {}),
       connectMs:
         s.launchedAt !== null && connectedAt !== null ? connectedAt - s.launchedAt : null,
       reconnectMs: reload === null ? null : reload.reconnectMs,
       seamless: reload?.seamless ?? false,
       longestGapMs: longestDisconnectedGapMs(s.observations, s.runEndAt),
       nonConnectedStates: spans,
+      elsewhereTransitions: elsewhereTransitions(s.observations),
       manualActions: s.manualActions,
       inputEvents: s.inputEvents,
       dropped: s.dropped,
@@ -114,6 +123,7 @@ export function buildReport(
 
   const connects = rows.map((r) => r.connectMs).filter((v): v is number => v !== null);
   const reconnects = rows.map((r) => r.reconnectMs).filter((v): v is number => v !== null);
+  const inputs = sessions.flatMap((s) => s.inputMs ?? []);
   const manualTotal = rows.reduce((n, r) => n + r.manualActions, 0);
   const droppedTotal = rows.filter((r) => r.dropped).length;
   const connectP95 = percentile(connects, 95);
@@ -165,6 +175,7 @@ export function buildReport(
         : {}),
       requestedDurationSeconds: run.requestedDurationMs / 1000,
       sessionsRequested: run.sessionsRequested,
+      ...(run.users !== undefined ? { users: run.users } : {}),
       inputIntervalSeconds: run.inputIntervalSeconds,
       pollIntervalSeconds: run.pollIntervalSeconds,
     },
@@ -173,8 +184,10 @@ export function buildReport(
     summary: {
       connectMs: { p50: percentile(connects, 50), p95: connectP95 },
       reconnectMs: { p50: percentile(reconnects, 50), p95: reconnectP95 },
+      inputDispatchMs: { p50: percentile(inputs, 50), p95: percentile(inputs, 95) },
       sessionsWithManualActions: rows.filter((r) => r.manualActions > 0).length,
       droppedSessions: droppedTotal,
+      falseElsewhereTransitions: rows.reduce((n, r) => n + r.elsewhereTransitions, 0),
       pass: failures.length === 0,
       failures,
     },

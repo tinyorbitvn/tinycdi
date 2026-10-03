@@ -47,6 +47,11 @@
           "description": "The soak duration that was asked for, counted from soakStartedAt; a run that ends sooner is truncated and fails."
         },
         "sessionsRequested": { "type": "integer", "minimum": 0 },
+        "users": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Distinct soak users the sessions were spread over (SOAK_USERS_FILE lanes)."
+        },
         "inputIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 },
         "pollIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 }
       }
@@ -75,6 +80,7 @@
           "seamless",
           "longestGapMs",
           "nonConnectedStates",
+          "elsewhereTransitions",
           "manualActions",
           "inputEvents",
           "dropped"
@@ -82,6 +88,10 @@
         "properties": {
           "workspaceId": { "type": "string" },
           "workspaceName": { "type": "string" },
+          "owner": {
+            "type": "string",
+            "description": "Soak user (lane) that owns this session; present in multi-user runs."
+          },
           "connectMs": {
             "type": ["number", "null"],
             "minimum": 0,
@@ -94,7 +104,7 @@
           },
           "seamless": {
             "type": "boolean",
-            "description": "True when the mid-run reload showed no non-connected state within 60 s. A later gap (a drill) is not attributed to the reload. False when not reloaded."
+            "description": "True when the mid-run reload was observed within 60 s and showed no non-connected state. A later gap (a drill) is not attributed to the reload. False when not reloaded or when nothing was observed inside the window (backlog 4: zero observations is never seamless)."
           },
           "longestGapMs": {
             "type": "number",
@@ -120,6 +130,11 @@
               }
             }
           },
+          "elsewhereTransitions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Times the session page flipped to its 'open in another tab' view while the harness held the only stream. Always a false transition; counted for the V3.10 watch item."
+          },
           "manualActions": {
             "type": "integer",
             "minimum": 0,
@@ -139,8 +154,10 @@
       "required": [
         "connectMs",
         "reconnectMs",
+        "inputDispatchMs",
         "sessionsWithManualActions",
         "droppedSessions",
+        "falseElsewhereTransitions",
         "pass",
         "failures"
       ],
@@ -163,8 +180,23 @@
             "p95": { "type": ["number", "null"] }
           }
         },
+        "inputDispatchMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          },
+          "description": "Wall-clock percentiles of scripted input dispatch through the driver (harness-side latency, not glass-to-glass)."
+        },
         "sessionsWithManualActions": { "type": "integer", "minimum": 0 },
         "droppedSessions": { "type": "integer", "minimum": 0 },
+        "falseElsewhereTransitions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of per-session elsewhere transitions; the harness owns every tab, so each one is false."
+        },
         "pass": { "type": "boolean" },
         "failures": { "type": "array", "items": { "type": "string" } }
       }
