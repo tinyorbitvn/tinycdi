@@ -485,6 +485,46 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		assertNoSecret(t, c, password)
 	})
 
+	t.Run("FontsCoverVietnameseAndCJK", func(t *testing.T) {
+		// Fonts live in linux-base, so both profiles inherit them. A page
+		// with Vietnamese or CJK text must not render tofu: fontconfig
+		// (the fallback mechanism Firefox and Chromium use per glyph) must
+		// resolve a font that actually carries the codepoints for each
+		// generic family. fc-match picks the font a request resolves to;
+		// fc-list then proves the picked family really contains the glyphs
+		// — a family name alone resolves even when nothing covers the
+		// script, so the selection is not the proof.
+		secret, _ := selfSignedSecret(t)
+		c := runContainer(t, runID, "fonts", baseImage, secret, "")
+		waitHealthy(t, c)
+
+		// Sample texts as codepoints for fontconfig's charset constraint:
+		// 'Tiếng Việt: Đây là chữ có dấu — ă â ê ô ơ ư đ' (Vietnamese),
+		// 中文 (zh), あカ日本 (ja), 한글 (ko).
+		scripts := map[string]string{
+			"vi": "110 111 103 e2 ea f4 1a1 1b0 1ebf",
+			"zh": "4e2d 6587",
+			"ja": "3042 30ab 65e5 672c",
+			"ko": "d55c ad6d",
+		}
+		for _, family := range []string{"sans-serif", "serif", "monospace"} {
+			for script, cps := range scripts {
+				q := family + ":charset=" + cps
+				matched := strings.TrimSpace(mustExec(t, c,
+					"fc-match -f '%{family}\\n' '"+q+"' | head -1 | cut -d, -f1"))
+				if matched == "" {
+					t.Errorf("fc-match %q resolved to no font", q)
+					continue
+				}
+				if out := strings.TrimSpace(mustExec(t, c,
+					"fc-list '"+matched+":charset="+cps+"' family")); out == "" {
+					t.Errorf("%s request for %s selected %q, which does not cover the %s codepoints (tofu)",
+						family, script, matched, script)
+				}
+			}
+		}
+	})
+
 	t.Run("ReadinessProbeIsNotAnAuthFailure", func(t *testing.T) {
 		// The runtime's readiness exec probe runs every few seconds for the
 		// life of the pod. An anonymous probe is an authentication failure
