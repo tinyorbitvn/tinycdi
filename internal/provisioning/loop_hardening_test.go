@@ -14,6 +14,7 @@ package provisioning_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -303,5 +304,69 @@ func TestSettleWorker_UnprovenStaysHeld(t *testing.T) {
 	w.DrainOnce(ctx)
 	if state, _, _, _ := resState(t, db, "ws_up"); state != "held" {
 		t.Fatalf("unproven absence = %s, want held", state)
+	}
+}
+
+// warnCounter is a minimal slog.Handler counting Warn+ records.
+type warnCounter struct{ n *int }
+
+func (h warnCounter) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelWarn }
+func (h warnCounter) Handle(context.Context, slog.Record) error    { *h.n++; return nil }
+func (h warnCounter) WithAttrs([]slog.Attr) slog.Handler           { return h }
+func (h warnCounter) WithGroup(string) slog.Handler                { return h }
+
+// TestSettleWorker_WarnOnceThenTickSettles: a persistently failing settle
+// produces at most one WARN per UID per minute and drops the UID instead
+// of re-enqueueing every drain — the recovery tick owns retries and still
+// settles the dropped workspace.
+func TestSettleWorker_WarnOnceThenTickSettles(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	const tenant = "tenant-warn"
+	seedHeldWorkspace(t, db, tenant, "ws_warn", quotaVec)
+	seedHeldWorkspace(t, db, tenant, "ws_dropped", quotaVec)
+	if _, err := db.Pool().Exec(ctx,
+		`UPDATE workspaces SET state = 'deleted' WHERE id IN ('ws_warn', 'ws_dropped')`); err != nil {
+		t.Fatal(err)
+	}
+
+	var warns int
+	trig := provisioning.NewSettleTrigger()
+	w := &provisioning.SettleWorker{
+		DB:      db,
+		Trigger: trig,
+		Rec:     provisioning.NewRecovery(db, &fakeObserver{gone: true}),
+		Log:     slog.New(warnCounter{n: &warns}),
+	}
+	badCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	trig.Enqueue("ws_warn")
+	trig.Enqueue("ws_dropped")
+	// Three failing drains — ws_warn keeps getting fresh events, all
+	// failing on the cancelled ctx; its WARN is suppressed to one.
+	for i := 0; i < 3; i++ {
+		w.DrainOnce(badCtx)
+		trig.Enqueue("ws_warn")
+	}
+	if warns != 2 {
+		t.Fatalf("warns = %d, want exactly one per UID (2 UIDs)", warns)
+	}
+	if n := trig.Pending(); n > 1 {
+		t.Fatalf("trigger pending = %d, want dropped UIDs not re-enqueued", n)
+	}
+
+	// The tick still owns the dropped workspace's retry.
+	actions, err := provisioning.NewRecovery(db, &fakeObserver{gone: true}).Recover(ctx, &recordingApplier{})
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	var released int
+	for _, a := range actions {
+		if a.Kind == provisioning.ActionReleaseQuota {
+			released++
+		}
+	}
+	if released != 2 {
+		t.Fatalf("tick released %d reservations, want both dropped candidates", released)
 	}
 }

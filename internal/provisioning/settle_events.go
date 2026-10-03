@@ -100,9 +100,14 @@ func (t *SettleTrigger) drain() []PlatformID {
 // For each triggered workspace it re-checks the recovery settle predicate
 // (settleCandidateSQL) and calls Recovery.SettleQuota — the event is only
 // a trigger, the same positive runtime-absence proof that gates the 30 s
-// tick gates the release. A lost event or a skipped workspace is settled
-// by the next recovery pass instead; a failed settle is re-enqueued so the
-// event path does not regress below the tick it replaces.
+// tick gates the release. A lost event or a dropped (failed) settle is
+// settled by the next recovery pass instead — the event path adds latency
+// only, it never becomes the sole retry path.
+// warnSuppression bounds failure WARNs to one per UID per minute: a
+// dropped UID is retried by the 30 s recovery tick, so repeated event
+// bursts on a poison row must not spam the log.
+const warnSuppression = time.Minute
+
 type SettleWorker struct {
 	DB      *store.DB
 	Rec     *Recovery
@@ -110,6 +115,9 @@ type SettleWorker struct {
 	Log     *slog.Logger
 	// Poll bounds the drain cadence; <=0 uses 1 s.
 	Poll time.Duration
+
+	warnMu sync.Mutex
+	warned map[PlatformID]time.Time
 }
 
 // Run drains the trigger until ctx is cancelled.
@@ -147,14 +155,15 @@ func (w *SettleWorker) settleCandidate(ctx context.Context, uid PlatformID) (str
 }
 
 // DrainOnce settles every currently-triggered candidate once. It is
-// exported for tests.
+// exported for tests. A failing UID is DROPPED — the periodic recovery
+// pass sweeps the same predicate (settleCandidateSQL) and owns retries —
+// and the failure warns at most once per UID per minute.
 func (w *SettleWorker) DrainOnce(ctx context.Context) {
 	for _, uid := range w.Trigger.drain() {
 		tenantID, ok, err := w.settleCandidate(ctx, uid)
 		switch {
 		case err != nil:
-			w.log().Warn("quota settle: candidate check", "workspace", string(uid), "err", err)
-			w.Trigger.Enqueue(uid)
+			w.warnOnce(uid, "quota settle: candidate check", "err", err)
 			continue
 		case !ok:
 			continue // not a settle candidate — the tick predicate matches
@@ -163,12 +172,32 @@ func (w *SettleWorker) DrainOnce(ctx context.Context) {
 			if errors.Is(err, ErrRuntimeNotProvenGone) {
 				continue // absence unproven: later events or the tick retry
 			}
-			w.log().Warn("quota settle failed", "workspace", string(uid), "err", err)
-			w.Trigger.Enqueue(uid)
+			w.warnOnce(uid, "quota settle failed", "err", err)
 			continue
 		}
 		w.log().Info("quota settled on observed runtime absence", "workspace", string(uid))
 	}
+}
+
+// warnOnce logs msg for uid at most once per warnSuppression window.
+func (w *SettleWorker) warnOnce(uid PlatformID, msg string, args ...interface{}) {
+	w.warnMu.Lock()
+	if w.warned == nil {
+		w.warned = map[PlatformID]time.Time{}
+	}
+	now := time.Now()
+	if last, ok := w.warned[uid]; ok && now.Sub(last) < warnSuppression {
+		w.warnMu.Unlock()
+		return
+	}
+	w.warned[uid] = now
+	for id, last := range w.warned { // bound the suppression map
+		if now.Sub(last) >= warnSuppression {
+			delete(w.warned, id)
+		}
+	}
+	w.warnMu.Unlock()
+	w.log().Warn(msg, append([]interface{}{"workspace", string(uid)}, args...)...)
 }
 
 func (w *SettleWorker) log() *slog.Logger {

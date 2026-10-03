@@ -143,7 +143,10 @@ func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1
 func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.LifecycleDefaults {
 	if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
 		var snap snapshotPolicy
-		if err := json.Unmarshal([]byte(raw), &snap); err == nil {
+		// An all-zero lifecycle — e.g. a snapshot written without the key —
+		// carries no recorded contract; resolve the live template instead.
+		if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
+			snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
 			lc := snap.Spec.Lifecycle
 			return &lc
 		}

@@ -248,15 +248,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			actions, err := recovery.Recover(ctx, applier)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				log.Error("recovery pass", "err", err)
-			} else {
-				for _, a := range actions {
-					log.Info("recovery action",
-						"workspace", string(a.WorkspaceUID),
-						"kind", string(a.Kind), "detail", a.Detail)
-				}
-				if len(actions) > 0 {
-					log.Info("recovery pass complete", "actions", len(actions))
-				}
+			}
+			// Actions performed before a mid-pass error are still logged —
+			// every action must be visible even when the pass failed partway.
+			for _, a := range actions {
+				log.Info("recovery action",
+					"workspace", string(a.WorkspaceUID),
+					"kind", string(a.Kind), "detail", a.Detail)
+			}
+			if err == nil && len(actions) > 0 {
+				log.Info("recovery pass complete", "actions", len(actions))
 			}
 			if cfg.RecoveryInterval <= 0 {
 				return
