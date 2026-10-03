@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -56,8 +57,12 @@ func (s *adminQuotaStore) Report(ctx context.Context, tenantID string) (store.Qu
 
 // SetLimits performs the conditional write in one statement so the version
 // check and the write cannot be raced: an existing row updates only when its
-// xmin still equals If-Match; "*" inserts only when no row exists. Zero rows
-// affected means the precondition failed, whatever the reason.
+// updated_at still equals If-Match (the token GET reported, RFC3339Nano);
+// "*" inserts only when no row exists. Writes stamp updated_at with
+// clock_timestamp() — wall-clock per statement, never the transaction's
+// start time — so back-to-back writes in one transaction cannot share a
+// version. Zero rows affected means the precondition failed, whatever the
+// reason.
 func (s *adminQuotaStore) SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector, ifMatch string) error {
 	return s.db.WithTx(ctx, func(tx store.Tx) error {
 		var tag pgconn.CommandTag
@@ -69,13 +74,20 @@ func (s *adminQuotaStore) SetLimits(ctx context.Context, tenantID string, v prov
 				ON CONFLICT (tenant_id) DO NOTHING`,
 				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes)
 		} else {
+			// An If-Match that is not a timestamp can never equal a row's
+			// updated_at — refuse it as a precondition failure rather than
+			// letting Postgres's cast error out.
+			since, perr := time.Parse(time.RFC3339Nano, ifMatch)
+			if perr != nil {
+				return ErrQuotaVersionMismatch
+			}
 			tag, err = tx.Exec(ctx, `
 				UPDATE tenant_quota SET
 					max_running_slots = $2, max_cpu_millis = $3,
 					max_memory_bytes  = $4, max_disk_bytes = $5,
-					updated_at        = now()
-				WHERE tenant_id = $1 AND xmin::text = $6`,
-				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes, ifMatch)
+					updated_at        = clock_timestamp()
+				WHERE tenant_id = $1 AND updated_at = $6`,
+				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes, since)
 		}
 		if err != nil {
 			return err

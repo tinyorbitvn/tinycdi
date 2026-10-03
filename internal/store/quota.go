@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -33,9 +34,10 @@ type OwnerUsage struct {
 type QuotaReport struct {
 	HasLimits bool
 	Limits    QuotaAmounts // Workspaces is always 0: there is no count limit
-	// Version is the limits row's change token (the row's xmin): it changes
-	// on every update and is empty when no row exists. Admin writes compare
-	// it under If-Match for optimistic concurrency.
+	// Version is the limits row's change token — its updated_at, formatted
+	// RFC3339Nano: it changes on every update and is empty when no row
+	// exists. Admin writes compare it under If-Match for optimistic
+	// concurrency.
 	Version string
 	Usage   QuotaAmounts
 	Owners  []OwnerUsage // ordered by owner reference
@@ -52,18 +54,20 @@ func NewQuotaReader(db *DB) *QuotaReader { return &QuotaReader{db: db} }
 // concurrent create by one transaction.
 func (q *QuotaReader) Report(ctx context.Context, tenantID string) (QuotaReport, error) {
 	var rep QuotaReport
+	var updatedAt time.Time
 	err := q.db.Pool().QueryRow(ctx, `
 		SELECT max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes,
-		       xmin::text
+		       updated_at
 		FROM tenant_quota WHERE tenant_id = $1`, tenantID).
 		Scan(&rep.Limits.RunningSlots, &rep.Limits.CPUMillis, &rep.Limits.MemoryBytes, &rep.Limits.DiskBytes,
-			&rep.Version)
+			&updatedAt)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return rep, fmt.Errorf("quota limits: %w", err)
 	default:
 		rep.HasLimits = true
+		rep.Version = updatedAt.UTC().Format(time.RFC3339Nano)
 	}
 
 	// A deleted workspace whose reservation is still held (release awaits

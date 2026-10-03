@@ -860,9 +860,9 @@ export interface components {
             configured: boolean;
             source: components["schemas"]["QuotaSource"];
             /**
-             * @description Opaque change token of the limits row (its storage version);
-             *     changes on every write. Absent when the tenant has no quota row
-             *     — PUT then uses `If-Match: *`.
+             * @description Opaque change token of the limits row — it changes on every
+             *     write and PUT echoes it verbatim in `If-Match`. Absent when the
+             *     tenant has no quota row — PUT then uses `If-Match: *`.
              */
             version?: string;
             limits?: components["schemas"]["QuotaAmounts"];

@@ -9,15 +9,19 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // TestAdminQuotaStore_IfMatch exercises the conditional write on a real
-// Postgres: the version token comes from the row's xmin, so it changes on
-// every committed update, and the check rides in the same statement as the
-// write — a stale If-Match cannot race the update it tried to guard.
+// Postgres: the version token is the row's updated_at (RFC3339Nano), so it
+// changes on every committed update, and the check rides in the same
+// statement as the write — a stale If-Match cannot race the update it
+// tried to guard. The declarative upsert (-tenant-quotas) bumps the same
+// token when it changes the row.
 func TestAdminQuotaStore_IfMatch(t *testing.T) {
 	db := newDB(t)
 	src := api.NewAdminQuotaSource(db)
@@ -41,7 +45,12 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 	if err != nil || !rep.HasLimits || rep.Version == "" {
 		t.Fatalf("post-create report = %+v err=%v", rep, err)
 	}
+	// The token is the row's updated_at rendered RFC3339Nano — opaque to
+	// clients, but it must round-trip through timestamptz equality.
 	v1 := rep.Version
+	if _, err := time.Parse(time.RFC3339Nano, v1); err != nil {
+		t.Fatalf("version %q is not RFC3339Nano: %v", v1, err)
+	}
 
 	// "*" does not bypass the check on an existing row.
 	if err := src.SetLimits(ctx, "tenant-a", limits, api.IfMatchCreate); !errors.Is(err, api.ErrQuotaVersionMismatch) {
@@ -73,5 +82,33 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 	// The old token is dead.
 	if err := src.SetLimits(ctx, "tenant-a", limits, v1); !errors.Is(err, api.ErrQuotaVersionMismatch) {
 		t.Fatalf("replayed version: %v, want mismatch", err)
+	}
+
+	// The declarative path moves the same token: UpsertQuota with different
+	// limits bumps the version, with identical limits it does not — an
+	// idempotent re-apply must not churn If-Match tokens.
+	v2 := rep.Version
+	if err := db.WithTx(ctx, func(tx store.Tx) error {
+		_, err := provisioning.UpsertQuota(ctx, tx, "tenant-a", limits)
+		return err
+	}); err != nil {
+		t.Fatalf("declarative upsert: %v", err)
+	}
+	rep, _ = src.Report(ctx, "tenant-a")
+	if rep.Version == v2 {
+		t.Fatalf("declarative upsert did not bump the version: %q", rep.Version)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, rep.Version); err != nil {
+		t.Fatalf("version %q is not RFC3339Nano: %v", rep.Version, err)
+	}
+	if err := db.WithTx(ctx, func(tx store.Tx) error {
+		_, err := provisioning.UpsertQuota(ctx, tx, "tenant-a", limits)
+		return err
+	}); err != nil {
+		t.Fatalf("idempotent declarative upsert: %v", err)
+	}
+	rep2, _ := src.Report(ctx, "tenant-a")
+	if rep2.Version != rep.Version {
+		t.Fatalf("no-op upsert bumped the version: %q -> %q", rep.Version, rep2.Version)
 	}
 }
