@@ -111,6 +111,9 @@ objects. It **keeps**:
 - CRDs — Helm installs `crds/` once and never upgrades or deletes them.
   Reconcile CRD drift by hand: `kubectl diff -f crds/` then
   `kubectl apply -f crds/` after review. Deleting a CRD deletes every CR.
+  Under GitOps (Argo CD), a changed CRD needs a hard refresh before the
+  app syncs CRs that use the new fields — see `docs/runbooks/upgrade.md`
+  → "GitOps note".
 - Managed namespaces and everything inside (Workspaces, runtime pods,
   **user PVCs**) — they carry `helm.sh/resource-policy: keep`.
 - Secrets you created manually.
@@ -256,6 +259,9 @@ licence — see `TRADEMARKS.md`. Supplying your own `branding.json` replaces
 the default product name and marks; "TinyCDI by TinyOrbit" attribution is
 shown only for the default branding.
 
+The full branding guide — field-level fallbacks, favicon override and
+token reference — is `docs/branding.md`.
+
 ### Runtime pod defaults (`runtime`)
 
 Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.placement` / `spec.linux.hostUsers` overrides them per field.
@@ -282,11 +288,45 @@ Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs 
 |---|---|---|
 | `serviceMonitor.enabled` | `false` | ServiceMonitor for the backend metrics endpoint (`backend-metrics` Service). The operator exposes no metrics endpoint: secure metrics need cluster-scoped TokenReview/SAR RBAC the chart never grants, and HTTP metrics are banned — `--metrics-bind-address=0` is pinned |
 | `serviceMonitor.labels` / `.interval` / `.scrapeTimeout` / `.honorLabels` | `{}`/`""`/`""`/`false` | Prometheus Operator selection + timing |
+| `dashboards.enabled` | `false` | Grafana dashboard ConfigMaps from `files/dashboards/*.json` for the Grafana sidecar — requires `backend.metrics.enabled` |
+| `dashboards.labels` | `{grafana_dashboard: "1"}` | sidecar discovery labels on the ConfigMaps (kube-prometheus-stack default; set your Grafana's label/value when it differs) |
+| `alerts.enabled` | `false` | `PrometheusRule` with the platform alert set below — requires `backend.metrics.enabled` and the Prometheus Operator CRDs |
+| `alerts.labels` | `{}` | labels on the `PrometheusRule` — the operator's ruleSelector (e.g. `{release: prometheus}`) |
+| `alerts.sessionDropFloor` | `5` | minimum live sessions 5m back required for `TinyCDISessionDropSpike` to fire — a small install draining at night (2→0) stays quiet; `0` disables the floor |
 | `networkPolicy.enabled` | `true` | default-deny baseline + allow rules (incl. the operator↔backend :9443 broker rule) |
 | `networkPolicy.apiServerPeers` / `.apiServerPort` | `10.96.0.1/32` / `443` | apiserver egress — set your `kubernetes.default` ClusterIP |
 | `networkPolicy.dnsPeers` | kube-system pods | DNS egress |
 | `networkPolicy.prometheusPeers` | `[]` | metrics-scrape ingress peers — **required** (render fails) when `backend.metrics.enabled` is set; scope to your monitoring namespace/pods |
 | `networkPolicy.edgeIngress` / `.edgeIngressCIDRs` | `ipBlock` / `[0.0.0.0/0]` | how edge traffic reaches the public listeners (backend :8443/:8444, frontend :8443) — `ipBlock` needs non-empty CIDRs (empty fails closed), `any` admits every source on the TLS ports, `cilium` renders `*-edge-ingress` CiliumNetworkPolicies instead |
+
+#### Dashboards and alerts
+
+Both are opt-in and require `backend.metrics.enabled` (the render fails
+otherwise — every expression reads the `tinycdi_*` series only the
+backend metrics listener serves).
+
+`dashboards.enabled` renders one ConfigMap per file in
+`files/dashboards/` (`tinycdi-overview`, `tinycdi-capacity`) carrying the
+`grafana_dashboard: "1"` label — the kube-prometheus-stack Grafana
+sidecar picks them up automatically; adjust `dashboards.labels` for
+other sidecar configurations.
+
+`alerts.enabled` renders one `PrometheusRule` named `tinycdi`:
+
+| Alert | Fires when |
+|---|---|
+| `TinyCDIBackendReplicaDown` | fewer backend replicas report metrics than `backend.replicas`, for 15m |
+| `TinyCDISessionDropSpike` | >50% of live sessions vanish inside 5m while ≥`alerts.sessionDropFloor` were live |
+| `TinyCDILeaseRenewFailures` | lease acquire/renew failures sustain ≈ >1 per 50 s for 15m |
+| `TinyCDIRehydrationFailures` | >20% of session rehydrations return miss/error for 15m |
+| `TinyCDIRuntimeImageStale` | a catalog family's newest revision is older than `-image-stale-after` (14 d default) for 1h |
+| `TinyCDILoginFailuresHigh` | >50% of completed logins are denied/error for 15m |
+
+The image-age threshold mirrors the `-image-stale-after` default; when
+the flag is overridden via `backend.extraArgs`, edit the rendered rule
+(or keep the default — the alert stays advisory). Set `alerts.labels` to
+match your Prometheus Operator's `ruleSelector` (e.g.
+`{release: prometheus}`), the same convention as `serviceMonitor.labels`.
 
 ### Host-network gateways (Cilium Gateway API / cilium-envoy)
 
@@ -524,7 +564,9 @@ A tenant with **no** row at all gets `409 QUOTA_NOT_CONFIGURED` on every
 create, so NOTES warns about each entry that has no `quota` block.
 `values.schema.json` rejects negative or unparsable quantities. Declared
 values overwrite a hand-edited row for that tenant at the next backend
-start. See `docs/runbooks/install.md` → "Tenant quotas".
+start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
+flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
+usage, refusal codes, changing limits).
 
 ## Validation & tests
 
