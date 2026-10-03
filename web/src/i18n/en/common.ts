@@ -26,6 +26,8 @@ export default {
     "The resource is not in a state that allows this right now — it may have changed; refresh and retry.",
   "errors.code.connectionInUse":
     "Another session is already connected to this workspace.",
+  "errors.code.imageStale":
+    "The runtime image is older than the freshness limit. Ask an administrator to refresh it.",
   "errors.code.forbidden": "You are not allowed to do that on this resource.",
   "errors.code.notFound":
     "This resource does not exist (or is not visible to you).",

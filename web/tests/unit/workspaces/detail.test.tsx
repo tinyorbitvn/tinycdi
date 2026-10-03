@@ -144,4 +144,16 @@ describe("WorkspaceDetailPage", () => {
     expect(connect).toBeDisabled();
     await screen.findByText(/no ConnectionReady|ConnectionReady=False/);
   }, 20000);
+
+  // V3.3 (E1/E3): a stopped workspace with updateAvailable starts on the
+  // newer published revision — the detail page says so.
+  it("detail: update available", async () => {
+    const api = createMockApi();
+    seedReady(api, { phase: "Stopped", desiredState: "Stopped", updateAvailable: true });
+    seedEvents(api, []);
+    loginCookies();
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+
+    await screen.findByText("Starts on the updated image", { exact: false });
+  }, 20000);
 });

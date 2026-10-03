@@ -73,8 +73,10 @@ the manifest `runtime-images.json` (three images; the profiles also record the
 engine versions they carry) is attached to the GitHub Release
 `runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
 the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
-from that manifest — values are GitOps-owned and never written back by
-the train; a new desktop image reaches a deployment by bumping
+from that manifest — the GitOps bump copies the engine versions from it
+too (`images.<key>.engines.chromium`/`.firefox`), so the template's
+stale-image view shows both — values are GitOps-owned and never written
+back by the train; a new desktop image reaches a deployment by bumping
 `images.linuxDesktop` (and the base digest, if it keeps one) in its values.
 `runtime-freshness.yml` keeps the chromium and firefox-esr pins current
 (daily check + auto PR; the desktop's Firefox pin is checked against the
