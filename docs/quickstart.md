@@ -58,6 +58,13 @@ exists only in the Keycloak realm of this throwaway cluster, which listens on
 loopback only. The realm (`hack/quickstart/realm-export.json`) maps the
 user's `tenant_id` attribute to the `tenant-a` namespace.
 
+**Sign out** in the account menu (top right) ends the Keycloak session too —
+end to end, the same way a real install does it: `POST /v1/logout`, the
+provider's end-session URL, then back to the portal's *Signed out* page.
+That last hop works because the realm registers
+`https://portal.<domain>/signed-out` as the client's only valid post-logout
+redirect URI and `up.sh` sets `oidc.postLogoutRedirect` to the same value.
+
 ## Clean up
 
 ```sh

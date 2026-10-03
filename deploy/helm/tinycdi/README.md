@@ -235,7 +235,7 @@ objects. It **keeps**:
 | `database.allowedPeers` | deny-all placeholder | backend→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
 | `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
 | `oidc.endSession` | `true` | sign-out also ends the identity provider session (RP-initiated logout) when its discovery document has `end_session_endpoint` — backend flag `--oidc-end-session`; `false` keeps sign-out local. See the install runbook, "Sign-out and the identity provider" |
-| `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
+| `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider — Keycloak: the client's *Valid post logout redirect URIs*) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
 | `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
