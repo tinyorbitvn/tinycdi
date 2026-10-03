@@ -40,6 +40,7 @@ mapfile -t expected < <(jq -r '.[]' <<< "$RELEASE_IMAGES" | sort)
 # images, kasmAdapter.image for the adapter init image.
 path_for() {
   case "$1" in
+    linux-base)    echo "images linuxBase" ;;
     linux-desktop) echo "images linuxDesktop" ;;
     kasm-adapter)  echo "kasmAdapter image" ;;
     *)             echo "images $1" ;;

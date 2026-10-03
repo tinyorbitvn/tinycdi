@@ -1,65 +1,65 @@
-# Linux desktop runtime image.
+# Desktop workspace profile: the linux-base runtime plus an XFCE4 desktop
+# and Firefox ESR.
 #
-# Pinned per docs/compatibility.md:
-#   - base image: debian:bookworm-slim by digest
-#   - KasmVNC: upstream 1.5.0 .deb verified by sha256
+# Builds on the local linux-base image (same KasmVNC/HTTPS/healthcheck/
+# credential contract); override BASE_IMAGE to consume a registry digest.
+# The session script (xstartup.sh) starts XFCE4 under its own D-Bus
+# session bus.
 #
-# Contract (see docs/images.md):
-#   - HTTPS streaming endpoint on :8443 inside the container (websocket
-#     transport only; KasmVNC 1.5.0 has no HTTP tunnel fallback).
-#   - HEALTHCHECK passes only while the X display AND the endpoint answer.
-#   - Credentials arrive as mounted Secret files under /run/secrets/tcdi
-#     (never env, never logged); runtime credential material lives on the
-#     ephemeral /run/tcdi mount, outside the persistent home.
-#   - Home is /home/workspace (persistent mount point); run as uid 1000.
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+# What is installed, and what is deliberately not, is documented in
+# docs/images.md ("The desktop profile"). In short: session, window
+# manager, panel, desktop, file manager, terminal, settings, text editor,
+# archive tool and image viewer; Firefox ESR doubles as the PDF viewer.
+# No display manager, screensaver/lock, power management, polkit agent,
+# sudo or package-manager front end; compositing is off.
+#
+# Firefox ESR pin: the SAME apt pin as build/browser/Dockerfile
+# (docs/compatibility.md); runtime-freshness bumps both together and
+# .github/tests/check-browser-freshness.test.sh asserts they agree.
+ARG BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-base:local
+FROM ${BASE_IMAGE}
 
-ARG KASMVNC_VERSION=1.5.0
-ARG KASMVNC_DEB_SHA256=770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71
-ARG KASMVNC_DEB_URL=https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_bookworm_${KASMVNC_VERSION}_amd64.deb
-# apt pin per docs/compatibility.md: the base
-# digest ships 2.5.0-1+deb12u3; deb12u4 carries the pending HIGH fixes.
-ARG LIBEXPAT1_APT_VERSION=2.5.0-1+deb12u4
 ARG DEBIAN_FRONTEND=noninteractive
+ARG FIREFOX_ESR_APT_VERSION=153.4.0esr-1~deb12u1
 
+USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl \
-      openbox xterm x11-xserver-utils x11-utils dbus-x11 \
-      fonts-dejavu-core \
-      perl libswitch-perl libyaml-tiny-perl libhash-merge-simple-perl \
-      libscalar-list-utils-perl liblist-moreutils-perl libtry-tiny-perl \
-      libdatetime-perl libdatetime-timezone-perl \
-      ssl-cert xauth x11-xkb-utils xkb-data procps \
-      libbsd0 libcrypt1 "libexpat1=${LIBEXPAT1_APT_VERSION}" libfreetype6 \
-      libgbm1 libgl1 libpixman-1-0 \
-      libpng16-16 libsystemd0 libunwind8 libx11-6 libxau6 libxcursor1 \
-      libxdmcp6 libxext6 libxfixes3 libxfont2 libxrandr2 libxshmfence1 \
-      libxtst6 zlib1g libssl3 \
- && curl -fsSL -o /tmp/kasmvncserver.deb "$KASMVNC_DEB_URL" \
- && echo "${KASMVNC_DEB_SHA256}  /tmp/kasmvncserver.deb" | sha256sum -c - \
- && apt-get install -y --no-install-recommends /tmp/kasmvncserver.deb \
- && rm -f /tmp/kasmvncserver.deb \
- && rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem \
-          /etc/ssl/private/ssl-cert-snakeoil.key \
+      xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings \
+      thunar thunar-archive-plugin xfce4-terminal mousepad xarchiver \
+      ristretto \
+      greybird-gtk-theme adwaita-icon-theme xdg-utils \
+      "firefox-esr=${FIREFOX_ESR_APT_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 
+# Ship the license/notice set inside the image even when BASE_IMAGE is
+# overridden to a build that predates the linux-base notices.
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES.md SOURCE-OFFER /usr/share/doc/tinycdi/
-COPY build/linux-desktop/kasmvnc.yaml /etc/kasmvnc/kasmvnc.yaml
-COPY build/linux-desktop/openbox-rc.xml /etc/xdg/openbox/rc.xml
-COPY build/linux-desktop/entrypoint.sh build/linux-desktop/healthcheck.sh build/linux-desktop/xstartup.sh /opt/tcdi/
-RUN chmod 755 /opt/tcdi/entrypoint.sh /opt/tcdi/healthcheck.sh /opt/tcdi/xstartup.sh \
- && useradd -m -u 1000 -d /home/workspace -s /bin/bash workspace \
- && mkdir -p /run/tcdi /run/secrets/tcdi \
- && chown workspace:workspace /run/tcdi \
+COPY build/linux-desktop/xfce4/ /etc/xdg/xfce4/
+COPY build/linux-desktop/mimeapps.list /etc/xdg/mimeapps.list
+COPY build/linux-desktop/firefox/policies.json /usr/lib/firefox-esr/distribution/policies.json
+COPY build/linux-desktop/xstartup.sh /opt/tcdi/xstartup.sh
+# Prune what the packages ship but this desktop must not offer: the
+# screensaver autostart (xfce4-session ships it; the TryExec would not
+# resolve anyway), the Log Out entry, the mail-reader launcher (no mail
+# client) and the Python interpreter's menu entry (python3 is only here
+# because xfce4-settings depends on it).
+# The two default keyboard shortcuts that reach log-out/lock and the
+# log-out and shutdown-helper binaries go too: a log-out ends the session
+# (the container would restart) and there is no logind, polkit or sudo
+# for a shutdown to reach anyway - the buttons simply must not exist.
+# Nothing in the desktop needs a setuid/setgid bit (no sudo, no polkit
+# agent, Firefox ESR uses seccomp-bpf, not a setuid sandbox helper).
+RUN chmod 755 /opt/tcdi/xstartup.sh \
+ && rm -f /etc/xdg/autostart/xscreensaver.desktop \
+          /usr/share/applications/xfce4-session-logout.desktop \
+          /usr/share/applications/xfce4-mail-reader.desktop \
+          /usr/share/applications/python3.11.desktop \
+          /usr/bin/xfce4-session-logout /usr/bin/xflock4 \
+          /usr/lib/x86_64-linux-gnu/xfce4/session/xfsm-shutdown-helper \
+ && sed -i -e '/xfce4-session-logout/d' -e '/xflock4/d' \
+      /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml \
+ && ! grep -rqE 'xfce4-session-logout|xflock4' /etc/xdg/xfce4/xfconf \
  && find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} +
 
 USER 1000:1000
-ENV HOME=/home/workspace
-EXPOSE 8443
-VOLUME ["/home/workspace"]
-
-HEALTHCHECK --interval=5s --timeout=5s --start-period=25s --retries=6 \
-  CMD /opt/tcdi/healthcheck.sh
-
-ENTRYPOINT ["/opt/tcdi/entrypoint.sh"]

@@ -2,18 +2,23 @@
 # publishes. One image name per line; # comments and blank lines ignored.
 # The name must match a build/<name>/Dockerfile and a digest field in the
 # helm chart values (images.<key> for component/runtime images,
-# linux-desktop -> linuxDesktop; kasm-adapter -> kasmAdapter.image).
+# linux-base -> linuxBase; linux-desktop -> linuxDesktop;
+# kasm-adapter -> kasmAdapter.image).
 #
-# images.yml (main CI) is unaffected — it still builds and scans all six
-# images on every push to main.
+# images.yml (main CI) builds and scans every image listed here on every
+# push to main.
 #
 # Platform (three components): backend = public API + session gateway in
 # one binary, frontend = static SPA server, operator = session controller.
 backend
 frontend
 operator
+# Runtime profiles FROM the shared base: linux-base is the base layer set
+# (KasmVNC, X, fonts, entrypoint, hardening); linux-desktop (XFCE4) and
+# browser (kiosk) are built FROM it, so it must be in this set and builds
+# first. It is also what custom desktop images build on (docs/images.md).
+linux-base
 linux-desktop
-# browser requires linux-desktop above (it is the FROM base).
 browser
 # initContainer image for spec.linux.adapter=kasm templates
 # (docs/kasm-images.md) — stamped into kasmAdapter.image.digest.

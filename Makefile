@@ -91,7 +91,7 @@ docker-build: ## Build the operator image as IMG (docker-build-images builds the
 	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -f build/operator/Dockerfile -t ${IMG} .
 
 # Local builds of the full image set, in build/release-images.txt order
-# (linux-desktop before browser, which FROMs it). Local tags only — CI
+# (linux-base before linux-desktop and browser, which FROM it). Local tags only — CI
 # (images.yml / release.yml) is the only path that pushes, by digest.
 #   make docker-build-images                  # every release image
 #   make docker-build-backend                 # one image: docker-build-<name>
@@ -103,11 +103,11 @@ RELEASE_IMAGES := $(shell grep -vE '^[[:space:]]*(\#|$$)' build/release-images.t
 .PHONY: docker-build-images
 docker-build-images: $(addprefix docker-build-,$(RELEASE_IMAGES)) ## Build every image in build/release-images.txt as tcdi/<name>:local (no push).
 
-docker-build-browser: docker-build-linux-desktop
+docker-build-linux-desktop docker-build-browser: docker-build-linux-base
 
-# browser FROMs the local linux-desktop build; the Go images honour an
-# optional BASE_IMAGE (builder) override, as docker-build does.
-image_build_args = $(if $(filter browser,$(1)),--build-arg BASE_IMAGE=$(IMAGE_PREFIX)linux-desktop:$(IMAGE_TAG),$(if $(and $(BASE_IMAGE),$(filter-out linux-desktop,$(1))),--build-arg BASE_IMAGE=$(BASE_IMAGE)))
+# linux-desktop and browser FROM the local linux-base build; the Go images
+# honour an optional BASE_IMAGE (builder) override, as docker-build does.
+image_build_args = $(if $(filter browser linux-desktop,$(1)),--build-arg BASE_IMAGE=$(IMAGE_PREFIX)linux-base:$(IMAGE_TAG),$(if $(and $(BASE_IMAGE),$(filter-out linux-base,$(1))),--build-arg BASE_IMAGE=$(BASE_IMAGE)))
 
 .PHONY: $(addprefix docker-build-,$(RELEASE_IMAGES))
 $(addprefix docker-build-,$(RELEASE_IMAGES)): docker-build-%:

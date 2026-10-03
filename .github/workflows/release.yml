@@ -63,13 +63,14 @@
 # packaged chart's images.*.digest fields are stamped with the pushed
 # digests (SEC-18).
 #
-# Topology: `browser` FROMs `linux-desktop` (ARG BASE_IMAGE), and the
-# docker-container buildx builder cannot see the daemon's image store.
-# linux-desktop therefore builds first in its own `desktop` job; on real
-# publishes the browser leg consumes the pushed manifest by digest
-# (BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-desktop@sha256:<digest>).
-# In dry_run nothing is pushed, so the browser leg instead consumes the
-# desktop job's image-tar artifact via `docker load`.
+# Topology: `linux-desktop` and `browser` both FROM `linux-base` (ARG
+# BASE_IMAGE), and the docker-container buildx builder cannot see the
+# daemon's image store. linux-base therefore builds first in its own
+# `base` job; on real publishes the two profile legs consume the pushed
+# manifest by digest
+# (BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-base@sha256:<digest>).
+# In dry_run nothing is pushed, so the profile legs instead consume the
+# base job's image-tar artifact via `docker load`.
 #
 # OCI labels: every image is stamped with org.opencontainers.image.*
 # labels (source, licenses, title, description, version, revision,
@@ -169,7 +170,7 @@ jobs:
       dry_run: ${{ steps.meta.outputs.dry_run }}
       release_images: ${{ steps.imgset.outputs.release_images }}
       release_matrix: ${{ steps.imgset.outputs.release_matrix }}
-      desktop_required: ${{ steps.imgset.outputs.desktop_required }}
+      base_required: ${{ steps.imgset.outputs.base_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -218,8 +219,9 @@ jobs:
 
       - name: read release image set
         # The released image set is the tracked file build/release-images.txt
-        # linux-desktop builds in the dedicated `desktop` job because the
-        # browser leg FROMs its pushed digest, so it leaves the matrix.
+        # linux-base builds in the dedicated `base` job because the
+        # linux-desktop and browser legs FROM its pushed digest, so it
+        # leaves the matrix.
         id: imgset
         run: |
           mapfile -t imgs < <(grep -vE '^[[:space:]]*(#|$)' build/release-images.txt)
@@ -231,17 +233,19 @@ jobs:
             [ -f "build/$i/Dockerfile" ] \
               || { echo "::error::release image '$i' has no build/$i/Dockerfile"; exit 1; }
           done
-          if printf '%s\n' "${imgs[@]}" | grep -qx browser \
-            && ! printf '%s\n' "${imgs[@]}" | grep -qx linux-desktop; then
-            echo "::error::browser requires linux-desktop (its FROM base) in build/release-images.txt"
-            exit 1
-          fi
+          for profile in linux-desktop browser; do
+            if printf '%s\n' "${imgs[@]}" | grep -qx "$profile" \
+              && ! printf '%s\n' "${imgs[@]}" | grep -qx linux-base; then
+              echo "::error::$profile requires linux-base (its FROM base) in build/release-images.txt"
+              exit 1
+            fi
+          done
           {
             echo "release_images=$(printf '%s\n' "${imgs[@]}" | jq -R . | jq -sc .)"
             echo "release_matrix=$(printf '%s\n' "${imgs[@]}" \
-              | grep -vx linux-desktop | jq -R . | jq -sc .)"
-            printf '%s\n' "${imgs[@]}" | grep -qx linux-desktop \
-              && echo "desktop_required=true" || echo "desktop_required=false"
+              | grep -vx linux-base | jq -R . | jq -sc .)"
+            printf '%s\n' "${imgs[@]}" | grep -qx linux-base \
+              && echo "base_required=true" || echo "base_required=false"
           } >> "$GITHUB_OUTPUT"
           echo "release images: ${imgs[*]}"
 
@@ -315,14 +319,15 @@ jobs:
                exit 1 ;;
           esac
 
-  desktop:
-    # linux-desktop is the browser image's base: on real publishes the
-    # browser leg consumes this job's pushed manifest by digest; on dry_run
-    # it consumes the image-tar artifact via docker load. The job is
-    # skipped when linux-desktop is not in build/release-images.txt.
-    name: linux-desktop image (browser base)
+  base:
+    # linux-base is the base of both runtime profiles: on real publishes
+    # the linux-desktop and browser legs consume this job's pushed manifest
+    # by digest; on dry_run they consume the image-tar artifact via docker
+    # load. The job is skipped when linux-base is not in
+    # build/release-images.txt.
+    name: linux-base image (profile base)
     needs: prepare
-    if: needs.prepare.outputs.desktop_required == 'true'
+    if: needs.prepare.outputs.base_required == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -370,14 +375,14 @@ jobs:
 
       - name: compute tags + OCI labels
         run: |
-          REF="$IMAGE_NS/tinycdi-linux-desktop"
+          REF="$IMAGE_NS/tinycdi-linux-base"
           # PUB-2: this image redistributes KasmVNC (GPL-2.0) + noVNC
           # (MPL-2.0) — the licenses label is the SPDX expression for the
           # headline licenses (the SBOM + THIRD_PARTY_LICENSES.md carry the
           # full Debian inventory) and a pointer label names the
           # corresponding-source offer attached to this release.
           KASMVNC_VERSION="$(awk -F= '/^ARG KASMVNC_VERSION=/ {print $2; exit}' \
-            build/linux-desktop/Dockerfile)"
+            build/linux-base/Dockerfile)"
           SRC_OFFER="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download"
           SRC_OFFER="$SRC_OFFER/${VERSION}/kasmvnc-${KASMVNC_VERSION}-corresponding-source.tar.gz"
           {
@@ -385,8 +390,8 @@ jobs:
             echo "OCI_LABELS<<__EOF__"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.licenses=MIT AND GPL-2.0-only AND MPL-2.0"
-            echo "org.opencontainers.image.title=tinycdi-linux-desktop"
-            echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux desktop runtime"
+            echo "org.opencontainers.image.title=tinycdi-linux-base"
+            echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux runtime base (profiles build FROM it)"
             echo "org.opencontainers.image.version=$VERSION"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
             echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -394,12 +399,12 @@ jobs:
             echo "__EOF__"
           } >> "$GITHUB_ENV"
 
-      - name: build + publish linux-desktop (digest only)
+      - name: build + publish linux-base (digest only)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
-          file: build/linux-desktop/Dockerfile
+          file: build/linux-base/Dockerfile
           # dry-run exports a docker tar for the isolated scan job; real
           # releases honour the optional platforms input (amd64 default)
           # and push BY DIGEST ONLY — tags are promoted after the gate.
@@ -408,7 +413,7 @@ jobs:
                 || (inputs.platforms || 'linux/amd64') }}
           outputs: >-
             ${{ needs.prepare.outputs.dry_run == 'true'
-                && 'type=docker,dest=/tmp/linux-desktop.tar'
+                && 'type=docker,dest=/tmp/linux-base.tar'
                 || format('type=registry,name={0},push-by-digest=true', env.IMAGE_REF) }}
           # tags only name the dry-run docker tar; a push-by-digest build
           # must not carry name:tag refs (buildx rejects tagged refs).
@@ -425,16 +430,16 @@ jobs:
         run: |
           mkdir -p refs
           if [ "$DRY_RUN" = "true" ]; then
-            echo "local" > refs/linux-desktop.ref
+            echo "local" > refs/linux-base.ref
           else
-            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-desktop.ref
+            echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-base.ref
           fi
 
       - name: upload image ref
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-ref-linux-desktop
-          path: refs/linux-desktop.ref
+          name: image-ref-linux-base
+          path: refs/linux-base.ref
           retention-days: 5
 
       - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
@@ -453,26 +458,26 @@ jobs:
         run: |
           : > /tmp/syft-empty.yaml   # SUPR-8: never load a repo .syft.yaml
           if [ "$DRY_RUN" = "true" ]; then
-            SRC="docker-archive:/tmp/linux-desktop.tar"
+            SRC="docker-archive:/tmp/linux-base.tar"
           else
             SRC="registry:$IMAGE_REF@$BUILD_DIGEST"
           fi
           "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
-            "$SRC" -o spdx-json="sbom-linux-desktop.spdx.json"
+            "$SRC" -o spdx-json="sbom-linux-base.spdx.json"
 
       - name: upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sbom-linux-desktop
-          path: sbom-linux-desktop.spdx.json
+          name: sbom-linux-base
+          path: sbom-linux-base.spdx.json
           retention-days: 30
 
       - name: upload image tar (dry-run)
         if: needs.prepare.outputs.dry_run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: image-tar-linux-desktop
-          path: /tmp/linux-desktop.tar
+          name: image-tar-linux-base
+          path: /tmp/linux-base.tar
           retention-days: 5
           compression-level: 0  # image layers are already compressed
 
@@ -490,12 +495,12 @@ jobs:
 
   images:
     name: ${{ matrix.image }} image
-    needs: [prepare, desktop]
+    needs: [prepare, base]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.result == 'success'
-          && (needs.desktop.result == 'success'
-              || needs.desktop.result == 'skipped') }}
+          && (needs.base.result == 'success'
+              || needs.base.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -511,6 +516,7 @@ jobs:
         ${{ matrix.image == 'backend' && 'TinyCDI backend (public API + session gateway)' ||
             matrix.image == 'frontend' && 'TinyCDI web frontend (portal SPA)' ||
             matrix.image == 'operator' && 'TinyCDI Kubernetes operator' ||
+            matrix.image == 'linux-desktop' && 'TinyCDI Linux desktop workspace (XFCE4 + Firefox ESR)' ||
             matrix.image == 'browser' && 'TinyCDI browser workspace (Chromium + Firefox ESR)' ||
             matrix.image == 'kasm-adapter' && 'TinyCDI Kasm workspace adapter (initContainer)' }}
     steps:
@@ -554,15 +560,16 @@ jobs:
           IMG: ${{ matrix.image }}
         run: |
           REF="$IMAGE_NS/tinycdi-$IMG"
-          # PUB-2: `browser` redistributes KasmVNC (GPL-2.0), noVNC and
-          # Firefox ESR (MPL-2.0) — its licenses label carries the SPDX
-          # expression plus a pointer to the corresponding-source offer
-          # attached to this release. The Go images stay MIT.
+          # PUB-2: `linux-desktop` and `browser` redistribute KasmVNC
+          # (GPL-2.0), noVNC and Firefox ESR (MPL-2.0) — their licenses
+          # label carries the SPDX expression plus a pointer to the
+          # corresponding-source offer attached to this release. The Go
+          # images stay MIT.
           LIC="MIT"
-          if [ "$IMG" = "browser" ]; then
+          if [ "$IMG" = "browser" ] || [ "$IMG" = "linux-desktop" ]; then
             LIC="MIT AND GPL-2.0-only AND MPL-2.0"
             KASMVNC_VERSION="$(awk -F= '/^ARG KASMVNC_VERSION=/ {print $2; exit}' \
-              build/linux-desktop/Dockerfile)"
+              build/linux-base/Dockerfile)"
             SRC_OFFER="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download"
             SRC_OFFER="$SRC_OFFER/${VERSION}/kasmvnc-${KASMVNC_VERSION}-corresponding-source.tar.gz"
           fi
@@ -576,46 +583,48 @@ jobs:
             echo "org.opencontainers.image.version=$VERSION"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
             echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            if [ "$IMG" = "browser" ]; then
+            if [ "$IMG" = "browser" ] || [ "$IMG" = "linux-desktop" ]; then
               echo "io.tinycdi.kasmvnc-source-offer=$SRC_OFFER"
             fi
             echo "__EOF__"
           } >> "$GITHUB_ENV"
 
-      - name: browser build wiring (publish — consume desktop digest)
-        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run != 'true'
+      - name: profile build wiring (publish — consume base digest)
+        if: ${{ (matrix.image == 'browser' || matrix.image == 'linux-desktop') && needs.prepare.outputs.dry_run != 'true' }}
         env:
-          DESKTOP_DIGEST: ${{ needs.desktop.outputs.digest }}
+          BASE_DIGEST: ${{ needs.base.outputs.digest }}
         run: |
           # The docker-container builder cannot see daemon-local images —
-          # FROM the exact linux-desktop manifest the desktop job pushed.
-          echo "BUILD_ARGS=BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop@$DESKTOP_DIGEST" \
+          # FROM the exact linux-base manifest the base job pushed.
+          echo "BUILD_ARGS=BASE_IMAGE=$IMAGE_NS/tinycdi-linux-base@$BASE_DIGEST" \
             >> "$GITHUB_ENV"
 
-      - name: download linux-desktop tar (browser leg, dry_run)
-        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run == 'true'
+      - name: download linux-base tar (profile legs, dry_run)
+        if: ${{ (matrix.image == 'browser' || matrix.image == 'linux-desktop') && needs.prepare.outputs.dry_run == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: image-tar-linux-desktop
+          name: image-tar-linux-base
           path: /tmp
 
-      - name: build browser (dry_run — daemon builder)
-        if: matrix.image == 'browser' && needs.prepare.outputs.dry_run == 'true'
+      - name: build ${{ matrix.image }} (dry_run — daemon builder)
+        if: ${{ (matrix.image == 'browser' || matrix.image == 'linux-desktop') && needs.prepare.outputs.dry_run == 'true' }}
+        env:
+          IMG: ${{ matrix.image }}
         run: |
-          # dry_run pushes nothing: FROM the desktop job's image via docker
+          # dry_run pushes nothing: FROM the base job's image via docker
           # load (the docker-container builder cannot see daemon images).
-          docker load --input /tmp/linux-desktop.tar
-          args=(--platform linux/amd64 -f build/browser/Dockerfile
-                --build-arg "BASE_IMAGE=$IMAGE_NS/tinycdi-linux-desktop:$VERSION")
+          docker load --input /tmp/linux-base.tar
+          args=(--platform linux/amd64 -f "build/$IMG/Dockerfile"
+                --build-arg "BASE_IMAGE=$IMAGE_NS/tinycdi-linux-base:$VERSION")
           while IFS= read -r lbl; do
             args+=(--label "$lbl")
           done <<< "$OCI_LABELS"
           args+=(-t "$IMAGE_REF:$VERSION")
           docker build "${args[@]}" .
-          docker save "$IMAGE_REF:$VERSION" -o /tmp/browser.tar
+          docker save "$IMAGE_REF:$VERSION" -o "/tmp/$IMG.tar"
 
       - name: build + publish ${{ matrix.image }} (digest only)
-        if: matrix.image != 'browser' || needs.prepare.outputs.dry_run != 'true'
+        if: ${{ !(matrix.image == 'browser' || matrix.image == 'linux-desktop') || needs.prepare.outputs.dry_run != 'true' }}
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
@@ -718,13 +727,13 @@ jobs:
     # Its outputs (trivy reports) are never merged into the release bundle
     # (SUPR-2).
     name: scan ${{ matrix.image }}
-    needs: [prepare, desktop, images]
+    needs: [prepare, base, images]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.result == 'success'
           && needs.images.result == 'success'
-          && (needs.desktop.result == 'success'
-              || needs.desktop.result == 'skipped') }}
+          && (needs.base.result == 'success'
+              || needs.base.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -886,13 +895,13 @@ jobs:
 
   chart:
     name: helm chart (lint, digest-stamp, package)
-    needs: [prepare, desktop, images]
+    needs: [prepare, base, images]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.result == 'success'
           && needs.images.result == 'success'
-          && (needs.desktop.result == 'success'
-              || needs.desktop.result == 'skipped') }}
+          && (needs.base.result == 'success'
+              || needs.base.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -997,13 +1006,14 @@ jobs:
           grep -c '^kind: CustomResourceDefinition' "dist/tinycdi-crds-${VERSION}.yaml"
 
       - name: KasmVNC corresponding-source bundle (GPL-2.0 offer)
-        # PUB-2: the linux-desktop/browser images redistribute KasmVNC
+        # PUB-2: the linux-base/linux-desktop/browser images redistribute KasmVNC
         # under GPL-2.0 — the complete corresponding source tarball and
         # its sha256 ship as release assets (see NOTICE /
         # THIRD_PARTY_LICENSES.md). Signed + checksummed like every other
         # bundle member downstream.
         if: >-
-          ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
+          ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-base')
+              || contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
               || contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
         run: |
           hack/kasmvnc-source-bundle.sh dist
@@ -1094,7 +1104,8 @@ jobs:
         # and bundle/ for the steps below.
         env:
           KASMVNC_SRC: >-
-            ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
+            ${{ contains(fromJSON(needs.prepare.outputs.release_images), 'linux-base')
+                || contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
                 || contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
         run: .github/scripts/collect-publish-inputs.sh dl "$PWD"
 
@@ -1136,6 +1147,19 @@ jobs:
             echo "name_$key=${ref%@*}" >> "$GITHUB_OUTPUT"
             echo "digest_$key=${ref#*@}" >> "$GITHUB_OUTPUT"
           done
+
+      - name: attest build provenance — linux-base
+        # Requires the repo to be public or on GitHub Enterprise — gated on
+        # the repo variable until then (SEC-I12). Each leg additionally runs
+        # only when the image is in the release set.
+        if: >-
+          ${{ vars.ATTESTATIONS_ENABLED == 'true'
+              && contains(fromJSON(needs.prepare.outputs.release_images), 'linux-base') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_linux_base }}
+          subject-digest: ${{ steps.refs.outputs.digest_linux_base }}
+          push-to-registry: true
 
       - name: attest build provenance — linux-desktop
         # Requires the repo to be public or on GitHub Enterprise — gated on
@@ -1275,7 +1299,8 @@ jobs:
               backend)       role="backend — public API + session gateway" ;;
               frontend)      role="frontend — web portal (SPA)" ;;
               operator)      role="operator — workspace controller" ;;
-              linux-desktop) role="runtime — Linux desktop" ;;
+              linux-base)    role="runtime — shared base (KasmVNC, X, entrypoint)" ;;
+              linux-desktop) role="runtime — Linux desktop (XFCE4 + Firefox ESR)" ;;
               browser)       role="runtime — browser (Chromium + Firefox ESR)" ;;
               kasm-adapter)  role="kasm adapter — initContainer for kasmweb/* workspaces" ;;
               *)             role="" ;;

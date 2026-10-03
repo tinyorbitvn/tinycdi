@@ -8,7 +8,7 @@
 # OWNER-capable kasm_user (-wo), a self-signed cert, port 6901, and a fleet of
 # side services (audio/upload/gamepad/webcam/printer/smartcard). None of that
 # matches the TinyCDI runtime contract, so this adapter drives kasmvncserver
-# directly with the same contract as build/linux-desktop/entrypoint.sh:
+# directly with the same contract as build/linux-base/entrypoint.sh:
 #
 #   1. Credentials/TLS arrive as mounted Secret FILES ($TCDI_SECRET_DIR).
 #   2. Runtime material lives on the ephemeral /run/tcdi mount.

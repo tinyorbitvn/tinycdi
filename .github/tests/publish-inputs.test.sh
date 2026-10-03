@@ -15,8 +15,8 @@ fails=0
 
 VERSION="v0.1.0"
 CHART_VERSION="0.1.0"
-IMGS=(backend browser frontend kasm-adapter linux-desktop operator)
-RELEASE_IMAGES='["backend","browser","frontend","kasm-adapter","linux-desktop","operator"]'
+IMGS=(backend browser frontend kasm-adapter linux-base linux-desktop operator)
+RELEASE_IMAGES='["backend","browser","frontend","kasm-adapter","linux-base","linux-desktop","operator"]'
 KV="1.5.0"
 
 WORK="$(mktemp -d)"
@@ -44,6 +44,7 @@ build_store() {
     for img in backend browser frontend operator; do
       printf '  %s:\n    repository: tinyorbitvn/tinycdi-%s\n    digest: ""\n' "$img" "$img"
     done
+    printf '  linuxBase:\n    repository: tinyorbitvn/tinycdi-linux-base\n    digest: ""\n'
     printf '  linuxDesktop:\n    repository: tinyorbitvn/tinycdi-linux-desktop\n    digest: ""\n'
     printf 'kasmAdapter:\n  image:\n    repository: tinyorbitvn/tinycdi-kasm-adapter\n    digest: ""\n'
   } > "$cd_/tinycdi/values.yaml"
@@ -89,9 +90,9 @@ expect_ok() {
     || { echo "FAIL: bundle lacks kasmvnc source tarball"; fails=1; }
   [ -f "$WORK/out/bundle/kasmvnc-$KV-corresponding-source.tar.gz.sha256" ] \
     || { echo "FAIL: bundle lacks kasmvnc sha256"; fails=1; }
-  [ "$(find "$WORK/out/refs" -name '*.ref' | wc -l)" -eq 6 ] \
+  [ "$(find "$WORK/out/refs" -name '*.ref' | wc -l)" -eq "${#IMGS[@]}" ] \
     || { echo "FAIL: refs dir wrong"; fails=1; }
-  [ "$(find "$WORK/out/sboms" -name '*.json' | wc -l)" -eq 6 ] \
+  [ "$(find "$WORK/out/sboms" -name '*.json' | wc -l)" -eq "${#IMGS[@]}" ] \
     || { echo "FAIL: sboms dir wrong"; fails=1; }
   echo "ok: happy path"
 }
@@ -125,7 +126,7 @@ mut_bad_chart() {
   mkdir -p "$cd_/tinycdi"
   {
     echo "images:"
-    for img in backend browser frontend operator linuxDesktop; do
+    for img in backend browser frontend operator linuxBase linuxDesktop; do
       printf '  %s:\n    digest: "sha256:%s"\n' "$img" "$(printf 'e%.0s' $(seq 64))"
     done
     printf 'kasmAdapter:\n  image:\n    digest: "sha256:%s"\n' "$(printf 'e%.0s' $(seq 64))"

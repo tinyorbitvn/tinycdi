@@ -44,14 +44,16 @@ Every image builds from a clean checkout with repo-root context:
 docker build -f build/operator/Dockerfile -t tcdi/operator .
 docker build -f build/backend/Dockerfile   -t tcdi/backend .
 docker build -f build/frontend/Dockerfile  -t tcdi/frontend .  # builds web/ in-stage
-docker build -f build/linux-desktop/Dockerfile -t tcdi/linux-desktop .
+docker build -f build/linux-base/Dockerfile -t tcdi/linux-base .
+docker build -f build/linux-desktop/Dockerfile -t tcdi/linux-desktop \
+    --build-arg BASE_IMAGE=tcdi/linux-base .
 docker build -f build/browser/Dockerfile   -t tcdi/browser \
-    --build-arg BASE_IMAGE=tcdi/linux-desktop .
+    --build-arg BASE_IMAGE=tcdi/linux-base .
 ```
 
-The browser image layers the pinned browsers on top of the desktop image —
-`BASE_IMAGE` selects which linux-desktop build to extend (a local tag or a
-registry digest). See `docs/images.md` for the runtime-image contract and
+The desktop (XFCE4) and browser (kiosk) images are profiles layered on the
+shared base image — `BASE_IMAGE` selects which linux-base build to extend (a
+local tag or a registry digest). See `docs/images.md` for the runtime-image contract and
 pinned inputs.
 
 ## Regenerating the README screenshots

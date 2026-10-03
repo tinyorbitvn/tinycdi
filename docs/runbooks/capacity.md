@@ -14,9 +14,18 @@ A workspace consumes resources at two layers:
    (`cpu`, `memory`, `storage` in `api/v1alpha1/workspacetemplate_types.go`),
    applied as pod requests/limits plus a PVC of `storage` size when the
    lifecycle `dataPolicy` keeps data. The dev templates used
-   500 mCPU / 1 GiB / 1 GiB per session; a fuller desktop profile is
+   500 mCPU / 1 GiB / 1 GiB per session on the old openbox desktop; the
+   XFCE desktop profile (`tcdi/linux-desktop`, V3.26) is
    1 CPU / 2 GiB / 5 GiB
-   (`deploy/helm/tinycdi/ci/example-values.yaml`).
+   (`deploy/helm/tinycdi/ci/example-values.yaml`). Measured on that image: a
+   fresh session idles at 14 mCPU / 98 MiB; with a terminal, Thunar and
+   Firefox (three tabs) open it settles at 20–40 mCPU / 555 MiB (peak
+   888 MiB incl. page cache) after a ~2-CPU, ~40 s Firefox start-up burst;
+   scripted mouse+keyboard input alone (the soak driver) is p95 52 mCPU,
+   max 112 MiB. Light terminal/file use fits 500 mCPU / 1 GiB; the **soak
+   profile** — sessions driven with synthetic input, no browser launched — is
+   its own number: **250 mCPU / 512 MiB / 1 GiB** (4× the measured memory and
+   p95 CPU). `docs/images.md` has the full before/after budgets.
 2. **Control-plane share** — backend (API, session gateway and broker in
    one process), frontend, operator and Postgres. Chart default *requests*
    (`deploy/helm/tinycdi/values.yaml`): backend 50 mCPU / 64 MiB × 2
@@ -36,8 +45,9 @@ A workspace consumes resources at two layers:
    gateway throughput directly.
 
 Cold-start cost is dominated by **image pull**, not CPU: `tcdi/linux-desktop`
-≈ 827 MB and `tcdi/browser` ≈ 1.8 GB on disk (uncompressed; digests
-recorded in `docs/images.md`). Keep runtime
+≈ 1.25 GB (302 MB compressed; the old openbox image was ≈ 0.83 GB) and
+`tcdi/browser` ≈ 1.86 GB on disk (uncompressed; the `tcdi/linux-base` layers
+they share are pulled once per node). Keep runtime
 images resident on the worker nodes that may schedule workspace pods, or
 accept the pull time inside `bootDeadline`.
 

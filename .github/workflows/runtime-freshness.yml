@@ -6,8 +6,9 @@
 #                  has a newer build — or its pinned version no longer
 #                  exists in the index, which breaks a from-scratch image
 #                  build — it bumps CHROMIUM_APT_VERSION /
-#                  FIREFOX_ESR_APT_VERSION (build/browser/Dockerfile +
-#                  the docs pins) on a chore branch and opens one
+#                  FIREFOX_ESR_APT_VERSION (build/browser/Dockerfile, and
+#                  the linux-desktop image's FIREFOX_ESR_APT_VERSION, the
+#                  same pinned source, + the docs pins) on a chore branch and opens one
 #                  pin-bump PR. Merging it triggers the runtime-images
 #                  train. The run stays red while a pin is stale.
 #                  Formerly ci.yml's weekly `browser-freshness` job —
@@ -63,7 +64,8 @@ jobs:
         id: check
         run: |
           set +e
-          out="$(.github/scripts/check-browser-freshness.sh 2>&1)"
+          out="$(.github/scripts/check-browser-freshness.sh \
+            build/browser/Dockerfile build/linux-desktop/Dockerfile 2>&1)"
           rc=$?
           set -e
           printf '%s\n' "$out"
@@ -105,7 +107,9 @@ jobs:
           for entry in "${entries[@]}"; do
             engine="${entry%%=*}"; rest="${entry#*=}"
             version="${rest%%:*}"; sha="${rest#*:}"
-            BUMP_DEB_SHA256="$sha" .github/scripts/bump-browser-pin.sh \
+            BUMP_DEB_SHA256="$sha" \
+              BUMP_DESKTOP_DOCKERFILE=build/linux-desktop/Dockerfile \
+              .github/scripts/bump-browser-pin.sh \
               "$engine" "$version" build/browser/Dockerfile docs/images.md \
               docs/compatibility.md NOTICE THIRD_PARTY_LICENSES.md
             SUMMARY="${SUMMARY:+$SUMMARY, }$engine $version"
@@ -120,8 +124,8 @@ jobs:
             git fetch -q origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
           fi
           git switch -c "$BRANCH"
-          git add build/browser/Dockerfile docs/images.md docs/compatibility.md \
-            NOTICE THIRD_PARTY_LICENSES.md
+          git add build/browser/Dockerfile build/linux-desktop/Dockerfile \
+            docs/images.md docs/compatibility.md NOTICE THIRD_PARTY_LICENSES.md
           git commit -m "build(browser): bump browser apt pins ($SUMMARY)"
           gh auth setup-git
           git push --force-with-lease -u origin "$BRANCH"
@@ -144,7 +148,8 @@ jobs:
           index — the latter breaks a from-scratch browser image build.
 
           Bumps \`CHROMIUM_APT_VERSION\` / \`FIREFOX_ESR_APT_VERSION\` in
-          \`build/browser/Dockerfile\`, the doc pins in \`docs/images.md\` /
+          \`build/browser/Dockerfile\` (and \`FIREFOX_ESR_APT_VERSION\` in
+          \`build/linux-desktop/Dockerfile\`, the same pinned source), the doc pins in \`docs/images.md\` /
           \`docs/compatibility.md\` (firefox-esr: with its deb sha256) and
           the shipped-version lists in \`NOTICE\` /
           \`THIRD_PARTY_LICENSES.md\`.

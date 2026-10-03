@@ -2,7 +2,8 @@
 # hack/kasmvnc-source-bundle.sh <out-dir>
 #
 # Assembles the GPL-2.0 "complete corresponding source" bundle for the
-# KasmVNC build shipped in the linux-desktop/browser runtime images
+# KasmVNC build shipped in the linux-base runtime image, and so in the
+# linux-desktop and browser images built FROM it
 # (kasmvncserver_bookworm_1.5.0_amd64.deb, sha256
 # 770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71,
 # published by upstream on 2026-07-29).

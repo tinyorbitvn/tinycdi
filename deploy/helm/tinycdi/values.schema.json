@@ -20,6 +20,7 @@
         "backend": {"$ref": "#/$defs/image"},
         "operator": {"$ref": "#/$defs/image"},
         "frontend": {"$ref": "#/$defs/image"},
+        "linuxBase": {"$ref": "#/$defs/image"},
         "linuxDesktop": {"$ref": "#/$defs/image"},
         "browser": {"$ref": "#/$defs/image"},
         "api": {"$ref": "#/$defs/image"},

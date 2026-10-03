@@ -11,7 +11,7 @@ this documents the mechanism a `vX.Y.Z` release exercises.
 Per the release interface contract, a release artifact has: image digests,
 SBOMs, provenance, NOTICE, and the compatibility matrix
 (`docs/compatibility.md`). Concretely, for each shipped image
-(`api`, `operator`, `gateway`, `portal`, `linux-desktop`, `browser`) plus
+(`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) plus
 the Helm chart:
 
 1. **Digest-pinned reference** — build jobs push **by digest only**
@@ -66,7 +66,7 @@ The provenance predicate records, at minimum:
 | Field | Source of truth |
 |---|---|
 | Source tree state | the git SHA (`GITHUB_SHA`) + tag; the release refuses refs not on `main` ancestry and refuses to overwrite an existing tag/release/GHCR version |
-| Build inputs | `FROM` digests (`golang`, `distroless/static`, `debian:bookworm-slim` lock entries), `ARG BASE_IMAGE` (browser builds FROM the exact pushed linux-desktop digest), pinned tool tarballs |
+| Build inputs | `FROM` digests (`golang`, `distroless/static`, `debian:bookworm-slim` lock entries), `ARG BASE_IMAGE` (the linux-desktop and browser profiles build FROM the exact pushed linux-base digest), pinned tool tarballs |
 | Build recipe | the workflow jobs themselves — pinned actions + sha256-verified tools |
 | Builder identity | the GitHub Actions OIDC identity (exact certificate identity above) |
 

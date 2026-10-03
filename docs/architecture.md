@@ -27,9 +27,11 @@
 - **Operator** (`cmd/operator`, `internal/operator`): reconciles `Workspace`
   / `WorkspaceTemplate` CRDs (`api/`), provisions runtime pods, enforces
   per-workspace NetworkPolicy, runs the teardown finalizer.
-- **Runtime images** (`build/linux-desktop`, `build/browser`): non-root
-  KasmVNC desktop on Debian bookworm, HTTPS endpoint on :8443, credentials
-  via mounted secrets.
+- **Runtime images** (`build/linux-base`, `build/linux-desktop`,
+  `build/browser`): non-root KasmVNC sessions on Debian bookworm, HTTPS
+  endpoint on :8443, credentials via mounted secrets. `linux-base` is the
+  shared runtime contract; `linux-desktop` (XFCE4) and `browser` (kiosk)
+  are profiles built `FROM` it.
 
 Design decisions live in the ADRs under `docs/adr/`; pinned
 dependency/toolchain versions are in `docs/compatibility.md`. Build, test

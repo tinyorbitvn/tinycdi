@@ -465,6 +465,31 @@ func TestKasmAdapterChromium(t *testing.T) {
 		assertNoSecret(t, c, password)
 	})
 
+	t.Run("ReadinessProbeIsNotAnAuthFailure", func(t *testing.T) {
+		// Same contract as the runtime images: the exec readiness probe must
+		// not register as an authentication failure, or KasmVNC's
+		// brute-force protection blacklists loopback after a few cycles.
+		secret, _ := selfSignedSecret(t)
+		c := runKasmContainer(t, runID, "probe", kasmImage, adapterVol(), secret, "")
+		waitHealthyTimeout(t, c, kasmRunTimeout)
+		for i := 0; i < 20; i++ {
+			if _, err := execIn(t, c, "/opt/tcdi/healthcheck.sh"); err != nil {
+				t.Fatalf("probe cycle %d not ready: %v", i+1, err)
+			}
+		}
+		log := mustExec(t, c, "cat /home/workspace/.vnc/*.log")
+		for _, bad := range []string{"blacklisted", "Authentication attempt failed"} {
+			if strings.Contains(log, bad) {
+				t.Fatalf("20 probe cycles (plus the HEALTHCHECK) left %q in the KasmVNC log:\n%s", bad, log)
+			}
+		}
+		code := strings.TrimSpace(mustExec(t, c,
+			`curl -sk -o /dev/null -w '%{http_code}' -u "kasm_user:$(cat /run/secrets/tcdi/password)" https://127.0.0.1:8443/`))
+		if code != "200" {
+			t.Fatalf("loopback after probing: got %s, want 200", code)
+		}
+	})
+
 	t.Run("DisplayDeathNotReady", func(t *testing.T) {
 		secret, _ := selfSignedSecret(t)
 		c := runKasmContainer(t, runID, "death", kasmImage, adapterVol(), secret, "")

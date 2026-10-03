@@ -11,8 +11,10 @@
 #   (the same files validate-image-refs.sh checks).
 # Env: RT_TAG             — required; the rt-YYYYMMDD.N tag just promoted
 #      BUILT_AT           — manifest timestamp (default: now, UTC)
-#      BROWSER_DOCKERFILE — chromium pin source
-#                          (default: build/browser/Dockerfile)
+#      BROWSER_DOCKERFILE — chromium + firefox-esr pin source for the
+#                          browser image (default: build/browser/Dockerfile)
+#      DESKTOP_DOCKERFILE — firefox-esr pin source for the linux-desktop
+#                          image (default: build/linux-desktop/Dockerfile)
 set -euo pipefail
 
 DIR="${1:?usage: write-runtime-manifest.sh <refs-dir> <out-file>}"
@@ -20,6 +22,7 @@ OUT="${2:?usage: write-runtime-manifest.sh <refs-dir> <out-file>}"
 TAG="${RT_TAG:?RT_TAG unset (the rt-YYYYMMDD.N tag this train promoted)}"
 BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 DOCKERFILE="${BROWSER_DOCKERFILE:-build/browser/Dockerfile}"
+DESKTOP_DOCKERFILE="${DESKTOP_DOCKERFILE:-build/linux-desktop/Dockerfile}"
 
 [[ "$TAG" =~ ^rt-[0-9]{8}\.[0-9]+$ ]] \
   || { echo "::error::RT_TAG '$TAG' is not rt-YYYYMMDD.N"; exit 1; }
@@ -28,10 +31,11 @@ shopt -s nullglob
 files=("$DIR"/*.ref)
 [ "${#files[@]}" -gt 0 ] || { echo "::error::no image refs in $DIR"; exit 1; }
 
-# linux-desktop first (it is browser's base), then browser, then any
-# extra runtime images in glob order — matches the documented manifest.
+# linux-base first (it is the profiles' base), then linux-desktop, then
+# browser, then any extra runtime images in glob order — matches the
+# documented manifest.
 order=()
-for want in linux-desktop browser; do
+for want in linux-base linux-desktop browser; do
   [ -f "$DIR/$want.ref" ] && order+=("$want")
 done
 for f in "${files[@]}"; do
@@ -55,11 +59,24 @@ for name in "${order[@]}"; do
     PIN="$(awk -F= '/^ARG CHROMIUM_APT_VERSION=/ {print $2; exit}' "$DOCKERFILE")"
     [ -n "$PIN" ] \
       || { echo "::error::CHROMIUM_APT_VERSION not found in $DOCKERFILE"; exit 1; }
+    FFPIN="$(awk -F= '/^ARG FIREFOX_ESR_APT_VERSION=/ {print $2; exit}' "$DOCKERFILE")"
+    [ -n "$FFPIN" ] \
+      || { echo "::error::FIREFOX_ESR_APT_VERSION not found in $DOCKERFILE"; exit 1; }
     # Strip the Debian revision — the manifest carries the engine version.
     CHROMIUM="${PIN%%-*}"
+    FIREFOX="${FFPIN%%-*}"
     jq -n --arg name "$name" --arg ref "$repo" --arg digest "$digest" \
-      --arg tag "$TAG" --arg chromium "$CHROMIUM" \
-      '{name: $name, ref: $ref, digest: $digest, tag: $tag, chromium: $chromium}' \
+      --arg tag "$TAG" --arg chromium "$CHROMIUM" --arg firefox "$FIREFOX" \
+      '{name: $name, ref: $ref, digest: $digest, tag: $tag, chromium: $chromium, firefox: $firefox}' \
+      >> "$OBJS"
+  elif [ "$name" = "linux-desktop" ]; then
+    FFPIN="$(awk -F= '/^ARG FIREFOX_ESR_APT_VERSION=/ {print $2; exit}' "$DESKTOP_DOCKERFILE")"
+    [ -n "$FFPIN" ] \
+      || { echo "::error::FIREFOX_ESR_APT_VERSION not found in $DESKTOP_DOCKERFILE"; exit 1; }
+    FIREFOX="${FFPIN%%-*}"
+    jq -n --arg name "$name" --arg ref "$repo" --arg digest "$digest" \
+      --arg tag "$TAG" --arg firefox "$FIREFOX" \
+      '{name: $name, ref: $ref, digest: $digest, tag: $tag, firefox: $firefox}' \
       >> "$OBJS"
   else
     jq -n --arg name "$name" --arg ref "$repo" --arg digest "$digest" \

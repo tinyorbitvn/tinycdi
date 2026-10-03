@@ -21,7 +21,7 @@ go install github.com/google/go-licenses/v2@v2.0.1
 go-licenses report ./api/... ./cmd/... ./internal/... --ignore github.com/tinyorbitvn/tinycdi
 npm install -g license-checker@25.0.1
 license-checker --start web --production --json
-syft tcdi/linux-desktop:local -o spdx-json   # then extract licenseDeclared per package
+syft tcdi/linux-desktop:local -o spdx-json   # likewise tcdi/linux-base, tcdi/browser; then extract licenseDeclared per package
 ```
 
 ## 1. Go dependencies (all shipped binaries)
@@ -74,30 +74,36 @@ mark are trademarks and are not MIT-licensed — see `TRADEMARKS.md`.
 ## 3. Runtime container images
 
 Per-package declared licenses were extracted from syft SPDX SBOMs of
-the two runtime images: the browser image carries 375 packages and the
-linux-desktop image 330.
+the runtime images: the shared linux-base image carries 251 packages, the
+browser image 375 and the linux-desktop image (XFCE4 + Firefox ESR) 385 —
+both profiles are built FROM linux-base.
 
 These are full Debian bookworm userspaces, so they contain the normal
 mix of copyleft and permissive system components — declared-license
-counts of copyleft-bearing packages: ~220 (browser) / ~190
-(linux-desktop) packages declare GPL/LGPL-family terms, overwhelmingly
+counts of copyleft-bearing packages (measured before the base/profile
+split; the shared base is a subset of both): ~220 (browser) / ~190
+(old openbox-based linux-desktop) packages declare GPL/LGPL-family terms, overwhelmingly
 GPL-2.0/GPL-3.0/LGPL-2.1 system libraries and tools (glibc, coreutils,
 bash, openssl-adjacent libs, etc.). Key packages:
 
 | Package | Version | Declared license |
 |---|---|---|
 | kasmvncserver | 1.5.0-1 | **GPL-2.0-only AND GPL-2.0-or-later** |
-| libexpat1 (apt-pinned in linux-desktop) | 2.5.0-1+deb12u4 | MIT |
+| libexpat1 (apt-pinned in linux-base) | 2.5.0-1+deb12u4 | MIT |
 | @kasmtech/novnc | 1.3.0 | MPL-2.0 |
 | chromium, chromium-common, chromium-sandbox (browser image) | 154.0.8037.92-1~deb12u1 | mixed BSD/MIT/Apache/GPL/LGPL/MPL — see `/usr/share/doc/<pkg>/copyright` in the image |
-| firefox-esr (browser image) | 153.4.0esr-1~deb12u1 | MPL-2.0-led mixed — see `/usr/share/doc/<pkg>/copyright` |
-| openbox | 3.6.1-10 | BSD-3-Clause AND GPL-2.0/GPL-3.0 |
+| firefox-esr (browser and linux-desktop images) | 153.4.0esr-1~deb12u1 | MPL-2.0-led mixed — see `/usr/share/doc/<pkg>/copyright` |
+| openbox (browser image) | 3.6.1-10 | BSD-3-Clause AND GPL-2.0/GPL-3.0 |
+| xfce4-session, xfwm4, xfce4-panel, xfdesktop4, xfce4-settings, thunar, xfce4-terminal (linux-desktop image) | 4.18.x / 1.0.4 | GPL-2.0-or-later, LGPL-2.1+ (per package copyright file) |
+| mousepad, xarchiver, ristretto (linux-desktop image) | 0.5.10 / 0.5.4 / 0.12.4 | GPL-2.0-or-later, LGPL-2.0+/LGPL-3+ |
+| greybird-gtk-theme (linux-desktop image) | 3.23.2-1 | GPL-2.0-or-later or CC-BY-SA-3.0-or-later |
+| adwaita-icon-theme (linux-desktop image) | 43-1 | CC-BY-SA-3.0 or LGPL-3.0 |
 
 Control-plane images (api, operator, gateway, portal) are
 `gcr.io/distroless/static:nonroot` + a static Go binary — Go deps only,
 no copyleft expected. Each also carries `/licenses/` — the collected
 license texts of its Go dependency tree (`make licenses`, go-licenses
-v2.0.1). The CI `images` job scans all six images on every build.
+v2.0.1). The CI `images` job scans every image in the set on every build.
 
 ### 3a. Derived node security profiles (deploy/node-profiles/)
 

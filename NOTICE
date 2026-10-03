@@ -47,8 +47,16 @@ Runtime container images additionally include:
   deb.debian.org, matched by the package names and versions recorded in
   the image SBOMs and per-package license inventories.
 * Chromium 154.0.8037.92-1~deb12u1 and Firefox ESR 153.4.0esr-1~deb12u1
-  (browser image) — see the Debian package copyright files inside the
+  (browser image; Firefox ESR is also the browser of the linux-desktop
+  image) — see the Debian package copyright files inside the
   image (/usr/share/doc/<pkg>/copyright) for the full license texts.
+* XFCE 4.18 desktop components (linux-desktop image: xfce4-session,
+  xfwm4, xfce4-panel, xfdesktop, xfce4-settings, Thunar,
+  xfce4-terminal), Mousepad, Xarchiver, Ristretto, the Greybird theme and
+  the Adwaita icon theme — GPL-2.0-or-later, LGPL-2.1+/LGPL-3.0 and
+  CC-BY-SA-3.0 as declared in each Debian package's copyright file
+  (/usr/share/doc/<pkg>/copyright). Redistributed unmodified from the
+  Debian archive; corresponding source is in the Debian archive as above.
 
 Where a component's license requires that its license text accompany
 the distribution, the text is available either in the component's

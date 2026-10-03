@@ -44,7 +44,7 @@ chk_absent "release: no trivy-action (unpinned runtime binary)" "$REL" 'uses:.*t
 # Job-level env entries sit at 6 columns ("    env:" + key); workflow-level
 # at 2. Step-scoped secrets (10 columns) are the allowed pattern.
 chk_absent "release: no job-level registry secrets" "$REL" '^ {2,6}(CRHUB|BASE_MIRROR)_[A-Z]+:'
-chk "release: chart job needs image jobs" "$REL" 'needs: \[prepare, desktop, images\]'
+chk "release: chart job needs image jobs" "$REL" 'needs: \[prepare, base, images\]'
 
 # SEC-16: no shared GHA cache on release image builds.
 chk_absent "release: no gha cache" "$REL" 'cache-(from|to):\s*>?-?\s*$?\s*\$?\{?\{?.*type=gha|cache-(from|to): type=gha'
@@ -141,20 +141,28 @@ for f in trivy.yaml .trivy.yaml trivy.yml .trivy.yml syft.yaml .syft.yaml syft.y
 done
 
 # SUPR-4: the released image set is a tracked file; the browser ships in
-# v0.1.0 (chromium .92) and FROMs linux-desktop, so both must be active.
+# v0.1.0 (chromium .92) and, with linux-desktop (V3.26), FROMs linux-base,
+# so all three must be active.
 chk "release: image set from build/release-images.txt" "$REL" 'build/release-images\.txt'
 [ -f "$ROOT/build/release-images.txt" ] \
   || { echo "FAIL: build/release-images.txt missing"; fails=1; }
 active_imgs="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/build/release-images.txt")"
+printf '%s\n' "$active_imgs" | grep -qx 'linux-base' \
+  || { echo "FAIL: linux-base must be in the release set"; fails=1; }
 printf '%s\n' "$active_imgs" | grep -qx 'linux-desktop' \
   || { echo "FAIL: linux-desktop must be in the release set"; fails=1; }
 printf '%s\n' "$active_imgs" | grep -qx 'browser' \
   || { echo "FAIL: browser must be in the release set"; fails=1; }
-if printf '%s\n' "$active_imgs" | grep -qx 'browser' \
-  && ! printf '%s\n' "$active_imgs" | grep -qx 'linux-desktop'; then
-  echo "FAIL: browser requires linux-desktop (its FROM base) in the release set"
-  fails=1
-fi
+for profile in browser linux-desktop; do
+  if printf '%s\n' "$active_imgs" | grep -qx "$profile" \
+    && ! printf '%s\n' "$active_imgs" | grep -qx 'linux-base'; then
+    echo "FAIL: $profile requires linux-base (its FROM base) in the release set"
+    fails=1
+  fi
+  # Both profiles must FROM the shared base (ARG BASE_IMAGE), never each other.
+  grep -qE '^ARG BASE_IMAGE=ghcr\.io/tinyorbitvn/tinycdi-linux-base:' "$ROOT/build/$profile/Dockerfile" \
+    || { echo "FAIL: build/$profile/Dockerfile must default BASE_IMAGE to tinycdi-linux-base"; fails=1; }
+done
 
 # v0.2 three-component platform: backend (public API + session gateway in
 # one binary), frontend (static SPA server) and operator. The removed
@@ -179,15 +187,15 @@ for i in $active_imgs; do
   grep -qE "attest build provenance — $i\$" "$REL" \
     || { echo "FAIL: release: no provenance attestation step for '$i'"; fails=1; }
 done
-# images.yml: build matrix (+ the dedicated desktop job) == scan matrix ==
+# images.yml: build matrix (+ the dedicated base job) == scan matrix ==
 # promote download/validate lists == the release set.
 want_set="$(printf '%s\n' "$active_imgs" | sort | xargs)"
 build_set="$( { grep -E '^        image: \[' "$IMG" | head -1 | tr -d '[] ' \
-  | sed 's/^image://' | tr ',' '\n'; echo linux-desktop; } | sort | xargs)"
+  | sed 's/^image://' | tr ',' '\n'; echo linux-base; } | sort | xargs)"
 scan_set="$(grep -E '^        image: \[' "$IMG" | sed -n 2p | tr -d '[] ' \
   | sed 's/^image://' | tr ',' '\n' | sort | xargs)"
 [ "$build_set" = "$want_set" ] \
-  || { echo "FAIL: images: build matrix + desktop [$build_set] != release set [$want_set]"; fails=1; }
+  || { echo "FAIL: images: build matrix + base [$build_set] != release set [$want_set]"; fails=1; }
 [ "$scan_set" = "$want_set" ] \
   || { echo "FAIL: images: scan matrix [$scan_set] != release set [$want_set]"; fails=1; }
 while IFS= read -r line; do
@@ -195,8 +203,8 @@ while IFS= read -r line; do
     | tr ' ' '\n' | grep -v '^\\$' | grep . | sort | xargs)"
   [ "$got" = "$want_set" ] \
     || { echo "FAIL: images: promote list [$got] != release set [$want_set]"; fails=1; }
-done < <(grep -E 'for img in linux-desktop|validate-image-refs\.sh refs' -A1 "$IMG" \
-  | grep -E 'for img in|^ +linux-desktop ')
+done < <(grep -E 'for img in linux-base|validate-image-refs\.sh refs' -A1 "$IMG" \
+  | grep -E 'for img in|^ +linux-base ')
 # release.yml binaries: exactly the Go commands that ship.
 bins="$(grep -E '^ +for comp in ' "$REL" | sed -E 's/.*for comp in //; s/; do//' | tr ' ' '\n' | sort | xargs)"
 [ "$bins" = "backend operator" ] \
@@ -210,6 +218,7 @@ done
 VALS="$ROOT/deploy/helm/tinycdi/values.yaml"
 for i in $active_imgs; do
   sec=images; key="$i"
+  [ "$i" = "linux-base" ] && key=linuxBase
   [ "$i" = "linux-desktop" ] && key=linuxDesktop
   if [ "$i" = "kasm-adapter" ]; then sec=kasmAdapter; key=image; fi
   awk -v s="$sec" -v k="$key" \
@@ -236,6 +245,14 @@ chk_absent "runtime-images: no :main/:latest promotion" "$TRAIN" 'imagetools cre
 chk "runtime-images: runtime-* release" "$TRAIN" 'gh release (create|upload) "\$REL_TAG"'
 chk "runtime-images: runtime release never takes the repo Latest marker (v* owns it)" "$TRAIN" -- "--latest=false"
 chk "runtime-images: never builds control-plane images" "$TRAIN" 'linux-desktop'
+chk "runtime-images: builds the shared base" "$TRAIN" 'build/linux-base/\*\*'
+chk "runtime-images: base is in the scan matrix" "$TRAIN" 'image: \[linux-base, linux-desktop, browser\]'
+chk "runtime-images: manifest reads the desktop firefox pin" "$TRAIN" 'DESKTOP_DOCKERFILE: build/linux-desktop/Dockerfile'
+# V3.26: the desktop and browser images must carry the SAME firefox-esr pin.
+ff_d="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$ROOT/build/linux-desktop/Dockerfile")"
+ff_b="$(awk -F= '$1 == "ARG FIREFOX_ESR_APT_VERSION" {print $2; exit}' "$ROOT/build/browser/Dockerfile")"
+{ [ -n "$ff_d" ] && [ "$ff_d" = "$ff_b" ]; } \
+  || { echo "FAIL: firefox-esr pin differs between linux-desktop ('$ff_d') and browser ('$ff_b')"; fails=1; }
 chk_absent "runtime-images: no api/backend/gateway build" "$TRAIN" 'build/(api|backend|operator|gateway|portal|frontend)/Dockerfile'
 for s in check-browser-freshness.sh bump-browser-pin.sh; do
   [ -x "$ROOT/.github/scripts/$s" ] \

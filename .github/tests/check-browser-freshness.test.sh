@@ -134,6 +134,21 @@ out="$(BROWSER_FRESHNESS_INDEX="$D/idx" bash "$CHECK" "$D/Dockerfile.nofx" 2>&1)
 expect "pin missing from Dockerfile" 2
 has    "pin missing from Dockerfile" "FIREFOX_ESR_APT_VERSION not found"
 
+# --- the desktop image's firefox pin is covered: it must equal the browser's ---
+{ noise; stanza chromium "$CHR_PIN" x; stanza firefox-esr "$FF_PIN" "$SHA_FF_PIN"; } > "$D/idx"
+printf 'ARG FIREFOX_ESR_APT_VERSION=%s\n' "$FF_PIN" > "$D/Dockerfile.desktop"
+out="$(BROWSER_FRESHNESS_INDEX="$D/idx" bash "$CHECK" "$D/Dockerfile" "$D/Dockerfile.desktop" 2>&1)"; rc=$?
+expect "desktop pin equals browser pin" 0
+printf 'ARG FIREFOX_ESR_APT_VERSION=%s\n' "$FF_NEW" > "$D/Dockerfile.desktop"
+out="$(BROWSER_FRESHNESS_INDEX="$D/idx" bash "$CHECK" "$D/Dockerfile" "$D/Dockerfile.desktop" 2>&1)"; rc=$?
+expect "desktop pin differs from browser pin" 2
+has    "desktop pin differs from browser pin" "share one firefox-esr pin"
+lacks  "desktop pin differs from browser pin" "BUMP "
+: > "$D/Dockerfile.desktop"
+out="$(BROWSER_FRESHNESS_INDEX="$D/idx" bash "$CHECK" "$D/Dockerfile" "$D/Dockerfile.desktop" 2>&1)"; rc=$?
+expect "desktop pin missing" 2
+has    "desktop pin missing" "FIREFOX_ESR_APT_VERSION not found in $D/Dockerfile.desktop"
+
 # --- check -> bump round trip: the BUMP lines repin a stale fixture so a
 #     second check passes ---
 cat > "$D/images.md" <<EOT

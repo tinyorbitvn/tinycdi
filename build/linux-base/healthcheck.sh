@@ -1,9 +1,7 @@
 #!/bin/bash
-# Copyright (c) 2026 TinyOrbit
-# SPDX-License-Identifier: MIT
-#
-# Readiness gate for the kasm-adapter runtime: succeed ONLY when the X
-# display is alive AND the KasmVNC HTTPS endpoint answers on :8443.
+# Readiness gate: succeed ONLY when the X display is alive AND the KasmVNC
+# HTTPS endpoint answers on :8443. Either leg failing => not ready.
+# (kasmvncserver itself uses xdpyinfo for the display check.)
 set -u
 
 DISPLAY_NUM="${TCDI_DISPLAY:-1}"
@@ -29,15 +27,16 @@ fi
 # curl config quoting: escape backslash and double quote.
 cred="$(printf '%s:%s' "$user" "$(cat "$SECRET_DIR/password")" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 
-# KasmVNC 1.4.x loopback quirk: when 127.0.0.1 IS blacklisted curl prints
-# the code it saw AND exits non-zero (yielding e.g. "200000"). Take the
-# first 3 chars (a blacklisted loopback is still never counted ready by
-# the credentialed probe: it would see 000 / a dropped connection).
-raw="$(printf 'user = "%s"\n' "$cred" \
+code="$(printf 'user = "%s"\n' "$cred" \
   | curl -sk -K - -o /dev/null -w '%{http_code}' --max-time 4 \
     "https://127.0.0.1:8443/" 2>/dev/null || echo 000)"
-code="${raw:0:3}"
+# curl may print the code AND exit non-zero (KasmVNC loopback quirk,
+# "200000"): keep the first three characters.
+code="${code:0:3}"
 
+# 200 (or a redirect) with valid credentials proves the endpoint is
+# serving AND still accepts the mounted Secret; 401 (credential mismatch),
+# 000/refused/timeout/blacklisted mean not ready.
 case "$code" in
   200|301|302) exit 0 ;;
   *) exit 1 ;;

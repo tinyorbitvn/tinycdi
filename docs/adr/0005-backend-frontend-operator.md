@@ -66,7 +66,7 @@ Decisions taken in the v0.2 design review (2026-10-02):
 | **backend** | `tinycdi-backend` | `cmd/backend` | `:8443` app (public API on the portal host) · `:8444` session (session gateway on `*.<sessionDomain>`) · `:9443` internal mTLS (operator broker client) · `:9090` metrics (optional) |
 | **frontend** | `tinycdi-frontend` | `build/frontend` | `:8443` static SPA + browser security headers — **no `/v1` proxy** |
 | **operator** | `tinycdi-operator` | `cmd/operator` | unchanged |
-| runtimes | `tinycdi-linux-desktop`, `tinycdi-browser`, `kasmweb/*` via adapter | — | unchanged |
+| runtimes | `tinycdi-linux-base` (shared base), `tinycdi-linux-desktop`, `tinycdi-browser`, `kasmweb/*` via adapter | — | unchanged |
 
 The `tinycdi-api`, `tinycdi-gateway` and `tinycdi-portal` images and
 commands are removed. The chart deploys exactly these three control-plane

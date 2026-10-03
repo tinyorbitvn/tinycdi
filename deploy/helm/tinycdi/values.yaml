@@ -48,6 +48,17 @@ images:
   # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
   # report imageBuiltAt/imageStale on templates and workspaces (warning
   # only — a stale image never blocks a launch).
+  # linuxBase is the base layer set both runtime profiles build FROM
+  # (docs/images.md). No template references it: it is here so the release
+  # pins its digest next to the profiles', for custom desktop images built
+  # on it. It is never pulled by the chart.
+  linuxBase:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-linux-base
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+    builtAt: ""
   linuxDesktop:
     registry: ""
     repository: tinyorbitvn/tinycdi-linux-desktop

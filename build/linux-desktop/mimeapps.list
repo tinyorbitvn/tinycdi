@@ -1,0 +1,19 @@
+[Default Applications]
+inode/directory=thunar.desktop
+text/plain=org.xfce.mousepad.desktop
+application/pdf=firefox-esr.desktop
+text/html=firefox-esr.desktop
+x-scheme-handler/http=firefox-esr.desktop
+x-scheme-handler/https=firefox-esr.desktop
+image/png=org.xfce.ristretto.desktop
+image/jpeg=org.xfce.ristretto.desktop
+image/gif=org.xfce.ristretto.desktop
+image/bmp=org.xfce.ristretto.desktop
+image/webp=org.xfce.ristretto.desktop
+image/tiff=org.xfce.ristretto.desktop
+application/zip=xarchiver.desktop
+application/x-tar=xarchiver.desktop
+application/gzip=xarchiver.desktop
+application/x-xz-compressed-tar=xarchiver.desktop
+application/x-bzip-compressed-tar=xarchiver.desktop
+application/x-7z-compressed=xarchiver.desktop
