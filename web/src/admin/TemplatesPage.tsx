@@ -3,7 +3,13 @@ import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import type { ApiClient } from "../api/client";
 import { t } from "../i18n";
-import { clipboardPolicyLabel } from "../templates/format";
+import {
+  clipboardPolicyLabel,
+  dataPolicyLabel,
+  experienceLabel,
+  networkProfileLabel,
+  runtimeLabel,
+} from "../templates/format";
 import {
   listScopedWorkspaces,
   listTemplates,
@@ -90,8 +96,8 @@ const columns: Column<CatalogRow>[] = [
     header: t("admin.templates.column.kind"),
     render: ({ template: tpl }) => (
       <span className="tc-admin-cell-stack">
-        <span>{tpl.experience}</span>
-        <span className="tc-admin-muted">{tpl.runtime}</span>
+        <span>{experienceLabel(tpl.experience)}</span>
+        <span className="tc-admin-muted">{runtimeLabel(tpl.runtime)}</span>
       </span>
     ),
   },
@@ -137,13 +143,13 @@ const columns: Column<CatalogRow>[] = [
     render: ({ template: tpl }) => (
       <span className="tc-admin-badges">
         <Badge tone={tpl.dataPolicyDefault === "Retain" ? "info" : "neutral"}>
-          {t("admin.templates.badge.data", { value: tpl.dataPolicyDefault })}
+          {t("admin.templates.badge.data", { value: dataPolicyLabel(tpl.dataPolicyDefault) })}
         </Badge>
         <Badge tone={tpl.clipboardPolicy === "Disabled" ? "neutral" : "warning"}>
           {t("admin.templates.badge.clipboard", { value: clipboardPolicyLabel(tpl.clipboardPolicy) })}
         </Badge>
         {tpl.networkProfile ? (
-          <Badge>{t("admin.templates.badge.network", { value: tpl.networkProfile })}</Badge>
+          <Badge>{t("admin.templates.badge.network", { value: networkProfileLabel(tpl.networkProfile) })}</Badge>
         ) : null}
       </span>
     ),

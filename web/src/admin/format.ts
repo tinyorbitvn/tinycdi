@@ -1,4 +1,4 @@
-import { t } from "../i18n";
+import { t, formatDateTime as formatDateTimeIntl, formatNumber } from "../i18n";
 import type { MessageKey } from "../i18n";
 import type { Owner, QuotaAmounts } from "./api";
 
@@ -28,7 +28,7 @@ export function formatAgo(iso: string, now: number = Date.now()): string {
 
 export function formatDateTime(iso: string): string {
   const tms = Date.parse(iso);
-  return Number.isNaN(tms) ? "—" : new Date(tms).toLocaleString();
+  return Number.isNaN(tms) ? "—" : formatDateTimeIntl(tms);
 }
 
 export type QuotaKey = keyof QuotaAmounts;
@@ -62,7 +62,7 @@ export function formatQuota(key: QuotaKey, value: number): string {
     case "storageGib":
       return value >= 1024 ? t("admin.unit.tib", { n: trim(value / 1024) }) : t("admin.unit.gib", { n: value });
     default:
-      return String(value);
+      return formatNumber(value);
   }
 }
 

@@ -12,6 +12,8 @@ package ratelimit
 
 import (
 	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -107,6 +109,16 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	// Ceil so a caller that waits exactly retryAfter always lands at or
 	// above one token regardless of float rounding.
 	return false, time.Duration((1-b.tokens)/l.perSec*float64(time.Second) + 0.5)
+}
+
+// KeyDigest derives a stable, non-secret bucket key from secret-bearing
+// material — a session ID or a validated OIDC state (FX-R30): the SHA-256
+// rendered in hex and namespaced with prefix so a derived key can never
+// collide with a client-IP key. The raw value never enters the key, so it
+// stays unexposed even if a key were ever logged.
+func KeyDigest(prefix, raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return prefix + hex.EncodeToString(sum[:])
 }
 
 // RetryAfterSeconds renders a refusal wait for the Retry-After header:

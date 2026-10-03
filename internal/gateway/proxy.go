@@ -135,9 +135,10 @@ type Config struct {
 	// reports per session (default InputReportInterval); injectable.
 	InputReportInterval time.Duration
 	// LaunchLimiter throttles /v1/launch attempts per client key (E7);
-	// nil disables. The key derives like ratelimit.ClientKey: the socket
-	// peer, or the right-most untrusted X-Forwarded-For entry when the
-	// peer sits inside TrustedProxies.
+	// nil disables. The key is a digest of the session cookie when the
+	// request carries a live session (FX-R30), else it derives like
+	// ratelimit.ClientKey: the socket peer, or the right-most untrusted
+	// X-Forwarded-For entry when the peer sits inside TrustedProxies.
 	LaunchLimiter *ratelimit.Limiter
 	// TrustedProxies lists the CIDRs of reverse proxies in front of the
 	// session listener whose X-Forwarded-For claims are trusted (S18):

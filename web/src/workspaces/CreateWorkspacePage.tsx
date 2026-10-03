@@ -7,7 +7,7 @@ import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
 import { IconArrowLeft } from "../design/icons";
 import { useTemplates } from "../templates/useTemplates";
-import { dataPolicyLabel, networkProfileLabel } from "../templates/format";
+import { dataPolicyLabel, networkProfileLabel, runtimeLabel } from "../templates/format";
 import type { DataPolicy } from "../templates/types";
 import { ErrorBanner } from "./ErrorBanner";
 
@@ -121,11 +121,11 @@ export function CreateWorkspacePage() {
                   ? t("workspaces.create.templateOption", {
                       name: tpl.name,
                       revision: tpl.revision,
-                      runtime: tpl.runtime,
+                      runtime: runtimeLabel(tpl.runtime),
                     })
                   : t("workspaces.create.templateOptionNoRevision", {
                       name: tpl.name,
-                      runtime: tpl.runtime,
+                      runtime: runtimeLabel(tpl.runtime),
                     })}
               </option>
             ))}
