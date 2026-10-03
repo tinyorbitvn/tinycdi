@@ -211,20 +211,21 @@ func (b *Backend) Run(ctx context.Context) error {
 	//    disconnect for each, without revoking leases — the same cookie
 	//    reconnects on another replica. Drain returns as soon as every
 	//    session is quiet, but the window is a duration, not just the shed
-	//    budget: the listeners keep serving until drainCtx ends — every
-	//    read still answers and new launches/upgrades still get the
-	//    retryable 503 instead of a refused socket while the pod's
-	//    endpoint removal propagates. A zero window skips the hold.
-	if b.gw != nil {
-		drainWindow := b.cfg.DrainWindow
-		if drainWindow < 0 {
-			drainWindow = 0
-		}
-		drainCtx, dcancel := context.WithTimeout(shCtx, drainWindow)
-		b.gw.Drain(drainCtx)
-		<-drainCtx.Done()
-		dcancel()
+	//    budget: EVERY listener keeps serving until drainCtx ends — reads
+	//    still answer and new launches/upgrades still get the retryable
+	//    503 instead of a refused socket while the pod's endpoint removal
+	//    propagates, and a backend without a session listener holds the
+	//    window all the same. A zero window skips the hold.
+	drainWindow := b.cfg.DrainWindow
+	if drainWindow < 0 {
+		drainWindow = 0
 	}
+	drainCtx, dcancel := context.WithTimeout(shCtx, drainWindow)
+	if b.gw != nil {
+		b.gw.Drain(drainCtx)
+	}
+	<-drainCtx.Done()
+	dcancel()
 
 	// 3. Graceful shutdown of every listener, in parallel, under the time
 	//    that remains.

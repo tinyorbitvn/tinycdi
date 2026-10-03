@@ -345,6 +345,9 @@ func (c *Config) validate() error {
 	if c.LoginRate < 0 || c.LaunchRate < 0 {
 		return errors.New("-login-rate and -launch-rate must be >= 0 (0 disables the limit)")
 	}
+	if c.DrainWindow < 0 {
+		return errors.New("-drain-window must be >= 0 (0 shuts down immediately, without a drain hold)")
+	}
 	if _, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil {
 		return fmt.Errorf("-trusted-proxies: %w", err)
 	}

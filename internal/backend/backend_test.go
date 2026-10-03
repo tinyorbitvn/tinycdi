@@ -882,6 +882,67 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 	}
 }
 
+// TestRun_HoldsDrainWindowAppOnly: the window hold is not a gateway
+// concern — a backend with no session listener (-session-listen unset)
+// still keeps the app listener answering for the whole -drain-window.
+func TestRun_HoldsDrainWindowAppOnly(t *testing.T) {
+	const window = 400 * time.Millisecond
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{cfg: Config{DrainWindow: window}, log: testLog()}
+	srv := &http.Server{Handler: b.readyz(http.NotFoundHandler())}
+	b.servers = append(b.servers, namedServer{name: "app", srv: srv, ln: ln})
+	b.markCacheSynced()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	base := "http://" + ln.Addr().String()
+	waitFor(t, 5*time.Second, "app listener serving", func() bool {
+		resp, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	start := time.Now()
+	cancel()
+
+	// Inside the window the app listener still answers — readiness is
+	// already false but the socket is not refused.
+	select {
+	case <-runDone:
+		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
+	case <-time.After(window - 100*time.Millisecond):
+	}
+	resp, err := http.Get(base + "/readyz")
+	if err != nil {
+		t.Fatalf("app listener refused a connection inside the drain window: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz inside the drain window = %d, want 503", resp.StatusCode)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain window")
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("Run returned %v after cancel, before the %v drain window ended", d, window)
+	}
+}
+
 // TestGatewayIDSharedAcrossInstances: two backends with the same
 // -gateway-id share lease ownership — a lease redeemed through one must be
 // renewable by the other (restart-safe sessions need replicas to be
