@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // respondJSON serializes v as an application/json response.
@@ -582,6 +583,10 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, CodeInvalidState, "workspace name already in use")
 	case errors.Is(err, provisioning.ErrReservationConflict):
 		writeError(w, r, CodeInvalidState, err.Error())
+	case store.IsTransient(err):
+		// Postgres did not answer (outage/failover): retryable 503, not a
+		// permanent 500 the portal would surface as a failure.
+		writeError(w, r, CodeUnavailable, "service unavailable")
 	default:
 		writeError(w, r, CodeInternal, "internal error")
 	}

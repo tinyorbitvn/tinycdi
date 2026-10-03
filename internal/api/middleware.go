@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // writeError is the package-local convenience wrapper around WriteError
@@ -96,7 +98,17 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			sess, err = a.sessions.Peek(r.Context(), c.Value)
 		}
 		if err != nil {
-			writeError(w, r, CodeUnauthenticated, "session missing or expired")
+			switch {
+			case errors.Is(err, ErrSessionNotFound):
+				writeError(w, r, CodeUnauthenticated, "session missing or expired")
+			case store.IsTransient(err):
+				// The session store could not answer: not "no session".
+				// 503 so the portal retries instead of re-logging in
+				// (fail closed, same shape as the session listener).
+				writeError(w, r, CodeUnavailable, "session store unavailable")
+			default:
+				writeError(w, r, CodeInternal, "internal error")
+			}
 			return
 		}
 		// Fill the outer audit collector (set by AuditWithSink) — context
