@@ -20,6 +20,15 @@ export function isConnectable(ws: WorkspaceView): boolean {
   return conn?.status === "True";
 }
 
+/**
+ * The "Desired" cell. A workspace being deleted has no desired state worth
+ * showing (it will never run again), so it renders a dash instead of a stale
+ * Running/Stopped value.
+ */
+export function desiredLabel(ws: WorkspaceView): string {
+  return ws.phase === "Terminating" ? "—" : ws.desiredState;
+}
+
 export interface Blocker {
   key: MessageKey;
   params?: Record<string, string | number>;

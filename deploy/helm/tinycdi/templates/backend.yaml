@@ -127,8 +127,19 @@ spec:
             - -tls-cert=/tls/app/tls.crt
             - -tls-key=/tls/app/tls.key
             - -session-idle={{ .Values.backend.sessionIdle }}
+            {{- $tenantQuotas := include "tinycdi.tenantQuotas" . }}
+            {{- if $tenantQuotas }}
+            # managedNamespaces[].quota: the singleton leader upserts these
+            # tenant_quota rows at startup; unlisted tenants are untouched.
+            - {{ printf "-tenant-quotas=%s" $tenantQuotas | quote }}
+            {{- end }}
             {{- if .Values.oidc.requiredGroups }}
             - --required-groups={{ join "," .Values.oidc.requiredGroups }}
+            {{- end }}
+            # Sign-out also ends the IdP session (RP-initiated logout).
+            - --oidc-end-session={{ ne (toString .Values.oidc.endSession) "false" }}
+            {{- if .Values.oidc.postLogoutRedirect }}
+            - --oidc-post-logout-redirect={{ .Values.oidc.postLogoutRedirect }}
             {{- end }}
             {{- if and .Values.dev.enabled (not (has (printf "%v" .Values.database.tls.mode) (list "verify-ca" "verify-full"))) }}
             - --dev-insecure-db

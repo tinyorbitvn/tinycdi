@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, test } from "vitest";
 import { ToastProvider } from "../../../src/design";
+import { ApiProvider } from "../../../src/api/context";
 import { AppShell, BrandingProvider } from "../../../src/app/shell";
 import { MeProvider, type Me } from "../../../src/app/me";
 import { ThemeProvider, THEME_STORAGE_KEY } from "../../../src/app/theme";
@@ -26,15 +27,17 @@ const TEST_ME: Me = {
 
 function renderShell(branding: Branding = DEFAULT_BRANDING) {
   return render(
-    <ThemeProvider>
-      <BrandingProvider load={async () => branding}>
-        <ToastProvider>
-          <MeProvider load={async () => TEST_ME}>
-            <AppShell areas={TEST_AREAS} />
-          </MeProvider>
-        </ToastProvider>
-      </BrandingProvider>
-    </ThemeProvider>,
+    <ApiProvider>
+      <ThemeProvider>
+        <BrandingProvider load={async () => branding}>
+          <ToastProvider>
+            <MeProvider load={async () => TEST_ME}>
+              <AppShell areas={TEST_AREAS} />
+            </MeProvider>
+          </ToastProvider>
+        </BrandingProvider>
+      </ThemeProvider>
+    </ApiProvider>,
   );
 }
 
@@ -74,15 +77,17 @@ describe("AppShell", () => {
 
   test("nav shows Admin for tenant admins", async () => {
     render(
-      <ThemeProvider>
-        <BrandingProvider load={async () => DEFAULT_BRANDING}>
-          <ToastProvider>
-            <MeProvider load={async () => ({ ...TEST_ME, roles: ["tenant-admin"] })}>
-              <AppShell areas={TEST_AREAS} />
-            </MeProvider>
-          </ToastProvider>
-        </BrandingProvider>
-      </ThemeProvider>,
+      <ApiProvider>
+        <ThemeProvider>
+          <BrandingProvider load={async () => DEFAULT_BRANDING}>
+            <ToastProvider>
+              <MeProvider load={async () => ({ ...TEST_ME, roles: ["tenant-admin"] })}>
+                <AppShell areas={TEST_AREAS} />
+              </MeProvider>
+            </ToastProvider>
+          </BrandingProvider>
+        </ThemeProvider>
+      </ApiProvider>,
     );
     expect(await screen.findByRole("link", { name: "Admin" })).toBeInTheDocument();
   });

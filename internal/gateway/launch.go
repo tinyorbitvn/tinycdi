@@ -41,9 +41,13 @@ const (
 	LaunchPath = "/v1/launch"
 	// TicketField is the form field carrying the ticket in the POST body.
 	TicketField = "ticket"
-	// CleanPath is the path the browser is redirected to after redemption —
-	// no ticket or session material may appear in it.
-	CleanPath = "/"
+	// DesktopPath is where the browser is redirected after redemption — no
+	// ticket or session material may appear in it. resize=remote is a static
+	// client setting: the KasmVNC web client otherwise treats a page inside
+	// an iframe as an embedded widget and forces resize=off, which keeps the
+	// remote screen at its old size and leaves large dark regions in a
+	// larger portal frame (FX-R18). It is the default in a top-level tab.
+	DesktopPath = "/?resize=remote"
 
 	maxLaunchBody = 4096
 )
@@ -240,7 +244,7 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeSuccess, "")
 
 	http.SetCookie(w, g.sessionCookie(s.id))
-	w.Header().Set("Location", CleanPath)
+	w.Header().Set("Location", DesktopPath)
 	w.WriteHeader(http.StatusSeeOther)
 }
 

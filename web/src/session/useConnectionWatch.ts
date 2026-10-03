@@ -1,6 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react";
 import type { components } from "../api/generated/schema";
-import { sessionOrigin, submitLaunch, type LaunchTicket } from "./launch";
+import { sessionFrameUrl, submitLaunch, type LaunchTicket } from "./launch";
 
 /**
  * Passive connection watch (D15). While the session is live the portal
@@ -104,7 +104,7 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       if (!el) return;
       // The session cookie on this host is bound to the live lease, so a
       // plain navigation to the workspace origin resumes the desktop.
-      el.src = sessionOrigin(opts.current.workspaceId, opts.current.sessionDomain);
+      el.src = sessionFrameUrl(opts.current.workspaceId, opts.current.sessionDomain);
       opts.current.onEvent({ type: "frame-navigated" });
     };
 

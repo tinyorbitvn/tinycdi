@@ -973,6 +973,45 @@ func (e *httpEnv) do(t *testing.T, sess, csrf *http.Cookie, method, path, body s
 	return resp, string(b)
 }
 
+// TestAPICreateWithoutQuotaRow (FX-R17): a tenant with no tenant_quota row
+// is refused with the distinct 409 QUOTA_NOT_CONFIGURED (not QUOTA_EXHAUSTED)
+// and creates no CR; once the quota is declared the same create succeeds.
+func TestAPICreateWithoutQuotaRow(t *testing.T) {
+	if k8sClient == nil {
+		t.Skip("no envtest assets (KUBEBUILDER_ASSETS)")
+	}
+	db := newDB(t)
+	env := newHTTPEnv(t, db, true)
+	sess, csrf := env.loginUser(t, "user-a", "tenant-a")
+	create := func(key string) (*http.Response, string) {
+		return env.do(t, sess, csrf, http.MethodPost, "/v1/workspaces",
+			`{"name":"a-box","templateRef":"tpl_linuxdesktop","desiredState":"Running"}`,
+			map[string]string{"Idempotency-Key": key})
+	}
+
+	resp, body := create("noquota-0001")
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "QUOTA_NOT_CONFIGURED") ||
+		strings.Contains(body, "QUOTA_EXHAUSTED") ||
+		!strings.Contains(body, "No quota is configured for your tenant. Ask an administrator to set one.") {
+		t.Fatalf("no quota row: status=%d body=%s", resp.StatusCode, body)
+	}
+	if n := countWorkspaceCRs(t, "ns-e2e"); n != 0 {
+		t.Fatalf("CRs in ns-e2e = %d, want 0", n)
+	}
+
+	quotas, err := provisioning.ParseTenantQuotas(
+		`[{"tenant":"tenant-a","runningWorkspaces":1,"cpu":"2","memory":"4Gi","storage":"20Gi"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioning.ApplyTenantQuotas(context.Background(), db, quotas); err != nil {
+		t.Fatalf("apply quotas: %v", err)
+	}
+	if resp, body = create("noquota-0002"); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create after quota declared: status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 // TestAPIEndToEnd: real OIDC login -> create -> CR lands in envtest;
 // cross-user reads are invisible; quota exhaustion maps to QUOTA_EXHAUSTED
 // and creates no CR; audit logs carry no secrets.

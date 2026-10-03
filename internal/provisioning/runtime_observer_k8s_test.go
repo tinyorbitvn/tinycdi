@@ -123,13 +123,14 @@ func TestK8sRuntimeObserver_DecisionTable(t *testing.T) {
 		t.Fatalf("live pod: gone=%v err=%v, want false/nil", gone, err)
 	}
 
-	// A non-retained PVC alone -> still not gone.
+	// A PVC is disk, not compute: an unlabelled (not yet retained) home
+	// volume never blocks the absence proof (FX-R25).
 	c = fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(cr, obsPVC("ws-cr-uid-1-home", "ns-a", "cr-uid-1", false)).Build()
 	obs = provisioning.NewK8sRuntimeObserver(c, tenants)
 	gone, err = obs.RuntimeGone(ctx, uid)
-	if err != nil || gone {
-		t.Fatalf("in-use pvc: gone=%v err=%v, want false/nil", gone, err)
+	if err != nil || !gone {
+		t.Fatalf("unretained pvc: gone=%v err=%v, want true/nil", gone, err)
 	}
 
 	// A retained PVC is data inventory, not compute -> gone.

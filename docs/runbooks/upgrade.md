@@ -179,6 +179,66 @@ release back (`helm upgrade` with the v0.1 chart and the pre-upgrade
 values file) **and** restore the pre-upgrade database dump per
 `docs/runbooks/backup-restore.md`. Re-run the post-checks afterwards.
 
+## Workspaces stuck by a pre-fix max-duration stop (release candidates up to rc.5)
+
+Up to rc.5, `status.startedAt` kept the time of a workspace's **first** start.
+Once that was older than the template's `maxDuration` (8 h), starting the
+workspace again made the operator stop it at once, and the platform database
+never learned of that stop. The symptom is a workspace that shows
+`Starting`/`Provisioning` for ever while its Workspace object says
+`Stopped`, with its quota reservation still held.
+
+From the release that carries this fix (`startedAt` belongs to the running
+incarnation) nothing needs to be done: the operator clears the stale value on
+its first reconcile, and within one expiry sweep (`-expiry-interval`, default
+30 s) the backend brings the database row in line with the Workspace
+(`desiredState` becomes `Stopped`, the events list shows `MaxDurationReached`),
+the recovery pass releases the reservation once the runtime is proven gone,
+and **Start** then works and gives the new run a fresh 8 h cap.
+
+If a user presses Start before the sweep has reached the row (Start is a no-op
+on a row the database still thinks is Running), the **manual fallback** is to
+press **Stop**, wait for the state to read Stopped, and then press **Start**.
+Operators can confirm a row has converged with:
+
+```sql
+SELECT name, desired_state, phase FROM workspaces WHERE state = 'active';
+SELECT workspace_id, state FROM quota_reservation WHERE state = 'held';
+```
+
+A stopped workspace that keeps `held` after a few recovery intervals is a
+different case: see "Stopped Retain workspaces and quota" in
+`docs/runbooks/capacity.md`.
+
+### Disconnect timing
+
+The disconnect stop runs `disconnectTimeout` after the gateway reports the
+last stream closed (the closing tab or a dropped connection), plus up to one
+expiry sweep (30 s) — not from the last lease renewal. The timeout is the
+template's `lifecycle.disconnectTimeout` (the seeded templates use 5 m). Up to
+rc.5 the expiry planner looked a template up by the workspace's catalog base
+name only and, missing the `<name>-<hash8>` revision objects, applied the
+platform default instead (10 m): a 5 m template stopped about 10 m after the
+tab closed. The planner now resolves the base name to the newest revision, as
+the operator does.
+
+## Upgrading to 0.2.0-rc.6
+
+Migration 014 adds three nullable columns to `quota_reservation`
+(`restart_slots`, `restart_cpu_millis`, `restart_memory_bytes`). It is
+additive and idempotent. Take a `pg_dump` first
+(`docs/runbooks/backup-restore.md`).
+
+On the first recovery pass after the upgrade, every stopped **Retain**
+workspace whose pod is gone converts to a disk-only quota hold: its running
+slot, CPU and memory are released with no user action, and its disk stays
+held. A start re-acquires the admitted compute from the stored vector
+(`docs/runbooks/capacity.md` → "Stopped Retain workspaces and quota").
+
+**No rollback below rc.6 after the first recovery pass; restore from the
+pg_dump instead.** An older binary would see held rows with a zero compute
+vector and `reserveForStart` would re-reserve zero.
+
 ## What is safe to upgrade while sessions run
 
 | Component | Effect of a restart/upgrade | Session impact |
