@@ -296,13 +296,27 @@ func verifyPurgeNonce(key []byte, caller string, r *RetainedRecord, nonce string
 
 // releaseDiskQuota subtracts size from a workspace's held disk
 // reservation. It is a no-op when the reservation is absent or already
-// released — a released row never re-enters 'held' here.
+// released — a released row never re-enters 'held' here. When the
+// subtraction leaves the row holding nothing at all (no compute, no disk,
+// no stored restart vector) it is settled: state flips to released with
+// proof quota_settled — a permanently empty held row is just bookkeeping.
+// A row carrying restart_* keeps 'held': the stopped Retain workspace it
+// belongs to still owes its compute on restart.
 func releaseDiskQuota(ctx context.Context, tx store.Tx, workspaceID string, size int64) error {
-	_, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE quota_reservation
 		SET disk_bytes = GREATEST(0, disk_bytes - $2)
 		WHERE workspace_id = $1 AND state = 'held'`,
-		workspaceID, size)
+		workspaceID, size); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE quota_reservation
+		SET state = 'released', release_proof = $2, released_at = now()
+		WHERE workspace_id = $1 AND state = 'held'
+		  AND running_slots = 0 AND cpu_millis = 0 AND memory_bytes = 0 AND disk_bytes = 0
+		  AND restart_slots IS NULL AND restart_cpu_millis IS NULL AND restart_memory_bytes IS NULL`,
+		workspaceID, string(ProofQuotaSettled))
 	return err
 }
 

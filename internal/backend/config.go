@@ -229,7 +229,10 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.RetainedSyncInterval, "retained-sync-interval", envDur(getenv, "TCDI_RETAINED_SYNC_INTERVAL", 30*time.Second),
 		"retained-inventory PVC->record sync interval; <=0 disables (env TCDI_RETAINED_SYNC_INTERVAL)")
 	fs.DurationVar(&c.RecoveryInterval, "recovery-interval", envDur(getenv, "TCDI_RECOVERY_INTERVAL", 30*time.Second),
-		"quota/intent recovery pass interval; <=0 runs a single startup pass (env TCDI_RECOVERY_INTERVAL)")
+		"quota/intent recovery pass interval; one pass runs at every leader acquisition, then every interval; "+
+			"<=0 runs the single startup pass only. Quota settlement is event-driven (Workspace informer) with "+
+			"this tick as the fallback — a reservation whose runtime absence is never proven waits indefinitely "+
+			"by design (env TCDI_RECOVERY_INTERVAL)")
 	fs.DurationVar(&c.ImageStaleAfter, "image-stale-after", envDur(getenv, "TCDI_IMAGE_STALE_AFTER", api.DefaultImageStaleAfter),
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
 	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
