@@ -323,5 +323,43 @@ The other two gates to open before a scale run:
 Measured baselines: 25 × 60 min on the e2e install (2026-10-03): connect
 p50 5.5 s / p95 5.9 s, reload reconnect p95 5.0 s (poll-quantised), zero
 dropped/manual actions, infra node CPU max 51 % during the 25-pod
-start-up burst, ~20 % steady. The 100- and 200-session numbers land here
-with the v0.3.0-rc.2 soak.
+start-up burst, ~20 % steady.
+
+### v0.3.0-rc.2 soak: 60 sessions × 60 min (2026-10-03)
+
+The planned ~82-session run was cut to a **60-session cap** for two
+reasons found on the night:
+
+- **The scheduler does not honour the per-node headroom plan.** The
+  template carries only `nodeSelector: workload-type=infra` — no spread
+  or anti-affinity — so pods land where scoring puts them. With even
+  spread the worst node (worker-03, 55 % baseline) crosses the 20 %
+  request-headroom rule at ~45 sessions; the observed run spread
+  10/30/8 because the freest node scored best. A new per-wave guard in
+  the harness stops workspace creation when any infra node would exceed
+  80 % CPU requests; effective N is recorded in the report.
+- **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
+  behind one source IP tripped `login-rate 30/min` (covers `/v1/login`,
+  `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
+  152 × 429 in ~15 min, logins failed, connect p95 hit 65 s. The e2e
+  run raised both to 600/min as a recorded deviation (restored after);
+  production ramps from many IPs are unaffected. A load test from one
+  host must raise the limits or distribute source IPs.
+
+Measured on 60 × 60 min, 20 users (3 per user), soak-small on rc.2:
+connect p50 6.1 s / p95 7.4 s (opens waved 10 per 15 s), reload
+reconnect p50 0 / p95 5.0 s (half of 60 seamless), inputDispatch p50
+67 ms / p95 89 ms, dropped 0, manual actions 0, per-lane 429s 0.
+Infra usage peaked at 59 % CPU / ~15.5 GiB workspace memory; node
+requests stayed ≤ 75 %. Two backend disruption drills plus a session
+cert rotation mid-run: the drill session reconnected in ≤ 4.5 s, but
+2/60 sessions reported `none` for ~85–120 s after the rollout — the
+reconnect tail after a backend pod loss is ~2 min, the one metric over
+its 60 s gate. 13/60 sessions logged a false "open in another tab" view
+during the restarts (watch item, non-zero on rc.2).
+
+Capacity answer for the release: **~60 sessions** is the safe level on
+the three-node infra pool under the 20 % headroom rule with today's
+baselines; ~82 is schedulable only if placement could be pinned per
+node; **200 sessions need ~50 CPU of spare requests → more or larger
+workload nodes.**
