@@ -10,6 +10,7 @@ export default {
 
   "progress.step.accepted": "Đã chấp nhận yêu cầu",
   "progress.step.queued": "Đang chờ tới lượt",
+  "progress.step.scheduling": "Đang lập lịch khởi động",
   "progress.step.disk": "Đang chuẩn bị đĩa",
   "progress.step.diskAttach": "Đang gắn đĩa của bạn",
   "progress.step.machine": "Đang tìm máy",
