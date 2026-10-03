@@ -355,6 +355,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant quota limits, usage and management source
+         * @description Administrator view of one tenant's quota: the configured limits and
+         *     current usage in display units (CPU in millicores, memory in MiB,
+         *     storage in GiB), the per-user breakdown, and `source`, which names
+         *     the layer owning the limits row. Usage counts held reservations —
+         *     including disk-only holds a stopped Retain workspace keeps — plus
+         *     active workspaces, exactly what admission counts. Requires the
+         *     tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminTenantQuota"];
+        /**
+         * Set a tenant's quota limits
+         * @description Replaces the tenant's quota limits for tenants **not** declared in
+         *     `-tenant-quotas`; a declared tenant answers
+         *     `409 QUOTA_MANAGED_BY_CONFIG` and must be changed through the
+         *     platform configuration. Limits below current usage are accepted:
+         *     held reservations stay, new ones are refused — a lowered limit
+         *     therefore takes effect without forcing a release. Requires the
+         *     tenant-admin role on the named tenant, the `X-CSRF-Token` header
+         *     and an `If-Match` precondition: the `version` returned by GET
+         *     (optimistic concurrency — a stale version answers
+         *     `412 PRECONDITION_FAILED`), or the literal `*` when the tenant has
+         *     no quota row yet. `If-Match: *` is not a bypass on an existing row —
+         *     it too answers 412.
+         */
+        put: operations["putAdminTenantQuota"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -485,6 +526,8 @@ export interface components {
          *     | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
+         *     | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
+         *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale quota version; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -494,7 +537,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /** @description Uniform error body returned for every 4xx/5xx response. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -767,6 +810,63 @@ export interface components {
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
             userLimits?: components["schemas"]["QuotaAmounts"];
+            users: components["schemas"]["UserUsage"][];
+        };
+        /**
+         * @description Which layer owns the tenant's limits row. `config`: the tenant is
+         *     declared in `-tenant-quotas` and its row is upserted from the
+         *     platform configuration — writes through the API are refused with
+         *     `QUOTA_MANAGED_BY_CONFIG`. `api`: a row exists that no config
+         *     declaration claims, so it stays writable through the admin quota
+         *     API. `none`: no row exists at all — admission fails closed, so the
+         *     absence of `limits` must never read as "unlimited".
+         * @enum {string}
+         */
+        QuotaSource: "config" | "api" | "none";
+        /**
+         * @description Quota limits in display units — the enforced dimensions of
+         *     `QuotaAmounts`. Every field is required; a partial block would
+         *     silently mean "none allowed" for the missing dimension. A value of
+         *     0 admits nothing on that dimension, and limits below current usage
+         *     are accepted (held reservations stay, new ones are refused). There
+         *     is no workspace-count limit, so `workspaces` is not settable.
+         */
+        AdminQuotaLimits: {
+            /** @description Maximum reserved running slots. */
+            runningWorkspaces: number;
+            /** @description Maximum CPU in millicores. */
+            cpuMillicores: number;
+            /** @description Maximum memory in MiB. */
+            memoryMib: number;
+            /** @description Maximum storage in GiB. */
+            storageGib: number;
+        };
+        /**
+         * @description Administrator quota snapshot for one tenant: `QuotaView` plus
+         *     `source`, which names the layer owning the limits row. `limits` is
+         *     absent when the tenant has no quota row (`configured: false`,
+         *     `source: none` — or `config` while a declared row is still pending
+         *     the startup upsert). `users` lists every owner with usage.
+         *     `version` is the opaque change token of the limits row — PUT echoes
+         *     it in `If-Match`; it is absent when no row exists.
+         */
+        AdminQuotaView: {
+            tenant: string;
+            /**
+             * @description False when the tenant has no quota row. Admission then refuses
+             *     every create, so clients must show "no quota configured", never
+             *     "no limit".
+             */
+            configured: boolean;
+            source: components["schemas"]["QuotaSource"];
+            /**
+             * @description Opaque change token of the limits row — it changes on every
+             *     write and PUT echoes it verbatim in `If-Match`. Absent when the
+             *     tenant has no quota row — PUT then uses `If-Match: *`.
+             */
+            version?: string;
+            limits?: components["schemas"]["QuotaAmounts"];
+            usage: components["schemas"]["QuotaAmounts"];
             users: components["schemas"]["UserUsage"][];
         };
         /**
@@ -1130,8 +1230,10 @@ export interface components {
          *     a different body), `INVALID_STATE` (operation not valid in the current
          *     phase/record state), `CONNECTION_IN_USE` (a live interactive lease
          *     exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
-         *     quota has no headroom), or `QUOTA_NOT_CONFIGURED` (the tenant has no
-         *     quota at all, so creates fail closed).
+         *     quota has no headroom), `QUOTA_NOT_CONFIGURED` (the tenant has no
+         *     quota at all, so creates fail closed), or `QUOTA_MANAGED_BY_CONFIG`
+         *     (the tenant's quota is owned by `-tenant-quotas` and only the
+         *     platform configuration may change it).
          */
         Conflict: {
             headers: {
@@ -1147,6 +1249,20 @@ export interface components {
          *     with the retained disk's runtime).
          */
         UnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description Optimistic-concurrency failure — `PRECONDITION_FAILED`: the
+         *     `If-Match` value does not name the current state of the resource
+         *     (a concurrent write landed first). Reload and retry with the fresh
+         *     version.
+         */
+        PreconditionFailed: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1192,6 +1308,12 @@ export interface components {
         WorkspaceId: string;
         /** @description Server-generated retained-data record identifier. */
         DataId: string;
+        /**
+         * @description Tenant identifier. Callers may only administer their own tenant —
+         *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+         *     differs from the caller's tenant answers `403 FORBIDDEN`.
+         */
+        Tenant: string;
         /**
          * @description Client-generated unique key (recommended: UUIDv4/ULID). Same key + same
          *     request body replays the recorded result; same key + different body
@@ -1667,6 +1789,83 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminTenantQuota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quota snapshot for the named tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminQuotaView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    putAdminTenantQuota: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Change token from the GET response's `version`, or `*` to create
+                 *     a row for a tenant that has none.
+                 */
+                "If-Match": string;
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminQuotaLimits"];
+            };
+        };
+        responses: {
+            /** @description The updated quota snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminQuotaView"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            412: components["responses"]["PreconditionFailed"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
