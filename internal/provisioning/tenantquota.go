@@ -155,7 +155,7 @@ func UpsertQuota(ctx context.Context, tx store.Tx, tenantID string, limit Resour
 			max_cpu_millis    = EXCLUDED.max_cpu_millis,
 			max_memory_bytes  = EXCLUDED.max_memory_bytes,
 			max_disk_bytes    = EXCLUDED.max_disk_bytes,
-			updated_at        = now()
+			updated_at        = clock_timestamp()
 		WHERE (tenant_quota.max_running_slots, tenant_quota.max_cpu_millis,
 		       tenant_quota.max_memory_bytes, tenant_quota.max_disk_bytes)
 		      IS DISTINCT FROM

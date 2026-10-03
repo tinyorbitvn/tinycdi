@@ -46,7 +46,7 @@ describe("admin: 403 handled", () => {
     loginCookies();
     makeAdmin(api);
     // Role revoked mid-session: the next tenant read answers 403.
-    failNextGet(api, "/v1/quota", 403, "FORBIDDEN");
+    failNextGet(api, "/v1/admin/tenants/acme/quota", 403, "FORBIDDEN");
     renderWithApi(<QuotaPage />, api);
 
     // The page chrome and an actionable error render — never a blank page.

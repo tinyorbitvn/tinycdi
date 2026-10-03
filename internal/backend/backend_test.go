@@ -360,7 +360,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, func(h http.Handler) http.Handler { return h })
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, func(h http.Handler) http.Handler { return h })
 	b := &Backend{log: testLog(), metrics: m}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
