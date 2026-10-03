@@ -170,7 +170,7 @@ objects. It **keeps**:
 |---|---|---|
 | `ingress.enabled` / `.className` / `.annotations` | `false`/`""`/`{}` | one Ingress per host; pods terminate TLS — use a pass-through backend annotation (e.g. nginx `backend-protocol: "HTTPS"`) |
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
-| `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through |
+| `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through. API-server-defaulted route fields (parentRef `group`/`kind`, rule `matches`, backendRef `group`/`kind`/`weight`) render explicitly so GitOps shows no drift |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
 ### Per-component tuning (`backend`, `operator`, `frontend`)
