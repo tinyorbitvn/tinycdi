@@ -111,6 +111,9 @@ objects. It **keeps**:
 - CRDs — Helm installs `crds/` once and never upgrades or deletes them.
   Reconcile CRD drift by hand: `kubectl diff -f crds/` then
   `kubectl apply -f crds/` after review. Deleting a CRD deletes every CR.
+  Under GitOps (Argo CD), a changed CRD needs a hard refresh before the
+  app syncs CRs that use the new fields — see `docs/runbooks/upgrade.md`
+  → "GitOps note".
 - Managed namespaces and everything inside (Workspaces, runtime pods,
   **user PVCs**) — they carry `helm.sh/resource-policy: keep`.
 - Secrets you created manually.
@@ -255,6 +258,9 @@ default branding are trademarks of TinyOrbit and are NOT covered by the MIT
 licence — see `TRADEMARKS.md`. Supplying your own `branding.json` replaces
 the default product name and marks; "TinyCDI by TinyOrbit" attribution is
 shown only for the default branding.
+
+The full branding guide — field-level fallbacks, favicon override and
+token reference — is `docs/branding.md`.
 
 ### Runtime pod defaults (`runtime`)
 
@@ -524,7 +530,9 @@ A tenant with **no** row at all gets `409 QUOTA_NOT_CONFIGURED` on every
 create, so NOTES warns about each entry that has no `quota` block.
 `values.schema.json` rejects negative or unparsable quantities. Declared
 values overwrite a hand-edited row for that tenant at the next backend
-start. See `docs/runbooks/install.md` → "Tenant quotas".
+start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
+flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
+usage, refusal codes, changing limits).
 
 ## Validation & tests
 
