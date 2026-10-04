@@ -112,6 +112,7 @@ checksum where the registry offers one (`common.sh` holds the pins).
 | `TCDI_QS_IMAGES` | `build` | `build` or `published` |
 | `TCDI_QS_IMAGE_TAG` | chart appVersion | tag for `published` images |
 | `TCDI_QS_STATE_DIR` | `~/.local/state/tcdi-quickstart` | kubeconfig, CA, passwords, logs |
+| `TCDI_QS_VALUES_OVERLAY` | unset | extra values file layered after `values.yaml` — e.g. `values-partitioned.yaml` installs with `backend.sessionCookieMode: partitioned` |
 
 Re-running `up.sh` on an existing cluster rebuilds the images and upgrades the
 release in place — the fast way to try a change.
@@ -173,3 +174,20 @@ the retained disk to a new workspace and read the file back with `kubectl exec`)
 and then runs `down.sh` twice, failing if any kind cluster remains. It runs on
 pushes to `main`, on manual dispatch and on pull requests that touch
 `hack/quickstart/`, `deploy/helm/` or `build/`; it is not a required check.
+
+The `partitioned` job is the same quickstart with
+`TCDI_QS_VALUES_OVERLAY=hack/quickstart/values-partitioned.yaml` —
+`backend.sessionCookieMode: partitioned` (SameSite=None; Secure;
+Partitioned / CHIPS) — and drives `smoke/partitioned.spec.ts` against it:
+login, create, the embedded Connected session, a backend rollout with
+in-frame reconnect, stop/start and logout, asserting the real Set-Cookie
+attributes and that the session listener rejects a cookie whose lease is
+dead. It needs a Chromium-based browser (CHIPS; the pinned Playwright
+Chromium is far past the 118 floor), runs on the same PR paths plus the
+weekly schedule, and is not a required check. Locally:
+
+```sh
+TCDI_QS_VALUES_OVERLAY=hack/quickstart/values-partitioned.yaml hack/quickstart/up.sh
+(cd hack/quickstart/smoke && npm ci && npx playwright test -c playwright.partitioned.config.ts)
+hack/quickstart/down.sh
+```

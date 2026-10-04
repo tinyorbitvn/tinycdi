@@ -698,6 +698,128 @@ jobs:
             exit 1
           fi
 
+  partitioned:
+    # B6-PART: the `partitioned` session-cookie mode (SameSite=None; Secure;
+    # Partitioned — CHIPS) had only unit coverage. Same kind plumbing as the
+    # quickstart job, installed with hack/quickstart/values-partitioned.yaml
+    # (TCDI_QS_VALUES_OVERLAY), then smoke/partitioned.spec.ts drives the
+    # full lifecycle — login, create, embedded Connected, backend rollout
+    # with in-frame reconnect (session rehydrate by cookie digest),
+    # stop/start, logout — and asserts the real Set-Cookie attributes and
+    # that the listener rejects a cookie whose lease is dead. Needs a
+    # Chromium browser (CHIPS, Chromium >= 118); the pinned @playwright/test
+    # ships 153. Gated like upgrade on the quickstart + cookie-mode surface,
+    # and additionally runs on the weekly schedule (the quickstart/upgrade
+    # jobs skip it) so the mode gets a weekly e2e even without PRs.
+    # Not a required check.
+    name: partitioned (kind up.sh + CHIPS cookie smoke)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      KIND_VERSION: "0.33.0"
+      KIND_BIN_SHA256: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
+      TCDI_QS_CLUSTER: tcdi-ci
+      TCDI_QS_VALUES_OVERLAY: hack/quickstart/values-partitioned.yaml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gate on partitioned-relevant changes
+        id: gate
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          case "${{ github.event_name }}" in
+            schedule|workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          git fetch -q origin "$BASE_REF"
+          # One line on purpose (see the kasm-contract gate comment).
+          PATHS_RE='^(hack/quickstart/|deploy/helm/|build/|internal/gateway/|internal/backend/|\.github/workflows/ci\.yml)'
+          changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
+          if grep -qE "$PATHS_RE" <<<"$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: hack/quickstart/smoke/package-lock.json
+      - name: shellcheck quickstart scripts
+        if: steps.gate.outputs.run == 'true'
+        run: shellcheck -x hack/quickstart/up.sh hack/quickstart/down.sh hack/quickstart/common.sh
+      - name: install helm ${{ env.HELM_VERSION }} (sha256-verified)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o /tmp/helm.tgz \
+            "https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz"
+          echo "${{ env.HELM_TGZ_SHA256 }}  /tmp/helm.tgz" | sha256sum -c -
+          tar -xzf /tmp/helm.tgz -C "$HOME/.local/bin" --strip-components=1 linux-amd64/helm
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: install kind v${{ env.KIND_VERSION }} (sha256-verified)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/v${{ env.KIND_VERSION }}/kind-linux-amd64"
+          echo "${{ env.KIND_BIN_SHA256 }}  $HOME/.local/bin/kind" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/kind"
+          "$HOME/.local/bin/kind" version
+      - name: up.sh (budget 20 min)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          start="$(date +%s)"
+          timeout --signal=TERM 1200 hack/quickstart/up.sh
+          echo "up.sh took $(( $(date +%s) - start )) s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: install playwright chromium
+        if: steps.gate.outputs.run == 'true'
+        working-directory: hack/quickstart/smoke
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: partitioned smoke (CHIPS cookie over the session lifecycle)
+        if: steps.gate.outputs.run == 'true'
+        working-directory: hack/quickstart/smoke
+        run: |
+          export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
+          npx playwright test -c playwright.partitioned.config.ts
+      - name: diagnostics
+        if: failure() && steps.gate.outputs.run == 'true'
+        run: |
+          export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
+          kubectl get pods -A -o wide || true
+          kubectl get workspaces,workspacetemplates -A || true
+          kubectl -n tinycdi-system logs deploy/backend --tail=100 || true
+          kubectl -n tinycdi-system logs deploy/operator --tail=100 || true
+          kubectl -n tcdi-qs-deps logs deploy/keycloak --tail=60 || true
+          for f in "$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/logs"/*.log; do
+            echo "== $f"; tail -n 30 "$f" || true
+          done
+          mkdir -p hack/quickstart/smoke/test-results
+          cp -a "$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/logs" \
+            hack/quickstart/smoke/test-results/cluster-logs || true
+      - name: upload smoke report
+        if: failure() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: partitioned-smoke
+          path: hack/quickstart/smoke/test-results
+          if-no-files-found: ignore
+      - name: down.sh leaves no kind cluster
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          hack/quickstart/down.sh
+          hack/quickstart/down.sh   # idempotent: a second run is a no-op
+          if kind get clusters 2>/dev/null | grep -q .; then
+            echo "::error::kind clusters left behind:"
+            kind get clusters
+            exit 1
+          fi
+
   actionlint:
     name: workflow lint (actionlint + yamllint + zizmor)
     runs-on: ubuntu-24.04
