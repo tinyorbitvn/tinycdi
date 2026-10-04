@@ -451,6 +451,15 @@ cookies and states always fall back to the client-IP key, so they cannot
 mint fresh buckets. See `docs/runbooks/capacity.md` ("Sign-in rate limits
 and NAT").
 
+The buckets are **in-memory per backend replica** (`internal/ratelimit`) —
+there is no shared counter, so with `backend.replicas: N` one client key
+can draw up to ~N× the configured budget as the edge spreads its requests
+across pods: 2 replicas × `-login-rate` 30/min + burst 10 is ~80/min
+aggregate for one anonymous IP. Size `-login-rate`/`-launch-rate` as
+aggregate-need ÷ replicas (or accept the N× headroom for a same-NAT
+rush), and remember the replica count when reading
+`tinycdi_rate_limited_total` against the flag.
+
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
 `X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value

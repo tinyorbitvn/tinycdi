@@ -4,6 +4,208 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
+## Upgrading from v0.2 to v0.3
+
+v0.3 ("Operate") keeps the v0.2 topology — the same `backend`,
+`operator` and `frontend` Deployments, the same session-domain routing —
+and upgrades **without dropping sessions**. What is new is fail-closed
+values: the render refuses the upgrade while a legacy
+`templates[].nodeSelector` entry or a non-allowlisted Kasm Browser
+template remains, `backend.trustedProxies` is required wherever an edge
+fronts the backend, four forward-only database migrations run, and both
+CRDs change. Read "Required values" before touching the release.
+
+### Prerequisites
+
+1. **Take the coordinated backup set** (`docs/runbooks/backup-restore.md`)
+   — the `pg_dump` specifically. Four embedded migrations run at backend
+   startup, all forward-only:
+   - `015_sessions_id_token` — adds `sessions.id_token`: the AEAD-sealed
+     OIDC ID token used as `id_token_hint` on logout (the raw JWT is
+     never stored; NULL rows just fall back to a `client_id`-only
+     end-session URL).
+   - `016_launch_ticket_clipboard` — adds `launch_ticket.clipboard_policy`:
+     the template's clipboard policy recorded at issue so the gateway
+     redirect can re-assert it.
+   - `017_sessions_drop_csrf` — drops `NOT NULL` on the dead v0.1 column
+     `sessions.csrf_token`. The column itself **stays** so a still-running
+     v0.2 replica can keep naming it; it drops in v0.4.
+   - `018_lease_stream_owner` — adds `stream_owner_tab`,
+     `stream_owner_epoch` and `portal_session_digest` to
+     `connection_lease` plus `portal_session_digest` to `launch_ticket`
+     (per-tab stream ownership — see "What happens to running
+     sessions").
+   All are additive/expand: new nullable columns plus one dropped
+   constraint, so a v0.2 replica still runs against the migrated schema
+   during the rolling window. Past the window, "old binary + new schema"
+   remains the unsupported direction — see "Schema migrations" below.
+2. **Apply the CRDs first.** v0.3 changes both `workspaces` and
+   `workspacetemplates` under `deploy/helm/tinycdi/crds/`: templates gain
+   the optional `lifecycle.imageUpdate` (`OnStart` default, `Pinned`)
+   and the Workspace `templateRef` CEL rule widens — the platform API
+   may re-point a workspace to a newer revision of its template family
+   only while `desiredState` is `Stopped`. Both changes are write-path
+   only; existing objects stay valid. Under Argo CD the cached schemas
+   must be refreshed before the app writes the new fields — see the
+   GitOps note under "Procedure".
+3. **No node or workload changes** — unless your nodes lack AppArmor
+   (`runtime.appArmor` under "Required values").
+
+### Required values
+
+`backend.trustedProxies` is an operational requirement (the backend
+warns, it does not fail); the Kasm and `nodeSelector` items fail the
+render; the rest are changed defaults you may want to pin back.
+
+- **`backend.trustedProxies`** — required whenever an ingress or Gateway
+  fronts the backend. v0.3 rate-limits the public API per client: the
+  anonymous surface (login start, unauthenticated session probes) keys
+  on the client IP, while signed-in traffic keys per validated session
+  and each OIDC callback on its validated state — so an office behind
+  one NAT keeps per-user budgets everywhere except the anonymous
+  sign-in start itself (`docs/runbooks/capacity.md`, "Sign-in rate
+  limits and NAT"). Leave it empty and every user collapses into the
+  edge's own IP bucket; the backend only logs a startup warning, it
+  does not fail. Note the buckets are in-memory per backend replica
+  (the chart default is 2; with N replicas the aggregate is ~N× the
+  configured rate — 2 × `-login-rate` 30/min + burst 10 ≈ 80/min for
+  one anonymous IP) — size `-login-rate` as aggregate-need ÷ replicas.
+- **Kasm Browser templates** — a seeded `adapter: kasm` template with
+  `experience: Browser` fails the render until its image is on
+  `kasmAdapter.browserAllowlist` or the template is re-classed
+  `experience: Desktop`. The allowlist accepts digest-pinned
+  browser-class `build/kasm-catalog.txt` entries only and ships empty —
+  see "Kasm browser templates — the E13 engine gate (fail-closed)"
+  below.
+- **`templates[].nodeSelector` is removed** — the v0.1 entry field now
+  fails the render; move the map to the typed
+  `templates[].spec.placement.nodeSelector`.
+- **Operator HA is on by default** — `operator.replicas: 2`,
+  `operator.leaderElect: true`, `operator.podDisruptionBudget.enabled:
+  true`, `frontend.pdb.enabled: true`. Size the cluster for two
+  operator pods; a single-replica install keeps `operator.replicas: 1`
+  (leader election with one replica is fine — it just holds the Lease).
+- **GitOps users: drop stale `ignoreDifferences`.** The chart now
+  renders every API-server-defaulted HTTPRoute field (`parentRefs`
+  group/kind, `rules[].matches`, `backendRefs` group/kind/weight) and
+  `spec.linux.adapter` explicitly — suppressions you kept for those
+  paths are dead config that can mask real drift.
+- **Nodes without AppArmor** (kind, SELinux-family distros): runtime
+  pods now carry `appArmorProfile: RuntimeDefault` by default
+  (`runtime.appArmor.requireRuntimeDefault: true`); set it to `false`
+  or the kubelet refuses runtime pods there. Templates with a Localhost
+  AppArmor profile (browser templates) cannot run on such nodes either
+  way — install.md "Nodes without AppArmor".
+
+### Values migration
+
+Only real changes; everything not listed keeps its name and meaning.
+
+| v0.2 | v0.3 |
+|---|---|
+| `templates[].nodeSelector` | `templates[].spec.placement.nodeSelector` — the old entry field fails the render |
+| `operator.replicas: 1`, `operator.leaderElect: false` | defaults `2` and `true` — pin `replicas: 1` to stay single-replica |
+| `operator.podDisruptionBudget.enabled: false`, `frontend.pdb.enabled: false` | both default `true` |
+| — | `backend.trustedProxies` — see "Required values" |
+| — | `kasmAdapter.browserAllowlist` — see the E13 gate section below |
+| — | `images.linuxBase` — the shared base layer the runtime profiles build FROM; pin its digest from the release's `runtime-images.json` alongside the profiles' (the chart never pulls it) |
+| — | `images.{linuxDesktop,browser}.engines` — optional; render as the templates' `image-chromium`/`image-firefox` annotations for the stale-image view |
+| — | `dashboards.*`, `alerts.*` — opt-in Grafana ConfigMaps and a PrometheusRule; require `backend.metrics.enabled` (observability.md) |
+| — | `runtime.appArmor.requireRuntimeDefault` — default `true`; set `false` on nodes without AppArmor |
+
+### What happens to running sessions
+
+**Sessions survive the upgrade.** The schema changes are expand-only,
+the backend pods roll one at a time (`maxUnavailable: 0`, surge-first —
+the chart default is 2 replicas, and with `replicas: 1` the new pod is
+Ready before the old one drains), and a terminating pod's pre-stop drain
+holds both listeners for the drain
+window (`-drain-window`, 8 s default): readiness drops at once, open
+reads keep being served, and only new launches and new stream upgrades
+get a retryable 503. A tab whose stream dies reconnects to a sibling
+inside its live lease — same session cookie, no re-launch. v0.3 also
+records the claiming portal tab on the lease, so a same-tab reconnect
+after a rollout resumes cleanly instead of flashing "open in another
+tab"; only an actual second tab raises that prompt.
+
+The one case that still costs sessions is every backend replica down
+past the 30 s lease TTL — the same exposure as any v0.2 rollout. A
+maintenance window is optional; pick a low-traffic one if one reconnect
+per user matters.
+
+### Procedure
+
+1. Translate values per the migration table (`trustedProxies`,
+   `browserAllowlist` if you run Kasm Browser templates,
+   `templates[].spec.placement.nodeSelector`).
+2. Take the backup set — the `pg_dump` is the rollback artefact.
+3. `kubectl diff -f deploy/helm/tinycdi/crds/`, review, then
+   `kubectl apply -f deploy/helm/tinycdi/crds/` — before the release,
+   not with it: Helm never upgrades objects in `crds/`.
+4. Pin digests: `images.{backend,frontend,operator}.digest` for the
+   platform release; `images.{linuxDesktop,browser}.digest` (with
+   `builtAt`/`engines`) and `images.linuxBase.digest` from
+   `runtime-images.json` for the runtime train.
+5. `helm template | kubectl diff`, then `helm upgrade` — the shared
+   "Procedure" below has the full commands (its steps 3–4).
+6. Watch the rollouts in order — `deployment/backend` (each pod's
+   streams drop and reconnect), `deployment/operator` (the standby
+   acquires the leader-election Lease when the leader pod goes),
+   `deployment/frontend`.
+
+Argo CD variant: sync `crds/` outside the application (or in an earlier
+sync wave), hard-refresh — `argocd app get <app> --hard-refresh` — so
+the cached OpenAPI schemas pick up `lifecycle.imageUpdate` and the wider
+`templateRef` rule, then sync the app (see "GitOps note — the Argo CD
+schema cache on CRD changes" below). Seeded templates diff as a
+delete+create of `<name>-<hash8>` revision objects, as always.
+
+### Post-upgrade checks
+
+- `SELECT version, name FROM schema_migrations ORDER BY version;` shows
+  015–018.
+- `kubectl -n <release-ns> get deploy` — `backend` and `operator` at
+  your configured replica counts (2/2 by default), `frontend` ready;
+  `kubectl -n <release-ns> get pdb` shows the operator and frontend
+  budgets.
+- `kubectl -n <release-ns> get lease` — the `b6b73984.cdi.tinyorbit.vn`
+  leader-election Lease names a holder.
+- The backend startup log carries no trusted-proxies warning once
+  `backend.trustedProxies` is set; a quick sign-in flood answers
+  `429 RATE_LIMITED` instead of queueing.
+- A synthetic login → launch → connect round-trip; reload the session
+  tab through a backend rollout and confirm it resumes without the
+  "open in another tab" prompt.
+- `tinycdi_lease_failures_total` back to baseline and
+  `tinycdi_quota_drift == 0`, as after any upgrade. With `dashboards` /
+  `alerts` enabled, the `tinycdi-overview` / `tinycdi-capacity`
+  ConfigMaps and the `tinycdi` PrometheusRule exist and panels show
+  data.
+
+### Rollback across v0.2 → v0.3
+
+Migrations 015–018 do not roll back with `helm rollback`. The clean
+downgrade is a **restore**: bring back the previous chart release
+(`helm upgrade` with the v0.2 chart and the pre-upgrade values file)
+**and** restore the pre-upgrade `pg_dump` per
+`docs/runbooks/backup-restore.md`. What is safe without a restore:
+
+- **Binary rollback inside the additive window.** 015/016/018 add only
+  nullable columns the v0.2 binaries never name, and 017 drops a
+  constraint on a column they still write — so `helm rollback` is a
+  workable short-term downgrade. It is still "old binary + new schema":
+  treat it as a bridge to the restore, not a steady state. Rows written
+  by v0.3 (sealed `id_token`s, recorded clipboard policies,
+  stream-owner evidence) are simply ignored under v0.2.
+- **Re-pointed workspaces.** `imageUpdate: OnStart` may have moved
+  stopped workspaces onto a newer `<name>-<hash8>` revision; a rollback
+  deletes revisions the old chart did not render. Before a start under
+  v0.2, check `spec.templateRef` still names an object that exists
+  (`kubectl -n <tenant-ns> get workspacetemplates`).
+- **The CRDs stay.** Do not "un-apply" the v0.3 CRDs — the wider CEL
+  rule and the new optional field harm nothing under v0.2, and a
+  `kubectl replace` of the older schema can prune stored data.
+
 ## Upgrading from v0.1 to v0.2
 
 v0.2 replaces the three v0.1 control-plane Deployments (`api`, `gateway`,
