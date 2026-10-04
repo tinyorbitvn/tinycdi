@@ -433,9 +433,9 @@ jobs:
             "internal/gateway FuzzHostClassify" \
             "internal/gateway FuzzLaunchRedeem" \
             "internal/api FuzzCallbackParsing"; do
-            set -- $spec
-            echo "== $2 (-fuzztime=$FUZZTIME)"
-            go test -count=1 -run='^$' -fuzz="^$2\$" -fuzztime="$FUZZTIME" "./$1"
+            read -r pkg target <<< "$spec"
+            echo "== $target (-fuzztime=$FUZZTIME)"
+            go test -count=1 -run='^$' -fuzz="^$target\$" -fuzztime="$FUZZTIME" "./$pkg"
           done
       - name: upload fuzz crashers
         if: failure() && steps.gate.outputs.run == 'true'
