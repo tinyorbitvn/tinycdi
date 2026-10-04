@@ -11,7 +11,8 @@
 # docs/quickstart.md. Re-running on an existing cluster upgrades in place.
 #
 # Environment: TCDI_QS_CLUSTER, TCDI_QS_DOMAIN, TCDI_QS_IMAGES (build|published),
-# TCDI_QS_IMAGE_TAG, TCDI_QS_STATE_DIR - see common.sh.
+# TCDI_QS_IMAGE_TAG, TCDI_QS_STATE_DIR, TCDI_QS_CHART, TCDI_QS_CHART_VERSION,
+# TCDI_QS_VALUES, TCDI_QS_{BROWSER,DESKTOP}_{DIGEST,BUILT_AT} - see common.sh.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=common.sh
@@ -262,7 +263,11 @@ GEN="$STATE_DIR/values-generated.yaml"
   echo "    - ipBlock: {cidr: ${api_ip}/32}"
   echo "images:"
   for c in backend operator frontend; do
-    echo "  ${c}:"
+    # Emit a component only when it has settings: a bare `backend:` merges
+    # as null, which relies on Helm's null-is-unset quirk for no gain.
+    if [ "$IMAGES" = build ] || [ -n "$IMAGE_TAG_RESOLVED" ]; then
+      echo "  ${c}:"
+    fi
     if [ "$IMAGES" = build ]; then
       echo "    registry: tcdi-qs.local"
       echo "    repository: tcdi-qs/${c}"
@@ -277,9 +282,11 @@ GEN="$STATE_DIR/values-generated.yaml"
   echo "    builtAt: \"${BROWSER_BUILT_AT}\""
 } >"$GEN"
 
-log "installing TinyCDI from ${REPO_ROOT}/deploy/helm/tinycdi"
-helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/tinycdi" -n "$NS_SYSTEM" \
-  -f "$QS_DIR/values.yaml" -f "$GEN" --wait --timeout 10m \
+log "installing TinyCDI from ${CHART}${CHART_VERSION:+ (version ${CHART_VERSION})}"
+helm_args=(upgrade --install "$RELEASE" "$CHART" -n "$NS_SYSTEM"
+  -f "$VALUES_FILE" -f "$GEN" --wait --timeout 10m)
+[ -z "$CHART_VERSION" ] || helm_args+=(--version "$CHART_VERSION")
+helm "${helm_args[@]}" \
   >"$STATE_DIR/logs/helm-tinycdi.log" 2>&1 || { tail -n 40 "$STATE_DIR/logs/helm-tinycdi.log" >&2; die "TinyCDI install failed"; }
 
 # ---- 6. verify end to end (TLS chain, routing, OIDC discovery) -------------
