@@ -69,10 +69,13 @@ else
       || { echo "::error::tags/list exceeded 50 pages" >&2; exit 1; }
     PAGE="$(tags_page "$TOKEN" "$URL")"
     MERGED="$(jq --argjson prev "$MERGED" '$prev + (.tags // [])' <<<"$PAGE")"
-    # RFC 5988 Link header: </v2/<repo>/tags/list?last=<tag>&n=1000>; rel="next"
+    # RFC 5988 Link header: </v2/<repo>/tags/list?last=<tag>&n=1000>; rel="next".
+    # sed (not grep) does the rel="next" match: the last page carries no
+    # Link header, and grep's no-match exit 1 would kill the loop under
+    # pipefail. An absent match must mean "done", not "error" — real
+    # failures (curl, bad JSON) above still die via set -e.
     NEXT="$(tr -d '\r' < "$HDRS" | awk 'tolower($0) ~ /^link:/' \
-      | tr ',' '\n' | grep 'rel="next"' \
-      | sed -n 's/.*<\(.*\)>.*/\1/p' | head -1)"
+      | tr ',' '\n' | sed -n '/rel="next"/ s/.*<\(.*\)>.*/\1/p' | head -1)"
     case "$NEXT" in
       "") URL="" ;;
       /*) URL="https://$REG$NEXT" ;;
