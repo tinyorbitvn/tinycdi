@@ -875,6 +875,56 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 
+  // The same restart, one beat later: the client's retry has ALREADY
+  // re-claimed at a much later epoch under our tab id when the poll looks —
+  // the epoch jump is claim evidence, so the watch waits it out (no
+  // re-navigation at the in-frame window's edge) and the page never reads
+  // "elsewhere".
+  it("a stream loss whose epoch already advanced under our tab id defers re-navigation (claim evidence), never 'elsewhere'", async () => {
+    const writes = watchFrameSrc();
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 1_000, reNavJitterMs: 0 },
+    });
+    await connectViaResume(ws, control);
+    const navs = writes.length;
+
+    // The first loss polls still show the pre-restart epoch: the watch
+    // records the baseline and announces the outage (Reconnecting).
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 2,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 2_000 });
+
+    // Then the re-claim lands at a much later epoch under OUR tab id: the
+    // evidence budget defers re-navigation, so the in-frame window elapsing
+    // below moves no frame.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    await new Promise((r) => setTimeout(r, 1_300)); // past the 1 s window
+    expect(writes.length).toBe(navs);
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+
+    // The landed claim turns connected — the page stayed ours throughout.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
   it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
     const { ws, control } = setupScripted({
       props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
