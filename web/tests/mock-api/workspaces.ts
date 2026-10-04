@@ -134,6 +134,9 @@ export function workspacesArea(ctx: MockContext): MockArea {
       return err(400, "INVALID_REQUEST", "retainedDataRef not found", false);
     }
     const running = desiredState === "Running";
+    // One stamp for the whole insert: the UI keys "create" vs "start" on
+    // createdAt === updatedAt, and two reads can straddle a millisecond.
+    const ts = ctx.nowIso();
     const ws = makeWorkspace({
       id: `${ctx.nextId("ws_")}X8KQ2M9X`,
       name: String(name ?? ""),
@@ -152,8 +155,8 @@ export function workspacesArea(ctx: MockContext): MockArea {
         : tpl.dataPolicyDefault) as WorkspaceFixture["dataPolicy"],
       conditions: [condition(ctx, "Admitted", "True", "QuotaReserved")],
       ...(typeof retainedDataRef === "string" ? { retainedDataRef } : {}),
-      createdAt: ctx.nowIso(),
-      updatedAt: ctx.nowIso(),
+      createdAt: ts,
+      updatedAt: ts,
     });
     state.workspaces.set(ws.id, ws);
     ctx.recordEvent(ws.id, {
