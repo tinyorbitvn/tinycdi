@@ -10,17 +10,21 @@ package api
 // configuration — never from the request.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 const testEndSessionPath = "/protocol/openid-connect/logout"
@@ -343,4 +347,163 @@ func TestLogout_UntrustedDiscoveredEndpointIs204(t *testing.T) {
 
 func TestOpenAPIContract_LogoutResult(t *testing.T) {
 	requireValid(t, "LogoutResult", LogoutResult{EndSessionURL: "https://idp.example/logout?client_id=tinycdi-portal"})
+}
+
+// --- S17: sign-out ends the session's reach over the desktop layer ------
+
+// fakeSessionRevoker records the portal session IDs sign-out asked it to
+// revoke and replays a scripted count/error.
+type fakeSessionRevoker struct {
+	calls []string
+	n     int
+	err   error
+}
+
+func (f *fakeSessionRevoker) RevokePortalSession(_ context.Context, id string) (int, error) {
+	f.calls = append(f.calls, id)
+	return f.n, f.err
+}
+
+// ctxProbingRevoker behaves like the real store implementation: when the
+// ctx it is handed is dead the revocation transaction cannot commit, so it
+// records the observed ctx error and returns it.
+type ctxProbingRevoker struct {
+	fakeSessionRevoker
+	ctxErr  error
+	bounded bool
+}
+
+func (f *ctxProbingRevoker) RevokePortalSession(ctx context.Context, id string) (int, error) {
+	f.calls = append(f.calls, id)
+	_, f.bounded = ctx.Deadline()
+	if err := ctx.Err(); err != nil {
+		f.ctxErr = err
+		return 0, err
+	}
+	return f.n, f.err
+}
+
+// disconnectOnDeleteStore cancels the request's context the moment the
+// session row is deleted — a client disconnect landing mid-logout, after
+// the handler has started but before the revocation runs.
+type disconnectOnDeleteStore struct {
+	SessionStore
+	cancel context.CancelFunc
+}
+
+func (s *disconnectOnDeleteStore) Delete(ctx context.Context, id string) error {
+	err := s.SessionStore.Delete(ctx, id)
+	s.cancel()
+	return err
+}
+
+// TestLogout_RevokeSurvivesClientDisconnect: a client that disconnects
+// mid-logout must not abort the revocation — the revoker runs on a context
+// detached from the request's cancellation (still bounded by the 5 s
+// revoke timeout), so the session's leases and tickets die even though the
+// response can no longer be delivered.
+func TestLogout_RevokeSurvivesClientDisconnect(t *testing.T) {
+	env := newTestEnv(t, nil) // no end-session endpoint: the 204 path
+	rv := &ctxProbingRevoker{fakeSessionRevoker: fakeSessionRevoker{n: 1}}
+	env.auth.WithSessionRevoker(rv)
+	sess := env.loginSession(t)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	env.auth.sessions = &disconnectOnDeleteStore{SessionStore: env.store, cancel: cancel}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil).WithContext(reqCtx)
+	req.AddCookie(sess)
+	rec := httptest.NewRecorder()
+	env.auth.LogoutHandler(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", rec.Code)
+	}
+	if len(rv.calls) != 1 || rv.calls[0] != sess.Value {
+		t.Fatalf("revocations = %v, want exactly [%q]", rv.calls, sess.Value)
+	}
+	if rv.ctxErr != nil {
+		t.Fatalf("revocation ran on a cancelled ctx: %v — client disconnect aborted it", rv.ctxErr)
+	}
+	if !rv.bounded {
+		t.Fatal("revocation ctx lost the 5 s timeout bound")
+	}
+}
+
+// TestLogout_RevokesSessionBoundMaterial: sign-out revokes the leases and
+// outstanding tickets bound to THIS session's credential digest — the
+// revoker sees the session's own ID — and the action lands in the audit
+// stream as session.revoke (the gateway's action name) with the lease
+// count, never the session material.
+func TestLogout_RevokesSessionBoundMaterial(t *testing.T) {
+	var buf bytes.Buffer
+	env := newLogoutEnv(t, nil)
+	rv := &fakeSessionRevoker{n: 2}
+	env.auth.WithSessionRevoker(rv).WithAuditSink(observability.NewJSONSink(&buf))
+	sess := env.loginSession(t)
+
+	resp := env.postLogout(t, sess, csrfTokenFor(sess.Value), nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200", resp.StatusCode)
+	}
+	if len(rv.calls) != 1 || rv.calls[0] != sess.Value {
+		t.Fatalf("revocations = %v, want exactly [%q]", rv.calls, sess.Value)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"action":"session.revoke"`) ||
+		!strings.Contains(out, `"outcome":"success"`) ||
+		!strings.Contains(out, `"leases_revoked":"2"`) {
+		t.Fatalf("missing session.revoke audit event: %s", out)
+	}
+	if strings.Contains(out, sess.Value) {
+		t.Fatal("audit event leaked the session ID")
+	}
+}
+
+// TestLogout_RevokeFailureStillSignsOut: a lease-store failure must never
+// keep the portal session or its cookie — it is logged, counted and
+// audited, and the sign-out still completes.
+func TestLogout_RevokeFailureStillSignsOut(t *testing.T) {
+	var buf bytes.Buffer
+	env := newTestEnv(t, nil) // no end-session endpoint: the 204 path
+	rv := &fakeSessionRevoker{err: errors.New("lease store down")}
+	env.auth.WithSessionRevoker(rv).WithAuditSink(observability.NewJSONSink(&buf))
+	sess := env.loginSession(t)
+
+	resp := env.postLogout(t, sess, csrfTokenFor(sess.Value), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
+	}
+	cleared := false
+	for _, h := range resp.Header.Values("Set-Cookie") {
+		if strings.HasPrefix(h, env.auth.SessionCookieName()+"=") && strings.Contains(h, "Max-Age=0") {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("session cookie not cleared on revoke failure")
+	}
+	r := env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session valid after logout: %d", r.StatusCode)
+	}
+	if out := buf.String(); !strings.Contains(out, `"action":"session.revoke"`) ||
+		!strings.Contains(out, `"outcome":"failure"`) {
+		t.Fatalf("missing failure audit event: %s", out)
+	}
+}
+
+// TestLogout_NoRevokerKeepsSignOut: with no revoker wired the handler is
+// exactly the portal-session destroy it always was.
+func TestLogout_NoRevokerKeepsSignOut(t *testing.T) {
+	env := newTestEnv(t, nil)
+	sess := env.loginSession(t)
+	resp := env.postLogout(t, sess, csrfTokenFor(sess.Value), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
+	}
 }

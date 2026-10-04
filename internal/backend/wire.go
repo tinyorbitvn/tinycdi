@@ -590,6 +590,12 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		return fmt.Errorf("oidc: %w", err)
 	}
 	authn.WithMetrics(b.metrics)
+	// Sign-out ends the portal session's live desktop material at the
+	// lease store (S17): every gateway replica's renew loop observes the
+	// revoke within one cycle and a copied workspace cookie resolves to a
+	// dead lease on any replica.
+	authn.WithSessionRevoker(broker.PublicRevoker{B: brk})
+	authn.WithAuditSink(observability.NewJSONSink(os.Stdout))
 
 	// The session domain maps workspace IDs to per-workspace launch hosts
 	// (D9) — launch URLs resolve to ws-<suffix>.<SessionDomain>/v1/launch.
