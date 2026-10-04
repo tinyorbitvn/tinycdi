@@ -452,13 +452,33 @@ mint fresh buckets. See `docs/runbooks/capacity.md` ("Sign-in rate limits
 and NAT").
 
 The buckets are **in-memory per backend replica** (`internal/ratelimit`) —
-there is no shared counter, so with `backend.replicas: N` one client key
-can draw up to ~N× the configured budget as the edge spreads its requests
-across pods: 2 replicas × `-login-rate` 30/min + burst 10 is ~80/min
-aggregate for one anonymous IP. Size `-login-rate`/`-launch-rate` as
-aggregate-need ÷ replicas (or accept the N× headroom for a same-NAT
-rush), and remember the replica count when reading
-`tinycdi_rate_limited_total` against the flag.
+there is no shared counter, so the chart passes
+`-rate-limit-replicas=backend.replicas` and every pod enforces its 1/N
+share of the configured budget (rate and burst divide, each clamped to a
+minimum of 1): the aggregate across replicas on an even spread is **~the
+configured rate** — 2 replicas × `-login-rate` 30/min + burst 10 lets one
+anonymous IP draw ~15/min + burst 5 per pod, ≈40/min in total (integer
+division rounds down, so the bound is never exceeded by rounding). Size
+`-login-rate`/`-launch-rate` as the aggregate you want to allow. Three
+edge cases to know:
+
+- **A rolling surge briefly loosens the bound.** While a rollout runs
+  N+1 pods each still enforces its 1/N share, so the transient aggregate
+  is up to ~(N+1)/N× configured — 1.5× on the default two replicas —
+  until the old pod drains.
+- **Out-of-band scaling desynchronises the divisor.** `kubectl scale`
+  changes the pod count but not the rendered flag; the aggregate becomes
+  ~configured × actual-pods ÷ N until the next `helm upgrade`. Scale by
+  editing `backend.replicas` and upgrading so the divisor tracks.
+- **An external HPA needs the divisor pinned to its ceiling.** The chart
+  does not ship an HPA for the backend; if you add one, set
+  `-rate-limit-replicas=<maxReplicas>` via `backend.extraArgs` (it
+  renders after the chart's value and wins) so the bound holds at full
+  scale — accept the looser limit below max, or keep
+  `backend.replicas` fixed.
+
+Remember the replica count when reading `tinycdi_rate_limited_total`
+against the flag — each series is per pod, at 1/N of the aggregate.
 
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
