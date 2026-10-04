@@ -29,6 +29,10 @@ IMAGE_TAG="${TCDI_QS_IMAGE_TAG:-}"
 CHART="${TCDI_QS_CHART:-$REPO_ROOT/deploy/helm/tinycdi}"
 CHART_VERSION="${TCDI_QS_CHART_VERSION:-}"
 VALUES_FILE="${TCDI_QS_VALUES:-$QS_DIR/values.yaml}"
+# An optional extra values file layered after VALUES_FILE and the generated
+# block — e.g. values-partitioned.yaml to install with the partitioned
+# (CHIPS) session-cookie mode for the partitioned smoke variant.
+VALUES_OVERLAY="${TCDI_QS_VALUES_OVERLAY:-}"
 STATE_ROOT="${TCDI_QS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tcdi-quickstart}"
 
 case "$CLUSTER" in
