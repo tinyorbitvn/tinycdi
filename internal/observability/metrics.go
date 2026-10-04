@@ -64,6 +64,12 @@ var (
 	rateLimitRoutes = map[string]struct{}{
 		"/v1/login": {}, "/v1/auth/callback": {}, "/v1/session": {}, "/v1/launch": {},
 	}
+	// rateLimitWindowRoutes are the bounded limiter families whose
+	// Postgres window check may fail (ADR 0006): the shared login bucket,
+	// the callback's per-IP ceiling and the launch budget.
+	rateLimitWindowRoutes = map[string]struct{}{
+		"login": {}, "callback_ceiling": {}, "launch": {},
+	}
 	// frameReloadDests are the browsing-context destinations a counted
 	// session-frame re-navigation may report (Sec-Fetch-Dest):
 	// iframe = the portal's embedded session frame, document = a
@@ -101,6 +107,7 @@ type Metrics struct {
 	logins         *prometheus.CounterVec
 	imageAge       *prometheus.GaugeVec
 	rateLimited    *prometheus.CounterVec
+	rateLimitStore *prometheus.CounterVec
 	frameReloads   *prometheus.CounterVec
 
 	tenants map[string]struct{}
@@ -180,6 +187,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "rate_limited_total",
 			Help: "Requests refused by the per-client rate limiters, by bounded route template.",
 		}, []string{"route"}),
+		rateLimitStore: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "rate_limit_store_errors_total",
+			Help: "Postgres-backed rate-limit window check failures (fail-open to the local ceiling), by bounded limiter family.",
+		}, []string{"route"}),
 		frameReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "session_frame_reloads_total",
 			Help: "Session-frame document loads re-navigating a session whose lease already had a stream, by bounded destination. Only same-tab reloads count: a load whose embedded claiming tab id differs from the lease's stream owner (second-tab takeover) is excluded, and the client's in-frame websocket retries never produce a document load.",
@@ -193,7 +204,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
-		m.rateLimited, m.frameReloads,
+		m.rateLimited, m.rateLimitStore, m.frameReloads,
 	)
 	return m
 }
@@ -305,6 +316,14 @@ func (m *Metrics) DeleteRuntimeImageAge(family string) {
 // /v1/launch, other}.
 func (m *Metrics) IncRateLimited(route string) {
 	m.rateLimited.WithLabelValues(boundValue(route, rateLimitRoutes)).Inc()
+}
+
+// IncRateLimitStoreError counts one failed Postgres rate-limit window
+// check; route is bounded to the limiter families {login,
+// callback_ceiling, launch, other}. Each failure falls back to the local
+// per-replica limiter for that request (ADR 0006 fail-open).
+func (m *Metrics) IncRateLimitStoreError(route string) {
+	m.rateLimitStore.WithLabelValues(boundValue(route, rateLimitWindowRoutes)).Inc()
 }
 
 // IncFrameReload counts one session-frame re-navigation: a document load on
