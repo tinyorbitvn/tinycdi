@@ -92,8 +92,36 @@ func TestRetainedApplierSameRevisionTwice(t *testing.T) {
 	if err := kc.Get(ctx, client.ObjectKey{Namespace: "ns-it", Name: provisioning.WorkspaceCRName(create.WorkspaceUID)}, cr); err != nil {
 		t.Fatalf("consuming CR: %v", err)
 	}
+	// Snapshot the side-effect surface the replay must not double: held
+	// quota, the retained rows and the events projection (outbox rows).
+	usedBefore, err := provisioning.HeldUsage(ctx, db.Pool(), tenant)
+	if err != nil {
+		t.Fatalf("held usage: %v", err)
+	}
 	if err := applier.Apply(ctx, create); err != nil {
 		t.Fatalf("re-apply create: %v", err)
+	}
+	usedAfter, err := provisioning.HeldUsage(ctx, db.Pool(), tenant)
+	if err != nil {
+		t.Fatalf("held usage after replay: %v", err)
+	}
+	if usedBefore != usedAfter {
+		t.Fatalf("replayed apply moved quota %+v -> %+v, want a no-op", usedBefore, usedAfter)
+	}
+	var nRows, nIntents int
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM retained_data WHERE tenant_id = $1`, tenant).Scan(&nRows); err != nil {
+		t.Fatalf("retained row count: %v", err)
+	}
+	if nRows != 1 {
+		t.Fatalf("retained_data rows = %d after replayed apply, want 1", nRows)
+	}
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM outbox_intent WHERE workspace_id = $1`, string(create.WorkspaceUID)).Scan(&nIntents); err != nil {
+		t.Fatalf("intent count: %v", err)
+	}
+	if nIntents != 1 {
+		t.Fatalf("outbox_intent rows = %d after replayed apply, want 1", nIntents)
 	}
 
 	got, err := rstore.GetRetained(ctx, tenant, rec.ID)
@@ -136,8 +164,28 @@ func TestRetainedApplierSameRevisionTwice(t *testing.T) {
 	if got.State != provisioning.RetainedStateRetained || got.ConsumingWorkspaceID != "" {
 		t.Fatalf("record after delete = %+v, want Retained unbound", got)
 	}
+	// The returned disk's held bytes moved exactly once: the replay must
+	// not subtract from the consumer or restore to the source again.
+	usedBefore, err = provisioning.HeldUsage(ctx, db.Pool(), tenant)
+	if err != nil {
+		t.Fatalf("held usage post-delete: %v", err)
+	}
 	if err := applier.Apply(ctx, del); err != nil {
 		t.Fatalf("re-apply delete: %v", err)
+	}
+	usedAfter, err = provisioning.HeldUsage(ctx, db.Pool(), tenant)
+	if err != nil {
+		t.Fatalf("held usage after delete replay: %v", err)
+	}
+	if usedBefore != usedAfter {
+		t.Fatalf("replayed delete moved quota %+v -> %+v, want a no-op", usedBefore, usedAfter)
+	}
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM retained_data WHERE tenant_id = $1`, tenant).Scan(&nRows); err != nil {
+		t.Fatalf("retained row count: %v", err)
+	}
+	if nRows != 1 {
+		t.Fatalf("retained_data rows = %d after replayed delete, want 1", nRows)
 	}
 	got, err = rstore.GetRetained(ctx, tenant, rec.ID)
 	if err != nil {

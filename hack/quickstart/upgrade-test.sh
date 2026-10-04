@@ -161,7 +161,7 @@ build_and_load() {
 # ${STATE_DIR}/logs so the CI artifact shows WHY the stack was unstable,
 # not only the playwright error. Best effort: never fails the caller.
 dump_cluster_diag() {
-  local d ns dep
+  local d ns pod pname
   d="${STATE_DIR}/logs/diag-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$d" || return 0
   kc get pods -A -o wide >"$d/pods.txt" 2>&1 || true
@@ -172,16 +172,34 @@ dump_cluster_diag() {
   kc get events -A --sort-by=.lastTimestamp >"$d/events.txt" 2>&1 || true
   kc get endpointslices -A -o yaml >"$d/endpointslices.yaml" 2>&1 || true
   kc get workspaces,workspacetemplates -A -o wide >"$d/workspaces.txt" 2>&1 || true
+  # The full CR carries the finalizer-progress annotation and conditions —
+  # the teardown-side story when a workspace delete misbehaves.
+  kc get workspaces.workspaces.cdi.tinyorbit.vn -A -o yaml >"$d/workspaces.yaml" 2>&1 || true
+  # PVC labels/annotations are the retained-inventory contract (retained
+  # tenant/owner/source-workspace/runtime + data-retained marker).
+  kc get pvc -A -o yaml >"$d/pvcs.yaml" 2>&1 || true
+  kc get pv -o wide >"$d/pvs.txt" 2>&1 || true
   kc get nodes -o wide >"$d/nodes.txt" 2>&1 || true
   kc describe nodes >"$d/nodes-describe.txt" 2>&1 || true
-  for ns_dep in \
-    "${NS_SYSTEM}/backend" "${NS_SYSTEM}/operator" "${NS_SYSTEM}/frontend" \
-    "${NS_INGRESS}/traefik" "${NS_DEPS}/keycloak" "kube-system/coredns"; do
-    ns="${ns_dep%/*}"; dep="${ns_dep#*/}"
-    kc -n "$ns" logs "deployment/$dep" --all-containers --tail=500 \
-      >"$d/log-${dep}.txt" 2>&1 || true
-    kc -n "$ns" logs "deployment/$dep" --all-containers --previous --tail=200 \
-      >"$d/log-${dep}-previous.txt" 2>&1 || true
+  # Every replica's log — `kubectl logs deployment/x` picks a single pod,
+  # and the retained-sync sweeper plus the operator's leader run on only
+  # one of the two replicas each, so a single-pod tail can miss the
+  # interesting replica entirely (observed on the run 37219121799
+  # retained-disk failure).
+  for ns in "$NS_SYSTEM" "$NS_INGRESS" "$NS_DEPS"; do
+    while IFS= read -r pod; do
+      [ -n "$pod" ] || continue
+      pname="${pod#pod/}"
+      kc -n "$ns" logs "$pod" --all-containers --tail=500 \
+        >"$d/log-${ns}-${pname}.txt" 2>&1 || true
+      kc -n "$ns" logs "$pod" --all-containers --previous --tail=200 \
+        >"$d/log-${ns}-${pname}-previous.txt" 2>&1 || true
+    done < <(kc -n "$ns" get pods -o name 2>/dev/null)
+  done
+  for pod in $(kc -n kube-system get pods -o name 2>/dev/null | grep -E "coredns|kindnet"); do
+    pname="${pod#pod/}"
+    kc -n kube-system logs "$pod" --all-containers --tail=300 \
+      >"$d/log-kube-system-${pname}.txt" 2>&1 || true
   done
   kc -n "$NS_DEPS" logs statefulset/postgres --tail=300 \
     >"$d/log-postgres.txt" 2>&1 || true

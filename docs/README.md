@@ -45,6 +45,10 @@
   vulnerability handling policy
 - [security/provenance.md](security/provenance.md) — release signing, SBOMs
   and SLSA provenance verification
+- [security/threat-model.md](security/threat-model.md) — v1.0 security
+  review preparation: assets, actors, trust boundaries, current controls
+- [security/test-inventory.md](security/test-inventory.md) — security-relevant
+  tests and CI scanners with paths
 
 ## ADRs
 
