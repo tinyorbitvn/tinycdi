@@ -123,6 +123,13 @@ export interface ReloadRecovery {
    * and is never seamless (backlog 4).
    */
   seamless: boolean;
+  /**
+   * Whether the 60 s window after the reload held at least one
+   * observation. "none" is the explicit no-evidence verdict — the session
+   * may have stopped reporting after the reload — and report gates count
+   * it as a failed reload check, never a pass (backlog 4).
+   */
+  evidence: "observed" | "none";
 }
 
 /**
@@ -135,11 +142,11 @@ export interface ReloadRecovery {
 export function reloadRecovery(observations: Observation[], reloadedAt: number): ReloadRecovery {
   const after = [...observations].sort((a, b) => a.at - b.at).filter((o) => o.at >= reloadedAt);
   const inWindow = after.filter((o) => o.at - reloadedAt <= RELOAD_RECONNECT_WINDOW_MS);
-  if (inWindow.length === 0) return { reconnectMs: null, seamless: false };
+  if (inWindow.length === 0) return { reconnectMs: null, seamless: false, evidence: "none" };
   const lost = inWindow.find((o) => o.state !== "connected");
-  if (!lost) return { reconnectMs: 0, seamless: true };
+  if (!lost) return { reconnectMs: 0, seamless: true, evidence: "observed" };
   const back = after.find((o) => o.at > lost.at && o.state === "connected");
-  return { reconnectMs: back ? back.at - lost.at : null, seamless: false };
+  return { reconnectMs: back ? back.at - lost.at : null, seamless: false, evidence: "observed" };
 }
 
 /**

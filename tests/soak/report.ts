@@ -12,6 +12,7 @@ import {
   elsewhereTransitions,
   longestDisconnectedGapMs,
   percentile,
+  RELOAD_RECONNECT_WINDOW_MS,
   reloadRecovery,
   stateSpans,
   type Observation,
@@ -127,6 +128,7 @@ export function buildReport(
         s.launchedAt !== null && connectedAt !== null ? connectedAt - s.launchedAt : null,
       reconnectMs: reload === null ? null : reload.reconnectMs,
       seamless: reload?.seamless ?? false,
+      reloadEvidence: reload === null ? null : reload.evidence,
       longestGapMs: longestDisconnectedGapMs(s.observations, s.runEndAt),
       nonConnectedStates: spans,
       elsewhereTransitions: elsewhereTransitions(s.observations),
@@ -163,8 +165,17 @@ export function buildReport(
   const connectP95 = percentile(connects, 95);
   const reconnectP95 = percentile(reconnects, 95);
   const worstGap = Math.max(0, ...rows.map((r) => r.longestGapMs));
+  // A reloaded session whose 60 s window held no observation proves nothing:
+  // the reload check failed for lack of evidence, never a pass (backlog 4).
+  const unprovenReloads = rows.filter((r) => r.reloadEvidence === "none").length;
 
   const failures: string[] = [...extraFailures];
+  if (unprovenReloads > 0) {
+    failures.push(
+      `${unprovenReloads} session(s) reloaded with no observation inside the ` +
+        `${RELOAD_RECONNECT_WINDOW_MS / 1000}s window: reload check unproven`,
+    );
+  }
   if (thresholds.connectP95Ms !== null && connectP95 !== null && connectP95 > thresholds.connectP95Ms) {
     failures.push(`connect p95 ${connectP95}ms exceeds ${thresholds.connectP95Ms}ms`);
   }
