@@ -16,6 +16,7 @@ substitute for review).
 | Frontend server | `go test ./build/frontend` | folded into the Go test run |
 | Portal web | `npm ci`, `tsc`, `vitest`, `vite build` | `ci.yml` job `portal ui` |
 | Soak harness | `npm ci`, `tsc`, vitest + drills dry-run | `ci.yml` job `soak harness`; live soak out of band |
+| Go fuzz | `go test -fuzz=<target>` | `ci.yml` job `go fuzz`: 30 s per target on PRs touching the fuzzed packages, 10 m per target on the weekly schedule; crashers uploaded as artifacts |
 | Quickstart e2e | `hack/quickstart/up.sh` on kind + Playwright portal smoke | `ci.yml` job `quickstart` |
 | Upgrade drill | previous release → tree on kind | `ci.yml` job `upgrade` |
 
@@ -83,6 +84,34 @@ substitute for review).
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
+
+### Fuzz targets (stdlib `testing.F`, run by the `go fuzz` CI job)
+
+- `internal/api/fuzz_callback_test.go` — `FuzzCallbackParsing`: OIDC
+  callback query params (state/code/error), raw Cookie header →
+  AEAD login-state open (test keys) and the code-exchange boundary
+  against the in-process issuer; asserts exact rejection order and
+  determinism, and that the callback rate-limit key is minted only for a
+  validated state.
+- `internal/gateway/fuzz_test.go` — `FuzzHostClassify`: arbitrary Host
+  headers (ports, IPv6 literals, IDNA/punycode, trailing dots, case) ×
+  request paths through `ServeHTTP`; asserts the host-class contract
+  (session host / control host / foreign → 421) is total and
+  deterministic.
+- `internal/gateway/fuzz_test.go` — `FuzzLaunchRedeem`: arbitrary launch
+  methods, query strings and form bodies through ticket redemption on an
+  in-memory digest store (tickets keyed by SHA-256 like
+  `launch_ticket.ticket_hash`); asserts the bounded status set, single
+  use, host binding, and that a 303 implies a well-formed cookie + clean
+  redirect with no ticket leakage.
+- `internal/ratelimit/fuzz_test.go` — `FuzzClientKey`: arbitrary
+  RemoteAddr, X-Forwarded-For lines and `-trusted-proxies` CIDR lists;
+  asserts the right-most-untrusted-entry contract end to end plus
+  deterministic, canonical-CIDR-only proxy parsing.
+- `internal/sessionhost/fuzz_test.go` — `FuzzDomainMatch`: arbitrary
+  session-domain config strings and Host headers through `ParseDomain`,
+  `Match`, `Label`/`WorkspaceID`; asserts determinism and
+  accept-implies-well-formed round-trips.
 
 ## 4. Broker, tickets, leases, internal mTLS
 
@@ -275,8 +304,6 @@ context):
 
 ## 11. Gaps a reviewer will notice
 
-- No fuzzing anywhere (OIDC callback parsing, Host-header parsing, ticket
-  redemption are the natural targets).
 - No automated test asserts that sign-out revokes live leases (open item
   S17).
 - `partitioned` cookie mode coverage is unit-level; no kind/e2e coverage.
