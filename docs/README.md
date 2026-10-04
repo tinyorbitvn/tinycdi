@@ -32,6 +32,11 @@
 - [runbooks/stuck-finalizer.md](runbooks/stuck-finalizer.md) — workspace
   teardown finalizer recovery
 
+## Releases
+
+- [releases/v0.3.0.md](releases/v0.3.0.md) — v0.3.0 release notes
+  (source for the GitHub release)
+
 ## Security
 
 - [../SECURITY.md](../SECURITY.md) — security policy, private reporting,

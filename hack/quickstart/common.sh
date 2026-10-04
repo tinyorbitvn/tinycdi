@@ -21,6 +21,14 @@ DOMAIN="${TCDI_QS_DOMAIN:-tcdi.localtest.me}"
 # (default: the chart appVersion) - use it on a release checkout to skip the build.
 IMAGES="${TCDI_QS_IMAGES:-build}"
 IMAGE_TAG="${TCDI_QS_IMAGE_TAG:-}"
+# What `helm upgrade --install` targets: the chart in this tree by default,
+# an OCI ref or a packaged .tgz when TCDI_QS_CHART says so (the N-1 -> N
+# upgrade test installs the previous release from the registry).
+# TCDI_QS_CHART_VERSION pins the OCI version; TCDI_QS_VALUES swaps the
+# primary values file (a previous release's chart knows fewer keys).
+CHART="${TCDI_QS_CHART:-$REPO_ROOT/deploy/helm/tinycdi}"
+CHART_VERSION="${TCDI_QS_CHART_VERSION:-}"
+VALUES_FILE="${TCDI_QS_VALUES:-$QS_DIR/values.yaml}"
 STATE_ROOT="${TCDI_QS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tcdi-quickstart}"
 
 case "$CLUSTER" in
@@ -60,11 +68,13 @@ TRAEFIK_DIGEST="sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b2
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc"
 POSTGRES_IMAGE="docker.io/library/postgres:18.0@sha256:41fc5342eefba6cc2ccda736aaf034bbbb7c3df0fdb81516eba1ba33f360162c"
 # Runtime images: the published runtime release train (runtime-2026.10.02),
-# digest-pinned exactly like a production values file would.
-BROWSER_DIGEST="sha256:b586ae0e271fa28226b6da3d9e54e1171eee2ed0d4afbd0d011424b7ab6cdc6d"
-BROWSER_BUILT_AT="2026-10-02T11:02:50Z"
-DESKTOP_DIGEST="sha256:5f14b9e80b1de58d8eb962c1e11c7211684dc51e6d7586e5331a088f7c1fab14"
-DESKTOP_BUILT_AT="2026-10-02T11:02:50Z"
+# digest-pinned exactly like a production values file would. The env
+# overrides exist for installing a previous release with ITS chart's pinned
+# runtime digests (upgrade test); leave them unset otherwise.
+BROWSER_DIGEST="${TCDI_QS_BROWSER_DIGEST:-sha256:b586ae0e271fa28226b6da3d9e54e1171eee2ed0d4afbd0d011424b7ab6cdc6d}"
+BROWSER_BUILT_AT="${TCDI_QS_BROWSER_BUILT_AT:-2026-10-02T11:02:50Z}"
+DESKTOP_DIGEST="${TCDI_QS_DESKTOP_DIGEST:-sha256:5f14b9e80b1de58d8eb962c1e11c7211684dc51e6d7586e5331a088f7c1fab14}"
+DESKTOP_BUILT_AT="${TCDI_QS_DESKTOP_BUILT_AT:-2026-10-02T11:02:50Z}"
 
 # ---- dev-only demo login (loopback-only, throwaway cluster) ------------------
 # These credentials exist ONLY inside the kind cluster's dev Keycloak realm.

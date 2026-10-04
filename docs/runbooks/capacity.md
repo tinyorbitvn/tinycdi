@@ -188,6 +188,12 @@ What that means for sizing:
   that is live on the serving replica are per-session; a *first* launch
   (no cookie yet, or a cookie only a sibling replica knows) is per-IP —
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
+- **Budgets multiply by replica.** The limiter is in-memory per backend
+  replica (`internal/ratelimit`) — no shared counter — so one key's
+  effective budget is up to ~`backend.replicas` × the flag on an even
+  spread: 2 replicas × `-login-rate` 30/min + burst 10 ≈ 80/min
+  aggregate for one anonymous IP. Size the flag as aggregate-need ÷
+  replicas; a same-IP ramp trips N buckets, not one.
 - The per-key limits and the limiter's key-space bound are unchanged;
   `backend.trustedProxies` must still name the edge's CIDRs or every user
   collapses into the edge's own IP bucket regardless.
