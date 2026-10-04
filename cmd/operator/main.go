@@ -520,8 +520,9 @@ func main() {
 	setupLog.Info("Starting manager")
 	ctx := ctrl.SetupSignalHandler()
 	if bkc != nil {
-		// Hot-reload the operator mTLS client certificate (E5); the
-		// loop ends when the manager's signal context is cancelled.
+		// Hot-reload the operator mTLS client certificate and the
+		// broker server CA bundle (E5); the loops end when the
+		// manager's signal context is cancelled.
 		go bkc.Run(ctx)
 	}
 	if err := mgr.Start(ctx); err != nil {
