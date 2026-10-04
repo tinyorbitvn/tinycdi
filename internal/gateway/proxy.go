@@ -520,11 +520,26 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	// load cannot see these, so the gateway counts them server-side.
 	// Websockify upgrades and asset fetches never match.
 	if dest, nav := frameNavDest(r, clean); nav && s.hadStream() {
-		if g.cfg.Metrics != nil {
-			g.cfg.Metrics.IncFrameReload(dest)
-		}
-		if g.cfg.Logger != nil {
-			g.cfg.Logger.Debug("session frame re-navigation", "dest", dest, "lease", s.leaseID())
+		// FX-R31 same-tab check: the frame URL embeds the claiming tab's id
+		// in its `path` client setting (path=websockify?tcdi_tab=<id>). A
+		// load carrying an id that differs from the lease's recorded stream
+		// owner is a second tab of the same browser taking the session over
+		// via the shared cookie — a takeover, not a re-navigation — and is
+		// not counted. Only a CONFIRMED different owner excludes: loads
+		// with no usable id and leases with no recorded owner cannot be
+		// told apart from a reload, so they still count. The id itself
+		// never reaches a metric label or log field.
+		if docTab, prev := docOwnerTab(r), s.streamOwner(); docTab != "" && prev != "" && docTab != prev {
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame tab-takeover load", "dest", dest)
+			}
+		} else {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncFrameReload(dest)
+			}
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame re-navigation", "dest", dest, "lease", s.leaseID())
+			}
 		}
 	}
 	var gen int
@@ -660,6 +675,29 @@ func frameNavDest(r *http.Request, cleanPath string) (string, bool) {
 		return "other", true
 	}
 	return "", false
+}
+
+// docOwnerTab extracts the claiming tab id a document load carries in its
+// `path` client setting: the portal's frame URL (and the gateway's own
+// post-launch DesktopPath) is ".../?...&path=websockify?tcdi_tab=<id>" so
+// the load's upcoming stream claim is pre-armed with it (FX-R31). Returns
+// "" when the param is absent or the embedded id is malformed — an
+// unclassifiable load, never a different-tab proof.
+func docOwnerTab(r *http.Request) string {
+	p := r.URL.Query().Get("path")
+	i := strings.IndexByte(p, '?')
+	if i < 0 {
+		return ""
+	}
+	q, err := url.ParseQuery(p[i+1:])
+	if err != nil {
+		return ""
+	}
+	t := q.Get(streamOwnerTabParam)
+	if !broker.ValidStreamOwnerTab(t) {
+		return ""
+	}
+	return t
 }
 
 // ensureTarget resolves the upstream once per session and builds the

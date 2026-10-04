@@ -387,6 +387,28 @@ func (s *session) streamCount() int {
 	return len(s.conns)
 }
 
+// streamOwner returns the lease's current stream-owner tab id as this
+// replica last observed it (claimStream's own write or the last
+// renew/rehydrate); "" when no valid id is recorded.
+func (s *session) streamOwner() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lease.StreamOwnerTab
+}
+
+// setStreamOwner records the owner this process's claim just wrote — the
+// local mirror of the lease's stream_owner_tab until the next renew
+// confirms it ("" when the claim carried no valid id, matching the NULL
+// the broker stores).
+func (s *session) setStreamOwner(ownerTab string) {
+	if !broker.ValidStreamOwnerTab(ownerTab) {
+		ownerTab = ""
+	}
+	s.mu.Lock()
+	s.lease.StreamOwnerTab = ownerTab
+	s.mu.Unlock()
+}
+
 // hadStream reports whether this lease already claimed a live stream —
 // the "already had a stream on the same lease" half of the frame-reload
 // counter (NAVTEL-1): a document load before then is a first load, after
@@ -643,5 +665,6 @@ func (g *Gateway) claimStream(ctx context.Context, s *session, ownerTab string) 
 		return 0, err
 	}
 	s.setStreamEpoch(epoch)
+	s.setStreamOwner(ownerTab)
 	return epoch, nil
 }

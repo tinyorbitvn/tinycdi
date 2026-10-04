@@ -225,6 +225,7 @@ func (f *fakeBroker) RenewLease(_ context.Context, gw broker.GatewayIdentity, le
 		if l.ID == leaseID {
 			l.ExpiresAt = time.Now().Add(broker.LeaseTTL)
 			l.StreamEpoch = f.epochs[leaseID]
+			l.StreamOwnerTab = f.ownerTabOf(leaseID)
 			return l, nil
 		}
 	}
@@ -335,6 +336,7 @@ func (f *fakeBroker) LeaseBySession(ctx context.Context, _ broker.GatewayIdentit
 	for _, l := range f.leases {
 		if l.ID == leaseID {
 			l.StreamEpoch = f.epochs[leaseID]
+			l.StreamOwnerTab = f.ownerTabOf(leaseID)
 			return l, nil
 		}
 	}
@@ -441,6 +443,17 @@ func (f *fakeBroker) failRenew(leaseID string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewErr[leaseID] = err
+}
+
+// ownerTabOf mirrors the broker's owner columns for lease reads: the last
+// claimed id, but only when it is a valid id (an invalid/empty claim stores
+// NULL, i.e. no owner) and the epoch that recorded it is still current —
+// the fake's ClaimStream writes both atomically, so it always is.
+func (f *fakeBroker) ownerTabOf(leaseID string) string {
+	if t := f.ownerTabs[leaseID]; broker.ValidStreamOwnerTab(t) {
+		return t
+	}
+	return ""
 }
 
 func (f *fakeBroker) epochOf(leaseID string) uint64 {

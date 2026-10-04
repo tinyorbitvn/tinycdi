@@ -212,7 +212,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Session frame re-navigations / 5m",
-      "description": "Document loads on the session host for sessions whose lease already had a stream — the portal watch's lease-active frame reloads (FX-R32 fallback) and user reloads/new-tab loads. 0 at steady state; up to ~1 per session per rollout.",
+      "description": "Same-tab frame re-navigations: document loads on the session host for sessions whose lease already had a stream, excluding second-tab takeovers (different claiming tcdi_tab) and the client's in-frame websocket retries. 0 at steady state; up to ~1 per session per rollout.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
       "targets": [

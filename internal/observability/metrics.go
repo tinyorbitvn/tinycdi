@@ -182,7 +182,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}, []string{"route"}),
 		frameReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "session_frame_reloads_total",
-			Help: "Session-frame document loads for sessions whose lease already had a stream — frame re-navigations only; the KasmVNC client's in-frame websocket retries never produce a document load and are never counted. By bounded destination.",
+			Help: "Session-frame document loads re-navigating a session whose lease already had a stream, by bounded destination. Only same-tab reloads count: a load whose embedded claiming tab id differs from the lease's stream owner (second-tab takeover) is excluded, and the client's in-frame websocket retries never produce a document load.",
 		}, []string{"dest"}),
 		tenants: map[string]struct{}{},
 	}

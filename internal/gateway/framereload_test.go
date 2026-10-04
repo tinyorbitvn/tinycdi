@@ -12,6 +12,7 @@ package gateway_test
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +20,18 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
+
+// Two valid stream-owner tab ids (32 lowercase hex, broker-valid).
+const (
+	testTabA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTabB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// frameURL builds a session-frame document URL carrying the claiming tab
+// id the way the portal's sessionFrameUrl does: ?...&path=websockify?tcdi_tab=<id>.
+func frameURL(tab string) string {
+	return "/?path=" + url.QueryEscape("websockify?tcdi_tab="+tab)
+}
 
 // navMeta carries the fetch-metadata headers a browser sends on a frame or
 // top-level navigation (Sec-Fetch-Mode: navigate + the context's dest).
@@ -194,6 +207,80 @@ func TestFrameReload_NoDirectory(t *testing.T) {
 
 	if got := frameReloads(t, reg, "iframe"); got != 1 {
 		t.Fatalf("frame_reloads{dest=iframe} = %v, want 1 (local stream record)", got)
+	}
+}
+
+// A second tab of the same browser resumes through the SHARED session
+// cookie on the same lease (FX-R31): its frame load carries its own
+// claiming id in path=websockify?tcdi_tab=<id>, which differs from the
+// lease's recorded stream owner — a takeover, not a re-navigation.
+func TestFrameReload_TabTakeoverExcluded(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-fr-take", testWSUID)
+	_, srv := newMetricsReplica(t, fb, "gw-A", m)
+	cookie := launchOK(t, srv, testHost, "tk-fr-take")
+
+	// Tab A's stream claims the lease under tcdi_tab=A.
+	up := upgrade(t, srv, testHost, "/websockify?tcdi_tab="+testTabA, cookie, map[string]string{"Origin": testOrigin})
+	if up.StatusCode != http.StatusSwitchingProtocols {
+		drain(up)
+		t.Fatalf("upgrade = %d, want 101", up.StatusCode)
+	}
+	defer up.Body.Close()
+
+	// Tab B's frame load on the same lease: excluded.
+	resp := proxied(t, srv, testHost, frameURL(testTabB), cookie, navMeta("iframe"))
+	drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("takeover load = %d, want 200", resp.StatusCode)
+	}
+	if got := metricValue(t, reg, "tinycdi_session_frame_reloads_total", nil); got != 0 {
+		t.Fatalf("frame_reloads = %v after tab-B takeover load, want 0", got)
+	}
+
+	// Tab A's own re-navigation carries its own id: still counts.
+	resp = proxied(t, srv, testHost, frameURL(testTabA), cookie, navMeta("iframe"))
+	drain(resp)
+	if got := frameReloads(t, reg, "iframe"); got != 1 {
+		t.Fatalf("frame_reloads{dest=iframe} = %v, want 1", got)
+	}
+}
+
+// The same exclusion survives rehydration: the lease's stream owner comes
+// back with the rebuilt session, so a second tab landing on a sibling
+// replica is still recognized as a takeover.
+func TestFrameReload_TabTakeoverExcludedAfterRehydrate(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-fr-take2", testWSUID)
+	_, srvA := newReplica(t, fb, "gw-A")
+	_, srvB := newMetricsReplica(t, fb, "gw-B", m)
+	cookie := launchOK(t, srvA, testHost, "tk-fr-take2")
+
+	up := upgrade(t, srvA, testHost, "/websockify?tcdi_tab="+testTabA, cookie, map[string]string{"Origin": testOrigin})
+	if up.StatusCode != http.StatusSwitchingProtocols {
+		drain(up)
+		t.Fatalf("upgrade on A = %d, want 101", up.StatusCode)
+	}
+	defer up.Body.Close()
+
+	resp := proxied(t, srvB, testHost, frameURL(testTabB), cookie, navMeta("iframe"))
+	drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rehydrated takeover load on B = %d, want 200", resp.StatusCode)
+	}
+	if got := metricValue(t, reg, "tinycdi_session_frame_reloads_total", nil); got != 0 {
+		t.Fatalf("frame_reloads = %v on B, want 0 (tab-B takeover, not a reload)", got)
+	}
+
+	// And the owning tab's reload on B still counts.
+	resp = proxied(t, srvB, testHost, frameURL(testTabA), cookie, navMeta("iframe"))
+	drain(resp)
+	if got := frameReloads(t, reg, "iframe"); got != 1 {
+		t.Fatalf("frame_reloads{dest=iframe} = %v on B, want 1", got)
 	}
 }
 
