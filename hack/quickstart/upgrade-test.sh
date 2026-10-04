@@ -57,7 +57,7 @@ apply_upgrade() {
   api_ip="$(kc -n default get endpointslices -l kubernetes.io/service-name=kubernetes \
     -o jsonpath='{.items[0].endpoints[0].addresses[0]}')"
   api_port="$(kc -n default get endpointslices -l kubernetes.io/service-name=kubernetes \
-    -o jsonpath='{.items[0].endpoints[0].ports[0].port}')"
+    -o jsonpath='{.items[0].ports[0].port}')"
   pod_cidr="$(kc get nodes -o jsonpath='{.items[0].spec.podCIDR}')"
   if [ -z "$api_ip" ] || [ -z "$api_port" ] || [ -z "$pod_cidr" ]; then
     die "could not resolve apiserver endpoint or node podCIDR"
