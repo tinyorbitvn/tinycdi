@@ -99,6 +99,17 @@ func newPKI(t *testing.T) *pki {
 
 func (p *pki) issue(t *testing.T, cn string, server bool) tls.Certificate {
 	t.Helper()
+	if server {
+		return p.issueSAN(t, cn, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			nil, []net.IP{net.ParseIP("127.0.0.1")})
+	}
+	return p.issueSAN(t, cn, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil, nil)
+}
+
+// issueSAN issues a leaf with explicit SANs so tests can control the
+// hostname the client must match.
+func (p *pki) issueSAN(t *testing.T, cn string, eku []x509.ExtKeyUsage, dns []string, ips []net.IP) tls.Certificate {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -110,12 +121,9 @@ func (p *pki) issue(t *testing.T, cn string, server bool) tls.Certificate {
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-	}
-	if server {
-		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-		tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
-	} else {
-		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		ExtKeyUsage:  eku,
+		DNSNames:     dns,
+		IPAddresses:  ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, &key.PublicKey, p.caKey)
 	if err != nil {
@@ -321,20 +329,26 @@ func writeClientPair(t *testing.T, certFile, keyFile string, cert tls.Certificat
 		t.Fatal(err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	for path, data := range map[string][]byte{certFile: certPEM, keyFile: keyPEM} {
-		tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tmp.Write(data); err != nil {
-			t.Fatal(err)
-		}
-		if err := tmp.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(tmp.Name(), path); err != nil {
-			t.Fatal(err)
-		}
+	writeAtomic(t, certFile, certPEM)
+	writeAtomic(t, keyFile, keyPEM)
+}
+
+// writeAtomic replaces path with data via temp-file + rename, like a
+// Kubernetes Secret volume swap.
+func writeAtomic(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		t.Fatal(err)
 	}
 }
 

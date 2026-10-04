@@ -715,11 +715,12 @@ v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
   **CN must stay `operator`** (or match `backend.operatorCN`) — the broker's
   workspace revoke/drain routes accept no other identity (ADR 0003).
 - Rotation needs **no restart**: the operator hot-reloads its broker
-  client certificate and the backend hot-reloads the internal listener's
-  client-CA bundle plus all three listener certs — the updated Secret
-  material lands on the next handshake. Mounts refresh within the kubelet
-  sync period (~1 min), so a CA-swap rollout should still follow the order
-  above rather than racing the reload.
+  client certificate and the CA bundle it verifies the internal listener
+  against (both re-checked every 30 s), and the backend hot-reloads the
+  internal listener's client-CA bundle plus all three listener certs —
+  the updated Secret material lands on the next handshake. Mounts refresh
+  within the kubelet sync period (~1 min), so a CA-swap rollout should
+  still follow the order above rather than racing the reload.
 - `devAllowNoBroker` exists to run the operator without a broker in dev —
   it must never appear in a release values file; the operator fails fast
   if the broker client is unconfigured. The render rejects

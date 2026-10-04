@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
@@ -56,14 +55,15 @@ type Config struct {
 	// BaseURL is the internal broker listener, e.g. https://api-internal:9443.
 	BaseURL string
 	// CertFile/KeyFile/CAFile are PEM paths for the operator client
-	// certificate and the CA that signed the broker's internal listener.
+	// certificate and the CA bundle that signs the broker's internal
+	// listener; both hot-reload under Run (E5).
 	CertFile, KeyFile, CAFile string
 	// TLSConfig, when set, is used verbatim and the file fields are ignored
 	// (and no hot-reload is wired).
 	TLSConfig *tls.Config
 	// Timeout bounds each call; default 10 s.
 	Timeout time.Duration
-	// ReloadInterval is how often the client certificate files are
+	// ReloadInterval is how often the certificate and CA bundle files are
 	// re-checked by Run; default 30 s.
 	ReloadInterval time.Duration
 }
@@ -73,6 +73,7 @@ type Client struct {
 	hc   *http.Client
 	base string
 	rel  *tlsreload.Reloader // nil when TLSConfig was injected
+	ca   *tlsreload.CAPool   // nil when TLSConfig was injected
 }
 
 // New loads the mTLS material and returns the client.
@@ -86,6 +87,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	tc := cfg.TLSConfig
 	var rel *tlsreload.Reloader
+	var ca *tlsreload.CAPool
 	if tc == nil {
 		if cfg.CertFile == "" || cfg.KeyFile == "" || cfg.CAFile == "" {
 			return nil, errors.New("opclient: CertFile, KeyFile and CAFile are required")
@@ -98,22 +100,29 @@ func New(cfg Config) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("opclient: load client cert: %w", err)
 		}
-		caPEM, err := os.ReadFile(cfg.CAFile)
+		ca, err = tlsreload.NewCAPool(cfg.CAFile, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("opclient: read CA: %w", err)
+			return nil, fmt.Errorf("opclient: load CA bundle: %w", err)
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, errors.New("opclient: CA file contains no PEM certificates")
-		}
+		serverName := u.Hostname()
 		tc = &tls.Config{
 			// GetClientCertificate re-reads the reloader's current pair at
 			// every new handshake, so rotating the cert files presents the
 			// new certificate without a restart (E5). Run must be started
 			// for the reloader to pick up changes.
 			GetClientCertificate: rel.GetClientCertificate,
-			RootCAs:              pool,
-			MinVersion:           tls.VersionTLS12,
+			// InsecureSkipVerify hands verification to VerifyConnection:
+			// the static RootCAs field is read once per Client build, but
+			// the internal CA rotates on the same file. VerifyConnection
+			// runs the standard chain + hostname check against the CAPool's
+			// newest parsed bundle on every handshake, so trust follows
+			// the file without a restart. InsecureSkipVerify is set only
+			// as this handoff — never without VerifyConnection.
+			InsecureSkipVerify: true,
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				return verifyServerChain(cs.PeerCertificates, serverName, ca.Pool())
+			},
+			MinVersion: tls.VersionTLS12,
 		}
 	}
 	timeout := cfg.Timeout
@@ -130,15 +139,43 @@ func New(cfg Config) (*Client, error) {
 		},
 		base: cfg.BaseURL,
 		rel:  rel,
+		ca:   ca,
 	}, nil
 }
 
-// Run reloads the client certificate files until ctx is done (E5). It is a
-// no-op when the client was built from an injected TLSConfig.
+// Run reloads the client certificate files and the broker CA bundle until
+// ctx is done (E5). It is a no-op when the client was built from an
+// injected TLSConfig.
 func (c *Client) Run(ctx context.Context) {
-	if c.rel != nil {
-		c.rel.Run(ctx)
+	if c.rel == nil {
+		return
 	}
+	go c.ca.Run(ctx)
+	c.rel.Run(ctx)
+}
+
+// verifyServerChain is the VerifyConnection check that InsecureSkipVerify
+// hands off to: it re-runs the standard server verification — chain to a
+// trusted root plus hostname, with the default ServerAuth EKU — against
+// roots, the CAPool's newest parsed bundle. x509 is asked to verify
+// against the pool read at this handshake, which is what a fixed
+// tls.Config.RootCAs cannot express once the bundle file rotates.
+func verifyServerChain(peers []*x509.Certificate, serverName string, roots *x509.CertPool) error {
+	if len(peers) == 0 {
+		return errors.New("opclient: broker presented no certificate")
+	}
+	intermediates := x509.NewCertPool()
+	for _, cert := range peers[1:] {
+		intermediates.AddCert(cert)
+	}
+	if _, err := peers[0].Verify(x509.VerifyOptions{
+		DNSName:       serverName,
+		Roots:         roots,
+		Intermediates: intermediates,
+	}); err != nil {
+		return fmt.Errorf("opclient: verify broker certificate: %w", err)
+	}
+	return nil
 }
 
 // Error is a broker-side failure: HTTP status + the standard error body.
