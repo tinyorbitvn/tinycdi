@@ -1317,6 +1317,21 @@ func TestBackendTrustedProxies(t *testing.T) {
 	}
 }
 
+// TestBackendRateLimitReplicas (RL-1): the chart passes the backend
+// replica count so every pod enforces its 1/N share of the configured
+// rate budgets and the aggregate approximates the flag value.
+func TestBackendRateLimitReplicas(t *testing.T) {
+	args := strings.Join(firstContainerArgs(deployment(render(t, "example-values.yaml"), "backend")), "\n")
+	if !strings.Contains(args, "-rate-limit-replicas=2") {
+		t.Errorf("example render: -rate-limit-replicas=2 missing or wrong\nargs:\n%s", args)
+	}
+	args = strings.Join(firstContainerArgs(deployment(renderArgs(t,
+		"-f", "tinycdi/ci/minimal-values.yaml", "--set", "backend.replicas=5"), "backend")), "\n")
+	if !strings.Contains(args, "-rate-limit-replicas=5") {
+		t.Errorf("--set backend.replicas=5: -rate-limit-replicas=5 missing or wrong\nargs:\n%s", args)
+	}
+}
+
 func toSlice(v any) []any {
 	s, _ := v.([]any)
 	return s

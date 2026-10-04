@@ -275,7 +275,10 @@ backend:
   # re-launches) or per validated OIDC state (callback, bounded by a 10x
   # per-IP ceiling), not per client IP; the anonymous surface — login
   # start, unauthenticated probes — shares the IP bucket. Tune
-  # -login-rate/-launch-rate via backend.extraArgs.
+  # -login-rate/-launch-rate via backend.extraArgs — each flag is the
+  # aggregate bound across replicas: the chart passes
+  # -rate-limit-replicas=backend.replicas and every pod enforces its
+  # 1/N share (RL-1).
   trustedProxies: []
   # Ticket audience; defaults to sessionDomain.
   audience: ""
