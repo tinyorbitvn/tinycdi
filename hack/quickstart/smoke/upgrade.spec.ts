@@ -96,10 +96,20 @@ async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 
     .toBe(phase);
 }
 
-async function getQuota(page: Page): Promise<{ configured?: boolean; limits?: unknown }> {
+async function getQuota(page: Page): Promise<{
+  configured?: boolean;
+  limits?: unknown;
+  usage?: { runningWorkspaces?: number };
+}> {
   return page.evaluate(async () => {
     const r = await fetch("/v1/quota");
-    return r.ok ? ((await r.json()) as { configured?: boolean; limits?: unknown }) : { configured: undefined };
+    return r.ok
+      ? ((await r.json()) as {
+          configured?: boolean;
+          limits?: unknown;
+          usage?: { runningWorkspaces?: number };
+        })
+      : { configured: undefined };
   });
 }
 
@@ -178,6 +188,16 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   inHome(stoppedId, 'printf %s "$1" > "$2" && sync', stopToken, file(stopToken));
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await waitPhase(page, stoppedId, "Stopped");
+  // The released backend frees the compute slots asynchronously — the
+  // workspace reports Stopped before convertToDiskOnly runs, and the next
+  // create races it. Wait until the running-slot usage drops.
+  await expect
+    .poll(async () => (await getQuota(page)).usage?.runningWorkspaces ?? -1, {
+      timeout: 90_000,
+      intervals: [2_000],
+      message: "stopped workspace frees its running slot",
+    })
+    .toBe(1);
 
   // A Retain workspace deleted before the upgrade: its disk sits in the
   // retained inventory and must stay attachable.
@@ -260,9 +280,17 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   expect(inHome(stoppedId, 'cat "$1"', file(stopToken)), "file on the restarted workspace").toBe(
     stopToken,
   );
-  // Free the quota slot again before the attach below (tenant quota is 2).
+  // Free the quota slot again before the attach below (tenant quota is 2)
+  // — same async free as before the upgrade.
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await waitPhase(page, stoppedId, "Stopped");
+  await expect
+    .poll(async () => (await getQuota(page)).usage?.runningWorkspaces ?? -1, {
+      timeout: 90_000,
+      intervals: [2_000],
+      message: "stopped workspace frees its running slot (post-upgrade)",
+    })
+    .toBe(1);
 
   // The retained-data row survived and is still attachable.
   await page.goto("/data");
@@ -297,6 +325,13 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   await page.goto(`/workspaces/${encodeURIComponent(keepId)}`);
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await waitPhase(page, keepId, "Stopped");
+  await expect
+    .poll(async () => (await getQuota(page)).usage?.runningWorkspaces ?? -1, {
+      timeout: 90_000,
+      intervals: [2_000],
+      message: "keep workspace frees its running slot before restart",
+    })
+    .toBe(1);
   await page.getByRole("button", { name: "Start", exact: true }).click();
   await waitPhase(page, keepId, "Ready");
   expect(inHome(keepId, 'cat "$1"', file(keepToken)), "file after post-upgrade restart").toBe(
