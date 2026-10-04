@@ -3,6 +3,7 @@ import type { Column } from "../design/Table";
 import { t } from "../i18n";
 import { formatDateTime } from "../templates/format";
 import { phaseLabelKey } from "./helpers";
+import { ReasonText } from "./reasons";
 import type { WorkspaceView } from "./helpers";
 
 type Condition = WorkspaceView["conditions"][number];
@@ -16,7 +17,11 @@ const COLUMNS: Column<Condition>[] = [
   { key: "type", header: t("workspaces.conditions.col.type"), rowHeader: true },
   { key: "status", header: t("workspaces.conditions.col.status") },
   { key: "reason", header: t("workspaces.conditions.col.reason") },
-  { key: "message", header: t("workspaces.conditions.col.message"), render: (c) => c.message ?? "" },
+  {
+    key: "message",
+    header: t("workspaces.conditions.col.message"),
+    render: (c) => <ReasonText reason={c.reason} detail={c.message} />,
+  },
   {
     key: "lastTransitionTime",
     header: t("workspaces.conditions.col.since"),

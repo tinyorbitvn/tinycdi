@@ -165,4 +165,77 @@ export default {
   "workspaces.connect.disabledStarting": "Starting…",
   "workspaces.connect.disabledFailed": "Failed",
   "workspaces.connect.disabledFinishing": "Finishing the connection…",
+
+  // Reason-token text for events and conditions (V3.14b): rendered in
+  // place of the server's English message; the message stays as secondary
+  // detail when it carries extra detail.
+  "workspaces.reason.created": "The workspace was created.",
+  "workspaces.reason.startRequested": "Starting the workspace was requested.",
+  "workspaces.reason.stopRequested": "Stopping the workspace was requested.",
+  "workspaces.reason.maxDurationReached":
+    "The workspace reached its maximum running time and was stopped.",
+  "workspaces.reason.deleteRequested": "Deleting the workspace was requested.",
+  "workspaces.reason.templateUpdateSkipped":
+    "The workspace stayed on its recorded template revision.",
+  "workspaces.reason.admitted": "The platform accepted the workspace request.",
+  "workspaces.reason.templateResolved": "The template snapshot was recorded.",
+  "workspaces.reason.templateNotFound": "The recorded template could not be found.",
+  "workspaces.reason.templateRejected":
+    "The platform refused the template's runtime configuration.",
+  "workspaces.reason.templateSnapshotInvalid":
+    "The recorded template snapshot failed verification; ask an administrator.",
+  "workspaces.reason.intentApplied": "The requested change was applied.",
+  "workspaces.reason.quotaReserved": "Capacity was reserved for the workspace.",
+  "workspaces.reason.provisioning": "The platform is setting the workspace up.",
+  "workspaces.reason.waitingForDisk":
+    "Waiting for the retained disk to be handed over to this workspace.",
+  "workspaces.reason.volumeBound": "The workspace's storage was attached.",
+  "workspaces.reason.ready": "This step is ready.",
+  "workspaces.reason.runtimeUp": "The runtime is up.",
+  "workspaces.reason.streamEndpointUp": "The streaming endpoint is up.",
+  "workspaces.reason.stopped": "The workspace is stopped.",
+  "workspaces.reason.runtimeStopped": "The runtime is not running.",
+  "workspaces.reason.terminating": "The workspace is being deleted.",
+  "workspaces.reason.nameConflict": "A runtime object with the same name already exists.",
+  "workspaces.reason.bootDeadlineExceeded":
+    "The workspace didn't become ready in time.",
+  "workspaces.reason.backendError":
+    "The platform couldn't complete a runtime step; it's retrying.",
+  "workspaces.reason.nominal": "The workspace reports no problems.",
+  "workspaces.reason.retainedClaimMissing":
+    "The retained disk reference is missing; the workspace can't start.",
+  "workspaces.reason.idleTimeout": "Stopped because the idle timeout passed.",
+  "workspaces.reason.disconnectTimeout": "Stopped after the disconnect grace window.",
+  "workspaces.reason.maxDuration": "Stopped at the maximum running time.",
+  "workspaces.reason.streamDraining": "Waiting for open sessions to close.",
+  "workspaces.reason.drainTimedOut": "Sessions didn't close in time; teardown continues.",
+  "workspaces.reason.retentionPending":
+    "The retention step hasn't finished; teardown waits.",
+  "workspaces.reason.cleanupRetry": "A cleanup step failed and will be retried.",
+  "workspaces.reason.failedCleanup": "The failed incarnation is being torn down.",
+  "workspaces.reason.missingWorkspaceID":
+    "The workspace record is missing its platform ID; teardown is held.",
+  "workspaces.reason.blockingConnects": "Blocking new connections.",
+  "workspaces.reason.revokingLeases": "Revoking session leases.",
+  "workspaces.reason.drainingStreams": "Closing open sessions.",
+  "workspaces.reason.stoppingRuntime": "Stopping the runtime.",
+  "workspaces.reason.applyingRetention": "Applying the data policy.",
+  "workspaces.reason.cleaningUp": "Removing the remaining objects.",
+  "workspaces.reason.unschedulable": "No machine has room for it right now.",
+  "workspaces.reason.preparingPod": "Preparing the pod sandbox.",
+  "workspaces.reason.pullingImage": "Downloading the runtime image.",
+  "workspaces.reason.containerCreating": "Creating the container.",
+  "workspaces.reason.podInitializing": "An init container is running.",
+  "workspaces.reason.notReady": "The container is up; the readiness check hasn't passed.",
+  "workspaces.reason.imagePull": "The runtime image couldn't be downloaded.",
+  "workspaces.reason.crashLoopBackOff": "The container keeps restarting.",
+  "workspaces.reason.createContainerConfigError": "The container config is invalid.",
+  "workspaces.reason.podFailed": "The pod failed.",
+  "workspaces.reason.podExited": "The container exited.",
+  "workspaces.reason.statusStale":
+    "The reported state is stale; showing the last known state.",
+  "workspaces.reason.unknown": "The workspace reported a status change.",
+  "workspaces.reason.sessionStarted": "An interactive session started.",
+  "workspaces.reason.sessionTakenOver": "An interactive session was taken over.",
+  "workspaces.reason.guestAgentUnreachable": "The guest agent is unreachable.",
 } as const;

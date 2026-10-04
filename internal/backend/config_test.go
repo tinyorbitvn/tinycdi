@@ -130,6 +130,40 @@ func TestParseFlags_ImageBlockAfter(t *testing.T) {
 	}
 }
 
+// TestParseFlags_RateLimitReplicas (RL-1): the replica divisor defaults
+// to 1 (one replica's full budget), honors TCDI_RATE_LIMIT_REPLICAS with
+// the flag winning, and rejects < 1 — a 0 divisor would silently turn
+// every limit off by division.
+func TestParseFlags_RateLimitReplicas(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RateLimitReplicas != 1 {
+		t.Fatalf("default RateLimitReplicas = %d, want 1", cfg.RateLimitReplicas)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_RATE_LIMIT_REPLICAS": "4"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RateLimitReplicas != 4 {
+		t.Fatalf("env RateLimitReplicas = %d, want 4", cfg.RateLimitReplicas)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-rate-limit-replicas", "2"),
+		envMap(map[string]string{"TCDI_RATE_LIMIT_REPLICAS": "4"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RateLimitReplicas != 2 {
+		t.Fatalf("flag RateLimitReplicas = %d, want 2 (flag wins over env)", cfg.RateLimitReplicas)
+	}
+	for _, bad := range []string{"0", "-1"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-rate-limit-replicas", bad), noEnv); err == nil {
+			t.Fatalf("-rate-limit-replicas %s must fail", bad)
+		}
+	}
+}
+
 func TestParseFlags_SplitModeRejectsMixed(t *testing.T) {
 	// -broker-url together with the default (non-empty) -listen must fail,
 	// and the error must name both flags so the operator can fix the config.

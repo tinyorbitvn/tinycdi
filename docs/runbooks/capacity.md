@@ -188,12 +188,21 @@ What that means for sizing:
   that is live on the serving replica are per-session; a *first* launch
   (no cookie yet, or a cookie only a sibling replica knows) is per-IP —
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
-- **Budgets multiply by replica.** The limiter is in-memory per backend
-  replica (`internal/ratelimit`) — no shared counter — so one key's
-  effective budget is up to ~`backend.replicas` × the flag on an even
-  spread: 2 replicas × `-login-rate` 30/min + burst 10 ≈ 80/min
-  aggregate for one anonymous IP. Size the flag as aggregate-need ÷
-  replicas; a same-IP ramp trips N buckets, not one.
+- **Budgets are the aggregate across replicas.** The limiter is
+  in-memory per backend replica (`internal/ratelimit`) — no shared
+  counter — so the chart passes `-rate-limit-replicas=backend.replicas`
+  and every pod enforces `max(1, rate÷N)`/min with `max(1, burst÷N)`
+  burst (rounded down): one key's effective budget is ~the configured
+  value on an even spread — 2 replicas × `-login-rate` 30/min + burst 10
+  ≈ 40/min aggregate for one anonymous IP — except a flag smaller than
+  the replica count, which clamps to 1/min per pod (~N/min aggregate,
+  the one overshoot). Size the flag as the aggregate you want to allow.
+  A same-IP ramp still trips N buckets,
+  but each holds 1/N of the budget — during a rolling surge (N+1 pods)
+  the transient aggregate is up to ~(N+1)/N× configured, and an
+  out-of-band `kubectl scale` leaves the rendered divisor stale until
+  the next `helm upgrade`. An external HPA should pin
+  `-rate-limit-replicas` to `maxReplicas` via `backend.extraArgs`.
 - The per-key limits and the limiter's key-space bound are unchanged;
   `backend.trustedProxies` must still name the edge's CIDRs or every user
   collapses into the edge's own IP bucket regardless.
@@ -389,6 +398,13 @@ reasons found on the night:
   harness stops workspace creation when any infra node's CPU requests
   plus the next wave's projected share would reach 80 %; effective N is
   recorded in the report.
+  **Fixed in v0.3.1** (TOPO-1): `runtime.topologySpread.enabled`
+  (default true) gives every workspace pod a soft
+  `topologySpreadConstraint` — maxSkew 1 over `kubernetes.io/hostname`,
+  `ScheduleAnyway`, scoped to the tenant namespace's runtime pods. It
+  nudges the scheduler toward even spread without ever blocking
+  placement (a retained PVC's node/zone affinity still wins); the
+  per-wave guard stays as the hard safety.
 - **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
   behind one source IP tripped `login-rate 30/min` (covers `/v1/login`,
   `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
