@@ -66,11 +66,10 @@ render; the rest are changed defaults you may want to pin back.
   sign-in start itself (`docs/runbooks/capacity.md`, "Sign-in rate
   limits and NAT"). Leave it empty and every user collapses into the
   edge's own IP bucket; the backend only logs a startup warning, it
-  does not fail. Note the buckets are in-memory per replica: with
-  `backend.replicas: N` one key draws up to ~N× the configured rate
-  (2 replicas × `-login-rate` 30/min + burst 10 ≈ 80/min aggregate
-  for one anonymous IP) — size `-login-rate` as aggregate-need ÷
-  replicas.
+  does not fail. Note the buckets are in-memory per backend replica
+  (the chart default is 2; with N replicas the aggregate is ~N× the
+  configured rate — 2 × `-login-rate` 30/min + burst 10 ≈ 80/min for
+  one anonymous IP) — size `-login-rate` as aggregate-need ÷ replicas.
 - **Kasm Browser templates** — a seeded `adapter: kasm` template with
   `experience: Browser` fails the render until its image is on
   `kasmAdapter.browserAllowlist` or the template is re-classed
@@ -117,8 +116,10 @@ Only real changes; everything not listed keeps its name and meaning.
 ### What happens to running sessions
 
 **Sessions survive the upgrade.** The schema changes are expand-only,
-the two backend replicas roll one at a time (`maxUnavailable: 0`), and a
-terminating pod's pre-stop drain holds both listeners for the drain
+the backend pods roll one at a time (`maxUnavailable: 0`, surge-first —
+the chart default is 2 replicas, and with `replicas: 1` the new pod is
+Ready before the old one drains), and a terminating pod's pre-stop drain
+holds both listeners for the drain
 window (`-drain-window`, 8 s default): readiness drops at once, open
 reads keep being served, and only new launches and new stream upgrades
 get a retryable 503. A tab whose stream dies reconnects to a sibling
@@ -164,8 +165,9 @@ delete+create of `<name>-<hash8>` revision objects, as always.
 - `SELECT version, name FROM schema_migrations ORDER BY version;` shows
   015–018.
 - `kubectl -n <release-ns> get deploy` — `backend` and `operator` at
-  2/2, `frontend` ready; `kubectl -n <release-ns> get pdb` shows the
-  operator and frontend budgets.
+  your configured replica counts (2/2 by default), `frontend` ready;
+  `kubectl -n <release-ns> get pdb` shows the operator and frontend
+  budgets.
 - `kubectl -n <release-ns> get lease` — the `b6b73984.cdi.tinyorbit.vn`
   leader-election Lease names a holder.
 - The backend startup log carries no trusted-proxies warning once
