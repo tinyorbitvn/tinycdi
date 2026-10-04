@@ -445,6 +445,15 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
   streams survived, operator kept reconciling, backend hot-reloaded the
   new server cert and client CA without a restart (`tlsreload` log
   lines), the pre-rotation client cert is refused after the CA rotation.
+  Postscript (found in the rc.4 cleanup): the drill verified the
+  backend's hot-reload and the old client cert being refused — it did
+  **not** cover the operator's server-trust path. The broker client
+  read its server-CA bundle once, so after the CA rotation it could not
+  verify the backend's new internal server cert and workspace deletes
+  wedged in the runtime-cleanup finalizer for ~4 h until an operator
+  restart. FX-R33 (#83) closes it — the broker CA bundle hot-reloads;
+  the rc.5 CA-rotation re-drill is the evidence (finalizer progress
+  without a restart).
 - **Fleet reconnect tail — the one failed gate.** After the all-pods
   rollout, 54/60 sessions had a disconnect span: p50 ~20 s, tail ~45 s
   (advisor budget p95 ≤ 10 s / p100 ≤ 30 s — FAIL). Single-pod delete was
@@ -464,3 +473,78 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
 Capacity answer unchanged: **~60 sessions** remains the safe level. The
 reconnect tail is a UX latency under full backend loss, not a capacity
 limit — re-score on rc.4 (FX-R32) with the short N=60 × 30 min re-soak.
+
+### v0.3.0-rc.4 soak: 60 sessions × 30 min (2026-10-04)
+
+The FX-R32 re-score: same shape (60 soak-small, 20 lanes, waves 10/15 s,
+node guard armed, default limits), half duration, drills at ~T+10 —
+backend pod delete, backend **rollout**, session-TLS rotate.
+
+- **In-frame reconnect verified at fleet scale.** PG `connection_lease`
+  snapshots around each drill: all 60 leases kept their lease id,
+  `stream_epoch` bumped in place, and `stream_owner_tab` unchanged for
+  every session through both backend drills. Zero `launch.redeem` audit
+  events and zero launch tickets minted in every drill window — the
+  rc.3 relaunch path is gone. Caveat: `stream_owner_tab` is minted once
+  per **outer** page load, so a frame re-navigation keeps the same id —
+  the rc.4 measurement could not see frame navigations (the rc.5
+  navwatch below measured them directly).
+- **Drill spans.** Pod delete: 6 sessions on the killed pod, p100 ~5 s.
+  Rollout: 38/60 sessions observed a span (22 reconnected inside one 5 s
+  poll — invisible to the metric): p50 ~5 s / p95 ~15 s / p100 ~15.0 s.
+  All span numbers are at the harness's 5 s poll resolution: a ~5 s
+  span is one missed poll (≈0–5 s real), ~15 s is three (≈10–15 s
+  real); a 1 s-poll rerun under rc.5 will re-score at true resolution.
+  TLS rotate: zero disconnects again. The ~15 s tail is 7 sessions whose
+  jittered in-frame retries (0.5–2 s, `reconnect_delay`) needed ~3 poll
+  cycles to land a claim on the fresh pods.
+- **Gates (advisor).** disconnect-span p95 14.96 s **fails** the ≤ 10 s
+  bar (p100 15.02 s inside ≤ 30 s); inputResumeMs p100 23.3 s PASS
+  (< 30 s); longest gap 15.0 s PASS (< 60 s); dropped 0; falseElsewhere
+  0; manual actions 0; inputTimeouts 0. vs rc.3: p95 39.9 s → 15.0 s,
+  p100 45 s → 15 s, relaunch thrash → none.
+- **Everything else.** connect p50 5.9 s / p95 6.1 s, mid-run reload
+  reconnect p50 0 / p95 5.0 s (near-seamless again), inputDispatch p50
+  66 ms / p95 83 ms, lane 429s = 4 anonymous-phase hits on soak09/10/14
+  during the OIDC ramp (same class as rc.3's 2; none on authenticated
+  traffic).
+
+Capacity answer unchanged: **~60 sessions** remains the safe level. The
+residual is a ~15 s worst-case reconnect tail under full backend loss —
+roughly three times better than rc.3 and no longer a correctness issue
+(no relaunch, no lost claims), still over the 10 s p95 bar for the
+v0.3.0 tag gate.
+
+### v0.3.0-rc.5: internal-CA drill + 1 s-poll rollout rerun (2026-10-04)
+
+- **Supply chain/upgrade.** 8/8 cosign OCI signatures + 3/3 release
+  blobs at `refs/tags/v0.3.0-rc.5`; chart 0.3.0-rc.5 deployed (helm rev
+  18); CRD guard held (305, never applied); schema stays 18.
+- **Internal-CA rotation drill (FX-R33) — PASS.** With 6 live sessions
+  `cmctl renew` on `tcdi-e2e-internal-ca` plus both leaves: operator logs
+  show `tlsreload: reloaded CA bundle file=/etc/broker-ca/ca.crt` on both
+  replicas (no restart), 6/6 sessions stayed connected, and **3 workspace
+  deletes cleared their `runtime-cleanup` finalizer in 2.9 s without an
+  operator restart** (rc.3/rc.4 wedged ~4 h here) with zero
+  `broker unreachable` lines; old-CA material is refused at the
+  handshake (HTTP 000) while the new cert reaches HTTP 403.
+- **Targeted rerun N=60 × 15 min, rollout only, poll = 1 s.** During
+  an operator-initiated full 2-replica backend rollout at 60 sessions:
+  reconnect p50 **1.0 s** / p95 **15.0 s** / max **16 s** (1 s
+  resolution); ~60 % resume in-frame in ~1 s, the rest via one frame
+  reload; 0 dropped, 0 false elsewhere, 0 new launch tickets. p95 still
+  **fails** the ≤ 10 s bar; p100 inside ≤ 30 s. inputResume p100
+  27.7 s, longest gap ~16 s, inputTimeouts 1, one lane 429 (OIDC ramp).
+  All 60 claims landed on the same leases — zero tickets, zero
+  `launch.redeem`.
+- **Frame-navigation evidence (corrects the rc.4 claim).**
+  `stream_owner_tab` is minted per outer-page load — a frame
+  re-navigation keeps the same id, so the rc.4 measurement could not
+  see frame navigations. A 10-session `framenavigated` probe through
+  the same rollout on rc.5: **5 sessions re-navigated the iframe
+  once**, at 12.7–16.5 s into their disconnect — the watch's fallback
+  gate (5 s in-frame window + page-side poll lag + jitter) — and each
+  nav's claim landed ~instantly. Sessions under ~2 s never navigated;
+  one nav also fired late on an already-recovered session. So the tail
+  is the single-shot fallback working as designed (one nav, one
+  claim), not rc.3's repeated thrash.
