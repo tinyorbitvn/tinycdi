@@ -96,20 +96,28 @@ async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 
     .toBe(phase);
 }
 
-// Navigates to `url` with a bounded retry on 5xx and navigation errors
-// (<= 60 s): right after a rollout the edge can briefly keep a stale
-// route to a terminated frontend pod and answer Gateway Timeout — an
-// availability hiccup, not a lost portal session (FX-R35). Returns the
-// last response, null when navigation itself kept failing.
-async function gotoRetryOn5xx(page: Page, url: string): Promise<Response | null> {
-  const deadline = Date.now() + 60_000;
-  let resp: Response | null = null;
-  do {
-    resp = await page.goto(url).catch(() => null);
-    if (resp && resp.status() < 500) return resp;
-    await page.waitForTimeout(1_000);
-  } while (Date.now() < deadline);
-  return resp;
+// Loads `url` and reports whether the page came up cleanly: navigation
+// succeeded, no response at 5xx (a dead sub-resource — e.g. /assets/* or
+// /branding/tokens.css — leaves the SPA a blank page even when GET /
+// itself was 200), and the Workspaces heading rendered inside a bounded
+// per-attempt wait.
+async function loadPortal(page: Page, url: string): Promise<boolean> {
+  let saw5xx = false;
+  const onResponse = (r: Response) => {
+    if (r.status() >= 500) saw5xx = true;
+  };
+  page.on("response", onResponse);
+  try {
+    await page.goto(url).catch(() => null);
+    const visible = await page
+      .getByRole("heading", { name: "Workspaces", exact: true })
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    return !saw5xx && visible;
+  } finally {
+    page.off("response", onResponse);
+  }
 }
 
 async function getQuota(page: Page): Promise<{
@@ -320,17 +328,24 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
 
   // ---------- post-upgrade assertions ----------
   // Portal session survives: the same browser context still reaches the
-  // app. The frontend roll just ended — retry the navigation on 5xx for a
-  // bounded window rather than failing on the first edge hiccup (FX-R35).
-  const resp = await gotoRetryOn5xx(page, "/");
+  // app. The pods terminating in THIS upgrade are the old v0.2.0
+  // frontends, which have no drain — FX-R35's drain only helps rollouts
+  // that START from v0.3.1 binaries — so the edge can serve the SPA
+  // shell from one pod while a sub-request lands on a terminating peer:
+  // GET / 200, /assets/* 504, blank page forever (run 37215806246). A
+  // single navigation cannot see that, so settle briefly, then reload
+  // until one full load comes back clean (bounded, <= 60 s).
+  await page.waitForTimeout(5_000);
+  const reloadDeadline = Date.now() + 60_000;
+  let portalUp = await loadPortal(page, "/");
+  while (!portalUp && Date.now() < reloadDeadline) {
+    await page.waitForTimeout(1_000);
+    portalUp = await loadPortal(page, "/");
+  }
   expect(
-    resp !== null && resp.status() < 500,
-    `portal unavailable after the upgrade: last GET / -> ${resp ? `HTTP ${resp.status()}` : "navigation failed"}`,
+    portalUp,
+    "portal session lost across the upgrade: no clean page load within 60 s",
   ).toBe(true);
-  await expect(
-    page.getByRole("heading", { name: "Workspaces", exact: true }),
-    "portal session lost across the upgrade",
-  ).toBeVisible({ timeout: 60_000 });
 
   const quotaAfter = await quotaNow(page);
   expect(quotaAfter.configured, "tenant quota row after upgrade").toBe(true);

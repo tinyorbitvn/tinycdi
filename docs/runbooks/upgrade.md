@@ -510,6 +510,14 @@ a graceful shutdown fits the 30 s `terminationGracePeriodSeconds`), then
 the listener closes. A rollover never routes to a dead pod; page loads
 land on a live replica.
 
+**Upgrading FROM v0.3.0 (or older): expect a few seconds of portal 5xx
+while the old frontend pods terminate** — they predate this drain, so the
+edge can briefly route a sub-request (a `/assets/*` bundle, branding CSS)
+to a pod that is already exiting even after `GET /` answered 200; a
+browser reload once the rollout settles recovers it. From v0.3.1 on the
+frontend drains (`frontend.drainDelay`), so later upgrades do not have
+the window.
+
 ## Before you start
 
 1. Read the diff of `deploy/helm/tinycdi/crds/` since the last applied
