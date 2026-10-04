@@ -186,7 +186,7 @@ type sniffingConn struct {
 	out          wsBoundary
 	closePending bool
 	closed       bool
-	done         chan struct{} // closed by finishLocked: graceful close landed
+	done         chan struct{} // closed by finishLocked; lazily created for hand-built conns
 }
 
 func (c *sniffingConn) Read(b []byte) (int, error) {

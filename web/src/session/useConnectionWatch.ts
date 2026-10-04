@@ -129,8 +129,6 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
   const exhausted = useRef(false);
   const pollIntervalMs = options.pollIntervalMs ?? CONNECTION_POLL_MS;
   const inFrameRetryMs = options.inFrameRetryMs ?? IN_FRAME_RETRY_MS;
-  const reNavJitter =
-    options.reNavJitter ?? (() => Math.floor(Math.random() * FIRST_RENAV_JITTER_MS));
   const enabled = options.active && options.sessionDomain !== "";
 
   useEffect(() => {
@@ -235,7 +233,11 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
         lastEpoch = epoch;
         if (lossSince === 0) {
           lossSince = Date.now();
-          navJitter = reNavJitter();
+          // Read through opts: an inline prop closure changes identity on
+          // every render — a dep would restart the watch and reset the
+          // outage state (R-V3d).
+          navJitter = (opts.current.reNavJitter ??
+            (() => Math.floor(Math.random() * FIRST_RENAV_JITTER_MS)))();
           opts.current.onEvent({ type: "recovering" });
         }
         if (Date.now() < claimUntil) return;
@@ -298,5 +300,5 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       stopped = true;
       clearInterval(interval);
     };
-  }, [enabled, pollIntervalMs, inFrameRetryMs, reNavJitter]);
+  }, [enabled, pollIntervalMs, inFrameRetryMs]);
 }

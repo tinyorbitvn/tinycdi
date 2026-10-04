@@ -171,6 +171,28 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(2);
   });
 
+  // R-V3d: jitter/fallback closures change identity on every render — if
+  // they were a watch dep, every re-render would restart the effect and
+  // reset the outage state (delaying recovery past the attempt bound).
+  it("a re-render during an outage does not restart the outage or its attempt count", async () => {
+    const { events, fetchStatus, view, props } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
+    await advanced(CONNECTION_POLL_MS * 2); // t=10: nav 1
+    expect(navigated(events)).toHaveLength(1);
+
+    // A re-render carrying a NEW jitter closure — what SessionPage's
+    // inline prop produces on every render — must leave the watch alone.
+    view.rerender({ ...props, reNavJitter: () => 0 });
+    expect(events.filter((e) => e.type === "recovering")).toHaveLength(1);
+
+    // The original claim budget still ends at nav1+20 s, not at a fresh
+    // window reopened by the re-render.
+    await advanced(CONNECTION_POLL_MS * 3); // t=25: still inside the budget
+    expect(navigated(events)).toHaveLength(1);
+    await advanced(CONNECTION_POLL_MS); // t=30: the budget ends -> nav 2
+    expect(navigated(events)).toHaveLength(2);
+  });
+
   it("jitters the first re-navigation off the in-frame window's edge", async () => {
     const { events, fetchStatus } = setup({ reNavJitter: () => 8_000 });
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });

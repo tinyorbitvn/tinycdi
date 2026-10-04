@@ -118,6 +118,12 @@ func (c *sniffingConn) gracefulClose() {
 	// without the lock) can unblock that writer — and with it, this call.
 	timer := time.AfterFunc(gracefulCloseBudget, c.abort)
 	c.mu.Lock()
+	// done is lazily created: sniffingConns built by hand (tests) skip the
+	// constructor, and a nil channel would hang the wait — or panic on
+	// close — instead of reporting the close landed.
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
 	switch {
 	case !c.closed && c.out.atBoundary():
 		_ = c.Conn.SetWriteDeadline(time.Now().Add(gracefulCloseBudget))
@@ -136,6 +142,9 @@ func (c *sniffingConn) gracefulClose() {
 // every gracefulClose caller waiting on done. Callers hold c.mu.
 func (c *sniffingConn) finishLocked() {
 	c.closed = true
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
 	select {
 	case <-c.done:
 	default:
