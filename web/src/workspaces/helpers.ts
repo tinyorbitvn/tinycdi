@@ -1,5 +1,6 @@
 import type { components } from "../api/generated/schema";
 import { t, type MessageKey } from "../i18n";
+import { reasonText } from "./reasons";
 
 type Schemas = components["schemas"];
 
@@ -50,7 +51,7 @@ export function blockingReason(ws: WorkspaceView): Blocker | null {
     return conn
       ? {
           key: "workspaces.detail.blocker.connectionReady",
-          params: { status: conn.status, reason: conn.reason },
+          params: { status: conn.status, reason: reasonText(conn.reason) },
         }
       : { key: "workspaces.detail.blocker.noConnection" };
   }
