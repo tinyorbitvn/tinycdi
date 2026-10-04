@@ -573,6 +573,18 @@ runtime:
   # cannot run on such nodes. See install.md "Nodes without AppArmor".
   appArmor:
     requireRuntimeDefault: true
+  # Soft topology spread for runtime pods (--runtime-topology-spread).
+  # true (default): every workspace pod carries a topologySpreadConstraint
+  # (maxSkew 1, topologyKey kubernetes.io/hostname, whenUnsatisfiable
+  # ScheduleAnyway) that prefers spreading the tenant namespace's runtime
+  # pods across pool nodes — the soak finding it answers is the default
+  # scheduler packing sessions onto a subset of nodes
+  # (docs/runbooks/capacity.md). It is soft, so it NEVER blocks
+  # scheduling: retained-disk reattach on a node-pinned PVC and
+  # single-node pools still work. Set enabled=false to keep the
+  # pre-v0.3.1 packed-by-scoring placement.
+  topologySpread:
+    enabled: true
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must

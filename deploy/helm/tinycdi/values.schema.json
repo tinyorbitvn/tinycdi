@@ -437,6 +437,13 @@
           "properties": {
             "requireRuntimeDefault": {"type": "boolean"}
           }
+        },
+        "topologySpread": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"}
+          }
         }
       }
     },
