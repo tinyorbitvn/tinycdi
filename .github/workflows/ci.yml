@@ -476,7 +476,7 @@ jobs:
           # PVC labels/annotations are the retained-inventory contract —
           # the retained-disk smoke reads this table end to end.
           kubectl get pvc -A || true
-          kubectl get pvc -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RETAINED:.metadata.labels.workspaces\.cdi\.tinyorbit\.vn/data-retained,WSUID:.metadata.labels.workspaces\.cdi\.tinyorbit\.vn/workspace-uid,ANN:.metadata.annotations' || true
+          kubectl get pvc -A -o yaml || true
           # Log every replica: `logs deploy/x` picks a single pod, and the
           # retained-sync sweeper / operator leader run on only one
           # replica each — a single-pod tail can miss the failure.
