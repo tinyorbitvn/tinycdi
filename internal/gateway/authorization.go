@@ -257,28 +257,52 @@ func (s *session) admitUpgrade() (int, bool) {
 
 // dropStreamsLocked closes every open stream conn and cancels the tracked
 // stream request — the local half of both self-takeover fencing and the
-// cross-replica epoch fence. Closed conns stay in the map until their proxy
-// request unwinds: untrack removes a conn only after its disconnect report
-// was queued, so "no conns" means every disconnect is at least enqueued —
-// the invariant Drain waits on. Caller holds s.mu.
+// cross-replica epoch fence. The close is abrupt on purpose: a fenced
+// stream must not let its client retry — the retry would fence the new
+// owner right back. Closed conns stay in the map until their proxy request
+// unwinds: untrack removes a conn only after its disconnect report was
+// queued, so "no conns" means every disconnect is at least enqueued — the
+// invariant Drain waits on. Caller holds s.mu.
 func (s *session) dropStreamsLocked() {
-	for c := range s.conns {
+	for _, c := range s.detachStreamsLocked() {
 		c.Close()
+	}
+}
+
+// detachStreamsLocked collects the open stream conns and cancels the
+// tracked stream request without closing anything. Caller holds s.mu.
+func (s *session) detachStreamsLocked() []net.Conn {
+	conns := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
 	}
 	if c, ok := s.cancels[s.streamTrackID]; ok {
 		delete(s.cancels, s.streamTrackID)
 		c()
 	}
 	s.streamTrackID = -1
+	return conns
 }
 
-// dropStreams closes this process's stream connections while the session
-// itself stays alive — the renew loop calls it when the lease's stream
-// epoch moved past ours, and Drain calls it to shed every stream.
-func (s *session) dropStreams() {
+// drainStreams sheds every open stream conn the way a rollout wants it
+// (FX-R32): a proper WebSocket close frame at a frame boundary, so the
+// KasmVNC client inside the portal frame sees a clean disconnect and
+// retries the websocket itself instead of waiting for the SPA to
+// re-navigate it. The session and its lease stay live. Closes run in
+// parallel so one silent conn cannot eat the drain window.
+func (s *session) drainStreams() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dropStreamsLocked()
+	conns := s.detachStreamsLocked()
+	s.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gracefulCloseConn(c)
+		}()
+	}
+	wg.Wait()
 }
 
 // streamBusy reports whether a stream admission is in flight or a hijacked

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -174,16 +175,47 @@ type wsFrameSniffer struct {
 }
 
 // sniffingConn wraps the hijacked client conn; Read feeds the sniffer
-// before passing bytes up to the proxy's copy loop unchanged.
+// before passing bytes up to the proxy's copy loop unchanged, and Write
+// feeds the server->client boundary tracker so a draining replica can end
+// the websocket with a real close frame at a frame boundary (FX-R32).
 type sniffingConn struct {
 	net.Conn
 	sniffer *wsFrameSniffer
+
+	mu           sync.Mutex
+	out          wsBoundary
+	closePending bool
+	closed       bool
 }
 
 func (c *sniffingConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.sniffer.feed(b[:n])
+	}
+	return n, err
+}
+
+// Write is the server->client direction of the copy loop. The conn write
+// stays inside the mutex so a drain's close frame can only ever land
+// between writes — and only when the tracker proves a frame boundary —
+// never interleaved inside a frame's bytes.
+func (c *sniffingConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, net.ErrClosed
+	}
+	c.out.feed(b)
+	n, err := c.Conn.Write(b)
+	if c.closePending && c.out.atBoundary() {
+		// This write completed a frame: the close lands right after its
+		// last byte — a clean close on the wire.
+		c.closed = true
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(gracefulCloseBudget))
+		_, _ = c.Conn.Write(wsCloseGoingAway)
+		_ = c.Conn.Close()
+		return n, net.ErrClosed
 	}
 	return n, err
 }

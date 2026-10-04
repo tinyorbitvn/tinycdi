@@ -79,6 +79,12 @@ export interface SessionPageProps {
    * report `connected` before the page falls back to a fresh ticket.
    */
   resumeTimeoutMs?: number;
+  /**
+   * How long the frame's own in-frame retry gets before the watch
+   * re-navigates; defaults to IN_FRAME_RETRY_MS in the watch. Injectable
+   * for tests.
+   */
+  inFrameRetryMs?: number;
   /** Navigates to the portal login (401). Injectable for tests. */
   onSignIn?: () => void;
 }
@@ -94,6 +100,7 @@ export function SessionPage({
   loadTimeoutMs = 20_000,
   pollIntervalMs,
   resumeTimeoutMs = 10_000,
+  inFrameRetryMs,
   onSignIn = defaultLoginRedirect,
 }: SessionPageProps) {
   const api = useApi();
@@ -526,6 +533,7 @@ export function SessionPage({
     frame: frameRef,
     active: state.status === "connected",
     pollIntervalMs,
+    inFrameRetryMs,
     fetchStatus: fetchConnection,
     frameUrl: useCallback(
       () => sessionFrameUrl(workspaceId, sessionDomain, embedOpts()),
@@ -584,6 +592,12 @@ export function SessionPage({
             } else if (isPortalApiError(ev.error) && ev.error.code === "NOT_FOUND") {
               dispatch({ type: "ended", reason: "deleted" });
             }
+            break;
+          case "recovering":
+            // The stream went quiet while the lease is live: the badge
+            // says "Reconnecting" while the frame's own retry — or a later
+            // reload — brings it back (FX-R32).
+            setRecovering(true);
             break;
           case "frame-navigated":
             // Our own reload opens a new stream: not another tab's. The

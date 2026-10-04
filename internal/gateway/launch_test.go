@@ -5,6 +5,8 @@ package gateway_test
 
 import (
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,9 +126,24 @@ func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("launch status = %d, want 303", resp.StatusCode)
 	}
-	if loc, want := resp.Header.Get("Location"),
-		"/?resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false"; loc != want {
-		t.Fatalf("redirect Location = %q, want %q", loc, want)
+	// FX-R32: reconnect=true plus the per-redemption jittered retry delay
+	// sit between the static settings and the clipboard flags.
+	loc := resp.Header.Get("Location")
+	if want := "/?resize=remote&enable_webp=true&idle_disconnect=1440&reconnect=true&reconnect_delay="; !strings.HasPrefix(loc, want) {
+		t.Fatalf("redirect Location = %q, want prefix %q", loc, want)
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("redirect Location %q: %v", loc, err)
+	}
+	delay, err := strconv.Atoi(u.Query().Get("reconnect_delay"))
+	if err != nil || delay < 500 || delay > 2000 {
+		t.Fatalf("reconnect_delay = %q, want an integer in [500,2000]", u.Query().Get("reconnect_delay"))
+	}
+	q := u.Query()
+	q.Del("reconnect_delay")
+	if got, want := q.Encode(), "clipboard_down=false&clipboard_up=false&enable_webp=true&idle_disconnect=1440&reconnect=true&resize=remote"; got != want {
+		t.Fatalf("redirect params = %q, want %q", got, want)
 	}
 }
 

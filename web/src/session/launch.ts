@@ -117,6 +117,27 @@ function seamlessClipboardOK(): boolean {
   return !(ua.includes("Safari") && !ua.includes("Chrome"));
 }
 
+// KasmVNC in-frame retry (FX-R32): with reconnect=true the client re-drives
+// its own websocket after a clean disconnect — the cheap reconnect path the
+// connection watch waits for before it ever re-navigates the frame. The
+// delay is jittered per PAGE INSTANCE inside [MIN, MAX] so a fleet that
+// loses its streams together (backend rollout) spreads its retry claims
+// instead of reconnecting in lockstep.
+export const RECONNECT_DELAY_MIN_MS = 500;
+export const RECONNECT_DELAY_MAX_MS = 2_000;
+
+let retryDelay: number | undefined;
+
+function reconnectDelayMs(): number {
+  if (retryDelay === undefined) {
+    const span = RECONNECT_DELAY_MAX_MS - RECONNECT_DELAY_MIN_MS + 1;
+    const b = new Uint16Array(1);
+    crypto.getRandomValues(b);
+    retryDelay = RECONNECT_DELAY_MIN_MS + (b[0]! % span);
+  }
+  return retryDelay;
+}
+
 /**
  * URL the session iframe is pointed at to (re)load the desktop client. The
  * KasmVNC client treats a page inside an iframe as an embedded widget
@@ -147,6 +168,10 @@ function seamlessClipboardOK(): boolean {
  * its websocket URL from the `path` setting, so
  * `path=websockify?tcdi_tab=<id>` lands the id on every stream claim this
  * frame makes — first connect and every retry alike.
+ *
+ * `reconnect`/`reconnect_delay` arm the client's own in-frame retry
+ * (FX-R32): after a clean disconnect it re-drives the websocket itself
+ * instead of needing a document reload, on a per-load jittered delay.
  */
 export function sessionFrameUrl(
   workspaceId: string,
@@ -158,6 +183,8 @@ export function sessionFrameUrl(
     resize: "remote",
     enable_webp: "true",
     idle_disconnect: "1440",
+    reconnect: "true",
+    reconnect_delay: String(reconnectDelayMs()),
     clipboard_up: String(up),
     clipboard_down: String(down),
   });

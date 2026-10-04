@@ -221,7 +221,10 @@ func (g *Gateway) Drain(ctx context.Context) {
 		for _, s := range all {
 			// Repeat: a handshake admitted just before Drain started can
 			// still land its conn — every pass closes what accumulated.
-			s.dropStreams()
+			// The graceful close is what lets the client's own reconnect
+			// retry (FX-R32); fencing paths stay abrupt so a fenced client
+			// cannot retry into the new owner.
+			s.drainStreams()
 			if s.streamBusy() || s.pendingActivity() > 0 {
 				quiet = false
 			}

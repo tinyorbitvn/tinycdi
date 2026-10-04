@@ -10,6 +10,8 @@ import {
   submitLaunch,
   sessionFrameAllow,
   SESSION_FRAME_SANDBOX,
+  RECONNECT_DELAY_MIN_MS,
+  RECONNECT_DELAY_MAX_MS,
   TICKET_FIELD,
   type LaunchTicket,
 } from "../../../src/session/launch";
@@ -54,8 +56,7 @@ describe("session host mapping", () => {
   // re-asserts tab-mode settings on every frame navigation, and the
   // clipboard client flags follow the workspace policy.
   it("sessionFrameUrl carries the embedded-mode settings", () => {
-    const base =
-      "resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false";
+    const base = "resize=remote&enable_webp=true&idle_disconnect=1440&reconnect=true";
     for (const url of [
       sessionFrameUrl(WS, "session.example.com"),
       sessionFrameUrl(WS, "session.example.com:8443"),
@@ -65,6 +66,13 @@ describe("session host mapping", () => {
       // every websocket claim lands on the lease under it.
       const path = new URL(url).searchParams.get("path");
       expect(path).toMatch(/^websockify\?tcdi_tab=[0-9a-f]{32}$/);
+      // FX-R32: the client's own in-frame retry is armed on a jittered
+      // delay inside [500, 2000] ms — stable within this page instance.
+      const delay = new URL(url).searchParams.get("reconnect_delay");
+      expect(delay).toMatch(/^[0-9]+$/);
+      expect(Number(delay)).toBeGreaterThanOrEqual(RECONNECT_DELAY_MIN_MS);
+      expect(Number(delay)).toBeLessThanOrEqual(RECONNECT_DELAY_MAX_MS);
+      expect(new URL(url).searchParams.get("clipboard_up")).toBe("false");
     }
     // show_control_bar stays out: the portal owns session chrome.
     expect(sessionFrameUrl(WS, "session.example.com")).not.toContain("control_bar");
