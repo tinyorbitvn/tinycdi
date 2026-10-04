@@ -473,9 +473,19 @@ jobs:
           export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
           kubectl get pods -A -o wide || true
           kubectl get workspaces,workspacetemplates -A || true
-          kubectl -n tinycdi-system logs deploy/backend --tail=100 || true
-          kubectl -n tinycdi-system logs deploy/operator --tail=100 || true
-          kubectl -n tcdi-qs-deps logs deploy/keycloak --tail=60 || true
+          # PVC labels/annotations are the retained-inventory contract —
+          # the retained-disk smoke reads this table end to end.
+          kubectl get pvc -A || true
+          kubectl get pvc -A -o yaml || true
+          # Log every replica: `logs deploy/x` picks a single pod, and the
+          # retained-sync sweeper / operator leader run on only one
+          # replica each — a single-pod tail can miss the failure.
+          for ns in tinycdi-system tcdi-qs-deps tcdi-qs-ingress; do
+            for pod in $(kubectl -n "$ns" get pods -o name); do
+              echo "===== $ns/$pod ====="
+              kubectl -n "$ns" logs "$pod" --all-containers --tail=150 || true
+            done
+          done
       - name: upload smoke report
         if: failure() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
