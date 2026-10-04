@@ -118,7 +118,8 @@ Controls that exist today:
   (`deploy/helm/tinycdi/templates/networkpolicy.yaml`, `edgeIngressRule`).
 
 Open questions: A6-S5 (Host-header parsing as a boundary — see boundary 5),
-cookie-mode `partitioned` has less e2e coverage than the default `lax` mode.
+cookie-mode `partitioned` cross-site behaviour (a deployment topology the
+kind e2e cannot reproduce).
 
 ### Boundary 2 — edge ↔ frontend :8443 / backend app :8443
 
@@ -464,8 +465,11 @@ interleavings on real row locks.
 
 Additional items found while writing this document (not from A6):
 
-- **Cookie-mode `partitioned`** has materially less e2e coverage than the
-  default `lax` mode.
+- **Cookie-mode `partitioned`** — e2e coverage added on kind
+  (`hack/quickstart` + `values-partitioned.yaml`, `partitioned.spec.ts`,
+  `ci.yml` job `partitioned`): real Set-Cookie attributes, in-frame
+  reconnect across a backend rollout, revoked-lease cookie rejection.
+  Same-site topology only; a cross-site deployment is not exercised.
 - **Portal idle-extension depends on lease activity** — verify a stolen
   portal cookie alone cannot extend itself, and that idle extension only
   credits input activity measured server-side.

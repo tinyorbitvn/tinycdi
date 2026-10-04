@@ -17,15 +17,15 @@
 # Environment: the TCDI_QS_* knobs of common.sh plus
 #   TCDI_UPGRADE_CHART    OCI ref of the previous chart
 #                         (default oci://ghcr.io/tinyorbitvn/charts/tinycdi)
-#   TCDI_UPGRADE_VERSION  chart version to start from (default 0.2.0)
-#   TCDI_UPGRADE_TAG      git tag the signer certificate names (default v0.2.0)
+#   TCDI_UPGRADE_VERSION  chart version to start from (default 0.3.1)
+#   TCDI_UPGRADE_TAG      git tag the signer certificate names (default v0.3.1)
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 UPGRADE_CHART="${TCDI_UPGRADE_CHART:-oci://ghcr.io/tinyorbitvn/charts/tinycdi}"
-UPGRADE_VERSION="${TCDI_UPGRADE_VERSION:-0.2.0}"
+UPGRADE_VERSION="${TCDI_UPGRADE_VERSION:-0.3.1}"
 UPGRADE_TAG="${TCDI_UPGRADE_TAG:-v${UPGRADE_VERSION}}"
 # Keyless identity the release workflow signs with (docs: .github/README.md
 # "Verifying a release") — exact match, no regexp.
@@ -211,8 +211,7 @@ dump_cluster_diag() {
   warn "cluster diagnostics dumped to $d"
 }
 
-# ---- readiness helpers (the §3b restart recovery wait and the §3c seeding
-# gate share them) ----------------------------------------------------------
+# ---- readiness helpers (shared by the §3b seeding gate) --------------------
 
 edge_code() { # edge_code <host> <path>: HTTP status through Traefik on loopback
   curl -sS --max-time 10 --cacert "${STATE_DIR}/tls/local-ca.crt" \
@@ -233,28 +232,6 @@ all_pods_ready() { # all_pods_ready <ns...>: every pod in the namespaces is Read
     [ "$bad" -gt 0 ] && return 1
   done
   return 0
-}
-
-# wait_cluster_ready: after the §3b containerd/kubelet restart, wait until
-# the cluster itself is serving again — the node Ready, the kube-system/CNI
-# pods Ready and the EndpointSlices of the edge-facing Services repopulated.
-# Returns non-zero when the budget runs out.
-wait_cluster_ready() {
-  local _ ok
-  for _ in $(seq 1 90); do
-    ok=1
-    kc get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' \
-      2>/dev/null | grep -qw True || ok=0
-    all_pods_ready kube-system local-path-storage || ok=0
-    ep_ready "$NS_SYSTEM" backend || ok=0
-    ep_ready "$NS_SYSTEM" frontend || ok=0
-    ep_ready "$NS_DEPS" keycloak || ok=0
-    ep_ready "$NS_DEPS" postgres || ok=0
-    ep_ready "$NS_INGRESS" traefik || ok=0
-    [ "$ok" = 1 ] && return 0
-    sleep 2
-  done
-  return 1
 }
 
 on_error() {
@@ -355,86 +332,15 @@ trap 'kill "$BUILD_PID" 2>/dev/null || true' EXIT
 # old release's runtime digests in the upgrade values instead of this tree's.
 TCDI_QS_IMAGES=published \
 TCDI_QS_CHART="$CHART_TGZ" \
-TCDI_QS_VALUES="$QS_DIR/values-v0.2.yaml" \
+TCDI_QS_VALUES="$QS_DIR/values-v0.3.yaml" \
 TCDI_QS_BROWSER_DIGEST="$RT_BROWSER_DIGEST" \
 TCDI_QS_DESKTOP_DIGEST="$RT_DESKTOP_DIGEST" \
 TCDI_QS_BROWSER_BUILT_AT="" \
 TCDI_QS_DESKTOP_BUILT_AT="" \
 "$QS_DIR/up.sh"
 
-# ---- 3b. give the kind node AppArmor (the previous release requires it) ------
-# v0.2.0 unconditionally sets appArmorProfile: RuntimeDefault on workspace
-# pods — the runtime.appArmor.requireRuntimeDefault opt-out is a v0.3 knob.
-# A real node satisfies that; a kind node can use the host kernel's AppArmor:
-# apparmor_parser in the node + securityfs mounted, then containerd AND
-# kubelet restarted — both cache "apparmor unsupported" at startup
-# (containerd's sync.Once HostSupports probe wants securityfs + parser +
-# kernel param; kubelet does its own one-time check). Without an
-# AppArmor-capable host kernel v0.2.0 workspaces simply cannot run — fail
-# loudly instead of timing out on AppArmor-rejected pods.
-log "enabling AppArmor inside the kind node (the ${UPGRADE_TAG} runtime requires RuntimeDefault)"
-NODE="${CLUSTER}-control-plane"
-if [ "$(docker exec "$NODE" cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" != "Y" ]; then
-  die "host kernel has no AppArmor — ${UPGRADE_TAG} workspace pods require RuntimeDefault AppArmor (the opt-out landed in v0.3); run on a host with AppArmor enabled"
-fi
-docker exec "$NODE" apt-get update -qq >/dev/null
-docker exec "$NODE" apt-get install -y -qq apparmor >/dev/null
-docker exec "$NODE" mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
-docker exec "$NODE" systemctl restart containerd kubelet
-# The restarts briefly unready the apiserver (static pods respawn).
-for _ in $(seq 1 90); do
-  kc get --raw=/readyz >/dev/null 2>&1 && break
-  sleep 2
-done
-kc get --raw=/readyz >/dev/null 2>&1 || die "apiserver did not recover after the containerd/kubelet restart"
-# The kubelet can stay down past the ~40 s node-monitor grace on a loaded
-# runner: the node then goes Unknown and every EndpointSlice drains, so
-# anything that touches the cluster afterwards sees a dead stack for the
-# next ~30-90 s (FLAKE3). Wait here — before ANY later phase — for the
-# node to be Ready again and for the kube-system/CNI pods plus the
-# edge-facing EndpointSlices to repopulate.
-log "waiting for the cluster to recover after the containerd/kubelet restart"
-if ! wait_cluster_ready; then
-  warn "the cluster did not become Ready again after the restart"
-  dump_cluster_diag
-  die "node/kube-system pods/EndpointSlices did not recover after the containerd/kubelet restart"
-fi
-# Probe exactly what the released runtime needs: a pod whose container
-# carries appArmorProfile: RuntimeDefault must be schedulable. A rejected
-# pod sits at reason=AppArmor forever — surface it in seconds instead of
-# letting a workspace hit its ten-minute readiness timeout.
-kc -n default delete pod upgrade-aa-probe --ignore-not-found --wait=false >/dev/null 2>&1 || true
-cat <<'EOF' | kc -n default apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: upgrade-aa-probe
-spec:
-  containers:
-    - name: c
-      image: busybox:stable
-      command: ["sleep", "30"]
-      securityContext:
-        appArmorProfile:
-          type: RuntimeDefault
-EOF
-aa_state=""
-for _ in $(seq 1 90); do
-  aa_state="$(kc -n default get pod upgrade-aa-probe \
-    -o jsonpath='{.status.phase}:{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)"
-  case "$aa_state" in
-    Running:|Succeeded:|*:AppArmor) break ;;
-  esac
-  sleep 2
-done
-case "$aa_state" in
-  Running:|Succeeded:) ;;
-  *) die "RuntimeDefault AppArmor is still not supported on the kind node (probe pod: ${aa_state:-unknown}) — ${UPGRADE_TAG} workspaces cannot run here" ;;
-esac
-kc -n default delete pod upgrade-aa-probe --wait=false >/dev/null 2>&1 || true
-
-# ---- 3c. seeding gate: the stack must be routable, not just Ready -----------
-# The cluster-level wait above covers control plane and endpoints; what the
+# ---- 3b. seeding gate: the stack must be routable, not just Ready -----------
+# Pods reporting Ready is not enough; what the
 # spec actually drives is the edge: the portal, the API and the OIDC issuer
 # answering through Traefik, the seeded template objects present — a few
 # consecutive good rounds, because one good reply can catch the edge
