@@ -97,6 +97,10 @@ spec:
             {{- if eq (printf "%v" (dig "appArmor" "requireRuntimeDefault" true .Values.runtime)) "false" }}
             - --runtime-apparmor-require-default=false
             {{- end }}
+            {{- /* Same shape: --runtime-topology-spread defaults to true. */}}
+            {{- if eq (printf "%v" (dig "topologySpread" "enabled" true .Values.runtime)) "false" }}
+            - --runtime-topology-spread=false
+            {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
             {{- end }}

@@ -147,6 +147,20 @@ func bindRuntimeAppArmorFlag(fs *flag.FlagSet, requireDefault *bool) {
 			"a Localhost profile requested by a template is always still set.")
 }
 
+// bindRuntimeTopologySpreadFlag registers --runtime-topology-spread. True
+// (the default) adds a soft topologySpreadConstraint to every runtime pod —
+// maxSkew 1 over kubernetes.io/hostname, whenUnsatisfiable ScheduleAnyway —
+// preferring an even spread of a namespace's workspace pods across nodes.
+// It is a preference only: ScheduleAnyway can never block scheduling, so a
+// retained PVC pinned by volume node affinity still schedules. The default
+// answers the soak finding of the scheduler packing workspace pods onto a
+// subset of pool nodes (docs/runbooks/capacity.md).
+func bindRuntimeTopologySpreadFlag(fs *flag.FlagSet, enabled *bool) {
+	fs.BoolVar(enabled, "runtime-topology-spread", true,
+		"Add a soft (ScheduleAnyway) topologySpreadConstraint spreading a namespace's "+
+			"runtime pods across nodes (maxSkew 1, kubernetes.io/hostname).")
+}
+
 // parse validates the --runtime-* flag strings. Every error names the
 // offending flag — main() exits non-zero on any of them, so a typo can
 // never silently drop placement (a missing selector on a dedicated pool
@@ -281,6 +295,7 @@ func main() {
 	var bf brokerFlags
 	var pf runtimePlacementFlags
 	var appArmorRequireDefault bool
+	var topologySpread bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -333,6 +348,7 @@ func main() {
 	bindBrokerFlags(flag.CommandLine, &bf, os.Getenv)
 	bindRuntimePlacementFlags(flag.CommandLine, &pf)
 	bindRuntimeAppArmorFlag(flag.CommandLine, &appArmorRequireDefault)
+	bindRuntimeTopologySpreadFlag(flag.CommandLine, &topologySpread)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -489,6 +505,7 @@ func main() {
 			},
 			DefaultHostUsers:    placement.hostUsers,
 			AppArmorNotRequired: !appArmorRequireDefault,
+			TopologySpread:      topologySpread,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.
