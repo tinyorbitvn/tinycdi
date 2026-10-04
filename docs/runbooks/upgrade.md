@@ -231,7 +231,7 @@ downgrade is a **restore**: bring back the previous chart release
 
 The `upgrade` job in `.github/workflows/ci.yml` exercises exactly this
 path on every relevant change: `hack/quickstart/upgrade-test.sh`
-installs the published 0.2.0 chart and its cosign-verified images on the
+installs the published previous release's chart and its cosign-verified images on the
 quickstart kind plumbing, seeds quota/running/stopped/retained state
 plus a live portal session, applies the CRDs and `helm upgrade`s to the
 working tree's chart and locally built images, and

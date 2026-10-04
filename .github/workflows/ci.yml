@@ -507,7 +507,7 @@ jobs:
   upgrade:
     # V3.19 / acceptance B3.13: N-1 -> N upgrade on the same kind plumbing
     # as the quickstart job. hack/quickstart/upgrade-test.sh installs the
-    # PREVIOUS release (the published 0.2.0 chart and its cosign-verified
+    # PREVIOUS release (the published 0.3.x chart and its cosign-verified
     # images), seeds real state — a tenant quota, a Retain workspace with a
     # file on its disk, a stopped workspace, a retained-data row and an
     # open portal session — then upgrades to the chart and the locally
