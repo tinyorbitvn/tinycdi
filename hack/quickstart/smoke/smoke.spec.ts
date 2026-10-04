@@ -229,9 +229,20 @@ test("attach a retained disk: the file written before delete is there after", as
   inHome(sourceId, 'printf %s "$1" > "$2" && sync', token, file);
   expect(inHome(sourceId, 'cat "$1"', file)).toBe(token);
 
-  // 2. Delete it: Retain moves the disk to the retained inventory.
+  // 2. Delete it: Retain moves the disk to the retained inventory. Wait for
+  //    the accepted delete BEFORE any navigation: a page.goto that beats the
+  //    in-flight DELETE aborts the fetch — the intent is never recorded, the
+  //    workspace stays Running and the poll below times out for no product
+  //    reason (observed in CI: status -1 on the DELETE, CR still Ready).
   await page.getByRole("button", { name: "Delete", exact: true }).click();
-  await page.getByRole("button", { name: "Confirm delete" }).click();
+  const [delResp] = await Promise.all([
+    page.waitForResponse(
+      (r) =>
+        r.url().endsWith(`/v1/workspaces/${sourceId}`) && r.request().method() === "DELETE",
+    ),
+    page.getByRole("button", { name: "Confirm delete" }).click(),
+  ]);
+  expect(delResp.status(), "delete is accepted").toBe(202);
 
   // 3. The disk shows up under Retained data (the inventory sync runs on an
   //    interval and the runtime teardown takes a moment).
