@@ -20,17 +20,27 @@ import (
 
 // Shutdown runs against ONE shared deadline, kept under the pod's
 // terminationGracePeriodSeconds (30 s): readiness flips first, then the
+// propagation delay (cfg.DrainPropagationDelay, default 5 s) lets the
+// endpoint removal reach kube-proxy / ingress watches while streams keep
+// flowing and new work is still served — the 1001 close lands only once
+// clients' retries can no longer be routed back here (FX-R34). Then the
 // drain window (cfg.DrainWindow, default 8 s) sheds streams while every
 // other request keeps serving — a read poll sees zero non-2xx; only new
 // launch redemptions and WebSocket upgrades are refused (retryable 503).
 // The window is a duration, not merely a shed budget: both listeners keep
 // serving for its full length — late reads still get 2xx and new work the
-// retryable 503 while endpoint removal propagates — so Shutdown only runs
-// once the window ends. Then every listener's Shutdown in parallel under
-// whatever remains, then the background loops and closers. Run returns by
-// shutdownDeadline even if a request or stream is still in flight (the
-// listeners are then closed hard).
+// retryable 503 — so Shutdown only runs once the window ends. Then every
+// listener's Shutdown in parallel under whatever remains, then the
+// background loops and closers. Run returns by shutdownDeadline even if a
+// request or stream is still in flight (the listeners are then closed
+// hard). Budget: propagation delay + drain window must leave
+// listenerShutdownReserve for the listener Shutdown (config validates).
 const shutdownDeadline = 24 * time.Second
+
+// listenerShutdownReserve is the slice of shutdownDeadline config keeps
+// free after -drain-propagation-delay + -drain-window for the parallel
+// listener Shutdown and the background-loop stop.
+const listenerShutdownReserve = 4 * time.Second
 
 // namedServer is one bound listener with its server and optional TLS
 // configuration (nil = plain HTTP).
@@ -143,7 +153,8 @@ func (b *Backend) Addrs() (app, session, internal, metrics string) {
 }
 
 // Run serves until ctx is done, then shuts down in order (all under one shared
-// deadline, see shutdownDeadline): stop readiness,
+// deadline, see shutdownDeadline): stop readiness, wait for the endpoint
+// removal to propagate while everything keeps serving,
 // drain the session gateway (disconnects reported, leases kept), graceful
 // http.Server.Shutdown on every listener in parallel, stop the background
 // loops, then close the broker side and DB.
@@ -207,15 +218,37 @@ func (b *Backend) Run(ctx context.Context) error {
 	//    work before sockets close.
 	b.beginShutdown()
 
-	// 2. Drain the session gateway: close every open stream and report
+	// 2. Let the endpoint removal propagate: the failed readiness marks
+	//    the pod's endpoints terminating at once, but kube-proxy /
+	//    ingress endpoint watches take ~0.5-2 s to stop routing new
+	//    connections here (FX-R34 measured ~0.3 s ClusterIP, ~1-2 s via
+	//    an ingress on kind). Everything keeps serving through the wait
+	//    — open streams are untouched and new launches/upgrades are
+	//    still accepted: a stream admitted now is closed cleanly in
+	//    step 3, so its client's in-frame retry can only land on a
+	//    sibling, while a drain 503 here would waste the client's one
+	//    retry (KasmVNC retries once per clean close, never after a
+	//    503) and send it to the SPA re-navigation fallback.
+	propDelay := b.cfg.DrainPropagationDelay
+	if propDelay < 0 {
+		propDelay = 0
+	}
+	if propDelay > 0 {
+		b.log.Info("drain: waiting for endpoint removal to propagate", "delay", propDelay)
+		propCtx, pcancel := context.WithTimeout(shCtx, propDelay)
+		<-propCtx.Done()
+		pcancel()
+	}
+
+	// 3. Drain the session gateway: close every open stream and report
 	//    disconnect for each, without revoking leases — the same cookie
 	//    reconnects on another replica. Drain returns as soon as every
 	//    session is quiet, but the window is a duration, not just the shed
 	//    budget: EVERY listener keeps serving until drainCtx ends — reads
 	//    still answer and new launches/upgrades still get the retryable
-	//    503 instead of a refused socket while the pod's endpoint removal
-	//    propagates, and a backend without a session listener holds the
-	//    window all the same. A zero window skips the hold.
+	//    503 instead of a refused socket, and a backend without a session
+	//    listener holds the window all the same. A zero window skips the
+	//    hold.
 	drainWindow := b.cfg.DrainWindow
 	if drainWindow < 0 {
 		drainWindow = 0
@@ -227,7 +260,7 @@ func (b *Backend) Run(ctx context.Context) error {
 	<-drainCtx.Done()
 	dcancel()
 
-	// 3. Graceful shutdown of every listener, in parallel, under the time
+	// 4. Graceful shutdown of every listener, in parallel, under the time
 	//    that remains.
 	var shWG sync.WaitGroup
 	for _, s := range b.servers {
@@ -241,7 +274,7 @@ func (b *Backend) Run(ctx context.Context) error {
 	}
 	shWG.Wait()
 
-	// 4. Stop the background loops (singletons, reloaders, informer cache)
+	// 5. Stop the background loops (singletons, reloaders, informer cache)
 	//    and wait for them before the closers release the database; bounded
 	//    by the same deadline.
 	cancel()
@@ -252,7 +285,7 @@ func (b *Backend) Run(ctx context.Context) error {
 	case <-shCtx.Done():
 		b.log.Error("background loops did not stop before the shutdown deadline")
 	}
-	// 5. deferred closeAll: hard-close any listener still open, then closers.
+	// 6. deferred closeAll: hard-close any listener still open, then closers.
 	return serveFailure
 }
 

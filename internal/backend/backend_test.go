@@ -666,8 +666,10 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
 		// The drain window is held for its full length now — keep this
-		// test about the shed mechanics, not the hold.
+		// test about the shed mechanics, not the hold or the propagation
+		// wait.
 		"-drain-window", "250ms",
+		"-drain-propagation-delay", "0",
 		"-broker-url", brokerURL,
 		"-broker-ca", brokerCA,
 		"-mtls-cert", mtlsCert,
@@ -784,6 +786,198 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	}
 }
 
+// TestRun_DrainPropagationWait (FX-R34): on shutdown the gateway drain
+// waits for the propagation delay BEFORE closing streams — readiness
+// fails at once, but an open stream is untouched, a new upgrade is still
+// served, and the broker sees no disconnect until the delay ends; only
+// then does the 1001 close land and the drain window run its course.
+// The whole sequence stays far inside the shared shutdown deadline.
+func TestRun_DrainPropagationWait(t *testing.T) {
+	const (
+		propDelay = 1500 * time.Millisecond
+		window    = 400 * time.Millisecond
+	)
+	dir := t.TempDir()
+
+	fb := newFakeBrokerClient(t)
+	fb.scriptTicket("tk-1", "ws_aaaa0001")
+	// The mid-wait upgrade must go to a second workspace — a lease for
+	// the same one would fence the first stream.
+	fb.scriptTicket("tk-2", "ws_bbbb0002")
+	internalH := httpapi.NewHandler(httpapi.Config{
+		Broker:   internalAdapter{fb},
+		Audience: "session.test",
+		Logger:   testLog(),
+	})
+	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
+
+	sessionCert, sessionKey := writeTestCert(t, dir, "session.test")
+	mtlsCert, mtlsKey := writeTestCert(t, dir, "gw-split")
+	brokerCA := writeFile(t, dir, "broker.ca", brokerCAPEM)
+
+	cfg, err := ParseFlags([]string{
+		"-listen=", "-internal-listen=",
+		"-session-listen", "127.0.0.1:0",
+		"-session-tls-cert", sessionCert,
+		"-session-tls-key", sessionKey,
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
+		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-renew-interval", "25ms",
+		"-revoke-deadline", "2s",
+		"-drain-window", window.String(),
+		"-drain-propagation-delay", propDelay.String(),
+		"-broker-url", brokerURL,
+		"-broker-ca", brokerCA,
+		"-mtls-cert", mtlsCert,
+		"-mtls-key", mtlsKey,
+		"-gateway-id", "gw-test",
+	}, noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+
+	b, err := New(context.Background(), cfg, testLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	_, sessionAddr, _, _ := b.Addrs()
+	if sessionAddr == "" {
+		t.Fatal("session listener not bound")
+	}
+	base := "https://" + sessionAddr
+	insecure := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+
+	upgrade := func(ticket, wsHost string) *http.Response {
+		form := url.Values{"ticket": {ticket}}
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/launch", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = wsHost
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://"+wsHost)
+		resp, err := insecure.Transport.(*http.Transport).RoundTrip(req)
+		if err != nil {
+			t.Fatalf("launch %s: %v", ticket, err)
+		}
+		var cookie string
+		for _, c := range resp.Cookies() {
+			if c.Name == gateway.SessionCookieName {
+				cookie = c.Value
+			}
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusSeeOther || cookie == "" {
+			t.Fatalf("launch %s = %d, cookie set=%v — want 303 + session cookie", ticket, resp.StatusCode, cookie != "")
+		}
+		wsReq, err := http.NewRequest(http.MethodGet, base+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wsReq.Host = wsHost
+		wsReq.Header.Set("Origin", "https://"+wsHost)
+		wsReq.Header.Set("Cookie", gateway.SessionCookieName+"="+cookie)
+		wsReq.Header.Set("Connection", "upgrade")
+		wsReq.Header.Set("Upgrade", "websocket")
+		wsReq.Header.Set("Sec-WebSocket-Version", "13")
+		wsReq.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		wsResp, err := insecure.Transport.(*http.Transport).RoundTrip(wsReq)
+		if err != nil {
+			t.Fatalf("upgrade %s: %v", ticket, err)
+		}
+		if wsResp.StatusCode != http.StatusSwitchingProtocols {
+			body, _ := io.ReadAll(wsResp.Body)
+			wsResp.Body.Close()
+			t.Fatalf("upgrade %s = %d, want 101 (%s)", ticket, wsResp.StatusCode, body)
+		}
+		return wsResp
+	}
+
+	disconnectSeen := func() bool {
+		for _, a := range fb.activityTypes() {
+			if a == broker.ActivityDisconnect {
+				return true
+			}
+		}
+		return false
+	}
+
+	ws1 := upgrade("tk-1", "ws-aaaa0001.session.test")
+	// The read blocks while the conn is healthy: if it returns before
+	// the propagation delay ends, the stream was closed too early.
+	streamClosed := make(chan struct{})
+	go func() {
+		_, _ = ws1.Body.Read(make([]byte, 16))
+		close(streamClosed)
+	}()
+
+	start := time.Now()
+	cancel()
+
+	// Readiness fails at once even though streams still flow — the drop
+	// must land inside the wait, well before the drain begins.
+	waitFor(t, propDelay, "readiness to drop inside the propagation wait", func() bool {
+		resp, err := insecure.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+
+	// A new upgrade during the wait is still served — refusing it would
+	// waste the client's one in-frame retry on a 503.
+	ws2 := upgrade("tk-2", "ws-bbbb0002.session.test")
+	defer ws2.Body.Close()
+	if d := time.Since(start); d >= propDelay {
+		t.Fatalf("mid-wait upgrade probe ran %v after cancel, past the %v propagation delay", d, propDelay)
+	}
+
+	// At ~2/3 of the delay the first stream must still be open and the
+	// broker must not have seen a disconnect.
+	time.Sleep(2 * propDelay / 3)
+	select {
+	case <-streamClosed:
+		t.Fatal("stream closed during the propagation wait")
+	default:
+	}
+	if disconnectSeen() {
+		t.Fatal("disconnect recorded during the propagation wait — streams must close only after it")
+	}
+
+	// After the delay: the drain's close lands and the disconnect is
+	// reported — still inside the propagation wait + window, far under
+	// the shutdown deadline.
+	waitFor(t, propDelay+3*time.Second, "disconnect after the propagation wait", disconnectSeen)
+	if d := time.Since(start); d < propDelay {
+		t.Fatalf("disconnect reported %v after cancel, before the %v propagation delay ended", d, propDelay)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return within 10s of ctx cancel")
+	}
+	if d := time.Since(start); d < propDelay+window {
+		t.Fatalf("Run returned %v after cancel, before propagation delay + drain window (%v)", d, propDelay+window)
+	}
+	_ = ws1.Body.Close()
+	if n := fb.revokeCount(); n != 0 {
+		t.Fatalf("drain revoked %d leases, want 0", n)
+	}
+}
+
 // TestRun_HoldsDrainWindow: the drain window is a duration, not a shed
 // budget — after ctx cancel the session listener keeps answering for the
 // whole -drain-window (readiness already failed, sockets still land) and
@@ -813,6 +1007,9 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 		"-session-domain", "session.test",
 		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
 		"-drain-window", window.String(),
+		// Keep the test about the window hold; the propagation wait has
+		// its own test.
+		"-drain-propagation-delay", "0",
 		"-broker-url", brokerURL,
 		"-broker-ca", brokerCA,
 		"-mtls-cert", mtlsCert,

@@ -123,14 +123,31 @@ Only real changes; everything not listed keeps its name and meaning.
 the backend pods roll one at a time (`maxUnavailable: 0`, surge-first —
 the chart default is 2 replicas, and with `replicas: 1` the new pod is
 Ready before the old one drains), and a terminating pod's pre-stop drain
-holds both listeners for the drain
-window (`-drain-window`, 8 s default): readiness drops at once, open
+runs in this order: readiness drops at once, then the pod waits the
+propagation delay (`-drain-propagation-delay`,
+`backend.drainPropagationDelay`, 5 s default) for the endpoint removal
+to reach kube-proxy / the ingress — streams keep flowing and new
+launches/upgrades are still served — before the graceful `1001` close
+tells clients to reconnect. The in-frame retry then lands on a sibling
+replica, not back on the terminating pod (which would answer the
+retryable 503 and waste the client's one retry). After the close, both
+listeners hold for the drain
+window (`-drain-window`, 8 s default): open
 reads keep being served, and only new launches and new stream upgrades
 get a retryable 503. A tab whose stream dies reconnects to a sibling
 inside its live lease — same session cookie, no re-launch. v0.3 also
 records the claiming portal tab on the lease, so a same-tab reconnect
 after a rollout resumes cleanly instead of flashing "open in another
 tab"; only an actual second tab raises that prompt.
+
+Budget: delay + window must leave ≥ 4 s of the backend's 24 s shared
+shutdown deadline for listener shutdown, and the deadline sits under the
+pod's 30 s `terminationGracePeriodSeconds` — the binary validates the
+pair at startup. With surge-first ordering a retry may instead land on a
+sibling that has not begun its own drain (the second hop): that replica
+serves the stream until its own wait ends, then sends another clean
+`1001` — one more in-frame retry, not a fallback. A retryable 503 only
+reaches a client that connects after the sibling's wait has ended.
 
 The one case that still costs sessions is every backend replica down
 past the 30 s lease TTL — the same exposure as any v0.2 rollout. A
@@ -503,11 +520,14 @@ renews the leases, they expire, and each user must start a fresh session.
    desktop image on the base).
 5. Check `tinycdi_workspaces_running` — decide whether the maintenance
    window tolerates one stream drop per backend pod, or drain users first
-   (stop issuing tickets). A graceful backend stop drains its open streams
-   and reports them closed, then keeps both listeners serving for the rest
-   of the drain window (`-drain-window`, default 8 s) — late reads still
-   answer and new launches/upgrades get a retryable 503 while endpoint
-   removal propagates; clients then reconnect inside their live lease.
+   (stop issuing tickets). A graceful backend stop fails readiness, waits
+   the propagation delay (`-drain-propagation-delay`, default 5 s) for the
+   pod's endpoint removal to propagate while streams keep flowing, then
+   drains its open streams with a clean close and reports them closed —
+   and keeps both listeners serving for the rest
+   of the drain window (`-drain-window`, default 8 s): late reads still
+   answer and new launches/upgrades get a retryable 503; clients then
+   reconnect inside their live lease on a sibling replica.
 
 ## Procedure
 

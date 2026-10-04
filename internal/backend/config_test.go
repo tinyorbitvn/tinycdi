@@ -109,6 +109,9 @@ func TestParseFlags_Defaults(t *testing.T) {
 	if cfg.ImageBlockAfter != api.DefaultImageBlockAfter {
 		t.Fatalf("ImageBlockAfter = %v, want the 1080h default", cfg.ImageBlockAfter)
 	}
+	if cfg.DrainPropagationDelay != 5*time.Second {
+		t.Fatalf("DrainPropagationDelay = %v, want the 5s default", cfg.DrainPropagationDelay)
+	}
 }
 
 // TestParseFlags_ImageBlockAfter (E3): the flag takes the 45-day default,
@@ -215,6 +218,39 @@ func TestParseFlags_LoginKeyRequired(t *testing.T) {
 	}
 	if _, err := ParseFlags(args, noEnv); err != nil {
 		t.Fatalf("session-only merged mode should not need -login-key-file: %v", err)
+	}
+}
+
+// TestParseFlags_DrainPropagationDelay (FX-R34): the propagation wait
+// parses like every duration flag, honors its env, rejects a negative
+// value, and together with -drain-window must leave listener shutdown
+// room inside the shared shutdown deadline.
+func TestParseFlags_DrainPropagationDelay(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_DRAIN_PROPAGATION_DELAY": "2s"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.DrainPropagationDelay != 2*time.Second {
+		t.Fatalf("env DrainPropagationDelay = %v, want 2s", cfg.DrainPropagationDelay)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-drain-propagation-delay", "0"),
+		envMap(map[string]string{"TCDI_DRAIN_PROPAGATION_DELAY": "2s"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.DrainPropagationDelay != 0 {
+		t.Fatalf("flag DrainPropagationDelay = %v, want 0", cfg.DrainPropagationDelay)
+	}
+	if _, err := ParseFlags(withArg(mergedArgs(), "-drain-propagation-delay", "-1s"), noEnv); err == nil {
+		t.Fatal("negative -drain-propagation-delay must be rejected")
+	}
+	// The budget: delay + window must leave listenerShutdownReserve of
+	// the shared deadline for listener shutdown.
+	if _, err := ParseFlags(withArg(mergedArgs(), "-drain-propagation-delay", "13s"), noEnv); err == nil {
+		t.Fatalf("delay 13s + window 8s = 21s must be rejected (no room for listener shutdown inside %s)", shutdownDeadline)
+	}
+	if _, err := ParseFlags(withArg(mergedArgs(), "-drain-propagation-delay", "12s"), noEnv); err != nil {
+		t.Fatalf("delay 12s + window 8s = 20s fits the budget, got: %v", err)
 	}
 }
 
