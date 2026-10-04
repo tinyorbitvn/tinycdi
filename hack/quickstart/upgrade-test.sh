@@ -253,6 +253,31 @@ TCDI_QS_BROWSER_BUILT_AT="" \
 TCDI_QS_DESKTOP_BUILT_AT="" \
 "$QS_DIR/up.sh"
 
+# ---- 3b. give the kind node AppArmor (the previous release requires it) ------
+# v0.2.0 unconditionally sets appArmorProfile: RuntimeDefault on workspace
+# pods — the runtime.appArmor.requireRuntimeDefault opt-out is a v0.3 knob.
+# A real node satisfies that; a kind node can use the host kernel's AppArmor:
+# apparmor_parser in the node + securityfs mounted + a containerd restart so
+# its sync.Once HostSupports() probe (securityfs + parser + kernel param)
+# re-runs. Without an AppArmor-capable host kernel v0.2.0 workspaces simply
+# cannot run — fail loudly instead of timing out on AppArmor-rejected pods.
+log "enabling AppArmor inside the kind node (the ${UPGRADE_TAG} runtime requires RuntimeDefault)"
+NODE="${CLUSTER}-control-plane"
+if [ "$(docker exec "$NODE" cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" != "Y" ]; then
+  die "host kernel has no AppArmor — ${UPGRADE_TAG} workspace pods require RuntimeDefault AppArmor (the opt-out landed in v0.3); run on a host with AppArmor enabled"
+fi
+docker exec "$NODE" apt-get update -qq >/dev/null
+docker exec "$NODE" apt-get install -y -qq apparmor >/dev/null
+docker exec "$NODE" mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+docker exec "$NODE" systemctl restart containerd
+# kubelet re-reads CRI features periodically; wait for the apiserver to be
+# healthy again before the spec starts driving workspaces.
+for _ in $(seq 1 60); do
+  kc get --raw=/readyz >/dev/null 2>&1 && break
+  sleep 2
+done
+kc get --raw=/readyz >/dev/null 2>&1 || die "apiserver did not recover after the containerd restart"
+
 # ---- 4. seed + upgrade + verify (hack/quickstart/smoke/upgrade.spec.ts) ------
 # The spec holds a live desktop session open while it runs this script's
 # --apply leg, so the same browser context proves the stream reconnects
