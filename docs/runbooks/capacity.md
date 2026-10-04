@@ -482,6 +482,9 @@ backend pod delete, backend **rollout**, session-TLS rotate.
 - **Drill spans.** Pod delete: 6 sessions on the killed pod, p100 ~5 s.
   Rollout: 38/60 sessions observed a span (22 reconnected inside one 5 s
   poll — invisible to the metric): p50 ~5 s / p95 ~15 s / p100 ~15.0 s.
+  All span numbers are at the harness's 5 s poll resolution: a ~5 s
+  span is one missed poll (≈0–5 s real), ~15 s is three (≈10–15 s
+  real); a 1 s-poll rerun under rc.5 will re-score at true resolution.
   TLS rotate: zero disconnects again. The ~15 s tail is 7 sessions whose
   jittered in-frame retries (0.5–2 s, `reconnect_delay`) needed ~3 poll
   cycles to land a claim on the fresh pods — all in-frame, none
