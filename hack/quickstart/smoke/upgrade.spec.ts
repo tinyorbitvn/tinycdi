@@ -113,6 +113,25 @@ async function getQuota(page: Page): Promise<{
   });
 }
 
+// A one-shot quota read that survives a transient in-page fetch failure.
+// The polls above already retry a thrown evaluate, but a bare getQuota
+// call does not: a navigation that races it (the detail page's own
+// "workspace gone -> /" redirect after a delete, or a connection dropped
+// by the post-upgrade rollout) aborts the fetch and would kill the test
+// — the same race class as the aborted retained-disk DELETE. Poll until
+// the read returns a real body instead of throwing once.
+async function quotaNow(page: Page) {
+  let quota: Awaited<ReturnType<typeof getQuota>> = {};
+  await expect
+    .poll(
+      async () =>
+        ((quota = await getQuota(page)).configured === undefined ? null : quota.configured),
+      { timeout: 60_000, message: "quota read" },
+    )
+    .not.toBeNull();
+  return quota;
+}
+
 // psql against the quickstart Postgres: local socket first, TCP+password
 // (up.sh's generated one) as fallback — the pod serves TLS on TCP only.
 function psql(sql: string): string {
@@ -157,7 +176,7 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
 
   // ---------- seed state on the previous release ----------
   await login(page);
-  const quotaBefore = await getQuota(page);
+  const quotaBefore = await quotaNow(page);
   expect(quotaBefore.configured, "tenant quota row before upgrade").toBe(true);
 
   // A Retain workspace whose disk must carry a file across the upgrade. Its
@@ -216,7 +235,7 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   await expect
     .poll(rtRowVisible, { timeout: 5 * 60_000, intervals: [5_000], message: "retained-data row created" })
     .toBe(true);
-  const quotaSeeded = await getQuota(page);
+  const quotaSeeded = await quotaNow(page);
   expect(quotaSeeded.limits, "quota limits must not move while seeding").toEqual(quotaBefore.limits);
 
   // ---------- upgrade: CRDs, then helm, while the session stays open ----------
@@ -259,7 +278,7 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
     "portal session lost across the upgrade",
   ).toBeVisible({ timeout: 60_000 });
 
-  const quotaAfter = await getQuota(page);
+  const quotaAfter = await quotaNow(page);
   expect(quotaAfter.configured, "tenant quota row after upgrade").toBe(true);
   expect(quotaAfter.limits, "quota limits unchanged").toEqual(quotaBefore.limits);
 
