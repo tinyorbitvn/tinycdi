@@ -245,12 +245,21 @@ test("attach a retained disk: the file written before delete is there after", as
   expect(delResp.status(), "delete is accepted").toBe(202);
 
   // 3. The disk shows up under Retained data (the inventory sync runs on an
-  //    interval and the runtime teardown takes a moment).
+  //    interval and the runtime teardown takes a moment). The table fills
+  //    from an async /v1/data fetch after goto resolves, so the predicate
+  //    must wait for the row to render before counting — an immediate
+  //    count() reads the pre-render DOM and misses a record the API is
+  //    already serving (run 37219121799 attempt 1: the record was in every
+  //    /v1/data response from +10 s while count() saw 0 for 5 min).
   const row = page.getByRole("row", { name: new RegExp(name) });
   await expect
     .poll(
       async () => {
         await page.goto("/data");
+        await row
+          .first()
+          .waitFor({ state: "attached", timeout: 5_000 })
+          .catch(() => {});
         return row.count();
       },
       { timeout: 5 * 60_000, intervals: [5_000], message: `retained disk of ${name}` },
