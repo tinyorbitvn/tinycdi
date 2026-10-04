@@ -464,3 +464,42 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
 Capacity answer unchanged: **~60 sessions** remains the safe level. The
 reconnect tail is a UX latency under full backend loss, not a capacity
 limit — re-score on rc.4 (FX-R32) with the short N=60 × 30 min re-soak.
+
+### v0.3.0-rc.4 soak: 60 sessions × 30 min (2026-10-04)
+
+The FX-R32 re-score: same shape (60 soak-small, 20 lanes, waves 10/15 s,
+node guard armed, default limits), half duration, drills at ~T+10 —
+backend pod delete, backend **rollout**, session-TLS rotate.
+
+- **In-frame reconnect verified at fleet scale.** PG `connection_lease`
+  snapshots around each drill: all 60 leases kept their lease id,
+  `stream_epoch` bumped in place, and **`stream_owner_tab` unchanged for
+  every session through both backend drills — zero frame
+  re-navigations** (the rc.3 nav-thrash mechanism is gone). Zero
+  `launch.redeem` audit events and zero launch tickets minted in every
+  drill window; the smoke recorded disconnect→Connected 1553 ms with
+  zero `framenavigated` events on the single-session path.
+- **Drill spans.** Pod delete: 6 sessions on the killed pod, p100 ~5 s.
+  Rollout: 38/60 sessions observed a span (22 reconnected inside one 5 s
+  poll — invisible to the metric): p50 ~5 s / p95 ~15 s / p100 ~15.0 s.
+  TLS rotate: zero disconnects again. The ~15 s tail is 7 sessions whose
+  jittered in-frame retries (0.5–2 s, `reconnect_delay`) needed ~3 poll
+  cycles to land a claim on the fresh pods — all in-frame, none
+  navigated (`stream_owner_tab` is the proof: a re-navigation lands a
+  new page context and a new tab id).
+- **Gates (advisor).** disconnect-span p95 14.96 s **fails** the ≤ 10 s
+  bar (p100 15.02 s inside ≤ 30 s); inputResumeMs p100 23.3 s PASS
+  (< 30 s); longest gap 15.0 s PASS (< 60 s); dropped 0; falseElsewhere
+  0; manual actions 0; inputTimeouts 0. vs rc.3: p95 39.9 s → 15.0 s,
+  p100 45 s → 15 s, nav thrash → zero navigations.
+- **Everything else.** connect p50 5.9 s / p95 6.1 s, mid-run reload
+  reconnect p50 0 / p95 5.0 s (near-seamless again), inputDispatch p50
+  66 ms / p95 83 ms, lane 429s = 4 anonymous-phase hits on soak09/10/14
+  during the OIDC ramp (same class as rc.3's 2; none on authenticated
+  traffic).
+
+Capacity answer unchanged: **~60 sessions** remains the safe level. The
+residual is a ~15 s worst-case in-frame reconnect tail under full
+backend loss — roughly three times better than rc.3 and no longer a
+correctness issue (no thrash, no lost claims), still over the 10 s p95
+bar for the v0.3.0 tag gate.
