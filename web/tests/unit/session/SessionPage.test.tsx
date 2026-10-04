@@ -790,3 +790,77 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     expect(ticketPosts()).toHaveLength(0);
   });
 });
+
+
+// ---- FX-R31 addendum: own-tab reconnect after a backend restart/rollout ----
+
+describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
+  // rc.2 soak: 'elsewhere' suppressed reconnect until lease expiry — a ~120 s
+  // gap (disconnected->stale->none->relaunch). With ownership evidence the
+  // restart's re-claim (new epoch, same tab id) keeps the page 'ours', so
+  // the watch's reconnect backoff runs immediately.
+  it("a stream loss with our owner id reloads the frame on the watch backoff — the 'elsewhere' gate never engages", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // The backend rolled: the stream died and the client's retry already
+    // re-claimed at a much later epoch under OUR tab id — epochs alone read
+    // "another tab" and rc.2 parked the page on the overlay until the lease
+    // expired. disconnected reports keep coming while the watch reloads.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    const iframe = () =>
+      document.querySelector("iframe") as HTMLIFrameElement | null;
+    // The reconnect begins on backoff[0] (~1 s), not after lease expiry.
+    await waitFor(
+      () => expect(iframe()?.getAttribute("src")).toBeTruthy(),
+      { timeout: 5_000 },
+    );
+
+    // The reloaded frame's claim lands: the stream is back under our id at
+    // a new epoch — the page never read "elsewhere" throughout.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+      streamOwnerTab: sessionTabId(),
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
+  it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Pre-FX-R31 shape: no streamOwnerTab. The restart's re-claim bumped
+    // the epoch beyond the +1 window — the page goes 'elsewhere' and the
+    // watch stops driving reconnect (lease expiry is the only way back).
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+    });
+    const iframe = () =>
+      document.querySelector("iframe") as HTMLIFrameElement | null;
+    await waitFor(() => expect(iframe()?.getAttribute("src")).toBeTruthy(), {
+      timeout: 5_000,
+    });
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+    });
+    expect(
+      await screen.findByText("This session is open in another tab"),
+    ).toBeInTheDocument();
+  });
+});
