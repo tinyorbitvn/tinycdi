@@ -191,8 +191,8 @@ Install-time invariants. Rendering FAILS when violated:
     shipped 0.0.0.0/32 ipBlock in allowedPeers is a deny-all placeholder —
     it fails the render too.
   - SEC-35: edge TLS is mandatory — ingress.enabled requires
-    ingress.tls.existingSecret; every gatewayApi parentRef must pin a
-    sectionName (a TLS listener).
+    ingress.tls.existingSecret; every gatewayApi parentRef (shared or
+    per-route) must pin a sectionName (a TLS listener).
   - SEC-02: a seeded InternetOnly template requires operator.clusterCIDRs.
   - SEC-36/CHTR-2/CHTR-3: dev surfaces are gated behind dev.enabled —
     operator.devAllowNoBroker, dangerous extraArgs, hostPath extraVolumes,
@@ -315,12 +315,16 @@ Install-time invariants. Rendering FAILS when violated:
 {{- fail "ingress.tls.existingSecret is required when ingress.enabled — edge TLS is mandatory" -}}
 {{- end -}}
 {{- if .Values.gatewayApi.enabled -}}
-{{- if not .Values.gatewayApi.parentRefs -}}
-{{- fail "gatewayApi.enabled requires at least one parentRef" -}}
+{{- /* A route resolves to its non-empty per-route list, else the shared
+        gatewayApi.parentRefs — every rendered route needs >= 1 ref. */ -}}
+{{- $portalPRs := or .Values.gatewayApi.portalParentRefs .Values.gatewayApi.parentRefs -}}
+{{- $sessionPRs := or .Values.gatewayApi.sessionParentRefs .Values.gatewayApi.parentRefs -}}
+{{- if or (not $portalPRs) (not $sessionPRs) -}}
+{{- fail "gatewayApi.enabled requires at least one parentRef per route — set gatewayApi.parentRefs or the per-route portalParentRefs/sessionParentRefs" -}}
 {{- end -}}
-{{- range .Values.gatewayApi.parentRefs -}}
+{{- range concat $portalPRs $sessionPRs -}}
 {{- if not .sectionName -}}
-{{- fail "every gatewayApi.parentRefs entry needs sectionName naming a TLS listener — a bare parentRef binds every listener including plain HTTP" -}}
+{{- fail "every gatewayApi parentRef entry needs sectionName naming a TLS listener — a bare parentRef binds every listener including plain HTTP" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

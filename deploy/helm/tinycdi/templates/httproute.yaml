@@ -11,12 +11,21 @@
 # explicitly (parentRefs group/kind, rules[].matches and backendRefs
 # group/kind/weight) so GitOps diffing (Argo CD, Flux) does not report
 # false drift on an unstructured CR.
-{{- $parentRefs := list }}
-{{- range .Values.gatewayApi.parentRefs }}
+{{- /* Each route resolves its own parentRefs: a non-empty per-route
+       override (gatewayApi.portalParentRefs for the portal host,
+       gatewayApi.sessionParentRefs for *.<sessionDomain>) replaces the
+       shared gatewayApi.parentRefs; empty falls back to the shared
+       list. */ -}}
+{{- $routeRefs := dict }}
+{{- range $route, $refs := dict "portal" (or .Values.gatewayApi.portalParentRefs .Values.gatewayApi.parentRefs) "session" (or .Values.gatewayApi.sessionParentRefs .Values.gatewayApi.parentRefs) }}
+{{- $resolved := list }}
+{{- range $refs }}
 {{- $pr := deepCopy . }}
 {{- if not (hasKey $pr "group") }}{{- $_ := set $pr "group" "gateway.networking.k8s.io" }}{{- end }}
 {{- if not (hasKey $pr "kind") }}{{- $_ := set $pr "kind" "Gateway" }}{{- end }}
-{{- $parentRefs = append $parentRefs $pr }}
+{{- $resolved = append $resolved $pr }}
+{{- end }}
+{{- $_ := set $routeRefs $route $resolved }}
 {{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -31,7 +40,7 @@ metadata:
   {{- end }}
 spec:
   parentRefs:
-    {{- toYaml $parentRefs | nindent 4 }}
+    {{- toYaml (get $routeRefs "portal") | nindent 4 }}
   hostnames: [{{ .Values.portalHost | quote }}]
   rules:
     # PathPrefix matches per path element: /v1 matches /v1 and /v1/...,
@@ -58,7 +67,7 @@ metadata:
   {{- end }}
 spec:
   parentRefs:
-    {{- toYaml $parentRefs | nindent 4 }}
+    {{- toYaml (get $routeRefs "session") | nindent 4 }}
   hostnames: [{{ printf "*.%s" .Values.sessionDomain | quote }}]
   rules:
     # The API server defaults a missing matches list to PathPrefix / —
