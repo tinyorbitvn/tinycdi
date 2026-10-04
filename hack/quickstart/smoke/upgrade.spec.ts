@@ -37,8 +37,9 @@ async function createBrowserWorkspace(
   name: string,
   dataPolicy?: "Retain" | "Ephemeral",
 ): Promise<string> {
-  await page.getByRole("link", { name: "New workspace" }).click();
-  await page.waitForURL("**/workspaces/new");
+  // The released portal only offers "New workspace" from the list page —
+  // the detail page (where the previous create left us) has none.
+  await page.goto("/workspaces/new");
   await page.locator('input[name="name"]').fill(name);
   const browserTemplate = page
     .locator('select[name="template"] option', { hasText: /browser/i })
