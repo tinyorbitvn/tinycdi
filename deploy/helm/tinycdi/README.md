@@ -264,6 +264,7 @@ objects. It **keeps**:
 | `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider — Keycloak: the client's *Valid post logout redirect URIs*) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |
 | `dev.enabled` | `false` | dev gate: required for `operator.devAllowNoBroker`, dangerous `extraArgs`, a non-verifying `database.tls.mode`, `podSecurity.managedEnforce=privileged`, `backend.extraVolumes` hostPath, and any securityContext override that weakens the hardened defaults |
+| `frontend.drainDelay` | `8s` | pre-stop drain: on SIGTERM `/healthz` fails at once and the pod keeps serving this long while the endpoint removal reaches kube-proxy/the edge, so a rollover never routes to a dead pod — render-time budget check: `drainDelay` must be <= 20s (leaves >= 10 s of the 30 s `terminationGracePeriodSeconds` for graceful shutdown) |
 | `frontend.branding.configMap` | `""` | optional ConfigMap mounted read-only at `/branding` and served at `/branding/` — see Branding below |
 
 ### Branding (`frontend.branding.configMap`)

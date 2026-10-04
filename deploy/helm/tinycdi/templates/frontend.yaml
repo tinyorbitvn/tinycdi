@@ -33,6 +33,13 @@ spec:
     spec:
       serviceAccountName: frontend
       automountServiceAccountToken: false
+      # SIGTERM fails /healthz, then the frontend keeps serving for
+      # -drain-delay (frontend.drainDelay, default 8s) while the pod's
+      # endpoint removal propagates to kube-proxy / the edge — a rollover
+      # never routes to a dead pod (FX-R35). 30 s covers the delay plus a
+      # graceful listener shutdown with margin (render-time bound:
+      # drainDelay <= 20s).
+      terminationGracePeriodSeconds: 30
       securityContext:
         {{- include "tinycdi.podSecurityContext" .Values.frontend.podSecurityContext | nindent 8 }}
       {{- include "tinycdi.imagePullSecrets" . | nindent 6 }}
@@ -54,6 +61,10 @@ spec:
           imagePullPolicy: {{ include "tinycdi.imagePullPolicy" .Values.images.frontend.pullPolicy }}
           args:
             - -listen=:8443
+            # pre-stop drain (FX-R35): /healthz fails on SIGTERM and the
+            # server keeps serving this long while the endpoint removal
+            # propagates, then shuts down gracefully.
+            - -drain-delay={{ .Values.frontend.drainDelay }}
             # The SPA shows sessions in an iframe on each workspace's own
             # <label>.<sessionDomain> host and launches them with a form
             # POST there — the CSP frame-src and form-action get the
@@ -81,6 +92,9 @@ spec:
             httpGet: {path: /healthz, port: https, scheme: HTTPS}
             initialDelaySeconds: 2
             periodSeconds: 5
+            # One miss flips Ready — on drain /healthz fails at once and
+            # the pod must leave the endpoints fast (FX-R35).
+            failureThreshold: 1
           securityContext:
             {{- include "tinycdi.containerSecurityContext" .Values.frontend.securityContext | nindent 12 }}
           resources:

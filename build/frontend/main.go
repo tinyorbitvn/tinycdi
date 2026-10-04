@@ -19,8 +19,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
@@ -34,6 +37,21 @@ func envOr(key, def string) string {
 	return def
 }
 
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// draining flips when shutdown starts: /healthz fails at once so the
+// pod's readiness drops and the pod leaves the Service endpoints, while
+// every other route keeps serving through the -drain-delay wait — the
+// edge stops routing before the listener closes (FX-R35).
+var draining atomic.Bool
+
 func main() {
 	var (
 		listen        string
@@ -42,6 +60,7 @@ func main() {
 		tlsKey        string
 		sessionDomain string
 		brandingDir   string
+		drainDelay    time.Duration
 	)
 	flag.StringVar(&listen, "listen", envOr("TCDI_FRONTEND_LISTEN", ":8443"), "HTTPS listen address")
 	flag.StringVar(&webRoot, "web-root", envOr("TCDI_FRONTEND_WEB_ROOT", "/srv/web"), "directory with the built SPA assets")
@@ -52,6 +71,9 @@ func main() {
 			"<label>.<session-domain> host; the wildcard https://*.<session-domain> is added to CSP frame-src and form-action")
 	flag.StringVar(&brandingDir, "branding-dir", envOr("TCDI_FRONTEND_BRANDING_DIR", ""),
 		"optional directory with branding overrides (branding.json, tokens.css, logo files) served at /branding/")
+	flag.DurationVar(&drainDelay, "drain-delay", envDuration("TCDI_FRONTEND_DRAIN_DELAY", 5*time.Second),
+		"on SIGTERM /healthz fails at once and the server keeps serving this long while the pod's "+
+			"endpoint removal propagates to the edge, then shuts down gracefully; 0 skips the wait")
 	flag.Parse()
 
 	if tlsCert == "" || tlsKey == "" {
@@ -88,10 +110,43 @@ func main() {
 	defer cancel()
 	go reloader.Run(ctx)
 	log.Info("frontend listening", "addr", listen, "sessionDomain", sessionDomain)
-	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Error("serve", "err", err)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServeTLS("", "") }()
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("serve", "err", err)
+			os.Exit(1)
+		}
+		return
+	case <-sigCtx.Done():
+	}
+	if err := drainAndShutdown(srv, drainDelay, log); err != nil {
+		log.Error("shutdown", "err", err)
 		os.Exit(1)
 	}
+}
+
+// drainAndShutdown (FX-R35) runs the pre-stop drain: /healthz starts
+// failing at once so the pod's readiness drops and it leaves the Service
+// endpoints, but the server keeps answering every other route for delay
+// while the endpoint removal propagates to kube-proxy / the edge — a
+// terminating pod still serves the traffic routed to it. Then the
+// listener shuts down gracefully under a bounded deadline. Without the
+// wait the edge keeps routing to a pod that is already gone for a
+// second or two, surfacing at the portal as a brief Gateway Timeout on a
+// rollover.
+func drainAndShutdown(srv *http.Server, delay time.Duration, log *slog.Logger) error {
+	draining.Store(true)
+	if delay > 0 {
+		log.Info("drain: readiness failing, serving through the propagation wait", "delay", delay)
+		time.Sleep(delay)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
 }
 
 // cspBase is sized to the vite build output (external module script +
@@ -147,6 +202,10 @@ func securityHeaders(csp string, next http.Handler) http.Handler {
 func newHandler(webRoot, brandingDir, csp string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if draining.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	// /v1/ belongs to the backend; the edge routes it there by path. If a

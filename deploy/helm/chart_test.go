@@ -2718,6 +2718,71 @@ func TestBackendDrainPropagationDelay(t *testing.T) {
 	}
 }
 
+func frontendArgsWith(t *testing.T, sets ...string) []string {
+	t.Helper()
+	args := []string{"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml")}
+	for _, s := range sets {
+		args = append(args, "--set", s)
+	}
+	dep := deployment(renderArgs(t, args...), "frontend")
+	if dep == nil {
+		t.Fatal("no frontend Deployment rendered")
+	}
+	return firstContainerArgs(dep)
+}
+
+// TestFrontendDrainDelay (FX-R35): the chart renders -drain-delay from
+// frontend.drainDelay (default 8s) — the pre-stop wait between the
+// readiness drop and the graceful listener shutdown so the endpoint
+// removal propagates before the pod stops serving — and the pod carries
+// the drain plumbing: a grace period covering the delay plus shutdown
+// and a readiness probe that flips on the first miss.
+func TestFrontendDrainDelay(t *testing.T) {
+	args := frontendArgsWith(t)
+	if !hasArg(args, "-drain-delay=8s") {
+		t.Errorf("default render lacks -drain-delay=8s: %v", args)
+	}
+	args = frontendArgsWith(t, "frontend.drainDelay=2s")
+	if !hasArg(args, "-drain-delay=2s") {
+		t.Errorf("frontend.drainDelay must render its flag: %v", args)
+	}
+	// The budget: the delay must leave >= 10 s of the 30 s
+	// terminationGracePeriodSeconds for graceful shutdown — rejected at
+	// render, not at pod start.
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "frontend.drainDelay=21s")
+	if !strings.Contains(out, "drainDelay") {
+		t.Errorf("drainDelay 21s must fail the render naming drainDelay, got: %s", out)
+	}
+	args = frontendArgsWith(t, "frontend.drainDelay=20s")
+	if !hasArg(args, "-drain-delay=20s") {
+		t.Errorf("drainDelay 20s fits the budget: %v", args)
+	}
+	// Duration format is enforced by the schema: a non-duration value
+	// must fail at values validation, not reach the binary.
+	out = renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "frontend.drainDelay=soon")
+	if !strings.Contains(out, "drainDelay") && !strings.Contains(out, "pattern") {
+		t.Errorf("non-duration drainDelay must fail validation, got: %s", out)
+	}
+	// The pod plumbing: 30 s grace (delay + graceful shutdown) and a
+	// readiness probe that fails on the first miss so the pod leaves the
+	// endpoints fast once /healthz starts failing on SIGTERM.
+	dep := deployment(render(t, "minimal-values.yaml"), "frontend")
+	spec, _ := dep["spec"].(map[string]any)
+	tpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tpl["spec"].(map[string]any)
+	if podSpec["terminationGracePeriodSeconds"] != 30 {
+		t.Errorf("frontend terminationGracePeriodSeconds = %v, want 30 (drain budget)", podSpec["terminationGracePeriodSeconds"])
+	}
+	rp, _ := firstContainer(dep)["readinessProbe"].(map[string]any)
+	if rp["failureThreshold"] != 1 {
+		t.Errorf("frontend readinessProbe.failureThreshold = %v, want 1 (fast readiness drop on drain)", rp["failureThreshold"])
+	}
+}
+
 // TestOperatorDefaultsHA: E4 — the operator Deployment ships HA defaults:
 // 2 replicas, leader election enabled, and a PodDisruptionBudget with
 // minAvailable 1 so a voluntary disruption keeps a live reconciler.

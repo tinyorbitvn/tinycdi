@@ -393,6 +393,14 @@ frontend:
   tls:
     existingSecret: tinycdi-frontend-tls       # keys tls.crt / tls.key
   webRoot: ""               # empty = image default (/srv/web)
+  # Pre-stop drain (FX-R35): on SIGTERM /healthz fails at once, then the
+  # frontend keeps serving for drainDelay while the pod's endpoint removal
+  # propagates to kube-proxy / the edge — a rollover never routes to a pod
+  # that is already gone (a request in that window answers 5xx). Go
+  # duration format (e.g. 8s, 1500ms); the render fails above 20s so at
+  # least 10 s of the 30 s terminationGracePeriodSeconds remains for
+  # graceful shutdown.
+  drainDelay: 8s
   # Optional operator branding: name a ConfigMap with branding.json,
   # tokens.css and logo files — mounted read-only at /branding and served
   # at /branding/ (see README "Branding"). Empty = default branding.

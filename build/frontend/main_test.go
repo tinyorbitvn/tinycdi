@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -623,5 +624,66 @@ func TestServerTimeouts(t *testing.T) {
 	}
 	if srv.TLSConfig == nil || srv.TLSConfig.MinVersion < 0x0303 {
 		t.Fatal("TLS 1.2 minimum must be set")
+	}
+}
+
+// TestDrainHealthz (FX-R35): once shutdown starts /healthz fails so the
+// pod's readiness drops and it leaves the Service endpoints, while the
+// SPA keeps being served through the drain delay — the edge removes the
+// endpoint before the listener closes.
+func TestDrainHealthz(t *testing.T) {
+	h := newTestHandler(t, "")
+	t.Cleanup(func() { draining.Store(false) })
+	if got := get(t, h, http.MethodGet, "/healthz"); got.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz before drain: got %d, want 200", got.StatusCode)
+	}
+	draining.Store(true)
+	if got := get(t, h, http.MethodGet, "/healthz"); got.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/healthz while draining: got %d, want 503", got.StatusCode)
+	}
+	if got := get(t, h, http.MethodGet, "/"); got.StatusCode != http.StatusOK {
+		t.Fatalf("SPA while draining: got %d, want 200 — content must keep serving through the drain", got.StatusCode)
+	}
+}
+
+// TestDrainAndShutdown (FX-R35): the drain order — /healthz fails first,
+// the rest of the server keeps answering through the propagation wait,
+// then the listener closes gracefully so no request sees a refused
+// connection mid-rollout.
+func TestDrainAndShutdown(t *testing.T) {
+	srv := httptest.NewServer(newTestHandler(t, ""))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { draining.Store(false) })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	done := make(chan error, 1)
+	go func() { done <- drainAndShutdown(srv.Config, 400*time.Millisecond, log) }()
+
+	// Mid-drain the listener still serves — only /healthz fails.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	var health, spa int
+	for time.Now().Before(deadline) {
+		if r, err := srv.Client().Get(srv.URL + "/healthz"); err == nil {
+			health = r.StatusCode
+			r.Body.Close()
+		}
+		if r, err := srv.Client().Get(srv.URL + "/"); err == nil {
+			spa = r.StatusCode
+			r.Body.Close()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if health != http.StatusServiceUnavailable {
+		t.Fatalf("/healthz during drain delay: got %d, want 503", health)
+	}
+	if spa != http.StatusOK {
+		t.Fatalf("/ during drain delay: got %d, want 200 — serving must continue through the wait", spa)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("drainAndShutdown: %v", err)
+	}
+	if r, err := srv.Client().Get(srv.URL + "/"); err == nil {
+		r.Body.Close()
+		t.Fatal("server still answering after the drain completed")
 	}
 }
