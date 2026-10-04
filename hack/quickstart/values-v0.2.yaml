@@ -1,0 +1,171 @@
+# TinyCDI chart values for the kind quickstart (DEV ONLY) — v0.2.0 variant.
+#
+# Identical to values.yaml minus the keys the released 0.2.0 chart does
+# not know: its strict values schema (additionalProperties: false) rejects
+# runtime.appArmor (added in v0.3). upgrade-test.sh feeds this file to the
+# OCI-published 0.2.0 chart; the working-tree chart gets values.yaml.
+
+# TinyCDI chart values for the kind quickstart (DEV ONLY - docs/quickstart.md).
+#
+# up.sh layers a generated file on top of this one (image references and, when
+# TCDI_QS_DOMAIN is set, the hostnames). Every Secret named below is created
+# by up.sh before the install; nothing sensitive lives in this file.
+
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    # Declarative tenant quota (chart README "Tenant quotas"): the backend
+    # leader upserts this row at startup, and a tenant without one is refused
+    # every create (409 QUOTA_NOT_CONFIGURED). Sized for a laptop kind node:
+    # two of the 1 CPU / 2 GiB / 5 GiB templates below, with headroom.
+    quota:
+      runningWorkspaces: 2
+      cpu: "4"
+      memory: 8Gi
+      storage: 20Gi
+  # No quota on purpose (B5.4 smoke): a PROVISIONED tenant without a quota
+  # row — its creates must be refused 409 QUOTA_NOT_CONFIGURED with the
+  # administrator message, not silently allowed. The dev realm's
+  # demo-noquota user maps here (realm-export.json).
+  - name: tinycdi-tenant-noquota
+    tenant: tenant-noquota
+
+# *.tcdi.localtest.me resolves to 127.0.0.1 on the public DNS, including
+# ws-<hex>.session.tcdi.localtest.me. portalHost sits outside sessionDomain.
+portalHost: portal.tcdi.localtest.me
+sessionDomain: session.tcdi.localtest.me
+
+oidc:
+  # Dev Keycloak realm created by up.sh inside the cluster. Pods reach this
+  # name through a CoreDNS rewrite to the ingress controller.
+  issuer: https://keycloak.tcdi.localtest.me/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+  egressCIDRs: [0.0.0.0/0]
+  # kindnet enforces NetworkPolicy after the ingress Service is NAT-ed, so the
+  # egress rule must name Traefik's container port, not the Service port 443.
+  port: 8443
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: tcdi-qs-deps}
+      podSelector:
+        matchLabels: {app.kubernetes.io/name: postgres}
+  # Postgres serves a certificate from the quickstart CA; the backend still
+  # verifies it (verify-full), exactly like production.
+  tls:
+    mode: verify-full
+    caSecret: {name: tinycdi-db-ca, key: ca.crt}
+
+backend:
+  replicas: 2
+  loginKeys:
+    generate: true
+  tls:
+    app: {existingSecret: tinycdi-backend-app-tls}
+    session: {existingSecret: tinycdi-backend-session-tls}
+    internal: {existingSecret: tinycdi-backend-internal-tls}
+  clientCA: {existingSecret: tinycdi-internal-ca}
+  # Trust bundle for the OIDC issuer (the quickstart CA).
+  extraCA: {existingSecret: tinycdi-local-ca, key: ca.crt}
+  # The backend listeners speak HTTPS: tell Traefik to re-encrypt to them.
+  service:
+    annotations:
+      traefik.ingress.kubernetes.io/service.serversscheme: https
+
+operator:
+  brokerClient:
+    ca: {existingSecret: tinycdi-internal-ca}
+    mtls: {existingSecret: tinycdi-operator-mtls}
+
+frontend:
+  tls: {existingSecret: tinycdi-frontend-tls}
+  service:
+    annotations:
+      traefik.ingress.kubernetes.io/service.serversscheme: https
+
+ingress:
+  enabled: true
+  className: traefik
+  tls: {existingSecret: tinycdi-ingress-tls}
+
+# kind has no dedicated workspace pool: runtime pods share the node. Keep the
+# dedicated pool in production (docs/runbooks/install.md "Workspace node pool").
+runtime:
+  placement:
+    allowSharedNodes: true
+  # kind nodes cannot start user-namespaced pods (runc fails mounting sysfs),
+  # so the quickstart leaves pod.spec.hostUsers unset. Keep the v0.2 default
+  # (false) on a real cluster.
+  hostUsers: null
+
+templates:
+  - name: browser
+    namespace: tinycdi-tenant-a
+    image: browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        # Firefox ESR instead of Chromium: Chromium's sandbox needs the
+        # Localhost seccomp/AppArmor node profiles, which a kind node cannot
+        # load. Firefox runs with seccomp-bpf only (reduced isolation, see
+        # docs/images.md) - fine for a throwaway quickstart, never for
+        # production. TCDI_BROWSER is read by the image's xstartup.
+        command: [env, TCDI_BROWSER=firefox, /opt/tcdi/entrypoint.sh]
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  - name: desktop
+    namespace: tinycdi-tenant-a
+    image: linuxDesktop
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Linux desktop (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux: {}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  # Same catalog entry in the no-quota tenant's namespace (B5.4): the
+  # template list is tenant-scoped, so demo-noquota needs a template to
+  # submit a create and hit the quota refusal.
+  - name: browser
+    namespace: tinycdi-tenant-noquota
+    image: browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        command: [env, TCDI_BROWSER=firefox, /opt/tcdi/entrypoint.sh]
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
