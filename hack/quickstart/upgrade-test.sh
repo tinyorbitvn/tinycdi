@@ -257,10 +257,12 @@ TCDI_QS_DESKTOP_BUILT_AT="" \
 # v0.2.0 unconditionally sets appArmorProfile: RuntimeDefault on workspace
 # pods — the runtime.appArmor.requireRuntimeDefault opt-out is a v0.3 knob.
 # A real node satisfies that; a kind node can use the host kernel's AppArmor:
-# apparmor_parser in the node + securityfs mounted + a containerd restart so
-# its sync.Once HostSupports() probe (securityfs + parser + kernel param)
-# re-runs. Without an AppArmor-capable host kernel v0.2.0 workspaces simply
-# cannot run — fail loudly instead of timing out on AppArmor-rejected pods.
+# apparmor_parser in the node + securityfs mounted, then containerd AND
+# kubelet restarted — both cache "apparmor unsupported" at startup
+# (containerd's sync.Once HostSupports probe wants securityfs + parser +
+# kernel param; kubelet does its own one-time check). Without an
+# AppArmor-capable host kernel v0.2.0 workspaces simply cannot run — fail
+# loudly instead of timing out on AppArmor-rejected pods.
 log "enabling AppArmor inside the kind node (the ${UPGRADE_TAG} runtime requires RuntimeDefault)"
 NODE="${CLUSTER}-control-plane"
 if [ "$(docker exec "$NODE" cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" != "Y" ]; then
@@ -269,14 +271,46 @@ fi
 docker exec "$NODE" apt-get update -qq >/dev/null
 docker exec "$NODE" apt-get install -y -qq apparmor >/dev/null
 docker exec "$NODE" mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
-docker exec "$NODE" systemctl restart containerd
-# kubelet re-reads CRI features periodically; wait for the apiserver to be
-# healthy again before the spec starts driving workspaces.
-for _ in $(seq 1 60); do
+docker exec "$NODE" systemctl restart containerd kubelet
+# The restarts briefly unready the apiserver (static pods respawn).
+for _ in $(seq 1 90); do
   kc get --raw=/readyz >/dev/null 2>&1 && break
   sleep 2
 done
-kc get --raw=/readyz >/dev/null 2>&1 || die "apiserver did not recover after the containerd restart"
+kc get --raw=/readyz >/dev/null 2>&1 || die "apiserver did not recover after the containerd/kubelet restart"
+# Probe exactly what the released runtime needs: a pod whose container
+# carries appArmorProfile: RuntimeDefault must be schedulable. A rejected
+# pod sits at reason=AppArmor forever — surface it in seconds instead of
+# letting a workspace hit its ten-minute readiness timeout.
+kc -n default delete pod upgrade-aa-probe --ignore-not-found --wait=false >/dev/null 2>&1 || true
+cat <<'EOF' | kc -n default apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: upgrade-aa-probe
+spec:
+  containers:
+    - name: c
+      image: busybox:stable
+      command: ["sleep", "30"]
+      securityContext:
+        appArmorProfile:
+          type: RuntimeDefault
+EOF
+aa_state=""
+for _ in $(seq 1 90); do
+  aa_state="$(kc -n default get pod upgrade-aa-probe \
+    -o jsonpath='{.status.phase}:{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)"
+  case "$aa_state" in
+    Running:|Succeeded:|*:AppArmor) break ;;
+  esac
+  sleep 2
+done
+case "$aa_state" in
+  Running:|Succeeded:) ;;
+  *) die "RuntimeDefault AppArmor is still not supported on the kind node (probe pod: ${aa_state:-unknown}) — ${UPGRADE_TAG} workspaces cannot run here" ;;
+esac
+kc -n default delete pod upgrade-aa-probe --wait=false >/dev/null 2>&1 || true
 
 # ---- 4. seed + upgrade + verify (hack/quickstart/smoke/upgrade.spec.ts) ------
 # The spec holds a live desktop session open while it runs this script's
