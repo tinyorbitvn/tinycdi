@@ -304,6 +304,16 @@ type Options struct {
 	// requested through the template annotation is always kept. The zero
 	// value keeps today's behaviour: RuntimeDefault is always set.
 	AppArmorNotRequired bool
+
+	// TopologySpread (operator --runtime-topology-spread) makes buildPod
+	// attach one soft topologySpreadConstraint to every runtime pod
+	// (maxSkew 1 over kubernetes.io/hostname, whenUnsatisfiable
+	// ScheduleAnyway, selector = this namespace's runtime pods). It is a
+	// scheduling PREFERENCE only — ScheduleAnyway never blocks a pod, so
+	// retained-disk reattach on a node-pinned PVC and single-node pools
+	// still schedule; the soak finding it answers is the default
+	// scheduler packing workspace pods onto a subset of pool nodes.
+	TopologySpread bool
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -1063,6 +1073,26 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 	pod.Spec.NodeSelector = nodeSelector
 	pod.Spec.Tolerations = tolerations
 	pod.Spec.RuntimeClassName = runtimeClass
+
+	// Soft topology spread (operator option, no template override — it is
+	// platform hygiene, not placement): prefer an even spread of the
+	// tenant's runtime pods across nodes. The selector matches only this
+	// namespace's runtime pods (topologySpreadConstraints are
+	// namespace-scoped), so one tenant's fleet can never skew another's
+	// placement. ScheduleAnyway is deliberate: the constraint must never
+	// block scheduling — a retained home PVC pinned to a node/zone by
+	// volume node affinity still wins, and a one-node pool just schedules
+	// as before.
+	if opts.TopologySpread {
+		pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+			MaxSkew:           1,
+			TopologyKey:       corev1.LabelHostname,
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{LabelRole: RoleRuntime},
+			},
+		}}
+	}
 
 	// hostUsers: template field → operator default; nil leaves the pod
 	// field unset (D26 — opt-in until the R1 spike lands).
