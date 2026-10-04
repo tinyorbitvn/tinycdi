@@ -36,6 +36,8 @@
 
 - [releases/v0.3.0.md](releases/v0.3.0.md) — v0.3.0 release notes
   (source for the GitHub release)
+- [releases/v0.3.1.md](releases/v0.3.1.md) — v0.3.1 release notes
+- [releases/v0.3.2.md](releases/v0.3.2.md) — v0.3.2 release notes
 
 ## Security
 
