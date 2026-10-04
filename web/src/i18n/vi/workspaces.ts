@@ -190,7 +190,7 @@ export default {
   "workspaces.reason.provisioning": "Nền tảng đang thiết lập workspace.",
   "workspaces.reason.waitingForDisk":
     "Đang chờ đĩa giữ lại được bàn giao cho workspace này.",
-  "workspaces.reason.volumeBound": "Đã gắn bộ nhớ của workspace.",
+  "workspaces.reason.volumeBound": "Đã gắn đĩa của workspace.",
   "workspaces.reason.ready": "Bước này đã sẵn sàng.",
   "workspaces.reason.runtimeUp": "Runtime đã hoạt động.",
   "workspaces.reason.streamEndpointUp": "Điểm cuối streaming đã hoạt động.",
