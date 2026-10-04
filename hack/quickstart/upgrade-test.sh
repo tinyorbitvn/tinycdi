@@ -193,6 +193,52 @@ dump_cluster_diag() {
   warn "cluster diagnostics dumped to $d"
 }
 
+# ---- readiness helpers (the §3b restart recovery wait and the §3c seeding
+# gate share them) ----------------------------------------------------------
+
+edge_code() { # edge_code <host> <path>: HTTP status through Traefik on loopback
+  curl -sS --max-time 10 --cacert "${STATE_DIR}/tls/local-ca.crt" \
+    --resolve "$1:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
+    "https://$1$2" 2>/dev/null || true
+}
+ep_ready() { # ep_ready <ns> <service>: an EndpointSlice has a ready endpoint
+  kc -n "$1" get endpointslices -l "kubernetes.io/service-name=$2" \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' \
+    2>/dev/null | grep -q .
+}
+all_pods_ready() { # all_pods_ready <ns...>: every pod in the namespaces is Ready
+  local ns bad
+  for ns in "$@"; do
+    bad="$(kc -n "$ns" get pods \
+      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+      2>/dev/null | grep -cv '^True$' || true)"
+    [ "$bad" -gt 0 ] && return 1
+  done
+  return 0
+}
+
+# wait_cluster_ready: after the §3b containerd/kubelet restart, wait until
+# the cluster itself is serving again — the node Ready, the kube-system/CNI
+# pods Ready and the EndpointSlices of the edge-facing Services repopulated.
+# Returns non-zero when the budget runs out.
+wait_cluster_ready() {
+  local _ ok
+  for _ in $(seq 1 90); do
+    ok=1
+    kc get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' \
+      2>/dev/null | grep -qw True || ok=0
+    all_pods_ready kube-system local-path-storage || ok=0
+    ep_ready "$NS_SYSTEM" backend || ok=0
+    ep_ready "$NS_SYSTEM" frontend || ok=0
+    ep_ready "$NS_DEPS" keycloak || ok=0
+    ep_ready "$NS_DEPS" postgres || ok=0
+    ep_ready "$NS_INGRESS" traefik || ok=0
+    [ "$ok" = 1 ] && return 0
+    sleep 2
+  done
+  return 1
+}
+
 on_error() {
   local rc=$?
   warn "upgrade-test.sh failed (exit $rc). Logs: ${STATE_DIR}/logs"
@@ -323,6 +369,18 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 kc get --raw=/readyz >/dev/null 2>&1 || die "apiserver did not recover after the containerd/kubelet restart"
+# The kubelet can stay down past the ~40 s node-monitor grace on a loaded
+# runner: the node then goes Unknown and every EndpointSlice drains, so
+# anything that touches the cluster afterwards sees a dead stack for the
+# next ~30-90 s (FLAKE3). Wait here — before ANY later phase — for the
+# node to be Ready again and for the kube-system/CNI pods plus the
+# edge-facing EndpointSlices to repopulate.
+log "waiting for the cluster to recover after the containerd/kubelet restart"
+if ! wait_cluster_ready; then
+  warn "the cluster did not become Ready again after the restart"
+  dump_cluster_diag
+  die "node/kube-system pods/EndpointSlices did not recover after the containerd/kubelet restart"
+fi
 # Probe exactly what the released runtime needs: a pod whose container
 # carries appArmorProfile: RuntimeDefault must be schedulable. A rejected
 # pod sits at reason=AppArmor forever — surface it in seconds instead of
@@ -358,45 +416,18 @@ esac
 kc -n default delete pod upgrade-aa-probe --wait=false >/dev/null 2>&1 || true
 
 # ---- 3c. seeding gate: the stack must be routable, not just Ready -----------
-# The containerd+kubelet restart above takes the node agent down for however
-# long systemd needs; on a loaded runner that can cross the ~40 s
-# node-monitor grace, the node then goes Unknown and EVERY EndpointSlice
-# drains — Traefik's own NodePort endpoints included — so the portal
-# refuses connections (and returns 5xx while partial endpoints come back)
-# for the next ~30-90 s. Pod Ready is not the same as the stack being
-# served end to end, so wait for the condition the spec actually drives:
-# node Ready, every workload pod Ready, a ready endpoint behind each
-# edge-facing Service, the seeded template objects present, and GET / plus
-# the API answering through the ingress — a few consecutive good rounds,
-# because one good reply can catch the edge mid-flap. (FLAKE3)
-edge_code() { # edge_code <host> <path>: HTTP status through Traefik on loopback
-  curl -sS --max-time 10 --cacert "${STATE_DIR}/tls/local-ca.crt" \
-    --resolve "$1:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
-    "https://$1$2" 2>/dev/null || true
-}
-ep_ready() { # ep_ready <ns> <service>: an EndpointSlice has a ready endpoint
-  kc -n "$1" get endpointslices -l "kubernetes.io/service-name=$2" \
-    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' \
-    2>/dev/null | grep -q .
-}
-all_pods_ready() { # every pod in the namespaces this test drives is Ready
-  local ns bad
-  for ns in "$NS_SYSTEM" "$NS_TENANT" tinycdi-tenant-noquota "$NS_DEPS" "$NS_INGRESS"; do
-    bad="$(kc -n "$ns" get pods \
-      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
-      2>/dev/null | grep -cv '^True$' || true)"
-    [ "$bad" -gt 0 ] && return 1
-  done
-  return 0
-}
-
+# The cluster-level wait above covers control plane and endpoints; what the
+# spec actually drives is the edge: the portal, the API and the OIDC issuer
+# answering through Traefik, the seeded template objects present — a few
+# consecutive good rounds, because one good reply can catch the edge
+# mid-flap. (FLAKE3)
 log "waiting for the ${UPGRADE_TAG} stack to be routable end to end (seeding gate)"
 stable=0
 for _ in $(seq 1 90); do
   ok=1
   kc get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' \
     2>/dev/null | grep -qw True || ok=0
-  all_pods_ready || ok=0
+  all_pods_ready "$NS_SYSTEM" "$NS_TENANT" tinycdi-tenant-noquota "$NS_DEPS" "$NS_INGRESS" || ok=0
   ep_ready "$NS_SYSTEM" backend || ok=0
   ep_ready "$NS_SYSTEM" frontend || ok=0
   ep_ready "$NS_DEPS" keycloak || ok=0
