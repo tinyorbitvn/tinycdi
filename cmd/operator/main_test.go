@@ -162,7 +162,7 @@ func TestBrokerSeam_ValidClient(t *testing.T) {
 
 func TestBrokerSeam_BadURL(t *testing.T) {
 	ca, cert, key := writeBrokerPKI(t, "operator")
-	for _, u := range []string{"http://insecure:9443", "notaurl", "https://"} {
+	for _, u := range []string{"http://insecure:9443", "notaurl", "https://", "https://:9443"} {
 		if _, err := brokerSeam(brokerFlags{
 			internalURL: u, caFile: ca, certFile: cert, keyFile: key,
 		}); err == nil {
