@@ -721,6 +721,12 @@ rolling-upgrade window. Once every backend is v0.3 the column carries
 only NULLs; **v0.4 drops `sessions.csrf_token`** — do not roll back to
 v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
 
+v0.4 also adds two `portal_session_digest` indexes (migration 020): the
+plain `CREATE INDEX` builds briefly block writes on `connection_lease` and
+`launch_ticket` while running (`CONCURRENTLY` cannot run inside the
+migration transaction) — on large installs run the upgrade in a quiet
+window.
+
 ## Rollback
 
 - **Binary rollback is supported:** `helm rollback tinycdi -n <release-ns>`

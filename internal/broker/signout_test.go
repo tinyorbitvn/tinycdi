@@ -8,6 +8,7 @@ package broker_test
 // replica.
 
 import (
+	"crypto/sha256"
 	"errors"
 	"testing"
 	"time"
@@ -15,7 +16,33 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
+
+// waitForLockWait polls pg_stat_activity until a backend is blocked on a
+// lock while running a statement matching queryLike — the deterministic
+// "the other transaction is now waiting on the row lock we hold" signal
+// the interleaving tests order themselves by.
+func waitForLockWait(t *testing.T, db *store.DB, queryLike string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var n int
+		if err := db.Pool().QueryRow(ctx,
+			`SELECT COUNT(*) FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock' AND query LIKE $1`,
+			queryLike).Scan(&n); err != nil {
+			t.Fatalf("lock-wait probe: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for a lock wait matching %q", queryLike)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 // TestRevokePortalSession_RevokesBoundLeases: every active lease minted
 // under the session's digest dies; another session's leases and a
@@ -190,6 +217,179 @@ func TestRevokePortalSession_LiveSessionSurvivesRevoke(t *testing.T) {
 	}
 	if _, err := b.RedeemTicket(ctx, gwA, tk.Token); err != nil {
 		t.Fatalf("sess-2 ticket died with sess-1's sign-out: %v", err)
+	}
+}
+
+// TestRevokePortalSession_RedeemCommitThenRevoke drives the redeem-wins
+// ordering of the ticket-lock serialization the one-tx revoke rests on: an
+// in-flight redemption holds the ticket row FOR UPDATE, so the revoke's
+// ticket UPDATE blocks on it; the redemption then commits — the revoke
+// proceeds on a fresh READ-COMMITTED snapshot, skips the consumed ticket
+// row, and its lease UPDATE still revokes the lease the redemption
+// minted. The one outcome: ticket consumed (not revoked), minted lease
+// dead — never a live lease bound to a revoked session.
+func TestRevokePortalSession_RedeemCommitThenRevoke(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	seedPortalSession(t, db, "sess-1")
+
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	if err != nil {
+		t.Fatalf("IssueTicket: %v", err)
+	}
+	hash := sha256.Sum256([]byte(tk.Token))
+	digest := sha256.Sum256([]byte("sess-1"))
+
+	// The in-flight redemption, paused holding the ticket row FOR UPDATE.
+	conn, err := db.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	redeemTx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("redeem tx: %v", err)
+	}
+	defer redeemTx.Rollback(ctx)
+	if _, err := redeemTx.Exec(ctx,
+		`SELECT ticket_hash FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`,
+		hash[:]); err != nil {
+		t.Fatalf("redeem ticket lock: %v", err)
+	}
+
+	// The revoke starts while the redemption holds the row: its ticket
+	// UPDATE must block on the lock.
+	type revokeRes struct {
+		n   int
+		err error
+	}
+	revoked := make(chan revokeRes, 1)
+	go func() {
+		n, err := b.RevokePortalSession(ctx, "sess-1")
+		revoked <- revokeRes{n, err}
+	}()
+	waitForLockWait(t, db, `%UPDATE launch_ticket%`)
+
+	// The redemption finishes — RedeemTicket's own two writes — and
+	// commits, releasing the lock the revoke waits on.
+	now := clock.Now()
+	if _, err := redeemTx.Exec(ctx,
+		`UPDATE launch_ticket SET consumed_at = $2 WHERE ticket_hash = $1`,
+		hash[:], now); err != nil {
+		t.Fatalf("redeem consume: %v", err)
+	}
+	if _, err := redeemTx.Exec(ctx, `
+		INSERT INTO connection_lease
+			(id, workspace_id, tenant_id, principal_subject,
+			 runtime_generation, runtime_uid, fencing_version, gateway_id,
+			 state, created_at, expires_at, last_renewed_at,
+			 portal_session_digest)
+		 VALUES ('lease-race', 'ws-1', 'tenant-a', $1,
+			 1, 'rt-1', 1, $2, 'active', $3, $4, $3, $5)`,
+		alice.Owner(), gwA.ID, now, now.Add(time.Minute), digest[:]); err != nil {
+		t.Fatalf("redeem lease insert: %v", err)
+	}
+	if err := redeemTx.Commit(ctx); err != nil {
+		t.Fatalf("redeem commit: %v", err)
+	}
+
+	res := <-revoked
+	if res.err != nil {
+		t.Fatalf("RevokePortalSession: %v", res.err)
+	}
+	if res.n != 1 {
+		t.Fatalf("revoked %d leases, want 1 — the lease the racing redeem minted", res.n)
+	}
+	// The committed redemption kept the ticket: consumed, not revoked.
+	var consumedAt, revokedAt *time.Time
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT consumed_at, revoked_at FROM launch_ticket WHERE ticket_hash = $1`,
+		hash[:]).Scan(&consumedAt, &revokedAt); err != nil {
+		t.Fatalf("ticket row: %v", err)
+	}
+	if consumedAt == nil || revokedAt != nil {
+		t.Fatalf("ticket consumed_at=%v revoked_at=%v — want consumed, not revoked",
+			consumedAt, revokedAt)
+	}
+	// And the lease it minted under the session's digest is dead.
+	minted := broker.Lease{
+		ID: "lease-race", WorkspaceUID: "ws-1",
+		RuntimeGeneration: 1, RuntimeUID: "rt-1", FencingVersion: 1,
+	}
+	if _, err := b.RenewLease(ctx, gwA, minted.ID, fenceOf(minted)); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("renew lease minted under revoked session = %v, want ErrRevoked", err)
+	}
+}
+
+// TestRevokePortalSession_RevokeCommitThenRedeem drives the reverse
+// ordering: the revoke's ticket UPDATE holds the row lock, a redemption
+// that started while the revoke was in flight blocks on it, and when the
+// revoke commits the blocked redemption re-reads the row on a fresh
+// snapshot and fails — the second outcome: ticket revoked, redeem denied,
+// no lease minted.
+func TestRevokePortalSession_RevokeCommitThenRedeem(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	seedPortalSession(t, db, "sess-1")
+
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	if err != nil {
+		t.Fatalf("IssueTicket: %v", err)
+	}
+	hash := sha256.Sum256([]byte(tk.Token))
+
+	// The in-flight revoke, paused after its ticket UPDATE — holding the
+	// same row lock RevokePortalSession's first statement takes.
+	conn, err := db.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	revokeTx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("revoke tx: %v", err)
+	}
+	defer revokeTx.Rollback(ctx)
+	if _, err := revokeTx.Exec(ctx, `
+		UPDATE launch_ticket SET revoked_at = $2
+		WHERE ticket_hash = $1
+		  AND consumed_at IS NULL AND revoked_at IS NULL`,
+		hash[:], clock.Now()); err != nil {
+		t.Fatalf("revoke ticket update: %v", err)
+	}
+
+	// A redemption started while the revoke holds the row blocks on the
+	// ticket's FOR UPDATE read.
+	type redeemRes struct {
+		lease broker.Lease
+		err   error
+	}
+	redeemed := make(chan redeemRes, 1)
+	go func() {
+		l, err := b.RedeemTicket(ctx, gwA, tk.Token)
+		redeemed <- redeemRes{l, err}
+	}()
+	waitForLockWait(t, db, `%launch_ticket%FOR UPDATE%`)
+
+	// The revoke commits; the blocked redemption wakes onto the revoked
+	// row and must not mint.
+	if err := revokeTx.Commit(ctx); err != nil {
+		t.Fatalf("revoke commit: %v", err)
+	}
+	res := <-redeemed
+	if !errors.Is(res.err, broker.ErrRevoked) {
+		t.Fatalf("redeem under committed revoke = %v, want ErrRevoked", res.err)
+	}
+	var leases int
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM connection_lease WHERE workspace_id = 'ws-1'`).
+		Scan(&leases); err != nil {
+		t.Fatalf("lease count: %v", err)
+	}
+	if leases != 0 {
+		t.Fatalf("%d lease(s) minted under a revoked session, want 0", leases)
 	}
 }
 

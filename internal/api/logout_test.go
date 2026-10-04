@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -361,6 +362,72 @@ type fakeSessionRevoker struct {
 func (f *fakeSessionRevoker) RevokePortalSession(_ context.Context, id string) (int, error) {
 	f.calls = append(f.calls, id)
 	return f.n, f.err
+}
+
+// ctxProbingRevoker behaves like the real store implementation: when the
+// ctx it is handed is dead the revocation transaction cannot commit, so it
+// records the observed ctx error and returns it.
+type ctxProbingRevoker struct {
+	fakeSessionRevoker
+	ctxErr  error
+	bounded bool
+}
+
+func (f *ctxProbingRevoker) RevokePortalSession(ctx context.Context, id string) (int, error) {
+	f.calls = append(f.calls, id)
+	_, f.bounded = ctx.Deadline()
+	if err := ctx.Err(); err != nil {
+		f.ctxErr = err
+		return 0, err
+	}
+	return f.n, f.err
+}
+
+// disconnectOnDeleteStore cancels the request's context the moment the
+// session row is deleted — a client disconnect landing mid-logout, after
+// the handler has started but before the revocation runs.
+type disconnectOnDeleteStore struct {
+	SessionStore
+	cancel context.CancelFunc
+}
+
+func (s *disconnectOnDeleteStore) Delete(ctx context.Context, id string) error {
+	err := s.SessionStore.Delete(ctx, id)
+	s.cancel()
+	return err
+}
+
+// TestLogout_RevokeSurvivesClientDisconnect: a client that disconnects
+// mid-logout must not abort the revocation — the revoker runs on a context
+// detached from the request's cancellation (still bounded by the 5 s
+// revoke timeout), so the session's leases and tickets die even though the
+// response can no longer be delivered.
+func TestLogout_RevokeSurvivesClientDisconnect(t *testing.T) {
+	env := newTestEnv(t, nil) // no end-session endpoint: the 204 path
+	rv := &ctxProbingRevoker{fakeSessionRevoker: fakeSessionRevoker{n: 1}}
+	env.auth.WithSessionRevoker(rv)
+	sess := env.loginSession(t)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	env.auth.sessions = &disconnectOnDeleteStore{SessionStore: env.store, cancel: cancel}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil).WithContext(reqCtx)
+	req.AddCookie(sess)
+	rec := httptest.NewRecorder()
+	env.auth.LogoutHandler(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", rec.Code)
+	}
+	if len(rv.calls) != 1 || rv.calls[0] != sess.Value {
+		t.Fatalf("revocations = %v, want exactly [%q]", rv.calls, sess.Value)
+	}
+	if rv.ctxErr != nil {
+		t.Fatalf("revocation ran on a cancelled ctx: %v — client disconnect aborted it", rv.ctxErr)
+	}
+	if !rv.bounded {
+		t.Fatal("revocation ctx lost the 5 s timeout bound")
+	}
 }
 
 // TestLogout_RevokesSessionBoundMaterial: sign-out revokes the leases and

@@ -716,7 +716,10 @@ func (a *Authenticator) revokeSessionMaterial(r *http.Request, sessionID string)
 	if a.revoker == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), sessionRevokeTimeout)
+	// Detached from the request's cancellation: a client that disconnects
+	// mid-logout must not abort the revocation transaction — sign-out was
+	// already accepted, so the revoke still runs to its own 5 s bound.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), sessionRevokeTimeout)
 	leases, err := a.revoker.RevokePortalSession(ctx, sessionID)
 	cancel()
 	var actor, tenant string
