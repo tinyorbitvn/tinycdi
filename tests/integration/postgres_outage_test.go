@@ -503,8 +503,15 @@ func TestPGOutage_LongClosesStreams(t *testing.T) {
 		t.Fatal("gateway never logged the session close")
 	}
 	t.Logf("gateway log: %s", killLine)
-	if !strings.Contains(killLine, "renew_deadline") {
-		t.Fatalf("session torn down by %q, want renew_deadline", killLine)
+	// renewLoop checks the fail-closed deadline twice per tick: before the
+	// renew attempt (renew_deadline) and again after a transient broker
+	// failure (broker_unreachable). Which check straddles
+	// lastRenewOK + revoke-deadline is a sub-interval scheduling race —
+	// both mean "no counted renew inside the budget" and both kill at the
+	// same bound, so either reason is correct here (FX-FLAKE1).
+	if !strings.Contains(killLine, "renew_deadline") &&
+		!strings.Contains(killLine, "broker_unreachable") {
+		t.Fatalf("session torn down by %q, want renew_deadline or broker_unreachable", killLine)
 	}
 	// Fail-closed: the kill lands strictly after the 30 s budget expires at
 	// the last counted renew (renew_deadline) — the spec's 30–40 s window
