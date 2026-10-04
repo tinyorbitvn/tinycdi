@@ -70,7 +70,9 @@ every main push touching `build/linux-base/**`, `build/linux-desktop/**` or
 profiles build `FROM` its exact pushed digest. Signed digests are promoted to
 `ghcr.io/tinyorbitvn/tinycdi-{linux-base,linux-desktop,browser}:rt-YYYYMMDD.N` and
 the manifest `runtime-images.json` (three images; the profiles also record the
-engine versions they carry) is attached to the GitHub Release
+browser versions they actually installed — `chromium` + `firefox` on
+`browser`, `firefox` on `linux-desktop`, read from each image's attested
+SPDX SBOM at publish time) is attached to the GitHub Release
 `runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
 the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
 from that manifest — the GitOps bump copies the engine versions from it
