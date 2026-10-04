@@ -86,6 +86,83 @@ func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d Sessi
 	}
 }
 
+// RevokePortalSession ends a portal session's authority over the session
+// layer (threat-model S17): inside one transaction it revokes every active
+// connection lease minted under the session's digest — so each gateway
+// replica's renew loop sees the lease die at its next renew and closes the
+// bound stream within one renew cycle, and a replayed workspace cookie
+// resolves to a dead lease on any replica — plus every still-outstanding
+// launch ticket the session issued, so a ticket in flight at sign-out can
+// never mint a replacement lease. Returns the number of leases revoked
+// (0 when nothing was live — re-running the revoke is a no-op).
+//
+// The ticket UPDATE is also the serialization point: RedeemTicket holds a
+// FOR UPDATE lock on its ticket row for the whole transaction, so this
+// UPDATE waits out any in-flight redemption of this session's tickets.
+// Whether the redeem then commits or aborts, the lease UPDATE below runs
+// on a fresh READ-COMMITTED snapshot that sees whatever it committed. A
+// redeem that starts after this transaction finds revoked_at — or a dead
+// session row, which RedeemTicket re-checks — and never mints. The portal
+// session row itself is deleted by the caller before this runs: deleting
+// it first makes "the session is gone" visible to redemption as early as
+// possible, and the store still owns the ordering either way.
+func (b *Broker) RevokePortalSession(ctx context.Context, portalSessionID string) (int, error) {
+	d := portalSessionDigest(portalSessionID)
+	if d == nil {
+		return 0, nil
+	}
+	now := b.now()
+	n := 0
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE launch_ticket SET revoked_at = $2
+			WHERE portal_session_digest = $1
+			  AND consumed_at IS NULL AND revoked_at IS NULL`, d, now); err != nil {
+			return fmt.Errorf("broker: revoke portal tickets: %w", err)
+		}
+		rows, err := tx.Query(ctx, `
+			UPDATE connection_lease SET state = 'revoked', closed_at = $2
+			WHERE portal_session_digest = $1 AND state = 'active'
+			RETURNING workspace_id, runtime_generation`, d, now)
+		if err != nil {
+			return fmt.Errorf("broker: revoke portal leases: %w", err)
+		}
+		var (
+			wsUIDs []string
+			gens   []int64
+		)
+		for rows.Next() {
+			var wsUID string
+			var gen int64
+			if err := rows.Scan(&wsUID, &gen); err != nil {
+				rows.Close()
+				return fmt.Errorf("broker: revoke portal leases: %w", err)
+			}
+			wsUIDs = append(wsUIDs, wsUID)
+			gens = append(gens, gen)
+			n++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("broker: revoke portal leases: %w", err)
+		}
+		rows.Close()
+		// Same rule as RevokeLease: a revoked lease's streams can never
+		// report their close, so the transition owns the bound
+		// generations' drain accounting in the same transaction.
+		for i := range wsUIDs {
+			if err := closeStreamsTx(ctx, tx, wsUIDs[i], uint64(gens[i]), now); err != nil {
+				return fmt.Errorf("broker: close revoked streams: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // StreamOwnerTabLen is the fixed length of a stream-owner tab id: 128 bits
 // as lowercase hex (32 chars) — what the portal mints per browser tab and
 // sends with its stream claim (see migration 018).

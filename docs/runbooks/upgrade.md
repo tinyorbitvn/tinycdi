@@ -738,6 +738,12 @@ v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
   upgrade, restore the pre-upgrade `pg_dump` per
   `docs/runbooks/backup-restore.md` — that is a restore, not a rollback.
 
+v0.4 also adds two `portal_session_digest` indexes (migration 020): the
+plain `CREATE INDEX` builds briefly block writes on `connection_lease` and
+`launch_ticket` while running (`CONCURRENTLY` cannot run inside the
+migration transaction) — on large installs run the upgrade in a quiet
+window.
+
 ## Rollback
 
 - **Binary rollback is supported:** `helm rollback tinycdi -n <release-ns>`

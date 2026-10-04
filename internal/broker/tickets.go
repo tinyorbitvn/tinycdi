@@ -448,6 +448,30 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return ErrRevoked
 		}
 
+		// A ticket minted under a portal session that no longer exists must
+		// not redeem (S17): sign-out deletes the session row before the
+		// revocation transaction, and a live session's tickets are revoked
+		// with it — this read is the second barrier, so an outstanding
+		// ticket dies with its session however the revoke itself fared.
+		// Epoch + absolute expiry mirror SessionStore's liveness rule; a
+		// restored dump or a rotated epoch fails closed.
+		if portalSession != nil {
+			var alive bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (
+					SELECT 1 FROM sessions
+					WHERE id = encode($1, 'hex')
+					  AND epoch = (SELECT value FROM platform_meta
+					               WHERE key = 'session_epoch')
+					  AND (expires_at IS NULL OR expires_at > now()))`,
+				portalSession).Scan(&alive); err != nil {
+				return fmt.Errorf("broker: portal session check: %w", err)
+			}
+			if !alive {
+				return ErrRevoked
+			}
+		}
+
 		// Claim the single active lease for this workspace. The FOR UPDATE
 		// read plus the partial unique index serialize concurrent claims;
 		// a takeover fences the old lease BEFORE the new lease exists.
