@@ -445,6 +445,14 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
   streams survived, operator kept reconciling, backend hot-reloaded the
   new server cert and client CA without a restart (`tlsreload` log
   lines), the pre-rotation client cert is refused after the CA rotation.
+  Postscript (found in the rc.4 cleanup): the drill checked the
+  backend's hot-reload and the old client cert being refused, but the
+  **operator's** broker client also loads its server-CA pool once —
+  after the CA rotation it could not verify the backend's new internal
+  server cert, so workspace deletes wedged in the
+  runtime-cleanup finalizer for ~4 h until an operator restart. Fixed
+  by FX-R33 (#83) in rc.5; the rc.5 CA-rotation re-drill checks
+  finalizer progress without a restart.
 - **Fleet reconnect tail — the one failed gate.** After the all-pods
   rollout, 54/60 sessions had a disconnect span: p50 ~20 s, tail ~45 s
   (advisor budget p95 ≤ 10 s / p100 ≤ 30 s — FAIL). Single-pod delete was
