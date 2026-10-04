@@ -155,12 +155,51 @@ build_and_load() {
   return 0
 }
 
+# dump_cluster_diag: capture everything that explains a pre-upgrade
+# failure — per-pod restart counts, events, EndpointSlices and the logs of
+# every component the seeding phase drives — into a timestamped dir under
+# ${STATE_DIR}/logs so the CI artifact shows WHY the stack was unstable,
+# not only the playwright error. Best effort: never fails the caller.
+dump_cluster_diag() {
+  local d ns dep
+  d="${STATE_DIR}/logs/diag-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$d" || return 0
+  kc get pods -A -o wide >"$d/pods.txt" 2>&1 || true
+  # pods.json carries containerStatuses[].restartCount and the Ready
+  # conditions — the answers to "did something restart" and "what was
+  # ready on paper while the edge was dead".
+  kc get pods -A -o json >"$d/pods.json" 2>&1 || true
+  kc get events -A --sort-by=.lastTimestamp >"$d/events.txt" 2>&1 || true
+  kc get endpointslices -A -o yaml >"$d/endpointslices.yaml" 2>&1 || true
+  kc get workspaces,workspacetemplates -A -o wide >"$d/workspaces.txt" 2>&1 || true
+  kc get nodes -o wide >"$d/nodes.txt" 2>&1 || true
+  kc describe nodes >"$d/nodes-describe.txt" 2>&1 || true
+  for ns_dep in \
+    "${NS_SYSTEM}/backend" "${NS_SYSTEM}/operator" "${NS_SYSTEM}/frontend" \
+    "${NS_INGRESS}/traefik" "${NS_DEPS}/keycloak" "kube-system/coredns"; do
+    ns="${ns_dep%/*}"; dep="${ns_dep#*/}"
+    kc -n "$ns" logs "deployment/$dep" --all-containers --tail=500 \
+      >"$d/log-${dep}.txt" 2>&1 || true
+    kc -n "$ns" logs "deployment/$dep" --all-containers --previous --tail=200 \
+      >"$d/log-${dep}-previous.txt" 2>&1 || true
+  done
+  kc -n "$NS_DEPS" logs statefulset/postgres --tail=300 \
+    >"$d/log-postgres.txt" 2>&1 || true
+  # The node-side services are the other half of the story: the
+  # containerd/kubelet restart window lives in the node's journal.
+  docker exec "${CLUSTER}-control-plane" \
+    journalctl -u kubelet -u containerd --since "-15 min" --no-pager \
+    >"$d/node-journal.txt" 2>&1 || true
+  warn "cluster diagnostics dumped to $d"
+}
+
 on_error() {
   local rc=$?
   warn "upgrade-test.sh failed (exit $rc). Logs: ${STATE_DIR}/logs"
   if [ -s "$KUBECONFIG" ]; then
     warn "pods not ready:"
     kc get pods -A --no-headers 2>/dev/null | grep -Ev 'Running|Completed' >&2 || true
+    dump_cluster_diag
   fi
   warn "tear down with: hack/quickstart/down.sh"
   exit "$rc"
@@ -177,6 +216,12 @@ if [ "${1:-}" = "--build" ]; then
   # docker-build children die with it if the run is aborted)
   build_and_load "$2"
   exit $?
+fi
+if [ "${1:-}" = "--collect-diag" ]; then
+  # internal: CI calls this on job failure (covers a SIGTERM-killed run,
+  # where the ERR trap never fires)
+  dump_cluster_diag
+  exit 0
 fi
 
 trap on_error ERR
@@ -311,6 +356,68 @@ case "$aa_state" in
   *) die "RuntimeDefault AppArmor is still not supported on the kind node (probe pod: ${aa_state:-unknown}) — ${UPGRADE_TAG} workspaces cannot run here" ;;
 esac
 kc -n default delete pod upgrade-aa-probe --wait=false >/dev/null 2>&1 || true
+
+# ---- 3c. seeding gate: the stack must be routable, not just Ready -----------
+# The containerd+kubelet restart above takes the node agent down for however
+# long systemd needs; on a loaded runner that can cross the ~40 s
+# node-monitor grace, the node then goes Unknown and EVERY EndpointSlice
+# drains — Traefik's own NodePort endpoints included — so the portal
+# refuses connections (and returns 5xx while partial endpoints come back)
+# for the next ~30-90 s. Pod Ready is not the same as the stack being
+# served end to end, so wait for the condition the spec actually drives:
+# node Ready, every workload pod Ready, a ready endpoint behind each
+# edge-facing Service, the seeded template objects present, and GET / plus
+# the API answering through the ingress — a few consecutive good rounds,
+# because one good reply can catch the edge mid-flap. (FLAKE3)
+edge_code() { # edge_code <host> <path>: HTTP status through Traefik on loopback
+  curl -sS --max-time 10 --cacert "${STATE_DIR}/tls/local-ca.crt" \
+    --resolve "$1:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
+    "https://$1$2" 2>/dev/null || true
+}
+ep_ready() { # ep_ready <ns> <service>: an EndpointSlice has a ready endpoint
+  kc -n "$1" get endpointslices -l "kubernetes.io/service-name=$2" \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' \
+    2>/dev/null | grep -q .
+}
+all_pods_ready() { # every pod in the namespaces this test drives is Ready
+  local ns bad
+  for ns in "$NS_SYSTEM" "$NS_TENANT" tinycdi-tenant-noquota "$NS_DEPS" "$NS_INGRESS"; do
+    bad="$(kc -n "$ns" get pods \
+      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+      2>/dev/null | grep -cv '^True$' || true)"
+    [ "$bad" -gt 0 ] && return 1
+  done
+  return 0
+}
+
+log "waiting for the ${UPGRADE_TAG} stack to be routable end to end (seeding gate)"
+stable=0
+for _ in $(seq 1 90); do
+  ok=1
+  kc get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' \
+    2>/dev/null | grep -qw True || ok=0
+  all_pods_ready || ok=0
+  ep_ready "$NS_SYSTEM" backend || ok=0
+  ep_ready "$NS_SYSTEM" frontend || ok=0
+  ep_ready "$NS_DEPS" keycloak || ok=0
+  ep_ready "$NS_DEPS" postgres || ok=0
+  ep_ready "$NS_INGRESS" traefik || ok=0
+  [ "$(kc -n "$NS_TENANT" get workspacetemplates --no-headers 2>/dev/null | wc -l)" -ge 2 ] || ok=0
+  [ "$(edge_code "$PORTAL_HOST" /)" = 200 ] || ok=0
+  # 401 is the win here: it proves the request crossed Traefik and the
+  # backend answered — the authed catalog check itself is in the spec.
+  [ "$(edge_code "$PORTAL_HOST" /v1/templates)" = 401 ] || ok=0
+  [ "$(edge_code "$KEYCLOAK_HOST" /realms/tinycdi/.well-known/openid-configuration)" = 200 ] || ok=0
+  if [ "$ok" = 1 ]; then stable=$((stable + 1)); else stable=0; fi
+  [ "$stable" -ge 3 ] && break
+  sleep 2
+done
+if [ "$stable" -lt 3 ]; then
+  warn "the ${UPGRADE_TAG} stack never became routable"
+  dump_cluster_diag
+  die "seeding gate timed out: stack not routable end to end"
+fi
+log "stack is routable end to end"
 
 # ---- 4. seed + upgrade + verify (hack/quickstart/smoke/upgrade.spec.ts) ------
 # The spec holds a live desktop session open while it runs this script's

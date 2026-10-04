@@ -192,6 +192,28 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
 
   // ---------- seed state on the previous release ----------
   await login(page);
+  // Seeding gate (FLAKE3): the released portal fills the template <select>
+  // on /workspaces/new from a single, non-retried GET /v1/templates — one
+  // failed fetch leaves the options empty forever, which is how the
+  // pre-upgrade flakes presented. Wait until the authed API actually
+  // serves the seeded catalog through the same path the page uses. This is
+  // the readiness the browser flow needs, not a retry around user actions.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () => {
+          const r = await fetch("/v1/templates?limit=200");
+          if (!r.ok) return [`http-${r.status}`];
+          const body = (await r.json()) as { items?: { name?: string }[] };
+          return (body.items ?? []).map((i) => i.name ?? "");
+        }),
+      {
+        timeout: 3 * 60_000,
+        intervals: [2_000],
+        message: "GET /v1/templates serves the seeded browser template",
+      },
+    )
+    .toContain("browser");
   const quotaBefore = await quotaNow(page);
   expect(quotaBefore.configured, "tenant quota row before upgrade").toBe(true);
 
