@@ -1,9 +1,12 @@
-# TinyCDI chart values for the kind quickstart (DEV ONLY) — v0.2.0 variant.
+# TinyCDI chart values for the kind quickstart (DEV ONLY) — v0.3.x variant.
 #
-# Identical to values.yaml minus the keys the released 0.2.0 chart does
-# not know: its strict values schema (additionalProperties: false) rejects
-# runtime.appArmor (added in v0.3). upgrade-test.sh feeds this file to the
-# OCI-published 0.2.0 chart; the working-tree chart gets values.yaml.
+# Identical to values.yaml today: the published 0.3.1 chart's strict values
+# schema (additionalProperties: false) already knows runtime.appArmor, which
+# was the only key values-v0.2.yaml had to omit. Keep this a snapshot of the
+# keys the PREVIOUS release accepts — if the tree's values.yaml grows a
+# v0.4-only key, drop it here rather than renaming the file.
+# upgrade-test.sh feeds this file to the OCI-published 0.3.x chart; the
+# working-tree chart gets values.yaml.
 
 # TinyCDI chart values for the kind quickstart (DEV ONLY - docs/quickstart.md).
 #
@@ -96,6 +99,11 @@ ingress:
 runtime:
   placement:
     allowSharedNodes: true
+  # kind nodes have no AppArmor: the kubelet refuses a pod that names an
+  # AppArmor profile there, so do not pin RuntimeDefault (supported setting
+  # for nodes without AppArmor; keep the default true on nodes that have it).
+  appArmor:
+    requireRuntimeDefault: false
   # kind nodes cannot start user-namespaced pods (runc fails mounting sysfs),
   # so the quickstart leaves pod.spec.hostUsers unset. Keep the v0.2 default
   # (false) on a real cluster.
