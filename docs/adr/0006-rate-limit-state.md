@@ -1,9 +1,47 @@
 # ADR 0006 — rate-limiter state placement (per-replica vs Postgres-backed)
 
-Status: **proposed** — options priced for the v0.4 decision. The advisor
-picks before the build tasks; this note changes no behaviour.
+Status: **accepted — implemented** (v0.4; see Decision below)
 
 Date: 2026-10-05
+
+## Decision
+
+The advisor picked **option B** (2026-10-05), with these guardrails:
+
+- **G1 — fail-open with a floor.** A store error falls back to the
+  divided local limiter, never to unlimited and never to a hard refusal:
+  every limited route's completion already needs Postgres, so the outage
+  degrades to option-A behaviour.
+- **G2 — split mode stays local-only.** A `-broker-url` session gateway
+  owns no Postgres handle, so `/v1/launch` there keeps the divided local
+  bucket rather than growing a broker RPC.
+- **i — effective bound = min(shared window, local ceiling).** The
+  divided local bucket stays on BOTH as the fail-open fallback AND as a
+  per-replica ceiling while Postgres is healthy: a locally-refused
+  request never reaches the store, which also bounds the upsert rate a
+  key spray can cause.
+- **ii — one upsert per check; leader-only cleanup.** The check is a
+  single `INSERT ... ON CONFLICT` returning the count (no second query);
+  expired windows are deleted only by the replica holding the Postgres
+  leader lock (the existing singleton machinery).
+- **iii — observability.** `tinycdi_rate_limit_store_errors_total{route}`
+  counts every store failure; fallback ENTRY and EXIT each log one line
+  (edge-triggered, never per request).
+- **iv — migration.** `rate_limit_window` (route, bucket_key,
+  window_start, count) + an index on `window_start`; expand-only, no
+  backfill, rolling-upgrade safe.
+- `-rate-limit-replicas` keeps its value and rendering
+  (`backend.replicas`) but its meaning changed: it divides each budget
+  into the per-replica LOCAL ceiling, not the aggregate bound — the
+  shared window makes the flags exact aggregates at every replica count.
+
+Implemented: `internal/store/rate_limit.go` (one-statement window
+check + sweep), `internal/ratelimit/shared.go` (`SharedLimiter` —
+min(Postgres window, divided local), fail-open, edge-triggered logs),
+wiring in `internal/backend/wire.go`, migration
+`021_rate_limit_window`. The B6 gate lives in
+`tests/integration/rate_limit_pg_test.go` (two-replica shared-window
+abuse + Postgres outage fail-open/recovery).
 
 ## Context
 

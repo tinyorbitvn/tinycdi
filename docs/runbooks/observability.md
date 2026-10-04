@@ -60,6 +60,7 @@ cardinality cannot leak in.
 | `tinycdi_logins_total` | counter | `outcome` | completed `/v1/auth/callback` attempts |
 | `tinycdi_runtime_image_age_seconds` | gauge | `family` | age of each catalog family's newest published image (refreshed every minute) |
 | `tinycdi_rate_limited_total` | counter | `route` | requests refused by the per-client rate limiters (E7) — a rising series means `429 RATE_LIMITED` responses; check `backend.trustedProxies` is set before blaming clients |
+| `tinycdi_rate_limit_store_errors_total` | counter | `route` | Postgres rate-limit window check failures (ADR 0006) — during a store outage the limiters fail open to each pod's divided local bucket, so a rising series means degraded per-replica limiting until Postgres returns; `route` is the limiter family (`login`, `callback_ceiling`, `launch`) |
 
 ## Dashboards
 

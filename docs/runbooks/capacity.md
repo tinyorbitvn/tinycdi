@@ -188,21 +188,23 @@ What that means for sizing:
   that is live on the serving replica are per-session; a *first* launch
   (no cookie yet, or a cookie only a sibling replica knows) is per-IP —
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
-- **Budgets are the aggregate across replicas.** The limiter is
-  in-memory per backend replica (`internal/ratelimit`) — no shared
-  counter — so the chart passes `-rate-limit-replicas=backend.replicas`
-  and every pod enforces `max(1, rate÷N)`/min with `max(1, burst÷N)`
-  burst (rounded down): one key's effective budget is ~the configured
-  value on an even spread — 2 replicas × `-login-rate` 30/min + burst 10
-  ≈ 40/min aggregate for one anonymous IP — except a flag smaller than
-  the replica count, which clamps to 1/min per pod (~N/min aggregate,
-  the one overshoot). Size the flag as the aggregate you want to allow.
-  A same-IP ramp still trips N buckets,
-  but each holds 1/N of the budget — during a rolling surge (N+1 pods)
-  the transient aggregate is up to ~(N+1)/N× configured, and an
-  out-of-band `kubectl scale` leaves the rendered divisor stale until
-  the next `helm upgrade`. An external HPA should pin
-  `-rate-limit-replicas` to `maxReplicas` via `backend.extraArgs`.
+- **Budgets are the exact aggregate across replicas.** The limiter is a
+  Postgres fixed-minute window shared by every backend replica (ADR 0006):
+  one key draws at most rate+burst in a window — `-login-rate` 30/min +
+  burst 10 admits an anonymous IP 40 requests inside any wall-clock
+  minute (the fixed-window edge admits up to 2× across a boundary — the
+  same overshoot class the old per-replica buckets had). Every pod also
+  keeps a divided in-memory bucket (`max(1, rate÷N)`/min, `max(1,
+  burst÷N)` burst via `-rate-limit-replicas=backend.replicas`) as a
+  per-replica ceiling, so the effective bound is
+  `min(shared window, this pod's share)` — a key pinned to one pod by
+  sticky load-balancing still sees only that pod's 1/N share. During a
+  Postgres outage each pod falls back to its divided local bucket
+  (fail-open — the limited routes all need Postgres to complete anyway),
+  which makes `-rate-limit-replicas` the ceiling divisor; a flag smaller
+  than the replica count clamps to 1/min per pod (~N/min aggregate,
+  the one overshoot). Size `-login-rate`/`-launch-rate` as the aggregate
+  you want to allow.
 - The per-key limits and the limiter's key-space bound are unchanged;
   `backend.trustedProxies` must still name the edge's CIDRs or every user
   collapses into the edge's own IP bucket regardless.
