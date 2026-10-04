@@ -72,7 +72,8 @@ render; the rest are changed defaults you may want to pin back.
   1/N share of the flag: the aggregate is ~the configured rate — 2 ×
   `-login-rate` 30/min + burst 10 ≈ 40/min for one anonymous IP —
   size `-login-rate` as the aggregate you want to allow (v0.3.0
-  multiplied the bound by N instead).
+  multiplied the bound by N instead; a flag below the replica count
+  clamps to 1/min per pod rather than disabling the limit).
 - **Kasm Browser templates** — a seeded `adapter: kasm` template with
   `experience: Browser` fails the render until its image is on
   `kasmAdapter.browserAllowlist` or the template is re-classed

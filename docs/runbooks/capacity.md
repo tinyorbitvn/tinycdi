@@ -191,11 +191,13 @@ What that means for sizing:
 - **Budgets are the aggregate across replicas.** The limiter is
   in-memory per backend replica (`internal/ratelimit`) — no shared
   counter — so the chart passes `-rate-limit-replicas=backend.replicas`
-  and every pod enforces its 1/N share of the flag (rate and burst
-  divide, each clamped to ≥1): one key's effective budget is ~the
-  configured value on an even spread — 2 replicas × `-login-rate` 30/min
-  + burst 10 ≈ 40/min aggregate for one anonymous IP. Size the flag as
-  the aggregate you want to allow. A same-IP ramp still trips N buckets,
+  and every pod enforces `max(1, rate÷N)`/min with `max(1, burst÷N)`
+  burst (rounded down): one key's effective budget is ~the configured
+  value on an even spread — 2 replicas × `-login-rate` 30/min + burst 10
+  ≈ 40/min aggregate for one anonymous IP — except a flag smaller than
+  the replica count, which clamps to 1/min per pod (~N/min aggregate,
+  the one overshoot). Size the flag as the aggregate you want to allow.
+  A same-IP ramp still trips N buckets,
   but each holds 1/N of the budget — during a rolling surge (N+1 pods)
   the transient aggregate is up to ~(N+1)/N× configured, and an
   out-of-band `kubectl scale` leaves the rendered divisor stale until

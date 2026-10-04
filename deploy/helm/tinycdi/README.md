@@ -454,13 +454,16 @@ and NAT").
 The buckets are **in-memory per backend replica** (`internal/ratelimit`) —
 there is no shared counter, so the chart passes
 `-rate-limit-replicas=backend.replicas` and every pod enforces its 1/N
-share of the configured budget (rate and burst divide, each clamped to a
-minimum of 1): the aggregate across replicas on an even spread is **~the
-configured rate** — 2 replicas × `-login-rate` 30/min + burst 10 lets one
-anonymous IP draw ~15/min + burst 5 per pod, ≈40/min in total (integer
-division rounds down, so the bound is never exceeded by rounding). Size
-`-login-rate`/`-launch-rate` as the aggregate you want to allow. Three
-edge cases to know:
+share of the configured budget — exactly `max(1, rate÷N)` tokens/min and
+`max(1, burst÷N)` burst per pod, integer division rounding down: on an
+even spread the aggregate is **~the configured rate** — 2 replicas ×
+`-login-rate` 30/min + burst 10 lets one anonymous IP draw ~15/min +
+burst 5 per pod, ≈40/min in total. The minimum-1 clamp is the one
+overshoot: a configured rate smaller than the replica count
+(`-login-rate=2` with `backend.replicas: 3`) resolves to 1/min per pod,
+so the aggregate is ~N/min — above the flag, never silently disabled by
+rounding to 0. Size `-login-rate`/`-launch-rate` as the aggregate you
+want to allow. Three edge cases to know:
 
 - **A rolling surge briefly loosens the bound.** While a rollout runs
   N+1 pods each still enforces its 1/N share, so the transient aggregate

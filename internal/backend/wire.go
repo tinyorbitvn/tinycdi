@@ -57,6 +57,25 @@ const (
 	rateLimitMaxKeys = 100_000
 )
 
+// launchLimiter builds the /v1/launch limiter for cfg: the flag names the
+// aggregate bound and the replica count divides it so an even spread
+// grants one key ~the configured rate total, not N× (RL-1). now injects a
+// clock for tests; nil means time.Now.
+func launchLimiter(cfg Config, now func() time.Time) *ratelimit.Limiter {
+	rate, burst := ratelimit.PerReplica(cfg.LaunchRate, launchRateBurst, cfg.RateLimitReplicas)
+	return ratelimit.New(rate, burst, rateLimitMaxKeys, now)
+}
+
+// loginLimiters builds the login-family limiter pair for cfg — the shared
+// bucket (login start, session probe, callback) and the per-IP callback
+// ceiling at 10× the *divided* login budget so the FX-R30 multiplier
+// stays exact per replica (RL-1).
+func loginLimiters(cfg Config, now func() time.Time) (shared, ceiling *ratelimit.Limiter) {
+	rate, burst := ratelimit.PerReplica(cfg.LoginRate, loginRateBurst, cfg.RateLimitReplicas)
+	return ratelimit.New(rate, burst, rateLimitMaxKeys, now),
+		ratelimit.New(10*rate, 10*burst, rateLimitMaxKeys, now)
+}
+
 // wire resolves secrets, builds every handler, binds every enabled listener
 // and records the background loops and closers on b. On error the caller
 // runs closeAll.
@@ -506,7 +525,6 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	launchRate, launchBurst := ratelimit.PerReplica(cfg.LaunchRate, launchRateBurst, cfg.RateLimitReplicas)
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
 		SessionDomain:  dom,
@@ -519,7 +537,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		ControlToken:   cfg.ControlToken,
 		RenewInterval:  cfg.RenewInterval,
 		RevokeDeadline: cfg.RevokeDeadline,
-		LaunchLimiter:  ratelimit.New(launchRate, launchBurst, rateLimitMaxKeys, nil),
+		LaunchLimiter:  launchLimiter(cfg, nil),
 		TrustedProxies: trusted,
 		Metrics:        metrics,
 		Audit:          observability.NewJSONSink(os.Stdout),
@@ -641,15 +659,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	// Budgets divide by the replica count (RL-1): the flags name the
-	// aggregate bound and every replica enforces its 1/N share, so an
-	// even spread grants one key ~the configured rate total, not N×.
-	loginRate, loginBurst := ratelimit.PerReplica(cfg.LoginRate, loginRateBurst, cfg.RateLimitReplicas)
-	loginLimiter := ratelimit.New(loginRate, loginBurst, rateLimitMaxKeys, nil)
+	loginLimiter, callbackCeiling := loginLimiters(cfg, nil)
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
-	ceilRate, ceilBurst := ratelimit.PerReplica(10*cfg.LoginRate, 10*loginRateBurst, cfg.RateLimitReplicas)
-	callbackCeiling := ratelimit.New(ceilRate, ceilBurst, rateLimitMaxKeys, nil)
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
 	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit, sessionLimit, callbackLimit)

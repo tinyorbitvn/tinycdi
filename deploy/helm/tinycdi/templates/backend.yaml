@@ -210,10 +210,12 @@ spec:
             {{- end }}
             # Rate-limit budgets are per pod (RL-1): each replica divides
             # -login-rate/-launch-rate by this count so the aggregate
-            # across replicas approximates the configured bound. Rendered
-            # before extraArgs so an override there (e.g. an HPA's
-            # maxReplicas) wins.
-            - -rate-limit-replicas={{ .Values.backend.replicas | int }}
+            # across replicas approximates the configured bound. Clamped
+            # to >= 1 — backend.replicas may be 0 (scaled down), and a
+            # later out-of-band scale-up must not crash-loop on a 0
+            # divisor. Rendered before extraArgs so an override there
+            # (e.g. an HPA's maxReplicas) wins.
+            - -rate-limit-replicas={{ max 1 (.Values.backend.replicas | int) }}
             {{- with .Values.backend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

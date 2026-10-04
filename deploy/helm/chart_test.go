@@ -1330,6 +1330,14 @@ func TestBackendRateLimitReplicas(t *testing.T) {
 	if !strings.Contains(args, "-rate-limit-replicas=5") {
 		t.Errorf("--set backend.replicas=5: -rate-limit-replicas=5 missing or wrong\nargs:\n%s", args)
 	}
+	// replicas may render 0 (scaled-down install): the flag clamps to 1
+	// so a later out-of-band scale-up does not crash-loop on the
+	// validation error.
+	args = strings.Join(firstContainerArgs(deployment(renderArgs(t,
+		"-f", "tinycdi/ci/minimal-values.yaml", "--set", "backend.replicas=0"), "backend")), "\n")
+	if !strings.Contains(args, "-rate-limit-replicas=1") {
+		t.Errorf("--set backend.replicas=0: -rate-limit-replicas=1 (clamped) missing or wrong\nargs:\n%s", args)
+	}
 }
 
 func toSlice(v any) []any {
