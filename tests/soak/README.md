@@ -11,12 +11,13 @@ portal.
 | File | Purpose |
 |---|---|
 | `soak.ts` | Playwright soak runner: login, launch N sessions, input ticks, mid-run reload, report |
+| `profiles/` | named run shapes (`soak-100`, `soak-200`) loadable via `--profile` / `SOAK_PROFILE` |
 | `drills.sh` | `delete-pod` / `rollout` / `rotate-cert` drills with UTC timestamps |
 | `report.schema.json` | JSON Schema (draft 2020-12) for `soak-report.json` |
 | `metrics.ts` | percentile, gap and duration math (pure, unit-tested) |
 | `report.ts` | report assembly + schema validation (ajv) |
 | `soak.test.ts` | `node --test` metrics/report unit tests and the dry-run end-to-end check |
-| `drive.test.ts` | orchestration tests against a scripted fake driver (relaunch, soak clock, reload, SIGINT, option validation) |
+| `drive.test.ts` | orchestration tests against a scripted fake driver (relaunch, soak clock, reload, SIGINT, option validation, lanes) |
 | `drills.test.ts` | `drills.sh` tests against a fake `kubectl` |
 
 The package has its own lockfile on purpose: it is a standalone harness, not
@@ -32,6 +33,10 @@ SOAK_USER=alice SOAK_PASSWORD=… \
 SOAK_SESSIONS=25 SOAK_DURATION=60m \
 npm run soak -- --connect-p95-ms 30000 --reconnect-p95-ms 15000 --max-gap-ms 60000
 
+# the 100-session scale profile (tests/soak/profiles/); flags still win:
+SOAK_PORTAL_URL=… SOAK_USERS_FILE=/secure/soak-users.csv \
+npm run soak -- --profile soak-100
+
 # dry run against the contract mock API (no cluster, no browser):
 npm run test:dry-run
 ```
@@ -46,8 +51,9 @@ What a run does, in order:
    unusual. Dry runs use the mock API's dev `POST /v1/login`.
 2. Resolves `SOAK_TEMPLATE` (id or name) against `GET /v1/templates`.
 3. Creates `SOAK_SESSIONS` workspaces (`desiredState: Running`) with
-   `Idempotency-Key` + CSRF (`/v1/me` csrfToken, falling back to a legacy
-   `tcdi_csrf` cookie), waits for `Ready`, then opens each session: real
+   `Idempotency-Key` + the session-bound CSRF token from `GET /v1/me`
+   (`csrfToken`; the legacy readable `tcdi_csrf` cookie no longer exists),
+   waits for `Ready`, then opens each session: real
    runs navigate a tab to `/workspaces/{id}/session` (the in-portal view
    fetches a `LaunchTicket` and POSTs it into the sandboxed iframe); dry
    runs do the same flow at request level against the session origin.
@@ -65,8 +71,10 @@ What a run does, in order:
    harness failure (the run fails and counts a manual action). The time from
    the first non-connected observation after the reload to the next
    `connected` one is the reconnect measurement, but only a non-connected
-   observation within 60 s after the reload counts; a reload without one is
-   seamless (`reconnectMs: 0`, `seamless: true`) and a later drill gap is never
+   observation within 60 s after the reload counts; a reload observed inside
+   that window without one is seamless (`reconnectMs: 0`, `seamless: true`),
+   a reload with zero observations in the window proves nothing
+   (`seamless: false`, `reconnectMs: null`), and a later drill gap is never
    attributed to it.
 6. At the end — and on failure or SIGINT — every workspace it created is
    stopped/deleted before the report is written.
@@ -79,6 +87,27 @@ stale browser tab is closed first); a relaunch that then connects is not a
 drop. Past the bound the session is recorded as `dropped` plus one
 `manualActions` — the report counts sessions that needed a human.
 
+### Multi-user lanes
+
+Scale runs spread the sessions over several users so per-user accounting
+and limits are exercised, not just the tenant aggregate. Point
+`SOAK_USERS_FILE` (or `--users-file`) at a CSV with one `user,password`
+pair per line (`#` comments and blank lines skipped; the split is on the
+first comma). Sessions are dealt round-robin over the listed users; every
+user gets its own browser context (real run) or request context (dry
+run), its own OIDC login and its own share of the workspace creation, and
+the report rows carry `owner`. Without a users file the run is the single
+`SOAK_USER`/`SOAK_PASSWORD` lane as before.
+
+### Profiles
+
+`tests/soak/profiles/*.json` are named default sets loaded with
+`--profile NAME` or `SOAK_PROFILE`: `soak-100` (100 sessions) and
+`soak-200` (200), each 60 minutes on the `soak-small` template with the
+E9 thresholds. Precedence is defaults < profile < environment < flags.
+A profile only carries shape — users still come from `SOAK_USERS_FILE`
+and the portal from `SOAK_PORTAL_URL`.
+
 A run that ends before the requested duration has elapsed on the soak clock
 (SIGINT, abort) is **truncated** and fails; so does a run whose soak clock
 never started. Numeric flags and `SOAK_SESSIONS` are validated up front.
@@ -89,11 +118,17 @@ always run the cleanup and write the report.
 
 `soak-report.json` is validated against `report.schema.json` before it is
 written. Per session it records `connectMs` (launch → first `connected`),
-`reconnectMs` (first non-connected observation within 60 s after the reload → `connected`; 0 when `seamless`), `longestGapMs` (longest continuous
+`reconnectMs` (first non-connected observation within 60 s after the reload → `connected`; 0 when `seamless`; null when nothing was observed inside
+that window — a reload with zero observations is never reported seamless),
+`longestGapMs` (longest continuous
 non-connected stretch after the first connect), every span spent in a state
-other than `connected`, `manualActions`, `inputEvents` and `dropped`. The
-summary carries p50/p95 of connect and reconnect (nearest-rank), the manual
-action and drop counts, and `pass`/`failures` against the `--connect-p95-ms`,
+other than `connected`, `elsewhereTransitions` (how often the page flipped
+to its "open in another tab" view — the harness owns the only tab, so every
+flip is a false transition), `manualActions`, `inputEvents` and `dropped`. The
+summary carries p50/p95 of connect, reconnect and scripted input dispatch
+(nearest-rank; the input figure is the harness-side dispatch time, not
+glass-to-glass), the manual
+action and drop counts, `falseElsewhereTransitions`, and `pass`/`failures` against the `--connect-p95-ms`,
 `--reconnect-p95-ms`, `--max-gap-ms`, `--max-manual-actions` and
 `--max-dropped` thresholds. Exit code is 0 on pass, 1 on fail.
 

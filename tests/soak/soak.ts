@@ -16,7 +16,7 @@
 // Erasable-syntax TypeScript only: run with
 //   node --disable-warning=ExperimentalWarning soak.ts ...
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -25,10 +25,12 @@ import {
   chromium,
   request,
   type APIRequestContext,
+  type APIResponse,
+  type Browser,
   type BrowserContext,
   type Page,
 } from "playwright";
-import { parseDurationMs, type Observation } from "./metrics.ts";
+import { parseDurationMs, percentile, type Observation } from "./metrics.ts";
 import { buildReport, type SessionResult, type Thresholds } from "./report.ts";
 
 // ---- pinned API shapes (PLAN.md T2.3 / T2.5; internal/api/openapi.yaml) ----
@@ -58,6 +60,12 @@ const MAX_AUTO_RELAUNCH = 2; // per 5 minutes, mirrors web/src/session/useConnec
 
 // ---- configuration ----
 
+/** One soak lane: a user whose share of the sessions it owns. */
+export interface SoakUser {
+  name: string;
+  password: string;
+}
+
 export interface Options {
   dryRun: boolean;
   portalUrl: string | undefined;
@@ -69,6 +77,7 @@ export interface Options {
   connectTimeoutMs: number;
   readyTimeoutMs: number;
   reportPath: string;
+  users: SoakUser[];
   thresholds: Thresholds;
   verbose: boolean;
 }
@@ -92,6 +101,18 @@ Environment:
   SOAK_POLL_INTERVAL     connection-status poll cadence (default 5s)
   SOAK_CONNECT_TIMEOUT   launch to connected budget (default 120s)
   SOAK_READY_TIMEOUT     workspace Ready budget (default 5m)
+  SOAK_USERS_FILE        CSV "user,password" per line: sessions spread
+                         round-robin over these users (multi-user runs)
+  SOAK_PROFILE           profile name under tests/soak/profiles/ (e.g.
+                         soak-100); flags and other env vars override it
+  SOAK_ABORT_DROPPED_PCT abort the run once dropped sessions exceed this
+                         share of the total, in percent (default 1)
+  SOAK_ABORT_CONNECT_P95_MS
+                         abort once the ramp-up connect p95 exceeds this
+                         (unset: never; the scale runs use 15000)
+  SOAK_LOGIN_CONCURRENCY OIDC logins at once during ramp-up (default 4)
+  SOAK_LOGIN_ATTEMPTS    per-lane login tries before the run aborts
+                         (default 3)
   SOAK_MOCK_PORTAL_PORT  dry-run mock portal port (default: a free port)
   SOAK_MOCK_SESSION_PORT dry-run mock session port (default: a free port)
   SOAK_IGNORE_TLS_ERRORS set to 1 for self-signed dev certs
@@ -102,6 +123,8 @@ Flags:
   --dry-run              run against the spawned contract mock, no browser
   --portal-url URL       overrides SOAK_PORTAL_URL (in dry-run: attach to an
                          already-running mock instead of spawning one)
+  --profile NAME         load tests/soak/profiles/NAME.json as defaults
+  --users-file PATH      overrides SOAK_USERS_FILE
   --sessions N --duration D --input-interval D --poll-interval D
   --template REF --report PATH (default ./soak-report.json)
   --connect-p95-ms N --reconnect-p95-ms N --max-gap-ms N   pass/fail thresholds
@@ -123,18 +146,124 @@ function nonNegativeInteger(flag: string, raw: string): number {
   return n;
 }
 
+/**
+ * A named default set under tests/soak/profiles/<name>.json. Fields use the
+ * same names/units as the environment variables; thresholds use the
+ * Thresholds names. Unknown keys are rejected so a typo cannot silently
+ * change a soak's scale.
+ */
+interface Profile {
+  sessions?: number;
+  duration?: string;
+  template?: string;
+  inputInterval?: string;
+  pollInterval?: string;
+  connectTimeout?: string;
+  readyTimeout?: string;
+  thresholds?: Partial<Thresholds>;
+}
+
+const PROFILE_KEYS = new Set([
+  "sessions",
+  "duration",
+  "template",
+  "inputInterval",
+  "pollInterval",
+  "connectTimeout",
+  "readyTimeout",
+  "thresholds",
+]);
+const PROFILE_THRESHOLD_KEYS = new Set([
+  "connectP95Ms",
+  "reconnectP95Ms",
+  "maxGapMs",
+  "maxManualActions",
+  "maxDroppedSessions",
+]);
+
+export function loadProfile(name: string): Profile {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`bad profile name "${name}"`);
+  const file = path.resolve(import.meta.dirname, "profiles", `${name}.json`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot load profile ${name} (${file}): ${(e as Error).message}`);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`profile ${name} must be a JSON object`);
+  }
+  const p = raw as Record<string, unknown>;
+  for (const k of Object.keys(p)) {
+    if (!PROFILE_KEYS.has(k)) throw new Error(`profile ${name}: unknown key "${k}"`);
+  }
+  if (p.sessions !== undefined && !Number.isInteger(p.sessions)) {
+    throw new Error(`profile ${name}: sessions must be an integer`);
+  }
+  for (const k of ["duration", "template", "inputInterval", "pollInterval", "connectTimeout", "readyTimeout"]) {
+    if (p[k] !== undefined && typeof p[k] !== "string") {
+      throw new Error(`profile ${name}: ${k} must be a string`);
+    }
+  }
+  if (p.thresholds !== undefined) {
+    if (typeof p.thresholds !== "object" || p.thresholds === null) {
+      throw new Error(`profile ${name}: thresholds must be an object`);
+    }
+    for (const [k, v] of Object.entries(p.thresholds as Record<string, unknown>)) {
+      if (!PROFILE_THRESHOLD_KEYS.has(k)) throw new Error(`profile ${name}: unknown threshold "${k}"`);
+      if (v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
+        throw new Error(`profile ${name}: threshold ${k} must be a non-negative number or null`);
+      }
+    }
+  }
+  return p as Profile;
+}
+
+/**
+ * CSV "user,password" lanes (comments/blank lines skipped). Passwords may
+ * contain commas only when nothing after the first comma needs splitting —
+ * the split is on the first comma so `u,p,a` means password "p,a". The
+ * file is read once at option parsing; its path is never logged.
+ */
+export function parseUsersFile(file: string): SoakUser[] {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    throw new Error(`cannot read users file ${file}: ${(e as Error).message}`);
+  }
+  const users: SoakUser[] = [];
+  const seen = new Set<string>();
+  text.split(/\r?\n/).forEach((line, i) => {
+    const t = line.trim();
+    if (t === "" || t.startsWith("#")) return;
+    const comma = t.indexOf(",");
+    if (comma <= 0 || comma === t.length - 1) {
+      throw new Error(`users file ${file}:${i + 1}: expected "user,password"`);
+    }
+    const name = t.slice(0, comma).trim();
+    const password = t.slice(comma + 1).trim();
+    if (seen.has(name)) throw new Error(`users file ${file}:${i + 1}: duplicate user "${name}"`);
+    seen.add(name);
+    users.push({ name, password });
+  });
+  if (users.length === 0) throw new Error(`users file ${file}: no users`);
+  return users;
+}
+
 export function parseArgs(argv: string[]): Options {
   const o: Options = {
     dryRun: false,
-    portalUrl: env("SOAK_PORTAL_URL"),
-    sessions: Number(env("SOAK_SESSIONS") ?? "25"),
-    template: env("SOAK_TEMPLATE"),
-    durationMs: parseDurationMs(env("SOAK_DURATION") ?? "60m"),
-    inputIntervalMs: parseDurationMs(env("SOAK_INPUT_INTERVAL") ?? "10s"),
-    pollIntervalMs: parseDurationMs(env("SOAK_POLL_INTERVAL") ?? "5s"),
-    connectTimeoutMs: parseDurationMs(env("SOAK_CONNECT_TIMEOUT") ?? "120s"),
-    readyTimeoutMs: parseDurationMs(env("SOAK_READY_TIMEOUT") ?? "5m"),
+    portalUrl: undefined,
+    sessions: 25,
+    template: undefined,
+    durationMs: parseDurationMs("60m"),
+    inputIntervalMs: parseDurationMs("10s"),
+    pollIntervalMs: parseDurationMs("5s"),
+    connectTimeoutMs: parseDurationMs("120s"),
+    readyTimeoutMs: parseDurationMs("5m"),
     reportPath: "soak-report.json",
+    users: [],
     thresholds: {
       connectP95Ms: null,
       reconnectP95Ms: null,
@@ -144,6 +273,37 @@ export function parseArgs(argv: string[]): Options {
     },
     verbose: false,
   };
+  // Defaults < profile < environment < flags.
+  const profileName =
+    argv.includes("--profile") ? argv[argv.indexOf("--profile") + 1] : env("SOAK_PROFILE");
+  if (profileName !== undefined) {
+    const p = loadProfile(profileName);
+    if (p.sessions !== undefined) o.sessions = p.sessions;
+    if (p.template !== undefined) o.template = p.template;
+    if (p.duration !== undefined) o.durationMs = parseDurationMs(p.duration);
+    if (p.inputInterval !== undefined) o.inputIntervalMs = parseDurationMs(p.inputInterval);
+    if (p.pollInterval !== undefined) o.pollIntervalMs = parseDurationMs(p.pollInterval);
+    if (p.connectTimeout !== undefined) o.connectTimeoutMs = parseDurationMs(p.connectTimeout);
+    if (p.readyTimeout !== undefined) o.readyTimeoutMs = parseDurationMs(p.readyTimeout);
+    if (p.thresholds) Object.assign(o.thresholds, p.thresholds);
+  }
+  if (env("SOAK_PORTAL_URL") !== undefined) o.portalUrl = env("SOAK_PORTAL_URL");
+  if (env("SOAK_SESSIONS") !== undefined) o.sessions = Number(env("SOAK_SESSIONS"));
+  if (env("SOAK_TEMPLATE") !== undefined) o.template = env("SOAK_TEMPLATE");
+  if (env("SOAK_DURATION") !== undefined) o.durationMs = parseDurationMs(env("SOAK_DURATION")!);
+  if (env("SOAK_INPUT_INTERVAL") !== undefined) {
+    o.inputIntervalMs = parseDurationMs(env("SOAK_INPUT_INTERVAL")!);
+  }
+  if (env("SOAK_POLL_INTERVAL") !== undefined) {
+    o.pollIntervalMs = parseDurationMs(env("SOAK_POLL_INTERVAL")!);
+  }
+  if (env("SOAK_CONNECT_TIMEOUT") !== undefined) {
+    o.connectTimeoutMs = parseDurationMs(env("SOAK_CONNECT_TIMEOUT")!);
+  }
+  if (env("SOAK_READY_TIMEOUT") !== undefined) {
+    o.readyTimeoutMs = parseDurationMs(env("SOAK_READY_TIMEOUT")!);
+  }
+  let usersFile = env("SOAK_USERS_FILE");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -157,6 +317,12 @@ export function parseArgs(argv: string[]): Options {
         break;
       case "--portal-url":
         o.portalUrl = next();
+        break;
+      case "--profile":
+        next(); // already applied above; consume its value
+        break;
+      case "--users-file":
+        usersFile = next();
         break;
       case "--sessions":
         o.sessions = Number(next());
@@ -211,6 +377,7 @@ export function parseArgs(argv: string[]): Options {
   if (!Number.isInteger(o.sessions) || o.sessions < 1) {
     throw new Error("--sessions (or SOAK_SESSIONS) must be a positive integer");
   }
+  if (usersFile !== undefined) o.users = parseUsersFile(usersFile);
   if (o.portalUrl) o.portalUrl = o.portalUrl.replace(/\/+$/, "");
   return o;
 }
@@ -219,6 +386,64 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function stamp(msg: string): void {
   console.log(`${new Date().toISOString()} ${msg}`);
+}
+
+/**
+ * Counts HTTP 429s on an APIRequestContext. `context.request` calls do not
+ * emit BrowserContext "response" events, so the methods are wrapped.
+ */
+function patchRateLimitCounter(
+  reqCtx: APIRequestContext,
+  lane: { rateLimited429: number },
+): void {
+  for (const m of ["get", "post", "delete", "put", "patch", "head", "fetch"] as const) {
+    const orig = reqCtx[m].bind(reqCtx) as (...a: unknown[]) => Promise<APIResponse>;
+    (reqCtx as unknown as Record<string, unknown>)[m] = async (...args: unknown[]) => {
+      const r = await orig(...args);
+      if (r.status() === 429) lane.rateLimited429++;
+      return r;
+    };
+  }
+}
+
+/**
+ * Per-node CPU-requests percentage from `kubectl describe node` (the
+ * advisor's worst-node guard): used to stop adding soak workspaces once
+ * any guarded node would exceed the cap. kubectl is a debug-time tool —
+ * when SOAK_NODE_GUARD is unset this never runs.
+ */
+function nodeRequestPcts(nodes: string[]): Record<string, number> {
+  const kubectl = env("SOAK_NODE_KUBECTL") ?? "kubectl";
+  const kcArgs = env("SOAK_NODE_KUBECONFIG")
+    ? ["--kubeconfig", env("SOAK_NODE_KUBECONFIG")!]
+    : [];
+  const out: Record<string, number> = {};
+  for (const n of nodes) {
+    const desc = execFileSync(kubectl, [...kcArgs, "describe", "node", n], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const m = /^ {2}cpu\s+\S+m \((\d+)%\)/m.exec(desc);
+    if (!m) throw new Error(`cannot parse cpu requests of node ${n}`);
+    out[n] = Number(m[1]);
+  }
+  return out;
+}
+
+/** Soak pods per node in the workspace namespace (placement record). */
+function soakPodsPerNode(ns: string): Record<string, number> {
+  const kubectl = env("SOAK_NODE_KUBECTL") ?? "kubectl";
+  const kcArgs = env("SOAK_NODE_KUBECONFIG")
+    ? ["--kubeconfig", env("SOAK_NODE_KUBECONFIG")!]
+    : [];
+  const json = execFileSync(
+    kubectl,
+    [...kcArgs, "-n", ns, "get", "pods", "-o", "jsonpath={range .items[*]}{.spec.nodeName}{\"\\n\"}{end}"],
+    { encoding: "utf8", timeout: 30_000 },
+  );
+  const out: Record<string, number> = {};
+  for (const n of json.split("\n").filter(Boolean)) out[n] = (out[n] ?? 0) + 1;
+  return out;
 }
 
 // ---- small testable helpers ----
@@ -263,6 +488,18 @@ export async function takeoverDialogVisible(page: {
   return (await page.getByText("Take over session").count()) > 0;
 }
 
+/**
+ * True when the session view shows its "open in another tab" state (the
+ * V3.24 lease epoch logic decided a newer stream claimed our lease). The
+ * harness opens exactly one tab per session, so this is always a false
+ * positive to count (V3.10 watch item).
+ */
+export async function elsewhereDialogVisible(page: {
+  getByText(text: string): { count(): Promise<number> };
+}): Promise<boolean> {
+  return (await page.getByText("This session is open in another tab").count()) > 0;
+}
+
 // ---- portal API client (shared by both drivers) ----
 
 export class PortalApi {
@@ -274,18 +511,14 @@ export class PortalApi {
   }
 
   async csrfToken(): Promise<string> {
-    // v0.2 (T2.3, D17): GET /v1/me returns csrfToken. The pre-T2.3 mock
-    // still carries the legacy readable tcdi_csrf cookie; accept either so
-    // the harness works against both.
+    // v0.2 (T2.3, D17): GET /v1/me returns the session-bound csrfToken.
+    // The legacy readable tcdi_csrf cookie no longer exists.
     const me = await this.ctx.get(`${this.portal}/v1/me`);
     if (me.ok()) {
       const body = (await me.json()) as { csrfToken?: string };
       if (body.csrfToken) return body.csrfToken;
     }
-    const state = await this.ctx.storageState();
-    const legacy = state.cookies.find((c) => /^(?:__Host-)?tcdi_csrf$/.test(c.name));
-    if (legacy?.value) return legacy.value;
-    throw new Error("no CSRF token: /v1/me has none and no tcdi_csrf cookie");
+    throw new Error(`no CSRF token: GET /v1/me -> ${me.status()}`);
   }
 
   async listTemplates(): Promise<{ id: string; name: string }[]> {
@@ -353,6 +586,8 @@ export class PortalApi {
 export interface SessionProbe {
   state: Observation["state"];
   source: "api" | "probe";
+  /** The session page was showing "open in another tab" at probe time. */
+  elsewhere?: boolean;
 }
 
 export interface Driver {
@@ -513,27 +748,24 @@ export class BrowserDriver implements Driver {
   context: BrowserContext;
   portal: string;
   api: PortalApi;
+  /** Lane credentials; falls back to SOAK_USER / SOAK_PASSWORD. */
+  user: SoakUser | undefined;
   pages = new Map<string, Page>();
 
-  constructor(context: BrowserContext, portal: string) {
+  constructor(context: BrowserContext, portal: string, user?: SoakUser) {
     this.context = context;
     this.portal = portal;
+    this.user = user;
     this.api = new PortalApi(context.request, portal);
   }
 
-  /** First visible locator among the candidates, waiting up to timeoutMs. */
-  private async firstMatch(page: Page, selectors: string[], timeoutMs: number) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      for (const selector of selectors) {
-        const loc = page.locator(selector).first();
-        if ((await loc.count()) > 0 && (await loc.isVisible())) return loc;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`no OIDC password field matched: ${selectors.join(", ")}`);
-      }
-      await sleep(250);
+  /** First visible locator among the candidates, or null. */
+  private async tryMatch(page: Page, selectors: string[]) {
+    for (const selector of selectors) {
+      const loc = page.locator(selector).first();
+      if ((await loc.count()) > 0 && (await loc.isVisible())) return loc;
     }
+    return null;
   }
 
   private async fillFirst(page: Page, selectors: string[], value: string): Promise<void> {
@@ -548,24 +780,52 @@ export class BrowserDriver implements Driver {
   }
 
   async login(): Promise<void> {
-    const user = env("SOAK_USER");
-    const password = env("SOAK_PASSWORD");
-    if (!user || !password) throw new Error("SOAK_USER and SOAK_PASSWORD are required");
+    const user = this.user?.name ?? env("SOAK_USER");
+    const password = this.user?.password ?? env("SOAK_PASSWORD");
+    if (!user || !password) {
+      throw new Error("SOAK_USER and SOAK_PASSWORD (or a users-file lane) are required");
+    }
     const sel = loginSelectors(process.env);
     const page = await this.context.newPage();
+    const hasSession = async () =>
+      (await this.context.request.get(`${this.portal}/v1/workspaces`)).ok();
     try {
+      // A previous attempt that died after the IdP set the SSO cookie but
+      // before the session probe passed already has a login: skip the form.
+      if (await hasSession()) return;
       await page.goto(this.portal, { waitUntil: "domcontentloaded" });
-      // The portal bounces to the IdP; wait for its password field.
-      const pw = await this.firstMatch(page, sel.password, 30_000);
-      await pw.waitFor({ state: "visible", timeout: 30_000 });
-      await this.fillFirst(page, sel.user, user);
-      await pw.fill(password);
-      const submit = page.locator(sel.submit).first();
-      if ((await submit.count()) > 0) await submit.click();
-      else await pw.press("Enter");
-      await page.waitForURL(`${this.portal}/**`, { timeout: 60_000 });
-      const check = await this.context.request.get(`${this.portal}/v1/workspaces`);
-      if (!check.ok()) throw new Error(`login did not yield a session (${check.status()})`);
+      // The portal bounces to the IdP; wait for its password field. If the
+      // redirect chain bounces straight back through an existing SSO
+      // session instead, hasSession() flips and we skip the form.
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const pw = await this.tryMatch(page, sel.password);
+        if (pw) {
+          await this.fillFirst(page, sel.user, user);
+          await pw.fill(password);
+          const submit = page.locator(sel.submit).first();
+          if ((await submit.count()) > 0) await submit.click();
+          else await pw.press("Enter");
+          await page.waitForURL(`${this.portal}/**`, { timeout: 60_000 });
+          break;
+        }
+        if (await hasSession()) return;
+        if (Date.now() > deadline) {
+          throw new Error(`no OIDC password field matched: ${sel.password.join(", ")}`);
+        }
+        await sleep(250);
+      }
+      // The backend session can lag the redirect: probe it for a few
+      // seconds before declaring the login failed.
+      const sessDeadline = Date.now() + 15_000;
+      let status = 0;
+      while (Date.now() <= sessDeadline) {
+        const check = await this.context.request.get(`${this.portal}/v1/workspaces`);
+        if (check.ok()) return;
+        status = check.status();
+        await sleep(1500);
+      }
+      throw new Error(`login did not yield a session (${status})`);
     } finally {
       await page.close();
     }
@@ -618,8 +878,19 @@ export class BrowserDriver implements Driver {
 
   async probe(id: string): Promise<SessionProbe> {
     const st = await this.api.connectionStatus(id);
-    if (st !== null && st.status === 200) return { state: st.state, source: "api" };
-    return { state: "error", source: "api" };
+    const state = st !== null && st.status === 200 ? st.state : "error";
+    // Watch item (V3.10): the page flipping to "open in another tab" while
+    // we hold the only stream is a false elsewhere transition — count it.
+    let elsewhere = false;
+    const page = this.pages.get(id);
+    if (page && !page.isClosed()) {
+      try {
+        elsewhere = await elsewhereDialogVisible(page);
+      } catch {
+        /* navigation in flight; unknown, not counted */
+      }
+    }
+    return { state, source: "api", ...(elsewhere ? { elsewhere: true } : {}) };
   }
 
   async closeSession(id: string): Promise<void> {
@@ -689,14 +960,38 @@ async function spawnMock(): Promise<{ child: ChildProcess; portal: string }> {
 
 // ---- orchestration ----
 
+/**
+ * One user's share of a multi-user run: its own API context and driver, so
+ * sessions stay under their owner's credentials and browser context.
+ */
+export interface Lane {
+  user?: SoakUser;
+  api: PortalApi;
+  driver: Driver;
+  /** Login attempts exhausted: the lane's share of sessions is dropped and
+   *  the run continues without it (advisor skip-lane rule). */
+  skipped?: boolean;
+  /** First line of the final login error when the lane was skipped. */
+  loginError?: string;
+  /** HTTP 429 responses observed on the lane's page traffic and API calls. */
+  rateLimited429: number;
+  dispose(): Promise<void>;
+}
+
 export interface SessionCtx extends SessionResult {
   id: string;
+  /** Owning lane (multi-user runs); the driveSessions driver is the fallback. */
+  lane?: Lane;
   relaunches: number;
   recentRelaunches: number[];
   lastInputAt: number;
   lastConnectedAt: number | null;
   /** When the latest automatic relaunch was issued; starts a fresh connect budget. */
   relaunchedAt: number | null;
+  /** Whether the latest observation showed "open in another tab". */
+  elsewhere: boolean;
+  /** Wall-clock ms of each scripted input dispatch (the harness-side latency). */
+  inputMs: number[];
 }
 
 export function newSession(id: string, name: string): SessionCtx {
@@ -716,6 +1011,8 @@ export function newSession(id: string, name: string): SessionCtx {
     lastInputAt: 0,
     lastConnectedAt: null,
     relaunchedAt: null,
+    elsewhere: false,
+    inputMs: [],
   };
 }
 
@@ -725,6 +1022,10 @@ export interface DriveOptions {
   pollIntervalMs: number;
   connectTimeoutMs: number;
   verbose: boolean;
+  /** Abort the soak once dropped sessions exceed this share of the total (%). */
+  abortDroppedPct?: number;
+  /** Abort once the ramp-up connect p95 exceeds this budget (ms). */
+  abortConnectP95Ms?: number | null;
 }
 
 export interface DriveOutcome {
@@ -759,15 +1060,32 @@ export async function driveSessions(
   const failures: string[] = [];
   const stopPoll = { v: false };
   const pollers: Promise<void>[] = [];
+  const drv = (s: SessionCtx): Driver => s.lane?.driver ?? driver;
+  // Advisor stop rules: the monitor handles the cluster-side ones; these
+  // are the harness-side aborts (dropped share, ramp-up connect p95).
+  let aborted: string | null = null;
+  const droppedShareExceeded = (): boolean =>
+    opts.abortDroppedPct !== undefined &&
+    (sessions.filter((s) => s.dropped).length / sessions.length) * 100 >
+      opts.abortDroppedPct;
 
   const watch = async (s: SessionCtx): Promise<void> => {
     while (!stopPoll.v) {
       const t0 = Date.now();
       try {
-        const p = await driver.probe(s.id);
+        const p = await drv(s).probe(s.id);
         const at = Date.now();
-        s.observations.push({ at, state: p.state, source: p.source });
+        s.observations.push({
+          at,
+          state: p.state,
+          source: p.source,
+          ...(p.elsewhere === true ? { elsewhere: true } : {}),
+        });
         if (p.state === "connected") s.lastConnectedAt = at;
+        if (p.elsewhere === true && !s.elsewhere) {
+          stamp(`${s.id}: page shows "open in another tab" while its stream is live (false elsewhere)`);
+        }
+        s.elsewhere = p.elsewhere === true;
       } catch {
         s.observations.push({ at: Date.now(), state: "error", source: "api" });
       }
@@ -782,7 +1100,7 @@ export async function driveSessions(
           s.relaunches++;
           s.relaunchedAt = now;
           try {
-            await driver.openSession(s.id);
+            await drv(s).openSession(s.id);
           } catch (e) {
             console.error(`relaunch ${s.id}: ${(e as Error).message}`);
           }
@@ -790,6 +1108,10 @@ export async function driveSessions(
           s.dropped = true;
           s.manualActions++;
           console.error(`${s.id} dropped after ${MAX_AUTO_RELAUNCH} auto-relaunches`);
+          if (aborted === null && droppedShareExceeded()) {
+            aborted = `dropped sessions exceed ${opts.abortDroppedPct}% of the fleet`;
+            console.error(`aborting: ${aborted}`);
+          }
         }
       }
       await sleep(Math.max(10, opts.pollIntervalMs - (Date.now() - t0)));
@@ -797,34 +1119,69 @@ export async function driveSessions(
   };
 
   try {
-    for (const s of sessions) {
-      if (shouldStop()) break;
-      s.launchedAt = Date.now();
-      await driver.openSession(s.id);
-      pollers.push(watch(s));
+    // Sessions open in waves (advisor msg_7d6860d0d212): a bounded burst
+    // keeps the per-IP launch limiter and the ramp healthy; a pause between
+    // waves lets the tail settle before the next batch.
+    const openWave = Math.max(1, Number(env("SOAK_OPEN_WAVE") ?? "10") || 10);
+    const openWavePauseMs = Math.max(
+      0,
+      Number(env("SOAK_OPEN_WAVE_PAUSE_MS") ?? "15000") || 0,
+    );
+    for (let w = 0; w < sessions.length && !shouldStop(); w += openWave) {
+      const wave = sessions.slice(w, w + openWave);
+      await Promise.all(
+        wave.map(async (s) => {
+          s.launchedAt = Date.now();
+          await drv(s).openSession(s.id);
+          pollers.push(watch(s));
+        }),
+      );
+      if (w + openWave < sessions.length) await sleep(openWavePauseMs);
     }
 
     // Soak clock: every session connected at least once (or given up on).
     while (
       !shouldStop() &&
+      aborted === null &&
       !sessions.every((s) => s.lastConnectedAt !== null || s.dropped)
     ) {
       await sleep(Math.min(100, opts.pollIntervalMs));
     }
     if (shouldStop()) return { soakStartedAt: null, completed: false, failures };
+    if (aborted !== null) {
+      failures.push(`aborted: ${aborted}`);
+      return { soakStartedAt: null, completed: false, failures };
+    }
+    // Ramp-up quality gate: if connecting the fleet was already too slow,
+    // an hour of soaking adds nothing — abort now (advisor stop rule).
+    if (opts.abortConnectP95Ms !== undefined && opts.abortConnectP95Ms !== null) {
+      const connects = sessions
+        .map((s) => {
+          const first = s.observations.find((o) => o.state === "connected");
+          return first !== undefined && s.launchedAt !== null ? first.at - s.launchedAt : null;
+        })
+        .filter((v): v is number => v !== null);
+      const p95 = percentile(connects, 95);
+      if (p95 !== null && p95 > opts.abortConnectP95Ms) {
+        aborted = `ramp-up connect p95 ${p95}ms exceeds ${opts.abortConnectP95Ms}ms`;
+        console.error(`aborting: ${aborted}`);
+        failures.push(`aborted: ${aborted}`);
+        return { soakStartedAt: null, completed: false, failures };
+      }
+    }
     const soakStartedAt = Date.now();
     const deadline = soakStartedAt + opts.durationMs;
     const reloadAt = soakStartedAt + opts.durationMs / 2;
     let reloaded = false;
 
-    while (Date.now() < deadline && !shouldStop()) {
+    while (Date.now() < deadline && !shouldStop() && aborted === null) {
       if (!reloaded && Date.now() >= reloadAt) {
         reloaded = true;
         stamp("mid-run reload of every session");
         for (const s of sessions) {
           s.reloadedAt = Date.now();
           try {
-            const r = await driver.reloadSession(s.id);
+            const r = await drv(s).reloadSession(s.id);
             if (r.takeoverPrompted) {
               // FX-R3c: a reload resumes without a ticket. A take-over prompt
               // means a human would have had to click: always a failure.
@@ -839,8 +1196,10 @@ export async function driveSessions(
       for (const s of sessions) {
         if (Date.now() - s.lastInputAt < opts.inputIntervalMs) continue;
         s.lastInputAt = Date.now();
+        const t0 = Date.now();
         try {
-          await driver.sendInput(s.id);
+          await drv(s).sendInput(s.id);
+          s.inputMs.push(Date.now() - t0);
           s.inputEvents++;
         } catch (e) {
           if (opts.verbose) console.error(`input ${s.id}: ${(e as Error).message}`);
@@ -848,7 +1207,12 @@ export async function driveSessions(
       }
       await sleep(Math.min(1_000, opts.inputIntervalMs));
     }
-    return { soakStartedAt, completed: Date.now() >= deadline, failures };
+    if (aborted !== null) failures.push(`aborted: ${aborted}`);
+    return {
+      soakStartedAt,
+      completed: Date.now() >= deadline && aborted === null,
+      failures,
+    };
   } finally {
     stopPoll.v = true;
     await Promise.allSettled(pollers);
@@ -881,38 +1245,72 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
   let runError: Error | undefined;
   let outcome: DriveOutcome | undefined;
 
-  // The API client must share the browser context's cookie jar in real
-  // mode, so it is created per driver below.
-  let api: PortalApi;
-  let driver: Driver;
-  let ownCtx: APIRequestContext | undefined;
+  // One lane per soak user: its own API context (cookie jar) and driver.
+  // Without a users file there is a single lane on SOAK_USER/SOAK_PASSWORD.
+  const lanes: Lane[] = [];
+  let browser: Browser | undefined;
+  // More users than sessions is pointless: lane i only ever receives
+  // session i mod laneCount, so cap the lanes at the session count.
+  const laneUsers = (opts: Options): (SoakUser | undefined)[] =>
+    opts.users.length ? opts.users.slice(0, opts.sessions) : [undefined];
   if (opts.dryRun) {
-    ownCtx = await request.newContext({
-      ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
-    });
-    api = new PortalApi(ownCtx, portalUrl);
-    driver = new ApiDriver(ownCtx, portalUrl, true);
+    const users = laneUsers(opts);
+    for (const user of users) {
+      const ctx = await request.newContext({
+        ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
+      });
+      const lane: Lane = {
+        ...(user !== undefined ? { user } : {}),
+        api: new PortalApi(ctx, portalUrl),
+        driver: new ApiDriver(ctx, portalUrl, true),
+        rateLimited429: 0,
+        dispose: () => ctx.dispose(),
+      };
+      lanes.push(lane);
+      patchRateLimitCounter(ctx, lane);
+    }
   } else {
-    const browser = await chromium.launch(chromiumLaunchOptions(env("SOAK_HEADFUL") !== "1"));
-    const context = await browser.newContext({
-      ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
-    });
-    api = new PortalApi(context.request, portalUrl);
-    driver = new BrowserDriver(context, portalUrl);
+    browser = await chromium.launch(chromiumLaunchOptions(env("SOAK_HEADFUL") !== "1"));
+    const users = laneUsers(opts);
+    for (const user of users) {
+      const context = await browser.newContext({
+        ignoreHTTPSErrors: env("SOAK_IGNORE_TLS_ERRORS") === "1",
+      });
+      const driver = new BrowserDriver(context, portalUrl, user);
+      const lane: Lane = {
+        ...(user !== undefined ? { user } : {}),
+        api: driver.api,
+        driver,
+        rateLimited429: 0,
+        dispose: () => driver.dispose(),
+      };
+      context.on("response", (r) => {
+        if (r.status() === 429) lane.rateLimited429++;
+      });
+      patchRateLimitCounter(context.request, lane);
+      lanes.push(lane);
+    }
   }
 
   const cleanup = async () => {
     for (const s of sessions) {
+      const lane = s.lane ?? lanes.find((l) => !l.skipped) ?? lanes[0];
       try {
-        await driver.closeSession(s.id);
-        await api.deleteWorkspace(s.id);
+        await lane.driver.closeSession(s.id);
+        await lane.api.deleteWorkspace(s.id);
       } catch (e) {
         console.error(`cleanup ${s.id}: ${(e as Error).message}`);
       }
     }
+    for (const lane of lanes) {
+      try {
+        await lane.dispose();
+      } catch {
+        /* teardown */
+      }
+    }
     try {
-      await driver.dispose();
-      await ownCtx?.dispose();
+      await browser?.close();
     } catch {
       /* teardown */
     }
@@ -920,10 +1318,52 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
   };
 
   try {
-    stamp(`login (${opts.dryRun ? "dev login" : "OIDC"})`);
-    await driver.login();
+    stamp(`login (${opts.dryRun ? "dev login" : "OIDC"}, ${lanes.length} lane${lanes.length === 1 ? "" : "s"})`);
+    // Bounded parallelism: a big OIDC burst can push the IdP form past the
+    // 30 s field deadline. A failed lane is retried twice before the run
+    // gives up (the name goes into the error, never the password).
+    const loginConcurrency = Math.max(
+      1,
+      Number(env("SOAK_LOGIN_CONCURRENCY") ?? "4") || 4,
+    );
+    const loginAttempts = Math.max(1, Number(env("SOAK_LOGIN_ATTEMPTS") ?? "3") || 3);
+    for (let i = 0; i < lanes.length; i += loginConcurrency) {
+      await Promise.all(
+        lanes.slice(i, i + loginConcurrency).map(async (lane) => {
+          const who = lane.user?.name ?? "default";
+          let lastErr: Error | undefined;
+          for (let attempt = 1; attempt <= loginAttempts; attempt++) {
+            try {
+              await lane.driver.login();
+              lastErr = undefined;
+              break;
+            } catch (e) {
+              lastErr = e as Error;
+              if (attempt < loginAttempts) {
+                stamp(`login lane ${who} failed attempt ${attempt} (${lastErr.message.split("\n")[0]}) — retrying`);
+              }
+            }
+          }
+          if (lastErr) {
+            // Advisor skip-lane rule: a lane that exhausts its login attempts
+            // is dropped (its share of sessions is never created) instead of
+            // aborting the run; skipped lanes are reported below.
+            lane.skipped = true;
+            lane.loginError = lastErr.message.split("\n")[0];
+            stamp(`login lane ${who} skipped after ${loginAttempts} attempts (${lane.loginError})`);
+          }
+        }),
+      );
+    }
+    const activeLanes = lanes.filter((l) => !l.skipped);
+    if (activeLanes.length !== lanes.length) {
+      stamp(`${lanes.length - activeLanes.length} lane(s) skipped; continuing with ${activeLanes.length}`);
+    }
+    if (activeLanes.length === 0) {
+      throw new Error(`every login lane failed (${lanes.length} skipped)`);
+    }
 
-    const templates = await api.listTemplates();
+    const templates = await activeLanes[0].api.listTemplates();
     const tpl = opts.template
       ? (templates.find((t) => t.id === opts.template || t.name === opts.template)?.id ??
         opts.template)
@@ -931,18 +1371,74 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     if (!tpl) throw new Error("no templates listed");
 
     stamp(`creating ${opts.sessions} workspaces on template ${tpl}`);
-    for (let i = 0; i < opts.sessions && !shouldStop(); i++) {
-      const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
-      const id = await api.createWorkspace(name, tpl);
-      sessions.push(newSession(id, name));
-      if (driver instanceof ApiDriver) await driver.forceReady(id);
+    // Advisor per-node guard (msg_7d6860d0d212): workspaces are created in
+    // waves; between waves the guarded nodes' CPU-request share is checked
+    // and creation stops when any would reach the cap. Effective N is what
+    // actually got created (sessionsEffective in the report).
+    const guardNodes = (env("SOAK_NODE_GUARD") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const guardPct = Math.max(1, Number(env("SOAK_NODE_GUARD_PCT") ?? "80") || 80);
+    const createWave = Math.max(1, Number(env("SOAK_CREATE_WAVE") ?? "10") || 10);
+    for (let w = 0; w < opts.sessions && !shouldStop(); w += createWave) {
+      if (guardNodes.length) {
+        const over = Object.entries(nodeRequestPcts(guardNodes)).filter(
+          ([, p]) => p >= guardPct,
+        );
+        if (over.length) {
+          stamp(
+            `node-request guard: ${over.map(([n, p]) => `${n} ${p}%`).join(", ")} ` +
+              `>= ${guardPct}% — stopping creation at ${sessions.length} sessions`,
+          );
+          break;
+        }
+      }
+      for (let i = w; i < Math.min(w + createWave, opts.sessions) && !shouldStop(); i++) {
+        const lane = lanes[i % lanes.length];
+        if (lane.skipped) continue; // skipped lane's share of sessions is dropped
+        const name = `soak-${startedAt.toString(36)}-${String(i).padStart(3, "0")}`;
+        const id = await lane.api.createWorkspace(name, tpl);
+        const s = newSession(id, name);
+        s.lane = lane;
+        if (lane.user !== undefined) s.owner = lane.user.name;
+        else if (!opts.dryRun && env("SOAK_USER") !== undefined) s.owner = env("SOAK_USER");
+        sessions.push(s);
+        if (lane.driver instanceof ApiDriver) await lane.driver.forceReady(id);
+      }
     }
-    if (!(driver instanceof ApiDriver)) {
-      await Promise.all(sessions.map((s) => waitForReady(api, s.id, opts.readyTimeoutMs)));
+    if (guardNodes.length && sessions.length > 0 && env("SOAK_GUARD_NS")) {
+      const placement = soakPodsPerNode(env("SOAK_GUARD_NS")!);
+      stamp(
+        `workspace placement by node: ${Object.entries(placement)
+          .sort()
+          .map(([n, c]) => `${n}=${c}`)
+          .join(" ")}`,
+      );
+    }
+    if (!opts.dryRun) {
+      await Promise.all(
+        sessions.map((s) => waitForReady(s.lane?.api ?? lanes[0].api, s.id, opts.readyTimeoutMs)),
+      );
     }
 
     stamp("opening sessions");
-    outcome = await driveSessions(opts, sessions, driver, shouldStop);
+    outcome = await driveSessions(
+      {
+        ...opts,
+        abortDroppedPct:
+          env("SOAK_ABORT_DROPPED_PCT") !== undefined
+            ? nonNegativeNumber("SOAK_ABORT_DROPPED_PCT", env("SOAK_ABORT_DROPPED_PCT")!)
+            : 1,
+        abortConnectP95Ms:
+          env("SOAK_ABORT_CONNECT_P95_MS") !== undefined
+            ? nonNegativeNumber("SOAK_ABORT_CONNECT_P95_MS", env("SOAK_ABORT_CONNECT_P95_MS")!)
+            : null,
+      },
+      sessions,
+      activeLanes[0].driver,
+      shouldStop,
+    );
   } catch (e) {
     runError = e as Error;
     console.error(`run aborted: ${runError.message}`);
@@ -961,6 +1457,20 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
         soakStartedAt: outcome?.soakStartedAt ?? null,
         requestedDurationMs: opts.durationMs,
         sessionsRequested: opts.sessions,
+        sessionsEffective: sessions.length,
+        users: lanes.length,
+        ...(lanes.some((l) => l.skipped)
+          ? {
+              skippedLanes: lanes
+                .filter((l) => l.skipped)
+                .map((l) => ({ user: l.user?.name ?? "default", error: l.loginError ?? "" })),
+            }
+          : {}),
+        lanes: lanes.map((l) => ({
+          user: l.user?.name ?? "default",
+          rateLimited429: l.rateLimited429,
+          skipped: l.skipped === true,
+        })),
         inputIntervalSeconds: opts.inputIntervalMs / 1000,
         pollIntervalSeconds: opts.pollIntervalMs / 1000,
       },
