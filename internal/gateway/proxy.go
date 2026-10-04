@@ -514,6 +514,34 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	// NAVTEL-1: a frame-document load on a session whose lease already had
+	// a stream is a re-navigation (the portal watch's FX-R32 fallback, or
+	// a user reload/new-tab load) — the per-tab id minted per outer page
+	// load cannot see these, so the gateway counts them server-side.
+	// Websockify upgrades and asset fetches never match.
+	if dest, nav := frameNavDest(r, clean); nav && s.hadStream() {
+		// FX-R31 same-tab check: the frame URL embeds the claiming tab's id
+		// in its `path` client setting (path=websockify?tcdi_tab=<id>). A
+		// load carrying an id that differs from the lease's recorded stream
+		// owner is a second tab of the same browser taking the session over
+		// via the shared cookie — a takeover, not a re-navigation — and is
+		// not counted. Only a CONFIRMED different owner excludes: loads
+		// with no usable id and leases with no recorded owner cannot be
+		// told apart from a reload, so they still count. The id itself
+		// never reaches a metric label or log field.
+		if docTab, prev := docOwnerTab(r), s.streamOwner(); docTab != "" && prev != "" && docTab != prev {
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame tab-takeover load", "dest", dest)
+			}
+		} else {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncFrameReload(dest)
+			}
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame re-navigation", "dest", dest, "lease", s.leaseID())
+			}
+		}
+	}
 	var gen int
 	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
 	if isUpgrade(r) {
@@ -609,6 +637,67 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		s.untrack(tid, captured)
 	}()
 	g.proxy.ServeHTTP(hw, r.WithContext(context.WithValue(ctx, ctxKeySession, s)))
+}
+
+// frameDocPaths are the upstream paths that serve the KasmVNC client's
+// HTML documents — the only allowlisted paths a browser navigation can
+// land on (asset subtrees never render as documents).
+var frameDocPaths = map[string]struct{}{
+	"/": {}, "/index.html": {}, "/vnc.html": {}, "/screen.html": {},
+	"/disconnected.html": {},
+}
+
+// frameNavDest reports whether r is a session-frame document load and, if
+// so, the bounded destination label to count it under. Fetch metadata is
+// authoritative when present: Sec-Fetch-Mode "navigate" marks exactly the
+// browser navigations — iframe (the portal's session frame), document (a
+// top-level load) or other contexts — and positively excludes subresource
+// fetches of document paths. With no metadata (older browsers, non-browser
+// clients) the document-path allowlist stands in: the runtime's HTML pages
+// are never fetched as subresources. Websocket upgrades and non-GET/HEAD
+// methods are never document loads.
+func frameNavDest(r *http.Request, cleanPath string) (string, bool) {
+	if isUpgrade(r) || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return "", false
+	}
+	if fm := r.Header.Get("Sec-Fetch-Mode"); fm != "" {
+		if fm != "navigate" {
+			return "", false
+		}
+		switch dest := r.Header.Get("Sec-Fetch-Dest"); dest {
+		case "iframe", "document":
+			return dest, true
+		default:
+			return "other", true
+		}
+	}
+	if _, ok := frameDocPaths[cleanPath]; ok {
+		return "other", true
+	}
+	return "", false
+}
+
+// docOwnerTab extracts the claiming tab id a document load carries in its
+// `path` client setting: the portal's frame URL (and the gateway's own
+// post-launch DesktopPath) is ".../?...&path=websockify?tcdi_tab=<id>" so
+// the load's upcoming stream claim is pre-armed with it (FX-R31). Returns
+// "" when the param is absent or the embedded id is malformed — an
+// unclassifiable load, never a different-tab proof.
+func docOwnerTab(r *http.Request) string {
+	p := r.URL.Query().Get("path")
+	i := strings.IndexByte(p, '?')
+	if i < 0 {
+		return ""
+	}
+	q, err := url.ParseQuery(p[i+1:])
+	if err != nil {
+		return ""
+	}
+	t := q.Get(streamOwnerTabParam)
+	if !broker.ValidStreamOwnerTab(t) {
+		return ""
+	}
+	return t
 }
 
 // ensureTarget resolves the upstream once per session and builds the

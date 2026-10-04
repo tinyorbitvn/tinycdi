@@ -35,6 +35,12 @@ type Lease struct {
 	FencingVersion    uint64 `json:"fencingVersion"`
 	GatewayID         string `json:"gatewayId"`
 	StreamEpoch       uint64 `json:"streamEpoch"`
+	// StreamOwnerTab is the tab id the current stream was claimed with —
+	// populated only while the stored id still names the current stream
+	// (stream_owner_epoch = stream_epoch); "" without a claim or when the
+	// claim carried no valid id. Gateway-side correlator only: never a
+	// metric label or log field.
+	StreamOwnerTab string `json:"-"`
 	// ClipboardPolicy is the workspace template's clipboard policy as
 	// recorded on the ticket at issue — populated only on redemption, so
 	// the gateway's post-redemption redirect can re-assert the client's
@@ -46,22 +52,32 @@ type Lease struct {
 // loadLease fetches the lease row including its lifecycle state.
 func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, error) {
 	var (
-		l     Lease
-		state string
+		l          Lease
+		state      string
+		ownerTab   *string
+		ownerEpoch *int64
 	)
 	err := b.db.Pool().QueryRow(ctx,
 		`SELECT id, workspace_id, tenant_id, principal_subject,
 			runtime_generation, runtime_uid, fencing_version, gateway_id,
-			state, expires_at, stream_epoch
+			state, expires_at, stream_epoch, stream_owner_tab, stream_owner_epoch
 		 FROM connection_lease WHERE id = $1`, leaseID).
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
-			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch)
+			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, "", ErrLeaseInvalid
 	}
 	if err != nil {
 		return Lease{}, "", fmt.Errorf("broker: lease lookup: %w", err)
+	}
+	// The stored owner id counts only while it names the current stream
+	// (stream_owner_epoch = stream_epoch): a replica predating the columns
+	// bumps the epoch without naming them, so a stale id reads as absent
+	// (R-V3c) — same rule ConnectionState applies.
+	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch >= 0 &&
+		uint64(*ownerEpoch) == l.StreamEpoch {
+		l.StreamOwnerTab = *ownerTab
 	}
 	return l, state, nil
 }

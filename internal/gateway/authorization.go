@@ -89,6 +89,10 @@ type session struct {
 	// request, so self-fencing kills only the old stream, not sibling
 	// asset fetches.
 	streamTrackID int
+	// streamSeen marks that a stream conn was actually hijacked on this
+	// replica — the local half of "the lease already had a stream" for
+	// the frame-reload counter (streamEpoch covers the directory mode).
+	streamSeen bool
 }
 
 // sessionMints counts newSession calls. A test cannot intercept a
@@ -232,6 +236,7 @@ func (s *session) addConn(c net.Conn) bool {
 		return false
 	}
 	s.conns[c] = struct{}{}
+	s.streamSeen = true
 	return true
 }
 
@@ -380,6 +385,41 @@ func (s *session) streamCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// streamOwner returns the lease's current stream-owner tab id as this
+// replica last observed it (claimStream's own write or the last
+// renew/rehydrate); "" when no valid id is recorded.
+func (s *session) streamOwner() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lease.StreamOwnerTab
+}
+
+// setStreamOwner records the owner this process's claim just wrote — the
+// local mirror of the lease's stream_owner_tab until the next renew
+// confirms it ("" when the claim carried no valid id, matching the NULL
+// the broker stores).
+func (s *session) setStreamOwner(ownerTab string) {
+	if !broker.ValidStreamOwnerTab(ownerTab) {
+		ownerTab = ""
+	}
+	s.mu.Lock()
+	s.lease.StreamOwnerTab = ownerTab
+	s.mu.Unlock()
+}
+
+// hadStream reports whether this lease already claimed a live stream —
+// the "already had a stream on the same lease" half of the frame-reload
+// counter (NAVTEL-1): a document load before then is a first load, after
+// it a re-navigation. streamEpoch > 0 is the lease-level record — a claim
+// on ANY replica bumps it, so a session rehydrated here after a rollout
+// still knows — while streamSeen covers the no-directory mode where
+// claims never bump an epoch.
+func (s *session) hadStream() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamEpoch > 0 || s.streamSeen
 }
 
 // ---------------------------------------------------------------------------
@@ -625,5 +665,6 @@ func (g *Gateway) claimStream(ctx context.Context, s *session, ownerTab string) 
 		return 0, err
 	}
 	s.setStreamEpoch(epoch)
+	s.setStreamOwner(ownerTab)
 	return epoch, nil
 }
