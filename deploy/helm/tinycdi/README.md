@@ -476,9 +476,13 @@ refused key never reaches the store) and the **fail-open fallback**
 during a Postgres outage — every limited route needs Postgres to
 complete anyway, so an outage degrades to per-replica limiting rather
 than a lifted cap or a hard 429. Store errors count on
-`tinycdi_rate_limit_store_errors_total{route}` and each limiter logs a
-single line on fallback entry and exit (never per request). Expired
-window rows are deleted by the leader replica's periodic sweep
+`tinycdi_rate_limit_store_errors_total{route}` — real failures only:
+each check runs under a 500 ms deadline and a failure opens a 10 s
+circuit breaker that skips the store until one probe succeeds, so a
+brown-out stalls at most one request per cool-down — with the breaker
+state on `tinycdi_rate_limit_store_degraded{route}` and each limiter
+logging a single line on fallback entry and exit (never per request).
+Expired window rows are deleted by the leader replica's periodic sweep
 (15-minute retention).
 
 Three edge cases to know:

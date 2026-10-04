@@ -17,14 +17,14 @@ import (
 // keep the test store-free; nothing calls Allow on it.)
 func TestWiredLimiters_SharedWindow(t *testing.T) {
 	cfg := Config{LoginRate: 30, LaunchRate: 60, RateLimitReplicas: 2}
-	shared, ceiling := sharedLoginLimiters(cfg, nil, nil, nil)
+	shared, ceiling := sharedLoginLimiters(cfg, nil, nil, nil, nil)
 	if _, ok := shared.(*ratelimit.SharedLimiter); !ok {
 		t.Fatalf("login limiter = %T, want *ratelimit.SharedLimiter", shared)
 	}
 	if _, ok := ceiling.(*ratelimit.SharedLimiter); !ok {
 		t.Fatalf("callback ceiling = %T, want *ratelimit.SharedLimiter", ceiling)
 	}
-	l := sharedLaunchLimiter(cfg, nil, nil, nil)
+	l := sharedLaunchLimiter(cfg, nil, nil, nil, nil)
 	if _, ok := l.(*ratelimit.SharedLimiter); !ok {
 		t.Fatalf("launch limiter = %T, want *ratelimit.SharedLimiter", l)
 	}

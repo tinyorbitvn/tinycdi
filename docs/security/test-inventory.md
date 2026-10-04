@@ -146,7 +146,9 @@ substitute for review).
   0006): fixed-window bound, local ceiling consulted first
   (min(shared, local)), fail-open to the divided bucket on store error,
   edge-triggered fallback logs + per-error metric, disabled-rate and
-  nil-store paths.
+  nil-store paths, and the circuit breaker — 500 ms per-call deadline
+  under a stalled store, no store contact inside the 10 s cool-down,
+  probe-triggered recovery, single-flight probe under -race.
 - `internal/backend/ratelimit_test.go` — the expired-window sweep runs
   only on the Postgres-leader replica (advisory-lock singleton).
 - `tests/integration/rate_limit_pg_test.go` — store-level window upsert

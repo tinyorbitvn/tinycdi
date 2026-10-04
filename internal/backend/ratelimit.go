@@ -55,25 +55,34 @@ func (b *Backend) rateLimitErrHook() func(route string) {
 	return b.metrics.IncRateLimitStoreError
 }
 
+// rateLimitDegradedHook returns the circuit-breaker gauge callback, or
+// nil when the metrics listener is off.
+func (b *Backend) rateLimitDegradedHook() func(route string, degraded bool) {
+	if b.metrics == nil {
+		return nil
+	}
+	return b.metrics.SetRateLimitStoreDegraded
+}
+
 // sharedLoginLimiters wraps the divided local login pair in the Postgres
 // fixed window (ADR 0006 option B): the window's bound is the UNDIVIDED
 // rate+burst per minute (the token bucket's rate R/min + burst B maps to
 // a fixed-window limit of R+B), while the divided local bucket stays on
 // as the per-replica ceiling and the fail-open fallback — effective bound
 // = min(shared window, local ceiling).
-func sharedLoginLimiters(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string)) (shared, ceiling ratelimit.Allower) {
+func sharedLoginLimiters(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) (shared, ceiling ratelimit.Allower) {
 	localShared, localCeiling := loginLimiters(cfg, nil)
 	windowLimit := cfg.LoginRate + loginRateBurst
-	return ratelimit.NewShared(localShared, db, rateLimitRouteLogin, windowLimit, log, onStoreError),
-		ratelimit.NewShared(localCeiling, db, rateLimitRouteCallbackCeiling, 10*windowLimit, log, onStoreError)
+	return ratelimit.NewShared(localShared, db, rateLimitRouteLogin, windowLimit, log, onStoreError, onDegraded),
+		ratelimit.NewShared(localCeiling, db, rateLimitRouteCallbackCeiling, 10*windowLimit, log, onStoreError, onDegraded)
 }
 
 // sharedLaunchLimiter is the merged-mode launch limiter: the Postgres
 // window bound to the undivided rate+burst, over the divided local
 // ceiling/fallback.
-func sharedLaunchLimiter(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string)) ratelimit.Allower {
+func sharedLaunchLimiter(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) ratelimit.Allower {
 	return ratelimit.NewShared(launchLimiter(cfg, nil), db, rateLimitRouteLaunch,
-		cfg.LaunchRate+launchRateBurst, log, onStoreError)
+		cfg.LaunchRate+launchRateBurst, log, onStoreError, onDegraded)
 }
 
 // rateLimitWindowSweepLoop is the leader-gated singleton that deletes

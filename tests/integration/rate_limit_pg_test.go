@@ -292,9 +292,13 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 		t.Fatalf("replica a never logged fallback entry:\n%s", logsA.String())
 	}
 
-	// Recovery: in the next window the shared counter is authoritative
-	// again — new hits land in Postgres and the exit line logs once.
+	// Recovery: the outage's first failure opened the limiter's circuit
+	// for a 10 s cool-down, so wait it out — only then does a request
+	// probe the store and close the circuit. In the next window the
+	// shared counter is authoritative again — new hits land in Postgres
+	// and the exit line logs once.
 	pg.start(t)
+	time.Sleep(11 * time.Second) // store circuit cool-down (10 s) + slack
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
 	allowed, _ = loginHammer(t, []*replica{a, b}, "203.0.113.30", 30)
 	if allowed < 6 || allowed > 12 {
@@ -306,8 +310,16 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	if got := windowCount(t, f.db, "login", "203.0.113.30"); got < int64(allowed)/2 {
 		t.Fatalf("post-recovery window count %d vs allowed %d — hits are not reaching Postgres again", got, allowed)
 	}
-	if !strings.Contains(logsA.String(), "shared window limiting resumed") {
-		t.Fatalf("replica a never logged fallback exit:\n%s", logsA.String())
+	// The exit line logs on replica a's first successful probe — keep
+	// hitting so a probe that met a dead pooled connection gets its next
+	// cool-down's chance inside the bound.
+	deadline := time.Now().Add(45 * time.Second)
+	for !strings.Contains(logsA.String(), "shared window limiting resumed") {
+		if time.Now().After(deadline) {
+			t.Fatalf("replica a never logged fallback exit:\n%s", logsA.String())
+		}
+		loginHit(t, a, "203.0.113.31")
+		time.Sleep(time.Second)
 	}
 
 	// The store-error counter exists on the metrics listener with the

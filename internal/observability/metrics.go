@@ -108,6 +108,7 @@ type Metrics struct {
 	imageAge       *prometheus.GaugeVec
 	rateLimited    *prometheus.CounterVec
 	rateLimitStore *prometheus.CounterVec
+	rateLimitDown  *prometheus.GaugeVec
 	frameReloads   *prometheus.CounterVec
 
 	tenants map[string]struct{}
@@ -189,7 +190,11 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}, []string{"route"}),
 		rateLimitStore: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "rate_limit_store_errors_total",
-			Help: "Postgres-backed rate-limit window check failures (fail-open to the local ceiling), by bounded limiter family.",
+			Help: "Postgres-backed rate-limit window check failures (fail-open to the local ceiling), by bounded limiter family. Counts real store errors only — checks skipped while the circuit breaker is open are not counted.",
+		}, []string{"route"}),
+		rateLimitDown: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "rate_limit_store_degraded",
+			Help: "Rate-limit window store circuit-breaker state by bounded limiter family: 1 while open (Postgres checks skipped, divided local limiter enforcing), 0 while closed.",
 		}, []string{"route"}),
 		frameReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "session_frame_reloads_total",
@@ -204,8 +209,13 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
-		m.rateLimited, m.rateLimitStore, m.frameReloads,
+		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads,
 	)
+	// A state gauge reads "no data" until first touched — seed every
+	// bounded family at 0 (closed) so dashboards see the healthy state.
+	for r := range rateLimitWindowRoutes {
+		m.rateLimitDown.WithLabelValues(r).Set(0)
+	}
 	return m
 }
 
@@ -320,10 +330,25 @@ func (m *Metrics) IncRateLimited(route string) {
 
 // IncRateLimitStoreError counts one failed Postgres rate-limit window
 // check; route is bounded to the limiter families {login,
-// callback_ceiling, launch, other}. Each failure falls back to the local
-// per-replica limiter for that request (ADR 0006 fail-open).
+// callback_ceiling, launch, other}. Only real store errors count —
+// checks skipped while the circuit breaker is open never reach this
+// counter, so a sustained outage costs ~one increment per 10 s
+// cool-down per limiter, not one per request. Each failure falls back
+// to the local per-replica limiter for that request (ADR 0006 fail-open).
 func (m *Metrics) IncRateLimitStoreError(route string) {
 	m.rateLimitStore.WithLabelValues(boundValue(route, rateLimitWindowRoutes)).Inc()
+}
+
+// SetRateLimitStoreDegraded reports a limiter family's circuit-breaker
+// state: 1 while the breaker is open (Postgres checks skipped, the
+// divided local limiter decides) and 0 once a probe closes it. route is
+// bounded to {login, callback_ceiling, launch, other}.
+func (m *Metrics) SetRateLimitStoreDegraded(route string, degraded bool) {
+	v := 0.0
+	if degraded {
+		v = 1
+	}
+	m.rateLimitDown.WithLabelValues(boundValue(route, rateLimitWindowRoutes)).Set(v)
 }
 
 // IncFrameReload counts one session-frame re-navigation: a document load on

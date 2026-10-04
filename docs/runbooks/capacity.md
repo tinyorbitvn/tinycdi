@@ -198,7 +198,11 @@ What that means for sizing:
   burst÷N)` burst via `-rate-limit-replicas=backend.replicas`) as a
   per-replica ceiling, so the effective bound is
   `min(shared window, this pod's share)` — a key pinned to one pod by
-  sticky load-balancing still sees only that pod's 1/N share. During a
+  sticky load-balancing still sees only that pod's 1/N share. Every
+  window check runs under a 500 ms deadline, and a store error opens a
+  10 s circuit breaker — checks skip the store until one probe closes
+  it — so a slow-but-alive Postgres stalls at most one request per
+  cool-down, not every login/launch. During a
   Postgres outage each pod falls back to its divided local bucket
   (fail-open — the limited routes all need Postgres to complete anyway),
   which makes `-rate-limit-replicas` the ceiling divisor; a flag smaller

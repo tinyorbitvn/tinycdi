@@ -25,8 +25,20 @@ The advisor picked **option B** (2026-10-05), with these guardrails:
   expired windows are deleted only by the replica holding the Postgres
   leader lock (the existing singleton machinery).
 - **iii — observability.** `tinycdi_rate_limit_store_errors_total{route}`
-  counts every store failure; fallback ENTRY and EXIT each log one line
-  (edge-triggered, never per request).
+  counts real store failures only — checks skipped while the circuit
+  breaker is open never reach the store, so a sustained outage shows
+  ~one increment per 10 s cool-down per limiter, not one per request;
+  `tinycdi_rate_limit_store_degraded{route}` (gauge) mirrors the
+  breaker. Fallback ENTRY and EXIT each log one line (edge-triggered,
+  never per request).
+- **iii-bis — latency bound + circuit breaker.** Every store check runs
+  under a 500 ms deadline (`storeCallTimeout`, always — healthy or
+  probing), so a slow-but-alive Postgres can add at most ~500 ms to one
+  request. A store error/timeout opens a 10 s cool-down: checks skip
+  the store entirely (the divided local limiter decides), then exactly
+  one request probes — single-flight, the rest keep their local
+  verdict. Probe success closes the circuit; failure reopens it for
+  another cool-down.
 - **iv — migration.** `rate_limit_window` (route, bucket_key,
   window_start, count) + an index on `window_start`; expand-only, no
   backfill, rolling-upgrade safe.
@@ -37,8 +49,9 @@ The advisor picked **option B** (2026-10-05), with these guardrails:
 
 Implemented: `internal/store/rate_limit.go` (one-statement window
 check + sweep), `internal/ratelimit/shared.go` (`SharedLimiter` —
-min(Postgres window, divided local), fail-open, edge-triggered logs),
-wiring in `internal/backend/wire.go`, migration
+min(Postgres window, divided local), fail-open, 500 ms per-call
+deadline + 10 s single-flight-probe circuit breaker, edge-triggered
+logs), wiring in `internal/backend/wire.go`, migration
 `021_rate_limit_window`. The B6 gate lives in
 `tests/integration/rate_limit_pg_test.go` (two-replica shared-window
 abuse + Postgres outage fail-open/recovery).
@@ -352,6 +365,10 @@ routes can complete anyway.
   decision (floor divisor vs deprecation), and the split-mode launch
   carve-out. The B6 multi-replica abuse test becomes the correctness
   gate.
+- Post-review hardening (PR #109, MINOR finding): the store check
+  carries a 500 ms per-call deadline and a 10 s open-circuit cool-down
+  with a single-flight probe — a persistently slow Postgres costs one
+  bounded probe per cool-down instead of a per-request stall.
 - If A is kept: pin guidance stays documentation-only; the three
   inaccuracies are accepted as documented bounds and B6 only needs to
   *measure* them, not gate on exactness.

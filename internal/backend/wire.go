@@ -457,7 +457,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		if err != nil {
 			return err
 		}
-		if err := b.newGateway(cfg, lg, id, metrics, lg, sharedLaunchLimiter(cfg, db, log, b.rateLimitErrHook())); err != nil {
+		if err := b.newGateway(cfg, lg, id, metrics, lg, sharedLaunchLimiter(cfg, db, log, b.rateLimitErrHook(), b.rateLimitDegradedHook())); err != nil {
 			return err
 		}
 	}
@@ -653,7 +653,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	loginLimiter, callbackCeiling := sharedLoginLimiters(cfg, db, b.log, b.rateLimitErrHook())
+	loginLimiter, callbackCeiling := sharedLoginLimiters(cfg, db, b.log, b.rateLimitErrHook(), b.rateLimitDegradedHook())
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
