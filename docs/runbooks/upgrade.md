@@ -206,6 +206,22 @@ downgrade is a **restore**: bring back the previous chart release
   rule and the new optional field harm nothing under v0.2, and a
   `kubectl replace` of the older schema can prune stored data.
 
+### CI gate — this procedure runs automatically
+
+The `upgrade` job in `.github/workflows/ci.yml` exercises exactly this
+path on every relevant change: `hack/quickstart/upgrade-test.sh`
+installs the published 0.2.0 chart and its cosign-verified images on the
+quickstart kind plumbing, seeds quota/running/stopped/retained state
+plus a live portal session, applies the CRDs and `helm upgrade`s to the
+working tree's chart and locally built images, and
+`hack/quickstart/smoke/upgrade.spec.ts` asserts the session reconnects
+inside its lease without a new launch ticket, migrations reach the
+newest file, and every seeded row survives. It is gated (not required)
+on `deploy/helm/`, `internal/store/migrations/`, `config/crd/`,
+`hack/quickstart/`, `build/` and the workflow itself; it runs locally
+too (`hack/quickstart/upgrade-test.sh` against any Docker daemon,
+`down.sh` removes everything).
+
 ## Upgrading from v0.1 to v0.2
 
 v0.2 replaces the three v0.1 control-plane Deployments (`api`, `gateway`,
