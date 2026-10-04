@@ -19,6 +19,7 @@ containerd 2.x, Cilium 1.20, and
 | KasmVNC | 1.5.0, `kasmvncserver_bookworm_1.5.0_amd64.deb`, sha256 `770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71` (GPL-2.0; WebSocket-only transport) |
 | Runtime base image | `debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251` |
 | libexpat1 apt pin | `libexpat1=2.5.0-1+deb12u4` (deb.debian.org/debian-security bookworm-security) — base digest ships deb12u3 |
+| libpcre2-8-0 apt pin | `libpcre2-8-0=10.42-1+deb12u2` (deb.debian.org/debian-security bookworm-security) — base digest ships deb12u1; deb12u2 fixes CVE-2026-103111 (HIGH). Drop the pin on the next `debian:bookworm-slim` digest bump that already ships the fix |
 | Node.js / npm | v22.23.3 / npm 10.9.9 (maintenance LTS until 2027-04) |
 | Playwright harness | @playwright/test 1.63.0, typescript 5.9.3, @types/node 22.20.4; bundles: Chromium 153.0.8010.12 (r1243) + headless shell, Firefox 155.0 (r1543); WebKit declared 26.6 (r2359), intentionally not installed (Safari gated) |
 | nss tools | libnss3-tools 2:3.98-1ubuntu0.2 (certutil) |
