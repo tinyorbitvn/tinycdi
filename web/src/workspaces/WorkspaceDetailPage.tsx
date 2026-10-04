@@ -36,6 +36,7 @@ import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
 import { blockingReason, desiredLabel } from "./helpers";
+import { ReasonText, reasonMessageKey } from "./reasons";
 import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
 import { ConditionsTable, PhasePill } from "./StatusBits";
@@ -72,7 +73,7 @@ const FAILURE_COPY: Record<string, Parameters<typeof t>[0]> = {
 
 function failureDetail(reason: string): ReactNode {
   const token = reason.split(":")[0].trim();
-  const key = FAILURE_COPY[token];
+  const key = FAILURE_COPY[token] ?? reasonMessageKey(token);
   if (!key) return reason;
   return (
     <>
@@ -102,7 +103,11 @@ function EventsTable({ events }: { events: WorkspaceEvent[] }) {
       ),
     },
     { key: "reason", header: t("workspaces.conditions.col.reason"), rowHeader: true },
-    { key: "message", header: t("workspaces.conditions.col.message") },
+    {
+      key: "message",
+      header: t("workspaces.conditions.col.message"),
+      render: (ev) => <ReasonText reason={ev.reason} detail={ev.message} />,
+    },
     {
       key: "count",
       header: "",
