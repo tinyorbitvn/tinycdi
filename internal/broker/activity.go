@@ -417,12 +417,29 @@ type OperatorStoppedSource interface {
 // ReportActivity. It is pure evaluation — it never mutates a runtime.
 type ExpiryPlanner struct {
 	b *Broker
+
+	// afterPending, when set, runs after the pending stop intents were
+	// listed and before they are emitted. A cancel inside simulates the
+	// leader losing its lock in that window. Test hook only.
+	afterPending func()
+}
+
+// ExpiryPlannerOption tunes an ExpiryPlanner.
+type ExpiryPlannerOption func(*ExpiryPlanner)
+
+// WithAfterPendingHook installs the cancel-simulation hook.
+func WithAfterPendingHook(h func()) ExpiryPlannerOption {
+	return func(p *ExpiryPlanner) { p.afterPending = h }
 }
 
 // NewExpiryPlanner returns the planner bound to this broker's activity
 // records and clock.
-func NewExpiryPlanner(b *Broker) *ExpiryPlanner {
-	return &ExpiryPlanner{b: b}
+func NewExpiryPlanner(b *Broker, opts ...ExpiryPlannerOption) *ExpiryPlanner {
+	p := &ExpiryPlanner{b: b}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // Scan evaluates the supplied running workspaces against recorded activity
@@ -493,52 +510,31 @@ func (p *ExpiryPlanner) Scan(ctx context.Context, running []RunningWorkspace) ([
 	return out, nil
 }
 
-// DrainStops returns the stop intents recorded by RequestStop that the
-// lifecycle pipeline has not yet consumed, in recording order, and marks
-// them consumed. It is the delivery seam between the broker and the
-// provisioning outbox.
-func (p *ExpiryPlanner) DrainStops(ctx context.Context) ([]StopIntent, error) {
-	var out []StopIntent
-	err := p.b.db.WithTx(ctx, func(tx store.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT id, workspace_id, runtime_generation, reason, deadline
-			FROM stop_intent WHERE drained_at IS NULL ORDER BY id FOR UPDATE`)
-		if err != nil {
-			return err
-		}
-		var ids []int64
-		for rows.Next() {
-			var (
-				id     int64
-				in     StopIntent
-				reason string
-			)
-			if err := rows.Scan(&id, &in.WorkspaceUID, &in.RuntimeGeneration,
-				&reason, &in.Deadline); err != nil {
-				rows.Close()
-				return err
-			}
-			in.Reason = StopReason(reason)
-			ids = append(ids, id)
-			out = append(out, in)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if len(ids) > 0 {
-			if _, err := tx.Exec(ctx,
-				`UPDATE stop_intent SET drained_at = $2 WHERE id = ANY($1)`,
-				ids, p.b.now()); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+// PendingStops returns the stop intents recorded by RequestStop that the
+// lifecycle pipeline has not yet consumed, in recording order. Reading is
+// not consuming: a row is marked drained inside the same transaction that
+// emits it or proves it moot, so a sweep interrupted between listing and
+// emitting replays the intent on the next pass instead of losing it.
+func (p *ExpiryPlanner) PendingStops(ctx context.Context) ([]StopIntent, error) {
+	rows, err := p.b.db.Pool().Query(ctx, `
+		SELECT workspace_id, runtime_generation, reason, deadline
+		FROM stop_intent WHERE drained_at IS NULL ORDER BY id`)
 	if err != nil {
-		return nil, fmt.Errorf("broker: drain stops: %w", err)
+		return nil, fmt.Errorf("broker: list pending stops: %w", err)
 	}
-	return out, nil
+	defer rows.Close()
+	var out []StopIntent
+	for rows.Next() {
+		var in StopIntent
+		var reason string
+		if err := rows.Scan(&in.WorkspaceUID, &in.RuntimeGeneration,
+			&reason, &in.Deadline); err != nil {
+			return nil, err
+		}
+		in.Reason = StopReason(reason)
+		out = append(out, in)
+	}
+	return out, rows.Err()
 }
 
 // Sweep is one planner pass over the running set: deadlines become durable
@@ -558,12 +554,15 @@ func (p *ExpiryPlanner) Sweep(ctx context.Context, src RunningSource) (int, erro
 	for _, in := range intents {
 		_ = p.b.RequestStop(ctx, in.WorkspaceUID, in.RuntimeGeneration, in.Reason)
 	}
-	drained, err := p.DrainStops(ctx)
+	pending, err := p.PendingStops(ctx)
 	if err != nil {
 		return 0, err
 	}
+	if p.afterPending != nil {
+		p.afterPending()
+	}
 	emitted := 0
-	for _, in := range drained {
+	for _, in := range pending {
 		ok, err := p.b.emitStop(ctx, in)
 		if err != nil {
 			return emitted, fmt.Errorf("broker: emit stop %s gen %d: %w",
@@ -627,12 +626,17 @@ func (p *ExpiryPlanner) reconcileOperatorStops(ctx context.Context, src Operator
 	return emitted, nil
 }
 
-// emitStop turns a drained stop intent into an outbox stop intent. The
-// workspaces row is flipped to Stopped and the intent appended in ONE
-// transaction — matching the SignalWorkspace contract — but only while the
-// row still pins the intent's generation: a delayed expiry for generation
-// N can never stop a runtime already restarted to N+1 (design §8). Never a
-// direct CR mutation: delivery flows through provisioning.AppendIntent.
+// emitStop turns a recorded stop intent into an outbox stop intent and
+// marks the stop_intent row consumed in the SAME transaction — whether the
+// intent emitted or the workspaces row already moved past it (fenced out:
+// already stopped/deleted, or a newer generation running). Consumption is
+// atomic with the outcome: a crash or cancel can never leave a stop
+// drained-but-unemitted, which the old drain-first order could — and the
+// (workspace, generation, reason) uniqueness meant that stop could never
+// be re-recorded. The workspaces row is flipped to Stopped and the intent
+// appended while the row still pins the intent's generation (design §8);
+// never a direct CR mutation: delivery flows through
+// provisioning.AppendIntent.
 func (b *Broker) emitStop(ctx context.Context, in StopIntent) (bool, error) {
 	var emitted bool
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
@@ -644,22 +648,31 @@ func (b *Broker) emitStop(ctx context.Context, in StopIntent) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return nil // already stopped/deleted or a newer generation runs
-		}
-		rev, err := provisioning.AppendIntent(ctx, tx, in.WorkspaceUID, provisioning.IntentStop)
-		if err != nil {
-			return err
-		}
-		// The cause stays with the intent so the workspace events can say
-		// why the workspace stopped.
-		if in.Reason != "" {
-			if err := provisioning.SetIntentReason(ctx, tx, in.WorkspaceUID, rev, string(in.Reason)); err != nil {
+		if tag.RowsAffected() > 0 {
+			rev, err := provisioning.AppendIntent(ctx, tx, in.WorkspaceUID, provisioning.IntentStop)
+			if err != nil {
 				return err
 			}
+			// The cause stays with the intent so the workspace events can
+			// say why the workspace stopped.
+			if in.Reason != "" {
+				if err := provisioning.SetIntentReason(ctx, tx, in.WorkspaceUID, rev, string(in.Reason)); err != nil {
+					return err
+				}
+			}
+			emitted = true
 		}
-		emitted = true
-		return nil
+		// A recorded intent is consumed with its outcome — emitted or
+		// moot. Synthetic emits (the operator-stopped reconciliation)
+		// carry no stop_intent row, so this UPDATE is a no-op for them —
+		// or it drains a recorded twin of the stop just emitted, which is
+		// equally moot.
+		_, err = tx.Exec(ctx, `
+			UPDATE stop_intent SET drained_at = $4
+			WHERE workspace_id = $1 AND runtime_generation = $2 AND reason = $3
+			  AND drained_at IS NULL`,
+			in.WorkspaceUID, int64(in.RuntimeGeneration), string(in.Reason), b.now())
+		return err
 	})
 	return emitted, err
 }
