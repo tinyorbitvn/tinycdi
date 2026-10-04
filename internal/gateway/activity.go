@@ -186,6 +186,7 @@ type sniffingConn struct {
 	out          wsBoundary
 	closePending bool
 	closed       bool
+	done         chan struct{} // closed by finishLocked: graceful close landed
 }
 
 func (c *sniffingConn) Read(b []byte) (int, error) {
@@ -211,10 +212,10 @@ func (c *sniffingConn) Write(b []byte) (int, error) {
 	if c.closePending && c.out.atBoundary() {
 		// This write completed a frame: the close lands right after its
 		// last byte — a clean close on the wire.
-		c.closed = true
 		_ = c.Conn.SetWriteDeadline(time.Now().Add(gracefulCloseBudget))
 		_, _ = c.Conn.Write(wsCloseGoingAway)
 		_ = c.Conn.Close()
+		c.finishLocked()
 		return n, net.ErrClosed
 	}
 	return n, err

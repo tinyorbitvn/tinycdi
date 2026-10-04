@@ -57,7 +57,7 @@ func TestWsBoundary(t *testing.T) {
 func TestSniffingGracefulClose_Boundary(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
-	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}}
+	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}, done: make(chan struct{})}
 
 	got := make(chan []byte, 1)
 	go readAll(right, got)
@@ -87,7 +87,7 @@ func TestSniffingGracefulClose_Boundary(t *testing.T) {
 func TestSniffingGracefulClose_MidFrame(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
-	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}}
+	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}, done: make(chan struct{})}
 
 	got := make(chan []byte, 1)
 	go readAll(right, got)
@@ -98,12 +98,25 @@ func TestSniffingGracefulClose_MidFrame(t *testing.T) {
 	if _, err := sc.Write(all[:len(all)-6]); err != nil {
 		t.Fatalf("partial write: %v", err)
 	}
-	sc.gracefulClose() // arms the pending close — nothing on the wire yet
+	// gracefulClose blocks until the close lands (drainStreams runs it in a
+	// goroutine for exactly this reason).
+	closed := make(chan struct{})
+	go func() { sc.gracefulClose(); close(closed) }()
+	for i := 0; i < 100; i++ { // wait until the pending close is armed
+		sc.mu.Lock()
+		p := sc.closePending
+		sc.mu.Unlock()
+		if p {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// The rest of the frame flows through untouched, THEN the close lands.
 	if _, err := sc.Write(all[len(all)-6:]); err == nil {
 		t.Fatal("the boundary-completing write did not report close")
 	}
+	<-closed
 	select {
 	case b := <-got:
 		want := append(append([]byte{}, all...), wsCloseGoingAway...)
@@ -119,7 +132,7 @@ func TestSniffingGracefulClose_MidFrame(t *testing.T) {
 // a bare close when the budget expires — never a corrupt stream.
 func TestSniffingGracefulClose_NoBoundary(t *testing.T) {
 	left, right := net.Pipe()
-	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}}
+	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}, done: make(chan struct{})}
 
 	got := make(chan []byte, 1)
 	go readAll(right, got)
@@ -140,5 +153,39 @@ func TestSniffingGracefulClose_NoBoundary(t *testing.T) {
 		}
 	case <-time.After(gracefulCloseBudget + 2*time.Second):
 		t.Fatal("bare close did not happen after the budget")
+	}
+}
+
+// TestSniffingGracefulClose_StalledWriter: a conn whose copy-loop Write is
+// parked on TCP backpressure must not hold gracefulClose open — the
+// budget-expired abort closes the conn without waiting on the writer lock,
+// so Drain stays inside its window.
+func TestSniffingGracefulClose_StalledWriter(t *testing.T) {
+	left, right := net.Pipe()
+	defer right.Close()
+	sc := &sniffingConn{Conn: left, sniffer: &wsFrameSniffer{}, done: make(chan struct{})}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		// net.Pipe is unbuffered: this blocks until the peer reads (it
+		// never does) or the conn dies.
+		_, err := sc.Write(frame(0x2, bytes.Repeat([]byte{7}, 10), false))
+		writeDone <- err
+	}()
+	// Let the writer park inside Conn.Write holding c.mu.
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	sc.gracefulClose()
+	if d := time.Since(start); d > gracefulCloseBudget+time.Second {
+		t.Fatalf("gracefulClose stalled %s behind a blocked writer", d)
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("parked write did not error after the abort")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked write never unblocked")
 	}
 }

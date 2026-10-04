@@ -521,6 +521,54 @@ func TestDrain_KeepsLease(t *testing.T) {
 	}
 }
 
+// TestDrain_GracefulClose_MidFrame: a conn parked mid-frame when Drain
+// starts must still receive a well-formed 1001 close — the graceful close
+// waits for the frame to complete instead of cutting the conn first.
+// Regresses the drain order: cancelling the tracked request ctx before the
+// close attempt unwound the copy loops and the client got a bare 1006.
+func TestDrain_GracefulClose_MidFrame(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-drain-mid", testWSUID)
+	gwA, srvA := newReplica(t, fb, "gw-A")
+	cookie := launchOK(t, srvA, testHost, "tk-drain-mid")
+
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		drain(resp)
+		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	// A 10-byte binary frame delivered in two pieces: the echo of the first
+	// piece leaves the stream mid-frame when the drain starts.
+	f := append([]byte{0x82, 0x0a}, bytes.Repeat([]byte{'x'}, 10)...)
+	wsWrite(t, resp, f[:7])
+	wsRead(t, resp, 7, 2*time.Second)
+
+	drained := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		gwA.Drain(ctx)
+		close(drained)
+	}()
+	// Give Drain a pass so the pending close is armed mid-frame.
+	time.Sleep(300 * time.Millisecond)
+
+	// The remainder's echo completes the frame through the copy loop; the
+	// injected close lands right after its last byte, then the conn ends.
+	wsWrite(t, resp, f[7:])
+	got := wsRead(t, resp, len(f[7:])+4, 3*time.Second)
+	want := append(append([]byte{}, f[7:]...), 0x88, 0x02, 0x03, 0xE9)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("post-drain bytes = %x, want %x (frame tail + 1001 close)", got, want)
+	}
+	if _, err := resp.Body.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stream survived Drain")
+	}
+	<-drained
+}
+
 // TestDrain_RefusesNewUpgrades: once Drain starts the replica sheds — new
 // WebSocket upgrades get 503 even with a valid cookie.
 func TestDrain_RefusesNewUpgrades(t *testing.T) {

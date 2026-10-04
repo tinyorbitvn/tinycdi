@@ -290,9 +290,17 @@ func (s *session) detachStreamsLocked() []net.Conn {
 // retries the websocket itself instead of waiting for the SPA to
 // re-navigate it. The session and its lease stay live. Closes run in
 // parallel so one silent conn cannot eat the drain window.
+//
+// Order matters: the graceful close runs BEFORE the tracked request ctx
+// is cancelled — cancelling first unwinds the proxy's copy loops and
+// closes the conn, and a conn parked mid-frame would never get the chance
+// to reach a boundary (the close frame must be on the wire first).
 func (s *session) drainStreams() {
 	s.mu.Lock()
-	conns := s.detachStreamsLocked()
+	conns := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
 	s.mu.Unlock()
 	var wg sync.WaitGroup
 	for _, c := range conns {
@@ -303,6 +311,9 @@ func (s *session) drainStreams() {
 		}()
 	}
 	wg.Wait()
+	s.mu.Lock()
+	s.detachStreamsLocked()
+	s.mu.Unlock()
 }
 
 // streamBusy reports whether a stream admission is in flight or a hijacked

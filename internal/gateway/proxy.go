@@ -569,7 +569,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// wrapConn intercepts client->upstream bytes so the sniffer can spot
 		// RFB input frames inside the proxied WebSocket stream.
 		wrapConn: func(c net.Conn) net.Conn {
-			return &sniffingConn{Conn: c, sniffer: &wsFrameSniffer{
+			return &sniffingConn{Conn: c, done: make(chan struct{}), sniffer: &wsFrameSniffer{
 				onInput: func() { g.noteInput(s) },
 			}}
 		},

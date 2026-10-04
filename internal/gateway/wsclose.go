@@ -102,39 +102,57 @@ func (t *wsBoundary) feed(b []byte) {
 	}
 }
 
-// gracefulClose ends the websocket the way a draining replica should (FX-R32):
-// a real close frame at a frame boundary inside gracefulCloseBudget, then the
-// conn closes. If the stream is already at a boundary the frame goes out
-// immediately; mid-frame it waits for the copy loop to reach the next one
-// (Write injects the close); no boundary inside the budget falls back to the
-// bare Close() every other path uses — a missed clean close only costs the
-// client its in-frame retry, never its last-resort re-navigation.
+// gracefulClose ends the websocket the way a draining replica should
+// (FX-R32): a real close frame at a frame boundary inside
+// gracefulCloseBudget, then the conn closes — and the call only returns
+// once that work landed, so Drain can cancel the stream's request ctx
+// without racing the close frame off the wire. If the stream is already at
+// a boundary the frame goes out immediately; mid-frame it waits for the
+// copy loop to reach the next one (Write injects the close); no boundary
+// inside the budget falls back to the bare Close() every other path uses —
+// a missed clean close only costs the client its in-frame retry, never its
+// last-resort re-navigation.
 func (c *sniffingConn) gracefulClose() {
+	// The abort timer is armed before the lock: c.mu can sit behind a
+	// Conn.Write parked on TCP backpressure, and only abort (which closes
+	// without the lock) can unblock that writer — and with it, this call.
+	timer := time.AfterFunc(gracefulCloseBudget, c.abort)
 	c.mu.Lock()
-	if c.closed || c.closePending {
-		c.mu.Unlock()
-		return
-	}
-	if c.out.atBoundary() {
-		c.closed = true
-		c.mu.Unlock()
+	switch {
+	case !c.closed && c.out.atBoundary():
 		_ = c.Conn.SetWriteDeadline(time.Now().Add(gracefulCloseBudget))
 		_, _ = c.Conn.Write(wsCloseGoingAway)
 		_ = c.Conn.Close()
-		return
+		c.finishLocked()
+	case !c.closePending:
+		c.closePending = true
 	}
-	c.closePending = true
 	c.mu.Unlock()
-	time.AfterFunc(gracefulCloseBudget, c.abort)
+	<-c.done
+	timer.Stop()
+}
+
+// finishLocked marks the conn's graceful-close work done once, releasing
+// every gracefulClose caller waiting on done. Callers hold c.mu.
+func (c *sniffingConn) finishLocked() {
+	c.closed = true
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
 }
 
 // abort is the budget-expired half of gracefulClose: no frame boundary came
-// in time, so the conn dies like it always has.
+// in time, so the conn dies like it always has. The Close() runs BEFORE the
+// mutex — a copy-loop Write parked on backpressure holds c.mu, so grabbing
+// it first would let one stalled client hold Drain open; Close() interrupts
+// that write and the bookkeeping settles after.
 func (c *sniffingConn) abort() {
-	c.mu.Lock()
-	c.closed = true
-	c.mu.Unlock()
 	_ = c.Conn.Close()
+	c.mu.Lock()
+	c.finishLocked()
+	c.mu.Unlock()
 }
 
 // gracefulCloseConn routes a stream conn through the frame-aware close when

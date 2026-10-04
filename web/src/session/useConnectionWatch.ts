@@ -147,15 +147,15 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
     };
 
     const reloadFrame = () => {
-      // The backoff advances only when a reload actually runs, so polls that
-      // find a reload already pending cannot burn through the budget.
       reloadTimer.current = undefined;
-      const interval = RECONNECT_BACKOFF_MS[reloads.current] ?? 0;
-      reloads.current += 1;
-      if (reloads.current >= RECONNECT_BACKOFF_MS.length) exhaustAfter = Date.now() + interval;
       const el = opts.current.frame.current;
       if (!el) return;
       if (lastOwner !== undefined && lastOwner !== sessionTabId()) return;
+      // The backoff advances only when a reload actually runs, so polls that
+      // find a reload already pending cannot burn through the budget.
+      const interval = RECONNECT_BACKOFF_MS[reloads.current] ?? 0;
+      reloads.current += 1;
+      if (reloads.current >= RECONNECT_BACKOFF_MS.length) exhaustAfter = Date.now() + interval;
       // The session cookie on this host is bound to the live lease, so a
       // plain navigation to the workspace origin resumes the desktop.
       el.src =
@@ -204,14 +204,14 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       if (status.leaseActive) {
         const owner = status.streamOwnerTab;
         lastOwner = typeof owner === "string" && owner !== "" ? owner : undefined;
-        if (lossSince === 0) {
-          lossSince = Date.now();
-          opts.current.onEvent({ type: "recovering" });
-        }
         // A foreign stream owner is a fence, not a loss: the observation
         // layer verdicts "elsewhere" and the frame must never navigate into
         // the other tab's claim — a reload's client would steal it back.
         if (lastOwner !== undefined && lastOwner !== sessionTabId()) return;
+        if (lossSince === 0) {
+          lossSince = Date.now();
+          opts.current.onEvent({ type: "recovering" });
+        }
         // A reload is already scheduled: let it run instead of re-arming it
         // on every poll.
         if (reloadTimer.current !== undefined) return;
