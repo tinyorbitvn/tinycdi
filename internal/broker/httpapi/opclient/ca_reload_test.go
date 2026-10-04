@@ -182,3 +182,14 @@ func TestOpClient_KeepsPoolOnBadCABundle(t *testing.T) {
 		t.Fatalf("drain after bad bundle write: %v", err)
 	}
 }
+
+// TestNew_RejectsBaseURLWithoutHostname: a BaseURL that parses but carries
+// no hostname (e.g. "https://:9443") is rejected — otherwise x509 would
+// treat the empty DNSName as "skip the name check".
+func TestNew_RejectsBaseURLWithoutHostname(t *testing.T) {
+	for _, u := range []string{"https://:9443", "https://user@:9443"} {
+		if _, err := opclient.New(opclient.Config{BaseURL: u}); err == nil {
+			t.Fatalf("BaseURL %q accepted without a hostname", u)
+		}
+	}
+}

@@ -85,6 +85,12 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, fmt.Errorf("opclient: BaseURL must be a valid https URL: %q", cfg.BaseURL)
 	}
+	// Hostname is the name VerifyConnection checks on the server cert —
+	// "https://:9443" parses with a Host but no hostname, which x509 would
+	// treat as "skip the name check". Reject instead of degrading.
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("opclient: BaseURL has no hostname: %q", cfg.BaseURL)
+	}
 	tc := cfg.TLSConfig
 	var rel *tlsreload.Reloader
 	var ca *tlsreload.CAPool
@@ -161,6 +167,9 @@ func (c *Client) Run(ctx context.Context) {
 // against the pool read at this handshake, which is what a fixed
 // tls.Config.RootCAs cannot express once the bundle file rotates.
 func verifyServerChain(peers []*x509.Certificate, serverName string, roots *x509.CertPool) error {
+	if serverName == "" {
+		return errors.New("opclient: no server name to verify the broker certificate against")
+	}
 	if len(peers) == 0 {
 		return errors.New("opclient: broker presented no certificate")
 	}
@@ -172,6 +181,7 @@ func verifyServerChain(peers []*x509.Certificate, serverName string, roots *x509
 		DNSName:       serverName,
 		Roots:         roots,
 		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}); err != nil {
 		return fmt.Errorf("opclient: verify broker certificate: %w", err)
 	}
