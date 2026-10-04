@@ -155,6 +155,33 @@ describe("useConnectionWatch (D15)", () => {
     expect(frame.getAttribute("src")).toBe(frameUrl());
   });
 
+  // FX-R31: a newer epoch under OUR OWN tab id is claim evidence too —
+  // ownership fencing and the evidence budget are independent gates.
+  it("defers re-navigation when the outage epoch jumped under this tab's own id", async () => {
+    const { events, fetchStatus } = setup({ reNavJitter: () => 0 });
+    fetchStatus.mockResolvedValue({
+      state: "connected",
+      leaseActive: true,
+      streamEpoch: 1,
+      streamOwnerTab: sessionTabId(),
+    });
+    await advanced(CONNECTION_POLL_MS); // t=5: baseline epoch 1
+
+    // The restart's re-claim already landed under our id at a much later
+    // epoch: past the in-frame window there is still no navigation — the
+    // claim gets its evidence budget first.
+    fetchStatus.mockResolvedValue({
+      state: "disconnected",
+      leaseActive: true,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    await advanced(CONNECTION_POLL_MS * 4); // t=25: inside the 20 s budget
+    expect(navigated(events)).toHaveLength(0);
+    await advanced(CONNECTION_POLL_MS); // t=30: budget out -> nav 1
+    expect(navigated(events)).toHaveLength(1);
+  });
+
   it("a landed claim that never connects still releases the next attempt", async () => {
     const { events, fetchStatus } = setup();
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
