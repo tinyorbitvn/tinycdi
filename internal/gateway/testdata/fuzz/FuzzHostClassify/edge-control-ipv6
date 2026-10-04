@@ -1,0 +1,3 @@
+go test fuzz v1
+string("backend.tinycdi.svc:8444")
+string("/v1/control/session")

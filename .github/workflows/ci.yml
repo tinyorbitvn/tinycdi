@@ -381,6 +381,70 @@ jobs:
             fi
           done < build/kasm-catalog.txt
 
+  fuzz:
+    # B6-FUZZ / v1.0 review pre-work: native Go fuzz targets on the
+    # auth/session parsing boundaries (OIDC callback params + sealed login
+    # cookie, Host-header classification, launch-ticket redemption, the
+    # trusted-proxy client-address derivation). Seed corpora live in
+    # testdata/fuzz/ and also run under the plain `go test` job. On PRs the
+    # job gates on changes to the fuzzed packages and runs each target for
+    # 30 s; the weekly schedule gets 10 m per target; crashes write their
+    # failing input into testdata/fuzz/<target>/, uploaded below.
+    name: go fuzz (auth/session parsing boundaries)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gate on fuzzed-surface changes + pick the time budget
+        id: gate
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          case "${{ github.event_name }}" in
+            schedule) echo "run=true" >> "$GITHUB_OUTPUT"; echo "time=10m" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; echo "time=30s" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          echo "time=30s" >> "$GITHUB_OUTPUT"
+          git fetch -q origin "$BASE_REF"
+          # One line on purpose (see the kasm-contract gate comment).
+          PATHS_RE='^(internal/api/|internal/gateway/|internal/sessionhost/|internal/ratelimit/|internal/broker/|\.github/workflows/ci\.yml)'
+          changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
+          if grep -qE "$PATHS_RE" <<<"$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        if: steps.gate.outputs.run == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go fuzz each target (${{ steps.gate.outputs.time }})
+        if: steps.gate.outputs.run == 'true'
+        env:
+          FUZZTIME: ${{ steps.gate.outputs.time }}
+        run: |
+          for spec in \
+            "internal/sessionhost FuzzDomainMatch" \
+            "internal/ratelimit FuzzClientKey" \
+            "internal/gateway FuzzHostClassify" \
+            "internal/gateway FuzzLaunchRedeem" \
+            "internal/api FuzzCallbackParsing"; do
+            set -- $spec
+            echo "== $2 (-fuzztime=$FUZZTIME)"
+            go test -count=1 -run='^$' -fuzz="^$2\$" -fuzztime="$FUZZTIME" "./$1"
+          done
+      - name: upload fuzz crashers
+        if: failure() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-crashers
+          path: internal/*/testdata/fuzz/
+          if-no-files-found: ignore
+
   quickstart:
     # V3.11/E10: hack/quickstart/up.sh brings up kind + Traefik + Postgres +
     # dev Keycloak + the chart from this tree; a Playwright smoke logs in,
