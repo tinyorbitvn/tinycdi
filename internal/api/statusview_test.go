@@ -923,7 +923,7 @@ func TestProjectConditions_Params(t *testing.T) {
 		Message: "teardown step cleanup blocked; retrying",
 	}
 	ann := map[string]string{
-		annotationCondParamName: `{
+		provisioning.AnnotationConditionParams: `{
 			"Degraded.CleanupRetry": {"step": "cleanup"},
 			"Degraded.StreamDraining": {"step": "drain-streams"},
 			"RuntimeReady.DrainingStreams": {"step": "drain-streams", "bad key": "x", "UPPER": "y"}
@@ -960,11 +960,11 @@ func TestConditionParamsOf_EdgeCases(t *testing.T) {
 	if got := conditionParamsOf(nil); got != nil {
 		t.Fatalf("nil annotations -> %v", got)
 	}
-	if got := conditionParamsOf(map[string]string{annotationCondParamName: "not json"}); got != nil {
+	if got := conditionParamsOf(map[string]string{provisioning.AnnotationConditionParams: "not json"}); got != nil {
 		t.Fatalf("corrupt annotation -> %v", got)
 	}
 	long := map[string]string{
-		annotationCondParamName: `{"Degraded.CleanupRetry": {"step": "` +
+		provisioning.AnnotationConditionParams: `{"Degraded.CleanupRetry": {"step": "` +
 			strings.Repeat("x", conditionParamValueMax+10) + `"}}`,
 	}
 	got := conditionParamsOf(long)

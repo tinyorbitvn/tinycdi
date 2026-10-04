@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"time"
 
@@ -283,13 +285,24 @@ func teardownStepReason(step FinalizerStep) string {
 // annotation. The /status subresource drops metadata writes, so the
 // annotation only lands through a main-resource update — but that update's
 // response carries the stored object whose status is still the old one, so
-// the stamp is re-applied before the status write.
+// the stamp is re-applied before the status write. A stamp that leaves the
+// annotations untouched skips the main update, and one that changes
+// nothing at all (a repeated drain stamp) writes nothing — each write
+// would only bump resourceVersion and self-trigger a reconcile.
 func (f *Finalizer) updateStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, stamp func()) error {
+	conditions := slices.Clone(ws.Status.Conditions)
+	annotations := maps.Clone(ws.Annotations)
 	stamp()
-	if err := f.Client.Update(ctx, ws); err != nil {
-		return err
+	metaChanged := !maps.Equal(annotations, ws.Annotations)
+	if !metaChanged && slices.Equal(conditions, ws.Status.Conditions) {
+		return nil
 	}
-	stamp()
+	if metaChanged {
+		if err := f.Client.Update(ctx, ws); err != nil {
+			return err
+		}
+		stamp()
+	}
 	return f.Client.Status().Update(ctx, ws)
 }
 

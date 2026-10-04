@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
 // Condition reasons for the lifecycle/finalizer surfaces .
@@ -72,20 +73,13 @@ func SetWorkspaceConditionParams(ws *workspacesv1alpha1.Workspace, condType stri
 	setConditionParams(ws, condType, reason, params)
 }
 
-// AnnotationConditionParams carries the structured message parameters of
-// status.conditions as JSON {"<type>.<reason>": {"<name>": "<value>"}} —
-// metav1.Condition itself cannot hold them. The API projects the entry
-// that matches a condition's type and reason onto the public condition's
-// params; entries whose condition is rewritten are dropped on write and a
-// stale entry under a different reason never matches.
-const AnnotationConditionParams = "workspaces.cdi.tinyorbit.vn/condition-params"
-
-// setConditionParams records params for condType/reason on the annotation,
-// clearing the type's previous entry first; nil/empty params just clears.
-// The annotation itself is deleted once it would be empty.
+// setConditionParams records params for condType/reason on the
+// provisioning.AnnotationConditionParams annotation, clearing the type's
+// previous entry first; nil/empty params just clears. The annotation
+// itself is deleted once it would be empty.
 func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason string, params map[string]string) {
 	m := map[string]map[string]string{}
-	if raw := ws.Annotations[AnnotationConditionParams]; raw != "" {
+	if raw := ws.Annotations[provisioning.AnnotationConditionParams]; raw != "" {
 		_ = json.Unmarshal([]byte(raw), &m)
 	}
 	for k := range m {
@@ -97,7 +91,7 @@ func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason strin
 		m[condType+"."+reason] = params
 	}
 	if len(m) == 0 {
-		delete(ws.Annotations, AnnotationConditionParams)
+		delete(ws.Annotations, provisioning.AnnotationConditionParams)
 		return
 	}
 	raw, err := json.Marshal(m)
@@ -107,7 +101,7 @@ func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason strin
 	if ws.Annotations == nil {
 		ws.Annotations = map[string]string{}
 	}
-	ws.Annotations[AnnotationConditionParams] = string(raw)
+	ws.Annotations[provisioning.AnnotationConditionParams] = string(raw)
 }
 
 // MarkFinalizerStepBlocked records the failure of step on the Degraded

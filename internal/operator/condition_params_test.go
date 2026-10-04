@@ -15,7 +15,9 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -23,7 +25,7 @@ import (
 
 func conditionParamsOf(t *testing.T, ws *workspacesv1alpha1.Workspace) map[string]map[string]string {
 	t.Helper()
-	raw := ws.Annotations[AnnotationConditionParams]
+	raw := ws.Annotations[provisioning.AnnotationConditionParams]
 	if raw == "" {
 		return nil
 	}
@@ -67,7 +69,7 @@ func TestSetWorkspaceConditionParams_Lifecycle(t *testing.T) {
 	// Clearing the last entry removes the annotation entirely.
 	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
 		metav1.ConditionTrue, ReasonReady, "", now)
-	if raw := ws.Annotations[AnnotationConditionParams]; raw != "" {
+	if raw := ws.Annotations[provisioning.AnnotationConditionParams]; raw != "" {
 		t.Fatalf("empty params left annotation behind: %q", raw)
 	}
 }
@@ -157,6 +159,92 @@ func TestRunDrain_Params(t *testing.T) {
 	}
 	if _, ok := got["Degraded.StreamDraining"]; ok {
 		t.Fatalf("timed-out write kept the waiting entry: %v", got)
+	}
+}
+
+// A drain pass that stamps the same Degraded/StreamDraining condition and
+// params it already persisted must not write again — the main Update +
+// Status().Update pair would only bump resourceVersion and self-trigger a
+// reconcile for every pass of the drain window. The interceptor counts
+// main-object and subresource updates separately.
+func TestRunDrain_RepeatStampWritesNothing(t *testing.T) {
+	s := snapScheme(t)
+	ws := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tenant-a", Name: "ws-a",
+			Labels: map[string]string{provisioning.LabelWorkspaceUID: "ws_a"},
+		},
+	}
+	var mainUpdates, statusUpdates int
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).
+		WithStatusSubresource(ws).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				mainUpdates++
+				return cl.Update(ctx, obj, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				statusUpdates++
+				return cl.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	f := &Finalizer{Client: c, Drainer: pendingDrainer{}, DrainBudget: 45 * time.Second}
+	prog := &FinalizerProgress{}
+	now := time.Now()
+
+	drained, err := f.runDrain(context.Background(), ws, prog, "ws_a", now)
+	if err != nil || drained {
+		t.Fatalf("runDrain = (%v, %v), want inside-window wait", drained, err)
+	}
+	if mainUpdates == 0 || statusUpdates == 0 {
+		t.Fatalf("first drain pass wrote main=%d status=%d, want at least one of each", mainUpdates, statusUpdates)
+	}
+
+	// The repeated pass (the requeue inside the drain window) re-stamps
+	// the same condition and params: no write may reach the API at all.
+	mainUpdates, statusUpdates = 0, 0
+	drained, err = f.runDrain(context.Background(), ws, prog, "ws_a", now)
+	if err != nil || drained {
+		t.Fatalf("runDrain repeat = (%v, %v), want inside-window wait", drained, err)
+	}
+	if mainUpdates != 0 || statusUpdates != 0 {
+		t.Fatalf("repeat drain stamp issued main=%d status=%d updates, want none", mainUpdates, statusUpdates)
+	}
+}
+
+// A stamp that changes only the condition — a param-less write with no
+// params of this type to prune — skips the main-object update; the
+// annotation did not change so only the status subresource write remains.
+func TestUpdateStatus_ConditionOnlySkipsMainUpdate(t *testing.T) {
+	s := snapScheme(t)
+	ws := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "ws-a"},
+	}
+	var mainUpdates, statusUpdates int
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).
+		WithStatusSubresource(ws).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				mainUpdates++
+				return cl.Update(ctx, obj, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				statusUpdates++
+				return cl.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	f := &Finalizer{Client: c}
+	now := time.Now()
+
+	err := f.updateStatus(context.Background(), ws, func() {
+		SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
+			metav1.ConditionFalse, ReasonStopped, "runtime stopped by intent", now)
+	})
+	if err != nil {
+		t.Fatalf("updateStatus: %v", err)
+	}
+	if mainUpdates != 0 || statusUpdates != 1 {
+		t.Fatalf("condition-only stamp wrote main=%d status=%d, want 0/1", mainUpdates, statusUpdates)
 	}
 }
 

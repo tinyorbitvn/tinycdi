@@ -245,9 +245,8 @@ func projectConditions(conds []metav1.Condition, annotations map[string]string) 
 var conditionParamName = regexp.MustCompile(`^[a-z][a-zA-Z0-9]{0,63}$`)
 
 const (
-	conditionParamMax       = 16
-	conditionParamValueMax  = 256
-	annotationCondParamName = "workspaces.cdi.tinyorbit.vn/condition-params"
+	conditionParamMax      = 16
+	conditionParamValueMax = 256
 )
 
 // conditionParamsOf parses the operator's condition-params annotation into
@@ -255,7 +254,7 @@ const (
 // corrupt JSON, over-long values, non-token param names — is dropped
 // rather than forwarded.
 func conditionParamsOf(annotations map[string]string) map[string]map[string]string {
-	raw := annotations[annotationCondParamName]
+	raw := annotations[provisioning.AnnotationConditionParams]
 	if raw == "" {
 		return nil
 	}
