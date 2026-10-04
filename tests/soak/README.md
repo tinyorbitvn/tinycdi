@@ -74,8 +74,9 @@ What a run does, in order:
    observation within 60 s after the reload counts; a reload observed inside
    that window without one is seamless (`reconnectMs: 0`, `seamless: true`),
    a reload with zero observations in the window proves nothing
-   (`seamless: false`, `reconnectMs: null`), and a later drill gap is never
-   attributed to it.
+   (`seamless: false`, `reconnectMs: null`, `reloadEvidence: "none"` — an
+   explicit no-evidence verdict that fails the run's reload check), and a
+   later drill gap is never attributed to it.
 6. At the end — and on failure or SIGINT — every workspace it created is
    stopped/deleted before the report is written.
 
@@ -120,6 +121,9 @@ always run the cleanup and write the report.
 written. Per session it records `connectMs` (launch → first `connected`),
 `reconnectMs` (first non-connected observation within 60 s after the reload → `connected`; 0 when `seamless`; null when nothing was observed inside
 that window — a reload with zero observations is never reported seamless),
+`reloadEvidence` (`"observed"`/`"none"`: whether the 60 s post-reload window
+held any observation at all; `none` fails the run as an unproven reload
+check — null when the session was never reloaded),
 `longestGapMs` (longest continuous
 non-connected stretch after the first connect), every span spent in a state
 other than `connected`, `elsewhereTransitions` (how often the page flipped
@@ -130,7 +134,9 @@ summary carries p50/p95 of connect, reconnect and scripted input dispatch
 glass-to-glass), the manual
 action and drop counts, `falseElsewhereTransitions`, and `pass`/`failures` against the `--connect-p95-ms`,
 `--reconnect-p95-ms`, `--max-gap-ms`, `--max-manual-actions` and
-`--max-dropped` thresholds. Exit code is 0 on pass, 1 on fail.
+`--max-dropped` thresholds. A reloaded session with `reloadEvidence: "none"`
+always lands in `failures` — the reload check has no evidence either way, so
+it can never be a pass. Exit code is 0 on pass, 1 on fail.
 
 Credentials are read from the environment only, are never logged and never
 reach the report; `run.portalOrigin` stores the origin only.

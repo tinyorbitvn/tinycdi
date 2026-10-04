@@ -61,6 +61,9 @@
   launch origin enforcement
 - [adr/0005-backend-frontend-operator.md](adr/0005-backend-frontend-operator.md) —
   v0.2: three components and per-workspace session hosts (accepted)
+- [adr/0006-rate-limit-state.md](adr/0006-rate-limit-state.md) —
+  rate-limiter state placement: per-replica vs Postgres-backed options
+  (proposed — decision pending for v0.4)
 
 ## Elsewhere in the repo
 
