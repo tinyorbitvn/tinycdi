@@ -11,6 +11,12 @@ export interface Observation {
   state: string;
   /** Where the state came from: the API endpoint or the session probe. */
   source?: string;
+  /**
+   * The session page was showing its "open in another tab" view at this
+   * observation. The harness opens exactly one tab per session, so every
+   * such observation is a false elsewhere transition (V3.10).
+   */
+  elsewhere?: boolean;
 }
 
 /** A contiguous span of observations in one state. */
@@ -107,27 +113,49 @@ export interface ReloadRecovery {
   /**
    * From the first non-connected observation within the window after the
    * reload to the next "connected" one. 0 for a seamless reload; null when
-   * the session was lost within the window and not seen connected again.
+   * the session was lost within the window and not seen connected again,
+   * or when nothing was observed inside the window at all.
    */
   reconnectMs: number | null;
-  /** True when no non-connected state was observed within the window. */
+  /**
+   * True only when the window held at least one observation and none of
+   * them was non-connected: a reload with zero observations proves nothing
+   * and is never seamless (backlog 4).
+   */
   seamless: boolean;
 }
 
 /**
  * What the mid-run reload cost. Only a non-connected observation in
  * [reloadedAt, reloadedAt + RELOAD_RECONNECT_WINDOW_MS] counts as the
- * reload's reconnect; a reload without one resumed seamlessly (0 ms), so a
- * gap that opens 20 minutes later is never attributed to it.
+ * reload's reconnect; a reload observed inside that window without one
+ * resumed seamlessly (0 ms), so a gap that opens 20 minutes later is never
+ * attributed to it.
  */
 export function reloadRecovery(observations: Observation[], reloadedAt: number): ReloadRecovery {
   const after = [...observations].sort((a, b) => a.at - b.at).filter((o) => o.at >= reloadedAt);
-  const lost = after.find(
-    (o) => o.state !== "connected" && o.at - reloadedAt <= RELOAD_RECONNECT_WINDOW_MS,
-  );
+  const inWindow = after.filter((o) => o.at - reloadedAt <= RELOAD_RECONNECT_WINDOW_MS);
+  if (inWindow.length === 0) return { reconnectMs: null, seamless: false };
+  const lost = inWindow.find((o) => o.state !== "connected");
   if (!lost) return { reconnectMs: 0, seamless: true };
   const back = after.find((o) => o.at > lost.at && o.state === "connected");
   return { reconnectMs: back ? back.at - lost.at : null, seamless: false };
+}
+
+/**
+ * How many times a session's observations flipped from not-elsewhere to
+ * elsewhere ("open in another tab"). The harness owns the only tab, so
+ * each transition is a false positive worth counting (V3.10 watch item).
+ */
+export function elsewhereTransitions(observations: Observation[]): number {
+  let count = 0;
+  let prev = false;
+  for (const obs of [...observations].sort((a, b) => a.at - b.at)) {
+    const cur = obs.elsewhere === true;
+    if (cur && !prev) count++;
+    prev = cur;
+  }
+  return count;
 }
 
 /**
