@@ -137,6 +137,7 @@ spec:
             # readiness drop -> endpoint-removal propagation wait ->
             # graceful 1001 stream close -> drain-window hold (FX-R34).
             - -drain-propagation-delay={{ .Values.backend.drainPropagationDelay }}
+            - -drain-window={{ .Values.backend.drainWindow }}
             {{- $tenantQuotas := include "tinycdi.tenantQuotas" . }}
             {{- if $tenantQuotas }}
             # managedNamespaces[].quota: the singleton leader upserts these

@@ -2665,9 +2665,33 @@ func TestBackendDrainPropagationDelay(t *testing.T) {
 	if !hasArg(args, "-drain-propagation-delay=5s") {
 		t.Errorf("default render lacks -drain-propagation-delay=5s: %v", args)
 	}
-	args = backendArgsWith(t, "backend.drainPropagationDelay=2s")
-	if !hasArg(args, "-drain-propagation-delay=2s") {
-		t.Errorf("backend.drainPropagationDelay=2s must render -drain-propagation-delay=2s: %v", args)
+	if !hasArg(args, "-drain-window=8s") {
+		t.Errorf("default render lacks -drain-window=8s: %v", args)
+	}
+	args = backendArgsWith(t, "backend.drainPropagationDelay=2s", "backend.drainWindow=10s")
+	if !hasArg(args, "-drain-propagation-delay=2s") || !hasArg(args, "-drain-window=10s") {
+		t.Errorf("drain values must render their flags: %v", args)
+	}
+	// The budget: delay + window must leave >= 4 s of the 24 s shutdown
+	// deadline for listener shutdown — rejected at render, not at pod
+	// start.
+	out := renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.drainPropagationDelay=13s")
+	if !strings.Contains(out, "drainPropagationDelay") {
+		t.Errorf("delay 13s + window 8s must fail the render naming drainPropagationDelay, got: %s", out)
+	}
+	args = backendArgsWith(t, "backend.drainPropagationDelay=12s")
+	if !hasArg(args, "-drain-propagation-delay=12s") {
+		t.Errorf("delay 12s + window 8s = 20s fits the budget: %v", args)
+	}
+	// Duration format is enforced by the schema: a non-duration value
+	// must fail at values validation, not reach the binary.
+	out = renderErrArgs(t,
+		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.drainPropagationDelay=soon")
+	if !strings.Contains(out, "drainPropagationDelay") && !strings.Contains(out, "pattern") {
+		t.Errorf("non-duration drainPropagationDelay must fail validation, got: %s", out)
 	}
 }
 

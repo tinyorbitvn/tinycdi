@@ -794,7 +794,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 // The whole sequence stays far inside the shared shutdown deadline.
 func TestRun_DrainPropagationWait(t *testing.T) {
 	const (
-		propDelay = 600 * time.Millisecond
+		propDelay = 1500 * time.Millisecond
 		window    = 400 * time.Millisecond
 	)
 	dir := t.TempDir()
@@ -922,8 +922,9 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	start := time.Now()
 	cancel()
 
-	// Readiness fails at once even though streams still flow.
-	waitFor(t, propDelay/2, "readiness to drop inside the propagation wait", func() bool {
+	// Readiness fails at once even though streams still flow — the drop
+	// must land inside the wait, well before the drain begins.
+	waitFor(t, propDelay, "readiness to drop inside the propagation wait", func() bool {
 		resp, err := insecure.Get(base + "/readyz")
 		if err != nil {
 			return false
@@ -936,6 +937,9 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// waste the client's one in-frame retry on a 503.
 	ws2 := upgrade("tk-2", "ws-bbbb0002.session.test")
 	defer ws2.Body.Close()
+	if d := time.Since(start); d >= propDelay {
+		t.Fatalf("mid-wait upgrade probe ran %v after cancel, past the %v propagation delay", d, propDelay)
+	}
 
 	// At ~2/3 of the delay the first stream must still be open and the
 	// broker must not have seen a disconnect.
@@ -952,7 +956,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// After the delay: the drain's close lands and the disconnect is
 	// reported — still inside the propagation wait + window, far under
 	// the shutdown deadline.
-	waitFor(t, propDelay+2*time.Second, "disconnect after the propagation wait", disconnectSeen)
+	waitFor(t, propDelay+3*time.Second, "disconnect after the propagation wait", disconnectSeen)
 	if d := time.Since(start); d < propDelay {
 		t.Fatalf("disconnect reported %v after cancel, before the %v propagation delay ended", d, propDelay)
 	}

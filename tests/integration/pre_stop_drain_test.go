@@ -157,7 +157,7 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 // delay + window before returning.
 func TestTwoReplicas_DrainPropagationWait(t *testing.T) {
 	f := newRestartFixture(t)
-	const delay = 800 * time.Millisecond
+	const delay = 1500 * time.Millisecond
 	a := f.startReplicaWith(t, "a",
 		"-drain-propagation-delay", delay.String(),
 		"-drain-window", "400ms")

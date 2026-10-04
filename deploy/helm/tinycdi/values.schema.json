@@ -120,7 +120,8 @@
         "replicas": {"type": "integer", "minimum": 0},
         "gatewayID": {"type": "string"},
         "sessionIdle": {"type": "string"},
-        "drainPropagationDelay": {"type": "string"},
+        "drainPropagationDelay": {"type": "string", "pattern": "^(0|([0-9]*\\.?[0-9]+(ns|us|µs|ms|s|m|h))+)$"},
+        "drainWindow": {"type": "string", "pattern": "^(0|([0-9]*\\.?[0-9]+(ns|us|µs|ms|s|m|h))+)$"},
         "sessionCookieMode": {"type": "string", "enum": ["lax", "partitioned"]},
         "loginKeys": {
           "type": "object",
