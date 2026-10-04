@@ -1,0 +1,6 @@
+go test fuzz v1
+string("ws-0000000a.session.test")
+string("POST")
+string("ticket=tk-fuzz-valid")
+string("ticket=tk-fuzz-valid")
+string("https://ws-0000000a.session.test")
