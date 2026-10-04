@@ -100,6 +100,9 @@
         "connectP95Ms": { "type": ["number", "null"], "minimum": 0 },
         "reconnectP95Ms": { "type": ["number", "null"], "minimum": 0 },
         "maxGapMs": { "type": ["number", "null"], "minimum": 0 },
+        "disconnectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "disconnectP100Ms": { "type": ["number", "null"], "minimum": 0 },
+        "inputResumeP100Ms": { "type": ["number", "null"], "minimum": 0 },
         "maxManualActions": { "type": "integer", "minimum": 0 },
         "maxDroppedSessions": { "type": "integer", "minimum": 0 }
       }
@@ -177,6 +180,11 @@
             "description": "Recovery actions outside the automatic flow the harness had to take."
           },
           "inputEvents": { "type": "integer", "minimum": 0 },
+          "inputTimeouts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Input dispatches that hit the per-input timeout (the page's ops were wedged)."
+          },
           "dropped": {
             "type": "boolean",
             "description": "Session was lost and could not be recovered by the harness."
@@ -191,6 +199,8 @@
         "connectMs",
         "reconnectMs",
         "inputDispatchMs",
+        "disconnectMs",
+        "inputResumeMs",
         "sessionsWithManualActions",
         "droppedSessions",
         "falseElsewhereTransitions",
@@ -225,6 +235,29 @@
             "p95": { "type": ["number", "null"] }
           },
           "description": "Wall-clock percentiles of scripted input dispatch through the driver (harness-side latency, not glass-to-glass)."
+        },
+        "inputTimeouts": { "type": "integer", "minimum": 0 },
+        "disconnectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p100"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] },
+            "p100": { "type": ["number", "null"] }
+          },
+          "description": "Non-connected span durations that start after first connect — the reconnect latency users feel around drills."
+        },
+        "inputResumeMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p100"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] },
+            "p100": { "type": ["number", "null"] }
+          },
+          "description": "Disconnect start to first successful scripted input after reconnect (harness-side usability)."
         },
         "sessionsWithManualActions": { "type": "integer", "minimum": 0 },
         "droppedSessions": { "type": "integer", "minimum": 0 },

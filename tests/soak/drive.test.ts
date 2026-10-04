@@ -16,6 +16,7 @@ import {
   chromiumLaunchOptions,
   driveSessions,
   elsewhereDialogVisible,
+  guardOverProjected,
   loadProfile,
   loginSelectors,
   newSession,
@@ -33,6 +34,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const FAST = {
   durationMs: 600,
   inputIntervalMs: 50,
+  inputTimeoutMs: 200,
   pollIntervalMs: 20,
   connectTimeoutMs: 400,
   verbose: false,
@@ -43,9 +45,11 @@ class FakeDriver implements Driver {
   opened: { id: string; at: number }[] = [];
   closed: string[] = [];
   reloads: string[] = [];
+  events: string[] = [];
   openDelayMs = 0;
   takeoverPrompted = false;
   stateFor: (id: string, now: number, driver: FakeDriver) => string = () => "connected";
+  sendInputFor: (id: string) => Promise<void> = () => Promise.resolve();
 
   login(): Promise<void> {
     return Promise.resolve();
@@ -56,10 +60,12 @@ class FakeDriver implements Driver {
   }
   reloadSession(id: string): Promise<{ takeoverPrompted: boolean }> {
     this.reloads.push(id);
+    this.events.push(`reload:${id}`);
     return Promise.resolve({ takeoverPrompted: this.takeoverPrompted });
   }
-  sendInput(): Promise<void> {
-    return Promise.resolve();
+  sendInput(id: string): Promise<void> {
+    this.events.push(`send:${id}`);
+    return this.sendInputFor(id);
   }
   probe(id: string): Promise<SessionProbe> {
     return Promise.resolve({ state: this.stateFor(id, Date.now(), this), source: "api" });
@@ -546,4 +552,71 @@ test("V3.10: profiles provide defaults that flags override", () => {
     if (prev === undefined) delete process.env.SOAK_SESSIONS;
     else process.env.SOAK_SESSIONS = prev;
   }
+});
+
+test("V3.10c: a bare --profile errors instead of being silently ignored", () => {
+  assert.throws(() => parseArgs(["--profile"]), /--profile needs a value/);
+  const o = parseArgs(["--sessions", "5", "--profile", "soak-100"]);
+  assert.equal(o.template, "soak-small", "the profile still loads");
+  assert.equal(o.sessions, 5, "and the flag still overrides it");
+});
+
+test("V3.10c: the node guard gates on current + projected wave requests", () => {
+  // 3 x 16-CPU nodes, a 10-pod wave of 250 m projects ~5.2 % per node.
+  const stats = {
+    "worker-01": { pct: 70, allocatableCpuM: 16_000 },
+    "worker-02": { pct: 50, allocatableCpuM: 16_000 },
+    "worker-03": { pct: 76, allocatableCpuM: 16_000 },
+  };
+  assert.deepEqual(guardOverProjected(stats, 10, 250, 80), ["worker-03"]);
+  assert.deepEqual(
+    guardOverProjected(stats, 10, 250, 82),
+    [],
+    "a higher cap clears the same projection",
+  );
+  assert.deepEqual(
+    guardOverProjected({ "worker-03": { pct: 74.9, allocatableCpuM: 16_000 } }, 10, 250, 80),
+    ["worker-03"],
+    "one guarded node absorbs the whole wave in the projection",
+  );
+  assert.deepEqual(
+    guardOverProjected({ "worker-03": { pct: 79.9, allocatableCpuM: 16_000 } }, 0, 250, 80),
+    [],
+    "no wave left means nothing to project",
+  );
+  assert.deepEqual(guardOverProjected({}, 10, 250, 80), [], "empty stats never block");
+});
+
+test("V3.10d: a wedged sendInput is bounded by inputTimeoutMs and cannot starve other lanes", async () => {
+  const driver = new FakeDriver();
+  // ws_stuck's dispatch never resolves — like a Playwright op on a page whose
+  // channel wedged mid-reconnect. Unbounded, the serialized input loop
+  // starves every later session (the rc.3 e2e cascade: inputs froze, the
+  // 30 min session-idle then mass-expired the fleet).
+  driver.sendInputFor = (id) =>
+    id === "ws_stuck" ? new Promise<void>(() => {}) : Promise.resolve();
+  const stuck = newSession("ws_stuck", "stuck");
+  const ok = newSession("ws_ok", "ok");
+  const t0 = Date.now();
+  await driveSessions({ ...FAST, durationMs: 1_200, inputTimeoutMs: 150 }, [stuck, ok], driver, () => false);
+  assert.ok(stuck.inputTimeouts >= 3, `wedged dispatch counted as timeouts (got ${stuck.inputTimeouts})`);
+  assert.equal(stuck.inputEvents, 0);
+  // Each wedged dispatch still costs one timeout per pass, so the healthy
+  // lane slows but never stops — vs a full stall without the bound.
+  assert.ok(ok.inputEvents >= 4, `healthy lane kept dispatching: ${ok.inputEvents}`);
+  assert.ok(Date.now() - t0 < 4_000, "the wedge did not hang the run");
+});
+
+test("V3.10d: the mid-run reload is spread across passes so inputs keep flowing", async () => {
+  const driver = new FakeDriver();
+  const sessions = ["a", "b", "c", "d"].map((x) => newSession(`ws_${x}`, `soak-${x}`));
+  await driveSessions({ ...FAST, durationMs: 1_000 }, sessions, driver, () => false);
+  assert.equal(driver.reloads.length, 4, "every session reloads once");
+  for (const s of sessions) assert.ok(s.reloadedAt !== null);
+  // Between the first and the last reload at least one input dispatched —
+  // a serialized reload burst would show zero sends inside the window.
+  const firstReload = driver.events.findIndex((e) => e.startsWith("reload:"));
+  const lastReload = driver.events.reduce((n, e, i) => (e.startsWith("reload:") ? i : n), -1);
+  const sendsInside = driver.events.slice(firstReload, lastReload).filter((e) => e.startsWith("send:"));
+  assert.ok(sendsInside.length > 0, "inputs interleave with the reload window");
 });

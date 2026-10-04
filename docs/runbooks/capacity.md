@@ -385,16 +385,18 @@ reasons found on the night:
   or anti-affinity — so pods land where scoring puts them. With even
   spread the worst node (worker-03, 55 % baseline) crosses the 20 %
   request-headroom rule at ~45 sessions; the observed run spread
-  10/30/8 because the freest node scored best. A new per-wave guard in
-  the harness stops workspace creation when any infra node would exceed
-  80 % CPU requests; effective N is recorded in the report.
+  10/30/8 because the freest node scored best. A per-wave guard in the
+  harness stops workspace creation when any infra node's CPU requests
+  plus the next wave's projected share would reach 80 %; effective N is
+  recorded in the report.
 - **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
   behind one source IP tripped `login-rate 30/min` (covers `/v1/login`,
   `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
   152 × 429 in ~15 min, logins failed, connect p95 hit 65 s. The e2e
   run raised both to 600/min as a recorded deviation (restored after);
-  production ramps from many IPs are unaffected. A load test from one
-  host must raise the limits or distribute source IPs.
+  production ramps from many IPs are unaffected. On rc.3 this is fixed by
+  FX-R30 (per-session/per-state limiter keys — see "Sign-in rate limits
+  and NAT"): the same 20-lane ramp at default limits produces zero 429s.
 
 Measured on 60 × 60 min, 20 users (3 per user), soak-small on rc.2:
 connect p50 6.1 s / p95 7.4 s (opens waved 10 per 15 s), reload
@@ -403,13 +405,62 @@ reconnect p50 0 / p95 5.0 s (half of 60 seamless), inputDispatch p50
 Infra usage peaked at 59 % CPU / ~15.5 GiB workspace memory; node
 requests stayed ≤ 75 %. Two backend disruption drills plus a session
 cert rotation mid-run: the drill session reconnected in ≤ 4.5 s, but
-2/60 sessions reported `none` for ~85–120 s after the rollout — the
-reconnect tail after a backend pod loss is ~2 min, the one metric over
-its 60 s gate. 13/60 sessions logged a false "open in another tab" view
-during the restarts (watch item, non-zero on rc.2).
+2/60 sessions reported `none` for ~85 s after the rollout and took a
+~120 s end-to-end stream gap to recover — the reconnect tail after a
+backend pod loss is ~2 min, the one metric over its 60 s gate (the
+suppressed re-launch is fixed by FX-R31, PR #76, in rc.3). 13/60
+sessions logged a false "open in another tab" view during the restarts
+(watch item, non-zero on rc.2; same FX-R31 fix).
 
 Capacity answer for the release: **~60 sessions** is the safe level on
 the three-node infra pool under the 20 % headroom rule with today's
 baselines; ~82 is schedulable only if placement could be pinned per
 node; **200 sessions need ~50 CPU of spare requests → more or larger
 workload nodes.**
+
+### v0.3.0-rc.3 soak: 60 sessions × 60 min (2026-10-04)
+
+Same shape as the rc.2 run: 60 soak-small workspaces over 20 OIDC lanes
+behind one host IP, waves of 10 / 15 s, the projected-request node guard
+(never fired — placement 15/30/11), default rate limits this time.
+
+- **NAT / limiter (FX-R30 verified).** 20 lanes logged in, probed and
+  launched from one IP: 0 × 429 on authenticated traffic (per-lane
+  counters 2, both anonymous-phase hits during the OIDC ramp, none after
+  lanes held cookies). An anonymous burst on `GET /v1/session` from the
+  same IP was capped: 24 × 200 then 56 × 429 in ~5 s (28 per backend pod
+  in the logs — matches the client count exactly).
+- **Connected metrics.** connect p50 6.1 s / p95 6.3 s, mid-run reload
+  reconnect p50 0 / p95 5.0 s (near-seamless), inputDispatch p50 66 ms /
+  p95 83 ms, dropped 0, falseElsewhere 0 (rc.2: 13), manual actions 0,
+  longest gap < 60 s. inputTimeouts 3 (bounded sends that hit the 5 s
+  cap during the drill churn; no starvation).
+- **Lease contract.** All 61 live leases kept the same lease id across
+  every drill; stream_epoch bumped in place (1→2–5); zero launch tickets
+  minted on reconnect — the `el.src` re-navigation re-claims the live
+  lease and only a gone lease mints a ticket.
+- **Drills.** Pod delete ~5.8 s and rollout ~5.8 s reconnect on the drill
+  session (same lease), session-TLS rotate with zero disconnects, and a
+  4th mTLS drill (operator client cert + internal CA, 6 live sessions):
+  streams survived, operator kept reconciling, backend hot-reloaded the
+  new server cert and client CA without a restart (`tlsreload` log
+  lines), the pre-rotation client cert is refused after the CA rotation.
+- **Fleet reconnect tail — the one failed gate.** After the all-pods
+  rollout, 54/60 sessions had a disconnect span: p50 ~20 s, tail ~45 s
+  (advisor budget p95 ≤ 10 s / p100 ≤ 30 s — FAIL). Single-pod delete was
+  fine (p50 ~5 s, max ~10 s). Mechanism: the page's
+  `RECONNECT_BACKOFF_MS` re-navigates the iframe without checking whether
+  the previous navigation is still attaching, so at fleet scale the early
+  steps abort nearly-landed claims and only a later, longer step lands.
+  Fixed by FX-R32 (`fix/inframe-reconnect`): in-frame reconnect, no
+  navigation thrash. The first run of this soak also surfaced a harness
+  flaw — one wedged Playwright call stalled the serialized input loop,
+  the 30 min session-idle mass-expired the fleet and the drop>1% abort
+  fired correctly; the harness now bounds each input dispatch
+  (`--input-timeout-ms`) and spreads the mid-run reload one per pass.
+- **Abort rules.** dropped>1%, connect-p95>15 s, live-pod/ArgoCD/node
+  guards all armed; no live pod restart, no node pressure, no Pending.
+
+Capacity answer unchanged: **~60 sessions** remains the safe level. The
+reconnect tail is a UX latency under full backend loss, not a capacity
+limit — re-score on rc.4 (FX-R32) with the short N=60 × 30 min re-soak.
