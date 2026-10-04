@@ -10,6 +10,7 @@ package gateway_test
 // Drain sheds streams without revoking the lease.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -425,9 +426,15 @@ func TestStreamFence_CrossGateway(t *testing.T) {
 	defer respB.Body.Close()
 
 	// A's stream must be fenced once its renew observes the bumped epoch.
+	// The fence stays abrupt (FX-R32): a graceful close would let the fenced
+	// client retry its websocket and fence B's stream right back.
 	done := make(chan error, 1)
 	go func() {
-		_, err := respA.Body.Read(make([]byte, 1))
+		buf := make([]byte, 4)
+		n, err := respA.Body.Read(buf)
+		if err == nil && bytes.Equal(buf[:n], []byte{0x88, 0x02, 0x03, 0xE9}) {
+			err = errors.New("fenced stream got a graceful close frame")
+		}
 		done <- err
 	}()
 	select {
@@ -459,13 +466,20 @@ func TestDrain_KeepsLease(t *testing.T) {
 		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
 	}
 	defer resp.Body.Close()
-	wsWrite(t, resp, []byte("x"))
-	wsRead(t, resp, 1, 2*time.Second)
+	// A real frame, so the boundary tracker sees the stream at rest.
+	wsWrite(t, resp, []byte{0x82, 0x01, 'x'})
+	wsRead(t, resp, 3, 2*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	gwA.Drain(ctx)
 	cancel()
 
+	// FX-R32: the drain ended the websocket properly — a 1001 close frame
+	// at a frame boundary is what lets the KasmVNC client retry in-frame;
+	// an abrupt cut (1006) would leave that branch unreachable.
+	if b := wsRead(t, resp, 4, 2*time.Second); !bytes.Equal(b, []byte{0x88, 0x02, 0x03, 0xE9}) {
+		t.Fatalf("drain close frame = %x, want 8802 03e9", b)
+	}
 	if _, err := resp.Body.Read(make([]byte, 1)); err == nil {
 		t.Fatal("stream survived Drain")
 	}
@@ -490,6 +504,69 @@ func TestDrain_KeepsLease(t *testing.T) {
 	if respB.StatusCode != http.StatusOK {
 		t.Fatalf("proxied on B after A drained = %d, want 200", respB.StatusCode)
 	}
+
+	// FX-R32: the client's own retry on the sibling replica — same cookie,
+	// no new launch ticket — re-claims the stream on the SAME lease (epoch
+	// bump, not a fresh lease).
+	respStream := upgrade(t, srvB, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if respStream.StatusCode != http.StatusSwitchingProtocols {
+		drain(respStream)
+		t.Fatalf("stream upgrade on B after A drained = %d, want 101", respStream.StatusCode)
+	}
+	defer respStream.Body.Close()
+	wsWrite(t, respStream, []byte{0x82, 0x01, 'y'})
+	wsRead(t, respStream, 3, 2*time.Second)
+	if got := fb.epochOf(fb.leaseOf(t, "tk-drain").ID); got < 2 {
+		t.Fatalf("stream epoch after sibling reconnect = %d, want >= 2 (same lease)", got)
+	}
+}
+
+// TestDrain_GracefulClose_MidFrame: a conn parked mid-frame when Drain
+// starts must still receive a well-formed 1001 close — the graceful close
+// waits for the frame to complete instead of cutting the conn first.
+// Regresses the drain order: cancelling the tracked request ctx before the
+// close attempt unwound the copy loops and the client got a bare 1006.
+func TestDrain_GracefulClose_MidFrame(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-drain-mid", testWSUID)
+	gwA, srvA := newReplica(t, fb, "gw-A")
+	cookie := launchOK(t, srvA, testHost, "tk-drain-mid")
+
+	resp := upgrade(t, srvA, testHost, "/websockify", cookie, map[string]string{"Origin": testOrigin})
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		drain(resp)
+		t.Fatalf("upgrade on A = %d, want 101", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	// A 10-byte binary frame delivered in two pieces: the echo of the first
+	// piece leaves the stream mid-frame when the drain starts.
+	f := append([]byte{0x82, 0x0a}, bytes.Repeat([]byte{'x'}, 10)...)
+	wsWrite(t, resp, f[:7])
+	wsRead(t, resp, 7, 2*time.Second)
+
+	drained := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		gwA.Drain(ctx)
+		close(drained)
+	}()
+	// Give Drain a pass so the pending close is armed mid-frame.
+	time.Sleep(300 * time.Millisecond)
+
+	// The remainder's echo completes the frame through the copy loop; the
+	// injected close lands right after its last byte, then the conn ends.
+	wsWrite(t, resp, f[7:])
+	got := wsRead(t, resp, len(f[7:])+4, 3*time.Second)
+	want := append(append([]byte{}, f[7:]...), 0x88, 0x02, 0x03, 0xE9)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("post-drain bytes = %x, want %x (frame tail + 1001 close)", got, want)
+	}
+	if _, err := resp.Body.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stream survived Drain")
+	}
+	<-drained
 }
 
 // TestDrain_RefusesNewUpgrades: once Drain starts the replica sheds — new

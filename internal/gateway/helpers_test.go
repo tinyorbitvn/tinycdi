@@ -443,6 +443,12 @@ func (f *fakeBroker) failRenew(leaseID string, err error) {
 	f.renewErr[leaseID] = err
 }
 
+func (f *fakeBroker) epochOf(leaseID string) uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.epochs[leaseID]
+}
+
 func (f *fakeBroker) wasRedeemed(ticket string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -132,7 +132,13 @@ export async function seedReadyWorkspace(request: APIRequestContext, id: string)
 export async function setConnectionStatus(
   request: APIRequestContext,
   workspaceId: string,
-  status: { state: string; leaseActive: boolean; leaseRef?: string; streamEpoch?: number },
+  status: {
+    state: string;
+    leaseActive: boolean;
+    leaseRef?: string;
+    streamEpoch?: number;
+    streamOwnerTab?: string;
+  },
 ) {
   const res = await request.post(`${MOCK_API}/_control/session/connection`, {
     data: { workspaceId, ...status },

@@ -291,6 +291,13 @@ behaviour it wants (V3.24 decisions, `internal/gateway.DesktopPath` and
 - `idle_disconnect=1440` — pushes the client's own idle cut (default
   20 min) past any template lifecycle timeout; idle policy belongs to
   the platform, not to a second, unsynchronized client timer.
+- `reconnect=true` + `reconnect_delay=<500–2000>` — arms the client's
+  own in-frame websocket retry after a clean disconnect (FX-R32): the
+  cheap reconnect path the portal's connection watch waits for before it
+  ever re-navigates the frame. The delay is jittered per document load
+  (per redemption on the gateway redirect, per page instance in the
+  portal) so a fleet that loses its streams together — a backend rollout —
+  spreads its retry claims instead of reconnecting in lockstep.
 - `clipboard_up`/`clipboard_down`/`clipboard_seamless` — set by the
   portal per workspace clipboard policy on the navigations it drives;
   `clipboard_seamless` only on Chrome-family browsers, mirroring the

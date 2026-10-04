@@ -571,11 +571,13 @@ describe("SessionPage duplicate tab (R8c)", () => {
   });
 
   it("a stream epoch advance caused by this tab's own frame reload is not 'another tab'", async () => {
-    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
+    });
     await connectViaResume(ws, control);
 
-    // The stream drops with the lease alive: the watch reloads the frame
-    // after its first backoff step, which opens stream 3.
+    // The stream drops with the lease alive: past the in-frame window the
+    // watch reloads the frame, which opens stream 3.
     control.connection = () => ({
       state: "disconnected",
       leaseActive: true,
@@ -695,8 +697,8 @@ describe("SessionPage reconnecting badge (T5.4)", () => {
     const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
     await connectViaResume(ws, control);
 
-    // The stream drops with the lease alive: the watch reloads the frame
-    // and the badge shows the recovery, not a stale "Connected".
+    // The stream drops with the lease alive: the badge shows the recovery
+    // as soon as the poll sees it, not a stale "Connected".
     control.connection = () => ({
       state: "disconnected",
       leaseActive: true,
@@ -705,11 +707,14 @@ describe("SessionPage reconnecting badge (T5.4)", () => {
     });
     await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 2_000 });
 
+    // The frame's own retry re-claims the stream under our tab id — no
+    // navigation needed for the page to call it ours.
     control.connection = () => ({
       state: "connected",
       leaseActive: true,
       leaseRef: OWN_REF,
       streamEpoch: 3,
+      streamOwnerTab: sessionTabId(),
     });
     await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
   });
@@ -818,8 +823,10 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
   // gap (disconnected->stale->none->relaunch). With ownership evidence the
   // restart's re-claim (new epoch, same tab id) keeps the page 'ours', so
   // the watch's reconnect backoff runs immediately.
-  it("a stream loss with our owner id reloads the frame on the watch backoff — the 'elsewhere' gate never engages", async () => {
-    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+  it("a stream loss with our owner id reloads the frame after the in-frame window — the 'elsewhere' gate never engages", async () => {
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
+    });
     await connectViaResume(ws, control);
 
     // The backend rolled: the stream died and the client's retry already
@@ -835,7 +842,8 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     });
     const iframe = () =>
       document.querySelector("iframe") as HTMLIFrameElement | null;
-    // The reconnect begins on backoff[0] (~1 s), not after lease expiry.
+    // The reconnect runs as soon as the in-frame window is out, not after
+    // lease expiry.
     await waitFor(
       () => expect(iframe()?.getAttribute("src")).toBeTruthy(),
       { timeout: 5_000 },
@@ -855,7 +863,9 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
   });
 
   it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
-    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
+    });
     await connectViaResume(ws, control);
 
     // Pre-FX-R31 shape: no streamOwnerTab. The restart's re-claim bumped
@@ -952,5 +962,115 @@ describe("SessionPage reconnect suppression (V3.10b evidence)", () => {
     // lease die and falls back to a ticket launch.
     await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+});
+
+// ---- FX-R32: the frame's own reconnect runs before any re-navigation ----
+
+// A re-navigation writes the same URL the resume already set (same page,
+// same frameUrl), so the reload is observed on the src setter, not by
+// comparing attribute values.
+function watchFrameSrc() {
+  const desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src")!;
+  const writes: string[] = [];
+  vi.spyOn(HTMLIFrameElement.prototype, "src", "set").mockImplementation(function (
+    this: HTMLIFrameElement,
+    v: string,
+  ) {
+    writes.push(v);
+    desc.set!.call(this, v);
+  });
+  return writes;
+}
+
+describe("SessionPage in-frame reconnect (FX-R32)", () => {
+  it("a lease-active drop changes no el.src inside the window; a poll 'connected' settles it", async () => {
+    const writes = watchFrameSrc();
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 600, reNavJitterMs: 0 },
+    });
+    await connectViaResume(ws, control);
+    const base = writes.length;
+
+    // The stream drops with the lease alive: the badge says Reconnecting,
+    // but the frame's own retry gets the window — no navigation.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 2,
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 1_000 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(writes.length).toBe(base);
+    expect(submitted).toHaveLength(0);
+    expect(ticketPosts()).toHaveLength(0);
+
+    // The frame's retry re-claimed: the poll sees connected and the page
+    // settles without ever having navigated.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writes.length).toBe(base);
+    expect(ticketPosts()).toHaveLength(0);
+  });
+
+  it("a lease-active drop past the window re-navigates exactly once", async () => {
+    const writes = watchFrameSrc();
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 150, reNavJitterMs: 0 },
+    });
+    await connectViaResume(ws, control);
+    const base = writes.length;
+
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 2,
+    });
+    // The window runs out: one bounded re-navigation reloads the client.
+    await waitFor(() => expect(writes.length).toBe(base + 1), { timeout: 3_000 });
+    // Backoff step 0 is 10 s: no second re-navigation inside it.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(writes.length).toBe(base + 1);
+
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
+  });
+
+  it("a foreign stream owner never gets an automatic re-navigation", async () => {
+    const writes = watchFrameSrc();
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
+    });
+    await connectViaResume(ws, control);
+    const base = writes.length;
+
+    // The poll reports the stream claimed by another tab and then dropped:
+    // the frame must not fight the other owner for it.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+      streamOwnerTab: "fedcba9876543210fedcba9876543210",
+    });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(writes.length).toBe(base);
+    expect(submitted).toHaveLength(0);
+    expect(ticketPosts()).toHaveLength(0);
   });
 });

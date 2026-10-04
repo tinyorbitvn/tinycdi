@@ -53,10 +53,14 @@ const (
 	// larger portal frame (FX-R18); enable_webp matches the tab-mode codec
 	// offer; idle_disconnect=1440 pushes the client's own idle cut (default
 	// 20 min) past any template lifecycle timeout — idle policy belongs to
-	// the platform (V3.24 embedded-mode decisions). Clipboard client flags
-	// are not static: the portal sets them per workspace policy on the
-	// navigations it drives.
-	DesktopPath = "/?resize=remote&enable_webp=true&idle_disconnect=1440"
+	// the platform (V3.24 embedded-mode decisions); reconnect=true arms the
+	// client's own in-frame websocket retry — the cheap reconnect the
+	// portal's connection watch waits for before it ever re-navigates the
+	// frame (FX-R32). The retry delay is NOT static: it is jittered per
+	// redemption so a fleet reconnecting together does not claim in
+	// lockstep. Clipboard client flags are not static either: the portal
+	// sets them per workspace policy on the navigations it drives.
+	DesktopPath = "/?resize=remote&enable_webp=true&idle_disconnect=1440&reconnect=true"
 
 	maxLaunchBody = 4096
 )
@@ -88,6 +92,26 @@ func seamlessClipboardOK(ua string) bool {
 	return !(strings.Contains(ua, "Safari") && !strings.Contains(ua, "Chrome"))
 }
 
+// reconnectDelay bounds on the client's in-frame retry delay (FX-R32),
+// mirroring the portal's RECONNECT_DELAY_*: long enough that a reconnect
+// wave cannot burst, short enough to beat the watch's re-navigation.
+const (
+	reconnectDelayMin = 500
+	reconnectDelayMax = 2000
+)
+
+// reconnectDelayMs returns this redemption's jittered in-frame retry delay:
+// uniform in [reconnectDelayMin, reconnectDelayMax] so the retry claims of
+// a whole fleet (a backend rollout drops every stream at once) spread over
+// a ~1.5 s window instead of landing in lockstep.
+func reconnectDelayMs() int {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return reconnectDelayMin
+	}
+	return reconnectDelayMin + (int(b[0])<<8|int(b[1]))%(reconnectDelayMax-reconnectDelayMin+1)
+}
+
 // desktopPath is the post-redemption URL the session frame actually
 // loads: the static DesktopPath settings plus the clipboard flags for
 // the policy the redeemed ticket recorded (V3.24 — the portal's iframe
@@ -101,7 +125,8 @@ func seamlessClipboardOK(ua string) bool {
 // `path` unset, which the broker stores as a NULL (legacy) claim.
 func desktopPath(policy, ua, ownerTab string) string {
 	up, down := clipboardDirections(policy)
-	path := fmt.Sprintf("%s&clipboard_up=%t&clipboard_down=%t", DesktopPath, up, down)
+	path := fmt.Sprintf("%s&reconnect_delay=%d&clipboard_up=%t&clipboard_down=%t",
+		DesktopPath, reconnectDelayMs(), up, down)
 	if up || down {
 		path += fmt.Sprintf("&clipboard_seamless=%t", seamlessClipboardOK(ua))
 	}
