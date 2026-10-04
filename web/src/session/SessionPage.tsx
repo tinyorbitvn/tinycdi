@@ -85,6 +85,8 @@ export interface SessionPageProps {
    * for tests.
    */
   inFrameRetryMs?: number;
+  /** First re-navigation's jitter delay; defaults to random. Tests. */
+  reNavJitterMs?: number;
   /** Navigates to the portal login (401). Injectable for tests. */
   onSignIn?: () => void;
 }
@@ -101,6 +103,7 @@ export function SessionPage({
   pollIntervalMs,
   resumeTimeoutMs = 10_000,
   inFrameRetryMs,
+  reNavJitterMs,
   onSignIn = defaultLoginRedirect,
 }: SessionPageProps) {
   const api = useApi();
@@ -534,6 +537,7 @@ export function SessionPage({
     active: state.status === "connected",
     pollIntervalMs,
     inFrameRetryMs,
+    reNavJitter: reNavJitterMs === undefined ? undefined : () => reNavJitterMs,
     fetchStatus: fetchConnection,
     frameUrl: useCallback(
       () => sessionFrameUrl(workspaceId, sessionDomain, embedOpts()),

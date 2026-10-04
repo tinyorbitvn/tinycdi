@@ -572,7 +572,7 @@ describe("SessionPage duplicate tab (R8c)", () => {
 
   it("a stream epoch advance caused by this tab's own frame reload is not 'another tab'", async () => {
     const { ws, control } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 100 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
 
@@ -825,7 +825,7 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
   // the watch's reconnect backoff runs immediately.
   it("a stream loss with our owner id reloads the frame after the in-frame window — the 'elsewhere' gate never engages", async () => {
     const { ws, control } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 100 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
 
@@ -864,7 +864,7 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
 
   it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
     const { ws, control } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 100 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
 
@@ -987,7 +987,7 @@ describe("SessionPage in-frame reconnect (FX-R32)", () => {
   it("a lease-active drop changes no el.src inside the window; a poll 'connected' settles it", async () => {
     const writes = watchFrameSrc();
     const { ws, control, submitted, ticketPosts } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 600 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 600, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
     const base = writes.length;
@@ -1024,7 +1024,7 @@ describe("SessionPage in-frame reconnect (FX-R32)", () => {
   it("a lease-active drop past the window re-navigates exactly once", async () => {
     const writes = watchFrameSrc();
     const { ws, control } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 150 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 150, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
     const base = writes.length;
@@ -1054,7 +1054,7 @@ describe("SessionPage in-frame reconnect (FX-R32)", () => {
   it("a foreign stream owner never gets an automatic re-navigation", async () => {
     const writes = watchFrameSrc();
     const { ws, control, submitted, ticketPosts } = setupScripted({
-      props: { pollIntervalMs: 20, inFrameRetryMs: 100 },
+      props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
     const base = writes.length;

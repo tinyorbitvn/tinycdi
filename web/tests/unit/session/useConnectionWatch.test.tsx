@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import {
+  CLAIM_EVIDENCE_MS,
   CONNECTION_POLL_MS,
   IN_FRAME_RETRY_MS,
   RECONNECT_BACKOFF_MS,
@@ -44,6 +45,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     fetchStatus,
     requestTicket,
     onEvent: (e: WatchEvent) => events.push(e),
+    reNavJitter: () => 0,
     ...overrides,
   };
   const view = renderHook((p: typeof props) => useConnectionWatch(p), { initialProps: props });
@@ -120,15 +122,65 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(1);
     expect(frame.getAttribute("src")).toBe(frameUrl());
 
-    // Bounded backoff: the next poll arms step 0 (10 s); the second
-    // re-navigation cannot fire inside it.
-    await advanced(CONNECTION_POLL_MS);
-    await advanced(RECONNECT_BACKOFF_MS[0] - 1);
+    // The nav's claim gets the full 20 s evidence budget: polls inside it
+    // fire nothing.
+    await advanced(CLAIM_EVIDENCE_MS - CONNECTION_POLL_MS); // polls at 15,20,25
     expect(navigated(events)).toHaveLength(1);
-    await advanced(1); // the step boundary itself fires the second reload
+    await advanced(CONNECTION_POLL_MS); // t=30: the budget is out -> nav 2
     expect(navigated(events)).toHaveLength(2);
-    await advanced(CONNECTION_POLL_MS * 2);
+    await advanced(CONNECTION_POLL_MS * 3); // inside nav 2's budget
     expect(navigated(events)).toHaveLength(2);
+  });
+
+  // Advisor MINOR-2: a re-navigation is a claim attempt — a claim that
+  // lands inside the 20 s budget (rc.3 measured 5-10 s) must never be
+  // aborted by the next reload.
+  it("does not abort a claim that lands within the evidence budget", async () => {
+    const { frame, events, fetchStatus } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
+    await advanced(CONNECTION_POLL_MS * 2); // t=10: nav 1
+    expect(navigated(events)).toHaveLength(1);
+
+    // ~5 s after the nav its claim lands: the poll reports a NEW stream
+    // epoch while the stream is still coming up.
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 3 });
+    await advanced(CONNECTION_POLL_MS); // t=15: the evidence poll
+    await advanced(CONNECTION_POLL_MS * 3); // t=30: inside the claim's budget
+    expect(navigated(events)).toHaveLength(1);
+
+    // The claim turns connected before the budget ends: no second nav.
+    fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true, streamEpoch: 3 });
+    await advanced(CONNECTION_POLL_MS * 6); // t=60
+    expect(navigated(events)).toHaveLength(1);
+    expect(frame.getAttribute("src")).toBe(frameUrl());
+  });
+
+  it("a landed claim that never connects still releases the next attempt", async () => {
+    const { events, fetchStatus } = setup();
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
+    await advanced(CONNECTION_POLL_MS * 2); // t=10: nav 1
+
+    // The claim lands (new epoch) but the stream never reports connected:
+    // it is dead, so the next attempt fires once the budget runs out.
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 3 });
+    await advanced(CONNECTION_POLL_MS); // t=15: evidence poll, budget arms
+    expect(navigated(events)).toHaveLength(1);
+    await advanced(CLAIM_EVIDENCE_MS - CONNECTION_POLL_MS); // to t=30
+    expect(navigated(events)).toHaveLength(1);
+    await advanced(CONNECTION_POLL_MS); // t=35: budget spent -> nav 2
+    expect(navigated(events)).toHaveLength(2);
+  });
+
+  it("jitters the first re-navigation off the in-frame window's edge", async () => {
+    const { events, fetchStatus } = setup({ reNavJitter: () => 8_000 });
+    fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
+    // Window 5 s + jitter 8 s: polls inside 13 s of the loss fire nothing.
+    await advanced(CONNECTION_POLL_MS * 2); // t=10: elapsed 5 < 13
+    expect(navigated(events)).toHaveLength(0);
+    await advanced(CONNECTION_POLL_MS); // t=15: elapsed 10 < 13
+    expect(navigated(events)).toHaveLength(0);
+    await advanced(CONNECTION_POLL_MS); // t=20: elapsed 15 >= 13
+    expect(navigated(events)).toHaveLength(1);
   });
 
   it("never navigates a frame whose stream was fenced by another owner", async () => {
@@ -163,14 +215,14 @@ describe("useConnectionWatch (D15)", () => {
     expect(navigated(events)).toHaveLength(1);
   });
 
-  // The backoff ladder runs only after the in-frame window, on the
-  // [10,15,20] spacing, then reports exhausted.
+  // The ladder is the outer bound: at most three attempts, each claim
+  // gets the 20 s evidence budget — navs land at ~10/30/50 s and the watch
+  // reports exhausted once the last claim's budget is also spent (~70 s).
   it("fires every backoff step exactly once under a 5 s poll, then reports exhausted", async () => {
     const { events, fetchStatus, requestTicket } = setup();
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
-    // Poll cadence 5 s; run long enough for the 20 s step to land and one
-    // more poll to find the budget spent.
+    // Poll cadence 5 s; run past the last nav's 20 s claim budget.
     await advanced(CONNECTION_POLL_MS * 20);
     expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
     expect(events.filter((e) => e.type === "exhausted")).toHaveLength(1);
@@ -187,29 +239,27 @@ describe("useConnectionWatch (D15)", () => {
     expect(requestTicket).not.toHaveBeenCalled();
   });
 
-  it("does not re-arm a pending reload on every poll (10 s step survives a 5 s poll)", async () => {
+  it("a poll inside the claim budget cannot fire a second navigation early", async () => {
     const { frame, events, fetchStatus } = setup();
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
 
-    // t=5 s: window opens. t=10 s: reload 1. t=15 s: step 0 (10 s) armed.
-    await advanced(CONNECTION_POLL_MS * 3);
+    // t=5 s: window opens. t=10 s: nav 1. t=15/20/25: polls mid-budget.
+    await advanced(CONNECTION_POLL_MS * 5); // t=25
     expect(navigated(events)).toHaveLength(1);
-    await advanced(CONNECTION_POLL_MS); // t = 20 s: a poll lands mid-wait
-    expect(navigated(events)).toHaveLength(1);
-    await advanced(5_000); // t = 25 s: the 10 s timer still fires
+    await advanced(CONNECTION_POLL_MS); // t=30: the 20 s budget is out
     expect(navigated(events)).toHaveLength(2);
     expect(frame.getAttribute("src")).toBe(frameUrl());
   });
 
-  it("cancels a pending reload when the stream comes back and restarts the recovery", async () => {
+  it("cancels the in-flight claim wait when the stream comes back and restarts the recovery", async () => {
     const { events, fetchStatus } = setup();
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
-    await advanced(CONNECTION_POLL_MS * 3); // nav 1 done; step 0 armed
+    await advanced(CONNECTION_POLL_MS * 2); // t=10: nav 1
     expect(navigated(events)).toHaveLength(1);
 
     fetchStatus.mockResolvedValue({ state: "connected", leaseActive: true, streamEpoch: 1 });
-    await advanced(CONNECTION_POLL_MS); // t = 20 s: connected again
-    await advanced(RECONNECT_BACKOFF_MS[0]); // the cancelled reload must not fire
+    await advanced(CONNECTION_POLL_MS); // t=15: connected again
+    await advanced(CLAIM_EVIDENCE_MS); // past the would-be nav 2 at t=30
     expect(navigated(events)).toHaveLength(1);
 
     // The next outage starts again at the in-frame window, not mid-ladder.
@@ -381,8 +431,8 @@ describe("useConnectionWatch last backoff step (FX-R8)", () => {
   it("a connected report during the last grace period cancels the exhaustion", async () => {
     const { events, fetchStatus } = setup();
     fetchStatus.mockResolvedValue({ state: "disconnected", leaseActive: true, streamEpoch: 0 });
-    // Run until the last reload has happened (~40 s in: window 5 s, then
-    // the +10 s and +15 s steps) but before its 20 s grace expires at ~60 s.
+    // Run until the last reload has happened (~50 s in: the 5 s window,
+    // then two 20 s claim budgets) but before its 20 s grace expires.
     await advanced(CONNECTION_POLL_MS * 11);
     expect(navigated(events)).toHaveLength(RECONNECT_BACKOFF_MS.length);
 
