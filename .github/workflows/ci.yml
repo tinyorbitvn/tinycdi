@@ -591,6 +591,10 @@ jobs:
         if: failure() && steps.gate.outputs.run == 'true'
         run: |
           export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
+          # The structured dump (pod restarts, events, EndpointSlices,
+          # backend/frontend/operator/traefik/coredns logs, node journal)
+          # lands in the state dir's logs/ — copied into the artifact below.
+          hack/quickstart/upgrade-test.sh --collect-diag || true
           kubectl get pods -A -o wide || true
           kubectl get workspaces,workspacetemplates -A || true
           kubectl -n tinycdi-system logs deploy/backend --tail=100 || true
@@ -599,6 +603,9 @@ jobs:
           for f in "$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/logs"/*.log; do
             echo "== $f"; tail -n 30 "$f" || true
           done
+          mkdir -p hack/quickstart/smoke/test-results
+          cp -a "$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/logs" \
+            hack/quickstart/smoke/test-results/cluster-logs || true
       - name: upload smoke report
         if: failure() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
