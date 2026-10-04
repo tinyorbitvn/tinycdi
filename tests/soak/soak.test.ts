@@ -281,7 +281,11 @@ test("R10b: a drill gap 20 minutes after a seamless reload is not the reload's r
     obs(t0 + 20 * min + 5_000, "disconnected"), // drill: gateway restart
     obs(t0 + 20 * min + 25_000, "connected"),
   ];
-  assert.deepEqual(reloadRecovery(observations, t0 + 30_000), { reconnectMs: 0, seamless: true });
+  assert.deepEqual(reloadRecovery(observations, t0 + 30_000), {
+    reconnectMs: 0,
+    seamless: true,
+    evidence: "observed",
+  });
   const report = buildReport(RUN(t0), LAX, [
     { ...SESSION(t0, observations, t0 + 30_000), runEndAt: t0 + 25 * min },
   ]) as {
@@ -301,22 +305,23 @@ test("R10b: only a non-connected observation within 60 s after the reload counts
   // Exactly at the 60 s boundary still counts as the reload's.
   assert.deepEqual(
     reloadRecovery([at(1_000, "connected"), at(60_000, "disconnected"), at(64_000, "connected")], reloadedAt),
-    { reconnectMs: 4_000, seamless: false },
+    { reconnectMs: 4_000, seamless: false, evidence: "observed" },
   );
   // One millisecond later belongs to something else.
   assert.deepEqual(
     reloadRecovery([at(1_000, "connected"), at(60_001, "disconnected"), at(64_000, "connected")], reloadedAt),
-    { reconnectMs: 0, seamless: true },
+    { reconnectMs: 0, seamless: true, evidence: "observed" },
   );
   // Lost within the window and never back: no reconnect time, not seamless.
   assert.deepEqual(reloadRecovery([at(2_000, "stale")], reloadedAt), {
     reconnectMs: null,
     seamless: false,
+    evidence: "observed",
   });
   // A non-connected observation just before the reload never counts.
   assert.deepEqual(
     reloadRecovery([at(-3_000, "stale"), at(-1_000, "connected"), at(5_000, "connected")], reloadedAt),
-    { reconnectMs: 0, seamless: true },
+    { reconnectMs: 0, seamless: true, evidence: "observed" },
   );
 });
 
@@ -324,35 +329,87 @@ test("backlog4: a reload with zero observations is never seamless", () => {
   const t0 = Date.parse("2026-10-02T01:00:30Z");
   const at = (ms: number, state: string) => obs(t0 + ms, state);
   // No observations at all after the reload (e.g. the run stopped there).
-  assert.deepEqual(reloadRecovery([], t0), { reconnectMs: null, seamless: false });
+  assert.deepEqual(reloadRecovery([], t0), { reconnectMs: null, seamless: false, evidence: "none" });
   assert.deepEqual(reloadRecovery([at(-5_000, "connected")], t0), {
     reconnectMs: null,
     seamless: false,
+    evidence: "none",
   });
   // The next observation lands beyond the 60 s window: still unproven.
   assert.deepEqual(
     reloadRecovery([at(61_000, "connected"), at(66_000, "connected")], t0),
-    { reconnectMs: null, seamless: false },
+    { reconnectMs: null, seamless: false, evidence: "none" },
   );
   // One connected observation inside the window is enough for seamless.
   assert.deepEqual(reloadRecovery([at(500, "connected"), at(61_000, "connected")], t0), {
     reconnectMs: 0,
     seamless: true,
+    evidence: "observed",
   });
   const report = buildReport(RUN(t0), LAX, [
     SESSION(t0, [obs(t0 + 1_000, "connected"), obs(t0 + 29_000, "connected")], t0 + 59_500),
-  ]) as { sessions: { reconnectMs: number | null; seamless: boolean }[] };
+  ]) as {
+    sessions: { reconnectMs: number | null; seamless: boolean; reloadEvidence: string | null }[];
+    summary: { pass: boolean; failures: string[] };
+  };
   assert.equal(report.sessions[0].seamless, false);
   assert.equal(report.sessions[0].reconnectMs, null);
+  assert.equal(report.sessions[0].reloadEvidence, "none");
+  // No evidence is a failed reload check, not a pass.
+  assert.equal(report.summary.pass, false);
+  assert.match(report.summary.failures.join(";"), /reload check unproven/);
+});
+
+test("backlog4: reload evidence gates the report", () => {
+  const t0 = Date.parse("2026-10-02T01:00:00Z");
+  const noEvidence = SESSION(t0, [obs(t0 + 1_000, "connected"), obs(t0 + 29_000, "connected")], t0 + 59_500);
+  const seamlessReload = SESSION(
+    t0,
+    [obs(t0 + 1_000, "connected"), obs(t0 + 31_000, "connected")],
+    t0 + 30_000,
+  );
+  const lostThenBack = SESSION(
+    t0,
+    [
+      obs(t0 + 1_000, "connected"),
+      obs(t0 + 32_000, "disconnected"),
+      obs(t0 + 36_000, "connected"),
+    ],
+    t0 + 30_000,
+  );
+  noEvidence.workspaceId = "ws_no_evidence";
+  seamlessReload.workspaceId = "ws_seamless";
+  lostThenBack.workspaceId = "ws_reconnected";
+  const typed = (r: unknown) =>
+    r as {
+      sessions: { reconnectMs: number | null; seamless: boolean; reloadEvidence: string | null }[];
+      summary: { pass: boolean; failures: string[] };
+    };
+  const good = typed(buildReport(RUN(t0), LAX, [seamlessReload, lostThenBack]));
+  assert.equal(good.sessions[0].reloadEvidence, "observed");
+  assert.equal(good.sessions[0].seamless, true);
+  assert.equal(good.sessions[0].reconnectMs, 0);
+  // Disconnected then connected after the reload -> real reconnectMs.
+  assert.equal(good.sessions[1].reloadEvidence, "observed");
+  assert.equal(good.sessions[1].seamless, false);
+  assert.equal(good.sessions[1].reconnectMs, 4_000);
+  assert.equal(good.summary.pass, true);
+  const bad = typed(buildReport(RUN(t0), LAX, [seamlessReload, lostThenBack, noEvidence]));
+  assert.equal(bad.sessions[2].reloadEvidence, "none");
+  assert.equal(bad.sessions[2].seamless, false);
+  assert.equal(bad.sessions[2].reconnectMs, null);
+  assert.equal(bad.summary.pass, false);
+  assert.match(bad.summary.failures.join(";"), /1 session\(s\) reloaded.*reload check unproven/);
 });
 
 test("R10b: a session that was not reloaded has no reconnect and is not seamless", () => {
   const t0 = Date.parse("2026-10-02T01:00:00Z");
   const report = buildReport(RUN(t0), LAX, [
     SESSION(t0, [obs(t0 + 1_000, "connected"), obs(t0 + 20_000, "connected")], null),
-  ]) as { sessions: { reconnectMs: number | null; seamless: boolean }[] };
+  ]) as { sessions: { reconnectMs: number | null; seamless: boolean; reloadEvidence: string | null }[] };
   assert.equal(report.sessions[0].reconnectMs, null);
   assert.equal(report.sessions[0].seamless, false);
+  assert.equal(report.sessions[0].reloadEvidence, null);
 });
 
 test("R5d: a run shorter than the requested soak duration fails as truncated", () => {

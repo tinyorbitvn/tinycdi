@@ -661,17 +661,15 @@ jobs:
       # SUPR-10: no setup-buildx here — `docker buildx imagetools` only
       # talks to the registry and needs no privileged BuildKit container.
 
-      # The validation/manifest scripts plus the browser and linux-desktop
-      # Dockerfiles (the manifest's chromium/firefox fields are read off
-      # their pins).
+      # The validation/manifest scripts; the manifest's chromium/firefox
+      # fields are read off the signed images' SPDX SBOMs (downloaded
+      # below), not the Dockerfile pins.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout-cone: false
           sparse-checkout: |
             .github/scripts
-            build/browser/Dockerfile
-            build/linux-desktop/Dockerfile
 
       - name: install cosign ${{ env.COSIGN_VERSION }} (pinned installer + sha256)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
@@ -766,11 +764,12 @@ jobs:
           done
 
       - name: write runtime-images.json
-        env:
-          BROWSER_DOCKERFILE: build/browser/Dockerfile
-          DESKTOP_DOCKERFILE: build/linux-desktop/Dockerfile
+        # Engine versions come from the built images themselves — the
+        # SPDX SBOMs the build jobs generated and this job just attested
+        # (SUPR-2) — so the manifest records what shipped, not the pin
+        # that asked for it.
         run: |
-          .github/scripts/write-runtime-manifest.sh refs runtime-images.json
+          .github/scripts/write-runtime-manifest.sh refs sboms runtime-images.json
           jq . runtime-images.json
 
       - name: upload manifest artifact

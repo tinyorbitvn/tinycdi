@@ -36,6 +36,8 @@
 
 - [releases/v0.3.0.md](releases/v0.3.0.md) — v0.3.0 release notes
   (source for the GitHub release)
+- [releases/v0.3.1.md](releases/v0.3.1.md) — v0.3.1 release notes
+- [releases/v0.3.2.md](releases/v0.3.2.md) — v0.3.2 release notes
 
 ## Security
 
@@ -61,6 +63,9 @@
   launch origin enforcement
 - [adr/0005-backend-frontend-operator.md](adr/0005-backend-frontend-operator.md) —
   v0.2: three components and per-workspace session hosts (accepted)
+- [adr/0006-rate-limit-state.md](adr/0006-rate-limit-state.md) —
+  rate-limiter state placement: per-replica vs Postgres-backed options
+  (proposed — decision pending for v0.4)
 
 ## Elsewhere in the repo
 

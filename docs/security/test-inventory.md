@@ -16,7 +16,9 @@ substitute for review).
 | Frontend server | `go test ./build/frontend` | folded into the Go test run |
 | Portal web | `npm ci`, `tsc`, `vitest`, `vite build` | `ci.yml` job `portal ui` |
 | Soak harness | `npm ci`, `tsc`, vitest + drills dry-run | `ci.yml` job `soak harness`; live soak out of band |
+| Go fuzz | `go test -fuzz=<target>` | `ci.yml` job `go fuzz`: 30 s per target on PRs touching the fuzzed packages, 10 m per target on the weekly schedule; crashers uploaded as artifacts |
 | Quickstart e2e | `hack/quickstart/up.sh` on kind + Playwright portal smoke | `ci.yml` job `quickstart` |
+| Partitioned-cookie e2e | quickstart + `values-partitioned.yaml` overlay + `partitioned.spec.ts` | `ci.yml` job `partitioned` (gated + weekly) |
 | Upgrade drill | previous release → tree on kind | `ci.yml` job `upgrade` |
 
 ## 2. Auth, session and API surface
@@ -83,6 +85,34 @@ substitute for review).
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
+
+### Fuzz targets (stdlib `testing.F`, run by the `go fuzz` CI job)
+
+- `internal/api/fuzz_callback_test.go` — `FuzzCallbackParsing`: OIDC
+  callback query params (state/code/error), raw Cookie header →
+  AEAD login-state open (test keys) and the code-exchange boundary
+  against the in-process issuer; asserts exact rejection order and
+  determinism, and that the callback rate-limit key is minted only for a
+  validated state.
+- `internal/gateway/fuzz_test.go` — `FuzzHostClassify`: arbitrary Host
+  headers (ports, IPv6 literals, IDNA/punycode, trailing dots, case) ×
+  request paths through `ServeHTTP`; asserts the host-class contract
+  (session host / control host / foreign → 421) is total and
+  deterministic.
+- `internal/gateway/fuzz_test.go` — `FuzzLaunchRedeem`: arbitrary launch
+  methods, query strings and form bodies through ticket redemption on an
+  in-memory digest store (tickets keyed by SHA-256 like
+  `launch_ticket.ticket_hash`); asserts the bounded status set, single
+  use, host binding, and that a 303 implies a well-formed cookie + clean
+  redirect with no ticket leakage.
+- `internal/ratelimit/fuzz_test.go` — `FuzzClientKey`: arbitrary
+  RemoteAddr, X-Forwarded-For lines and `-trusted-proxies` CIDR lists;
+  asserts the right-most-untrusted-entry contract end to end plus
+  deterministic, canonical-CIDR-only proxy parsing.
+- `internal/sessionhost/fuzz_test.go` — `FuzzDomainMatch`: arbitrary
+  session-domain config strings and Host headers through `ParseDomain`,
+  `Match`, `Label`/`WorkspaceID`; asserts determinism and
+  accept-implies-well-formed round-trips.
 
 ## 4. Broker, tickets, leases, internal mTLS
 
@@ -192,6 +222,7 @@ Security-relevant subset:
 | `workflow-policy` | `.github/tests/*.test.sh` regression suite, `.trivyignore` expiry policy (`check-trivyignore.sh`), kasm-catalog policy (`check-kasm-catalog.sh`) |
 | `kasm-contract` | adapter contract test + catalog scan (trivy gate + engine freshness floor); weekly + kasm-relevant PRs |
 | `quickstart` | kind e2e + Playwright portal smoke; `shellcheck` on quickstart scripts |
+| `partitioned` | kind e2e with `backend.sessionCookieMode: partitioned` — CHIPS Set-Cookie attributes, in-frame reconnect across a backend rollout (digest rehydrate), revoked-lease cookie rejection, logout; `partitioned.spec.ts` on the pinned Chromium (CHIPS ≥ 118) |
 | `upgrade` | previous release → tree upgrade drill on kind |
 | `workflow lint` | actionlint + yamllint + zizmor on all workflows (sha256-pinned tools) |
 
@@ -275,11 +306,12 @@ context):
 
 ## 11. Gaps a reviewer will notice
 
-- No fuzzing anywhere (OIDC callback parsing, Host-header parsing, ticket
-  redemption are the natural targets).
 - No automated test asserts that sign-out revokes live leases (open item
   S17).
-- `partitioned` cookie mode coverage is unit-level; no kind/e2e coverage.
+- `partitioned` cookie mode now has kind e2e coverage (`ci.yml` job
+  `partitioned`); a cross-SITE deployment shape (portal and session on
+  different registrable domains) is still not exercised — kind resolves
+  everything under one domain.
 - Soak/drill harness exists (`tests/soak/`) but runs out of band, not per PR.
 - No load/abuse test of the rate limiters under multi-replica deployment.
 - Branch-protection drift is only as good as the last run of

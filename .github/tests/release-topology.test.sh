@@ -247,7 +247,12 @@ chk "runtime-images: runtime release never takes the repo Latest marker (v* owns
 chk "runtime-images: never builds control-plane images" "$TRAIN" 'linux-desktop'
 chk "runtime-images: builds the shared base" "$TRAIN" 'build/linux-base/\*\*'
 chk "runtime-images: base is in the scan matrix" "$TRAIN" 'image: \[linux-base, linux-desktop, browser\]'
-chk "runtime-images: manifest reads the desktop firefox pin" "$TRAIN" 'DESKTOP_DOCKERFILE: build/linux-desktop/Dockerfile'
+# RTJSON-1 / backlog 14: the manifest's engine fields are read out of
+# the signed images' SPDX SBOMs — what the image actually installed —
+# never the Dockerfile pins.
+chk "runtime-images: manifest versions read from the image SBOMs" "$TRAIN" 'write-runtime-manifest\.sh refs sboms '
+chk_absent "runtime-images: manifest no longer reads Dockerfile pins" "$TRAIN" 'DOCKERFILE'
+order "runtime-images: SBOMs downloaded before manifest write" "$TRAIN" 'name: download refs \+ SBOMs' 'name: write runtime-images\.json'
 # V3.22 / backlog 15: the rt-* N numbers successful publishes — derived
 # by next-rt-tag.sh from the day's already-promoted registry tags, once
 # in meta (labels) and again in publish right before promotion so a
