@@ -66,7 +66,11 @@ render; the rest are changed defaults you may want to pin back.
   sign-in start itself (`docs/runbooks/capacity.md`, "Sign-in rate
   limits and NAT"). Leave it empty and every user collapses into the
   edge's own IP bucket; the backend only logs a startup warning, it
-  does not fail.
+  does not fail. Note the buckets are in-memory per replica: with
+  `backend.replicas: N` one key draws up to ~N× the configured rate
+  (2 replicas × `-login-rate` 30/min + burst 10 ≈ 80/min aggregate
+  for one anonymous IP) — size `-login-rate` as aggregate-need ÷
+  replicas.
 - **Kasm Browser templates** — a seeded `adapter: kasm` template with
   `experience: Browser` fails the render until its image is on
   `kasmAdapter.browserAllowlist` or the template is re-classed
