@@ -70,6 +70,9 @@ export function dataArea(ctx: MockContext): MockArea {
       );
     }
     rec.state = "Attaching";
+    // One stamp for the whole insert: the UI keys "create" vs "start" on
+    // createdAt === updatedAt, and two reads can straddle a millisecond.
+    const ts = ctx.nowIso();
     const ws = makeWorkspace({
       id: `${ctx.nextId("ws_")}ATTACH9X`,
       name: String(req.body?.name ?? "restored-desktop"),
@@ -86,8 +89,8 @@ export function dataArea(ctx: MockContext): MockArea {
       dataPolicy: "Retain",
       retainedDataRef: rec.id,
       conditions: [],
-      createdAt: ctx.nowIso(),
-      updatedAt: ctx.nowIso(),
+      createdAt: ts,
+      updatedAt: ts,
     });
     rec.consumingWorkspaceId = ws.id;
     state.workspaces.set(ws.id, ws);
