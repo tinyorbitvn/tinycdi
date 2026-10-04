@@ -90,11 +90,15 @@ spec:
       # The API projects Workspace CRs and reads templates/secrets in the
       # managed namespaces (rbac.yaml backend-role).
       automountServiceAccountToken: true
-      # SIGTERM fails readiness, then both listeners keep serving for the
-      # whole -drain-window (default 8 s, TCDI_DRAIN_WINDOW): reads answer,
-      # new launches/upgrades get a retryable 503, then graceful listener
-      # shutdown — all under one 24 s deadline (internal/backend). 30 s
-      # covers it with margin. Never lower this below 30.
+      # SIGTERM fails readiness, then the pod waits
+      # -drain-propagation-delay (backend.drainPropagationDelay, default
+      # 5 s) for the endpoint removal to propagate while streams keep
+      # flowing, closes them with a graceful 1001, and holds both
+      # listeners for the whole -drain-window (default 8 s,
+      # TCDI_DRAIN_WINDOW): reads answer, new launches/upgrades get a
+      # retryable 503, then graceful listener shutdown — all under one
+      # 24 s deadline (internal/backend). 30 s covers it with margin.
+      # Never lower this below 30.
       terminationGracePeriodSeconds: 30
       securityContext:
         {{- include "tinycdi.podSecurityContext" .Values.backend.podSecurityContext | nindent 8 }}
@@ -130,6 +134,9 @@ spec:
             - -tls-cert=/tls/app/tls.crt
             - -tls-key=/tls/app/tls.key
             - -session-idle={{ .Values.backend.sessionIdle }}
+            # readiness drop -> endpoint-removal propagation wait ->
+            # graceful 1001 stream close -> drain-window hold (FX-R34).
+            - -drain-propagation-delay={{ .Values.backend.drainPropagationDelay }}
             {{- $tenantQuotas := include "tinycdi.tenantQuotas" . }}
             {{- if $tenantQuotas }}
             # managedNamespaces[].quota: the singleton leader upserts these

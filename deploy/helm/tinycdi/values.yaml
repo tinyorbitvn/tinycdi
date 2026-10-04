@@ -213,6 +213,16 @@ backend:
   # directory is shared across replicas — never a per-pod name.
   gatewayID: tinycdi-backend
   sessionIdle: 30m
+  # Pre-stop drain order (FX-R34): on SIGTERM /readyz fails at once, then
+  # the backend waits drainPropagationDelay for the pod's endpoint
+  # removal to reach kube-proxy / the ingress — streams keep flowing and
+  # new upgrades are still served — before the graceful 1001 close
+  # tells clients to reconnect (their retry then lands on a sibling
+  # replica, not back here). The drain window (-drain-window, 8 s
+  # binary default) then holds the listeners for late reads. Budget:
+  # delay + window must leave >= 4 s of the 24 s shutdown deadline for
+  # listener shutdown; the deadline sits under the 30 s grace period.
+  drainPropagationDelay: 5s
   # Session-cookie mode: "lax" (portal and session domain on the same
   # registrable domain) or "partitioned" (SameSite=None;Secure;Partitioned
   # — for cross-site deployments).

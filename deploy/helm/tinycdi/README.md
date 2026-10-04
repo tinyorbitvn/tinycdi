@@ -243,6 +243,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `backend.sessionIdle` | `30m` | session idle timeout |
+| `backend.drainPropagationDelay` | `5s` | wait between the readiness drop and the graceful 1001 stream close on pod drain, so the endpoint removal reaches kube-proxy/the ingress before clients are told to reconnect — budget: delay + drain window (8 s) must leave >= 4 s of the 24 s shutdown deadline inside the 30 s grace period |
 | `backend.sessionCookieMode` | `lax` | session cookie mode — `lax` (portal + session domain on one registrable domain) or `partitioned` (cross-site) |
 | `backend.gatewayID` | `tinycdi-backend` | ONE gateway identity shared by all replicas — the lease directory is per-identity, so it must be a literal, never a pod name |
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |

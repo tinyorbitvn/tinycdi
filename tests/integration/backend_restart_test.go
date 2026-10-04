@@ -605,6 +605,11 @@ func (f *restartFixture) flags(replica string) []string {
 		// The drain window is held for its full length on every stop —
 		// 1 s keeps the drill fast while staying a real duration.
 		"-drain-window", "1s",
+		// The propagation wait is exercised by its own test; 0 keeps
+		// every shared replica stop fast and the window semantics the
+		// pre-stop drills assert unchanged (refusals start at the
+		// readiness drop).
+		"-drain-propagation-delay", "0",
 		"-internal-listen", "",
 		"-metrics-listen", "",
 	}

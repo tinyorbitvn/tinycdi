@@ -147,3 +147,80 @@ func TestTwoReplicas_PreStopDrainKeepsReadsZeroNon2xx(t *testing.T) {
 	}
 	wsEcho(t, again)
 }
+
+// TestTwoReplicas_DrainPropagationWait (FX-R34): the drain order is
+// readiness drop -> endpoint-propagation wait -> stream close -> window
+// hold. Inside the propagation wait a new WebSocket upgrade is still
+// SERVED — the replica may legitimately still be routed, and refusing
+// would waste the client's single in-frame retry on a 503 — while a
+// probe after the wait gets the retryable 503, and Run takes at least
+// delay + window before returning.
+func TestTwoReplicas_DrainPropagationWait(t *testing.T) {
+	f := newRestartFixture(t)
+	const delay = 800 * time.Millisecond
+	a := f.startReplicaWith(t, "a",
+		"-drain-propagation-delay", delay.String(),
+		"-drain-window", "400ms")
+	defer a.cleanup(t)
+	b := f.startReplica(t, "b")
+	defer b.cleanup(t)
+
+	sess, csrf := f.portalLogin(t, a, a)
+	cookie := f.launch(t, a, f.issueTicket(t, a, sess, csrf))
+
+	start := time.Now()
+	a.beginStop(t)
+
+	// Readiness drops first — the probe below lands inside the wait.
+	eventually(t, "replica a reports draining", 5*time.Second, func() bool {
+		resp, err := a.client.Get(a.appURL + "/readyz")
+		if err != nil {
+			return false
+		}
+		drainBody(resp)
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+	if d := time.Since(start); d >= delay {
+		t.Fatalf("readiness barrier took %v, past the %v propagation delay", d, delay)
+	}
+
+	// Still inside the wait: a new upgrade is served (101), not refused.
+	if resp := f.wsTry(a, cookie); resp == nil {
+		t.Fatal("session listener refused a connection inside the propagation wait")
+	} else {
+		code := resp.StatusCode
+		resp.Body.Close()
+		if code != http.StatusSwitchingProtocols {
+			t.Fatalf("upgrade inside the propagation wait = %d, want 101 (serving, not 503)", code)
+		}
+	}
+
+	// After the wait the drain refuses new upgrades with the retryable
+	// 503 — the first refusal must not precede the delay.
+	saw503At := time.Time{}
+	eventually(t, "upgrade refused after the propagation wait", delay+3*time.Second, func() bool {
+		resp := f.wsTry(a, cookie)
+		if resp == nil {
+			return false
+		}
+		code := resp.StatusCode
+		drainBody(resp)
+		if code == http.StatusServiceUnavailable {
+			saw503At = time.Now()
+			return true
+		}
+		if code == http.StatusSwitchingProtocols {
+			return false // still inside the wait: served
+		}
+		t.Fatalf("upgrade after propagation wait = %d, want 503 or 101", code)
+		return false
+	})
+	if d := saw503At.Sub(start); d < delay {
+		t.Fatalf("first 503 %v after cancel, before the %v propagation delay ended", d, delay)
+	}
+
+	a.waitStopped(t)
+	if d := time.Since(start); d < delay+300*time.Millisecond {
+		t.Fatalf("Run returned %v after cancel, before propagation delay + drain window", d)
+	}
+}

@@ -120,6 +120,7 @@
         "replicas": {"type": "integer", "minimum": 0},
         "gatewayID": {"type": "string"},
         "sessionIdle": {"type": "string"},
+        "drainPropagationDelay": {"type": "string"},
         "sessionCookieMode": {"type": "string", "enum": ["lax", "partitioned"]},
         "loginKeys": {
           "type": "object",

@@ -2656,6 +2656,21 @@ func TestBackendDefaults(t *testing.T) {
 	}
 }
 
+// TestBackendDrainPropagationDelay (FX-R34): the chart renders
+// -drain-propagation-delay from backend.drainPropagationDelay (default
+// 5s) — the wait between the readiness drop and the graceful stream
+// close so endpoint removal propagates before clients retry.
+func TestBackendDrainPropagationDelay(t *testing.T) {
+	args := backendArgsWith(t)
+	if !hasArg(args, "-drain-propagation-delay=5s") {
+		t.Errorf("default render lacks -drain-propagation-delay=5s: %v", args)
+	}
+	args = backendArgsWith(t, "backend.drainPropagationDelay=2s")
+	if !hasArg(args, "-drain-propagation-delay=2s") {
+		t.Errorf("backend.drainPropagationDelay=2s must render -drain-propagation-delay=2s: %v", args)
+	}
+}
+
 // TestOperatorDefaultsHA: E4 — the operator Deployment ships HA defaults:
 // 2 replicas, leader election enabled, and a PodDisruptionBudget with
 // minAvailable 1 so a voluntary disruption keeps a live reconciler.
