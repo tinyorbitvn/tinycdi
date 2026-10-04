@@ -165,6 +165,12 @@ type Config struct {
 	GatewayAudience string
 	LoginKeyFiles   stringList // first file seals; all open (rotation)
 	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/S18)
+	// RateLimitReplicas is the backend replica count the per-key rate
+	// budgets are divided by, so the aggregate across replicas
+	// approximates the -login-rate/-launch-rate bound instead of
+	// multiplying by N (RL-1). >= 1; the chart sets it to
+	// backend.replicas.
+	RateLimitReplicas int
 
 	// Split/test mode: session listener over a remote mTLS broker.
 	BrokerURL string
@@ -254,7 +260,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.ImageBlockAfter, "image-block-after", envDur(getenv, "TCDI_IMAGE_BLOCK_AFTER", api.DefaultImageBlockAfter),
 		"runtime image age that blocks create/start with 409 IMAGE_STALE (E3); a missing imageBuiltAt never blocks; 0 disables (env TCDI_IMAGE_BLOCK_AFTER)")
 	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
-		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10); over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
+		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10), divided across -rate-limit-replicas replicas; over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
 	// Session listener.
 	fs.StringVar(&c.SessionListen, "session-listen", envOr(getenv, "TCDI_SESSION_LISTEN", ":8444"),
@@ -272,7 +278,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain window: listeners keep serving reads and refuse new launches/upgrades until it ends (0 shuts down immediately)")
 	fs.DurationVar(&c.DrainPropagationDelay, "drain-propagation-delay", envDur(getenv, "TCDI_DRAIN_PROPAGATION_DELAY", 5*time.Second), "wait between the readiness drop and the stream close at drain start, so endpoint removal propagates before clients are told to reconnect (0 closes streams at once)")
 	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 60),
-		"per-client launches/minute on /v1/launch (burst 20); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
+		"per-client launches/minute on /v1/launch (burst 20), divided across -rate-limit-replicas replicas; over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),
@@ -299,6 +305,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"OIDC login-state sealing key file (repeatable or CSV; env TCDI_LOGIN_KEY_FILE; first file seals, all open; required when the app listener is on)")
 	fs.StringVar(&c.TrustedProxies, "trusted-proxies", envOr(getenv, "TCDI_TRUSTED_PROXIES", ""),
 		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For claims are trusted; empty trusts only the socket peer (env TCDI_TRUSTED_PROXIES)")
+	fs.IntVar(&c.RateLimitReplicas, "rate-limit-replicas", envInt(getenv, "TCDI_RATE_LIMIT_REPLICAS", 1),
+		"backend replica count -login-rate/-launch-rate are divided by so the aggregate across replicas approximates the configured bound; set to the deployment replica count (env TCDI_RATE_LIMIT_REPLICAS)")
 
 	// Split/test mode.
 	fs.StringVar(&c.BrokerURL, "broker-url", envOr(getenv, "TCDI_BROKER_URL", ""), "remote broker base URL (https); split/test mode only — requires -listen= and -internal-listen=")
@@ -357,6 +365,9 @@ func (c *Config) validate() error {
 	}
 	if c.LoginRate < 0 || c.LaunchRate < 0 {
 		return errors.New("-login-rate and -launch-rate must be >= 0 (0 disables the limit)")
+	}
+	if c.RateLimitReplicas < 1 {
+		return errors.New("-rate-limit-replicas must be >= 1")
 	}
 	if c.DrainWindow < 0 {
 		return errors.New("-drain-window must be >= 0 (0 shuts down immediately, without a drain hold)")

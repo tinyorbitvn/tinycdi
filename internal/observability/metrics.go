@@ -64,6 +64,14 @@ var (
 	rateLimitRoutes = map[string]struct{}{
 		"/v1/login": {}, "/v1/auth/callback": {}, "/v1/session": {}, "/v1/launch": {},
 	}
+	// frameReloadDests are the browsing-context destinations a counted
+	// session-frame re-navigation may report (Sec-Fetch-Dest):
+	// iframe = the portal's embedded session frame, document = a
+	// top-level load (open-in-new-tab / full reload). Absent or
+	// unrecognized values fold into "other".
+	frameReloadDests = map[string]struct{}{
+		"iframe": {}, "document": {},
+	}
 )
 
 func boundValue(v string, allowed map[string]struct{}) string {
@@ -93,6 +101,7 @@ type Metrics struct {
 	logins         *prometheus.CounterVec
 	imageAge       *prometheus.GaugeVec
 	rateLimited    *prometheus.CounterVec
+	frameReloads   *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -171,6 +180,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "rate_limited_total",
 			Help: "Requests refused by the per-client rate limiters, by bounded route template.",
 		}, []string{"route"}),
+		frameReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "session_frame_reloads_total",
+			Help: "Session-frame document loads re-navigating a session whose lease already had a stream, by bounded destination. Only same-tab reloads count: a load whose embedded claiming tab id differs from the lease's stream owner (second-tab takeover) is excluded, and the client's in-frame websocket retries never produce a document load.",
+		}, []string{"dest"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -180,7 +193,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
-		m.rateLimited,
+		m.rateLimited, m.frameReloads,
 	)
 	return m
 }
@@ -292,4 +305,12 @@ func (m *Metrics) DeleteRuntimeImageAge(family string) {
 // /v1/launch, other}.
 func (m *Metrics) IncRateLimited(route string) {
 	m.rateLimited.WithLabelValues(boundValue(route, rateLimitRoutes)).Inc()
+}
+
+// IncFrameReload counts one session-frame re-navigation: a document load on
+// the session host for a session whose lease already had a stream (the
+// KasmVNC client's own websocket retries never touch it). dest is bounded
+// to {iframe, document, other}.
+func (m *Metrics) IncFrameReload(dest string) {
+	m.frameReloads.WithLabelValues(boundValue(dest, frameReloadDests)).Inc()
 }
