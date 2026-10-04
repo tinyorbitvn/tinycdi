@@ -406,12 +406,12 @@ func TestRequestStop_RejectsStaleGeneration(t *testing.T) {
 	if !errors.Is(err, broker.ErrStaleBinding) {
 		t.Fatalf("RequestStop(gen 2 while gen 3 runs) = %v, want ErrStaleBinding", err)
 	}
-	drained, err := p.DrainStops(ctx)
+	pending, err := p.PendingStops(ctx)
 	if err != nil {
-		t.Fatalf("DrainStops: %v", err)
+		t.Fatalf("PendingStops: %v", err)
 	}
-	if len(drained) != 0 {
-		t.Fatalf("stale RequestStop still recorded an intent: %+v", drained)
+	if len(pending) != 0 {
+		t.Fatalf("stale RequestStop still recorded an intent: %+v", pending)
 	}
 }
 
@@ -426,17 +426,22 @@ func TestRequestStop_CurrentGeneration(t *testing.T) {
 	if err := b.RequestStop(ctx, "ws-1", 3, broker.StopReasonMaxDuration); err != nil {
 		t.Fatalf("RequestStop: %v", err)
 	}
-	got, err := p.DrainStops(ctx)
+	got, err := p.PendingStops(ctx)
 	if err != nil {
-		t.Fatalf("DrainStops: %v", err)
+		t.Fatalf("PendingStops: %v", err)
 	}
 	wantIntents(t, got, []broker.StopIntent{{
 		WorkspaceUID: "ws-1", RuntimeGeneration: 3, Reason: broker.StopReasonMaxDuration,
 	}})
-	// Drained intents do not repeat.
-	got, err = p.DrainStops(ctx)
+	// The sweep consumes the recorded intent exactly once: emitting it
+	// drains the row, so the next listing is empty.
+	markRunning(t, db, "ws-1", 3)
+	if _, err := p.Sweep(ctx, staticRunning{running("ws-1", 3, clock.Now(), broker.DefaultTimeoutPolicy)}); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	got, err = p.PendingStops(ctx)
 	if err != nil {
-		t.Fatalf("DrainStops(2): %v", err)
+		t.Fatalf("PendingStops(2): %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("drained intents replayed: %+v", got)
