@@ -17,6 +17,7 @@ substitute for review).
 | Portal web | `npm ci`, `tsc`, `vitest`, `vite build` | `ci.yml` job `portal ui` |
 | Soak harness | `npm ci`, `tsc`, vitest + drills dry-run | `ci.yml` job `soak harness`; live soak out of band |
 | Quickstart e2e | `hack/quickstart/up.sh` on kind + Playwright portal smoke | `ci.yml` job `quickstart` |
+| Partitioned-cookie e2e | quickstart + `values-partitioned.yaml` overlay + `partitioned.spec.ts` | `ci.yml` job `partitioned` (gated + weekly) |
 | Upgrade drill | previous release → tree on kind | `ci.yml` job `upgrade` |
 
 ## 2. Auth, session and API surface
@@ -192,6 +193,7 @@ Security-relevant subset:
 | `workflow-policy` | `.github/tests/*.test.sh` regression suite, `.trivyignore` expiry policy (`check-trivyignore.sh`), kasm-catalog policy (`check-kasm-catalog.sh`) |
 | `kasm-contract` | adapter contract test + catalog scan (trivy gate + engine freshness floor); weekly + kasm-relevant PRs |
 | `quickstart` | kind e2e + Playwright portal smoke; `shellcheck` on quickstart scripts |
+| `partitioned` | kind e2e with `backend.sessionCookieMode: partitioned` — CHIPS Set-Cookie attributes, in-frame reconnect across a backend rollout (digest rehydrate), revoked-lease cookie rejection, logout; `partitioned.spec.ts` on the pinned Chromium (CHIPS ≥ 118) |
 | `upgrade` | previous release → tree upgrade drill on kind |
 | `workflow lint` | actionlint + yamllint + zizmor on all workflows (sha256-pinned tools) |
 
@@ -279,7 +281,10 @@ context):
   redemption are the natural targets).
 - No automated test asserts that sign-out revokes live leases (open item
   S17).
-- `partitioned` cookie mode coverage is unit-level; no kind/e2e coverage.
+- `partitioned` cookie mode now has kind e2e coverage (`ci.yml` job
+  `partitioned`); a cross-SITE deployment shape (portal and session on
+  different registrable domains) is still not exercised — kind resolves
+  everything under one domain.
 - Soak/drill harness exists (`tests/soak/`) but runs out of band, not per PR.
 - No load/abuse test of the rate limiters under multi-replica deployment.
 - Branch-protection drift is only as good as the last run of
