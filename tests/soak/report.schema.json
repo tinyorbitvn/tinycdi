@@ -117,6 +117,7 @@
           "connectMs",
           "reconnectMs",
           "seamless",
+          "reloadEvidence",
           "longestGapMs",
           "nonConnectedStates",
           "elsewhereTransitions",
@@ -144,6 +145,11 @@
           "seamless": {
             "type": "boolean",
             "description": "True when the mid-run reload was observed within 60 s and showed no non-connected state. A later gap (a drill) is not attributed to the reload. False when not reloaded or when nothing was observed inside the window (backlog 4: zero observations is never seamless)."
+          },
+          "reloadEvidence": {
+            "type": ["string", "null"],
+            "enum": ["observed", "none", null],
+            "description": "Evidence behind the reload check: 'observed' when at least one observation landed inside the 60 s post-reload window, 'none' when it was empty — an explicit no-evidence verdict that fails the run's reload check (backlog 4). null when the session was never reloaded."
           },
           "longestGapMs": {
             "type": "number",

@@ -184,13 +184,20 @@ day):
     {"name": "linux-base", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-base",
      "digest": "sha256:…", "tag": "rt-20261020.1"},
     {"name": "linux-desktop", "ref": "ghcr.io/tinyorbitvn/tinycdi-linux-desktop",
-     "digest": "sha256:…", "tag": "rt-20261020.1", "firefox": "153.4.0esr"},
+     "digest": "sha256:…", "tag": "rt-20261020.1",
+     "firefox": "153.4.0esr-1~deb12u1"},
     {"name": "browser", "ref": "ghcr.io/tinyorbitvn/tinycdi-browser",
-     "digest": "sha256:…", "tag": "rt-20261020.1", "chromium": "154.0.8037.92",
-     "firefox": "153.4.0esr"}
+     "digest": "sha256:…", "tag": "rt-20261020.1",
+     "chromium": "154.0.8037.92-1~deb12u1",
+     "firefox": "153.4.0esr-1~deb12u1"}
   ]
 }
 ```
+
+The `chromium`/`firefox` fields are the full Debian package versions the
+signed images actually installed — read off each image's attested SPDX
+SBOM at publish time (what `dpkg-query` reports), not the Dockerfile
+pins that requested them. `linux-base` carries no browser.
 
 Chart values stay GitOps-owned (P7): deployments bump
 `images.*.digest`/`images.*.builtAt` from the manifest — the train
