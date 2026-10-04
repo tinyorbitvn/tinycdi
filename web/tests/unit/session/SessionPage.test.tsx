@@ -883,3 +883,74 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ---- V3.10b confirmation: the ~120 s gaps were suppressed reconnects ----
+
+describe("SessionPage reconnect suppression (V3.10b evidence)", () => {
+  // DB evidence: the two gap sessions flipped to 'elsewhere' while their
+  // stream-owner backend pod died, the watch disarmed, the lease expired,
+  // and the SPA made no POST /v1/connections for ~85 s. With ownership the
+  // page stays 'ours'/provisional — the watch's relaunch must fire on the
+  // first lease-gone poll.
+  it("stream dies + lease expires under our owner id → immediate relaunch, never 'elsewhere'", async () => {
+    const { api, ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
+    await connectViaResume(ws, control);
+
+    // The pod holding our stream dies mid-rollout: stream gone, lease
+    // still nominally alive, owner id still ours.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    // The lease then lapses while the page still believes 'ours' — drop
+    // the mock's lease row too, so the relaunch ticket mints (a still-
+    // held lease would be a takeover, not a relaunch).
+    api.state.leases.delete(ws.id);
+    control.connection = () => ({ state: "none", leaseActive: false });
+
+    // The relaunch goes out on the next poll — a fresh ticket, not an
+    // 'elsewhere' wait for user input or for the lease to come back. (The
+    // rc.2 failure was ~85 s with zero POST /v1/connections.)
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+
+    // The launch is in flight — "connecting", not parked on a verdict —
+    // and exactly one ticket went out (no double mint while the ticket
+    // request was in flight).
+    expect(badge()).toHaveTextContent("Connecting");
+    expect(submitted.length).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(ticketPosts()).toHaveLength(1);
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  }, 20_000);
+
+  it("lease expires while our claim is still provisional → launches fresh, never parks", async () => {
+    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    // A foreign stream holds the lease our marker names — our claim is
+    // pending — and the lease then dies inside the window.
+    let gone = false;
+    control.connection = () =>
+      gone
+        ? { state: "none", leaseActive: false }
+        : {
+            state: "connected",
+            leaseActive: true,
+            leaseRef: OWN_REF,
+            streamEpoch: 1,
+            streamOwnerTab: "deadbeefdeadbeefdeadbeefdeadbeef",
+          };
+    await new Promise((r) => setTimeout(r, 150));
+    gone = true;
+
+    // Provisional must not suppress reconnect: the resume path sees the
+    // lease die and falls back to a ticket launch.
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+});
