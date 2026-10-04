@@ -721,6 +721,23 @@ rolling-upgrade window. Once every backend is v0.3 the column carries
 only NULLs; **v0.4 drops `sessions.csrf_token`** — do not roll back to
 v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
 
+**v0.3 → v0.4 drops `sessions.csrf_token`** (migration
+`019_sessions_drop_csrf_column`). Read this before upgrading:
+
+- **Upgrade through v0.3.x — never v0.2.x → v0.4 directly.** The drop is
+  rolling-upgrade safe from v0.3.x: no v0.3 binary names the column, so
+  an old v0.3 replica keeps running against the contracted schema. A
+  still-running **v0.2 replica names `csrf_token` in every session
+  `SELECT`/`INSERT` and fails the moment the column disappears** — every
+  backend must be on v0.3.x before the v0.4 schema lands.
+- **Take the `pg_dump` first** (`docs/runbooks/backup-restore.md`). The
+  migration runs at backend startup like every other; the backup is the
+  only way back.
+- **The drop is irreversible.** There is no down migration: rolling the
+  release back with `helm rollback` leaves the column gone. To undo the
+  upgrade, restore the pre-upgrade `pg_dump` per
+  `docs/runbooks/backup-restore.md` — that is a restore, not a rollback.
+
 ## Rollback
 
 - **Binary rollback is supported:** `helm rollback tinycdi -n <release-ns>`
