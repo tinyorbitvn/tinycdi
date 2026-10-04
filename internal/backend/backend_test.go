@@ -294,14 +294,14 @@ func TestRouteIsolation_SessionListener(t *testing.T) {
 // fakeConnIssuer satisfies api.ConnectionIssuer for route-table tests.
 type fakeConnIssuer struct{}
 
-func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, string) (api.IssuedTicket, *api.Error) {
+func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, string, string) (api.IssuedTicket, *api.Error) {
 	return api.IssuedTicket{}, &api.Error{Code: api.CodeNotFound, Message: "no ticket in tests"}
 }
 
 // fakeConnStater satisfies api.ConnectionStater for route-table tests.
 type fakeConnStater struct{}
 
-func (fakeConnStater) ConnectionState(context.Context, string) (api.ConnectionStatus, *api.Error) {
+func (fakeConnStater) ConnectionState(context.Context, string, string) (api.ConnectionStatus, *api.Error) {
 	return api.ConnectionStatus{State: "none"}, nil
 }
 
@@ -988,7 +988,7 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	tick, err := brk.IssueTicket(ctx,
 		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
-		"ws-shared-1", false, "")
+		"ws-shared-1", false, "", "")
 	if err != nil {
 		t.Fatalf("issue ticket: %v", err)
 	}

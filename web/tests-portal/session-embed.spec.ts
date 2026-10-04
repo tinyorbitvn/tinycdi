@@ -47,10 +47,19 @@ async function embedRun(fixtures: {
   // (KasmVNC forces resize=off inside an iframe otherwise, FX-R18) plus the
   // static embedded-parity settings (V3.24) and the clipboard flags from
   // the policy recorded on the ticket — none here, so least privilege.
-  expect(frame.url()).toBe(
-    `${origin}/?resize=remote&enable_webp=true&idle_disconnect=1440` +
-      `&clipboard_up=false&clipboard_down=false`,
-  );
+  // The path= setting carries the page's stream-owner tab id (FX-R31).
+  const frameUrl = new URL(frame.url());
+  expect(`${frameUrl.origin}${frameUrl.pathname}`).toBe(`${origin}/`);
+  for (const [k, v] of [
+    ["resize", "remote"],
+    ["enable_webp", "true"],
+    ["idle_disconnect", "1440"],
+    ["clipboard_up", "false"],
+    ["clipboard_down", "false"],
+  ] as const) {
+    expect(frameUrl.searchParams.get(k), `param ${k}`).toBe(v);
+  }
+  expect(frameUrl.searchParams.get("path")).toMatch(/^websockify\?tcdi_tab=[0-9a-f]{32}$/);
   await expect(frame.locator("h1")).toContainText(DESKTOP_MARKER);
 
   // FX-R22: the client's two load-time probes both succeed in the frame —

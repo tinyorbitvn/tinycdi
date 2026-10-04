@@ -27,6 +27,13 @@ export const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000] as const;
 export const MAX_AUTO_RELAUNCH = 2; // per 5 minutes
 export const CONNECTION_POLL_MS = 5_000;
 export const AUTO_RELAUNCH_WINDOW_MS = 5 * 60_000;
+// Minimum spacing between relaunch ticket mints: a successful mint's
+// "relaunched" dispatch takes a render to disable this watch, and a
+// straggler lease-gone poll in that gap must not mint again (two mints
+// back-to-back burn the whole budget). Real retries still get through —
+// a live relaunch means the next poll finds the lease active, and a
+// genuinely dead one outlives the gate.
+export const RELAUNCH_RETRY_MS = 1_000;
 
 /** GET /v1/workspaces/{id}/connection response body. */
 export type ConnectionStatus = components["schemas"]["ConnectionStatus"];
@@ -90,6 +97,11 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
     // that settles after the watch was disabled or unmounted must not act.
     let stopped = false;
     let inflight = false;
+    // A lease-gone relaunch is async and fire-and-forget: a poll that finds
+    // the lease still gone while its ticket request is in flight must not
+    // mint a second one (two concurrent mints burn the relaunch budget and
+    // the loser can exhaust it spuriously).
+    let relaunchInflight = false;
     // Earliest moment the lease-active path may give up: the last reload
     // gets its step's full interval, not just the time to the next poll.
     let exhaustAfter = 0;
@@ -118,6 +130,7 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
 
     const relaunch = async () => {
       relaunches.current.push(Date.now());
+      relaunchInflight = true;
       try {
         const ticket = await opts.current.requestTicket();
         if (stopped) return;
@@ -131,6 +144,8 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
       } catch (e) {
         if (stopped) return;
         opts.current.onEvent({ type: "relaunch-error", error: e });
+      } finally {
+        relaunchInflight = false;
       }
     };
 
@@ -163,9 +178,14 @@ export function useConnectionWatch(options: ConnectionWatchOptions): void {
         return;
       }
       // The lease is gone: recover through a fresh ticket, bounded per
-      // window so a dead session cannot mint tickets forever.
+      // window so a dead session cannot mint tickets forever. One mint in
+      // flight at a time (relaunchInflight) and none inside RELAUNCH_RETRY_MS
+      // of the last — the "relaunched" dispatch needs that beat to land.
+      if (relaunchInflight) return;
       const now = Date.now();
       relaunches.current = relaunches.current.filter((t) => now - t < AUTO_RELAUNCH_WINDOW_MS);
+      const last = relaunches.current[relaunches.current.length - 1];
+      if (last !== undefined && now - last < RELAUNCH_RETRY_MS) return;
       if (relaunches.current.length >= MAX_AUTO_RELAUNCH) {
         exhaust();
         return;

@@ -56,12 +56,16 @@ describe("session host mapping", () => {
   it("sessionFrameUrl carries the embedded-mode settings", () => {
     const base =
       "resize=remote&enable_webp=true&idle_disconnect=1440&clipboard_up=false&clipboard_down=false";
-    expect(sessionFrameUrl(WS, "session.example.com")).toBe(
-      `https://ws-0123456789abcdef.session.example.com/?${base}`,
-    );
-    expect(sessionFrameUrl(WS, "session.example.com:8443")).toBe(
-      `https://ws-0123456789abcdef.session.example.com:8443/?${base}`,
-    );
+    for (const url of [
+      sessionFrameUrl(WS, "session.example.com"),
+      sessionFrameUrl(WS, "session.example.com:8443"),
+    ]) {
+      expect(url).toContain(`/?${base}`);
+      // FX-R31: the client's `path` setting carries this tab's owner id so
+      // every websocket claim lands on the lease under it.
+      const path = new URL(url).searchParams.get("path");
+      expect(path).toMatch(/^websockify\?tcdi_tab=[0-9a-f]{32}$/);
+    }
     // show_control_bar stays out: the portal owns session chrome.
     expect(sessionFrameUrl(WS, "session.example.com")).not.toContain("control_bar");
   });
@@ -135,7 +139,10 @@ describe("submitLaunch", () => {
     expect(submitted).toHaveLength(1);
     const form = submitted[0];
     expect(form.method).toBe("post");
-    expect(form.action).toBe(`${ORIGIN}/v1/launch`);
+    // The tab id rides the POST's query (the ticket itself stays in the body).
+    const action = new URL(form.action);
+    expect(`${action.origin}${action.pathname}`).toBe(`${ORIGIN}/v1/launch`);
+    expect(action.searchParams.get("tcdi_tab")).toMatch(/^[0-9a-f]{32}$/);
     expect(form.target).toBe(frame);
     const input = form.querySelector(`input[name="${TICKET_FIELD}"]`) as HTMLInputElement;
     expect(input.value).toBe("tkt_test");

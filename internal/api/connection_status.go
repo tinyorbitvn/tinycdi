@@ -32,13 +32,23 @@ type ConnectionStatus struct {
 	// StreamEpoch is the active lease's stream_epoch: it advances each time a
 	// stream is claimed on the lease. 0 without an active lease.
 	StreamEpoch uint64 `json:"streamEpoch"`
+	// StreamOwnerTab is the opaque per-tab id the current stream was claimed
+	// with (migration 018): the portal compares it against its own tab id —
+	// equal means the stream is ours even across a backend restart, different
+	// means another tab holds it. Absent when the claim carried no id, and
+	// NEVER served to a principal other than the lease's own.
+	StreamOwnerTab string `json:"streamOwnerTab,omitempty"`
 }
 
 // ConnectionStater is the broker-facing surface the handler needs. Defined
 // here (not in broker) so this package never imports internal/broker; the
 // adapter lives in internal/broker/apishim.go.
 type ConnectionStater interface {
-	ConnectionState(ctx context.Context, workspaceUID string) (ConnectionStatus, *Error)
+	// ConnectionState reports the workspace's connection state.
+	// portalSessionID is the caller's session id: StreamOwnerTab is
+	// populated only when the lease was minted under that session — never
+	// for a second session of the same user.
+	ConnectionState(ctx context.Context, workspaceUID, portalSessionID string) (ConnectionStatus, *Error)
 }
 
 // workspaceGetter is the ownership-check surface the endpoint shares with
@@ -96,7 +106,15 @@ func (h *ConnectionStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInternal, "internal error")
 		return
 	}
-	st, apiErr := h.stater.ConnectionState(r.Context(), id)
+	// streamOwnerTab is session-scoped evidence (R-V3c): the caller's
+	// session id, not the principal, gates it — a second session of the
+	// same user must not learn the claiming tab's id.
+	sess, _ := SessionFromContext(r.Context())
+	var sessionID string
+	if sess != nil {
+		sessionID = sess.ID
+	}
+	st, apiErr := h.stater.ConnectionState(r.Context(), id, sessionID)
 	if apiErr != nil {
 		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
 		return

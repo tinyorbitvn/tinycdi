@@ -41,6 +41,8 @@ export interface MockConnectionStatus {
   leaseRef?: string;
   /** The lease's stream epoch; advances when a new stream opens. */
   streamEpoch?: number;
+  /** The tab id the current stream was claimed with; absent for a legacy claim (FX-R31). */
+  streamOwnerTab?: string;
 }
 
 /** What the API publishes as leaseRef: SHA-256(lease ID), first 16 hex chars. */
@@ -63,8 +65,10 @@ export function sessionArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const scripted = new Map<string, MockConnectionStatus>();
   // Stream epoch per lease ID: 1 for a lease's first stream; the control
-  // route below advances it like a new stream opening would.
+  // route below advances it like a new stream opening would. The claiming
+  // tab's owner id rides the same write on the real broker (FX-R31).
   const epochs = new Map<string, number>();
+  const owners = new Map<string, string>();
 
   // launchOriginOK is the gateway's launchOriginOK (ADR 0004): the Origin
   // must exactly match a configured portal origin, or the session origin
@@ -160,7 +164,13 @@ export function sessionArea(ctx: MockContext): MockArea {
       leaseActive,
       lastRenewedAt: ctx.nowIso(),
       ...(leaseActive
-        ? { leaseRef: leaseRefOf(leaseId), streamEpoch: epochs.get(leaseId) ?? 1 }
+        ? {
+            leaseRef: leaseRefOf(leaseId),
+            streamEpoch: epochs.get(leaseId) ?? 1,
+            ...(owners.get(leaseId) !== undefined
+              ? { streamOwnerTab: owners.get(leaseId) }
+              : {}),
+          }
         : { streamEpoch: 0 }),
     });
   }
@@ -173,14 +183,17 @@ export function sessionArea(ctx: MockContext): MockArea {
     if (req.path === "/_control/launchRequests" && req.method === "GET") {
       return { status: 200, headers: { "content-type": "application/json" }, body: { requests: state.launchRequests } };
     }
-    // POST /_control/session/stream {workspaceId} — a new stream opened on
-    // the workspace's current lease: its epoch advances by one.
+    // POST /_control/session/stream {workspaceId, streamOwnerTab?} — a new
+    // stream opened on the workspace's current lease: its epoch advances by
+    // one and the claiming tab's id lands on the same "write" (FX-R31).
     if (req.path === "/_control/session/stream" && req.method === "POST") {
       const id = String(req.body?.workspaceId ?? "");
       const leaseId = state.leases.get(id);
       if (leaseId === undefined) return err(404, "NOT_FOUND", "no active lease", false);
       const next = (epochs.get(leaseId) ?? 1) + 1;
       epochs.set(leaseId, next);
+      if (typeof req.body?.streamOwnerTab === "string") owners.set(leaseId, req.body.streamOwnerTab);
+      else owners.delete(leaseId); // a legacy claim: NULL, like the broker
       return ok(200, { leaseRef: leaseRefOf(leaseId), streamEpoch: next });
     }
     // POST /_control/session/connection {workspaceId, state?, leaseActive?,
@@ -205,6 +218,9 @@ export function sessionArea(ctx: MockContext): MockArea {
           ...(typeof req.body?.leaseRef === "string" ? { leaseRef: req.body.leaseRef } : {}),
           ...(typeof req.body?.streamEpoch === "number"
             ? { streamEpoch: req.body.streamEpoch }
+            : {}),
+          ...(typeof req.body?.streamOwnerTab === "string"
+            ? { streamOwnerTab: req.body.streamOwnerTab }
             : {}),
         });
         return ok(200, { scripted: id });

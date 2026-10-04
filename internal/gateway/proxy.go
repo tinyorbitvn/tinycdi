@@ -536,9 +536,11 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		defer s.endUpgrade(gen)
 		// With a session directory the lease's stream epoch is the
 		// cross-replica fence: claiming it here makes the previous
-		// replica's renew loop drop its copy of this stream (P3).
+		// replica's renew loop drop its copy of this stream (P3). The
+		// claiming tab's id rides the same write (FX-R31): GET /connection
+		// can then answer WHO holds the stream, not just the epoch count.
 		if g.cfg.Sessions != nil {
-			epoch, err := g.claimStream(r.Context(), s)
+			epoch, err := g.claimStream(r.Context(), s, r.URL.Query().Get(streamOwnerTabParam))
 			streamEpoch = epoch
 			if err != nil {
 				if terminalBrokerErr(err) {

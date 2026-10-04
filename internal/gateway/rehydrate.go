@@ -33,7 +33,10 @@ import (
 type SessionDirectory interface {
 	BindSession(ctx context.Context, gw broker.GatewayIdentity, leaseID string, d broker.SessionDigest) error
 	LeaseBySession(ctx context.Context, gw broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error)
-	ClaimStream(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (uint64, error)
+	// ClaimStream bumps the lease's stream epoch for the claiming tab:
+	// ownerTab is the tab id the client sent on the upgrade ("" or a
+	// malformed value is stored as NULL — never a matchable owner).
+	ClaimStream(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ownerTab string) (uint64, error)
 }
 
 // sessionDigest derives the stored lookup key for a session cookie value —

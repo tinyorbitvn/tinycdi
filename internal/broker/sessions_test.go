@@ -182,11 +182,11 @@ func TestClaimStream_Increments(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
 	lease := leaseFor(t, b, gwA, "ws-1", false)
-	e1, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease))
+	e1, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), "")
 	if err != nil {
 		t.Fatalf("ClaimStream #1: %v", err)
 	}
-	e2, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease))
+	e2, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), "")
 	if err != nil {
 		t.Fatalf("ClaimStream #2: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestClaimStream_StaleFence(t *testing.T) {
 	lease := leaseFor(t, b, gwA, "ws-1", false)
 	stale := fenceOf(lease)
 	stale.RuntimeUID = "rt-other"
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, stale); !errors.Is(err, broker.ErrStaleBinding) {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, stale, ""); !errors.Is(err, broker.ErrStaleBinding) {
 		t.Fatalf("claim with stale fence = %v, want ErrStaleBinding", err)
 	}
 }
@@ -348,7 +348,7 @@ func TestStreams_HardKillThenRehydrate(t *testing.T) {
 	lease := leaseFor(t, b, gwA, "ws-1", false)
 	fence := fenceOf(lease)
 
-	e1, err := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	e1, err := b.ClaimStream(ctx, gwA, lease.ID, fence, "")
 	if err != nil || e1 != 1 {
 		t.Fatalf("first ClaimStream = %d, %v; want 1", e1, err)
 	}
@@ -362,7 +362,7 @@ func TestStreams_HardKillThenRehydrate(t *testing.T) {
 
 	// No disconnect: the first replica was hard-killed. Another replica
 	// rehydrates the session and claims the stream.
-	e2, err := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	e2, err := b.ClaimStream(ctx, gwA, lease.ID, fence, "")
 	if err != nil || e2 != 2 {
 		t.Fatalf("second ClaimStream = %d, %v; want 2", e2, err)
 	}
@@ -396,12 +396,12 @@ func TestStreams_StaleDisconnectIgnored(t *testing.T) {
 	lease := leaseFor(t, b, gwA, "ws-1", false)
 	fence := fenceOf(lease)
 
-	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence, "")
 	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
 		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
 		t.Fatalf("connected@1: %v", err)
 	}
-	e2, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	e2, _ := b.ClaimStream(ctx, gwA, lease.ID, fence, "")
 	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
 		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e2}); err != nil {
 		t.Fatalf("connected@2: %v", err)
@@ -442,12 +442,12 @@ func TestClaimStream_ZeroesPreviousStream(t *testing.T) {
 	lease := leaseFor(t, b, gwA, "ws-1", false)
 	fence := fenceOf(lease)
 
-	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence)
+	e1, _ := b.ClaimStream(ctx, gwA, lease.ID, fence, "")
 	if err := b.ReportActivity(ctx, gwA, lease.ID, fence,
 		broker.ActivityEvent{Type: broker.ActivityConnected, StreamEpoch: e1}); err != nil {
 		t.Fatalf("connected@1: %v", err)
 	}
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fence); err != nil {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fence, ""); err != nil {
 		t.Fatalf("second ClaimStream: %v", err)
 	}
 	open, since := openStreamsOf(t, db, "ws-1", lease.RuntimeGeneration)

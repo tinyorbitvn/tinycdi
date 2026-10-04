@@ -40,6 +40,42 @@ export function sessionOrigin(workspaceId: string, sessionDomain: string): strin
 /** The template's clipboard policy, as published by GET /v1/templates. */
 export type ClipboardPolicy = "Disabled" | "Send" | "Receive" | "Bidirectional";
 
+// Stream-owner tab id (FX-R31, R-V3c). The page mints one random 128-bit
+// id per PAGE INSTANCE and keeps it in memory only — never in
+// sessionStorage, which browsers COPY on "duplicate tab" and
+// reopen-closed-tab: a stored id would be shared by the copy and both
+// tabs would claim the same owner, defeating the check entirely.
+// A reload mints a new id; this instance's frame claims record it, and
+// until a claim lands the page withholds its 'elsewhere' verdict (see
+// observe() in SessionPage). The id travels to the broker inside the
+// KasmVNC client's `path` URL setting (path=websockify?tcdi_tab=<id>):
+// the client rebuilds its websocket URL from that setting on every
+// connect and retry, so every stream claim from this frame carries the
+// same id — including the re-claims a backend restart or rollout
+// triggers. GET /connection then reports the claim's owner, and an epoch
+// advance is no longer mistaken for a foreign tab.
+let tabId: string | undefined;
+
+function mintTabId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * This page instance's stream-owner id: a 32-char lowercase hex string
+ * (128 bits, crypto.getRandomValues), minted once per page load. Not
+ * persisted anywhere — persistence is precisely what a duplicated tab
+ * shares.
+ */
+export function sessionTabId(): string {
+  if (tabId === undefined) tabId = mintTabId();
+  return tabId;
+}
+
+/** The stream-claim parameter the id travels in on the websocket URL. */
+export const STREAM_TAB_PARAM = "tcdi_tab";
+
 /** Options the workspace's policy gives the embedded client. */
 export interface SessionEmbedOpts {
   /**
@@ -106,6 +142,11 @@ function seamlessClipboardOK(): boolean {
  * `show_control_bar` stays unset deliberately: it would restore ALL
  * non-embed defaults including the Kasm control bar — a second settings
  * UI inside the portal's own toolbar (V3.24 decision).
+ *
+ * `path` carries this tab's stream-owner id (FX-R31): the client builds
+ * its websocket URL from the `path` setting, so
+ * `path=websockify?tcdi_tab=<id>` lands the id on every stream claim this
+ * frame makes — first connect and every retry alike.
  */
 export function sessionFrameUrl(
   workspaceId: string,
@@ -121,6 +162,7 @@ export function sessionFrameUrl(
     clipboard_down: String(down),
   });
   if ((up || down) && seamlessClipboardOK()) q.set("clipboard_seamless", "true");
+  q.set("path", `websockify?${STREAM_TAB_PARAM}=${sessionTabId()}`);
   return `${sessionOrigin(workspaceId, sessionDomain)}/?${q}`;
 }
 
@@ -225,9 +267,14 @@ export function submitLaunch(
   sessionDomain: string,
 ): void {
   assertLaunchTarget(ticket, workspaceId, sessionDomain);
+  // The redemption 303 is the navigation that loads the desktop client, so
+  // this tab's owner id rides the POST's query (never the ticket — that
+  // stays in the body) for the gateway to re-assert on the redirect.
+  const action = new URL(ticket.launchUrl);
+  action.searchParams.set(STREAM_TAB_PARAM, sessionTabId());
   const form = document.createElement("form");
   form.method = "POST";
-  form.action = ticket.launchUrl;
+  form.action = action.toString();
   form.target = target;
   if (target === "_blank") form.rel = "noopener";
   form.hidden = true;

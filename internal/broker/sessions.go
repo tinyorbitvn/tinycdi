@@ -86,10 +86,48 @@ func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d Sessi
 	}
 }
 
+// StreamOwnerTabLen is the fixed length of a stream-owner tab id: 128 bits
+// as lowercase hex (32 chars) — what the portal mints per browser tab and
+// sends with its stream claim (see migration 018).
+const StreamOwnerTabLen = 32
+
+// ValidStreamOwnerTab reports whether s is a well-formed stream-owner tab
+// id: exactly 32 lowercase hex characters. Anything else — a missing,
+// truncated or non-hex value — is not a usable owner id: it must be stored
+// as NULL and never trusted as a match.
+func ValidStreamOwnerTab(s string) bool {
+	if len(s) != StreamOwnerTabLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ownerTabOrNull normalizes a claimed tab id for storage: the id itself
+// when valid, nil (SQL NULL) otherwise. A legacy claim without an id must
+// overwrite a previous id too — the row always reflects the CURRENT
+// stream's owner, not the last valid one.
+func ownerTabOrNull(s string) *string {
+	if !ValidStreamOwnerTab(s) {
+		return nil
+	}
+	return &s
+}
+
 // ClaimStream increments the lease's stream epoch and returns the new value.
 // It applies the same liveness and fence checks as RenewLease: a stale or
 // foreign incarnation can never claim a stream.
-func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence) (uint64, error) {
+//
+// ownerTab is the claiming tab's id; it lands on the lease in the same row
+// update that bumps stream_epoch, so the epoch and its owner can never
+// diverge. An empty or malformed id is stored as NULL (a legacy claim) —
+// never as a matchable owner.
+func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ownerTab string) (uint64, error) {
 	now := b.now()
 	l, err := b.liveLease(ctx, gw, leaseID, now)
 	if err != nil {
@@ -111,9 +149,15 @@ func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID st
 	// sets the count back to 1 and clears the grace window.
 	var epoch uint64
 	err = b.db.WithTx(ctx, func(tx store.Tx) error {
+		// stream_owner_epoch repeats the new epoch: a replica predating the
+		// column bumps stream_epoch without naming the owner columns, and a
+		// stored id whose epoch no longer matches is stale evidence — read
+		// as absent, never as a match (R-V3c).
 		if err := tx.QueryRow(ctx,
-			`UPDATE connection_lease SET stream_epoch = stream_epoch + 1
-			 WHERE id = $1 AND state = 'active' RETURNING stream_epoch`, l.ID).
+			`UPDATE connection_lease SET stream_epoch = stream_epoch + 1,
+				stream_owner_tab = $2::text,
+				stream_owner_epoch = CASE WHEN $2::text IS NULL THEN NULL ELSE stream_epoch + 1 END
+			 WHERE id = $1 AND state = 'active' RETURNING stream_epoch`, l.ID, ownerTabOrNull(ownerTab)).
 			Scan(&epoch); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrRevoked

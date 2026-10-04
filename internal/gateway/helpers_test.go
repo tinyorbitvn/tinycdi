@@ -73,12 +73,13 @@ type fakeBroker struct {
 
 	// SessionDirectory stand-in: digests bind cookie digests to lease IDs,
 	// epochs is the per-lease stream epoch ClaimStream increments.
-	digests map[broker.SessionDigest]string
-	epochs  map[string]uint64
-	bindErr error          // injected BindSession failure
-	renewBy map[string]int // renew calls per gateway identity
-	lookupN int            // LeaseBySession calls
-	revokeN int            // RevokeLease calls
+	digests   map[broker.SessionDigest]string
+	epochs    map[string]uint64
+	ownerTabs map[string]string // lease ID -> last claimed ownerTab
+	bindErr   error             // injected BindSession failure
+	renewBy   map[string]int    // renew calls per gateway identity
+	lookupN   int               // LeaseBySession calls
+	revokeN   int               // RevokeLease calls
 	// lookupGate, when set, makes every LeaseBySession call block on the
 	// channel — a scripted rendezvous for the concurrent-miss test, so the
 	// overlap is deterministic rather than timing-dependent.
@@ -101,6 +102,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		revokes:   map[string]int{},
 		digests:   map[broker.SessionDigest]string{},
 		epochs:    map[string]uint64{},
+		ownerTabs: map[string]string{},
 		renewBy:   map[string]int{},
 		upstream:  httptest.NewTLSServer(http.HandlerFunc(fakeUpstream)),
 	}
@@ -340,14 +342,16 @@ func (f *fakeBroker) LeaseBySession(ctx context.Context, _ broker.GatewayIdentit
 }
 
 // ClaimStream bumps the lease's stream epoch so the replica holding the
-// previous stream sees it on its next renew.
-func (f *fakeBroker) ClaimStream(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence) (uint64, error) {
+// previous stream sees it on its next renew. The claiming tab's id is
+// recorded per lease so tests can assert it rode the claim through.
+func (f *fakeBroker) ClaimStream(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ownerTab string) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.renewErr[leaseID]; err != nil {
 		return 0, err
 	}
 	f.epochs[leaseID]++
+	f.ownerTabs[leaseID] = ownerTab
 	return f.epochs[leaseID], nil
 }
 

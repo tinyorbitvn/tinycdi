@@ -9,6 +9,7 @@ import {
   markSessionOwned,
   readSessionMarker,
   sessionFrameName,
+  sessionTabId,
   TICKET_FIELD,
 } from "../../../src/session/launch";
 import { createMockApi, CSRF_TOKEN_VALUE } from "../../mock-api/handler.ts";
@@ -94,7 +95,8 @@ describe("SessionPage", () => {
     // The ticket POST lands inside the frame, never in the top navigation.
     await waitFor(() => expect(submitted).toHaveLength(1));
     expect(submitted[0].target).toBe(sessionFrameName(ws.id));
-    expect(submitted[0].action).toBe(
+    const action = new URL(submitted[0].action);
+    expect(`${action.origin}${action.pathname}`).toBe(
       `https://ws-${ws.id.replace("ws_", "").toLowerCase()}.${SESSION_DOMAIN}/v1/launch`,
     );
     const input = submitted[0].querySelector(
@@ -710,5 +712,245 @@ describe("SessionPage reconnecting badge (T5.4)", () => {
       streamEpoch: 3,
     });
     await waitFor(() => expect(badge()).toHaveTextContent("Connected"));
+  });
+});
+
+// ---- FX-R31: ownership evidence decides "elsewhere", not epoch arithmetic ----
+
+describe("SessionPage stream-owner tab (FX-R31)", () => {
+  const MY_TAB = () => sessionTabId(); // this page instance's memory-only id
+  const OTHER_TAB = "fedcba9876543210fedcba9876543210";
+  const owned = (streamEpoch: number, streamOwnerTab: string, leaseRef = OWN_REF) => ({
+    state: "connected",
+    leaseActive: true,
+    leaseRef,
+    streamEpoch,
+    streamOwnerTab,
+  });
+
+  it("two claims of this tab inside one poll interval stay Connected (rc.2 false positive)", async () => {
+    const { ws, control, submitted } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // The rc.2 failure mode: a backend restart's re-claim bumps the epoch
+    // twice inside one interval — epochs alone read "another tab", but the
+    // owner id says the stream is this tab's.
+    control.connection = () => owned(4, MY_TAB());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
+    expect(submitted).toHaveLength(0);
+  });
+
+  it("a claim with a different tab id shows 'open in another tab'", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Even at an epoch the arithmetic would accept (+1), a foreign owner
+    // id is a takeover — evidence beats the +1 window.
+    control.connection = () => owned(3, OTHER_TAB);
+    expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
+  });
+
+  it("a re-claim at a new epoch with this tab's id is 'ours' (restart/rollout)", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Backend restart: the gateway drained, the client's websocket retry
+    // re-claimed at a higher epoch under the same tab id.
+    control.connection = () => owned(5, MY_TAB());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Connected");
+  });
+
+  it("a legacy claim (no owner id) still decides by epoch arithmetic", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // No streamOwnerTab: exactly the pre-FX-R31 behaviour — a newer epoch
+    // on our lease reads as another tab.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 3,
+    });
+    expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
+  });
+
+  // R-V3c: a foreign owner while OUR claim is pending is not yet a
+  // takeover — the page claims first, and 'elsewhere' lands on the tab
+  // whose stream was replaced. This is also the reload path: a reload
+  // mints a fresh id, the old stream still shows the previous id, and an
+  // early verdict would flash "open in another tab" until the claim lands.
+  it("a foreign owner id during the resume window suppresses 'elsewhere' until our claim lands", async () => {
+    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    // The live stream belongs to another tab, our claim is pending: the
+    // page must NOT verdict 'elsewhere' — it navigates and claims.
+    control.connection = () => owned(1, OTHER_TAB);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(ticketPosts()).toHaveLength(0);
+
+    // Our claim lands at the next epoch — the page is ours, and a verdict
+    // on any LATER foreign claim is back on.
+    control.connection = () => owned(2, sessionTabId());
+    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
+  it("a foreign owner after our claim landed verdicts 'elsewhere'", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+    control.connection = () => owned(9, OTHER_TAB);
+    expect(
+      await screen.findByText("This session is open in another tab"),
+    ).toBeInTheDocument();
+  });
+});
+
+
+// ---- FX-R31 addendum: own-tab reconnect after a backend restart/rollout ----
+
+describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
+  // rc.2 soak: 'elsewhere' suppressed reconnect until lease expiry — a ~120 s
+  // gap (disconnected->stale->none->relaunch). With ownership evidence the
+  // restart's re-claim (new epoch, same tab id) keeps the page 'ours', so
+  // the watch's reconnect backoff runs immediately.
+  it("a stream loss with our owner id reloads the frame on the watch backoff — the 'elsewhere' gate never engages", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // The backend rolled: the stream died and the client's retry already
+    // re-claimed at a much later epoch under OUR tab id — epochs alone read
+    // "another tab" and rc.2 parked the page on the overlay until the lease
+    // expired. disconnected reports keep coming while the watch reloads.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    const iframe = () =>
+      document.querySelector("iframe") as HTMLIFrameElement | null;
+    // The reconnect begins on backoff[0] (~1 s), not after lease expiry.
+    await waitFor(
+      () => expect(iframe()?.getAttribute("src")).toBeTruthy(),
+      { timeout: 5_000 },
+    );
+
+    // The reloaded frame's claim lands: the stream is back under our id at
+    // a new epoch — the page never read "elsewhere" throughout.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+      streamOwnerTab: sessionTabId(),
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
+  it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+
+    // Pre-FX-R31 shape: no streamOwnerTab. The restart's re-claim bumped
+    // the epoch beyond the +1 window — the page goes 'elsewhere' and the
+    // watch stops driving reconnect (lease expiry is the only way back).
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+    });
+    const iframe = () =>
+      document.querySelector("iframe") as HTMLIFrameElement | null;
+    await waitFor(() => expect(iframe()?.getAttribute("src")).toBeTruthy(), {
+      timeout: 5_000,
+    });
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+    });
+    expect(
+      await screen.findByText("This session is open in another tab"),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---- V3.10b confirmation: the ~120 s gaps were suppressed reconnects ----
+
+describe("SessionPage reconnect suppression (V3.10b evidence)", () => {
+  // DB evidence: the two gap sessions flipped to 'elsewhere' while their
+  // stream-owner backend pod died, the watch disarmed, the lease expired,
+  // and the SPA made no POST /v1/connections for ~85 s. With ownership the
+  // page stays 'ours'/provisional — the watch's relaunch must fire on the
+  // first lease-gone poll.
+  it("stream dies + lease expires under our owner id → immediate relaunch, never 'elsewhere'", async () => {
+    const { api, ws, control, submitted, ticketPosts } = setupScripted({
+      props: { pollIntervalMs: 20 },
+    });
+    await connectViaResume(ws, control);
+
+    // The pod holding our stream dies mid-rollout: stream gone, lease
+    // still nominally alive, owner id still ours.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    // The lease then lapses while the page still believes 'ours' — drop
+    // the mock's lease row too, so the relaunch ticket mints (a still-
+    // held lease would be a takeover, not a relaunch).
+    api.state.leases.delete(ws.id);
+    control.connection = () => ({ state: "none", leaseActive: false });
+
+    // The relaunch goes out on the next poll — a fresh ticket, not an
+    // 'elsewhere' wait for user input or for the lease to come back. (The
+    // rc.2 failure was ~85 s with zero POST /v1/connections.)
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+
+    // The launch is in flight — "connecting", not parked on a verdict —
+    // and exactly one ticket went out (no double mint while the ticket
+    // request was in flight).
+    expect(badge()).toHaveTextContent("Connecting");
+    expect(submitted.length).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(ticketPosts()).toHaveLength(1);
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  }, 20_000);
+
+  it("lease expires while our claim is still provisional → launches fresh, never parks", async () => {
+    const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
+    // A foreign stream holds the lease our marker names — our claim is
+    // pending — and the lease then dies inside the window.
+    let gone = false;
+    control.connection = () =>
+      gone
+        ? { state: "none", leaseActive: false }
+        : {
+            state: "connected",
+            leaseActive: true,
+            leaseRef: OWN_REF,
+            streamEpoch: 1,
+            streamOwnerTab: "deadbeefdeadbeefdeadbeefdeadbeef",
+          };
+    await new Promise((r) => setTimeout(r, 150));
+    gone = true;
+
+    // Provisional must not suppress reconnect: the resume path sees the
+    // lease die and falls back to a ticket launch.
+    await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 });

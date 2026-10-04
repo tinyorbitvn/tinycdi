@@ -28,7 +28,7 @@ func TestIssueTicket_BindsCurrentIncarnation(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 3, "rt-uid-3", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestIssueTicket_RequiresReady(t *testing.T) {
 	binding.Phase = "Provisioning"
 	src.set(binding)
 
-	_, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if !errors.Is(err, broker.ErrNotReady) {
 		t.Fatalf("IssueTicket on Provisioning = %v, want ErrNotReady", err)
 	}
@@ -80,7 +80,7 @@ func TestIssueTicket_StaleObservedState(t *testing.T) {
 	src.set(binding)
 
 	clock.Advance(broker.MaxBindingAge + time.Second) // observation now stale
-	_, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if !errors.Is(err, broker.ErrFreshness) {
 		t.Fatalf("IssueTicket with stale binding = %v, want ErrFreshness", err)
 	}
@@ -93,7 +93,7 @@ func TestIssueTicket_TenantAndOwnership(t *testing.T) {
 	seedWorkspace(t, db, "tenant-b", bobTenant.Owner(), "ws-other")
 	src.set(readyBinding("ws-other", "tenant-b", bobTenant.Owner(), 1, "rt-1", clock.Now()))
 
-	_, err := b.IssueTicket(ctx, alice, "ws-other", false, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-other", false, "", "")
 	if !errors.Is(err, broker.ErrNotFound) && !errors.Is(err, broker.ErrDenied) {
 		t.Fatalf("IssueTicket cross-tenant = %v, want ErrNotFound or ErrDenied", err)
 	}
@@ -106,7 +106,7 @@ func TestRedeemTicket_ExactlyOnce(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 5, "rt-5", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRedeemTicket_ConcurrentExactlyOneWins(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestRedeemTicket_ExpiredStillConsumed(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestRedeemTicket_RevokedNeverRedeems(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestRedeemTicket_WrongGatewayAudience(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestRedeemTicket_ExpiredLeaseClosesStreams(t *testing.T) {
 	// keeps the binding inside the freshness budget.
 	clock.Advance(broker.LeaseTTL + time.Second)
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket over expired lease: %v", err)
 	}
@@ -285,14 +285,14 @@ func TestIssueTicket_ConnectionInUse(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk1, err := b.IssueTicket(ctx, alice, "ws-1", false, "")
+	tk1, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket #1: %v", err)
 	}
 	if _, err := b.RedeemTicket(ctx, gwA, tk1.Token); err != nil {
 		t.Fatalf("RedeemTicket #1: %v", err)
 	}
-	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, ""); !errors.Is(err, broker.ErrConnectionInUse) {
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, "", ""); !errors.Is(err, broker.ErrConnectionInUse) {
 		t.Fatalf("IssueTicket with live lease = %v, want ErrConnectionInUse", err)
 	}
 }
@@ -307,7 +307,7 @@ func TestTicket_ClipboardPolicyRecordedOnRedeem(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "Bidirectional")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "Bidirectional", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestTicket_ClipboardPolicyRecordedOnRedeem(t *testing.T) {
 
 	// A ticket issued with no policy records NULL and redeems "".
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	tk2, err := b.IssueTicket(ctx, alice, "ws-1", true, "")
+	tk2, err := b.IssueTicket(ctx, alice, "ws-1", true, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket #2: %v", err)
 	}

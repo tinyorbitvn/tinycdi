@@ -11,7 +11,7 @@ import (
 // leaseFor issues and redeems a ticket, returning the live lease.
 func leaseFor(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool) broker.Lease {
 	t.Helper()
-	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "")
+	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestLease_StaleRuntimeUID(t *testing.T) {
 		t.Fatalf("renew with stale runtimeUID = %v, want ErrStaleBinding", err)
 	}
 	// A new ticket binds the NEW incarnation and reconnects cleanly.
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, "", "")
 	if err != nil {
 		t.Fatalf("IssueTicket for reconnect: %v", err)
 	}
@@ -243,4 +243,19 @@ func TestResolveTarget_RequiresLeaseAndGateway(t *testing.T) {
 	if _, err := b.ResolveTarget(ctx, gwB, lease.ID); !errors.Is(err, broker.ErrDenied) {
 		t.Fatalf("resolve by foreign gateway = %v, want ErrDenied", err)
 	}
+}
+
+// leaseForSess is leaseFor with the issuing portal session recorded: the
+// owner-tab gate needs a lease whose portal_session_digest is known.
+func leaseForSess(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool, portalSession string) broker.Lease {
+	t.Helper()
+	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "", portalSession)
+	if err != nil {
+		t.Fatalf("IssueTicket: %v", err)
+	}
+	lease, err := b.RedeemTicket(ctx, gw, tk.Token)
+	if err != nil {
+		t.Fatalf("RedeemTicket: %v", err)
+	}
+	return lease
 }
