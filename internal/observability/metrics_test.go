@@ -45,6 +45,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncLogin("success")
 	m.SetRuntimeImageAge("browser", 3600)
 	m.IncRateLimited("/v1/login")
+	m.IncFrameReload("iframe")
 
 	want := []string{
 		"tinycdi_http_requests_total",
@@ -63,6 +64,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_logins_total",
 		"tinycdi_runtime_image_age_seconds",
 		"tinycdi_rate_limited_total",
+		"tinycdi_session_frame_reloads_total",
 	}
 	fams := gatherFamilies(t, reg)
 	for _, name := range want {
@@ -197,6 +199,8 @@ func TestReasonAndResultLabelsBounded(t *testing.T) {
 	m.IncLeaseFailure("some-novel-failure-mode-xyz")
 	m.ObserveProvisioningLatency("success", time.Second)
 	m.ObserveProvisioningLatency("weird-outcome", time.Second)
+	m.IncFrameReload("iframe")
+	m.IncFrameReload("nested-iframe")
 
 	// Check label *values*, not names, stay inside the bounded sets.
 	mfs, _ := reg.Gather()
@@ -215,6 +219,12 @@ func TestReasonAndResultLabelsBounded(t *testing.T) {
 					case "success", "failure", "other":
 					default:
 						t.Fatalf("unbounded result label value: %q", l.GetValue())
+					}
+				case "tinycdi_session_frame_reloads_total":
+					switch l.GetValue() {
+					case "iframe", "document", "other":
+					default:
+						t.Fatalf("unbounded dest label value: %q", l.GetValue())
 					}
 				}
 			}

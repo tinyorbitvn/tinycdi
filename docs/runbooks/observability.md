@@ -37,7 +37,7 @@ status and logs.
 ### Metric reference
 
 All series carry the `tinycdi_` prefix. `tenant`, `result`, `outcome`,
-`reason`, `route`, `listener` and `code_class` labels are bounded —
+`reason`, `route`, `listener`, `code_class` and `dest` labels are bounded —
 unrecognized values are folded into `"other"`/curated buckets, so high
 cardinality cannot leak in.
 
@@ -56,6 +56,7 @@ cardinality cannot leak in.
 | `tinycdi_sessions_active` | gauge | — | live desktop sessions this replica holds |
 | `tinycdi_gateway_rehydrations_total` | counter | `result` | session-directory lookups for cookies the replica never saw (`ok`/miss/error) |
 | `tinycdi_gateway_streams_fenced_total` | counter | — | streams closed because another replica claimed the stream epoch (takeovers) |
+| `tinycdi_session_frame_reloads_total` | counter | `dest` | session-frame document loads on a session whose lease already had a stream — i.e. frame **re-navigations** only: the portal connection watch's lease-active reload (FX-R32 fallback) and user reloads/new-tab loads. The KasmVNC client's own in-frame websocket retry (FX-R32, `reconnect=true`) is a bare `/websockify` upgrade and never produces a document load, so it is never counted — a rising series means the SPA actually re-navigated the frame, not that the client retried its socket. `dest=iframe` is the portal's embedded frame, `document` a top-level load, `other` covers clients without fetch metadata. Expected: `0` at steady state; up to 1 per session per backend rollout (a few per session when a rollout's reconnect needs several watch attempts — `RECONNECT_BACKOFF_MS` allows up to 3). Sustained growth with no rollout means in-frame websocket retries are failing and the SPA is reloading the frame |
 | `tinycdi_logins_total` | counter | `outcome` | completed `/v1/auth/callback` attempts |
 | `tinycdi_runtime_image_age_seconds` | gauge | `family` | age of each catalog family's newest published image (refreshed every minute) |
 | `tinycdi_rate_limited_total` | counter | `route` | requests refused by the per-client rate limiters (E7) — a rising series means `429 RATE_LIMITED` responses; check `backend.trustedProxies` is set before blaming clients |

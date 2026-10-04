@@ -89,6 +89,10 @@ type session struct {
 	// request, so self-fencing kills only the old stream, not sibling
 	// asset fetches.
 	streamTrackID int
+	// streamSeen marks that a stream conn was actually hijacked on this
+	// replica — the local half of "the lease already had a stream" for
+	// the frame-reload counter (streamEpoch covers the directory mode).
+	streamSeen bool
 }
 
 // sessionMints counts newSession calls. A test cannot intercept a
@@ -232,6 +236,7 @@ func (s *session) addConn(c net.Conn) bool {
 		return false
 	}
 	s.conns[c] = struct{}{}
+	s.streamSeen = true
 	return true
 }
 
@@ -380,6 +385,19 @@ func (s *session) streamCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// hadStream reports whether this lease already claimed a live stream —
+// the "already had a stream on the same lease" half of the frame-reload
+// counter (NAVTEL-1): a document load before then is a first load, after
+// it a re-navigation. streamEpoch > 0 is the lease-level record — a claim
+// on ANY replica bumps it, so a session rehydrated here after a rollout
+// still knows — while streamSeen covers the no-directory mode where
+// claims never bump an epoch.
+func (s *session) hadStream() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamEpoch > 0 || s.streamSeen
 }
 
 // ---------------------------------------------------------------------------
