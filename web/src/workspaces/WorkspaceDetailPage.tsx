@@ -106,7 +106,9 @@ function EventsTable({ events }: { events: WorkspaceEvent[] }) {
     {
       key: "message",
       header: t("workspaces.conditions.col.message"),
-      render: (ev) => <ReasonText reason={ev.reason} detail={ev.message} />,
+      render: (ev) => (
+        <ReasonText reason={ev.reason} detail={ev.message} params={ev.params} />
+      ),
     },
     {
       key: "count",

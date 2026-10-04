@@ -1,7 +1,9 @@
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -47,7 +49,18 @@ const (
 // meta.SetStatusCondition preserves the previous LastTransitionTime when
 // the status itself is unchanged, so anchors such as the Failed cleanup
 // deadline and the drain window stay stable across reconciles.
+// A write without params drops any the previous condition of this type
+// recorded — they described the old message, not the new one.
 func SetWorkspaceCondition(ws *workspacesv1alpha1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, now time.Time) {
+	SetWorkspaceConditionParams(ws, condType, status, reason, message, nil, now)
+}
+
+// SetWorkspaceConditionParams is SetWorkspaceCondition plus the structured
+// values the message interpolates (e.g. the teardown step name): they are
+// persisted on the condition-params annotation keyed "<type>.<reason>" so
+// the API can project them alongside the condition. Params must never
+// carry secrets, tokens or internal hosts — they are tenant-visible.
+func SetWorkspaceConditionParams(ws *workspacesv1alpha1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, params map[string]string, now time.Time) {
 	meta.SetStatusCondition(&ws.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
@@ -56,6 +69,45 @@ func SetWorkspaceCondition(ws *workspacesv1alpha1.Workspace, condType string, st
 		ObservedGeneration: ws.Generation,
 		LastTransitionTime: metav1.NewTime(now),
 	})
+	setConditionParams(ws, condType, reason, params)
+}
+
+// AnnotationConditionParams carries the structured message parameters of
+// status.conditions as JSON {"<type>.<reason>": {"<name>": "<value>"}} —
+// metav1.Condition itself cannot hold them. The API projects the entry
+// that matches a condition's type and reason onto the public condition's
+// params; entries whose condition is rewritten are dropped on write and a
+// stale entry under a different reason never matches.
+const AnnotationConditionParams = "workspaces.cdi.tinyorbit.vn/condition-params"
+
+// setConditionParams records params for condType/reason on the annotation,
+// clearing the type's previous entry first; nil/empty params just clears.
+// The annotation itself is deleted once it would be empty.
+func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason string, params map[string]string) {
+	m := map[string]map[string]string{}
+	if raw := ws.Annotations[AnnotationConditionParams]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &m)
+	}
+	for k := range m {
+		if strings.HasPrefix(k, condType+".") {
+			delete(m, k)
+		}
+	}
+	if len(params) > 0 {
+		m[condType+"."+reason] = params
+	}
+	if len(m) == 0 {
+		delete(ws.Annotations, AnnotationConditionParams)
+		return
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if ws.Annotations == nil {
+		ws.Annotations = map[string]string{}
+	}
+	ws.Annotations[AnnotationConditionParams] = string(raw)
 }
 
 // MarkFinalizerStepBlocked records the failure of step on the Degraded
@@ -77,6 +129,7 @@ func MarkFinalizerStepBlocked(ws *workspacesv1alpha1.Workspace, step FinalizerSt
 	// names, upstream errors) stay in the operator logs. The Reason and
 	// the step name carry the machine-readable cause.
 	msg := fmt.Sprintf("teardown step %s blocked; retrying — detail in the operator logs", step)
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
-		metav1.ConditionTrue, reason, msg, now)
+	SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+		metav1.ConditionTrue, reason, msg,
+		map[string]string{"step": string(step)}, now)
 }

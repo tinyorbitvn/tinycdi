@@ -18,8 +18,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -162,7 +164,7 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	ws := &list.Items[0]
 	obs.Found = true
 	obs.Phase = string(ws.Status.Phase)
-	obs.Conditions = projectConditions(ws.Status.Conditions)
+	obs.Conditions = projectConditions(ws.Status.Conditions, ws.Annotations)
 	obs.FailureReason = failureReasonOf(ws.Status.Conditions)
 	obs.ImageBuiltAt = ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]
 	if obs.Phase != "" {
@@ -206,8 +208,12 @@ func (v *K8sStatusView) forget(workspaceUID string) {
 }
 
 // projectConditions maps CR status conditions onto the public shape,
-// restricted to the OpenAPI ConditionType enum.
-func projectConditions(conds []metav1.Condition) []workspaceCondition {
+// restricted to the OpenAPI ConditionType enum. annotations is the CR's
+// annotation set: the operator's condition-params annotation supplies the
+// structured params of the one entry that matches each condition's type
+// and reason.
+func projectConditions(conds []metav1.Condition, annotations map[string]string) []workspaceCondition {
+	params := conditionParamsOf(annotations)
 	out := make([]workspaceCondition, 0, len(conds))
 	for _, c := range conds {
 		if !viewConditionTypes[c.Type] {
@@ -226,8 +232,56 @@ func projectConditions(conds []metav1.Condition) []workspaceCondition {
 			Status:             status,
 			Reason:             reason,
 			Message:            c.Message,
+			Params:             params[c.Type+"."+reason],
 			LastTransitionTime: c.LastTransitionTime.Time,
 		})
+	}
+	return out
+}
+
+// conditionParamName bounds the param keys the API forwards; values are
+// capped at conditionParamValueMax runes and entries at
+// conditionParamMax keys so an oversized annotation cannot bloat the view.
+var conditionParamName = regexp.MustCompile(`^[a-z][a-zA-Z0-9]{0,63}$`)
+
+const (
+	conditionParamMax       = 16
+	conditionParamValueMax  = 256
+	annotationCondParamName = "workspaces.cdi.tinyorbit.vn/condition-params"
+)
+
+// conditionParamsOf parses the operator's condition-params annotation into
+// a sanitized "<type>.<reason>" -> params table. Anything malformed —
+// corrupt JSON, over-long values, non-token param names — is dropped
+// rather than forwarded.
+func conditionParamsOf(annotations map[string]string) map[string]map[string]string {
+	raw := annotations[annotationCondParamName]
+	if raw == "" {
+		return nil
+	}
+	var m map[string]map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(m))
+	for key, params := range m {
+		clean := make(map[string]string, len(params))
+		for k, v := range params {
+			if len(clean) >= conditionParamMax {
+				break
+			}
+			if !conditionParamName.MatchString(k) {
+				continue
+			}
+			runes := []rune(v)
+			if len(runes) > conditionParamValueMax {
+				v = string(runes[:conditionParamValueMax])
+			}
+			clean[k] = v
+		}
+		if len(clean) > 0 {
+			out[key] = clean
+		}
 	}
 	return out
 }
@@ -258,11 +312,13 @@ func staleConditions(obs ObservedStatus) []workspaceCondition {
 			c.Status = "Unknown"
 			c.Reason = ReasonObservedStale
 			c.Message = "observed status is stale; connectivity is unverified"
+			c.Params = nil
 		case c.Type == workspacesv1alpha1.ConditionDegraded:
 			degraded = true
 			c.Status = "Unknown"
 			c.Reason = ReasonObservedStale
 			c.Message = "observed status is stale; showing last known state"
+			c.Params = nil
 		}
 		out = append(out, c)
 	}

@@ -669,6 +669,12 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 			ObservedGeneration: gen,
 			LastTransitionTime: now,
 		})
+		// Reconcile-written conditions never carry message params: clear any
+		// a finalizer-path write recorded for this type. The annotation only
+		// persists through a main-resource update, not the status write
+		// below — an entry the status write cannot drop stays inert anyway:
+		// the API projects params only for an exact "<type>.<reason>" match.
+		setConditionParams(ws, typ, reason, nil)
 	}
 
 	if applied.DesiredState == workspacesv1alpha1.DesiredStateRunning {

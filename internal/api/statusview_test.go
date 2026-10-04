@@ -908,3 +908,84 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 		t.Fatalf("stale phase=%q, want last known Failed", v.Phase)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// B3-PARAMS: condition params projection
+// ---------------------------------------------------------------------------
+
+// projectConditions forwards the params entry that matches each
+// condition's "<type>.<reason>" — and nothing else: an entry under a
+// different reason, a non-token param name or an oversized value is
+// dropped rather than forwarded to tenants.
+func TestProjectConditions_Params(t *testing.T) {
+	cond := metav1.Condition{
+		Type: "Degraded", Status: metav1.ConditionTrue, Reason: "CleanupRetry",
+		Message: "teardown step cleanup blocked; retrying",
+	}
+	ann := map[string]string{
+		annotationCondParamName: `{
+			"Degraded.CleanupRetry": {"step": "cleanup"},
+			"Degraded.StreamDraining": {"step": "drain-streams"},
+			"RuntimeReady.DrainingStreams": {"step": "drain-streams", "bad key": "x", "UPPER": "y"}
+		}`,
+	}
+	out := projectConditions([]metav1.Condition{cond}, ann)
+	if len(out) != 1 {
+		t.Fatalf("projected %d conditions, want 1", len(out))
+	}
+	if out[0].Params["step"] != "cleanup" || len(out[0].Params) != 1 {
+		t.Fatalf("params = %v, want {step: cleanup}", out[0].Params)
+	}
+
+	// A condition whose reason matches no entry carries no params — a stale
+	// entry under another reason never leaks across.
+	out = projectConditions([]metav1.Condition{{
+		Type: "Degraded", Status: metav1.ConditionTrue, Reason: "Nominal",
+	}}, ann)
+	if out[0].Params != nil {
+		t.Fatalf("unrelated reason picked up params: %v", out[0].Params)
+	}
+
+	// Non-token param names are stripped from the entry that does match.
+	out = projectConditions([]metav1.Condition{{
+		Type: "RuntimeReady", Status: metav1.ConditionFalse, Reason: "DrainingStreams",
+	}}, ann)
+	if out[0].Params["step"] != "drain-streams" || len(out[0].Params) != 1 {
+		t.Fatalf("params = %v, want only {step}", out[0].Params)
+	}
+}
+
+// A missing or corrupt annotation simply yields no params.
+func TestConditionParamsOf_EdgeCases(t *testing.T) {
+	if got := conditionParamsOf(nil); got != nil {
+		t.Fatalf("nil annotations -> %v", got)
+	}
+	if got := conditionParamsOf(map[string]string{annotationCondParamName: "not json"}); got != nil {
+		t.Fatalf("corrupt annotation -> %v", got)
+	}
+	long := map[string]string{
+		annotationCondParamName: `{"Degraded.CleanupRetry": {"step": "` +
+			strings.Repeat("x", conditionParamValueMax+10) + `"}}`,
+	}
+	got := conditionParamsOf(long)
+	if len(got["Degraded.CleanupRetry"]["step"]) != conditionParamValueMax {
+		t.Fatalf("oversized value not capped: %d runes", len(got["Degraded.CleanupRetry"]["step"]))
+	}
+}
+
+// The stale rewrite changes a condition's reason and message, so any
+// params recorded for the live reason must not travel with it.
+func TestStaleConditions_DropsParams(t *testing.T) {
+	obs := ObservedStatus{ObservedAt: time.Now(), Conditions: []workspaceCondition{
+		{Type: "ConnectionReady", Status: "True", Reason: "Ready",
+			Params: map[string]string{"step": "x"}},
+		{Type: "Degraded", Status: "True", Reason: "CleanupRetry",
+			Params: map[string]string{"step": "cleanup"}},
+	}}
+	out := staleConditions(obs)
+	for _, c := range out {
+		if c.Reason == ReasonObservedStale && c.Params != nil {
+			t.Fatalf("stale %s condition kept params %v", c.Type, c.Params)
+		}
+	}
+}

@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import {
   ReasonText,
+  formatReasonMessage,
+  formatReasonParam,
   reasonMessageKey,
+  reasonParamFormats,
   reasonText,
 } from "../../../src/workspaces/reasons";
+import { en } from "../../../src/i18n/en";
+import { vi as viCatalog } from "../../../src/i18n/vi";
 import { setActiveLocale } from "../../../src/i18n";
 import { WorkspaceDetailPage } from "../../../src/workspaces/WorkspaceDetailPage";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
@@ -121,7 +126,127 @@ describe("WorkspaceDetailPage reason localization", () => {
     renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
 
     const table = await screen.findByRole("table", { name: "conditions" });
-    expect(within(table).getByText("Capacity was reserved for the workspace.")).toBeInTheDocument();
+    expect(within(table).getByText("Capacity reserved: 4 vCPU, 8 GiB memory, 20 GiB storage.")).toBeInTheDocument();
     expect(within(table).getByText("The runtime is up.")).toBeInTheDocument();
   }, 20000);
+});
+
+// ---------------------------------------------------------------------------
+// B3-PARAMS: structured params localize the interpolated values too.
+// ---------------------------------------------------------------------------
+
+import { REASON_TOKENS } from "../../../src/workspaces/reasons";
+
+describe("formatReasonMessage params", () => {
+  it("interpolates token params through their catalog text", () => {
+    expect(
+      formatReasonMessage("TemplateUpdateSkipped", {
+        revision: "7",
+        skipReason: "runtime-changed",
+      }),
+    ).toBe("The workspace stayed on its recorded template revision 7 (runtime changed).");
+    expect(formatReasonMessage("CleanupRetry", { step: "drain-streams" })).toBe(
+      "Teardown step stream draining is blocked; retrying.",
+    );
+    expect(formatReasonMessage("DrainTimedOut", { budgetSeconds: "45" })).toBe(
+      "Open sessions did not close inside the 45 s budget; teardown continues.",
+    );
+  });
+
+  it("formats sizes and counts for the active locale", () => {
+    expect(
+      formatReasonMessage("QuotaReserved", {
+        cpuMillicores: "8000",
+        memoryMiB: "16384",
+        storageGiB: "50",
+      }),
+    ).toBe("Capacity reserved: 8 vCPU, 16 GiB memory, 50 GiB storage.");
+    setActiveLocale("vi");
+    expect(
+      formatReasonMessage("QuotaReserved", {
+        cpuMillicores: "8000",
+        memoryMiB: "16384",
+        storageGiB: "50",
+      }),
+    ).toBe("Đã dành sẵn tài nguyên: 8 vCPU, 16 GiB bộ nhớ, 50 GiB đĩa.");
+    expect(formatReasonMessage("CleanupRetry", { step: "drain-streams" })).toBe(
+      "Bước gỡ bỏ dọn stream bị chặn; đang thử lại.",
+    );
+  });
+
+  it("renders an unknown param value raw instead of failing", () => {
+    expect(formatReasonMessage("CleanupRetry", { step: "mystery" })).toBe(
+      "Teardown step mystery is blocked; retrying.",
+    );
+  });
+
+  it("falls back to the server message when a placeholder param is missing", () => {
+    const detail = "teardown step cleanup blocked; retrying — detail in the operator logs";
+    expect(formatReasonMessage("CleanupRetry", { condition: "Degraded" }, detail)).toBe(detail);
+    expect(formatReasonMessage("CleanupRetry", undefined, detail)).toBe(detail);
+    // No server message: the raw token is the last-resort fallback.
+    expect(formatReasonMessage("CleanupRetry", {})).toBe("CleanupRetry");
+  });
+
+  it("ignores params a template does not ask for", () => {
+    expect(formatReasonMessage("Stopped", { step: "x" })).toBe("The workspace is stopped.");
+  });
+});
+
+describe("formatReasonParam", () => {
+  it("formats each kind, raw on unparseable", () => {
+    expect(formatReasonParam("int", "12345")).toBe("12,345");
+    expect(formatReasonParam("int", "abc")).toBe("abc");
+    expect(formatReasonParam("durationSeconds", "45")).toBe("45 s");
+    expect(formatReasonParam("durationSeconds", "3600")).toBe("1 h");
+    expect(formatReasonParam("cpu", "8000")).toBe("8 vCPU");
+    expect(formatReasonParam("cpu", "500")).toBe("0.5 vCPU");
+    expect(formatReasonParam("mib", "16384")).toBe("16 GiB");
+    expect(formatReasonParam("mib", "512")).toBe("512 MiB");
+    expect(formatReasonParam("gib", "50")).toBe("50 GiB");
+    expect(formatReasonParam("step", "drain-streams")).toBe("stream draining");
+    expect(formatReasonParam("skipReason", "storage-smaller")).toBe("smaller storage");
+    expect(formatReasonParam("raw", "<img>")).toBe("<img>");
+  });
+});
+
+describe("params escaping", () => {
+  it("substitutes values as text — markup in a param is not interpreted", () => {
+    const evil = '<img src=x onerror=alert(1)>';
+    const { container } = render(
+      <ReasonText
+        reason="TemplateUpdateSkipped"
+        detail="stayed on recorded revision"
+        params={{ revision: "7", skipReason: evil }}
+      />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(container).toHaveTextContent(evil);
+  });
+});
+
+// Catalog completeness (B3-PARAMS): every reason token has an en + vi
+// template whose {placeholders} all resolve to a declared param for that
+// token — a template can never ask for a value no emitter produces.
+describe("reason catalog completeness", () => {
+  const PLACEHOLDER = /\{([^{}]+)\}/g;
+  const placeholders = (s: string) => [...s.matchAll(PLACEHOLDER)].map((m) => m[1]);
+
+  it("every known token has en + vi templates with declared placeholders", () => {
+    for (const token of REASON_TOKENS) {
+      const key = reasonMessageKey(token);
+      expect(key, token).toBeDefined();
+      const declared = reasonParamFormats(token);
+      for (const [locale, catalog] of [
+        ["en", en],
+        ["vi", viCatalog],
+      ] as const) {
+        const template = catalog[key!];
+        expect(template, `${locale} ${token}`).toBeDefined();
+        for (const name of placeholders(template)) {
+          expect(declared[name], `${locale} ${token} placeholder {${name}}`).toBeDefined();
+        }
+      }
+    }
+  });
 });

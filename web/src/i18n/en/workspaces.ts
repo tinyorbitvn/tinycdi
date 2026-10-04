@@ -47,6 +47,7 @@ export default {
   "templates.format.duration.m": "{m} min",
   "templates.format.duration.h": "{h} h",
   "templates.format.duration.hm": "{h} h {m} min",
+  "templates.format.duration.s": "{n} s",
 
   "workspaces.list.title": "Workspaces",
   "workspaces.list.loading": "Loading…",
@@ -176,7 +177,7 @@ export default {
     "The workspace reached its maximum running time and was stopped.",
   "workspaces.reason.deleteRequested": "Deleting the workspace was requested.",
   "workspaces.reason.templateUpdateSkipped":
-    "The workspace stayed on its recorded template revision.",
+    "The workspace stayed on its recorded template revision {revision} ({skipReason}).",
   "workspaces.reason.admitted": "The platform accepted the workspace request.",
   "workspaces.reason.templateResolved": "The template snapshot was recorded.",
   "workspaces.reason.templateNotFound": "The recorded template could not be found.",
@@ -185,11 +186,12 @@ export default {
   "workspaces.reason.templateSnapshotInvalid":
     "The recorded template snapshot failed verification; ask an administrator.",
   "workspaces.reason.intentApplied": "The requested change was applied.",
-  "workspaces.reason.quotaReserved": "Capacity was reserved for the workspace.",
+  "workspaces.reason.quotaReserved":
+    "Capacity reserved: {cpuMillicores}, {memoryMiB} memory, {storageGiB} storage.",
   "workspaces.reason.provisioning": "The platform is setting the workspace up.",
   "workspaces.reason.waitingForDisk":
     "Waiting for the retained disk to be handed over to this workspace.",
-  "workspaces.reason.volumeBound": "The workspace's storage was attached.",
+  "workspaces.reason.volumeBound": "The workspace's storage was attached ({sizeGiB}).",
   "workspaces.reason.ready": "This step is ready.",
   "workspaces.reason.runtimeUp": "The runtime is up.",
   "workspaces.reason.streamEndpointUp": "The streaming endpoint is up.",
@@ -208,10 +210,11 @@ export default {
   "workspaces.reason.disconnectTimeout": "Stopped after the disconnect grace window.",
   "workspaces.reason.maxDuration": "Stopped at the maximum running time.",
   "workspaces.reason.streamDraining": "Waiting for open sessions to close.",
-  "workspaces.reason.drainTimedOut": "Sessions didn't close in time; teardown continues.",
+  "workspaces.reason.drainTimedOut":
+    "Open sessions did not close inside the {budgetSeconds} budget; teardown continues.",
   "workspaces.reason.retentionPending":
     "The retention step hasn't finished; teardown waits.",
-  "workspaces.reason.cleanupRetry": "A cleanup step failed and will be retried.",
+  "workspaces.reason.cleanupRetry": "Teardown step {step} is blocked; retrying.",
   "workspaces.reason.failedCleanup": "The failed incarnation is being torn down.",
   "workspaces.reason.missingWorkspaceID":
     "The workspace record is missing its platform ID; teardown is held.",
@@ -238,4 +241,17 @@ export default {
   "workspaces.reason.sessionStarted": "An interactive session started.",
   "workspaces.reason.sessionTakenOver": "An interactive session was taken over.",
   "workspaces.reason.guestAgentUnreachable": "The guest agent is unreachable.",
+
+  // Localized values for reason `params` (B3-PARAMS): machine tokens the
+  // server sends structured so they never need parsing out of English.
+  "workspaces.reason.param.step.blockConnects": "connection blocking",
+  "workspaces.reason.param.step.revokeLeases": "lease revocation",
+  "workspaces.reason.param.step.drainStreams": "stream draining",
+  "workspaces.reason.param.step.stopRuntime": "runtime stop",
+  "workspaces.reason.param.step.retention": "retention",
+  "workspaces.reason.param.step.cleanup": "cleanup",
+  "workspaces.reason.param.skipReason.runtimeChanged": "runtime changed",
+  "workspaces.reason.param.skipReason.experienceChanged": "experience changed",
+  "workspaces.reason.param.skipReason.dataPolicyChanged": "data policy changed",
+  "workspaces.reason.param.skipReason.storageSmaller": "smaller storage",
 } as const;

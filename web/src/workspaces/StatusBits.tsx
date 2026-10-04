@@ -20,7 +20,7 @@ const COLUMNS: Column<Condition>[] = [
   {
     key: "message",
     header: t("workspaces.conditions.col.message"),
-    render: (c) => <ReasonText reason={c.reason} detail={c.message} />,
+    render: (c) => <ReasonText reason={c.reason} detail={c.message} params={c.params} />,
   },
   {
     key: "lastTransitionTime",
