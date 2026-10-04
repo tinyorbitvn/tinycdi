@@ -33,6 +33,9 @@ ARG KASMVNC_DEB_URL=https://github.com/kasmtech/KasmVNC/releases/download/v${KAS
 # apt pin per docs/compatibility.md: the base
 # digest ships 2.5.0-1+deb12u3; deb12u4 carries the pending HIGH fixes.
 ARG LIBEXPAT1_APT_VERSION=2.5.0-1+deb12u4
+# apt pin per docs/compatibility.md: the base digest ships
+# 10.42-1+deb12u1; deb12u2 fixes CVE-2026-103111 (HIGH).
+ARG LIBPCRE2_APT_VERSION=10.42-1+deb12u2
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -46,7 +49,7 @@ RUN apt-get update \
       libdatetime-perl libdatetime-timezone-perl \
       ssl-cert xauth x11-xkb-utils xkb-data procps \
       libbsd0 libcrypt1 "libexpat1=${LIBEXPAT1_APT_VERSION}" libfreetype6 \
-      libgbm1 libgl1 libpixman-1-0 \
+      libgbm1 libgl1 "libpcre2-8-0=${LIBPCRE2_APT_VERSION}" libpixman-1-0 \
       libpng16-16 libsystemd0 libunwind8 libx11-6 libxau6 libxcursor1 \
       libxdmcp6 libxext6 libxfixes3 libxfont2 libxrandr2 libxshmfence1 \
       libxtst6 zlib1g libssl3 \
