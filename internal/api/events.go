@@ -175,11 +175,12 @@ func templateSkipEvent(in IntentRecord) (WorkspaceEvent, bool) {
 // alongside the condition (teardown step, drain budget).
 func conditionEvent(c workspaceCondition) WorkspaceEvent {
 	ts := c.LastTransitionTime
-	params := map[string]string{
-		"condition": c.Type,
-		"status":    c.Status,
-	}
+	// Operator params first so the API's own derived values win: a CR
+	// annotation key colliding with condition/status must not be able to
+	// claim a type or status the condition does not have.
+	params := map[string]string{}
 	maps.Copy(params, c.Params)
+	params["condition"], params["status"] = c.Type, c.Status
 	ev := WorkspaceEvent{
 		ID:             c.Type + "." + curatedReason(c.Reason),
 		Type:           "Normal",

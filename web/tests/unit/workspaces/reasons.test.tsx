@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import {
   ReasonText,
+  REASON_TOKENS,
   formatReasonMessage,
   formatReasonParam,
   reasonMessageKey,
@@ -134,8 +135,6 @@ describe("WorkspaceDetailPage reason localization", () => {
 // ---------------------------------------------------------------------------
 // B3-PARAMS: structured params localize the interpolated values too.
 // ---------------------------------------------------------------------------
-
-import { REASON_TOKENS } from "../../../src/workspaces/reasons";
 
 describe("formatReasonMessage params", () => {
   it("interpolates token params through their catalog text", () => {
