@@ -202,6 +202,31 @@ Install-time invariants. Rendering FAILS when violated:
     namespace — never the release namespace, a managed namespace, kube-*
     or default — and its image must be pinned.
 */}}
+{{- /* tinycdi.durationNs renders a Go duration string ("5s", "1m30s",
+        "1500ms", "0") as nanoseconds; an unparseable value fails the
+        render naming the value (the binary would reject it at startup
+        anyway — a render error beats a CrashLoopBackOff). */ -}}
+{{- define "tinycdi.durationNs" -}}
+{{- $v := printf "%v" . -}}
+{{- if eq $v "0" -}}0{{- else -}}
+{{- if not (regexMatch `^([0-9]*\.?[0-9]+(ns|us|µs|ms|s|m|h))+$` $v) -}}
+{{- fail (printf "duration %q is not a Go duration (e.g. 5s, 1m30s, 1500ms, 0)" $v) -}}
+{{- end -}}
+{{- $seg := regexFindAll `[0-9]*\.?[0-9]+(ns|us|µs|ms|s|m|h)` $v -1 -}}
+{{- if ne (join "" $seg) $v -}}
+{{- fail (printf "duration %q has an unparseable residue" $v) -}}
+{{- end -}}
+{{- $unitNs := dict "ns" 1.0 "us" 1000.0 "µs" 1000.0 "ms" 1000000.0 "s" 1000000000.0 "m" 60000000000.0 "h" 3600000000000.0 -}}
+{{- $ns := 0.0 -}}
+{{- range $s := $seg -}}
+{{- $u := regexFind `[a-zµ]+$` $s -}}
+{{- $n := float64 (regexReplaceAll `[a-zµ]+$` $s "") -}}
+{{- $ns = addf $ns (mulf $n (index $unitNs $u)) -}}
+{{- end -}}
+{{- printf "%.0f" $ns -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "tinycdi.validate" -}}
 {{- include "tinycdi.legacyValues" . -}}
 {{- $portal := .Values.portalHost | default "" | trim -}}
@@ -225,6 +250,14 @@ Install-time invariants. Rendering FAILS when violated:
 {{- end -}}
 {{- if not (has (printf "%v" .Values.backend.sessionCookieMode) (list "lax" "partitioned")) -}}
 {{- fail (printf "backend.sessionCookieMode must be lax or partitioned (got %q)" (printf "%v" .Values.backend.sessionCookieMode)) -}}
+{{- end -}}
+{{- /* FX-R34 drain budget: the propagation wait plus the drain window
+        must leave >= 4 s of the backend's 24 s shared shutdown deadline
+        for listener shutdown (the binary enforces the same bound at
+        startup — fail the render instead of a CrashLoopBackOff). */ -}}
+{{- $drainNs := addf (float64 (include "tinycdi.durationNs" (.Values.backend.drainPropagationDelay | default "5s"))) (float64 (include "tinycdi.durationNs" (.Values.backend.drainWindow | default "8s"))) -}}
+{{- if gt $drainNs 20000000000.0 -}}
+{{- fail (printf "backend.drainPropagationDelay + backend.drainWindow must be <= 20s so listener shutdown fits the 24s shutdown deadline (got %s + %s)" (printf "%v" .Values.backend.drainPropagationDelay) (printf "%v" .Values.backend.drainWindow)) -}}
 {{- end -}}
 {{- range .Values.managedNamespaces -}}
 {{- if or (not .name) (not .tenant) -}}
