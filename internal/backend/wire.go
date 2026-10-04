@@ -47,7 +47,10 @@ const defaultMergedGatewayID = "backend"
 
 // E7 rate-limit tuning: bursts are fixed per route family (the flags set
 // the per-minute rate only) and buckets are LRU-bounded so a sprayed
-// client-key space cannot grow memory.
+// client-key space cannot grow memory. Rate and burst are divided by
+// -rate-limit-replicas so the aggregate across replicas approximates the
+// configured bound (RL-1) — the flags name the Deployment-wide budget,
+// not one pod's.
 const (
 	loginRateBurst   = 10
 	launchRateBurst  = 20
@@ -503,6 +506,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
+	launchRate, launchBurst := ratelimit.PerReplica(cfg.LaunchRate, launchRateBurst, cfg.RateLimitReplicas)
 	gw, err := gateway.New(gateway.Config{
 		Identity:       id,
 		SessionDomain:  dom,
@@ -515,7 +519,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		ControlToken:   cfg.ControlToken,
 		RenewInterval:  cfg.RenewInterval,
 		RevokeDeadline: cfg.RevokeDeadline,
-		LaunchLimiter:  ratelimit.New(cfg.LaunchRate, launchRateBurst, rateLimitMaxKeys, nil),
+		LaunchLimiter:  ratelimit.New(launchRate, launchBurst, rateLimitMaxKeys, nil),
 		TrustedProxies: trusted,
 		Metrics:        metrics,
 		Audit:          observability.NewJSONSink(os.Stdout),
@@ -637,10 +641,15 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	loginLimiter := ratelimit.New(cfg.LoginRate, loginRateBurst, rateLimitMaxKeys, nil)
+	// Budgets divide by the replica count (RL-1): the flags name the
+	// aggregate bound and every replica enforces its 1/N share, so an
+	// even spread grants one key ~the configured rate total, not N×.
+	loginRate, loginBurst := ratelimit.PerReplica(cfg.LoginRate, loginRateBurst, cfg.RateLimitReplicas)
+	loginLimiter := ratelimit.New(loginRate, loginBurst, rateLimitMaxKeys, nil)
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
-	callbackCeiling := ratelimit.New(10*cfg.LoginRate, 10*loginRateBurst, rateLimitMaxKeys, nil)
+	ceilRate, ceilBurst := ratelimit.PerReplica(10*cfg.LoginRate, 10*loginRateBurst, cfg.RateLimitReplicas)
+	callbackCeiling := ratelimit.New(ceilRate, ceilBurst, rateLimitMaxKeys, nil)
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
 	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit, sessionLimit, callbackLimit)

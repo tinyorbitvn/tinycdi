@@ -130,6 +130,27 @@ func TestLimiter_KeysAreIndependent(t *testing.T) {
 	}
 }
 
+func TestPerReplica(t *testing.T) {
+	for _, tc := range []struct {
+		rate, burst, n int
+		wantR, wantB   int
+	}{
+		{30, 10, 2, 15, 5},   // even split
+		{30, 10, 3, 10, 3},   // rounds down, never up
+		{60, 20, 1, 60, 20},  // one replica: full budget
+		{60, 20, 0, 60, 20},  // n < 1: no division
+		{30, 10, -2, 30, 10}, // n < 1: no division
+		{1, 2, 5, 1, 1},      // positive rate clamps to 1, not 0
+		{0, 10, 2, 0, 5},     // disabled stays disabled
+		{300, 100, 3, 100, 33},
+	} {
+		if r, b := PerReplica(tc.rate, tc.burst, tc.n); r != tc.wantR || b != tc.wantB {
+			t.Errorf("PerReplica(%d, %d, %d) = (%d, %d), want (%d, %d)",
+				tc.rate, tc.burst, tc.n, r, b, tc.wantR, tc.wantB)
+		}
+	}
+}
+
 func TestParseTrustedProxies(t *testing.T) {
 	p, err := ParseTrustedProxies(" 10.0.0.0/8 ,, 192.168.0.0/16,fd00::/8")
 	if err != nil {

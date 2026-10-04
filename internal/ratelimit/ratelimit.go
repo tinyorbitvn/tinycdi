@@ -111,6 +111,30 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	return false, time.Duration((1-b.tokens)/l.perSec*float64(time.Second) + 0.5)
 }
 
+// PerReplica divides a configured per-key budget across n backend
+// replicas so the aggregate over an even spread approximates the
+// configured bound: every replica gets rate/n tokens per minute and
+// burst/n (integer division rounds down, so the aggregate lands at or
+// just under the flag, never above). A configured rate of 0 stays 0 —
+// the limiter stays disabled — while any positive rate divides to at
+// least 1 (a 0 per-replica rate would silently disable the limit, so a
+// rate smaller than n yields an aggregate of ~n/min, not 0); burst
+// likewise clamps to 1. n < 1 means no division (a single replica's
+// full budget).
+func PerReplica(rate, burst, n int) (int, int) {
+	if n < 1 {
+		n = 1
+	}
+	r, b := rate/n, burst/n
+	if rate > 0 && r < 1 {
+		r = 1
+	}
+	if b < 1 {
+		b = 1
+	}
+	return r, b
+}
+
 // KeyDigest derives a stable, non-secret bucket key from secret-bearing
 // material — a session ID or a validated OIDC state (FX-R30): the SHA-256
 // rendered in hex and namespaced with prefix so a derived key can never
