@@ -45,6 +45,11 @@ export interface Thresholds {
   connectP95Ms: number | null;
   reconnectP95Ms: number | null;
   maxGapMs: number | null;
+  /** Disconnect-span (post-connect gap) p95/p100 caps — the advisor's after-drill reconnect gates. */
+  disconnectP95Ms?: number | null;
+  disconnectP100Ms?: number | null;
+  /** Cap on disconnect-to-first-input latency (harness-side usability). */
+  inputResumeP100Ms?: number | null;
   maxManualActions: number;
   maxDroppedSessions: number;
 }
@@ -61,8 +66,12 @@ export interface SessionResult {
   reloadedAt: number | null;
   manualActions: number;
   inputEvents: number;
+  /** Dispatches that hit the per-input timeout (the page's ops were wedged). */
+  inputTimeouts?: number;
   /** Wall-clock ms of each scripted input dispatch (harness-side latency). */
   inputMs?: number[];
+  /** Wall-clock ms from disconnect start to the first successful input after reconnect. */
+  inputResumeMs?: number[];
   dropped: boolean;
   runEndAt: number;
 }
@@ -123,6 +132,7 @@ export function buildReport(
       elsewhereTransitions: elsewhereTransitions(s.observations),
       manualActions: s.manualActions,
       inputEvents: s.inputEvents,
+      inputTimeouts: s.inputTimeouts,
       dropped: s.dropped,
     };
   });
@@ -130,6 +140,24 @@ export function buildReport(
   const connects = rows.map((r) => r.connectMs).filter((v): v is number => v !== null);
   const reconnects = rows.map((r) => r.reconnectMs).filter((v): v is number => v !== null);
   const inputs = sessions.flatMap((s) => s.inputMs ?? []);
+  const inputResumes = sessions.flatMap((s) => s.inputResumeMs ?? []);
+  // Disconnect spans = non-connected stretches that START after the session's
+  // first connect — the reconnect latency the user feels around drills.
+  const disconnects = sessions.flatMap((s) => {
+    const first = firstConnectedAt(s.observations);
+    if (first === null) return [];
+    return stateSpans(s.observations)
+      .filter(
+        (sp) =>
+          sp.state !== "connected" &&
+          new Date(sp.startedAt).getTime() >= first &&
+          sp.durationMs !== null,
+      )
+      .map((sp) => sp.durationMs);
+  });
+  const disconnectP95 = percentile(disconnects, 95);
+  const disconnectP100 = percentile(disconnects, 100);
+  const inputResumeP100 = percentile(inputResumes, 100);
   const manualTotal = rows.reduce((n, r) => n + r.manualActions, 0);
   const droppedTotal = rows.filter((r) => r.dropped).length;
   const connectP95 = percentile(connects, 95);
@@ -149,6 +177,27 @@ export function buildReport(
   }
   if (thresholds.maxGapMs !== null && worstGap > thresholds.maxGapMs) {
     failures.push(`longest connected gap ${worstGap}ms exceeds ${thresholds.maxGapMs}ms`);
+  }
+  if (
+    thresholds.disconnectP95Ms != null &&
+    disconnectP95 !== null &&
+    disconnectP95 > thresholds.disconnectP95Ms
+  ) {
+    failures.push(`disconnect-span p95 ${disconnectP95}ms exceeds ${thresholds.disconnectP95Ms}ms`);
+  }
+  if (
+    thresholds.disconnectP100Ms != null &&
+    disconnectP100 !== null &&
+    disconnectP100 > thresholds.disconnectP100Ms
+  ) {
+    failures.push(`disconnect-span p100 ${disconnectP100}ms exceeds ${thresholds.disconnectP100Ms}ms`);
+  }
+  if (
+    thresholds.inputResumeP100Ms != null &&
+    inputResumeP100 !== null &&
+    inputResumeP100 > thresholds.inputResumeP100Ms
+  ) {
+    failures.push(`input-resume p100 ${inputResumeP100}ms exceeds ${thresholds.inputResumeP100Ms}ms`);
   }
   if (manualTotal > thresholds.maxManualActions) {
     failures.push(`${manualTotal} manual actions exceed ${thresholds.maxManualActions}`);
@@ -198,6 +247,17 @@ export function buildReport(
       connectMs: { p50: percentile(connects, 50), p95: connectP95 },
       reconnectMs: { p50: percentile(reconnects, 50), p95: reconnectP95 },
       inputDispatchMs: { p50: percentile(inputs, 50), p95: percentile(inputs, 95) },
+      inputTimeouts: rows.reduce((n, r) => n + (r.inputTimeouts ?? 0), 0),
+      disconnectMs: {
+        p50: percentile(disconnects, 50),
+        p95: disconnectP95,
+        p100: disconnectP100,
+      },
+      inputResumeMs: {
+        p50: percentile(inputResumes, 50),
+        p95: percentile(inputResumes, 95),
+        p100: inputResumeP100,
+      },
       sessionsWithManualActions: rows.filter((r) => r.manualActions > 0).length,
       droppedSessions: droppedTotal,
       falseElsewhereTransitions: rows.reduce((n, r) => n + r.elsewhereTransitions, 0),

@@ -14,9 +14,9 @@ const DOMAIN = "session.example.com";
 const ORIGIN = `https://ws-0123456789abcdef.${DOMAIN}`;
 // Frame navigations load the desktop client with the embedded-parity
 // settings (FX-R18 resize=remote + V3.24); no clipboard policy here.
-// The frame URL includes the tab-id path setting (FX-R31); the id is minted
-// once per test (sessionStorage clears after each), so compare against a
-// same-test call rather than a module constant.
+// The frame URL includes the tab-id path setting (FX-R31); the id is
+// module-scoped, minted once per test file, so compare against a same-test
+// call rather than a module constant.
 const frameUrl = () => sessionFrameUrl(WS, DOMAIN);
 
 function ticket(): LaunchTicket {

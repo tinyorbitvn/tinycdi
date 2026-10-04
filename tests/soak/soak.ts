@@ -73,6 +73,8 @@ export interface Options {
   template: string | undefined;
   durationMs: number;
   inputIntervalMs: number;
+  /** Per-dispatch cap on a scripted input; a wedged page op cannot starve the rest. */
+  inputTimeoutMs: number;
   pollIntervalMs: number;
   connectTimeoutMs: number;
   readyTimeoutMs: number;
@@ -111,8 +113,8 @@ Environment:
                          abort once the ramp-up connect p95 exceeds this
                          (unset: never; the scale runs use 15000)
   SOAK_LOGIN_CONCURRENCY OIDC logins at once during ramp-up (default 4)
-  SOAK_LOGIN_ATTEMPTS    per-lane login tries before the run aborts
-                         (default 3)
+  SOAK_LOGIN_ATTEMPTS    per-lane login tries before the lane is skipped
+                         (all lanes skipped = abort) (default 3)
   SOAK_MOCK_PORTAL_PORT  dry-run mock portal port (default: a free port)
   SOAK_MOCK_SESSION_PORT dry-run mock session port (default: a free port)
   SOAK_IGNORE_TLS_ERRORS set to 1 for self-signed dev certs
@@ -125,9 +127,10 @@ Flags:
                          already-running mock instead of spawning one)
   --profile NAME         load tests/soak/profiles/NAME.json as defaults
   --users-file PATH      overrides SOAK_USERS_FILE
-  --sessions N --duration D --input-interval D --poll-interval D
+  --sessions N --duration D --input-interval D --input-timeout-ms N --poll-interval D
   --template REF --report PATH (default ./soak-report.json)
   --connect-p95-ms N --reconnect-p95-ms N --max-gap-ms N   pass/fail thresholds
+  --disconnect-p95-ms N --disconnect-p100-ms N --input-resume-p100-ms N  drill gates
   --max-manual-actions N (default 0) --max-dropped N (default 0)
   --verbose`;
 }
@@ -177,6 +180,9 @@ const PROFILE_THRESHOLD_KEYS = new Set([
   "connectP95Ms",
   "reconnectP95Ms",
   "maxGapMs",
+  "disconnectP95Ms",
+  "disconnectP100Ms",
+  "inputResumeP100Ms",
   "maxManualActions",
   "maxDroppedSessions",
 ]);
@@ -259,6 +265,7 @@ export function parseArgs(argv: string[]): Options {
     template: undefined,
     durationMs: parseDurationMs("60m"),
     inputIntervalMs: parseDurationMs("10s"),
+    inputTimeoutMs: 5_000,
     pollIntervalMs: parseDurationMs("5s"),
     connectTimeoutMs: parseDurationMs("120s"),
     readyTimeoutMs: parseDurationMs("5m"),
@@ -274,8 +281,12 @@ export function parseArgs(argv: string[]): Options {
     verbose: false,
   };
   // Defaults < profile < environment < flags.
+  const profileIdx = argv.indexOf("--profile");
+  if (profileIdx !== -1 && argv[profileIdx + 1] === undefined) {
+    throw new Error("--profile needs a value");
+  }
   const profileName =
-    argv.includes("--profile") ? argv[argv.indexOf("--profile") + 1] : env("SOAK_PROFILE");
+    profileIdx !== -1 ? argv[profileIdx + 1] : env("SOAK_PROFILE");
   if (profileName !== undefined) {
     const p = loadProfile(profileName);
     if (p.sessions !== undefined) o.sessions = p.sessions;
@@ -293,6 +304,9 @@ export function parseArgs(argv: string[]): Options {
   if (env("SOAK_DURATION") !== undefined) o.durationMs = parseDurationMs(env("SOAK_DURATION")!);
   if (env("SOAK_INPUT_INTERVAL") !== undefined) {
     o.inputIntervalMs = parseDurationMs(env("SOAK_INPUT_INTERVAL")!);
+  }
+  if (env("SOAK_INPUT_TIMEOUT_MS") !== undefined) {
+    o.inputTimeoutMs = nonNegativeNumber("SOAK_INPUT_TIMEOUT_MS", env("SOAK_INPUT_TIMEOUT_MS")!);
   }
   if (env("SOAK_POLL_INTERVAL") !== undefined) {
     o.pollIntervalMs = parseDurationMs(env("SOAK_POLL_INTERVAL")!);
@@ -336,6 +350,9 @@ export function parseArgs(argv: string[]): Options {
       case "--input-interval":
         o.inputIntervalMs = parseDurationMs(next());
         break;
+      case "--input-timeout-ms":
+        o.inputTimeoutMs = nonNegativeNumber(a, next());
+        break;
       case "--poll-interval":
         o.pollIntervalMs = parseDurationMs(next());
         break;
@@ -353,6 +370,15 @@ export function parseArgs(argv: string[]): Options {
         break;
       case "--reconnect-p95-ms":
         o.thresholds.reconnectP95Ms = nonNegativeNumber(a, next());
+        break;
+      case "--disconnect-p95-ms":
+        o.thresholds.disconnectP95Ms = nonNegativeNumber(a, next());
+        break;
+      case "--disconnect-p100-ms":
+        o.thresholds.disconnectP100Ms = nonNegativeNumber(a, next());
+        break;
+      case "--input-resume-p100-ms":
+        o.thresholds.inputResumeP100Ms = nonNegativeNumber(a, next());
         break;
       case "--max-gap-ms":
         o.thresholds.maxGapMs = nonNegativeNumber(a, next());
@@ -407,17 +433,20 @@ function patchRateLimitCounter(
 }
 
 /**
- * Per-node CPU-requests percentage from `kubectl describe node` (the
- * advisor's worst-node guard): used to stop adding soak workspaces once
- * any guarded node would exceed the cap. kubectl is a debug-time tool —
- * when SOAK_NODE_GUARD is unset this never runs.
+ * Per-node CPU-requests percentage and allocatable CPU (millicores) from
+ * `kubectl describe node` (the advisor's worst-node guard): used to stop
+ * adding soak workspaces once any guarded node would exceed the cap.
+ * kubectl is a debug-time tool — when SOAK_NODE_GUARD is unset this never
+ * runs.
  */
-function nodeRequestPcts(nodes: string[]): Record<string, number> {
+function nodeRequestStats(
+  nodes: string[],
+): Record<string, { pct: number; allocatableCpuM: number }> {
   const kubectl = env("SOAK_NODE_KUBECTL") ?? "kubectl";
   const kcArgs = env("SOAK_NODE_KUBECONFIG")
     ? ["--kubeconfig", env("SOAK_NODE_KUBECONFIG")!]
     : [];
-  const out: Record<string, number> = {};
+  const out: Record<string, { pct: number; allocatableCpuM: number }> = {};
   for (const n of nodes) {
     const desc = execFileSync(kubectl, [...kcArgs, "describe", "node", n], {
       encoding: "utf8",
@@ -425,9 +454,37 @@ function nodeRequestPcts(nodes: string[]): Record<string, number> {
     });
     const m = /^ {2}cpu\s+\S+m \((\d+)%\)/m.exec(desc);
     if (!m) throw new Error(`cannot parse cpu requests of node ${n}`);
-    out[n] = Number(m[1]);
+    const allocBlock = /^Allocatable:\n((?: {2}.+\n)+)/m.exec(desc);
+    const a = allocBlock && /^ {2}cpu:\s+(\d+)(m?)\s*$/m.exec(allocBlock[1]);
+    if (!a) throw new Error(`cannot parse cpu allocatable of node ${n}`);
+    out[n] = {
+      pct: Number(m[1]),
+      allocatableCpuM: a[2] === "m" ? Number(a[1]) : Number(a[1]) * 1000,
+    };
   }
   return out;
+}
+
+/**
+ * Guard nodes whose projected CPU-request share would reach the cap once
+ * the next create wave lands: `describe node` only counts bound pods, so
+ * a wave of still-Pending pods is invisible to a current-only check
+ * (PR-71 review). The wave is projected spread over the guarded nodes —
+ * the scheduler's expected shape — as
+ * `current + wavePods * podCpuM / nodes / allocatable >= guardPct`.
+ */
+export function guardOverProjected(
+  stats: Record<string, { pct: number; allocatableCpuM: number }>,
+  wavePods: number,
+  podCpuM: number,
+  guardPct: number,
+): string[] {
+  const names = Object.keys(stats);
+  if (names.length === 0) return [];
+  const perNodeWaveM = (wavePods * podCpuM) / names.length;
+  return names.filter(
+    (n) => stats[n].pct + (perNodeWaveM / stats[n].allocatableCpuM) * 100 >= guardPct,
+  );
 }
 
 /** Soak pods per node in the workspace namespace (placement record). */
@@ -992,6 +1049,14 @@ export interface SessionCtx extends SessionResult {
   elsewhere: boolean;
   /** Wall-clock ms of each scripted input dispatch (the harness-side latency). */
   inputMs: number[];
+  /** Dispatches that hit the per-input timeout (the page's ops were wedged). */
+  inputTimeouts: number;
+  /** Start of the current disconnect span (set on the first non-connected obs). */
+  disconnectStartedAt: number | null;
+  /** A connected obs ended a disconnect span; cleared when the next input lands. */
+  awaitingInputResume: boolean;
+  /** Wall-clock ms from disconnect start to the first successful input after reconnect. */
+  inputResumeMs: number[];
 }
 
 export function newSession(id: string, name: string): SessionCtx {
@@ -1004,6 +1069,10 @@ export function newSession(id: string, name: string): SessionCtx {
     reloadedAt: null,
     manualActions: 0,
     inputEvents: 0,
+    inputTimeouts: 0,
+    disconnectStartedAt: null,
+    awaitingInputResume: false,
+    inputResumeMs: [],
     dropped: false,
     runEndAt: 0,
     relaunches: 0,
@@ -1019,6 +1088,8 @@ export function newSession(id: string, name: string): SessionCtx {
 export interface DriveOptions {
   durationMs: number;
   inputIntervalMs: number;
+  /** Per-dispatch cap on a scripted input; a wedged page op cannot starve the rest. */
+  inputTimeoutMs: number;
   pollIntervalMs: number;
   connectTimeoutMs: number;
   verbose: boolean;
@@ -1081,7 +1152,12 @@ export async function driveSessions(
           source: p.source,
           ...(p.elsewhere === true ? { elsewhere: true } : {}),
         });
-        if (p.state === "connected") s.lastConnectedAt = at;
+        if (p.state === "connected") {
+          s.lastConnectedAt = at;
+          if (s.disconnectStartedAt !== null) s.awaitingInputResume = true;
+        } else if (s.lastConnectedAt !== null && s.disconnectStartedAt === null) {
+          s.disconnectStartedAt = at;
+        }
         if (p.elsewhere === true && !s.elsewhere) {
           stamp(`${s.id}: page shows "open in another tab" while its stream is live (false elsewhere)`);
         }
@@ -1172,40 +1248,68 @@ export async function driveSessions(
     const soakStartedAt = Date.now();
     const deadline = soakStartedAt + opts.durationMs;
     const reloadAt = soakStartedAt + opts.durationMs / 2;
-    let reloaded = false;
 
+    let reloadQueue: SessionCtx[] | null = null;
     while (Date.now() < deadline && !shouldStop() && aborted === null) {
-      if (!reloaded && Date.now() >= reloadAt) {
-        reloaded = true;
+      if (reloadQueue === null && Date.now() >= reloadAt) {
         stamp("mid-run reload of every session");
-        for (const s of sessions) {
-          s.reloadedAt = Date.now();
-          try {
-            const r = await drv(s).reloadSession(s.id);
-            if (r.takeoverPrompted) {
-              // FX-R3c: a reload resumes without a ticket. A take-over prompt
-              // means a human would have had to click: always a failure.
-              s.manualActions++;
-              failures.push(`take-over prompt after the mid-run reload of ${s.id}`);
-            }
-          } catch (e) {
-            console.error(`reload ${s.id}: ${(e as Error).message}`);
+        reloadQueue = [...sessions];
+      }
+      // One reload per pass: a serialized reload burst starves the input
+      // loop exactly like a wedged send would (rc.3 e2e: 60 sequential
+      // reloads blocked every input heartbeat for the whole window).
+      const rs = reloadQueue?.shift();
+      if (rs !== undefined) {
+        rs.reloadedAt = Date.now();
+        try {
+          const r = await drv(rs).reloadSession(rs.id);
+          if (r.takeoverPrompted) {
+            // FX-R3c: a reload resumes without a ticket. A take-over prompt
+            // means a human would have had to click: always a failure.
+            rs.manualActions++;
+            failures.push(`take-over prompt after the mid-run reload of ${rs.id}`);
           }
+        } catch (e) {
+          console.error(`reload ${rs.id}: ${(e as Error).message}`);
         }
+        if (reloadQueue!.length === 0) reloadQueue = [];
       }
       for (const s of sessions) {
         if (Date.now() - s.lastInputAt < opts.inputIntervalMs) continue;
         s.lastInputAt = Date.now();
         const t0 = Date.now();
-        try {
-          await drv(s).sendInput(s.id);
-          s.inputMs.push(Date.now() - t0);
+        const send = drv(s).sendInput(s.id);
+        const outcome = await Promise.race([
+          send.then((): "ok" => "ok").catch((e): Error => e as Error),
+          sleep(opts.inputTimeoutMs).then((): "timeout" => "timeout"),
+        ]);
+        const ms = Date.now() - t0;
+        if (outcome === "ok") {
+          s.inputMs.push(ms);
           s.inputEvents++;
-        } catch (e) {
-          if (opts.verbose) console.error(`input ${s.id}: ${(e as Error).message}`);
+          if (s.awaitingInputResume) {
+            s.inputResumeMs.push(Date.now() - (s.disconnectStartedAt ?? Date.now()));
+            s.awaitingInputResume = false;
+            s.disconnectStartedAt = null;
+          }
+        } else {
+          s.inputTimeouts++;
+          s.inputMs.push(Math.min(ms, opts.inputTimeoutMs));
+          if (opts.verbose)
+            console.error(
+              `input ${s.id}: ${outcome === "timeout" ? `exceeded ${opts.inputTimeoutMs}ms` : outcome.message}`,
+            );
         }
       }
       await sleep(Math.min(1_000, opts.inputIntervalMs));
+    }
+    // Inputs that never resumed before the run ended count against the
+    // resume window at their floor value — the real stall was longer.
+    const endedAt = Date.now();
+    for (const s of sessions) {
+      if (s.awaitingInputResume && s.disconnectStartedAt !== null) {
+        s.inputResumeMs.push(endedAt - s.disconnectStartedAt);
+      }
     }
     if (aborted !== null) failures.push(`aborted: ${aborted}`);
     return {
@@ -1372,9 +1476,10 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
 
     stamp(`creating ${opts.sessions} workspaces on template ${tpl}`);
     // Advisor per-node guard (msg_7d6860d0d212): workspaces are created in
-    // waves; between waves the guarded nodes' CPU-request share is checked
-    // and creation stops when any would reach the cap. Effective N is what
-    // actually got created (sessionsEffective in the report).
+    // waves; between waves the guarded nodes' CPU-request share plus the
+    // next wave's projected share is checked and creation stops when any
+    // node would reach the cap. Effective N is what actually got created
+    // (sessionsEffective in the report).
     const guardNodes = (env("SOAK_NODE_GUARD") ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -1383,13 +1488,22 @@ async function run(opts: Options, shouldStop: () => boolean): Promise<number> {
     const createWave = Math.max(1, Number(env("SOAK_CREATE_WAVE") ?? "10") || 10);
     for (let w = 0; w < opts.sessions && !shouldStop(); w += createWave) {
       if (guardNodes.length) {
-        const over = Object.entries(nodeRequestPcts(guardNodes)).filter(
-          ([, p]) => p >= guardPct,
+        const podCpuM = Math.max(
+          1,
+          Number(env("SOAK_GUARD_POD_CPU_M") ?? "250") || 250,
+        );
+        const wavePods = Math.min(createWave, opts.sessions - w);
+        const over = guardOverProjected(
+          nodeRequestStats(guardNodes),
+          wavePods,
+          podCpuM,
+          guardPct,
         );
         if (over.length) {
           stamp(
-            `node-request guard: ${over.map(([n, p]) => `${n} ${p}%`).join(", ")} ` +
-              `>= ${guardPct}% — stopping creation at ${sessions.length} sessions`,
+            `node-request guard: ${over.join(", ")} would reach ` +
+              `>= ${guardPct}% projected CPU requests with the next wave ` +
+              `— stopping creation at ${sessions.length} sessions`,
           );
           break;
         }
