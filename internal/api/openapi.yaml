@@ -1751,8 +1751,9 @@ components:
             sends it with its stream claim, so a tab can tell that the live
             stream is its own — even across a backend restart that bumped the
             stream epoch — versus another tab's. Absent when the claim carried
-            no id (legacy client) and never served to a principal other than
-            the lease's own.
+            no id (legacy client) and never served to a session other than
+            the one the lease was minted under — not even a second session
+            of the same user.
 
     CreateConnectionRequest:
       type: object

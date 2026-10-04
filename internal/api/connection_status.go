@@ -44,10 +44,11 @@ type ConnectionStatus struct {
 // here (not in broker) so this package never imports internal/broker; the
 // adapter lives in internal/broker/apishim.go.
 type ConnectionStater interface {
-	// ConnectionState reports the workspace's connection state. owner is the
-	// caller's owner ref (issuer|subject): StreamOwnerTab is populated only
-	// when it equals the lease's own principal.
-	ConnectionState(ctx context.Context, workspaceUID, owner string) (ConnectionStatus, *Error)
+	// ConnectionState reports the workspace's connection state.
+	// portalSessionID is the caller's session id: StreamOwnerTab is
+	// populated only when the lease was minted under that session — never
+	// for a second session of the same user.
+	ConnectionState(ctx context.Context, workspaceUID, portalSessionID string) (ConnectionStatus, *Error)
 }
 
 // workspaceGetter is the ownership-check surface the endpoint shares with
@@ -105,7 +106,15 @@ func (h *ConnectionStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInternal, "internal error")
 		return
 	}
-	st, apiErr := h.stater.ConnectionState(r.Context(), id, p.Owner())
+	// streamOwnerTab is session-scoped evidence (R-V3c): the caller's
+	// session id, not the principal, gates it — a second session of the
+	// same user must not learn the claiming tab's id.
+	sess, _ := SessionFromContext(r.Context())
+	var sessionID string
+	if sess != nil {
+		sessionID = sess.ID
+	}
+	st, apiErr := h.stater.ConnectionState(r.Context(), id, sessionID)
 	if apiErr != nil {
 		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
 		return

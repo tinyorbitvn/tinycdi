@@ -217,10 +217,11 @@ func TestConnection_StreamOwnerTab(t *testing.T) {
 	const ws = "ws_0000000000000006"
 	const tabA = "0123456789abcdef0123456789abcdef"
 	const tabB = "fedcba9876543210fedcba9876543210"
+	const portalSess = "portal-session-1"
 	db, b, clock, src := setup(t)
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
 	src.set(readyBinding(ws, "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	lease := leaseFor(t, b, gwA, broker.PlatformID(ws), false)
+	lease := leaseForSess(t, b, gwA, broker.PlatformID(ws), false, portalSess)
 
 	// Two claims of the same tab inside one poll interval: the owner is
 	// that tab on both — a restart re-claim stays "ours".
@@ -229,15 +230,16 @@ func TestConnection_StreamOwnerTab(t *testing.T) {
 			t.Fatalf("claim %d: %v", want, err)
 		}
 	}
-	st, err := b.ConnectionState(ctx, broker.PlatformID(ws), alice.Owner())
+	st, err := b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
 	if err != nil || st.StreamOwnerTab != tabA || st.StreamEpoch != 2 {
 		t.Fatalf("same-tab claims: %+v err=%v, want StreamOwnerTab %q", st, err, tabA)
 	}
 
-	// A foreign principal sees the same connection state minus the owner id.
-	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), "https://idp.example|bob")
+	// A different portal session of the same user never learns the id —
+	// the gate is the lease's portal_session_digest, not the principal.
+	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), "portal-session-2")
 	if err != nil || st.State == "" || st.StreamOwnerTab != "" {
-		t.Fatalf("foreign principal: %+v err=%v, want StreamOwnerTab empty", st, err)
+		t.Fatalf("other session: %+v err=%v, want StreamOwnerTab empty", st, err)
 	}
 
 	// A different tab's claim replaces the owner in the same update as the
@@ -245,7 +247,7 @@ func TestConnection_StreamOwnerTab(t *testing.T) {
 	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), tabB); err != nil {
 		t.Fatalf("foreign claim: %v", err)
 	}
-	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), alice.Owner())
+	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
 	if err != nil || st.StreamOwnerTab != tabB || st.StreamEpoch != 3 {
 		t.Fatalf("foreign claim: %+v err=%v, want StreamOwnerTab %q", st, err, tabB)
 	}
@@ -255,16 +257,49 @@ func TestConnection_StreamOwnerTab(t *testing.T) {
 	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), ""); err != nil {
 		t.Fatalf("legacy claim: %v", err)
 	}
-	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), alice.Owner())
+	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
 	if err != nil || st.StreamOwnerTab != "" || st.StreamEpoch != 4 {
 		t.Fatalf("legacy claim: %+v err=%v, want StreamOwnerTab empty", st, err)
 	}
 	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), "not-hex!"); err != nil {
 		t.Fatalf("malformed claim: %v", err)
 	}
-	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), alice.Owner())
+	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
 	if err != nil || st.StreamOwnerTab != "" || st.StreamEpoch != 5 {
 		t.Fatalf("malformed claim: %+v err=%v, want StreamOwnerTab empty", st, err)
+	}
+}
+
+// TestConnection_StreamOwnerEpochStale (R-V3c): the stored id only names the
+// current stream while stream_owner_epoch = stream_epoch. A replica
+// predating the columns bumps the epoch without naming them — its claim
+// leaves stale evidence that must read as absent, never as a match.
+func TestConnection_StreamOwnerEpochStale(t *testing.T) {
+	const ws = "ws_0000000000000007"
+	const portalSess = "portal-session-1"
+	const tabA = "0123456789abcdef0123456789abcdef"
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
+	src.set(readyBinding(ws, "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	lease := leaseForSess(t, b, gwA, broker.PlatformID(ws), false, portalSess)
+
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), tabA); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	st, err := b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
+	if err != nil || st.StreamOwnerTab != tabA {
+		t.Fatalf("claim: %+v err=%v, want StreamOwnerTab %q", st, err, tabA)
+	}
+
+	// An rc.2-era claim: epoch bumps, owner columns untouched.
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE connection_lease SET stream_epoch = stream_epoch + 1
+		WHERE id = $1`, lease.ID); err != nil {
+		t.Fatalf("rc.2-shaped claim: %v", err)
+	}
+	st, err = b.ConnectionState(ctx, broker.PlatformID(ws), portalSess)
+	if err != nil || st.StreamOwnerTab != "" || st.StreamEpoch != 2 {
+		t.Fatalf("stale owner: %+v err=%v, want StreamOwnerTab empty", st, err)
 	}
 }
 

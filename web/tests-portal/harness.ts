@@ -141,14 +141,25 @@ export async function setConnectionStatus(
 }
 
 // openStream tells the mock a new stream opened on the workspace's current
-// lease (its stream epoch advances) — what the real gateway reports when a
-// frame connects with the lease's session cookie.
-export async function openStream(request: APIRequestContext, workspaceId: string) {
+// lease (its stream epoch advances; an optional streamOwnerTab lands on the
+// same "write") — what the real gateway reports when a frame connects with
+// the lease's session cookie.
+export async function openStream(request: APIRequestContext, workspaceId: string, streamOwnerTab?: string) {
   const res = await request.post(`${MOCK_API}/_control/session/stream`, {
-    data: { workspaceId },
+    data: { workspaceId, ...(streamOwnerTab !== undefined ? { streamOwnerTab } : {}) },
   });
   expect(res.ok(), "open a stream on the mock lease").toBeTruthy();
   return (await res.json()) as { leaseRef: string; streamEpoch: number };
+}
+
+// frameTabId reads this page instance's stream-owner id off the frame's
+// `path` URL setting (path=websockify?tcdi_tab=<id>) — the same channel the
+// real KasmVNC client sends it on with every websocket claim (FX-R31).
+export function frameTabId(frameUrl: string): string {
+  const path = new URL(frameUrl).searchParams.get("path") ?? "";
+  const m = path.match(/tcdi_tab=([0-9a-f]{32})/);
+  if (!m) throw new Error(`frame URL carries no tcdi_tab: ${frameUrl}`);
+  return m[1];
 }
 
 // clearLease drops the mock's lease record for the workspace — the broker-

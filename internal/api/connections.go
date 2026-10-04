@@ -31,7 +31,10 @@ type IssuedTicket struct {
 // ticket so the gateway's redirect can re-assert the client's flags; ""
 // records nothing.
 type ConnectionIssuer interface {
-	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool, clipboardPolicy string) (IssuedTicket, *Error)
+	// IssueTicket mints a launch ticket. portalSessionID is the caller's
+	// session id: the lease it produces records its digest so the stream's
+	// owner tab is only ever reported back to this session (R-V3c).
+	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool, clipboardPolicy, portalSessionID string) (IssuedTicket, *Error)
 }
 
 // LaunchPath is the session-origin endpoint the browser POSTs the ticket to
@@ -132,7 +135,11 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if h.clipboard != nil {
 		policy, _ = h.clipboard(r.Context(), p, id)
 	}
-	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy)
+	var sessionID string
+	if sess, ok := SessionFromContext(r.Context()); ok && sess != nil {
+		sessionID = sess.ID
+	}
+	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sessionID)
 	if apiErr != nil {
 		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
 		return

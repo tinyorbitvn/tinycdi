@@ -718,7 +718,7 @@ describe("SessionPage reconnecting badge (T5.4)", () => {
 // ---- FX-R31: ownership evidence decides "elsewhere", not epoch arithmetic ----
 
 describe("SessionPage stream-owner tab (FX-R31)", () => {
-  const MY_TAB = () => sessionTabId(); // the page's own id (same sessionStorage)
+  const MY_TAB = () => sessionTabId(); // this page instance's memory-only id
   const OTHER_TAB = "fedcba9876543210fedcba9876543210";
   const owned = (streamEpoch: number, streamOwnerTab: string, leaseRef = OWN_REF) => ({
     state: "connected",
@@ -779,15 +779,34 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     expect(await screen.findByText("This session is open in another tab")).toBeInTheDocument();
   });
 
-  it("a foreign owner id inside the resume window is a takeover, not our stream", async () => {
+  // R-V3c: a foreign owner while OUR claim is pending is not yet a
+  // takeover — the page claims first, and 'elsewhere' lands on the tab
+  // whose stream was replaced. This is also the reload path: a reload
+  // mints a fresh id, the old stream still shows the previous id, and an
+  // early verdict would flash "open in another tab" until the claim lands.
+  it("a foreign owner id during the resume window suppresses 'elsewhere' until our claim lands", async () => {
     const { control, ticketPosts } = setupScripted({ props: { pollIntervalMs: 20 } });
-    // Our marker and the live lease agree on epoch 1, but the stream on
-    // the lease belongs to another tab — the resume poll must not claim it.
+    // The live stream belongs to another tab, our claim is pending: the
+    // page must NOT verdict 'elsewhere' — it navigates and claims.
     control.connection = () => owned(1, OTHER_TAB);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+    expect(ticketPosts()).toHaveLength(0);
+
+    // Our claim lands at the next epoch — the page is ours, and a verdict
+    // on any LATER foreign claim is back on.
+    control.connection = () => owned(2, sessionTabId());
+    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
+  it("a foreign owner after our claim landed verdicts 'elsewhere'", async () => {
+    const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
+    await connectViaResume(ws, control);
+    control.connection = () => owned(9, OTHER_TAB);
     expect(
       await screen.findByText("This session is open in another tab"),
     ).toBeInTheDocument();
-    expect(ticketPosts()).toHaveLength(0);
   });
 });
 

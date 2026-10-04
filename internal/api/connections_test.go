@@ -32,7 +32,7 @@ type fakeIssuer struct {
 	calls     int
 }
 
-func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, takeover bool, _ string) (IssuedTicket, *Error) {
+func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, takeover bool, _, _ string) (IssuedTicket, *Error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++

@@ -283,7 +283,21 @@ func requestID(ctx context.Context) string {
 // API at issue: it is recorded on the ticket row so the gateway's
 // post-redemption redirect can re-assert the client's clipboard flags
 // (V3.24). "" records NULL — a ticket with no policy appends nothing.
-func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, clipboardPolicy string) (Ticket, error) {
+// portalSessionDigest is SHA-256 of the issuing portal session's id,
+// stored on the ticket and copied onto the lease at redemption — the
+// session id itself never reaches the database (same convention as the
+// gateway session_digest). The id scopes streamOwnerTab reads: only the
+// portal session that minted the lease may see the stream's owner tab —
+// never a second session of the same user (R-V3c).
+func portalSessionDigest(portalSessionID string) []byte {
+	if portalSessionID == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(portalSessionID))
+	return sum[:]
+}
+
+func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, clipboardPolicy, portalSessionID string) (Ticket, error) {
 	now := b.now()
 
 	// Ownership check against the authoritative workspace row: cross-tenant
@@ -358,11 +372,12 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 		`INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience, takeover,
-			 request_id, expires_at, clipboard_policy)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			 request_id, expires_at, clipboard_policy, portal_session_digest)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		ticketHash(token), workspaceUID, tenantID, owner,
 		int64(binding.RuntimeGeneration), binding.RuntimeUID,
-		b.audience, takeover, requestID(ctx), expires, policy); err != nil {
+		b.audience, takeover, requestID(ctx), expires, policy,
+		portalSessionDigest(portalSessionID)); err != nil {
 		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
 	}
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil
@@ -384,14 +399,15 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			expiresAt                                      time.Time
 			consumedAt, revokedAt                          *time.Time
 			policy                                         *string
+			portalSession                                  []byte
 		)
 		err := tx.QueryRow(ctx,
 			`SELECT workspace_id, tenant_id, principal_subject, runtime_generation,
 				runtime_uid, audience, takeover, expires_at, consumed_at, revoked_at,
-				clipboard_policy
+				clipboard_policy, portal_session_digest
 			 FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`, hash).
 			Scan(&wsUID, &tenantID, &subject, &gen, &runtimeUID, &audience,
-				&takeover, &expiresAt, &consumedAt, &revokedAt, &policy)
+				&takeover, &expiresAt, &consumedAt, &revokedAt, &policy, &portalSession)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return ErrTicketInvalid
@@ -496,10 +512,11 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			`INSERT INTO connection_lease
 				(id, workspace_id, tenant_id, principal_subject,
 				 runtime_generation, runtime_uid, fencing_version, gateway_id,
-				 state, created_at, expires_at, last_renewed_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9)`,
+				 state, created_at, expires_at, last_renewed_at,
+				 portal_session_digest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)`,
 			lease.ID, wsUID, tenantID, subject, int64(gen), runtimeUID,
-			int64(fencing), gw.ID, now, lease.ExpiresAt); err != nil {
+			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return ErrConnectionInUse

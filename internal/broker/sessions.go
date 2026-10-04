@@ -149,9 +149,14 @@ func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID st
 	// sets the count back to 1 and clears the grace window.
 	var epoch uint64
 	err = b.db.WithTx(ctx, func(tx store.Tx) error {
+		// stream_owner_epoch repeats the new epoch: a replica predating the
+		// column bumps stream_epoch without naming the owner columns, and a
+		// stored id whose epoch no longer matches is stale evidence — read
+		// as absent, never as a match (R-V3c).
 		if err := tx.QueryRow(ctx,
 			`UPDATE connection_lease SET stream_epoch = stream_epoch + 1,
-				stream_owner_tab = $2
+				stream_owner_tab = $2::text,
+				stream_owner_epoch = CASE WHEN $2::text IS NULL THEN NULL ELSE stream_epoch + 1 END
 			 WHERE id = $1 AND state = 'active' RETURNING stream_epoch`, l.ID, ownerTabOrNull(ownerTab)).
 			Scan(&epoch); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

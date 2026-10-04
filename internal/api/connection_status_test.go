@@ -21,20 +21,20 @@ import (
 
 // fakeStater scripts the broker-facing connection-state surface.
 type fakeStater struct {
-	mu       sync.Mutex
-	state    ConnectionStatus
-	err      *Error
-	gotWS    string
-	gotOwner string
-	calls    int
+	mu      sync.Mutex
+	state   ConnectionStatus
+	err     *Error
+	gotWS   string
+	gotSess string
+	calls   int
 }
 
-func (f *fakeStater) ConnectionState(_ context.Context, wsUID, owner string) (ConnectionStatus, *Error) {
+func (f *fakeStater) ConnectionState(_ context.Context, wsUID, portalSessionID string) (ConnectionStatus, *Error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.gotWS = wsUID
-	f.gotOwner = owner
+	f.gotSess = portalSessionID
 	return f.state, f.err
 }
 
@@ -197,8 +197,9 @@ func TestConnectionStatus_JSONCarriesLeaseRefAndEpoch(t *testing.T) {
 }
 
 // TestConnectionStatus_OwnerScopedTabID (FX-R31): the handler hands the
-// caller's owner ref to the stater — the gate that decides whether
-// streamOwnerTab may appear — and a populated value round-trips in JSON.
+// caller's portal session id to the stater — the gate that decides
+// whether streamOwnerTab may appear — and a populated value round-trips
+// in JSON.
 func TestConnectionStatus_OwnerScopedTabID(t *testing.T) {
 	const wsID = "ws_00000000000000000000000001"
 	st := &fakeStater{state: ConnectionStatus{
@@ -218,7 +219,7 @@ func TestConnectionStatus_OwnerScopedTabID(t *testing.T) {
 	if m["streamOwnerTab"] != "fedcba9876543210fedcba9876543210" {
 		t.Fatalf("streamOwnerTab missing in %v", m)
 	}
-	if want := env.issuer.URL() + "|alice"; st.gotOwner != want {
-		t.Fatalf("stater got owner %q, want the caller's owner ref %q", st.gotOwner, want)
+	if st.gotSess != sess.Value {
+		t.Fatalf("stater got session %q, want the caller's session id %q", st.gotSess, sess.Value)
 	}
 }

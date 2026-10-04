@@ -222,16 +222,25 @@ export function SessionPage({
       // the lease in the same write as the epoch, so it always names the
       // CURRENT stream's claimer. OUR id means the live stream is ours —
       // the epoch arithmetic below never sees two same-tab claims inside
-      // one poll interval (a backend restart's re-claim) as a takeover. A
-      // different id is a foreign tab's claim whatever the epochs say.
-      // Absent (a legacy claim stored NULL) falls back to the epochs.
-      if (s.streamOwnerTab !== undefined) {
-        pending.current = null;
-        remember({ leaseRef, streamEpoch });
+      // one poll interval (a backend restart's re-claim) as a takeover.
+      // A different id verdicts "elsewhere" only once this page instance's
+      // own claim has had its turn: while a claim of ours is pending (the
+      // provisional marker the resume/launch path armed), a foreign owner
+      // just means our claim has not reached the broker yet — every reload
+      // mints a fresh id that only arrives with the frame's next claim,
+      // and an early verdict would flash "open in another tab" on each
+      // reload (R-V3c). With nothing pending, the stream provably belongs
+      // to a different tab. Absent (a legacy claim stored NULL) falls back
+      // to the epochs.
+      if (s.streamOwnerTab) {
         if (s.streamOwnerTab === sessionTabId()) {
+          pending.current = null;
           owned.current = true;
+          remember({ leaseRef, streamEpoch });
           return "ours";
         }
+        if (pending.current !== null) return "unknown";
+        remember({ leaseRef, streamEpoch });
         return "elsewhere";
       }
       const p = pending.current;

@@ -40,20 +40,21 @@ export function sessionOrigin(workspaceId: string, sessionDomain: string): strin
 /** The template's clipboard policy, as published by GET /v1/templates. */
 export type ClipboardPolicy = "Disabled" | "Send" | "Receive" | "Bidirectional";
 
-// Stream-owner tab id (FX-R31). The page mints one random 128-bit id per
-// browsing context and keeps it in sessionStorage, so it survives reloads
-// and in-portal navigation of THIS tab but is never shared with a second
-// tab. The id travels to the broker inside the KasmVNC client's `path`
-// URL setting (path=websockify?tcdi_tab=<id>): the client rebuilds its
-// websocket URL from that setting on every connect and retry, so every
-// stream claim from this frame carries the same id — including the
-// re-claims a backend restart or rollout triggers. GET /connection then
-// reports the claim's owner, and an epoch advance is no longer mistaken
-// for a foreign tab.
-const TAB_ID_KEY = "tcdi.session.tab";
-const TAB_ID_RE = /^[0-9a-f]{32}$/;
-// storage-unavailable fallback: one id for this page's lifetime.
-let memoTabId = "";
+// Stream-owner tab id (FX-R31, R-V3c). The page mints one random 128-bit
+// id per PAGE INSTANCE and keeps it in memory only — never in
+// sessionStorage, which browsers COPY on "duplicate tab" and
+// reopen-closed-tab: a stored id would be shared by the copy and both
+// tabs would claim the same owner, defeating the check entirely.
+// A reload mints a new id; this instance's frame claims record it, and
+// until a claim lands the page withholds its 'elsewhere' verdict (see
+// observe() in SessionPage). The id travels to the broker inside the
+// KasmVNC client's `path` URL setting (path=websockify?tcdi_tab=<id>):
+// the client rebuilds its websocket URL from that setting on every
+// connect and retry, so every stream claim from this frame carries the
+// same id — including the re-claims a backend restart or rollout
+// triggers. GET /connection then reports the claim's owner, and an epoch
+// advance is no longer mistaken for a foreign tab.
+let tabId: string | undefined;
 
 function mintTabId(): string {
   const bytes = new Uint8Array(16);
@@ -62,22 +63,14 @@ function mintTabId(): string {
 }
 
 /**
- * This tab's stream-owner id: a 32-char lowercase hex string (128 bits,
- * crypto.getRandomValues), stable across this tab's reloads. When storage
- * is unavailable the id only has to live for the page's lifetime — a
- * reload without storage cannot resume anyway.
+ * This page instance's stream-owner id: a 32-char lowercase hex string
+ * (128 bits, crypto.getRandomValues), minted once per page load. Not
+ * persisted anywhere — persistence is precisely what a duplicated tab
+ * shares.
  */
 export function sessionTabId(): string {
-  try {
-    const stored = sessionStorage.getItem(TAB_ID_KEY);
-    if (stored !== null && TAB_ID_RE.test(stored)) return stored;
-    const id = mintTabId();
-    sessionStorage.setItem(TAB_ID_KEY, id);
-    return id;
-  } catch {
-    if (!TAB_ID_RE.test(memoTabId)) memoTabId = mintTabId();
-    return memoTabId;
-  }
+  if (tabId === undefined) tabId = mintTabId();
+  return tabId;
 }
 
 /** The stream-claim parameter the id travels in on the websocket URL. */

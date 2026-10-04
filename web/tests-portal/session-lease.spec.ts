@@ -3,6 +3,7 @@ import {
   DESKTOP_MARKER,
   PORTAL_ORIGIN,
   expect,
+  frameTabId,
   login,
   openStream,
   openSession,
@@ -92,7 +93,10 @@ test("duplicated tab: one shows the desktop, the other 'open in another tab', ne
   await expect(statusBadge(page)).toContainText("Connected");
 
   // "Duplicate tab": a new tab in the same browser profile (same cookies)
-  // that starts with a copy of the first tab's sessionStorage.
+  // that starts with a copy of the first tab's sessionStorage — exactly
+  // what browsers hand a duplicated tab. The stream-owner id itself is
+  // memory-only (R-V3c), so the duplicate mints its OWN id; the copied
+  // marker only lets it resume onto the lease, like a reload would.
   const stored = await page.evaluate(() => JSON.stringify({ ...sessionStorage }));
   const dup = await context.newPage();
   await dup.goto("/");
@@ -103,13 +107,17 @@ test("duplicated tab: one shows the desktop, the other 'open in another tab', ne
   }, stored);
   await dup.goto(`/workspaces/${encodeURIComponent(WS_A)}/session`);
 
-  // The duplicate resumes with the shared cookie; its frame opens a stream
-  // on the lease (what the gateway reports as a higher stream epoch).
-  await waitForDesktopFrame(dup, origin);
-  await openStream(request, WS_A);
+  // The duplicate resumes: while its claim is pending a foreign owner is
+  // "our claim hasn't landed yet", never 'elsewhere' — it navigates, and
+  // its frame's claim records its own instance's tab id.
+  const dupFrame = await waitForDesktopFrame(dup, origin);
+  const dupTabId = frameTabId(dupFrame.url());
+  await openStream(request, WS_A, dupTabId);
 
   await expect(dup.getByText("This session is open in another tab")).toHaveCount(0);
   await expect(statusBadge(dup)).toContainText("Connected", { timeout: 15_000 });
+  // 'Elsewhere' lands on the tab that LOST the stream — a differing owner
+  // id with no claim of its own pending.
   await expect(page.getByText("This session is open in another tab")).toBeVisible({
     timeout: 15_000,
   });
@@ -122,4 +130,35 @@ test("duplicated tab: one shows the desktop, the other 'open in another tab', ne
   expect(await renders()).toEqual(before);
   await expect(page.getByText("This session is open in another tab")).toBeVisible();
   await expect(statusBadge(dup)).toContainText("Connected");
+});
+
+test("reload: the page reconnects under its fresh tab id — no 'elsewhere' flash", async ({
+  page,
+  request,
+  harnessMode,
+}) => {
+  await resetState(request, harnessMode);
+  await seedReadyWorkspace(request, WS_A);
+  await login(page);
+  const origin = workspaceOrigin(harnessMode, WS_A);
+  await openSession(page, harnessMode, WS_A);
+  await waitForMarker(page);
+  await expect(statusBadge(page)).toContainText("Connected");
+
+  // The reload mints a NEW owner id (memory-only, R-V3c). Until this page
+  // instance's own claim lands, the lease still shows the previous id —
+  // a foreign owner that must NOT verdict 'elsewhere' while the resume's
+  // claim is pending (an early verdict is the reload flash).
+  await page.reload();
+  const foreign = "deadbeefdeadbeefdeadbeefdeadbeef";
+  await openStream(request, WS_A, foreign);
+
+  const frame = await waitForDesktopFrame(page, origin);
+  expect(await page.getByText("This session is open in another tab").count()).toBe(0);
+
+  // The reloaded frame's claim records the fresh id — the page is 'ours'
+  // again without ever showing the dialog.
+  await openStream(request, WS_A, frameTabId(frame.url()));
+  await expect(statusBadge(page)).toContainText("Connected", { timeout: 15_000 });
+  expect(await page.getByText("This session is open in another tab").count()).toBe(0);
 });
