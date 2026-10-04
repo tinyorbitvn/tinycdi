@@ -40,8 +40,10 @@ substitute for review).
 - `internal/api/session_probe_test.go` — the unauthenticated session probe.
 - `internal/api/logout_test.go` — sign-out destroys the session and expires
   cookies; `endSessionURL` built only from discovery+config (no open
-  redirect). Note: no test asserts lease revocation on logout — see
-  threat-model S17.
+  redirect); `TestLogout_RevokesSessionBoundMaterial` /
+  `TestLogout_RevokeFailureStillSignsOut` — sign-out revokes session-bound
+  leases/tickets at the store, audits `session.revoke`, and a store failure
+  never blocks the sign-out (S17).
 - `internal/api/tenant_scope_test.go`, `events_test.go`, `statusview_test.go`,
   `me_test.go`, `owner_test.go`, `principal.go` — tenant scoping, curated
   events, principal directory fallbacks.
@@ -83,6 +85,9 @@ substitute for review).
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
+- `internal/gateway/signout_test.go` — S17 propagation: a store-level
+  revoke ends a live stream on a sibling replica within one renew cycle,
+  and the workspace cookie replays to 401 on any replica.
 
 ## 4. Broker, tickets, leases, internal mTLS
 
@@ -93,6 +98,10 @@ substitute for review).
   `sessions_test.go`, `bindings_envtest_test.go`/`bindings_internal_test.go`,
   `targets_internal_test.go` — lease lifecycle, fencing/freshness, stale
   binding, target resolution.
+- `internal/broker/signout_test.go` — `RevokePortalSession` semantics (S17):
+  digest-bound leases revoked with drain accounting, outstanding tickets
+  revoked, redemption denied once the issuing session's row is gone,
+  idempotent; migration 020 indexes.
 - `internal/broker/credentials_envtest_test.go` — per-workspace Secret
   credential reads.
 - `internal/broker/operator_stopped_test.go` +
@@ -277,8 +286,6 @@ context):
 
 - No fuzzing anywhere (OIDC callback parsing, Host-header parsing, ticket
   redemption are the natural targets).
-- No automated test asserts that sign-out revokes live leases (open item
-  S17).
 - `partitioned` cookie mode coverage is unit-level; no kind/e2e coverage.
 - Soak/drill harness exists (`tests/soak/`) but runs out of band, not per PR.
 - No load/abuse test of the rate limiters under multi-replica deployment.

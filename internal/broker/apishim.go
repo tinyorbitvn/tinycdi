@@ -29,6 +29,20 @@ func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspac
 	}, nil
 }
 
+// PublicRevoker adapts *Broker to the public API's api.SessionRevoker
+// contract — same pattern as PublicIssuer, so internal/api never imports
+// this package. Sign-out calls it to end the portal session's leases and
+// outstanding tickets at the store (S17).
+type PublicRevoker struct {
+	B *Broker
+}
+
+// RevokePortalSession revokes the portal session's session-layer material;
+// the count is informational only (audit), so errors pass through verbatim.
+func (s PublicRevoker) RevokePortalSession(ctx context.Context, portalSessionID string) (int, error) {
+	return s.B.RevokePortalSession(ctx, portalSessionID)
+}
+
 // PublicIssueError maps broker domain errors onto the public error model for
 // POST /v1/workspaces/{id}/connections (openapi.yaml createConnection).
 func PublicIssueError(err error) *api.Error {

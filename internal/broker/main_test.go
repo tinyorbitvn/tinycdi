@@ -13,6 +13,7 @@ package broker_test
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -173,6 +174,38 @@ func seedWorkspace(t *testing.T, db *store.DB, tenantID, ownerSubject, wsUID str
 		wsUID, tenantID, ownerSubject, "req-"+wsUID)
 	if err != nil {
 		t.Fatalf("seed workspace: %v", err)
+	}
+}
+
+// seedPortalSession inserts the sessions row a ticket's
+// portal_session_digest points at: redemption re-checks that the issuing
+// portal session still exists (S17). The row key is the same digest form
+// the API's store writes (hex of SHA-256).
+func seedPortalSession(t *testing.T, db *store.DB, portalSessionID string) {
+	t.Helper()
+	sum := sha256.Sum256([]byte(portalSessionID))
+	_, err := db.Pool().Exec(context.Background(), `
+		INSERT INTO sessions (id, issuer, subject, tenant_id, groups,
+			created_at, last_seen_at, expires_at, epoch)
+		VALUES ($1, 'iss', 'sub', 'tenant-a', '[]', now(), now(),
+			now() + interval '1 hour',
+			(SELECT value FROM platform_meta WHERE key = 'session_epoch'))
+		ON CONFLICT (id) DO NOTHING`,
+		hex.EncodeToString(sum[:]))
+	if err != nil {
+		t.Fatalf("seed portal session: %v", err)
+	}
+}
+
+// deletePortalSession removes the seeded sessions row — what the API's
+// session delete does at sign-out.
+func deletePortalSession(t *testing.T, db *store.DB, portalSessionID string) {
+	t.Helper()
+	sum := sha256.Sum256([]byte(portalSessionID))
+	tag, err := db.Pool().Exec(context.Background(),
+		`DELETE FROM sessions WHERE id = $1`, hex.EncodeToString(sum[:]))
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("delete portal session: %v (rows=%d)", err, tag.RowsAffected())
 	}
 }
 

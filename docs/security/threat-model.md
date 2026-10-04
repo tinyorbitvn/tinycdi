@@ -191,9 +191,9 @@ PKCE means a secretless public client also works), RP-initiated logout.
 
 Controls: exact issuer/audience match via go-oidc; `endSessionURL` is built
 only from discovery + static configuration so request input cannot produce an
-open redirect (`internal/api/auth.go:655-677`);
+open redirect (`internal/api/auth.go:770-787`);
 `PostLogoutRedirect` is validated as an absolute http(s) URL at startup
-(auth.go:341). Client secret comes from `oidc.existingSecret` (chart).
+(auth.go:359). Client secret comes from `oidc.existingSecret` (chart).
 Tests: `auth_test.go`, `logout_test.go`, `oidctest/` in-memory IdP.
 
 Open question: A6-S2 — replay of the sealed login cookie within its TTL
@@ -452,7 +452,7 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | **Implemented since** (`internal/ratelimit`, FX-R30 keying, RL-1 per-replica division); reviewer verifies coverage, ceilings and bypass resistance |
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
-| S17 | Sign-out vs live desktop streams | **Still open**: `LogoutHandler` destroys the portal session but does not revoke connection leases or the workspace-host session cookie (`internal/api/auth.go:621-650`); a live stream survives sign-out until lease expiry — needs a product decision, then review |
+| S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Tests `signout_test.go` (api, broker, gateway) — review the ticket-lock serialization claim |
 | S18 | Client address chain gateway → KasmVNC | Partially closed: client XFF never reaches the runtime and only trusted proxies shift rate-limit keys (`forwarded_test.go`); open: whether pod-side brute-force protection is meaningful behind the authenticating gateway |
 
 Additional items found while writing this document (not from A6):

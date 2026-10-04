@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -298,6 +299,21 @@ func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+// SessionRevoker destroys the session-layer material a portal session
+// minted (threat-model S17): its active connection leases and its still
+// outstanding launch tickets, revoked at the shared lease store so every
+// gateway replica's renew loop observes the death within one renew cycle
+// and a replayed workspace cookie resolves to a dead lease on any replica.
+// The returned count is informational (audit); a nil revoker leaves
+// sign-out as the portal-session-only destroy it was before (tests,
+// single-purpose embeds).
+type SessionRevoker interface {
+	// RevokePortalSession revokes every active lease bound to the digest
+	// of portalSessionID plus its unconsumed launch tickets, and returns
+	// the number of leases revoked.
+	RevokePortalSession(ctx context.Context, portalSessionID string) (int, error)
+}
+
 // Authenticator implements the OIDC login/logout endpoints and exposes the
 // session accessors the middleware needs.
 type Authenticator struct {
@@ -307,6 +323,8 @@ type Authenticator struct {
 	sessions  SessionStore
 	directory Directory
 	metrics   *observability.Metrics
+	revoker   SessionRevoker
+	auditSink observability.AuditSink
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
@@ -388,6 +406,23 @@ func (a *Authenticator) WithDirectory(d Directory) *Authenticator {
 // count toward tinycdi_logins_total (E8). Nil disables the count.
 func (a *Authenticator) WithMetrics(m *observability.Metrics) *Authenticator {
 	a.metrics = m
+	return a
+}
+
+// WithSessionRevoker attaches the store-level revoker sign-out calls to end
+// the session's live desktop material (S17) — broker.PublicRevoker in the
+// wired backend. Nil disables the call.
+func (a *Authenticator) WithSessionRevoker(r SessionRevoker) *Authenticator {
+	a.revoker = r
+	return a
+}
+
+// WithAuditSink attaches the sink the dedicated session.revoke audit record
+// is written to at sign-out — the same action name the gateway's control
+// revoke emits. The request-level audit trail stays in the middleware;
+// this carries only the revocation outcome. Nil disables the event.
+func (a *Authenticator) WithAuditSink(s observability.AuditSink) *Authenticator {
+	a.auditSink = s
 	return a
 }
 
@@ -618,8 +653,23 @@ type LogoutResult struct {
 	EndSessionURL string `json:"endSessionUrl"`
 }
 
+// sessionRevokeTimeout bounds the lease-store call sign-out makes for the
+// session's leases and tickets: a wedged store must not hang the logout
+// response.
+const sessionRevokeTimeout = 5 * time.Second
+
 // LogoutHandler destroys the server-side session and expires all login- and
 // session-scoped cookies. Route it behind RequireAuth + RequireCSRF.
+//
+// Sign-out also ends the session's reach over the desktop layer (S17): the
+// session row dies first — visible to ticket redemption's session check as
+// early as possible — then the session-bound leases and outstanding tickets
+// are revoked at the store (best effort, bounded). A revoked lease fails
+// every replica's next renew, closing the live stream within one renew
+// cycle, and its session_digest dies with it, so a copied workspace cookie
+// can never rehydrate anywhere. A revoke failure is logged, counted and
+// audited but never kept back the sign-out: the portal cookie is cleared
+// and the session destroyed regardless.
 //
 // RP-initiated logout: when EndSession is on and the provider advertises
 // end_session_endpoint, it answers 200 {"endSessionUrl"} so the portal can
@@ -639,7 +689,11 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		if sess, err := a.sessions.Peek(ctx, c.Value); err == nil {
 			idToken = sess.IDToken
 		}
-		_ = a.sessions.Delete(ctx, c.Value)
+		if err := a.sessions.Delete(ctx, c.Value); err != nil {
+			a.log.Warn("sign-out: session delete failed",
+				"request_id", RequestIDFromContext(ctx), "err", err)
+		}
+		a.revokeSessionMaterial(r, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
 	endSession := a.endSessionURL(idToken)
@@ -651,6 +705,63 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(LogoutResult{EndSessionURL: endSession})
+}
+
+// revokeSessionMaterial revokes the portal session's session-layer material
+// (S17) through the attached SessionRevoker — a no-op when none is wired.
+// Best effort by contract: the local sign-out (session row + cookie) is
+// already complete, so a store failure only produces the failure records —
+// warn log, error metric, failure audit — never a failed response.
+func (a *Authenticator) revokeSessionMaterial(r *http.Request, sessionID string) {
+	if a.revoker == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), sessionRevokeTimeout)
+	leases, err := a.revoker.RevokePortalSession(ctx, sessionID)
+	cancel()
+	var actor, tenant string
+	if sess, ok := SessionFromContext(r.Context()); ok && sess != nil {
+		actor = observability.ActorRef(sess.Principal.Issuer, sess.Principal.Subject)
+		tenant = sess.Principal.TenantID
+	}
+	if err != nil {
+		a.log.Warn("sign-out: session-bound revocation failed",
+			"request_id", RequestIDFromContext(r.Context()),
+			"actor", actor, "err", err)
+		if a.metrics != nil {
+			a.metrics.IncSessionRevocation("error")
+		}
+		a.writeRevokeAudit(r, actor, tenant, observability.OutcomeFailure, "revoke_failed", 0)
+		return
+	}
+	if a.metrics != nil {
+		a.metrics.IncSessionRevocation("ok")
+	}
+	a.writeRevokeAudit(r, actor, tenant, observability.OutcomeSuccess, "", leases)
+}
+
+// writeRevokeAudit emits the session.revoke audit record for a sign-out
+// revocation — the same action name the gateway's control-surface revoke
+// uses, so lease-death auditing reads uniformly. leases is the revoked
+// count on success; session material never reaches the record (Detail
+// keys still pass through observability.RedactDetails on write).
+func (a *Authenticator) writeRevokeAudit(r *http.Request, actor, tenant string, outcome observability.AuditOutcome, errCode string, leases int) {
+	if a.auditSink == nil {
+		return
+	}
+	var details map[string]string
+	if outcome == observability.OutcomeSuccess {
+		details = map[string]string{"leases_revoked": strconv.Itoa(leases)}
+	}
+	_ = a.auditSink.WriteAudit(r.Context(), observability.AuditEvent{
+		Actor:     actorOrAnonymous(actor),
+		Action:    "session.revoke",
+		Tenant:    tenant,
+		RequestID: RequestIDFromContext(r.Context()),
+		Outcome:   outcome,
+		ErrorCode: errCode,
+		Details:   details,
+	})
 }
 
 // endSessionURL assembles the RP-initiated logout URL, or "" when sign-out
