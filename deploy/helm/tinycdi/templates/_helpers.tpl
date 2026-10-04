@@ -259,6 +259,12 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if gt $drainNs 20000000000.0 -}}
 {{- fail (printf "backend.drainPropagationDelay + backend.drainWindow must be <= 20s so listener shutdown fits the 24s shutdown deadline (got %s + %s)" (printf "%v" .Values.backend.drainPropagationDelay) (printf "%v" .Values.backend.drainWindow)) -}}
 {{- end -}}
+{{- /* FX-R35 drain budget: the frontend's drain delay must leave >= 10 s
+        of its 30 s terminationGracePeriodSeconds for graceful listener
+        shutdown — fail the render, not the pod. */ -}}
+{{- if gt (float64 (include "tinycdi.durationNs" (.Values.frontend.drainDelay | default "8s"))) 20000000000.0 -}}
+{{- fail (printf "frontend.drainDelay must be <= 20s so graceful shutdown fits the 30s terminationGracePeriodSeconds (got %s)" (printf "%v" .Values.frontend.drainDelay)) -}}
+{{- end -}}
 {{- range .Values.managedNamespaces -}}
 {{- if or (not .name) (not .tenant) -}}
 {{- fail "every managedNamespaces entry needs non-empty name and tenant" -}}

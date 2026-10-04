@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Response } from "@playwright/test";
 
 // N-1 -> N upgrade assertions (hack/quickstart/upgrade-test.sh). The cluster
 // this runs against was installed from the PREVIOUS release's chart and
@@ -94,6 +94,22 @@ async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 
   await expect
     .poll(() => workspacePhase(page, id), { timeout: timeoutMs, intervals: [3_000], message: `${id} -> ${phase}` })
     .toBe(phase);
+}
+
+// Navigates to `url` with a bounded retry on 5xx and navigation errors
+// (<= 60 s): right after a rollout the edge can briefly keep a stale
+// route to a terminated frontend pod and answer Gateway Timeout — an
+// availability hiccup, not a lost portal session (FX-R35). Returns the
+// last response, null when navigation itself kept failing.
+async function gotoRetryOn5xx(page: Page, url: string): Promise<Response | null> {
+  const deadline = Date.now() + 60_000;
+  let resp: Response | null = null;
+  do {
+    resp = await page.goto(url).catch(() => null);
+    if (resp && resp.status() < 500) return resp;
+    await page.waitForTimeout(1_000);
+  } while (Date.now() < deadline);
+  return resp;
 }
 
 async function getQuota(page: Page): Promise<{
@@ -264,6 +280,16 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   }
   expect(await applyExit, `upgrade-test.sh --apply failed:\n${applyOut}`).toBe(0);
 
+  // The apply leg must wait for ALL rollouts — backend, operator AND
+  // frontend — before returning, so the portal navigation below never
+  // races an unfinished rollout (FX-R35). kubectl prints
+  // `deployment "<name>" successfully rolled out` per wait.
+  for (const d of ["backend", "operator", "frontend"]) {
+    expect(applyOut, `--apply waited for deployment/${d} to roll out`).toContain(
+      `deployment "${d}" successfully rolled out`,
+    );
+  }
+
   // The live session reconnects to a new backend replica inside its lease —
   // no second launch ticket (docs/runbooks/upgrade.md "safe to upgrade").
   await expect(status).toHaveText("Connected", { timeout: 5 * 60_000 });
@@ -271,8 +297,14 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
   await sessionPage.screenshot({ path: "test-results/session-after-upgrade.png" });
 
   // ---------- post-upgrade assertions ----------
-  // Portal session survives: the same browser context still reaches the app.
-  await page.goto("/");
+  // Portal session survives: the same browser context still reaches the
+  // app. The frontend roll just ended — retry the navigation on 5xx for a
+  // bounded window rather than failing on the first edge hiccup (FX-R35).
+  const resp = await gotoRetryOn5xx(page, "/");
+  expect(
+    resp !== null && resp.status() < 500,
+    `portal unavailable after the upgrade: last GET / -> ${resp ? `HTTP ${resp.status()}` : "navigation failed"}`,
+  ).toBe(true);
   await expect(
     page.getByRole("heading", { name: "Workspaces", exact: true }),
     "portal session lost across the upgrade",

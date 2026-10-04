@@ -480,7 +480,7 @@ vector and `reserveForStart` would re-reserve zero.
 
 | Component | Effect of a restart/upgrade | Session impact |
 |---|---|---|
-| `frontend` | static SPA, no proxy state | page reloads; no session loss |
+| `frontend` | static SPA, no proxy state; a terminating pod drains (`frontend.drainDelay`) so the edge stops routing before it exits | page reloads; no session loss |
 | `backend` | public API + in-process broker + session gateway; tickets, leases and quota live in Postgres | a restart or rollout **closes the streams on that replica** — clients reconnect to another replica with the same session cookie inside their live lease (no new launch ticket); the lease row survives and the session is rebuilt from it |
 | `operator` | reconcile resumes from persisted annotations (`applied-intent`, `template-snapshot`, `finalizer-progress`) | running pods untouched; in-flight teardown continues after restart |
 
@@ -497,6 +497,18 @@ stream dies reconnects with the same cookie and resumes within seconds —
 no re-launch, no new ticket. The one case that still needs a re-launch is
 **every backend replica down for longer than the 30 s lease TTL**: nothing
 renews the leases, they expire, and each user must start a fresh session.
+
+The stateless `frontend` has the same propagation gap without the streams:
+a pod that exits the instant it is told to still receives traffic for a
+second or two — the edge only learns the endpoint is gone once the
+EndpointSlice update propagates — and a request landing in that window
+gets a Gateway Timeout. The frontend therefore drains in the same order:
+on SIGTERM its `/healthz` fails at once so the pod leaves the Service
+endpoints, it keeps serving for `-drain-delay`
+(`frontend.drainDelay`, 8 s default — render-time bound so the delay plus
+a graceful shutdown fits the 30 s `terminationGracePeriodSeconds`), then
+the listener closes. A rollover never routes to a dead pod; page loads
+land on a live replica.
 
 ## Before you start
 
