@@ -297,11 +297,24 @@ describe("SessionPage resume (R3c)", () => {
       streamEpoch: 1,
     });
 
+    // The resume deadline is armed right after the frame navigation, so the
+    // ticket count at the src write is the deterministic pre-deadline
+    // observation — a waitFor that lands after 150 ms would see the mint.
+    const ticketsAtNav: number[] = [];
+    const srcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src")!;
+    vi.spyOn(HTMLIFrameElement.prototype, "src", "set").mockImplementation(function (
+      this: HTMLIFrameElement,
+      v: string,
+    ) {
+      ticketsAtNav.push(ticketPosts().length);
+      srcDesc.set!.call(this, v);
+    });
+
     const frame = (await screen.findByTitle(`Desktop: ${ws.name}`)) as HTMLIFrameElement;
     await waitFor(() =>
       expect(frame.getAttribute("src") ?? "").toContain(frameUrlPrefixOf(ws.id)),
     );
-    expect(ticketPosts()).toHaveLength(0);
+    expect(ticketsAtNav).toEqual([0]);
 
     await waitFor(() => expect(ticketPosts()).toHaveLength(1));
     // Never a silent takeover: the lease is still held, so the user is asked.
@@ -801,7 +814,7 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     // Our claim lands at the next epoch — the page is ours, and a verdict
     // on any LATER foreign claim is back on.
     control.connection = () => owned(2, sessionTabId());
-    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 
@@ -824,33 +837,33 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
   // restart's re-claim (new epoch, same tab id) keeps the page 'ours', so
   // the watch's reconnect backoff runs immediately.
   it("a stream loss with our owner id reloads the frame after the in-frame window — the 'elsewhere' gate never engages", async () => {
+    const writes = watchFrameSrc();
     const { ws, control } = setupScripted({
       props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
+    const navs = writes.length;
 
-    // The backend rolled: the stream died and the client's retry already
-    // re-claimed at a much later epoch under OUR tab id — epochs alone read
-    // "another tab" and rc.2 parked the page on the overlay until the lease
-    // expired. disconnected reports keep coming while the watch reloads.
+    // The backend rolled: the stream died and no claim has reached the
+    // broker yet (a newer epoch here would be claim evidence and defer the
+    // re-navigation). disconnected reports keep coming while the watch
+    // waits out the in-frame window, then re-navigates the frame to the
+    // same URL — so the reload is observed on the src-write count.
     control.connection = () => ({
       state: "disconnected",
       leaseActive: true,
       leaseRef: OWN_REF,
-      streamEpoch: 7,
+      streamEpoch: 2,
       streamOwnerTab: sessionTabId(),
     });
-    const iframe = () =>
-      document.querySelector("iframe") as HTMLIFrameElement | null;
     // The reconnect runs as soon as the in-frame window is out, not after
     // lease expiry.
-    await waitFor(
-      () => expect(iframe()?.getAttribute("src")).toBeTruthy(),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(writes.length).toBe(navs + 1), { timeout: 5_000 });
 
     // The reloaded frame's claim lands: the stream is back under our id at
-    // a new epoch — the page never read "elsewhere" throughout.
+    // a much later epoch — epochs alone read "another tab" and rc.2 parked
+    // the page on the overlay until the lease expired, but the owner id
+    // keeps the page 'ours' throughout.
     control.connection = () => ({
       state: "connected",
       leaseActive: true,
@@ -858,7 +871,57 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
       streamEpoch: 8,
       streamOwnerTab: sessionTabId(),
     });
-    expect(await screen.findByRole("status")).toHaveTextContent("Connected");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+  });
+
+  // The same restart, one beat later: the client's retry has ALREADY
+  // re-claimed at a much later epoch under our tab id when the poll looks —
+  // the epoch jump is claim evidence, so the watch waits it out (no
+  // re-navigation at the in-frame window's edge) and the page never reads
+  // "elsewhere".
+  it("a stream loss whose epoch already advanced under our tab id defers re-navigation (claim evidence), never 'elsewhere'", async () => {
+    const writes = watchFrameSrc();
+    const { ws, control } = setupScripted({
+      props: { pollIntervalMs: 20, inFrameRetryMs: 1_000, reNavJitterMs: 0 },
+    });
+    await connectViaResume(ws, control);
+    const navs = writes.length;
+
+    // The first loss polls still show the pre-restart epoch: the watch
+    // records the baseline and announces the outage (Reconnecting).
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 2,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 2_000 });
+
+    // Then the re-claim lands at a much later epoch under OUR tab id: the
+    // evidence budget defers re-navigation, so the in-frame window elapsing
+    // below moves no frame.
+    control.connection = () => ({
+      state: "disconnected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 7,
+      streamOwnerTab: sessionTabId(),
+    });
+    await new Promise((r) => setTimeout(r, 1_300)); // past the 1 s window
+    expect(writes.length).toBe(navs);
+    expect(screen.queryByText("This session is open in another tab")).toBeNull();
+
+    // The landed claim turns connected — the page stayed ours throughout.
+    control.connection = () => ({
+      state: "connected",
+      leaseActive: true,
+      leaseRef: OWN_REF,
+      streamEpoch: 8,
+      streamOwnerTab: sessionTabId(),
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Connected"));
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 
@@ -877,11 +940,9 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
       leaseRef: OWN_REF,
       streamEpoch: 7,
     });
-    const iframe = () =>
-      document.querySelector("iframe") as HTMLIFrameElement | null;
-    await waitFor(() => expect(iframe()?.getAttribute("src")).toBeTruthy(), {
-      timeout: 5_000,
-    });
+    // Ordering only: the watch has registered the loss (badge flips to
+    // Reconnecting) before the re-claim is offered below.
+    await waitFor(() => expect(badge()).toHaveTextContent("Reconnecting"), { timeout: 5_000 });
     control.connection = () => ({
       state: "connected",
       leaseActive: true,

@@ -5,27 +5,46 @@
 # images.*.builtAt from it; it is the only contract between the train
 # and a deployment's values.
 #
-# Usage: write-runtime-manifest.sh <refs-dir> <out-file>
-#   refs-dir holds one <image>.ref per published runtime image, each a
-#   canonical ghcr.io/tinyorbitvn/tinycdi-<image>@sha256:<64hex> ref
-#   (the same files validate-image-refs.sh checks).
-# Env: RT_TAG             — required; the rt-YYYYMMDD.N tag just promoted
-#      BUILT_AT           — manifest timestamp (default: now, UTC)
-#      BROWSER_DOCKERFILE — chromium + firefox-esr pin source for the
-#                          browser image (default: build/browser/Dockerfile)
-#      DESKTOP_DOCKERFILE — firefox-esr pin source for the linux-desktop
-#                          image (default: build/linux-desktop/Dockerfile)
+# Usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>
+#   refs-dir  holds one <image>.ref per published runtime image, each a
+#             canonical ghcr.io/tinyorbitvn/tinycdi-<image>@sha256:<64hex>
+#             ref (the same files validate-image-refs.sh checks).
+#   sboms-dir holds the matching sbom-<image>.spdx.json that the build
+#             jobs generated from the pushed image and that the publish
+#             job attests (SUPR-2). The manifest's browser-engine fields
+#             are read out of it — the package versions actually
+#             installed in the shipped image, not the Dockerfile pins
+#             that asked for them.
+# Env: RT_TAG   — required; the rt-YYYYMMDD.N tag just promoted
+#      BUILT_AT — manifest timestamp (default: now, UTC)
 set -euo pipefail
 
-DIR="${1:?usage: write-runtime-manifest.sh <refs-dir> <out-file>}"
-OUT="${2:?usage: write-runtime-manifest.sh <refs-dir> <out-file>}"
+DIR="${1:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
+SBOMS="${2:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
+OUT="${3:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
 TAG="${RT_TAG:?RT_TAG unset (the rt-YYYYMMDD.N tag this train promoted)}"
 BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-DOCKERFILE="${BROWSER_DOCKERFILE:-build/browser/Dockerfile}"
-DESKTOP_DOCKERFILE="${DESKTOP_DOCKERFILE:-build/linux-desktop/Dockerfile}"
 
 [[ "$TAG" =~ ^rt-[0-9]{8}\.[0-9]+$ ]] \
   || { echo "::error::RT_TAG '$TAG' is not rt-YYYYMMDD.N"; exit 1; }
+
+# installed_version <image> <deb-package> — print the full Debian
+# version the built image carries, per its attested SPDX SBOM (what
+# `dpkg-query -W <pkg>` would report inside it). Exactly one package of
+# that name with one distinct versionInfo must exist: zero means the
+# image does not ship it (a packaging or wiring bug), two means the
+# SBOM is ambiguous — the manifest never guesses.
+installed_version() {
+  local img="$1" pkg="$2" f="$SBOMS/sbom-$1.spdx.json" n
+  [ -s "$f" ] || { echo "::error::missing SBOM '$f' for image '$img'" >&2; exit 1; }
+  n="$(jq -r --arg pkg "$pkg" \
+    '[.packages[]? | select(.name == $pkg) | .versionInfo // empty] | unique | length' \
+    "$f")" || { echo "::error::$f is not valid JSON" >&2; exit 1; }
+  [ "$n" -eq 0 ] && { echo "::error::$f has no usable '$pkg' package version" >&2; exit 1; }
+  [ "$n" -gt 1 ] && { echo "::error::$f lists $n distinct '$pkg' versions" >&2; exit 1; }
+  jq -r --arg pkg "$pkg" \
+    '[.packages[]? | select(.name == $pkg) | .versionInfo // empty] | unique | .[0]' "$f"
+}
 
 shopt -s nullglob
 files=("$DIR"/*.ref)
@@ -56,24 +75,14 @@ for name in "${order[@]}"; do
   repo="${ref%@*}"
   digest="${ref#*@}"
   if [ "$name" = "browser" ]; then
-    PIN="$(awk -F= '/^ARG CHROMIUM_APT_VERSION=/ {print $2; exit}' "$DOCKERFILE")"
-    [ -n "$PIN" ] \
-      || { echo "::error::CHROMIUM_APT_VERSION not found in $DOCKERFILE"; exit 1; }
-    FFPIN="$(awk -F= '/^ARG FIREFOX_ESR_APT_VERSION=/ {print $2; exit}' "$DOCKERFILE")"
-    [ -n "$FFPIN" ] \
-      || { echo "::error::FIREFOX_ESR_APT_VERSION not found in $DOCKERFILE"; exit 1; }
-    # Strip the Debian revision — the manifest carries the engine version.
-    CHROMIUM="${PIN%%-*}"
-    FIREFOX="${FFPIN%%-*}"
+    CHROMIUM="$(installed_version browser chromium)"
+    FIREFOX="$(installed_version browser firefox-esr)"
     jq -n --arg name "$name" --arg ref "$repo" --arg digest "$digest" \
       --arg tag "$TAG" --arg chromium "$CHROMIUM" --arg firefox "$FIREFOX" \
       '{name: $name, ref: $ref, digest: $digest, tag: $tag, chromium: $chromium, firefox: $firefox}' \
       >> "$OBJS"
   elif [ "$name" = "linux-desktop" ]; then
-    FFPIN="$(awk -F= '/^ARG FIREFOX_ESR_APT_VERSION=/ {print $2; exit}' "$DESKTOP_DOCKERFILE")"
-    [ -n "$FFPIN" ] \
-      || { echo "::error::FIREFOX_ESR_APT_VERSION not found in $DESKTOP_DOCKERFILE"; exit 1; }
-    FIREFOX="${FFPIN%%-*}"
+    FIREFOX="$(installed_version linux-desktop firefox-esr)"
     jq -n --arg name "$name" --arg ref "$repo" --arg digest "$digest" \
       --arg tag "$TAG" --arg firefox "$FIREFOX" \
       '{name: $name, ref: $ref, digest: $digest, tag: $tag, firefox: $firefox}' \
