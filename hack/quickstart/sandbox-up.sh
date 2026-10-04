@@ -49,7 +49,8 @@ else
     # mappings — the ingress then stays cluster-internal only.
     KIND_CFG="$STATE_DIR/kind-config-noports.yaml"
     mkdir -p "$STATE_DIR"
-    sed '/extraPortMappings:/,/protocol: TCP}/d' "$QS_DIR/kind-config.yaml" >"$KIND_CFG"
+    sed -e '/extraPortMappings:/d' -e '/containerPort:.*hostPort:/d' \
+      "$QS_DIR/kind-config.yaml" >"$KIND_CFG"
   else
     KIND_CFG="$QS_DIR/kind-config.yaml"
   fi
