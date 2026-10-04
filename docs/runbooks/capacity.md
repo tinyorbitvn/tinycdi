@@ -398,6 +398,13 @@ reasons found on the night:
   harness stops workspace creation when any infra node's CPU requests
   plus the next wave's projected share would reach 80 %; effective N is
   recorded in the report.
+  **Fixed in v0.3.1** (TOPO-1): `runtime.topologySpread.enabled`
+  (default true) gives every workspace pod a soft
+  `topologySpreadConstraint` — maxSkew 1 over `kubernetes.io/hostname`,
+  `ScheduleAnyway`, scoped to the tenant namespace's runtime pods. It
+  nudges the scheduler toward even spread without ever blocking
+  placement (a retained PVC's node/zone affinity still wins); the
+  per-wave guard stays as the hard safety.
 - **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
   behind one source IP tripped `login-rate 30/min` (covers `/v1/login`,
   `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
