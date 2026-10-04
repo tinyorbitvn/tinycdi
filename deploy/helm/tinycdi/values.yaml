@@ -317,6 +317,10 @@ backend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # Pod hostAliases (spec.hostAliases) — extra /etc/hosts entries in the
+  # backend pods, e.g. resolving an in-cluster OIDC issuer host to a
+  # Service ClusterIP when cluster DNS cannot. Empty renders nothing.
+  hostAliases: []
   # Pod/container securityContext keys MERGE over the hardened defaults
   # (runAsNonRoot, drop ALL caps, read-only rootfs). Override keys only
   # when you must — the defaults are what the chart tests assert.
@@ -476,6 +480,14 @@ gatewayApi:
   # Gateway listener refs, e.g.
   #   - {name: shared-gateway, namespace: gateway-system, sectionName: https}
   parentRefs: []
+  # Optional per-route overrides: portalParentRefs parents the portal
+  # HTTPRoute (the portalHost), sessionParentRefs the wildcard session
+  # route (*.<sessionDomain>) — e.g. two listeners on one Gateway
+  # (cdi-https for the portal host, wildcard-https for the session
+  # domain). A non-empty list REPLACES parentRefs for that route; empty
+  # falls back to the shared parentRefs.
+  portalParentRefs: []
+  sessionParentRefs: []
   annotations: {}
 
 # Optional Prometheus ServiceMonitor for the backend metrics endpoint

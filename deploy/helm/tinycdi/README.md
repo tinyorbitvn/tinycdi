@@ -224,6 +224,7 @@ objects. It **keeps**:
 | `ingress.enabled` / `.className` / `.annotations` | `false`/`""`/`{}` | one Ingress per host; pods terminate TLS — use a pass-through backend annotation (e.g. nginx `backend-protocol: "HTTPS"`) |
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
 | `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through. API-server-defaulted route fields (parentRef `group`/`kind`, rule `matches`, backendRef `group`/`kind`/`weight`) render explicitly so GitOps shows no drift |
+| `gatewayApi.portalParentRefs` / `.sessionParentRefs` | `[]` | per-route `parentRefs` overrides: a non-empty list replaces `gatewayApi.parentRefs` for that HTTPRoute — e.g. different Gateway listeners for the portal host (`cdi-https`) vs the wildcard session domain (`wildcard-https`); empty falls back to the shared list |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
 ### Per-component tuning (`backend`, `operator`, `frontend`)
@@ -250,6 +251,7 @@ objects. It **keeps**:
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
 | `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
 | `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
+| `backend.hostAliases` | `[]` | pod `spec.hostAliases` on the backend Deployment — e.g. resolve an in-cluster OIDC issuer host to a Service ClusterIP when cluster DNS cannot; empty renders nothing |
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
