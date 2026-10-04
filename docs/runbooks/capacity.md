@@ -485,10 +485,10 @@ backend pod delete, backend **rollout**, session-TLS rotate.
   `stream_epoch` bumped in place, and `stream_owner_tab` unchanged for
   every session through both backend drills. Zero `launch.redeem` audit
   events and zero launch tickets minted in every drill window — the
-  rc.3 relaunch path is gone. Caveat corrected in rc.5: `stream_owner_tab`
-  is minted once per **outer** page load, so a frame re-navigation keeps
-  the same id — the snapshots prove no relaunch/no outer reload, and
-  cannot see navs (see the rc.5 navwatch below).
+  rc.3 relaunch path is gone. Caveat: `stream_owner_tab` is minted once
+  per **outer** page load, so a frame re-navigation keeps the same id —
+  the rc.4 measurement could not see frame navigations (the rc.5
+  navwatch below measured them directly).
 - **Drill spans.** Pod delete: 6 sessions on the killed pod, p100 ~5 s.
   Rollout: 38/60 sessions observed a span (22 reconnected inside one 5 s
   poll — invisible to the metric): p50 ~5 s / p95 ~15 s / p100 ~15.0 s.
@@ -528,23 +528,23 @@ v0.3.0 tag gate.
   operator restart** (rc.3/rc.4 wedged ~4 h here) with zero
   `broker unreachable` lines; old-CA material is refused at the
   handshake (HTTP 000) while the new cert reaches HTTP 403.
-- **Targeted rerun N=60 × 15 min, rollout only, poll = 1 s.** Disconnect
-  spans at true resolution: p50 **1.03 s** / p95 **15.01 s** /
-  p100 **16.01 s** — bimodal, not quantized: ~60 % reconnect inside ~1 s
-  (in-frame retry), a ~24-session cohort lands 11–16 s. p95 still
+- **Targeted rerun N=60 × 15 min, rollout only, poll = 1 s.** During
+  an operator-initiated full 2-replica backend rollout at 60 sessions:
+  reconnect p50 **1.0 s** / p95 **15.0 s** / max **16 s** (1 s
+  resolution); ~60 % resume in-frame in ~1 s, the rest via one frame
+  reload; 0 dropped, 0 false elsewhere, 0 new launch tickets. p95 still
   **fails** the ≤ 10 s bar; p100 inside ≤ 30 s. inputResume p100
-  27.7 s, longest gap ~16 s, dropped 0, falseElsewhere 0, inputTimeouts
-  1, one lane 429 (OIDC ramp). All 60 claims landed on the same leases —
-  zero tickets, zero `launch.redeem`.
+  27.7 s, longest gap ~16 s, inputTimeouts 1, one lane 429 (OIDC ramp).
+  All 60 claims landed on the same leases — zero tickets, zero
+  `launch.redeem`.
 - **Frame-navigation evidence (corrects the rc.4 claim).**
   `stream_owner_tab` is minted per outer-page load — a frame
-  re-navigation keeps the same id, so the rc.4 "zero navigations" claim
-  over-read the data. A 10-session `framenavigated` probe through the
-  same rollout on rc.5: **5 sessions re-navigated the iframe once**, at
-  12.7–16.5 s into their disconnect — the watch's fallback gate
-  (5 s in-frame window + page-side poll lag + jitter) — and each nav's
-  claim landed ~instantly. Sessions under ~2 s never navigated; one nav
-  also fired late on an already-recovered session. So the tail is the
-  single-shot fallback working as designed (one nav, one claim), not
-  rc.3's repeated thrash — but "zero navigations" is not literally
-  true at fleet scale on rc.4/rc.5.
+  re-navigation keeps the same id, so the rc.4 measurement could not
+  see frame navigations. A 10-session `framenavigated` probe through
+  the same rollout on rc.5: **5 sessions re-navigated the iframe
+  once**, at 12.7–16.5 s into their disconnect — the watch's fallback
+  gate (5 s in-frame window + page-side poll lag + jitter) — and each
+  nav's claim landed ~instantly. Sessions under ~2 s never navigated;
+  one nav also fired late on an already-recovered session. So the tail
+  is the single-shot fallback working as designed (one nav, one
+  claim), not rc.3's repeated thrash.
