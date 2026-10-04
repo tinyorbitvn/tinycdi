@@ -129,6 +129,74 @@ func TestSweep_StaleGenerationNeverEmits(t *testing.T) {
 	}
 }
 
+// TestSweep_CancelBeforeEmitKeepsStop: a leader loss between listing the
+// pending stop intents and emitting them must not consume the rows — the
+// old drain-first order marked them drained before emit, so a crash in
+// that window lost the stop for good ((workspace, generation, reason) is
+// unique, so it could never be re-recorded). The intent now drains inside
+// the emit transaction, so the row stays pending and the next pass
+// delivers it (backlog 11).
+func TestSweep_CancelBeforeEmitKeepsStop(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	markRunning(t, db, "ws-1", 1)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	if err := b.RequestStop(ctx, "ws-1", 1, broker.StopReasonIdleTimeout); err != nil {
+		t.Fatalf("RequestStop: %v", err)
+	}
+
+	// Cancel the sweep ctx after the pending stops are listed, before
+	// they are emitted — the crash window.
+	sweepCtx, cancel := context.WithCancel(ctx)
+	p := broker.NewExpiryPlanner(b, broker.WithAfterPendingHook(cancel))
+	if _, err := p.Sweep(sweepCtx,
+		staticRunning{running("ws-1", 1, clock.Now(), broker.DefaultTimeoutPolicy)}); err == nil {
+		t.Fatal("cancelled sweep should fail at emit")
+	}
+
+	// The recorded stop is still pending and the workspace still runs.
+	pending, err := p.PendingStops(ctx)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending after cancelled sweep = %+v err %v, want the intent retained", pending, err)
+	}
+	var desired string
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT desired_state FROM workspaces WHERE id='ws-1'`).Scan(&desired); err != nil {
+		t.Fatalf("workspace lookup: %v", err)
+	}
+	if desired != "Running" {
+		t.Fatalf("cancelled sweep still stopped the workspace: desired=%q", desired)
+	}
+	var emitted int
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM outbox_intent WHERE workspace_id='ws-1'`).Scan(&emitted); err != nil {
+		t.Fatalf("outbox count: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("cancelled sweep appended %d outbox intents, want 0", emitted)
+	}
+
+	// The next pass delivers it.
+	n, err := p.Sweep(ctx,
+		staticRunning{running("ws-1", 1, clock.Now(), broker.DefaultTimeoutPolicy)})
+	if err != nil {
+		t.Fatalf("second Sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("second sweep emitted %d intents, want 1", n)
+	}
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT desired_state FROM workspaces WHERE id='ws-1'`).Scan(&desired); err != nil {
+		t.Fatalf("workspace lookup: %v", err)
+	}
+	if desired != "Stopped" {
+		t.Fatalf("retried sweep did not stop the workspace: desired=%q", desired)
+	}
+	if pending, err = p.PendingStops(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("pending after delivery = %+v err %v, want drained", pending, err)
+	}
+}
+
 // TestRevokeWorkspaceLeases_BlocksTicketsAndRedeems: the operator revoke
 // kills live leases, blocks new issues for covered generations and refuses
 // outstanding ticket redemption — while a NEWER generation reconnects.

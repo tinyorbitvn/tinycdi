@@ -111,6 +111,10 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.backend.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Spread replicas across nodes (P8: preferred, not required — a
       # required rule would strand the second replica on single-node
       # clusters). backend.affinity keys merge over this default.

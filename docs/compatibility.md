@@ -95,11 +95,42 @@ workspace pod unchanged. It selects the node's container-runtime handler,
 so it only works when the workspace nodes actually carry a RuntimeClass
 with that name — a missing class fails scheduling.
 
-**No sandboxed runtime has been tested by the project.** Neither gVisor
-(`runsc`) nor Kata has run under the project's gates: the reference
-environment offers only `crun`, `nvidia` and `nvidia-experimental`. The
-E12 sandboxed-runtime matrix is therefore not met in v0.3 and moves to the
-v1.0 list. Setting `runtimeClassName` to a sandboxed handler today is
-operator discretion: expect the Localhost seccomp + AppArmor node-profile
-story (`deploy/node-profiles/`) and the `hostUsers: false` verification
-above to need re-proof under the new handler.
+### Results matrix (runtime × feature)
+
+Tested 2026-10-05 on a local kind cluster (`tcdi-sandbox`, kindest/node
+v1.34.0, containerd 2.3.4, no KVM) with gVisor `release-20260817.0` on the
+`ptrace` platform, installed per `hack/quickstart/sandbox-gvisor.sh`;
+workspaces were the seeded quickstart templates (browser image
+`tinycdi-browser@sha256:b586ae0e…`, desktop image
+`tinycdi-linux-desktop@sha256:5f14b9e8…`, runtime train 2026.10.02) with
+`spec.placement.runtimeClassName: gvisor`. The `.github/workflows/sandbox.yml`
+weekly run re-proves the same matrix on a GitHub-hosted runner (KVM
+present → `kvm` platform). "Embedded" = the portal → gateway → pod
+stream path; the pod-level rows were verified through the same TLS +
+BasicAuth + websocket + RFB exchange the gateway performs.
+
+| Capability | gVisor `runsc` (kind, ptrace) | gVisor `runsc` (runner, kvm) | Kata Containers |
+|---|---|---|---|
+| Workspace pod starts, reaches Ready | PASS — browser + desktop pods Ready in ~45–75 s; Admitted/StorageReady/RuntimeReady/ConnectionReady all True, Degraded False | pending weekly run | not tested — needs nested virtualization; no RuntimeClass offered |
+| `pod.spec.runtimeClassName` honoured | PASS — `runtimeClassName: gvisor`, `uname -r` inside the pod reports `4.19.0-gvisor` | pending | — |
+| KasmVNC desktop starts (Xvnc + WM) | PASS — Xvnc on :8443 (TLS), openbox/XFCE up | pending | — |
+| Stream connects (websocket + RFB handshake + framebuffer update) | PASS — `sandbox-check.sh` completes RFB 003.008 handshake, ServerInit 1280×800, FramebufferUpdate with real rects via pod IP/ClusterIP | pending | — |
+| Input works (KeyEvent + PointerEvent accepted) | PASS — events accepted; the KasmVNC PointerEvent is 11 bytes (mask u16 + scroll s16×2), not the classic 6 | pending | — |
+| Embedded path (portal iframe → gateway → pod) | expected PASS — ClusterIP→pod-IP→netstack verified; full portal path covered by the weekly run | pending | — |
+| Stop → start (new runtime incarnation) | PASS — pod recreated, Ready again, stream re-verified | pending | — |
+| Retained disk (home PVC across stop/start) | PASS — home mounts via 9p directfs; marker file survives stop→start on the same PVC | pending | — |
+| Browser engine: Firefox ESR 153.4 | **FAIL** — aborts ~7–13 s after start under gVisor: `wasm_rt_syscall_set_segue_base: Invalid argument` → `mozalloc_abort` (SIGSEGV@0). The WASM in-process sandbox's segue setup is not implemented by gVisor; `javascript.options.wasm_sandbox=false` did NOT help. Desktop stays up and streams; the session itself is healthy | pending (expected same — runsc ABI gap, platform-independent) | — |
+| Browser engine: Chromium | not run — quickstart uses Firefox on kind (Chromium needs the node seccomp/AppArmor profiles kind cannot load); nested userns under runsc is additionally unproven | not run | — |
+| `kubectl port-forward` to a runsc pod | **does not work** — gVisor sockets live in netstack, not the kernel netns the kubelet dials; use the Service/pod IP path (what the gateway does) or a client inside the cluster | same | — |
+
+Installing a runtime on nodes is outside the chart: the results above
+cover `runtimeClassName` pass-through plus the workload. The reference
+environment still offers only `crun`, `nvidia` and `nvidia-experimental`,
+so the E12 sandboxed-runtime matrix stays advisory — the weekly workflow
+keeps it current. Operator guidance until then: the gVisor result is
+usable for the desktop workload but the shipped browser image's Firefox
+aborts under runsc (see the Firefox row); a gVisor-supported browser
+engine needs its own image/pref work. Expect the Localhost seccomp +
+AppArmor node-profile story (`deploy/node-profiles/`) and the
+`hostUsers: false` verification above to need re-proof under any
+sandboxed handler — `hostUsers: false` is untested under runsc.

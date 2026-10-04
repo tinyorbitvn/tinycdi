@@ -172,6 +172,47 @@ func TestPurgeSweeper_VanishedPVCOnStrip(t *testing.T) {
 	}
 }
 
+// cancelOnPVCStripClient cancels the sweep ctx inside the finalizer-strip
+// Patch — the leader loses its lock between the cluster-side state change
+// and the completion bookkeeping (backlog 11).
+func cancelOnPVCStripClient(t *testing.T, cancel context.CancelFunc, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(retainedApplyScheme(t)).
+		WithObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				err := c.Patch(ctx, obj, patch)
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && err == nil {
+					cancel()
+				}
+				return err
+			},
+		}).Build()
+}
+
+// TestPurgeSweeper_DetachedCompletion: the volume is terminating and the
+// finalizer stripped when the leader loses its lock — the completion
+// proof still lands on its bounded detached ctx, so the record reaches
+// Purged instead of looping Purging forever.
+func TestPurgeSweeper_DetachedCompletion(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	const tenant, ns, name = "tenant-b11", "ns-it", "pvc-b11"
+	rec := purgingRecord(t, db, tenant, ns, name, "uid-"+name)
+	st := provisioning.NewRetainedStore(db)
+
+	pvc := retainedPVC(ns, name, "cruid-b11", "ws-"+name, nil)
+	pvc.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	sweepCtx, cancel := context.WithCancel(ctx)
+	kc := cancelOnPVCStripClient(t, cancel, pvc)
+
+	provisioning.NewPurgeSweeper(st, kc, nil).SweepOnce(sweepCtx)
+
+	if s := retainedState(t, st, tenant, rec.ID); s != provisioning.RetainedStatePurged {
+		t.Fatalf("record = %s, want Purged — the completion must survive the cancelled sweep ctx", s)
+	}
+}
+
 // TestPurgeSweeper_ConsumerKeepsProtection: pvc-protection is never
 // stripped while a consumer mounts the volume — not even when the PVC is
 // already terminating. The record stays Purging (retried by the sweep)
