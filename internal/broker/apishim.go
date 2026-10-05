@@ -43,6 +43,14 @@ func (s PublicRevoker) RevokePortalSession(ctx context.Context, portalSessionID 
 	return s.B.RevokePortalSession(ctx, portalSessionID)
 }
 
+// RevokePrincipalSessions revokes every portal session of the principal in
+// the tenant plus their leases and outstanding tickets (ADR 0007); counts
+// are informational only (audit), so errors pass through verbatim.
+func (s PublicRevoker) RevokePrincipalSessions(ctx context.Context, tenantID, issuer, subject string) (api.RevokeAllResult, error) {
+	res, err := s.B.RevokePrincipalSessions(ctx, tenantID, issuer, subject)
+	return api.RevokeAllResult{Sessions: res.Sessions, Tickets: res.Tickets, Leases: res.Leases}, err
+}
+
 // PublicIssueError maps broker domain errors onto the public error model for
 // POST /v1/workspaces/{id}/connections (openapi.yaml createConnection).
 func PublicIssueError(err error) *api.Error {

@@ -118,6 +118,8 @@ type Metrics struct {
 	rateLimitDown  *prometheus.GaugeVec
 	frameReloads   *prometheus.CounterVec
 	sessionRevokes *prometheus.CounterVec
+	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
+	sessionRevokeAlls *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -212,6 +214,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "session_revocations_total",
 			Help: "Sign-out revocations of session-bound leases/tickets, by bounded result.",
 		}, []string{"result"}),
+		sessionRevokeAlls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "session_revoke_all_total",
+			Help: "Sign-out-everywhere principal-scoped revocations (ADR 0007), by bounded result.",
+		}, []string{"result"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -222,6 +228,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
+		m.sessionRevokeAlls,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -376,4 +383,11 @@ func (m *Metrics) IncFrameReload(dest string) {
 // other}.
 func (m *Metrics) IncSessionRevocation(result string) {
 	m.sessionRevokes.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
+}
+
+// IncSessionRevokeAll counts one sign-out-everywhere revocation of a
+// principal's sessions/leases/tickets (ADR 0007); result is bounded to
+// {ok, error, other} — the same outcomes as the per-session counter.
+func (m *Metrics) IncSessionRevokeAll(result string) {
+	m.sessionRevokeAlls.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
 }

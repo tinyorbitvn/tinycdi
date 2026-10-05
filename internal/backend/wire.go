@@ -587,6 +587,9 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// revoke within one cycle and a copied workspace cookie resolves to a
 	// dead lease on any replica.
 	authn.WithSessionRevoker(broker.PublicRevoker{B: brk})
+	// Sign-out-everywhere (ADR 0007): one store tx ends every session of
+	// the principal in the tenant — leases, tickets and session rows.
+	authn.WithPrincipalRevoker(broker.PublicRevoker{B: brk})
 	authn.WithAuditSink(observability.NewJSONSink(os.Stdout))
 
 	// The session domain maps workspace IDs to per-workspace launch hosts
@@ -683,6 +686,10 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
 	mux.Handle("GET /v1/auth/callback", callbackLimit(http.HandlerFunc(authn.CallbackHandler)))
 	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
+	// Sign-out-everywhere (ADR 0007): same auth+CSRF pair as logout, plus
+	// the session-digest-keyed login-family limiter — the op is
+	// self-scoped and idempotent; the limit only bounds repeat DB churn.
+	mux.Handle("POST /v1/me/sessions:revoke-all", sessionLimit(authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.RevokeAllSessionsHandler)))))
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)

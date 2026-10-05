@@ -353,6 +353,17 @@ the portal session (`POST /v1/logout`, CSRF-protected, session cookie
 expired) and leaves for a public **Signed out** page that offers
 **Sign in again** and never starts a login by itself.
 
+**Sign out everywhere** sits next to it (ADR 0007). After a confirmation
+it calls `POST /v1/me/sessions:revoke-all`, which ends **every** portal
+session the user holds in the current tenant — on all browsers and
+devices, including this one — in one store transaction that also revokes
+the sessions' live desktop streams (they close within seconds) and any
+unredeemed launch links. Sessions in other tenants are not affected. The
+answer carries the same `endSessionUrl` as a plain sign-out, so the
+provider session ends identically; there is no IdP back-channel logout. A
+store failure answers `500` and revokes nothing — the call is idempotent
+and safe to retry.
+
 Ending only the portal session is not enough: the identity provider keeps
 its own browser session, and the next visit would log the user straight
 back in. So, by default, sign-out continues at the provider

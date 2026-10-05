@@ -163,6 +163,105 @@ func (b *Broker) RevokePortalSession(ctx context.Context, portalSessionID string
 	return n, nil
 }
 
+// PrincipalRevocation counts what RevokePrincipalSessions destroyed — for
+// the session.revoke_all audit record, never for control flow.
+type PrincipalRevocation struct {
+	// Sessions is the number of portal session rows deleted (the caller's
+	// included).
+	Sessions int
+	// Tickets is the number of outstanding launch tickets revoked.
+	Tickets int
+	// Leases is the number of active connection leases revoked.
+	Leases int
+}
+
+// RevokePrincipalSessions ends every portal session of a principal inside
+// one tenant — sign-out-everywhere (ADR 0007). In a single transaction it
+// revokes the principal's outstanding launch tickets, deletes all their
+// session rows for the tenant (the caller's own session included — revoke
+// everywhere means everywhere), and revokes every active connection lease
+// the principal holds in the tenant, including leases minted before
+// portal_session_digest existed: the predicate is the principal, not the
+// digest. Each gateway replica's renew loop sees the leases die within one
+// renew cycle, and a replayed workspace cookie from any revoked session
+// resolves to a dead lease on any replica.
+//
+// Lock order is identical to the other session-layer mutators — tickets,
+// then sessions, then leases. The ticket UPDATE is the serialization
+// point, exactly as in RevokePortalSession: RedeemTicket holds a
+// FOR UPDATE lock on its ticket row for the whole transaction, so this
+// UPDATE waits out any in-flight redemption of the principal's tickets.
+// Whether a redeem then commits or aborts, the lease UPDATE below runs on
+// a fresh READ-COMMITTED snapshot that sees whatever it committed; a
+// redeem that starts after this transaction finds revoked_at — or the
+// deleted session row, which RedeemTicket re-checks — and never mints.
+// Re-running revokes zero rows: the operation is idempotent.
+func (b *Broker) RevokePrincipalSessions(ctx context.Context, tenantID, issuer, subject string) (PrincipalRevocation, error) {
+	principal := issuer + "|" + subject
+	now := b.now()
+	var res PrincipalRevocation
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE launch_ticket SET revoked_at = $3
+			WHERE tenant_id = $1 AND principal_subject = $2
+			  AND consumed_at IS NULL AND revoked_at IS NULL`,
+			tenantID, principal, now)
+		if err != nil {
+			return fmt.Errorf("broker: revoke principal tickets: %w", err)
+		}
+		res.Tickets = int(tag.RowsAffected())
+		tag, err = tx.Exec(ctx, `
+			DELETE FROM sessions
+			WHERE issuer = $2 AND subject = $3 AND tenant_id = $1`,
+			tenantID, issuer, subject)
+		if err != nil {
+			return fmt.Errorf("broker: delete principal sessions: %w", err)
+		}
+		res.Sessions = int(tag.RowsAffected())
+		rows, err := tx.Query(ctx, `
+			UPDATE connection_lease SET state = 'revoked', closed_at = $3
+			WHERE tenant_id = $1 AND principal_subject = $2 AND state = 'active'
+			RETURNING workspace_id, runtime_generation`,
+			tenantID, principal, now)
+		if err != nil {
+			return fmt.Errorf("broker: revoke principal leases: %w", err)
+		}
+		var (
+			wsUIDs []string
+			gens   []int64
+		)
+		for rows.Next() {
+			var wsUID string
+			var gen int64
+			if err := rows.Scan(&wsUID, &gen); err != nil {
+				rows.Close()
+				return fmt.Errorf("broker: revoke principal leases: %w", err)
+			}
+			wsUIDs = append(wsUIDs, wsUID)
+			gens = append(gens, gen)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("broker: revoke principal leases: %w", err)
+		}
+		rows.Close()
+		res.Leases = len(wsUIDs)
+		// Same rule as RevokeLease: a revoked lease's streams can never
+		// report their close, so the transition owns the bound
+		// generations' drain accounting in the same transaction.
+		for i := range wsUIDs {
+			if err := closeStreamsTx(ctx, tx, wsUIDs[i], uint64(gens[i]), now); err != nil {
+				return fmt.Errorf("broker: close revoked streams: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return PrincipalRevocation{}, err
+	}
+	return res, nil
+}
+
 // StreamOwnerTabLen is the fixed length of a stream-owner tab id: 128 bits
 // as lowercase hex (32 chars) — what the portal mints per browser tab and
 // sends with its stream claim (see migration 018).

@@ -76,13 +76,17 @@ order:
 4. `closeStreamsTx` per revoked lease — same drain-accounting rule as
    `RevokeLease`/`RevokePortalSession`.
 
-Lock ordering is *tickets → sessions → leases*; `RevokePortalSession` runs
-tickets → leases and `RevokeLease` touches only `connection_lease`, so no
-operation acquires locks in an order that can cycle against this one — a
-concurrent revoke can delay, never deadlock.
+Lock ordering is *tickets → sessions → leases* and it matches the other
+mutators' order exactly: `RedeemTicket` takes its ticket row `FOR UPDATE`,
+then reads `sessions`, then writes `connection_lease`; `RevokePortalSession`
+takes tickets then leases with the caller's session delete up front. No
+operation acquires these rows in a different order, so a concurrent redeem
+or per-session sign-out can only serialize — never deadlock (covered by a
+`-race` interleaving test).
 
-Tenant-scoping is deliberate: revocation stays inside the caller's tenant
-boundary even if the IdP subject is shared.
+Tenant-scoping is deliberate and user-visible: a principal with sessions in
+several tenants revokes **only the caller's tenant**. The API description
+and the portal confirm text both say so.
 
 ### The caller's own session: revoked too (default)
 
@@ -107,10 +111,13 @@ audit only, never for control flow.
 ### Audit
 
 One dedicated event, action `session.revoke_all` (distinct from
-`session.revoke`, which stays reserved for the per-session path), with
-`Details{sessions_revoked, tickets_revoked, leases_revoked}` on success and
-`ErrorCode` on failure — written through the same `AuditSink`/`RedactDetails`
-path as today. The request-level audit trail stays in the middleware.
+`session.revoke`, which stays reserved for the per-session path), with the
+per-kind counts on success and `ErrorCode` on failure — written through
+the same `AuditSink`/`RedactDetails` path as today. The counts travel in
+one `counts` detail (`"sessions=3,tickets=1,leases=2"`): Detail *keys*
+containing `session`/`ticket` are redacted on write, so per-key counts
+would emit `[REDACTED]`. The request-level audit trail stays in the
+middleware.
 
 ### Metrics
 
@@ -135,15 +142,17 @@ bucket per ADR 0006's split-mode rule.
 
 The account menu gains **"Sign out everywhere"** below "Sign out". It opens
 a confirm dialog stating the caller is signed out on **all devices
-including this one**; on confirm it POSTs the endpoint and then follows the
+including this one** and naming the scope: sessions of this tenant only
+(`en`/`vi` strings). On confirm it POSTs the endpoint and then follows the
 same navigation as `signOut` (`endSessionUrl` → `/signed-out` fallback).
 A 401 (session already gone) lands on `/signed-out` like today.
 
 ### Index migration
 
-New migration `022_principal_revocation_indexes` (expand-only,
-rolling-upgrade safe — replicas predating it just scan): two partial
-indexes so revocation never seq-scans the unpruned append-mostly tables —
+New migration `023_principal_revocation_indexes` (expand-only,
+rolling-upgrade safe — replicas predating it just scan; 022 belongs to the
+USER-LIMITS task): two partial indexes so revocation never seq-scans the
+unpruned append-mostly tables —
 
 - `connection_lease (tenant_id, principal_subject) WHERE state='active'`
 - `launch_ticket (tenant_id, principal_subject) WHERE consumed_at IS NULL AND revoked_at IS NULL`
