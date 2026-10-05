@@ -475,11 +475,19 @@ Additional items found while writing this document (not from A6):
 - **Portal idle-extension depends on lease activity** — verify a stolen
   portal cookie alone cannot extend itself, and that idle extension only
   credits input activity measured server-side.
-- **Metrics listener** is scrape-only but has no auth; confirm chart
-  NetworkPolicy + docs keep it off the edge path.
-- **Operator leader election off by default** — two simultaneous operators
-  would double-drive reconciliation; a deploy-time footgun rather than a
-  code bug.
+- **Metrics listener** is scrape-only but has no auth — Implemented:
+  served on the dedicated ClusterIP `backend-metrics` Service; the only
+  rule opening the metrics port is `allow-metrics-scrape` admitting
+  exactly `networkPolicy.prometheusPeers`, and no edge rule (ipBlock, any
+  or cilium `edgeIngress`) carries it (`TestMetricsListenerIsolation`,
+  `TestEdgePolicyNeverOpensInternalPort`); the observability runbook tells
+  operators to keep it off the edge path.
+- **Operator leader election off by default** — Implemented: election is
+  on by default since v0.3.0 and `operator.leaderElect=false` with
+  `operator.replicas>1` now fails the chart render (`tinycdi.validate`;
+  `TestOperatorLeaderElectionGuard`); the binary cannot observe the
+  replica count, so the guard is chart-side only (cmd/operator note).
+  Single-replica installs (`replicas: 1`) may still run unelected.
 - **`kasmweb/*` third-party images** — the adapter neutralizes their startup
   but they carry KasmVNC 1.4.0 (vs the pinned 1.5.0 in TinyCDI-built images);
   the catalog gate enforces a floor — reviewer should confirm the floor and

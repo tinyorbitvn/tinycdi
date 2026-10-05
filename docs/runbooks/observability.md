@@ -28,6 +28,13 @@ The listener serves plain HTTP on its own ClusterIP Service
 is in-cluster only, default-deny `NetworkPolicy` included, so only the
 peers in `networkPolicy.prometheusPeers` reach it (SEC-33).
 
+Keep it off the edge path: the listener has no auth, so never expose
+`backend-metrics` through an Ingress, HTTPRoute or a
+NodePort/LoadBalancer Service, and never add the metrics port to an edge
+rule (`networkPolicy.edgeIngress*`). The chart tests pin this — no
+rendered policy admits edge/gateway traffic to the metrics port in any
+`edgeIngress` mode (ipBlock, any or cilium).
+
 The **operator exposes no metrics endpoint**: secure controller-runtime
 metrics need cluster-scoped TokenReview/SAR RBAC the chart never grants,
 and plaintext metrics are banned — `--metrics-bind-address=0` is pinned.
