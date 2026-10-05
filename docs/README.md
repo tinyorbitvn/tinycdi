@@ -68,7 +68,7 @@
 - [adr/0006-rate-limit-state.md](adr/0006-rate-limit-state.md) —
   rate-limiter state placement: per-replica vs Postgres-backed options
   (proposed — decision pending for v0.4)
-- [adr/0007-kasmvnc-bruteforce.md](adr/0007-kasmvnc-bruteforce.md) —
+- [adr/0008-kasmvnc-bruteforce.md](adr/0008-kasmvnc-bruteforce.md) —
   KasmVNC endpoint brute-force posture: reachability and credential
   channel analysis closing threat-model S18 (accepted — no build)
 

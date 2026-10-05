@@ -1,4 +1,4 @@
-# ADR 0007 — KasmVNC endpoint brute-force posture (S18)
+# ADR 0008 — KasmVNC endpoint brute-force posture (S18)
 
 Status: **accepted — no build required** (analysis note; closes S18)
 
