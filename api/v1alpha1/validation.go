@@ -163,6 +163,13 @@ const (
 	// ConditionDegraded is true when the workspace is up but impaired
 	// (e.g. runtime restarted, reconnect pending).
 	ConditionDegraded = "Degraded"
+	// ConditionIntentBehind is true when the platform's intent stream
+	// trails the workspace's applied intent fence — a newer intent was
+	// dropped because its revision was behind the recorded one (the
+	// signature of a database restored behind the live cluster). Intents
+	// stay dropped until the stream is realigned; the condition reports
+	// the drift instead of the drop staying silent.
+	ConditionIntentBehind = "IntentBehind"
 )
 
 // DigestPattern matches a digest-pinned OCI reference. The regex is embedded

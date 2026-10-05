@@ -47,6 +47,11 @@ rules:
 - apiGroups: ["networking.k8s.io"]
   resources: ["networkpolicies"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Events: the operator emits the IntentBehind warning on Workspace objects
+# (edge-triggered, one per drift transition) inside managed namespaces.
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 ---
 # Backend role (public API): projects intents onto Workspace CRs and reads templates, only
 # inside tenant namespaces (bound via RoleBindings below). secrets get is

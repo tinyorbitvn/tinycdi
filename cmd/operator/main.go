@@ -496,8 +496,9 @@ func main() {
 	}
 
 	workspaceReconciler := &operator.WorkspaceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("workspace-controller"),
 		Backend: linuxruntime.New(mgr.GetClient(), linuxruntime.Options{
 			InternetExceptCIDRs:         exceptCIDRs,
 			DisableBuiltinEgressExcepts: disableBuiltinExcepts,

@@ -2,6 +2,7 @@ package provisioning
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,64 @@ const (
 // the public condition's params; the single shared name keeps writer and
 // reader from drifting.
 const AnnotationConditionParams = "workspaces.cdi.tinyorbit.vn/condition-params"
+
+// AnnotationIntentBehind is stamped on a Workspace CR by the intent
+// applier when it drops an intent whose revision trails the CR's
+// spec.intentRevision — the signature of a platform DB restored behind the
+// live cluster (the restored workspaces.intent_revision restarted below
+// the fence the CR already carries). The operator reads it to raise the
+// IntentBehind condition and its event; the applier removes it on the
+// first intent that applies forward again.
+const AnnotationIntentBehind = "workspaces.cdi.tinyorbit.vn/intent-behind"
+
+// IntentBehindMark is the JSON payload of AnnotationIntentBehind:
+// RowRevision is the dropped intent's revision (the workspace row's
+// intent_revision), CRRevision the spec.intentRevision it trailed.
+type IntentBehindMark struct {
+	RowRevision int64 `json:"rowRevision"`
+	CRRevision  int64 `json:"crRevision"`
+}
+
+// intentFenceDrifted reports whether a dropped intent evidences stream
+// drift rather than an idempotent replay. Delivery is at-least-once and
+// intents are applied in order, so a replay always arrives at exactly the
+// CR's current revision carrying identical fields. Anything else — a
+// strictly-behind revision, or an equal revision describing different
+// intent fields — means the stream the row serves diverged from what the
+// CR already applied.
+func intentFenceDrifted(ws *workspacev1alpha1.Workspace, in Intent) bool {
+	rev := int64(in.Revision)
+	if rev != ws.Spec.IntentRevision {
+		return rev < ws.Spec.IntentRevision
+	}
+	return in.DesiredState != string(ws.Spec.DesiredState) ||
+		in.RuntimeGeneration != ws.Spec.RuntimeGeneration
+}
+
+// markIntentBehind records the drift marker on the CR, writing only when
+// the recorded pair changed (each dropped intent is a real stream event,
+// not a poll). The intent itself is still dropped — fencing is unchanged.
+func (a *K8sApplier) markIntentBehind(ctx context.Context, ws *workspacev1alpha1.Workspace, in Intent) error {
+	raw, err := json.Marshal(IntentBehindMark{
+		RowRevision: int64(in.Revision),
+		CRRevision:  ws.Spec.IntentRevision,
+	})
+	if err != nil {
+		return nil
+	}
+	if ws.Annotations[AnnotationIntentBehind] == string(raw) {
+		return nil
+	}
+	setCRAnnotation(ws, AnnotationIntentBehind, string(raw))
+	return a.client.Update(ctx, ws)
+}
+
+// clearIntentBehind removes the drift marker; called on every forward
+// apply so the first intent the CR adopts again realigns the marker with
+// the stream.
+func clearIntentBehind(ws *workspacev1alpha1.Workspace) {
+	delete(ws.Annotations, AnnotationIntentBehind)
+}
 
 // PlatformID is the platform workspace identity the API mints
 // ("ws_<hex>", stored as workspaces.id). It is stamped into the
@@ -184,7 +243,13 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 			return err
 		}
 		if int64(in.Revision) <= ws.Spec.IntentRevision {
-			return nil // stale or already applied
+			// Stale or already applied — still dropped, but a drifted
+			// stream is recorded on the CR so the operator can surface
+			// IntentBehind instead of the drop staying silent.
+			if intentFenceDrifted(&ws, in) {
+				return a.markIntentBehind(ctx, &ws, in)
+			}
+			return nil
 		}
 		if in.Kind == IntentStart && in.Spec.TemplateName != "" {
 			if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped {
@@ -216,6 +281,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
 		}
 		ws.Spec.IntentRevision = int64(in.Revision)
+		clearIntentBehind(&ws)
 		return a.client.Update(ctx, &ws)
 	})
 }
@@ -252,6 +318,9 @@ func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in I
 // already at or beyond the intent revision is left untouched.
 func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Workspace, in Intent) error {
 	if int64(in.Revision) <= ws.Spec.IntentRevision {
+		if intentFenceDrifted(ws, in) {
+			return a.markIntentBehind(ctx, ws, in)
+		}
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -259,6 +328,9 @@ func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Wor
 			return err
 		}
 		if int64(in.Revision) <= ws.Spec.IntentRevision {
+			if intentFenceDrifted(ws, in) {
+				return a.markIntentBehind(ctx, ws, in)
+			}
 			return nil
 		}
 		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
@@ -266,6 +338,7 @@ func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Wor
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
 		}
 		ws.Spec.IntentRevision = int64(in.Revision)
+		clearIntentBehind(ws)
 		return a.client.Update(ctx, ws)
 	})
 }

@@ -311,3 +311,110 @@ func TestK8sApplierSameRevisionTwice(t *testing.T) {
 		t.Fatalf("CR present after delete replay: %v", err)
 	}
 }
+
+// TestK8sApplierIntentDrift: a dropped stale intent that evidences stream
+// drift (a strictly-behind revision, or an equal revision carrying
+// different fields — only a rewritten stream produces either) stamps the
+// intent-behind marker the operator surfaces as IntentBehind; an
+// idempotent replay and the normal forward flow stamp nothing, and the
+// first forward-applying intent clears the marker.
+func TestK8sApplierIntentDrift(t *testing.T) {
+	c, applier := newFakeK8sApplier(t)
+	ctx := context.Background()
+	uid := provisioning.PlatformID("ws_dddd1111eeee2222aaaa3333bbbb4444")
+	if err := applier.Apply(ctx, createIntent(uid, "req-drift", 1)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	name := provisioning.WorkspaceCRName(uid)
+	stop2 := provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 2,
+		Kind: provisioning.IntentStop, DesiredState: "Stopped", RuntimeGeneration: 1,
+	}
+	if err := applier.Apply(ctx, stop2); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	mark := func() string {
+		return getWorkspace(t, c, "ns-a", name).Annotations[provisioning.AnnotationIntentBehind]
+	}
+
+	// Pure replay: same revision, same fields — silent, no marker.
+	before := getWorkspace(t, c, "ns-a", name)
+	if err := applier.Apply(ctx, stop2); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	after := getWorkspace(t, c, "ns-a", name)
+	if before.ResourceVersion != after.ResourceVersion {
+		t.Fatalf("identical replay wrote the CR (rv %s -> %s)", before.ResourceVersion, after.ResourceVersion)
+	}
+	if mark() != "" {
+		t.Fatalf("identical replay stamped drift marker: %q", mark())
+	}
+
+	// Drift: a strictly-behind revision (the row restarted below the CR's
+	// fence, e.g. after a DB restore) is dropped AND marked.
+	stale := createIntent(uid, "req-drift", 1)
+	if err := applier.Apply(ctx, stale); err != nil {
+		t.Fatalf("stale create: %v", err)
+	}
+	if got := mark(); got != `{"rowRevision":1,"crRevision":2}` {
+		t.Fatalf("marker = %q", got)
+	}
+	ws := getWorkspace(t, c, "ns-a", name)
+	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+		t.Fatalf("stale intent rewound spec: %+v", ws.Spec)
+	}
+
+	// Same drift pair again: marker already recorded — no rewrite.
+	before = getWorkspace(t, c, "ns-a", name)
+	if err := applier.Apply(ctx, stale); err != nil {
+		t.Fatalf("stale replay: %v", err)
+	}
+	if after := getWorkspace(t, c, "ns-a", name); before.ResourceVersion != after.ResourceVersion {
+		t.Fatalf("same drift pair rewrote the CR (rv %s -> %s)", before.ResourceVersion, after.ResourceVersion)
+	}
+
+	// A newer dropped intent updates the marker's row revision.
+	staleSignal := provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 1,
+		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 1,
+	}
+	if err := applier.Apply(ctx, staleSignal); err != nil {
+		t.Fatalf("stale start: %v", err)
+	}
+	if got := mark(); got == "" {
+		t.Fatal("marker cleared by a dropped intent")
+	}
+
+	// Equal revision with diverged fields is drift too (same revision,
+	// different history).
+	diverged := provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 2,
+		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 1,
+	}
+	if err := applier.Apply(ctx, diverged); err != nil {
+		t.Fatalf("diverged replay: %v", err)
+	}
+	if got := mark(); got == "" {
+		t.Fatal("diverged same-revision intent left no marker")
+	}
+	ws = getWorkspace(t, c, "ns-a", name)
+	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+		t.Fatalf("diverged intent rewrote spec: %+v", ws.Spec)
+	}
+
+	// A forward intent applies and clears the marker: stream realigned.
+	if err := applier.Apply(ctx, provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 3,
+		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 2,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ws = getWorkspace(t, c, "ns-a", name)
+	if ws.Spec.IntentRevision != 3 || ws.Spec.RuntimeGeneration != 2 {
+		t.Fatalf("forward intent not applied: %+v", ws.Spec)
+	}
+	if mark() != "" {
+		t.Fatalf("marker survived a forward apply: %q", mark())
+	}
+}
