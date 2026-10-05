@@ -55,6 +55,50 @@ export async function putAdminQuota(
   );
 }
 
+export type AdminUserLimitsView = components["schemas"]["AdminUserLimitsView"];
+export type AdminUserLimitEntry = components["schemas"]["AdminUserLimitEntry"];
+export type SetUserLimitRequest = components["schemas"]["SetUserLimitRequest"];
+export type SetUserLimitDefaultRequest = components["schemas"]["SetUserLimitDefaultRequest"];
+
+// Per-user running-workspace limits
+// (GET/PUT /v1/admin/tenants/{tenant}/user-limits[...]). Writes are upserts
+// — a `null` limit clears the row back to the tenant default (or
+// unlimited), so no If-Match precondition exists.
+export async function fetchAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitsView> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/user-limits", { params: { path: { tenant } } }),
+  );
+}
+
+export async function putAdminUserLimit(
+  api: ApiClient,
+  tenant: string,
+  ownerRef: string,
+  limit: number | null,
+): Promise<AdminUserLimitsView> {
+  const body: SetUserLimitRequest = { ownerRef, limit };
+  return unwrap(
+    await api.PUT("/v1/admin/tenants/{tenant}/user-limits", {
+      params: { path: { tenant } },
+      body,
+    }),
+  );
+}
+
+export async function putAdminUserLimitDefault(
+  api: ApiClient,
+  tenant: string,
+  limit: number | null,
+): Promise<AdminUserLimitsView> {
+  const body: SetUserLimitDefaultRequest = { limit };
+  return unwrap(
+    await api.PUT("/v1/admin/tenants/{tenant}/user-limits/default", {
+      params: { path: { tenant } },
+      body,
+    }),
+  );
+}
+
 export function listScopedWorkspaces(api: ApiClient, scope: Scope, phase?: WorkspacePhase) {
   return listAll<ScopedWorkspace>(api, "/v1/workspaces", { scope, phase });
 }

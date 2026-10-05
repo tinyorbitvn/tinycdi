@@ -43,17 +43,21 @@ func mapQuotaAmounts(v store.QuotaAmounts) quotaAmounts {
 	}
 }
 
-// userUsage is one owner's usage row (openapi UserUsage).
+// userUsage is one owner's usage row (openapi UserUsage). Limit is the
+// owner's effective per-principal running-workspace limit — absent when
+// the owner is unlimited.
 type userUsage struct {
 	Subject     string       `json:"subject"`
 	DisplayName string       `json:"displayName"`
 	Usage       quotaAmounts `json:"usage"`
+	Limit       *int64       `json:"limit,omitempty"`
 }
 
 // quotaView is the tenant quota snapshot (openapi QuotaView). userLimits is
-// omitted: there is no per-user limit store in v0.2. Limits is omitted for a
-// tenant without a quota row (admission fails closed there); inside Limits,
-// workspaces 0 means "no count limit".
+// present only when the caller has an effective per-principal
+// running-workspace limit; inside it only runningWorkspaces is meaningful.
+// Limits is omitted for a tenant without a quota row (admission fails
+// closed there); inside Limits, workspaces 0 means "no count limit".
 type quotaView struct {
 	Tenant string `json:"tenant"`
 	// Configured is false when the tenant has no quota row: admission then
@@ -62,6 +66,10 @@ type quotaView struct {
 	Configured bool          `json:"configured"`
 	Limits     *quotaAmounts `json:"limits,omitempty"`
 	Usage      quotaAmounts  `json:"usage"`
+	// UserLimits carries the caller's effective per-principal limit; only
+	// RunningWorkspaces is meaningful, the other fields stay zero. Absent
+	// when the caller is unlimited.
+	UserLimits *quotaAmounts `json:"userLimits,omitempty"`
 	Users      []userUsage   `json:"users"`
 }
 
@@ -108,6 +116,7 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	owners := resolveOwners(r.Context(), h.dir, p.TenantID, refs)
+	effective := func(ownerRef string) *int64 { return effectiveUserLimit(rep, ownerRef) }
 	out := quotaView{
 		Tenant:     p.TenantID,
 		Configured: rep.HasLimits,
@@ -118,6 +127,9 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 		limits := mapQuotaAmounts(rep.Limits)
 		out.Limits = &limits
 	}
+	if eff := effective(p.Owner()); eff != nil {
+		out.UserLimits = &quotaAmounts{RunningWorkspaces: *eff}
+	}
 	for _, o := range rep.Owners {
 		if !admin && o.OwnerRef != p.Owner() {
 			continue
@@ -127,6 +139,7 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 			Subject:     owner.Subject,
 			DisplayName: owner.DisplayName,
 			Usage:       mapQuotaAmounts(o.Usage),
+			Limit:       effective(o.OwnerRef),
 		})
 	}
 	respondJSON(w, out)

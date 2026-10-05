@@ -9,10 +9,12 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -191,6 +193,16 @@ type AdminQuotaHandler struct {
 	tenants TenantResolver
 	managed map[string]bool
 	maxBody int64
+	// audit is the dedicated audit-event sink the admin routes emit
+	// through (nil = no domain audit events).
+	audit observability.AuditSink
+}
+
+// WithAuditSink attaches the audit sink the admin quota routes write their
+// dedicated audit events to.
+func (h *AdminQuotaHandler) WithAuditSink(s observability.AuditSink) *AdminQuotaHandler {
+	h.audit = s
+	return h
 }
 
 // NewAdminQuotaHandler wires the handler. dir may be nil; owner display
@@ -200,18 +212,24 @@ func NewAdminQuotaHandler(src AdminQuotaSource, dir Directory, t TenantResolver,
 	return &AdminQuotaHandler{source: src, dir: dir, tenants: t, managed: managed, maxBody: 16 << 10}
 }
 
-// MountAdminQuotaRoutes registers the admin quota routes: RequireAuth on
-// the read, RequireAuth+RequireCSRF on the write.
+// MountAdminQuotaRoutes registers the admin quota routes audited (see
+// MountWorkspaceRoutes): RequireAuth+audit on the read, RequireAuth+audit+
+// RequireCSRF on the write — the read is inside the wrapper too, so admin
+// API coverage is total: every /v1/admin/ request leaves an audit event.
 func MountAdminQuotaRoutes(mux *http.ServeMux, authn *Authenticator, h *AdminQuotaHandler) {
-	mux.Handle("GET /v1/admin/tenants/{tenant}/quota", authn.RequireAuth(http.HandlerFunc(h.Get)))
-	mux.Handle("PUT /v1/admin/tenants/{tenant}/quota", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(h.Put))))
+	mux.Handle(routeAdminQuotaGet, authn.RequireAuth(
+		audited(h.audit, routeAdminQuotaGet, http.HandlerFunc(h.Get))))
+	mux.Handle(routeAdminQuotaSet, authn.RequireAuth(
+		audited(h.audit, routeAdminQuotaSet,
+			authn.RequireCSRF(http.HandlerFunc(h.Put)))))
 }
 
-// adminPrincipal gates the endpoint: the caller must be a tenant
-// administrator of the tenant named in the path — the only admin role the
-// platform defines — and that tenant must be provisioned. Cross-tenant
-// reads and writes answer the same 403 as every other tenant boundary.
-func (h *AdminQuotaHandler) adminPrincipal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+// tenantAdminPrincipal gates a tenant-admin endpoint: the caller must be a
+// tenant administrator of the tenant named in the path — the only admin
+// role the platform defines — and that tenant must be provisioned.
+// Cross-tenant reads and writes answer the same 403 as every other tenant
+// boundary.
+func tenantAdminPrincipal(tenants TenantResolver, w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	p, ok := PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, r, CodeUnauthenticated, "authentication required")
@@ -219,14 +237,19 @@ func (h *AdminQuotaHandler) adminPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 	tenant := r.PathValue("tenant")
 	if !p.InGroup(TenantAdminGroup) || tenant != p.TenantID {
-		writeError(w, r, CodeForbidden, "tenant quota administration requires the tenant-admin role")
+		writeError(w, r, CodeForbidden, "tenant administration requires the tenant-admin role")
 		return p, false
 	}
-	if _, ok := h.tenants.Namespace(p.TenantID); !ok {
+	if _, ok := tenants.Namespace(p.TenantID); !ok {
 		writeError(w, r, CodeForbidden, "tenant is not provisioned")
 		return p, false
 	}
 	return p, true
+}
+
+// adminPrincipal gates the endpoint; see tenantAdminPrincipal.
+func (h *AdminQuotaHandler) adminPrincipal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+	return tenantAdminPrincipal(h.tenants, w, r)
 }
 
 func (h *AdminQuotaHandler) view(ctx context.Context, tenantID string) (adminQuotaView, error) {
@@ -263,9 +286,21 @@ func (h *AdminQuotaHandler) view(ctx context.Context, tenantID string) (adminQuo
 			Subject:     owner.Subject,
 			DisplayName: owner.DisplayName,
 			Usage:       mapQuotaAmounts(o.Usage),
+			Limit:       effectiveUserLimit(rep, o.OwnerRef),
 		})
 	}
 	return out, nil
+}
+
+// effectiveUserLimit resolves an owner's per-principal running limit from
+// a quota report: stored override, else the tenant default, else nil
+// (unlimited). Shared by the admin quota view and the user-limits view.
+func effectiveUserLimit(rep store.QuotaReport, ownerRef string) *int64 {
+	if v, ok := rep.UserLimits[ownerRef]; ok {
+		l := v
+		return &l
+	}
+	return rep.DefaultUserLimit
 }
 
 // Get handles GET /v1/admin/tenants/{tenant}/quota.
@@ -320,6 +355,12 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 			"limits must set non-negative runningWorkspaces, cpuMillicores, memoryMib and storageGib ("+field+")")
 		return
 	}
+	// Record the requested limits in display units so the audit event —
+	// success or refusal — carries what the write attempted.
+	auditSetDetail(r.Context(), "running_workspaces", strconv.FormatInt(v.RunningSlots, 10))
+	auditSetDetail(r.Context(), "cpu_millicores", strconv.FormatInt(v.CPUMillis, 10))
+	auditSetDetail(r.Context(), "memory_mib", strconv.FormatInt(v.MemoryBytes>>20, 10))
+	auditSetDetail(r.Context(), "storage_gib", strconv.FormatInt(v.DiskBytes>>30, 10))
 	if err := h.source.SetLimits(r.Context(), tenant, v, ifMatch); err != nil {
 		if errors.Is(err, ErrQuotaVersionMismatch) {
 			writeError(w, r, CodePreconditionFailed,

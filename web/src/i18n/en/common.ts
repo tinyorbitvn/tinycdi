@@ -18,6 +18,8 @@ export default {
     "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
   "errors.code.quotaNotConfigured":
     "No quota is configured for your tenant. Ask an administrator to set one.",
+  "errors.code.userLimitReached":
+    "You have reached your running-workspace limit ({current} of {limit}). Stop or delete a workspace, or ask an administrator to raise your limit.",
   "errors.code.invalidTemplate":
     "That template is not available (unpublished or disallowed for your tenant). Pick another template.",
   "errors.code.idempotencyConflict":

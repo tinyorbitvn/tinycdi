@@ -27,6 +27,7 @@ import {
 import { loadMe, useLoader } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
+import { UserLimitsSection } from "./UserLimitsSection";
 
 // A workspace-count limit of 0 in a configured quota means "no limit" — never
 // a meter against zero. A tenant without a quota row is not unlimited: it is
@@ -407,6 +408,7 @@ export function QuotaContent({
           empty={t("admin.quota.users.empty")}
         />
       </Section>
+      <UserLimitsSection tenant={quota.tenant} />
       <QuotaEditDialog
         quota={quota}
         open={editing}

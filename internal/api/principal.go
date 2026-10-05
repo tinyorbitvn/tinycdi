@@ -52,6 +52,7 @@ const (
 	ctxKeyRequestID
 	ctxKeySession
 	ctxKeyAuditCollector
+	ctxKeyRouteAudit
 )
 
 // WithPrincipal stores a verified principal in the context. Only
