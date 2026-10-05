@@ -663,6 +663,8 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
 	case provisioning.IsQuotaExceeded(err):
 		writeQuotaExceeded(w, r, err, h.retryAfterSeconds())
+	case provisioning.IsUserLimit(err):
+		writeUserLimitReached(w, r, err, h.retryAfterSeconds())
 	case provisioning.IsImageStale(err):
 		writeImageStale(w, r, err)
 	case provisioning.IsIdempotencyConflict(err):

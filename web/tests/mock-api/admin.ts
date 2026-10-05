@@ -158,6 +158,10 @@ export interface Tenancy {
   // undefined = the tenant has no quota row (the API then omits `limits`).
   limits: QuotaAmounts | undefined;
   userLimits: QuotaAmounts | undefined;
+  // Per-principal running limits (v0.5): the tenant default (null =
+  // unlimited) and ownerRef ("iss|sub") -> max running workspaces.
+  userLimitDefault: number | null;
+  userLimitOverrides: Map<string, number>;
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
   managed: boolean;
@@ -200,6 +204,8 @@ export function tenancy(ctx: MockContext): Tenancy {
     me: freshMe(ctx.demo),
     limits: { ...DEFAULT_LIMITS },
     userLimits: { ...DEFAULT_USER_LIMITS },
+    userLimitDefault: null,
+    userLimitOverrides: new Map(),
     managed: false,
     version: 1,
     owners: new Map(),
@@ -241,6 +247,13 @@ function zero(): QuotaAmounts {
   return { workspaces: 0, runningWorkspaces: 0, cpuMillicores: 0, memoryMib: 0, storageGib: 0 };
 }
 
+// ISS prefixes the "issuer|sub" owner references the contract API keys
+// per-user limits on; the portal echoes an ownerRef back verbatim on PUT.
+const ISS = "https://idp.invalid";
+function ownerRefOf(subject: string): string {
+  return `${ISS}|${subject}`;
+}
+
 export function adminArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const t = tenancy(ctx);
@@ -260,6 +273,8 @@ export function adminArea(ctx: MockContext): MockArea {
     t.me = freshMe(ctx.demo);
     t.limits = { ...DEFAULT_LIMITS };
     t.userLimits = { ...DEFAULT_USER_LIMITS };
+    t.userLimitDefault = null;
+    t.userLimitOverrides = new Map();
     t.managed = false;
     t.version = 1;
     t.owners = new Map();
@@ -310,7 +325,17 @@ export function adminArea(ctx: MockContext): MockArea {
     }
     const users = [...perUser.values()]
       .filter((b) => t.isAdmin() || b.owner.subject === t.me.subject)
-      .map((b) => ({ subject: b.owner.subject, displayName: b.owner.displayName, usage: b.usage }));
+      .map((b) => {
+        // users[].limit mirrors the contract: the owner's effective
+        // per-principal running limit, absent when unlimited.
+        const limit = t.userLimitOverrides.get(`${ISS}|${b.owner.subject}`) ?? t.userLimitDefault;
+        return {
+          subject: b.owner.subject,
+          displayName: b.owner.displayName,
+          usage: b.usage,
+          ...(limit === null ? {} : { limit }),
+        };
+      });
     return {
       tenant: t.me.tenant,
       configured: t.limits !== undefined,
@@ -380,6 +405,79 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  // GET/PUT /v1/admin/tenants/{tenant}/user-limits[...] — tenant-admin of
+  // the named tenant only. The view unions principals with usage and
+  // stored overrides; PUT upserts (`limit: null` clears back to inherit).
+  function userLimitsBody() {
+    const rows = new Map<
+      string,
+      { ownerRef: string; subject: string; displayName: string; running: number }
+    >();
+    for (const u of quotaBody().users) {
+      rows.set(ownerRefOf(u.subject), {
+        ownerRef: ownerRefOf(u.subject),
+        subject: u.subject,
+        displayName: u.displayName,
+        running: u.usage.runningWorkspaces,
+      });
+    }
+    for (const ref of t.userLimitOverrides.keys()) {
+      if (rows.has(ref)) continue;
+      const sub = ref.split("|").slice(1).join("|");
+      const known = [t.me, ...OTHER_USERS].find((o) => o.subject === sub);
+      rows.set(ref, {
+        ownerRef: ref,
+        subject: sub,
+        displayName: known?.displayName ?? sub,
+        running: 0,
+      });
+    }
+    return {
+      tenant: t.me.tenant,
+      default: t.userLimitDefault,
+      users: [...rows.values()].map((u) => ({
+        ...u,
+        limit: t.userLimitOverrides.get(u.ownerRef) ?? null,
+        effective: t.userLimitOverrides.get(u.ownerRef) ?? t.userLimitDefault,
+      })),
+    };
+  }
+
+  function adminUserLimits(req: MockRequest, tenant: string, isDefault: boolean): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method === "GET" && !isDefault) {
+      const failed = t.takeFailure(req);
+      if (failed) return failed;
+      return ok(200, userLimitsBody());
+    }
+    if (req.method === "PUT") {
+      const b = req.body as Record<string, unknown> | null;
+      if (b === null) return err(400, "INVALID_REQUEST", "invalid request body", false);
+      const limit = b.limit;
+      const lv =
+        limit === null || limit === undefined
+          ? null
+          : Number.isInteger(limit) && (limit as number) >= 0
+            ? (limit as number)
+            : undefined;
+      if (lv === undefined) return err(400, "INVALID_REQUEST", "invalid limit", false);
+      if (isDefault) {
+        t.userLimitDefault = lv;
+      } else {
+        const ref = b.ownerRef;
+        if (typeof ref !== "string" || !ref.includes("|") || ref.endsWith("|") || ref.startsWith("|")) {
+          return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+        }
+        if (lv === null) t.userLimitOverrides.delete(ref);
+        else t.userLimitOverrides.set(ref, lv);
+      }
+      return ok(200, userLimitsBody());
+    }
+    return err(405, "INVALID_REQUEST", "method not allowed", false);
+  }
+
   function listWorkspaces(req: MockRequest): MockResponse {
     const scope = t.resolveScope(req);
     if ("status" in scope) return scope;
@@ -397,6 +495,8 @@ export function adminArea(ctx: MockContext): MockArea {
     const { method, path } = req;
     const mQuota = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/quota$/);
     if (mQuota) return adminQuota(req, mQuota[1]);
+    const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(\/default)?$/);
+    if (mUL) return adminUserLimits(req, mUL[1], mUL[2] !== undefined);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
       const failed = t.takeFailure(req);
       if (failed) return failed;
@@ -438,6 +538,17 @@ export function adminArea(ctx: MockContext): MockArea {
         else if (req.body?.userLimits) t.userLimits = { ...DEFAULT_USER_LIMITS, ...(req.body.userLimits as object) };
         if (typeof req.body?.managed === "boolean") t.managed = req.body.managed;
         return ok(200, { limits: t.limits ?? null, userLimits: t.userLimits ?? null, managed: t.managed });
+      case "/_control/admin/userlimits":
+        if (req.body?.default !== undefined) {
+          t.userLimitDefault = req.body.default === null ? null : Number(req.body.default);
+        }
+        if (req.body?.overrides) {
+          for (const [ref, v] of Object.entries(req.body.overrides as Record<string, number | null>)) {
+            if (v === null) t.userLimitOverrides.delete(ref);
+            else t.userLimitOverrides.set(ref, v);
+          }
+        }
+        return ok(200, userLimitsBody());
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

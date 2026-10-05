@@ -91,3 +91,18 @@ Condition params travel on the
 condition's type and reason, so a stale entry under a different reason
 never applies. An operator older than v0.4 writes no annotation — the
 conditions then carry no `params` and clients fall back to `message`.
+
+## API refusal reasons
+
+The error body's `details.reason` is a separate token namespace from
+condition/event reasons — it refines `Error.code` on 4xx/5xx responses.
+Documented values:
+
+| reason | code | params | meaning |
+|---|---|---|---|
+| `release_pending` | `QUOTA_EXHAUSTED` | — | the refused amount is held only by workspaces whose quota release is pending teardown; `retryable: true` + `Retry-After` — retry is safe |
+| `UserLimitReached` | `QUOTA_EXHAUSTED` | `limit`, `current` | the caller already holds their maximum of concurrent running workspaces (a per-principal limit, not the tenant quota): `limit` is their cap, `current` the running workspaces they hold. When the caller's own teardown-pending holds cover the shortfall the response also carries `retryable: true` + `Retry-After` |
+
+`params` here is the same flat string map convention as
+`WorkspaceEvent.params` — clients may localize the refusal instead of
+parsing `message`, and unknown keys must be ignored.

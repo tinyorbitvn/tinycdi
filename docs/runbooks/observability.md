@@ -168,6 +168,7 @@ Emitted events:
 | `action` | Source | Covers |
 |---|---|---|
 | `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals and `QUOTA_MANAGED_BY_CONFIG` rejections; `details` carry the attempted limits |
+| `admin.user_limit.get` / `.set` / `.clear` / `.default.set` / `.default.clear` | `GET`/`PUT /v1/admin/tenants/{t}/user-limits` and `PUT .../default` | tenant-admin per-principal limit reads/writes — including denied attempts (denied pre-decode writes record the `.set` attempt action); `details` carry the pseudonymized `owner` ref and attempted `max_running` |
 | `admin.quota.config_apply` | `-tenant-quotas` startup singleton | the platform-level quota write performed from configuration (leader replica only); a failed pass records `failure`/`apply_failed` with `changed: "0"` (the transaction rolls back) |
 | `workspace.create` / `.start` / `.stop` / `.delete` | `/v1/workspaces` mutations | every lifecycle write, owner- and admin-scoped alike — `role=tenant-admin` marks elevated use |
 | `data.attach` / `data.purge` | `/v1/data/{id}/attach`/`/purge` | retained-disk claims and destructive purges, incl. admin action on other owners' records |

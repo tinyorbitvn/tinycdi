@@ -162,6 +162,34 @@ describe("CreateWorkspacePage", () => {
     expect(alert).not.toHaveTextContent("delete an unused workspace");
   }, 20000);
 
+  // USER-LIMITS (v0.5): QUOTA_EXHAUSTED + details.reason=UserLimitReached
+  // names the caller's own running cap — the banner interpolates
+  // details.params limit/current into dedicated copy.
+  it("create: per-user limit refusal shows the limit copy with params", async () => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: {
+        code: "QUOTA_EXHAUSTED",
+        message: "per-user running-workspace limit reached",
+        retryable: false,
+        requestId: "r-ul",
+        details: { reason: "UserLimitReached", params: { limit: "2", current: "2" } },
+      },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).toHaveTextContent(
+      "You have reached your running-workspace limit (2 of 2).",
+    );
+    expect(alert).not.toHaveTextContent("delete an unused workspace");
+  }, 20000);
+
   // V3.3 (E3): a template over the -image-block-after limit reports
   // imageBlocked — the create submit is disabled and the reason is shown
   // before any request goes out.
