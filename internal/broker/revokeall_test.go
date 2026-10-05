@@ -584,9 +584,9 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 		seedSessionRowFor(t, db, s, alice.Issuer, alice.Subject, "tenant-a")
 	}
 	// One live lease per session — the lease sweeps overlap the same way.
-	leaseForSess(t, db, b, gwA, "ws-28", false, "sess-1")
-	leaseForSess(t, db, b, gwA, "ws-29", false, "sess-2")
-	leaseForSess(t, db, b, gwA, "ws-30", false, "sess-3")
+	l1 := leaseForSess(t, db, b, gwA, "ws-28", false, "sess-1")
+	l2 := leaseForSess(t, db, b, gwA, "ws-29", false, "sess-2")
+	l3 := leaseForSess(t, db, b, gwA, "ws-30", false, "sess-3")
 
 	// Mint outstanding tickets round-robin across the sessions — three
 	// per session — until the set provably contains an order inversion.
@@ -618,7 +618,10 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 
 	// Race: revoke-all vs the per-session sign-outs of sess-1 and sess-2
 	// (logout's delete-then-revoke shape) vs redemptions of one covered
-	// ticket each from sess-1 and sess-3. A barrier maximizes overlap.
+	// ticket each from sess-1 and sess-3 vs #123's renew path — a renew
+	// that observes the deleted session revokes its lease via
+	// RevokeLeaseChanged (single-lease lock, ordered-compatible). A
+	// barrier maximizes overlap.
 	redeemOf := func(sess string) *racingTicket {
 		for i := range outstanding {
 			if outstanding[i].session == sess {
@@ -632,7 +635,7 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	done := make(chan struct{})
-	wg.Add(5)
+	wg.Add(8)
 	go func() { wg.Wait(); close(done) }()
 
 	go func() {
@@ -669,6 +672,20 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 				t.Errorf("RedeemTicket(%s ticket): %v (deadlock=%v)", tk.session, err, isDeadlockError(err))
 			}
 		}(tk)
+	}
+	for _, l := range []broker.Lease{l1, l2, l3} {
+		go func(l broker.Lease) {
+			defer wg.Done()
+			<-start
+			// #123: a renew landing after the session row died revokes the
+			// lease on the spot (RevokeLeaseChanged) — ErrRevoked either
+			// way; a renew that wins outright is a bounded outcome too.
+			if _, err := b.RenewLease(ctx, gwA, l.ID, fenceOf(l)); err != nil &&
+				!errors.Is(err, broker.ErrRevoked) &&
+				!errors.Is(err, broker.ErrLeaseInvalid) {
+				t.Errorf("RenewLease(%s): %v (deadlock=%v)", l.ID, err, isDeadlockError(err))
+			}
+		}(l)
 	}
 	close(start)
 	select {
