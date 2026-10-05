@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import {
   Alert,
   Button,
+  ConfirmDialog,
   cx,
   EmptyState,
   IconCheck,
@@ -10,6 +11,7 @@ import {
   IconLaptop,
   IconLogOut,
   IconMoon,
+  IconShield,
   IconSun,
   IconUser,
   IconButton,
@@ -18,7 +20,7 @@ import {
   useToast,
 } from "../design";
 import { useApi } from "../api/context";
-import { signOut } from "../auth/signOut";
+import { signOut, signOutEverywhere } from "../auth/signOut";
 import { Link, navigate, NavLink, usePathname } from "./router";
 import {
   areaFor,
@@ -131,6 +133,7 @@ function UserMenu({ me }: { me: Me }) {
   const api = useApi();
   const { toast } = useToast();
   const [signingOut, setSigningOut] = useState(false);
+  const [confirmAll, setConfirmAll] = useState(false);
   const onSignOut = () => {
     if (signingOut) return;
     setSigningOut(true);
@@ -143,30 +146,68 @@ function UserMenu({ me }: { me: Me }) {
       });
     });
   };
+  // Sign-out-everywhere confirms first: it ends EVERY session of the
+  // principal in this tenant — this browser's too (ADR 0007).
+  const onSignOutAll = () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    signOutEverywhere(api).catch(() => {
+      setSigningOut(false);
+      toast({
+        tone: "danger",
+        title: t("app.user.signOutFailed.title"),
+        description: t("app.user.signOutFailed.body"),
+      });
+    });
+  };
   return (
-    <Menu
-      label={t("app.user.menu", { name: me.displayName })}
-      align="end"
-      header={
-        <div className="tc-topbar__identity">
-          <span>{t("app.user.signedInAs", { name: me.displayName })}</span>
-          {me.tenant ? <span className="tc-topbar__tenant">{t("app.user.tenant", { tenant: me.tenant })}</span> : null}
-        </div>
-      }
-      trigger={(props) => (
-        <Button
-          {...props}
-          variant="ghost"
-          size="sm"
-          icon={<IconUser />}
-          iconEnd={<IconChevronDown />}
-          loading={signingOut}
-        >
-          <span className="tc-topbar__user">{me.displayName}</span>
-        </Button>
-      )}
-      items={[{ id: "sign-out", label: t("app.user.signOut"), icon: <IconLogOut />, onSelect: onSignOut }]}
-    />
+    <>
+      <Menu
+        label={t("app.user.menu", { name: me.displayName })}
+        align="end"
+        header={
+          <div className="tc-topbar__identity">
+            <span>{t("app.user.signedInAs", { name: me.displayName })}</span>
+            {me.tenant ? <span className="tc-topbar__tenant">{t("app.user.tenant", { tenant: me.tenant })}</span> : null}
+          </div>
+        }
+        trigger={(props) => (
+          <Button
+            {...props}
+            variant="ghost"
+            size="sm"
+            icon={<IconUser />}
+            iconEnd={<IconChevronDown />}
+            loading={signingOut}
+          >
+            <span className="tc-topbar__user">{me.displayName}</span>
+          </Button>
+        )}
+        items={[
+          { id: "sign-out", label: t("app.user.signOut"), icon: <IconLogOut />, onSelect: onSignOut },
+          {
+            id: "sign-out-all",
+            label: t("app.user.signOutAll"),
+            icon: <IconShield />,
+            onSelect: () => setConfirmAll(true),
+          },
+        ]}
+      />
+      <ConfirmDialog
+        open={confirmAll}
+        title={t("app.user.signOutAll.title")}
+        confirmLabel={signingOut ? t("app.user.signOutAll.busy") : t("app.user.signOutAll.confirm")}
+        cancelLabel={t("common.cancel")}
+        busy={signingOut}
+        onConfirm={() => {
+          setConfirmAll(false);
+          onSignOutAll();
+        }}
+        onCancel={() => setConfirmAll(false)}
+      >
+        <p>{t("app.user.signOutAll.body", { tenant: me.tenant })}</p>
+      </ConfirmDialog>
+    </>
   );
 }
 
