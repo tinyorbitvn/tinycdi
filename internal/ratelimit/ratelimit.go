@@ -75,7 +75,7 @@ func New(ratePerMinute, burst, maxKeys int, now func() time.Time) *Limiter {
 // value callers put on Retry-After. Refills are continuous at the
 // configured rate; a refused attempt does not consume a token.
 func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
-	if l.perSec <= 0 {
+	if l == nil || l.perSec <= 0 {
 		return true, 0
 	}
 	now := l.now()

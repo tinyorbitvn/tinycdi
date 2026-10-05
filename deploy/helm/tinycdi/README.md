@@ -459,37 +459,55 @@ cookies and states always fall back to the client-IP key, so they cannot
 mint fresh buckets. See `docs/runbooks/capacity.md` ("Sign-in rate limits
 and NAT").
 
-The buckets are **in-memory per backend replica** (`internal/ratelimit`) —
-there is no shared counter, so the chart passes
-`-rate-limit-replicas=backend.replicas` and every pod enforces its 1/N
-share of the configured budget — exactly `max(1, rate÷N)` tokens/min and
-`max(1, burst÷N)` burst per pod, integer division rounding down: on an
-even spread the aggregate is **~the configured rate** — 2 replicas ×
-`-login-rate` 30/min + burst 10 lets one anonymous IP draw ~15/min +
-burst 5 per pod, ≈40/min in total. The minimum-1 clamp is the one
-overshoot: a configured rate smaller than the replica count
-(`-login-rate=2` with `backend.replicas: 3`) resolves to 1/min per pod,
-so the aggregate is ~N/min — above the flag, never silently disabled by
-rounding to 0. Size `-login-rate`/`-launch-rate` as the aggregate you
-want to allow. Three edge cases to know:
+The bound is enforced by a **Postgres fixed-minute window** shared by
+every replica (ADR 0006): one counter per key, checked with a single
+upsert per request — the flags are now the *exact* aggregate: 2 replicas
+with `-login-rate` 30/min + burst 10 let one anonymous IP draw exactly
+40 requests inside a window, however the traffic spreads. The
+fixed-window edge admits up to ~2×(rate+burst) inside a span crossing a
+minute boundary — the same overshoot class the old per-replica buckets
+had. Split mode (`backend.brokerURL`, no database) keeps the divided
+in-memory limiter.
 
-- **A rolling surge briefly loosens the bound.** While a rollout runs
-  N+1 pods each still enforces its 1/N share, so the transient aggregate
-  is up to ~(N+1)/N× configured — 1.5× on the default two replicas —
-  until the old pod drains.
-- **Out-of-band scaling desynchronises the divisor.** `kubectl scale`
-  changes the pod count but not the rendered flag; the aggregate becomes
-  ~configured × actual-pods ÷ N until the next `helm upgrade`. Scale by
-  editing `backend.replicas` and upgrading so the divisor tracks.
-- **An external HPA needs the divisor pinned to its ceiling.** The chart
+Every pod additionally keeps its divided in-memory bucket — the chart
+passes `-rate-limit-replicas=backend.replicas` — which now plays two
+roles: a **per-replica ceiling** while Postgres is healthy (effective
+bound = `min(shared window, pod share)`, so one pod can never serve more
+than its `max(1, rate÷N)`/min + `max(1, burst÷N)` burst, and a locally
+refused key never reaches the store) and the **fail-open fallback**
+during a Postgres outage — every limited route needs Postgres to
+complete anyway, so an outage degrades to per-replica limiting rather
+than a lifted cap or a hard 429. Store errors count on
+`tinycdi_rate_limit_store_errors_total{route}` — real failures only:
+each check runs under a 500 ms deadline and a failure opens a 10 s
+circuit breaker that skips the store until one probe succeeds, so a
+brown-out stalls at most one request per cool-down — with the breaker
+state on `tinycdi_rate_limit_store_degraded{route}` and each limiter
+logging a single line on fallback entry and exit (never per request).
+Expired window rows are deleted by the leader replica's periodic sweep
+(15-minute retention).
+
+Three edge cases to know:
+
+- **Sticky load-balancing still sees the pod share.** A key pinned to
+  one pod (cookie/IP-hash affinity) is bounded by that pod's 1/N ceiling
+  even while the shared window has room — the ceiling is deliberate (it
+  bounds what one pod may serve) and only loosens if you raise
+  `-rate-limit-replicas` **downward** or spread traffic.
+- **A configured rate below the replica count still clamps up.** During
+  a Postgres outage (`-login-rate=2` with `backend.replicas: 3`) each
+  pod's floor is 1/min — ~N/min aggregate, above the flag, never
+  silently disabled by rounding to 0.
+- **An external HPA should pin the divisor to its ceiling.** The chart
   does not ship an HPA for the backend; if you add one, set
   `-rate-limit-replicas=<maxReplicas>` via `backend.extraArgs` (it
-  renders after the chart's value and wins) so the bound holds at full
-  scale — accept the looser limit below max, or keep
-  `backend.replicas` fixed.
+  renders after the chart's value and wins) so the outage/degraded-mode
+  bound holds at full scale. With Postgres healthy the shared window
+  enforces the aggregate at every replica count regardless.
 
-Remember the replica count when reading `tinycdi_rate_limited_total`
-against the flag — each series is per pod, at 1/N of the aggregate.
+When reading `tinycdi_rate_limited_total` during an outage remember the
+replica count — each pod's local ceiling is 1/N of the aggregate; while
+Postgres is healthy the series measures the shared bound.
 
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted

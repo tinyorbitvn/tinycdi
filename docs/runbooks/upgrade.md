@@ -744,6 +744,20 @@ plain `CREATE INDEX` builds briefly block writes on `connection_lease` and
 migration transaction) — on large installs run the upgrade in a quiet
 window.
 
+v0.3 → v0.4 also adds `021_rate_limit_window` — the `rate_limit_window`
+table behind the Postgres-backed login/launch rate limits (ADR 0006).
+Expand-only: a still-running v0.3 replica never reads it and keeps its
+in-process divided limiter, and a request lands on exactly one pod, so a
+mixed-version rollout applies one enforcement or the other — the
+aggregate bound may differ by the per-replica share for the few seconds
+the rollout spans. Rollback leaves an orphan table (harmless; droppable
+later). On v0.4, `-rate-limit-replicas` changes meaning: it is no longer
+the divisor that approximates the aggregate bound — the shared window
+enforces `-login-rate`/`-launch-rate` exactly — but the **per-replica
+local ceiling** each pod keeps as a cap and as the fail-open limiter
+during a Postgres outage. Keep it at `backend.replicas` (the chart still
+renders it so); an HPA should pin it to `maxReplicas` as before.
+
 ## Rollback
 
 - **Binary rollback is supported:** `helm rollback tinycdi -n <release-ns>`

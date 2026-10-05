@@ -249,7 +249,7 @@ type RateLimitKeyFunc func(r *http.Request) string
 // entry when the peer sits inside trusted — the same derivation the
 // session gateway applies (S18). A nil limiter disables the check
 // entirely; a nil Metrics skips the count.
-func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics) func(http.Handler) http.Handler {
+func RateLimit(l ratelimit.Allower, trusted []netip.Prefix, m *observability.Metrics) func(http.Handler) http.Handler {
 	return RateLimitWithKey(l, trusted, m, nil)
 }
 
@@ -262,7 +262,7 @@ func RateLimit(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Me
 // the IP rate (FX-R30 review). A "" from the resolver means "no
 // authenticated key" and only the client-IP bucket in l applies — the
 // ceiling never subsidizes anonymous requests.
-func RateLimitWithCeiling(l, ceiling *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
+func RateLimitWithCeiling(l, ceiling ratelimit.Allower, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if l != nil {
@@ -298,7 +298,7 @@ func RateLimitWithCeiling(l, ceiling *ratelimit.Limiter, trusted []netip.Prefix,
 // override per request; a "" from the resolver falls back to the
 // client-IP key (ClientKey). The refusal shape, Retry-After and metrics
 // are identical either way — only the bucket changes.
-func RateLimitWithKey(l *ratelimit.Limiter, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
+func RateLimitWithKey(l ratelimit.Allower, trusted []netip.Prefix, m *observability.Metrics, key RateLimitKeyFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if l != nil {

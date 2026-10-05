@@ -45,6 +45,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncLogin("success")
 	m.SetRuntimeImageAge("browser", 3600)
 	m.IncRateLimited("/v1/login")
+	m.IncRateLimitStoreError("login")
+	m.SetRateLimitStoreDegraded("login", true)
 	m.IncFrameReload("iframe")
 
 	want := []string{
@@ -64,6 +66,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_logins_total",
 		"tinycdi_runtime_image_age_seconds",
 		"tinycdi_rate_limited_total",
+		"tinycdi_rate_limit_store_errors_total",
+		"tinycdi_rate_limit_store_degraded",
 		"tinycdi_session_frame_reloads_total",
 	}
 	fams := gatherFamilies(t, reg)

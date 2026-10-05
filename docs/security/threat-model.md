@@ -158,16 +158,20 @@ Controls:
   `RequireTrustedOrigin` (middleware.go:169-227) requires a single `Origin`
   byte-equal to the allowlist, or `Sec-Fetch-Site: same-origin` when Origin
   is absent (tests: `middleware_test.go` CSRF/Origin cases).
-- **Rate limits** — token buckets in `internal/ratelimit` applied to
+- **Rate limits** — shared Postgres fixed-minute windows (ADR 0006) over
+  per-replica token buckets in `internal/ratelimit`, applied to
   `/v1/login`, `/v1/auth/callback` and the `GET /v1/session` probe
-  (`internal/api/middleware.go:252-316`, wiring `internal/backend/wire.go:73-76,650-675`).
-  Keys: client IP, or a digest of the *validated* session ID / OIDC login
-  state when present so NAT-shared users keep separate buckets
+  (`internal/api/middleware.go:252-316`, wiring `internal/backend/wire.go`,
+  store `internal/store/rate_limit.go`, migration 021). Keys: client IP,
+  or a digest of the *validated* session ID / OIDC login state when
+  present so NAT-shared users keep separate buckets
   (`internal/api/ratelimit_key.go`, FX-R30); the callback is additionally
   capped by a 10× per-IP ceiling so validated-state spray stays bounded.
-  `PerReplica` divides the configured budget by replica count (RL-1).
-  Client IPs derive from the socket peer, or the right-most untrusted
-  X-Forwarded-For entry when the peer sits inside `-trusted-proxies` CIDRs
+  The effective bound is `min(shared window, divided local bucket)` —
+  `PerReplica` still divides the configured budget into each pod's local
+  ceiling and fail-open fallback for a store outage (RL-1). Client IPs
+  derive from the socket peer, or the right-most untrusted X-Forwarded-For
+  entry when the peer sits inside `-trusted-proxies` CIDRs
   (`ratelimit.go:174`, `ParseTrustedProxies`).
 - **Passive auth** — `GET /v1/connections/.../status` authenticates via
   `RequireAuthPassive`, which never extends the idle clock
@@ -450,7 +454,7 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S11 | KASM-2 risk acceptance | The risk acceptance lapsed with v0.2; the kasm adapter + catalog scan ship now. Reviewer should confirm the catalog gate (`check-kasm-catalog.sh`, `kasm-contract` job) actually covers the documented minimum engine floor |
 | S12 | Runtime image release train | Live (`runtime-images.yml`); intentionally no human gate — review job permissions, keyless identity, train-vs-release image distinguishability |
 | S13 | G0–G5 merged without independent review | Standing: the whole v0.1→v0.3 delta has had no external security review — this document exists to scope it |
-| S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | **Implemented since** (`internal/ratelimit`, FX-R30 keying, RL-1 per-replica division); reviewer verifies coverage, ceilings and bypass resistance |
+| S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | **Implemented since** (`internal/ratelimit` + Postgres windows, ADR 0006 — FX-R30 keying, shared bound with per-replica ceiling and fail-open fallback); reviewer verifies coverage, ceilings, bypass resistance and the outage degradation path |
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
 | S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Tests `signout_test.go` (api, broker, gateway) |
