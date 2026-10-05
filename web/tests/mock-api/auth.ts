@@ -59,7 +59,13 @@ export function authArea(_ctx: MockContext): MockArea {
     reset() {
       endSessionUrl = null;
     },
-    api: (req) => (req.path === "/v1/logout" && req.method === "POST" ? logout() : undefined),
+    api: (req) => {
+      // POST /v1/me/sessions:revoke-all (openapi.yaml revokeAllSessions):
+      // same answer shape as logout — the caller's session dies too.
+      if (req.path === "/v1/me/sessions:revoke-all" && req.method === "POST") return logout();
+      if (req.path === "/v1/logout" && req.method === "POST") return logout();
+      return undefined;
+    },
     control: (req) => {
       if (req.path === "/_control/auth/endSession" && req.method === "POST") {
         const url = req.body?.url;

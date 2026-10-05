@@ -21,6 +21,12 @@ export default {
   "app.user.signedInAs": "Signed in as {name}",
   "app.user.tenant": "Tenant {tenant}",
   "app.user.signOut": "Sign out",
+  "app.user.signOutAll": "Sign out everywhere",
+  "app.user.signOutAll.title": "Sign out everywhere?",
+  "app.user.signOutAll.body":
+    "This ends every session you have in tenant {tenant} — on all browsers and devices, including this one. Live desktop streams close within seconds. Sessions in other tenants are not affected.",
+  "app.user.signOutAll.confirm": "Sign out everywhere",
+  "app.user.signOutAll.busy": "Signing out…",
   "app.user.signOutFailed.title": "Could not sign out",
   "app.user.signOutFailed.body": "Try again. If it keeps failing, close this browser window.",
 

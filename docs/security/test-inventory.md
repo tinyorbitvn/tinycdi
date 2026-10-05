@@ -46,6 +46,12 @@ substitute for review).
   `TestLogout_RevokeFailureStillSignsOut` — sign-out revokes session-bound
   leases/tickets at the store, audits `session.revoke`, and a store failure
   never blocks the sign-out (S17).
+- `internal/api/revokeall_test.go` — sign-out-everywhere (ADR 0007, S19):
+  `POST /v1/me/sessions:revoke-all` hands the caller's (tenant, issuer,
+  subject) to the principal revoker — the caller's own session included —
+  audits `session.revoke_all` with per-kind counts, expires the cookie,
+  returns the same `endSessionUrl` as logout, and answers 500 leaving every
+  session intact when the store transaction fails (503 when unwired).
 - `internal/api/tenant_scope_test.go`, `events_test.go`, `statusview_test.go`,
   `me_test.go`, `owner_test.go`, `principal.go` — tenant scoping, curated
   events, principal directory fallbacks.
@@ -90,6 +96,10 @@ substitute for review).
 - `internal/gateway/signout_test.go` — S17 propagation: a store-level
   revoke ends a live stream on a sibling replica within one renew cycle,
   and the workspace cookie replays to 401 on any replica.
+- `internal/gateway/revokeall_test.go` — S19 propagation: a principal-scoped
+  revoke ends every revoked session's stream within one renew cycle on the
+  replica holding it, and each session's cookie replays to 401 — including
+  on a replica that never saw either session.
 
 ### Fuzz targets (stdlib `testing.F`, run by the `go fuzz` CI job)
 
@@ -132,6 +142,14 @@ substitute for review).
   digest-bound leases revoked with drain accounting, outstanding tickets
   revoked, redemption denied once the issuing session's row is gone,
   idempotent; migration 020 indexes.
+- `internal/broker/revokeall_test.go` — `RevokePrincipalSessions` semantics
+  (ADR 0007, S19): all of the principal's sessions in the tenant deleted
+  (caller's included), leases revoked principal-scoped (pre-digest rows
+  covered) with drain accounting, outstanding tickets revoked, replayed
+  cookies resolve to dead leases, tenant boundary held, idempotent, both
+  redeem/revoke interleavings pinned on real row locks, and a `-race`
+  revoke-all × redeem × per-session-sign-out run proving no deadlock and no
+  live lease left for a destroyed session; migration 023 indexes.
 - `internal/broker/lease_session_test.go` — bound-portal-session re-check on
   every live-lease read (S17 defence-in-depth): renew/attach/claim revoke a
   lease whose session row was deleted, epoch-staled (restored dump) or

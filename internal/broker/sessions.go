@@ -114,11 +114,33 @@ func (b *Broker) RevokePortalSession(ctx context.Context, portalSessionID string
 	now := b.now()
 	n := 0
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		// Lock the covered rows in ascending primary-key order before the
+		// UPDATEs touch them (lockByKeysInOrderTx): the digest-scoped sweep
+		// and the principal-scoped one cover overlapping rows, and letting
+		// each UPDATE lock in its own index's scan order left a residual
+		// deadlock window.
+		if err := lockByKeysInOrderTx(ctx, tx, `
+			SELECT ticket_hash FROM launch_ticket
+			WHERE portal_session_digest = $1
+			  AND consumed_at IS NULL AND revoked_at IS NULL
+			ORDER BY ticket_hash`,
+			`SELECT 1 FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`,
+			d); err != nil {
+			return fmt.Errorf("broker: lock portal tickets: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE launch_ticket SET revoked_at = $2
 			WHERE portal_session_digest = $1
 			  AND consumed_at IS NULL AND revoked_at IS NULL`, d, now); err != nil {
 			return fmt.Errorf("broker: revoke portal tickets: %w", err)
+		}
+		if err := lockByKeysInOrderTx(ctx, tx, `
+			SELECT id FROM connection_lease
+			WHERE portal_session_digest = $1 AND state = 'active'
+			ORDER BY id`,
+			`SELECT 1 FROM connection_lease WHERE id = $1 FOR UPDATE`,
+			d); err != nil {
+			return fmt.Errorf("broker: lock portal leases: %w", err)
 		}
 		rows, err := tx.Query(ctx, `
 			UPDATE connection_lease SET state = 'revoked', closed_at = $2
@@ -161,6 +183,135 @@ func (b *Broker) RevokePortalSession(ctx context.Context, portalSessionID string
 		return 0, err
 	}
 	return n, nil
+}
+
+// PrincipalRevocation counts what RevokePrincipalSessions destroyed — for
+// the session.revoke_all audit record, never for control flow.
+type PrincipalRevocation struct {
+	// Sessions is the number of portal session rows deleted (the caller's
+	// included).
+	Sessions int
+	// Tickets is the number of outstanding launch tickets revoked.
+	Tickets int
+	// Leases is the number of active connection leases revoked.
+	Leases int
+}
+
+// RevokePrincipalSessions ends every portal session of a principal inside
+// one tenant — sign-out-everywhere (ADR 0007). In a single transaction it
+// revokes the principal's outstanding launch tickets, deletes all their
+// session rows for the tenant (the caller's own session included — revoke
+// everywhere means everywhere), and revokes every active connection lease
+// the principal holds in the tenant, including leases minted before
+// portal_session_digest existed: the predicate is the principal, not the
+// digest. Each gateway replica's renew loop sees the leases die within one
+// renew cycle, and a replayed workspace cookie from any revoked session
+// resolves to a dead lease on any replica.
+//
+// Lock order is identical to the other session-layer mutators — tickets,
+// then sessions, then leases. The ticket UPDATE is the serialization
+// point, exactly as in RevokePortalSession: RedeemTicket holds a
+// FOR UPDATE lock on its ticket row for the whole transaction, so this
+// UPDATE waits out any in-flight redemption of the principal's tickets.
+// Whether a redeem then commits or aborts, the lease UPDATE below runs on
+// a fresh READ-COMMITTED snapshot that sees whatever it committed; a
+// redeem that starts after this transaction finds revoked_at — or the
+// deleted session row, which RedeemTicket re-checks — and never mints.
+// Re-running revokes zero rows: the operation is idempotent.
+func (b *Broker) RevokePrincipalSessions(ctx context.Context, tenantID, issuer, subject string) (PrincipalRevocation, error) {
+	principal := issuer + "|" + subject
+	now := b.now()
+	var res PrincipalRevocation
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		// Deterministic lock order (lockByKeysInOrderTx): tickets in
+		// ticket_hash order, sessions in id order, leases in id order —
+		// the same global order the per-session revoke follows, so
+		// overlapping sweeps serialize on the first contested row instead
+		// of crossing waits into a deadlock.
+		if err := lockByKeysInOrderTx(ctx, tx, `
+			SELECT ticket_hash FROM launch_ticket
+			WHERE tenant_id = $1 AND principal_subject = $2
+			  AND consumed_at IS NULL AND revoked_at IS NULL
+			ORDER BY ticket_hash`,
+			`SELECT 1 FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`,
+			tenantID, principal); err != nil {
+			return fmt.Errorf("broker: lock principal tickets: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE launch_ticket SET revoked_at = $3
+			WHERE tenant_id = $1 AND principal_subject = $2
+			  AND consumed_at IS NULL AND revoked_at IS NULL`,
+			tenantID, principal, now)
+		if err != nil {
+			return fmt.Errorf("broker: revoke principal tickets: %w", err)
+		}
+		res.Tickets = int(tag.RowsAffected())
+		if err := lockByKeysInOrderTx(ctx, tx, `
+			SELECT id FROM sessions
+			WHERE issuer = $2 AND subject = $3 AND tenant_id = $1
+			ORDER BY id`,
+			`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`,
+			tenantID, issuer, subject); err != nil {
+			return fmt.Errorf("broker: lock principal sessions: %w", err)
+		}
+		tag, err = tx.Exec(ctx, `
+			DELETE FROM sessions
+			WHERE issuer = $2 AND subject = $3 AND tenant_id = $1`,
+			tenantID, issuer, subject)
+		if err != nil {
+			return fmt.Errorf("broker: delete principal sessions: %w", err)
+		}
+		res.Sessions = int(tag.RowsAffected())
+		if err := lockByKeysInOrderTx(ctx, tx, `
+			SELECT id FROM connection_lease
+			WHERE tenant_id = $1 AND principal_subject = $2 AND state = 'active'
+			ORDER BY id`,
+			`SELECT 1 FROM connection_lease WHERE id = $1 FOR UPDATE`,
+			tenantID, principal); err != nil {
+			return fmt.Errorf("broker: lock principal leases: %w", err)
+		}
+		rows, err := tx.Query(ctx, `
+			UPDATE connection_lease SET state = 'revoked', closed_at = $3
+			WHERE tenant_id = $1 AND principal_subject = $2 AND state = 'active'
+			RETURNING workspace_id, runtime_generation`,
+			tenantID, principal, now)
+		if err != nil {
+			return fmt.Errorf("broker: revoke principal leases: %w", err)
+		}
+		var (
+			wsUIDs []string
+			gens   []int64
+		)
+		for rows.Next() {
+			var wsUID string
+			var gen int64
+			if err := rows.Scan(&wsUID, &gen); err != nil {
+				rows.Close()
+				return fmt.Errorf("broker: revoke principal leases: %w", err)
+			}
+			wsUIDs = append(wsUIDs, wsUID)
+			gens = append(gens, gen)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("broker: revoke principal leases: %w", err)
+		}
+		rows.Close()
+		res.Leases = len(wsUIDs)
+		// Same rule as RevokeLease: a revoked lease's streams can never
+		// report their close, so the transition owns the bound
+		// generations' drain accounting in the same transaction.
+		for i := range wsUIDs {
+			if err := closeStreamsTx(ctx, tx, wsUIDs[i], uint64(gens[i]), now); err != nil {
+				return fmt.Errorf("broker: close revoked streams: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return PrincipalRevocation{}, err
+	}
+	return res, nil
 }
 
 // StreamOwnerTabLen is the fixed length of a stream-owner tab id: 128 bits
@@ -250,4 +401,46 @@ func (b *Broker) ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID st
 		return 0, err
 	}
 	return epoch, nil
+}
+
+// lockByKeysInOrderTx takes the multi-row locks a session-layer sweep is
+// about to write through, one key at a time in ascending primary-key
+// order: selectSQL lists the covered rows ordered by their PK, and
+// lockSQL point-locks each returned key FOR UPDATE. Every mutator then
+// holds its rows in the same global order — tickets by ticket_hash,
+// sessions by id, leases by id — so overlapping sweeps serialize on the
+// first contested row instead of crossing waits into a deadlock. A bare
+// UPDATE locks rows in its own index's scan order, which differs between
+// the digest- and principal-scoped predicates (the residual abort window
+// R-V5a flagged), and ORDER BY on a FOR UPDATE select does not fix it —
+// PostgreSQL locks rows as the scan produces them, sorting only the
+// output. Rows deleted between the list and the lock are skipped.
+func lockByKeysInOrderTx(ctx context.Context, tx store.Tx, selectSQL, lockSQL string, args ...any) error {
+	rows, err := tx.Query(ctx, selectSQL, args...)
+	if err != nil {
+		return err
+	}
+	var keys []any
+	for rows.Next() {
+		var k any
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		var one int
+		if err := tx.QueryRow(ctx, lockSQL, k).Scan(&one); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }

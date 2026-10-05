@@ -324,7 +324,10 @@ type Authenticator struct {
 	directory Directory
 	metrics   *observability.Metrics
 	revoker   SessionRevoker
-	auditSink observability.AuditSink
+	// principalRevoker backs POST /v1/me/sessions:revoke-all (ADR 0007);
+	// nil leaves that endpoint answering 503 — logout is unaffected.
+	principalRevoker PrincipalRevoker
+	auditSink        observability.AuditSink
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
