@@ -390,6 +390,9 @@ jobs:
     # job gates on changes to the fuzzed packages and runs each target for
     # 30 s; the weekly schedule gets 10 m per target; crashes write their
     # failing input into testdata/fuzz/<target>/, uploaded below.
+    # go-fuzz-targets.sh retries the go.dev/issue/75804 coordinator
+    # deadline race once (no crasher -> warning annotation); any real
+    # crasher fails the job.
     name: go fuzz (auth/session parsing boundaries)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -410,7 +413,7 @@ jobs:
           echo "time=30s" >> "$GITHUB_OUTPUT"
           git fetch -q origin "$BASE_REF"
           # One line on purpose (see the kasm-contract gate comment).
-          PATHS_RE='^(internal/api/|internal/gateway/|internal/sessionhost/|internal/ratelimit/|internal/broker/|\.github/workflows/ci\.yml)'
+          PATHS_RE='^(internal/api/|internal/gateway/|internal/sessionhost/|internal/ratelimit/|internal/broker/|\.github/workflows/ci\.yml|\.github/scripts/go-fuzz-targets\.sh)'
           changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
           if grep -qE "$PATHS_RE" <<<"$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -426,17 +429,7 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         env:
           FUZZTIME: ${{ steps.gate.outputs.time }}
-        run: |
-          for spec in \
-            "internal/sessionhost FuzzDomainMatch" \
-            "internal/ratelimit FuzzClientKey" \
-            "internal/gateway FuzzHostClassify" \
-            "internal/gateway FuzzLaunchRedeem" \
-            "internal/api FuzzCallbackParsing"; do
-            read -r pkg target <<< "$spec"
-            echo "== $target (-fuzztime=$FUZZTIME)"
-            go test -count=1 -run='^$' -fuzz="^$target\$" -fuzztime="$FUZZTIME" "./$pkg"
-          done
+        run: .github/scripts/go-fuzz-targets.sh
       - name: upload fuzz crashers
         if: failure() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
