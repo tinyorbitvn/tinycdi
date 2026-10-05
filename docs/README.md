@@ -68,6 +68,9 @@
 - [adr/0006-rate-limit-state.md](adr/0006-rate-limit-state.md) —
   rate-limiter state placement: per-replica vs Postgres-backed options
   (proposed — decision pending for v0.4)
+- [adr/0007-sign-out-everywhere.md](adr/0007-sign-out-everywhere.md) —
+  principal-scoped revocation of all portal sessions, leases and tickets
+  (proposed)
 
 ## Elsewhere in the repo
 
