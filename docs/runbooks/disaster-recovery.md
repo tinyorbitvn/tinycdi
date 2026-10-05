@@ -16,7 +16,7 @@ fresh login (expected, not an outage).
 |---|---|---|
 | 1 | Component pod/node loss (api, operator, gateway, portal, one worker) | Kubernetes reschedules; streams drop and users reconnect within the lease window or re-ticket. No restore needed. |
 | 2 | Platform namespace or release loss | `helm install` again + re-create the values-referenced Secrets from escrow; CRs/PVCs in managed namespaces survive (chart keeps them — install.md §Uninstall). |
-| 3 | Postgres loss | Restore DB dump; rebuild retained inventory from PVC metadata; reconcile quota (backup-restore.md §4–6). |
+| 3 | Postgres loss | Restore DB dump; rebuild retained inventory from PVC metadata; reconcile quota (backup-restore.md §4–6). **If the cluster kept running** (CRs and runtime pods still live), follow "Postgres-only restore onto a live cluster" below instead — the fencing assumptions the rebuild procedure relies on do not hold there. |
 | 4 | Whole cluster loss | Full rebuild below — CRDs + chart + Secrets + CRs + volumes + DB. |
 | 5 | Storage backend loss | Only the off-cluster volume backups below save the data. |
 
@@ -172,6 +172,157 @@ Semantics, for operators planning DB maintenance or running a failover:
 - No operator action is needed on recovery: renewals resume on the next
   tick and the lease/outbox machinery settles itself.
 
+## Postgres-only restore onto a live cluster
+
+The procedures so far assume a rebuild: fresh release, fresh gateway,
+dead runtimes. A different failure is **Postgres alone rolling back** —
+the DB is lost, corrupted or reverted while the cluster keeps running,
+and the only dump is *older* than the live world. Restoring it is not a
+rebuild: the fencing that makes restored tickets and leases harmless on
+a fresh release (dead `runtimeUID`s, a foreign gateway audience) does
+**not** hold — the workspaces, runtimes and gateway the dump remembers
+are still alive. This section is the restore-semantics contract for that
+case and was verified in the kind drill below.
+
+### What an older dump resurrects or regresses
+
+| Restored state | What the dump brings back | Verdict |
+|---|---|---|
+| `sessions` | Rows exactly as of the dump — **including sessions deleted by sign-out after the dump** (S17). The old portal cookie is valid again until the idle/absolute cap. | **Resurrects.** The row is digest-keyed and cryptographically indistinguishable from a live one; nothing marks it "deleted after dump". Fix: rotate `platform_meta.session_epoch` after loading the dump — every restored row fails its next read. Verified in the drill: a signed-out cookie returned `200` after a naive restore, `401` after rotation. |
+| `connection_lease` | `'active'` leases as of the dump — **including leases revoked after it** — with their `session_digest` bindings. | **Resurrects inside the lease TTL.** `LeaseBySession` resolves cookie digest → `'active'` lease; renew and re-attach never consult the portal session, and the bound `(runtimeUID, runtimeGeneration, fencingVersion)` still matches — the runtime is alive. The drill restored a dump ~15 s old and the signed-out gateway cookie served `200` until `expires_at` lapsed. A restore landing inside the TTL (or a stream renewing inside it) extends this indefinitely — the lease self-heals only by expiry. Fix: revoke every restored lease unconditionally, below. |
+| `launch_ticket` | Unconsumed tickets re-arm; tickets revoked after the dump revive. | Fenced, mostly: redemption re-checks the portal-session digest (S17 second barrier) and fails closed under a rotated epoch, and tickets die at `expires_at` (60 s). Tickets minted without a portal-session digest have no such barrier, and a fast restore lands inside either TTL. Fix: deny every unconsumed ticket unconditionally, below. |
+| Fencing counters (`fencing_version`, `stream_epoch`) | Regress to dump values. | Safe. `fencing_version` is `MAX+1` per workspace inside the restored table — self-consistent; renew/claim re-validate against the live informer binding, so a recreated runtime stays fenced. |
+| `workspaces` rows vs live CRs | Dump-time `desired_state`, `runtime_generation`, `intent_revision`, `phase`; CRs created after the dump have no row at all. | **Diverges — the real cost.** See "Workspace reconciliation" below. |
+| `outbox_intent` | `dispatched_at` regresses; intents applied after the dump are undispatched again. | Safe by fencing: re-delivery hits CRs whose `applied-intent` already names the revision, and the operator drops `intentRevision <= applied.revision`. Pending rows replay by design. |
+| `quota_reservation` | `held` rows for workloads deleted after the dump (phantom usage); missing rows for workloads created after it (invisible usage). | Phantoms release on proven runtime absence in one recovery pass. Invisible usage under-counts until reconciled — keep admission closed until the workspace reconcile finishes (the freeze covers this). |
+| `retained_data` | Rows for PVCs deleted after the dump; missing rows for retained PVCs created after it. | `RetainedSync` imports the missing and counts the stale as `MissingVolumes` — it never deletes; purge stale rows per runbook `retained-data.md`. |
+| `rate_limit_window` | Minute-bucketed counters at dump state. | Harmless: a rollback under-counts at most the in-flight minute; expired rows are swept on the 15-minute retention. `TRUNCATE rate_limit_window` is acceptable but buys nothing the bound does not already give. |
+| `idempotency`, `workspace_activity`, `workspace_revocation`, `tenant_quota` | Dump-time copies. | A retried create collides on `workspaces.request_id` (conflict, not double-create). Activity counters skew idle/disconnect timers one cycle. A post-dump operator-stop revocation row is lost, but the stopped phase still blocks tickets. Quota limit edits after the dump revert — re-apply them. |
+
+### Procedure
+
+Do this on a change window; it is a platform freeze, not a rebuild.
+Steps 1–3 are the parts that differ from backup-restore.md.
+
+1. **Freeze the platform.** Scale `backend` and `operator` to 0 in the
+   release namespace and wait for the pods to exit. `backend` is the app
+   API, the session gateway and the outbox dispatcher in one Deployment —
+   scaling it stops logins, lease renewals, ticket redemption and intent
+   dispatch; every open stream dies at its revoke deadline (~30 s) and
+   every lease at its TTL. The operator may stay up if you prefer, but
+   scaling it too means nothing mutates CRs mid-restore (it comes back
+   at step 4 — orphan deletion needs its finalizer, which calls the
+   backend control surface).
+2. **Load the dump** exactly as backup-restore.md step 3: drop and
+   recreate schema `public`, replay the `pg_dump --no-owner` output.
+   `store.Migrate` fills any schema gap when the api comes back.
+3. **Kill all restored access — unconditionally, before scaling back.**
+
+   ```sql
+   -- session epoch rotation (F5): every restored session row is rejected
+   -- on its next read, revoked or not. Defensive DDL keeps this working
+   -- against dumps taken before migration 009.
+   CREATE TABLE IF NOT EXISTS platform_meta (key text PRIMARY KEY, value text NOT NULL);
+   ALTER TABLE sessions ADD COLUMN IF NOT EXISTS epoch text NOT NULL DEFAULT '';
+   INSERT INTO platform_meta (key, value)
+   VALUES ('session_epoch', gen_random_uuid()::text)
+   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+   -- resurrected leases carry live session_digest bindings: the old
+   -- gateway cookie rehydrates to them with no portal-session check.
+   UPDATE connection_lease SET state = 'revoked', closed_at = now()
+     WHERE state = 'active';
+
+   -- re-armed or un-revoked tickets.
+   UPDATE launch_ticket SET revoked_at = now()
+     WHERE consumed_at IS NULL AND revoked_at IS NULL;
+   ```
+
+   This block is what turns "dead within one TTL, if you're lucky" into
+   "dead deterministically". Skipping it is the unsafe restore the drill
+   below demonstrates.
+4. **Scale `operator` and `backend` back up.** With the kill-SQL landed,
+   resurrected access is already dead — the reconcile below needs the
+   platform running (orphan-CR deletion runs the operator's finalizer,
+   which itself calls the backend control surface).
+5. **Reconcile `workspaces` against the live CRs** — in both directions:
+   - **CR exists, row does not** (created after the dump): an orphan —
+     running, unmetered, invisible to the API. Default: delete it,
+     `kubectl delete workspace <cr-name> -n <tenant-ns>`; the operator
+     finalizer runs teardown and a `Retain` disk survives via the
+     retained path. Adopt only if you must keep the workload: insert the
+     `workspaces` row (fresh `request_id`), a `held` `quota_reservation`
+     matching the running vector, and the CR's intent revision.
+   - **Row exists, CR does not** (deleted after the dump): a ghost —
+     listed by the API, holding quota it cannot spend. Re-delete through
+     the API (`DELETE /v1/workspaces/{id}` — the applier tolerates a
+     missing CR), or mark the row `state='deleted'` in SQL.
+   - **Both exist, intents diverged** (any start/stop/delete after the
+     dump): the CR's `spec.intentRevision` and applied-intent revision
+     are ahead of the restored row's `intent_revision`, and the operator
+     adopts only `intentRevision > applied.revision`. Intents the API
+     writes afterwards land at or under the applied revision and are
+     **silently ignored** — the drill hit this: the restored row claimed
+     `Running` over a `Stopped` CR, so `start` was refused by the API's
+     own desired-state check. For every diverged workspace, align the
+     row with the live CR:
+
+     ```sql
+     UPDATE workspaces
+        SET desired_state      = '<CR spec.desiredState>',
+            runtime_generation = <CR spec.runtimeGeneration>,
+            intent_revision    = <CR's applied-intent revision>
+      WHERE id = '<ws_...>';
+     ```
+
+     The dump-side desired state is *not* forced onto the cluster — the
+     live CR is the truth for workload state; the row is aligned to
+     describe it. A stopped-after-dump workspace stays stopped; users
+     re-drive from there (each new intent is adoptable once the row no
+     longer trails the CR).
+6. **Rebuild retained inventory + reconcile quota** as in the rebuild
+   path (steps 7–8): `RetainedSync`/`ImportRetained` for PVC-side truth,
+   one recovery pass for held reservations, `tinycdi_quota_drift` at 0
+   before declaring the restore done.
+7. **Tell users:** every session died — log in again, then reconnect;
+   work on the platform between dump and freeze is gone or reverted (see
+   below).
+
+### What users experience
+
+- **Forced re-login, always.** Restored portal cookies fail
+  `UNAUTHENTICATED` the moment the epoch rotates — that is the fix
+  working, not breakage.
+- **Every stream is dead.** There is no live-restore path; reconnect
+  lands on the normal ticket/launch flow.
+- **Post-dump changes are lost on the DB side and kept on the cluster
+  side.** Sessions, sign-outs, quota edits and retained inventory revert
+  to the dump; CR-side facts (a workspace stopped after the dump, a new
+  workspace's pod) persist — the reconcile above aligns the record with
+  them rather than rewinding workloads.
+- **One benign wedge if step 5 is skipped:** intents on a diverged
+  workspace are silently dropped until its `intent_revision` passes the
+  CR's applied revision — a user-visible "button does nothing", not a
+  security hole.
+
+### Invariant checklist — live-cluster restore
+
+Run after step 6, in addition to the rebuild list in backup-restore.md:
+
+- [ ] `sessions` joined to `platform_meta.session_epoch` shows **zero**
+      rows at the current epoch (`SELECT count(*) FROM sessions WHERE
+      epoch = (SELECT value FROM platform_meta WHERE key='session_epoch')`).
+- [ ] Zero `connection_lease` rows `state='active'` and zero
+      `launch_ticket` rows `consumed_at IS NULL AND revoked_at IS NULL`
+      predating the restore.
+- [ ] `kubectl get workspaces -A` and `SELECT id FROM workspaces WHERE
+      state='active'` agree on the workspace set — no orphans, no ghosts.
+- [ ] Every `workspaces.intent_revision` >= the matching CR's
+      applied-intent revision.
+- [ ] `quota_reservation` `held` rows ↔ running runtimes + retained disks
+      exactly once; `tinycdi_quota_drift` = 0.
+- [ ] Fresh login → ticket → redeem → stream works on a live workspace.
+
 ## Restore drill — executed
 
 A release drill executed tier 3 + the volume path on a
@@ -215,3 +366,33 @@ backup-restore.md:
   BEFORE `helm uninstall` removes the operator — or strip the
   `runtime-cleanup` finalizer during a wholesale namespace teardown
   (as the drill did).
+
+A second drill (v0.5, kind quickstart — `hack/quickstart`) exercised the
+**live-cluster** path: `pg_dump` while a portal session held a running
+workspace with an active lease, then sign-out (S17 revoke) + a workspace
+stop + a new workspace, then the dump loaded back over the running
+release.
+
+Observed, and now covered by "Postgres-only restore onto a live
+cluster":
+
+- **Naive restore resurrects a signed-out session.** With the dump
+  loaded and no epoch rotation, the signed-out portal cookie answered
+  `200` on `/v1/me` (idle window intact). After the epoch rotation in
+  the procedure: `401`.
+- **Naive restore resurrects a revoked lease inside its TTL.** The
+  restored `connection_lease` row came back `state='active'` with its
+  `session_digest`; the old gateway cookie served `200` on the session
+  host until `expires_at` lapsed (~15 s of residual TTL observed). The
+  unconditional `state='revoked'` update removes the window entirely.
+- **Intent fence wedges on divergence.** The workspace stopped after
+  the dump had CR `applied-intent` revision 2 vs restored row revision
+  1: `POST /start` was refused by the API's own desired-state check
+  ("Running" over a stopped CR) and, once bumped past, the next intent
+  (revision 3) adopted and booted normally. The reconcile step exists
+  precisely for this.
+- **Orphan CR reconcile works.** The post-dump workspace had no
+  `workspaces` row; deleting its CR ran the operator finalizer cleanly.
+- Post-procedure: fresh login, ticket issue, redemption (303) and
+  workspace list all healthy; held quota matched the running runtime;
+  no resurrected sessions, leases or tickets.
