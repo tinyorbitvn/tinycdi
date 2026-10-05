@@ -96,17 +96,17 @@ func (w *countWindow) RateLimitWindowHit(_ context.Context, route, _ string) (in
 	return w.n[route], time.Minute, nil
 }
 
-// TestRateLimitDefaults_V040 (RL-DEFAULT): the v0.4.0 defaults double
-// the flag budgets — equal to v0.3.0's effective two-replica aggregate
-// (each pod's undivided bucket: login 30/min + burst 10, launch 60/min +
-// burst 20), before v0.3.1's RL-1 made the flags aggregate bounds.
-// Under the exact shared window (ADR 0006) there is no per-replica
-// slack: -login-rate 60/min + loginRateBurst 20 map to an 80/minute
-// window, -launch-rate 120/min + launchRateBurst 40 to 160/minute, and
-// the per-IP callback ceiling stays derived at 10x the login budget. At
-// the chart's backend.replicas=2 each pod's local ceiling equals the
-// share one v0.3.x pod enforced under RL-1's division.
-func TestRateLimitDefaults_V040(t *testing.T) {
+// TestRateLimitDefaults_V040Budgets (RL-DEFAULT): the v0.4.0 defaults
+// double the flag budgets — equal to v0.3.0's effective two-replica
+// aggregate (each pod's undivided bucket: login 30/min + burst 10,
+// launch 60/min + burst 20), before v0.3.1's RL-1 made the flags
+// aggregate bounds. Under the exact shared window (ADR 0006) there is
+// no per-replica slack: -login-rate 60/min + loginRateBurst 20 map to
+// an 80/minute window, -launch-rate 120/min + launchRateBurst 40 to
+// 160/minute, and the per-IP callback ceiling stays derived at 10x the
+// login budget. At the chart's backend.replicas=2 each pod's local
+// ceiling equals the bucket one v0.3.0 pod enforced undivided.
+func TestRateLimitDefaults_V040Budgets(t *testing.T) {
 	cfg, err := ParseFlags(mergedArgs(), noEnv)
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
@@ -155,8 +155,9 @@ func TestRateLimitDefaults_V040(t *testing.T) {
 		t.Fatal("hit 161 inside the launch window allowed — want bound 160 (120+40)")
 	}
 
-	// Two replicas: the divided local ceilings equal one v0.3.x pod's
-	// RL-1 share — login 30/min + burst 10, launch 60/min + burst 20.
+	// Two replicas: the divided local ceilings equal the bucket one
+	// v0.3.0 pod enforced undivided — login 30/min + burst 10, launch
+	// 60/min + burst 20.
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	local, localCeiling := loginLimiters(Config{LoginRate: cfg.LoginRate, RateLimitReplicas: 2}, clock)
