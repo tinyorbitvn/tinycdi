@@ -5,12 +5,15 @@
 
 package integration
 
-// ADR 0006 option B: the login/launch rate limits are backed by a shared
-// Postgres fixed-minute window (migration 021), with the divided local
-// bucket kept as the per-replica ceiling and the fail-open fallback.
-// These tests are the B6 gate: two backend replicas sharing one Postgres
-// must admit one hammered key at most R+B times inside a window, and a
-// Postgres outage must degrade to the divided local limiter and back.
+// ADR 0006 option B (+ RL-CEILING amendment): the login/launch rate
+// limits are backed by a shared Postgres fixed-minute window (migration
+// 021); while the store is healthy each pod's local ceiling is the
+// undivided budget — a store-protection prefilter — and only in degraded
+// mode does the divided bucket decide (the fail-open floor). These tests
+// are the B6 gate: two backend replicas sharing one Postgres must admit
+// one hammered key at most R+B times inside a window however uneven the
+// spread, and a Postgres outage must degrade to the divided local
+// limiter and back.
 
 import (
 	"context"
@@ -207,8 +210,8 @@ func TestRateLimitWindow_HitAndSweep(t *testing.T) {
 // TestRateLimit_SharedWindowAcrossReplicas (B6 gate): two backend
 // replicas share one Postgres window — one key driven at 3x the bound
 // across both pods is admitted exactly R+B times inside a window. With
-// -rate-limit-replicas=1 the per-replica local ceiling equals the
-// aggregate bound, so the shared window is what stops the second
+// -rate-limit-replicas=1 the healthy local ceiling equals the aggregate
+// bound either way, so the shared window is what stops the second
 // replica's traffic: without it the two pods would admit 2x(R+B).
 func TestRateLimit_SharedWindowAcrossReplicas(t *testing.T) {
 	f := newRestartFixture(t)
@@ -238,6 +241,68 @@ func TestRateLimit_SharedWindowAcrossReplicas(t *testing.T) {
 		allowed, denied, windowCount(t, f.db, "login", ip))
 }
 
+// TestRateLimit_UnevenSplitUsesWindowBound (RL-CEILING regression): the
+// E2E-V050-RAMP run-3 finding — a 20-lane sign-in ramp split 11/9 across
+// two pods drew a local 429 on the busier pod at an aggregate of 19/80
+// because the healthy local ceiling was the DIVIDED share. Now the
+// healthy ceiling is the undivided budget (a store-protection prefilter)
+// and only the window binds: -login-rate 5 + burst 20 → bound 25, two
+// replicas (floor 2/min + burst 10 each). A 15/5 split admits all 20 —
+// the old divided ceiling would have refused pod a's 11th hit — a 20/0
+// split is likewise served by one pod alone, and the window itself
+// refuses the hit past 25.
+func TestRateLimit_UnevenSplitUsesWindowBound(t *testing.T) {
+	f := newRestartFixture(t)
+	extra := []string{"-login-rate", "5", "-rate-limit-replicas", "2", "-trusted-proxies", "127.0.0.0/8"}
+	a := f.startReplicaWith(t, "a", extra...)
+	defer a.cleanup(t)
+	b := f.startReplicaWith(t, "b", extra...)
+	defer b.cleanup(t)
+	waitReplicaServing(t, a)
+	waitReplicaServing(t, b)
+
+	waitForFreshRateWindow(t, f.db, 20*time.Second)
+	const ip = "203.0.113.60"
+	// 15 hits on pod a + 5 on pod b: every hit must pass — under the
+	// divided ceiling pod a's burst would have been 10.
+	for i := 0; i < 15; i++ {
+		if code := loginHit(t, a, ip); code != http.StatusFound {
+			t.Fatalf("pod-a hit %d of the 15/5 split = %d, want 302 — a 429 here is the divided-ceiling regression", i+1, code)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if code := loginHit(t, b, ip); code != http.StatusFound {
+			t.Fatalf("pod-b hit %d of the 15/5 split = %d, want 302", i+1, code)
+		}
+	}
+	// The next 5 hits on pod b reach the bound (25); the 26th is refused
+	// by the window's own count — not by a pod's share (pod b's ceiling
+	// still has burst left).
+	for i := 0; i < 5; i++ {
+		if code := loginHit(t, b, ip); code != http.StatusFound {
+			t.Fatalf("hit %d of 25 = %d, want 302 — the bound is exactly rate+burst", 21+i, code)
+		}
+	}
+	if code := loginHit(t, b, ip); code != http.StatusTooManyRequests {
+		t.Fatalf("26th aggregate hit = %d, want 429 — the window bound did not hold", code)
+	}
+	if got := windowCount(t, f.db, "login", ip); got != 26 {
+		t.Fatalf("window count = %d, want 26 — every admitted/refused hit reached the store", got)
+	}
+
+	// 20/0 on a fresh key in the same window: one pod alone serves the
+	// whole burst — the ceiling is undivided.
+	const ipSolo = "203.0.113.61"
+	for i := 0; i < 20; i++ {
+		if code := loginHit(t, a, ipSolo); code != http.StatusFound {
+			t.Fatalf("single-pod hit %d of the 20/0 split = %d, want 302", i+1, code)
+		}
+	}
+	if got := windowCount(t, f.db, "login", ipSolo); got != 20 {
+		t.Fatalf("window count = %d, want 20", got)
+	}
+}
+
 // TestRateLimit_PGOutageFailsOpenAndRecovers (B6 gate, G1): with Postgres
 // down the limiters fail open to the divided local buckets — bounded by
 // each pod's 1/N share, never lifted — and the shared window resumes on
@@ -245,10 +310,11 @@ func TestRateLimit_SharedWindowAcrossReplicas(t *testing.T) {
 // counted on tinycdi_rate_limit_store_errors_total.
 func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	f, pg := newOutageFixture(t)
-	// login-rate 2 + burst 20 → shared window bound 22; replicas 2 → the
-	// per-pod local ceiling is 1/min + burst 10. Only replica a gets a
-	// metrics listener — two in-process backends share the default
-	// Prometheus registry, so a second set would double-register.
+	// login-rate 2 + burst 20 → shared window bound 22 and undivided
+	// healthy ceilings of 2/min + burst 20; replicas 2 → the
+	// degraded-mode floor is 1/min + burst 10 per pod. Only replica a
+	// gets a metrics listener — two in-process backends share the
+	// default Prometheus registry, so a second set would double-register.
 	flags := func(extra ...string) []string {
 		return append([]string{"-login-rate", "2", "-rate-limit-replicas", "2",
 			"-trusted-proxies", "127.0.0.0/8"}, extra...)
@@ -261,12 +327,13 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	waitReplicaServing(t, b)
 
 	// Baseline: one key hammered across both pods is bounded by the
-	// shared window (22) — the spread lands most refusals on the local
-	// ceilings, so admit ~20-22, never more than 22.
+	// shared window (22) — deterministic now that the healthy ceiling is
+	// the undivided budget (burst 20/pod covers the 15-hit half), so all
+	// 30 requests reach the store and it refuses exactly hits 23-30.
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
-	allowed, _ := loginHammer(t, []*replica{a, b}, "203.0.113.10", 30)
-	if allowed < 15 || allowed > 22 {
-		t.Fatalf("healthy shared window allowed %d, want 15..22 (window bound 22, per-pod ceiling ~10)", allowed)
+	allowed, denied := loginHammer(t, []*replica{a, b}, "203.0.113.10", 30)
+	if allowed != 22 || denied != 8 {
+		t.Fatalf("healthy shared window allowed %d / denied %d, want 22/8 (window bound 22)", allowed, denied)
 	}
 	if base := windowCount(t, f.db, "login", "203.0.113.10"); base < int64(allowed) {
 		t.Fatalf("window count %d < allowed %d — the store did not count admitted hits", base, allowed)
@@ -278,7 +345,7 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	// fail-closed and not the shared window's 22. Replica b sees no
 	// traffic during the outage, so only a's log carries the entry line.
 	pg.stop(t)
-	allowed, denied := loginHammer(t, []*replica{a}, "203.0.113.20", 20)
+	allowed, denied = loginHammer(t, []*replica{a}, "203.0.113.20", 20)
 	if allowed < 1 {
 		t.Fatalf("outage allowed 0 — the limiter must fail OPEN to the local bucket")
 	}
@@ -301,8 +368,14 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	time.Sleep(11 * time.Second) // store circuit cool-down (10 s) + slack
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
 	allowed, _ = loginHammer(t, []*replica{a, b}, "203.0.113.30", 30)
-	if allowed < 15 || allowed > 22 {
-		t.Fatalf("post-recovery allowed %d, want 15..22 (shared window bound)", allowed)
+	// Normally exactly 22 (the window bound). The slack above covers a
+	// fail-open leg: a first post-reconnect check that meets a dead
+	// pooled connection admits via the ceiling and opens the circuit,
+	// and requests inside that cool-down are bounded by the divided
+	// floor (~11/pod) instead of the window — so a fully-unlucky hammer
+	// can legitimately admit up to ~22 floor + a couple of fail-opens.
+	if allowed < 15 || allowed > 26 {
+		t.Fatalf("post-recovery allowed %d, want 15..26 (window bound 22 + floor-bounded fail-opens)", allowed)
 	}
 	// Hits land in Postgres again. The slack covers the first
 	// post-reconnect requests, which can legitimately fail open on a dead

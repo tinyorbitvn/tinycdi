@@ -33,10 +33,11 @@ func TestWiredLimiters_SharedWindow(t *testing.T) {
 }
 
 // TestWiredLimiters_ReplicaDivision (RL-1) guards the PerReplica call in
-// the limiter builders: it asserts the *effective* rate and burst of the
-// limiters wire hands to the listeners, so dropping the division (which
-// would leave the undivided budget) fails the test. The clock never
-// advances, so Allow counts show the burst and Retry-After the rate.
+// the DIVIDED limiter builders — after the RL-CEILING amendment these
+// are the degraded-mode floors under the shared window (and the whole
+// split-mode launch limiter), so dropping the division still fails the
+// test. The clock never advances, so Allow counts show the burst and
+// Retry-After the rate.
 func TestWiredLimiters_ReplicaDivision(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
@@ -80,6 +81,38 @@ func TestWiredLimiters_ReplicaDivision(t *testing.T) {
 	}
 	if got := ratelimit.RetryAfterSeconds(retry); got != 2 {
 		t.Fatalf("launch Retry-After = %ds, want 2 (30/min per replica)", got)
+	}
+}
+
+// TestWiredLimiters_UndividedHealthyCeiling (RL-CEILING): while the
+// store is healthy the local ceiling a SharedLimiter consults is the
+// UNDIVIDED budget — one key driven past the divided per-pod share but
+// under the window bound is admitted in full. Guards the amendment at
+// the wiring layer: the divided bucket must only ever be the
+// degraded-mode floor.
+func TestWiredLimiters_UndividedHealthyCeiling(t *testing.T) {
+	// LoginRate 30, burst 20 → window bound 50; replicas 2 → floor
+	// 15/min + burst 10. 15 hits on one key exceed the divided share
+	// (10) but stay under the bound — all must pass.
+	cfg := Config{LoginRate: 30, RateLimitReplicas: 2}
+	shared, ceiling := sharedLoginLimiters(cfg, &countWindow{}, nil, nil, nil)
+	for i := 0; i < 15; i++ {
+		if ok, _ := shared.Allow("k"); !ok {
+			t.Fatalf("login hit %d refused — the healthy ceiling must be undivided (burst 20)", i+1)
+		}
+	}
+	for i := 0; i < 150; i++ {
+		if ok, _ := ceiling.Allow("k"); !ok {
+			t.Fatalf("callback-ceiling hit %d refused — want the undivided 10x ceiling (burst 200)", i+1)
+		}
+	}
+	// LaunchRate 60, burst 40 → bound 100; floor 30/min + burst 20.
+	// 30 hits exceed the divided share, stay under the bound.
+	l := sharedLaunchLimiter(Config{LaunchRate: 60, RateLimitReplicas: 2}, &countWindow{}, nil, nil, nil)
+	for i := 0; i < 30; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("launch hit %d refused — the healthy ceiling must be undivided (burst 40)", i+1)
+		}
 	}
 }
 
@@ -127,7 +160,7 @@ func TestRateLimitDefaults_V040Budgets(t *testing.T) {
 	// Shared window bounds: rate+burst on each bucket — 80 login, 160
 	// launch — and 10x login on the callback ceiling (800). A fresh key
 	// per request clears the local ceiling (each new key starts with a
-	// full burst), so the window count alone decides.
+	// full undivided burst), so the window count alone decides.
 	shared, ceiling := sharedLoginLimiters(cfg, &countWindow{}, nil, nil, nil)
 	for i := 1; i <= 80; i++ {
 		if ok, _ := shared.Allow(fmt.Sprintf("k%d", i)); !ok {
@@ -155,9 +188,9 @@ func TestRateLimitDefaults_V040Budgets(t *testing.T) {
 		t.Fatal("hit 161 inside the launch window allowed — want bound 160 (120+40)")
 	}
 
-	// Two replicas: the divided local ceilings equal the bucket one
-	// v0.3.0 pod enforced undivided — login 30/min + burst 10, launch
-	// 60/min + burst 20.
+	// Two replicas: the divided degraded-mode floors equal the bucket
+	// one v0.3.0 pod enforced undivided — login 30/min + burst 10,
+	// launch 60/min + burst 20.
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	local, localCeiling := loginLimiters(Config{LoginRate: cfg.LoginRate, RateLimitReplicas: 2}, clock)

@@ -165,12 +165,13 @@ type Config struct {
 	GatewayAudience string
 	LoginKeyFiles   stringList // first file seals; all open (rotation)
 	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/S18)
-	// RateLimitReplicas divides each rate budget into the per-replica
-	// local ceiling (RL-1, ADR 0006): while the Postgres window enforces
-	// -login-rate/-launch-rate as the exact aggregate bound, every pod
-	// additionally enforces its 1/N share — the cap during a store
-	// outage (fail-open) and the most one pod may serve while the store
-	// is healthy. >= 1; the chart sets it to backend.replicas.
+	// RateLimitReplicas divides each rate budget into the degraded-mode
+	// local floor (RL-1, ADR 0006 + RL-CEILING amendment): while the
+	// Postgres window is reachable it enforces -login-rate/-launch-rate
+	// as the exact aggregate bound and every pod's local ceiling is the
+	// undivided budget (a store-protection prefilter); during a store
+	// outage each pod falls back to its 1/N share (fail-open). >= 1; the
+	// chart sets it to backend.replicas.
 	RateLimitReplicas int
 
 	// Split/test mode: session listener over a remote mTLS broker.
@@ -307,7 +308,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TrustedProxies, "trusted-proxies", envOr(getenv, "TCDI_TRUSTED_PROXIES", ""),
 		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For claims are trusted; empty trusts only the socket peer (env TCDI_TRUSTED_PROXIES)")
 	fs.IntVar(&c.RateLimitReplicas, "rate-limit-replicas", envInt(getenv, "TCDI_RATE_LIMIT_REPLICAS", 1),
-		"divisor for the per-replica rate-limit ceiling: the Postgres window enforces -login-rate/-launch-rate as exact aggregate bounds, and each pod additionally keeps a 1/N local bucket as the fail-open fallback during a store outage and as the cap no single pod may exceed; set to the deployment replica count (env TCDI_RATE_LIMIT_REPLICAS)")
+		"divisor for the degraded-mode rate-limit floor: the Postgres window enforces -login-rate/-launch-rate as exact aggregate bounds and while it is reachable each pod's local ceiling is the undivided budget (a store-protection prefilter); during a store outage each pod falls back to its 1/N share (fail-open floor), and split-mode launch is that share outright; set to the deployment replica count (env TCDI_RATE_LIMIT_REPLICAS)")
 
 	// Split/test mode.
 	fs.StringVar(&c.BrokerURL, "broker-url", envOr(getenv, "TCDI_BROKER_URL", ""), "remote broker base URL (https); split/test mode only — requires -listen= and -internal-listen=")
