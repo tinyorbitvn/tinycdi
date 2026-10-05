@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -116,6 +118,14 @@ const (
 	// from ReasonRetainedClaimMissing, which is the refusal when the claim
 	// is not named at all.
 	ReasonWaitingForDisk = "WaitingForDisk"
+
+	// ReasonIntentBehind — the platform's intent stream trails the
+	// workspace's applied intent fence: the applier dropped an intent whose
+	// revision was behind the CR's (IntentBehindMark annotation), or the
+	// spec itself predates the applied record. The stale intent is still
+	// never applied; the condition reports the drift so an operator can
+	// realign the stream (docs/runbooks/disaster-recovery.md).
+	ReasonIntentBehind = "IntentBehind"
 )
 
 const (
@@ -183,6 +193,10 @@ type WorkspaceReconciler struct {
 	Leases    LeaseRevoker
 	Drainer   StreamDrainer
 	Retention RetentionHandler
+
+	// Recorder emits Kubernetes events (the IntentBehind transition). Nil
+	// skips emission — the condition still records the state.
+	Recorder record.EventRecorder
 }
 
 // newFinalizer assembles the step-wise teardown executor for one run.
@@ -220,6 +234,7 @@ func (r *WorkspaceReconciler) newFinalizer() *Finalizer {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WorkspaceReconciler) now() time.Time {
 	if r.Now != nil {
@@ -334,6 +349,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, err
 		}
 		setAnnotation(ws, AnnotationAppliedIntent, string(raw))
+		// A newer spec intent can only have been written by a stream that
+		// caught up to the fence: any drift marker is stale now.
+		delete(ws.Annotations, provisioning.AnnotationIntentBehind)
 		if err := r.Update(ctx, ws); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -638,6 +656,13 @@ func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv
 // persists it. statusErr, when non-nil, marks Degraded with its reason.
 func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error) error {
 	gen := ws.Generation
+	// Intent-fence drift: reconcile the params annotation BEFORE any status
+	// field is staged — persisting it needs a main-resource update whose
+	// response carries the stored (unstaged) status.
+	drift, derr := r.evalIntentDrift(ctx, ws, applied)
+	if derr != nil {
+		return derr
+	}
 	st := &ws.Status
 	// A workspace that already latched Failed on this intent keeps its step
 	// conditions as they were: they record which step stalled, and the
@@ -737,6 +762,22 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		setCond(workspacesv1alpha1.ConditionDegraded, metav1.ConditionFalse, ReasonNominal, "")
 	}
 
+	// IntentBehind reports intent-fence drift (the applier's marker or a
+	// spec trailing the applied record); it goes False once the stream is
+	// aligned again. A workspace that never drifted gets no row.
+	switch {
+	case drift.drifted:
+		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind,
+			metav1.ConditionTrue, ReasonIntentBehind, intentBehindMessage,
+			map[string]string{
+				"crRevision":  drift.crRevision,
+				"rowRevision": drift.rowRevision,
+			}, now.Time)
+	case drift.had:
+		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind,
+			metav1.ConditionFalse, ReasonNominal, intentAlignedMessage, nil, now.Time)
+	}
+
 	// timestamps. startedAt is the running incarnation's start: cleared when
 	// an incarnation ended (now, or at the previous write) and set again when
 	// the next one becomes Ready.
@@ -753,7 +794,88 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		st.StoppedAt = nil
 	}
 
-	return r.Status().Update(ctx, ws)
+	if err := r.Status().Update(ctx, ws); err != nil {
+		return err
+	}
+	// The drift event is edge-triggered: it fires once on the transition
+	// into drift, after the condition that proves it persisted.
+	if drift.edge && r.Recorder != nil {
+		r.Recorder.Eventf(ws, corev1.EventTypeWarning, ReasonIntentBehind,
+			"intent stream revision %s is behind the applied revision %s; "+
+				"new intents are dropped until the stream is realigned "+
+				"(see the disaster-recovery runbook)",
+			drift.rowRevision, drift.crRevision)
+	}
+	return nil
+}
+
+// intentBehindMessage is the fixed condition text for ReasonIntentBehind;
+// tenant-visible, so it names no internals beyond the fence itself.
+const intentBehindMessage = "the platform's intent stream is behind this workspace; new intents are held until it is realigned"
+
+// intentAlignedMessage is the fixed text once the stream has caught up.
+const intentAlignedMessage = "the intent stream is aligned with the workspace again"
+
+// intentFenceDrift reports whether the intent stream trails the workspace's
+// applied fence: either the applier stamped the intent-behind marker on a
+// stale drop (the freshest signal — it carries the dropped intent's row
+// revision), or spec.intentRevision itself predates the applied record.
+// Returns the CR-side and stream-side revisions for the condition params.
+func intentFenceDrift(ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (crRev, rowRev int64, drifted bool) {
+	if raw := ws.Annotations[provisioning.AnnotationIntentBehind]; raw != "" {
+		var m provisioning.IntentBehindMark
+		if err := json.Unmarshal([]byte(raw), &m); err == nil {
+			return m.CRRevision, m.RowRevision, true
+		}
+		// An unparseable marker still proves the applier saw a drop.
+		return ws.Spec.IntentRevision, 0, true
+	}
+	if ws.Spec.IntentRevision < applied.Revision {
+		return applied.Revision, ws.Spec.IntentRevision, true
+	}
+	return 0, 0, false
+}
+
+// intentDrift is the drift evaluation of one reconcile pass.
+type intentDrift struct {
+	drifted                 bool // the intent stream trails the applied fence
+	had                     bool // an IntentBehind condition already exists (kept -> False)
+	edge                    bool // this pass transitions into drift (fires the event)
+	crRevision, rowRevision string
+}
+
+// evalIntentDrift evaluates the drift state and syncs the params
+// annotation ahead of the status staging in writeStatus: the annotation
+// persists only through a main-resource update (/status drops metadata),
+// and that update must happen before status fields are staged because its
+// response restores the stored status. A workspace that never drifted
+// writes nothing — no update, no annotation entry.
+func (r *WorkspaceReconciler) evalIntentDrift(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (intentDrift, error) {
+	var d intentDrift
+	cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionIntentBehind)
+	crRev, rowRev, drifted := intentFenceDrift(ws, applied)
+	d.drifted = drifted
+	d.had = cur != nil
+	d.edge = drifted && (cur == nil || cur.Status != metav1.ConditionTrue)
+	if !drifted && !d.had {
+		return d, nil
+	}
+	d.crRevision = strconv.FormatInt(crRev, 10)
+	d.rowRevision = strconv.FormatInt(rowRev, 10)
+
+	annotations := maps.Clone(ws.Annotations)
+	if drifted {
+		setConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind, ReasonIntentBehind,
+			map[string]string{"crRevision": d.crRevision, "rowRevision": d.rowRevision})
+	} else {
+		setConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind, "", nil)
+	}
+	if !maps.Equal(annotations, ws.Annotations) {
+		if err := r.Update(ctx, ws); err != nil {
+			return d, err
+		}
+	}
+	return d, nil
 }
 
 // appliedIntent reads the persisted applied-intent record; a missing

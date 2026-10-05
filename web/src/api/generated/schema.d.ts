@@ -612,7 +612,7 @@ export interface components {
         /** @enum {string} */
         ExperienceKind: "Desktop" | "Browser";
         /** @enum {string} */
-        ConditionType: "Admitted" | "StorageReady" | "RuntimeReady" | "ConnectionReady" | "Degraded";
+        ConditionType: "Admitted" | "StorageReady" | "RuntimeReady" | "ConnectionReady" | "Degraded" | "IntentBehind";
         /** @enum {string} */
         ConditionStatus: "True" | "False" | "Unknown";
         /**

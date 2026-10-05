@@ -56,6 +56,19 @@ ran out) → `StoppingRuntime` → `ApplyingRetention` (Retain keeps the disk,
 Ephemeral destroys it; `Degraded/RetentionPending` while it is blocked) →
 `CleaningUp` (`Degraded/CleanupRetry` when a step failed and will retry).
 
+## Intent drift
+
+`IntentBehind` is its own condition type (not a step condition). It is
+`True` when the platform's intent stream trails the workspace's applied
+intent fence — the applier dropped an intent whose revision was behind the
+CR's, which is the signature of a database restored behind the live
+cluster. Intents stay dropped (the fence still never applies a stale
+intent) until the stream is realigned; the operator also emits one
+`IntentBehind` Warning event on the transition into drift. The condition
+goes `False`/`Nominal` once the stream has caught up again. See
+docs/runbooks/disaster-recovery.md ("Workspace reconciliation") for the
+realign procedure.
+
 ## Events
 
 `GET /v1/workspaces/{id}/events` serves curated lifecycle and condition
@@ -84,6 +97,8 @@ rendering. Params never carry secrets, tickets or internal hostnames.
 | `status` | every condition-derived event | its status (`True`/`False`/`Unknown`) |
 | `step` | teardown marks (`BlockingConnects`…`CleaningUp` on `RuntimeReady`; `CleanupRetry`, `RetentionPending`, `StreamDraining`, `DrainTimedOut` on `Degraded`) | the teardown step token: `block-connects`, `revoke-leases`, `drain-streams`, `stop-runtime`, `retention`, `cleanup` |
 | `budgetSeconds` | `Degraded/StreamDraining`, `Degraded/DrainTimedOut` | the stream-drain budget in seconds |
+| `crRevision` | `IntentBehind` | the Workspace CR's applied intent revision the stream trails |
+| `rowRevision` | `IntentBehind` | the intent revision the platform row/stream presented |
 
 Condition params travel on the
 `workspaces.cdi.tinyorbit.vn/condition-params` object annotation, keyed
