@@ -154,9 +154,9 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
 ## Sign-in rate limits and NAT
 
 The backend throttles its unauthenticated surface **per client IP**:
-`-login-rate` (30/min, burst 10) covers `GET /v1/login`,
+`-login-rate` (60/min, burst 20) covers `GET /v1/login`,
 `GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate`
-(60/min, burst 20) covers `POST /v1/launch`. Authenticated requests get
+(120/min, burst 40) covers `POST /v1/launch`. Authenticated requests get
 their own keys instead — `GET /v1/session` keys on a digest of the
 *validated* session cookie, `/v1/launch` likewise once the session is
 live on the serving replica (a cookie issued by a sibling and not yet
@@ -169,9 +169,9 @@ the anonymous sign-in start itself.
 
 One bound to know: a validated state is *mintable* — it costs its holder
 one IP-limited `/v1/login` — so callback keys are additionally gated by a
-per-IP ceiling at **10× the login limits** (300/min, burst 100 by
+per-IP ceiling at **10× the login limits** (600/min, burst 200 by
 default). A spray of minted states cannot amplify callback throughput
-past that multiplier, and a NAT'd org needs >100 concurrent OIDC
+past that multiplier, and a NAT'd org needs >200 concurrent OIDC
 callbacks from one address before the ceiling even engages.
 
 What that means for sizing:
@@ -190,8 +190,8 @@ What that means for sizing:
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
 - **Budgets are the exact aggregate across replicas.** The limiter is a
   Postgres fixed-minute window shared by every backend replica (ADR 0006):
-  one key draws at most rate+burst in a window — `-login-rate` 30/min +
-  burst 10 admits an anonymous IP 40 requests inside any wall-clock
+  one key draws at most rate+burst in a window — `-login-rate` 60/min +
+  burst 20 admits an anonymous IP 80 requests inside any wall-clock
   minute (the fixed-window edge admits up to 2× across a boundary — the
   same overshoot class the old per-replica buckets had). Every pod also
   keeps a divided in-memory bucket (`max(1, rate÷N)`/min, `max(1,
@@ -412,8 +412,8 @@ reasons found on the night:
   placement (a retained PVC's node/zone affinity still wins); the
   per-wave guard stays as the hard safety.
 - **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
-  behind one source IP tripped `login-rate 30/min` (covers `/v1/login`,
-  `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
+  behind one source IP tripped the then-default `login-rate 30/min` (covers `/v1/login`,
+  `/v1/auth/callback`, `GET /v1/session`) and the then-default `launch-rate 60/min` —
   152 × 429 in ~15 min, logins failed, connect p95 hit 65 s. The e2e
   run raised both to 600/min as a recorded deviation (restored after);
   production ramps from many IPs are unaffected. On rc.3 this is fixed by

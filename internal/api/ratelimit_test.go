@@ -18,8 +18,8 @@ import (
 // 429 RATE_LIMITED with Retry-After.
 func TestLogin_RateLimited(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	// -login-rate defaults to 30/min with burst 10; 11 requests from one
-	// client inside the window exhaust it.
+	// A 30/min, burst-10 bucket; 11 requests from one client inside the
+	// window exhaust it.
 	l := ratelimit.New(30, 10, 100, func() time.Time { return now })
 	srv := httptest.NewServer(RateLimit(l, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

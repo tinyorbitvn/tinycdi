@@ -314,15 +314,15 @@ Day-2 quota operations (reading usage, `QUOTA_EXHAUSTED` vs
 ## Rate limits and trusted proxies
 
 `GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited
-to 30 requests/min per client address (burst 10); `POST /v1/launch` to
-60/min (burst 20). Over the limit the API answers `429 RATE_LIMITED` with
+to 60 requests/min per client address (burst 20); `POST /v1/launch` to
+120/min (burst 40). Over the limit the API answers `429 RATE_LIMITED` with
 `Retry-After`.
 
 The client address is the socket peer unless the peer is inside
 `backend.trustedProxies` — then the right-most untrusted `X-Forwarded-For`
 entry stands in. **Behind any ingress or Gateway, set the value to the
 CIDR(s) your edge sources from.** With it empty every user shares the
-edge's own bucket (~30 logins/min for the whole organisation) and the
+edge's own bucket (~60 logins/min for the whole organisation) and the
 backend logs a startup warning while a limit is on. The same list feeds
 the forwarded headers toward workspace pods — client-supplied values are
 stripped and rebuilt from the trusted chain only.

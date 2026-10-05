@@ -55,8 +55,8 @@ const defaultMergedGatewayID = "backend"
 // healthy. In split mode (no database) the divided local limiter is the
 // whole enforcement.
 const (
-	loginRateBurst   = 10
-	launchRateBurst  = 20
+	loginRateBurst   = 20
+	launchRateBurst  = 40
 	rateLimitMaxKeys = 100_000
 )
 

@@ -260,8 +260,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
 	fs.DurationVar(&c.ImageBlockAfter, "image-block-after", envDur(getenv, "TCDI_IMAGE_BLOCK_AFTER", api.DefaultImageBlockAfter),
 		"runtime image age that blocks create/start with 409 IMAGE_STALE (E3); a missing imageBuiltAt never blocks; 0 disables (env TCDI_IMAGE_BLOCK_AFTER)")
-	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
-		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10), aggregate across replicas via the shared Postgres window; over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
+	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 60),
+		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 20), aggregate across replicas via the shared Postgres window; over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
 	// Session listener.
 	fs.StringVar(&c.SessionListen, "session-listen", envOr(getenv, "TCDI_SESSION_LISTEN", ":8444"),
@@ -278,8 +278,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.RevokeDeadline, "revoke-deadline", envDur(getenv, "TCDI_REVOKE_DEADLINE", gateway.RevokeDeadline), "fail-closed budget after last successful renew")
 	fs.DurationVar(&c.DrainWindow, "drain-window", envDur(getenv, "TCDI_DRAIN_WINDOW", 8*time.Second), "pre-stop drain window: listeners keep serving reads and refuse new launches/upgrades until it ends (0 shuts down immediately)")
 	fs.DurationVar(&c.DrainPropagationDelay, "drain-propagation-delay", envDur(getenv, "TCDI_DRAIN_PROPAGATION_DELAY", 5*time.Second), "wait between the readiness drop and the stream close at drain start, so endpoint removal propagates before clients are told to reconnect (0 closes streams at once)")
-	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 60),
-		"per-client launches/minute on /v1/launch (burst 20), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
+	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 120),
+		"per-client launches/minute on /v1/launch (burst 40), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),
