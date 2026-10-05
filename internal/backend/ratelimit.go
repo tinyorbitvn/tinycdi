@@ -70,7 +70,7 @@ func (b *Backend) rateLimitDegradedHook() func(route string, degraded bool) {
 // a fixed-window limit of R+B), while the divided local bucket stays on
 // as the per-replica ceiling and the fail-open fallback — effective bound
 // = min(shared window, local ceiling).
-func sharedLoginLimiters(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) (shared, ceiling ratelimit.Allower) {
+func sharedLoginLimiters(cfg Config, db ratelimit.WindowStore, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) (shared, ceiling ratelimit.Allower) {
 	localShared, localCeiling := loginLimiters(cfg, nil)
 	windowLimit := cfg.LoginRate + loginRateBurst
 	return ratelimit.NewShared(localShared, db, rateLimitRouteLogin, windowLimit, log, onStoreError, onDegraded),
@@ -80,7 +80,7 @@ func sharedLoginLimiters(cfg Config, db *store.DB, log *slog.Logger, onStoreErro
 // sharedLaunchLimiter is the merged-mode launch limiter: the Postgres
 // window bound to the undivided rate+burst, over the divided local
 // ceiling/fallback.
-func sharedLaunchLimiter(cfg Config, db *store.DB, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) ratelimit.Allower {
+func sharedLaunchLimiter(cfg Config, db ratelimit.WindowStore, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) ratelimit.Allower {
 	return ratelimit.NewShared(launchLimiter(cfg, nil), db, rateLimitRouteLaunch,
 		cfg.LaunchRate+launchRateBurst, log, onStoreError, onDegraded)
 }

@@ -260,8 +260,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"runtime image age reported as imageStale on template/workspace views; advisory only (env TCDI_IMAGE_STALE_AFTER)")
 	fs.DurationVar(&c.ImageBlockAfter, "image-block-after", envDur(getenv, "TCDI_IMAGE_BLOCK_AFTER", api.DefaultImageBlockAfter),
 		"runtime image age that blocks create/start with 409 IMAGE_STALE (E3); a missing imageBuiltAt never blocks; 0 disables (env TCDI_IMAGE_BLOCK_AFTER)")
-	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 30),
-		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 10), aggregate across replicas via the shared Postgres window; over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
+	fs.IntVar(&c.LoginRate, "login-rate", envInt(getenv, "TCDI_LOGIN_RATE", 60),
+		"per-client requests/minute on /v1/login, /v1/auth/callback and GET /v1/session (burst 20), aggregate across replicas via the shared Postgres window; over the limit answers 429 RATE_LIMITED with Retry-After — 0 disables (env TCDI_LOGIN_RATE)")
 
 	// Session listener.
 	fs.StringVar(&c.SessionListen, "session-listen", envOr(getenv, "TCDI_SESSION_LISTEN", ":8444"),

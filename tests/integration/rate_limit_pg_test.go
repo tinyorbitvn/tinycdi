@@ -221,7 +221,7 @@ func TestRateLimit_SharedWindowAcrossReplicas(t *testing.T) {
 	waitReplicaServing(t, b)
 
 	const ip = "203.0.113.50"
-	const windowLimit = 5 + 10 // -login-rate + loginRateBurst
+	const windowLimit = 5 + 20 // -login-rate + loginRateBurst
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
 	allowed, denied := loginHammer(t, []*replica{a, b}, ip, 45)
 
@@ -245,8 +245,8 @@ func TestRateLimit_SharedWindowAcrossReplicas(t *testing.T) {
 // counted on tinycdi_rate_limit_store_errors_total.
 func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	f, pg := newOutageFixture(t)
-	// login-rate 2 + burst 10 → shared window bound 12; replicas 2 → the
-	// per-pod local ceiling is 1/min + burst 5. Only replica a gets a
+	// login-rate 2 + burst 20 → shared window bound 22; replicas 2 → the
+	// per-pod local ceiling is 1/min + burst 10. Only replica a gets a
 	// metrics listener — two in-process backends share the default
 	// Prometheus registry, so a second set would double-register.
 	flags := func(extra ...string) []string {
@@ -261,12 +261,12 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	waitReplicaServing(t, b)
 
 	// Baseline: one key hammered across both pods is bounded by the
-	// shared window (12) — the spread lands most refusals on the local
-	// ceilings, so admit ~10-12, never more than 12.
+	// shared window (22) — the spread lands most refusals on the local
+	// ceilings, so admit ~20-22, never more than 22.
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
 	allowed, _ := loginHammer(t, []*replica{a, b}, "203.0.113.10", 30)
-	if allowed < 6 || allowed > 12 {
-		t.Fatalf("healthy shared window allowed %d, want 6..12 (window bound 12, per-pod ceiling ~6)", allowed)
+	if allowed < 15 || allowed > 22 {
+		t.Fatalf("healthy shared window allowed %d, want 15..22 (window bound 22, per-pod ceiling ~10)", allowed)
 	}
 	if base := windowCount(t, f.db, "login", "203.0.113.10"); base < int64(allowed) {
 		t.Fatalf("window count %d < allowed %d — the store did not count admitted hits", base, allowed)
@@ -275,17 +275,17 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	// Outage: docker stop returns once the container is down, so every
 	// later check fails fast (connection refused). A fresh key hammered
 	// on ONE pod gets exactly that pod's divided share — fail-open, not
-	// fail-closed and not the shared window's 12. Replica b sees no
+	// fail-closed and not the shared window's 22. Replica b sees no
 	// traffic during the outage, so only a's log carries the entry line.
 	pg.stop(t)
 	allowed, denied := loginHammer(t, []*replica{a}, "203.0.113.20", 20)
 	if allowed < 1 {
 		t.Fatalf("outage allowed 0 — the limiter must fail OPEN to the local bucket")
 	}
-	if allowed > 8 {
-		t.Fatalf("outage allowed %d on one pod — above the divided local ceiling (1/min + burst 5)", allowed)
+	if allowed > 12 {
+		t.Fatalf("outage allowed %d on one pod — above the divided local ceiling (1/min + burst 10)", allowed)
 	}
-	if denied < 12 {
+	if denied < 8 {
 		t.Fatalf("outage denied %d of 20 — the local ceiling did not bound the flood", denied)
 	}
 	if !strings.Contains(logsA.String(), "enforcing local per-replica limit") {
@@ -301,8 +301,8 @@ func TestRateLimit_PGOutageFailsOpenAndRecovers(t *testing.T) {
 	time.Sleep(11 * time.Second) // store circuit cool-down (10 s) + slack
 	waitForFreshRateWindow(t, f.db, 20*time.Second)
 	allowed, _ = loginHammer(t, []*replica{a, b}, "203.0.113.30", 30)
-	if allowed < 6 || allowed > 12 {
-		t.Fatalf("post-recovery allowed %d, want 6..12 (shared window bound)", allowed)
+	if allowed < 15 || allowed > 22 {
+		t.Fatalf("post-recovery allowed %d, want 15..22 (shared window bound)", allowed)
 	}
 	// Hits land in Postgres again. The slack covers the first
 	// post-reconnect requests, which can legitimately fail open on a dead

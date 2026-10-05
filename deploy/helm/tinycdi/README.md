@@ -435,7 +435,7 @@ the single option that decides how the edge reaches the public listeners.
 ### Rate limits and trusted proxies
 
 The backend rate-limits its unauthenticated surface **per client address**:
-`-login-rate` (30/min, burst 10) covers `GET /v1/login`,
+`-login-rate` (60/min, burst 20) covers `GET /v1/login`,
 `GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate` (60/min, burst 20)
 covers the session listener's `POST /v1/launch`. A client over its budget gets
 `429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
@@ -462,8 +462,8 @@ and NAT").
 The bound is enforced by a **Postgres fixed-minute window** shared by
 every replica (ADR 0006): one counter per key, checked with a single
 upsert per request — the flags are now the *exact* aggregate: 2 replicas
-with `-login-rate` 30/min + burst 10 let one anonymous IP draw exactly
-40 requests inside a window, however the traffic spreads. The
+with `-login-rate` 60/min + burst 20 let one anonymous IP draw exactly
+80 requests inside a window, however the traffic spreads. The
 fixed-window edge admits up to ~2×(rate+burst) inside a span crossing a
 minute boundary — the same overshoot class the old per-replica buckets
 had. Split mode (`backend.brokerURL`, no database) keeps the divided

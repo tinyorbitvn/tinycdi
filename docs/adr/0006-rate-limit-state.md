@@ -56,6 +56,14 @@ logs), wiring in `internal/backend/wire.go`, migration
 `tests/integration/rate_limit_pg_test.go` (two-replica shared-window
 abuse + Postgres outage fail-open/recovery).
 
+Amendment (RL-DEFAULT): the implemented `-login-rate` default is
+60/minute with burst 20 — the numbers below are read at that default —
+chosen to match the v0.3.x effective aggregate at two replicas, where
+each pod enforced the undivided 30/minute + burst 10 bucket (an exact
+30/minute shared window would have halved every two-replica install's
+sign-in budget). The callback ceiling follows at 10×; `-launch-rate`
+is unchanged.
+
 ## Context
 
 The v0.3 line enforces its client-facing rate limits in-process
@@ -95,15 +103,15 @@ anything unverifiable falls back to the client-IP key.
 
 | Route | Listener | Key when authenticated | Key otherwise | Configured budget | Extra ceiling |
 |---|---|---|---|---|---|
-| `GET /v1/login` | app | — deliberately IP-keyed (FX-R30 review: cookie-keying would buy every forged value a store read) | client IP | `-login-rate` 30/min, burst 10 | — |
-| `GET /v1/auth/callback` | app | `oidc:`+sha256(state) — `?state` must equal the sealed login-cookie state (SEC-03) | client IP | same shared login bucket: 30/min, burst 10 | per-IP ceiling 10×: 300/min, burst 100 |
-| `GET /v1/session` (probe) | app | `sess:`+sha256(session ID) via `Peek` — read-only, no idle slide | client IP | same shared login bucket: 30/min, burst 10 | — |
+| `GET /v1/login` | app | — deliberately IP-keyed (FX-R30 review: cookie-keying would buy every forged value a store read) | client IP | `-login-rate` 60/min, burst 20 | — |
+| `GET /v1/auth/callback` | app | `oidc:`+sha256(state) — `?state` must equal the sealed login-cookie state (SEC-03) | client IP | same shared login bucket: 60/min, burst 20 | per-IP ceiling 10×: 600/min, burst 200 |
+| `GET /v1/session` (probe) | app | `sess:`+sha256(session ID) via `Peek` — read-only, no idle slide | client IP | same shared login bucket: 60/min, burst 20 | — |
 | `POST /v1/launch` | session | `sess:`+sha256(cookie) iff the cookie maps to a session **live on this replica** (in-memory check only — the limiter never spends a directory read) | client IP | `-launch-rate` 60/min, burst 20 | — |
 
 All four budgets are divided by `-rate-limit-replicas`
 (`ratelimit.PerReplica`, integer round-down, `max(1, ·)` clamps): at the
-chart default `backend.replicas=2` each pod enforces 15/min + burst 5
-(login family), 30/min + burst 10 (launch), 150/min + burst 50 (callback
+chart default `backend.replicas=2` each pod enforces 30/min + burst 10
+(login family), 30/min + burst 10 (launch), 300/min + burst 100 (callback
 ceiling). A configured rate below the replica count clamps to 1/min per
 pod — the one upward drift (~N/min aggregate). The launch limiter is
 built in both merged and split (`-broker-url`) mode — a split session
@@ -187,8 +195,8 @@ RETURNING count;
 ```
 
 Semantics mapping: today's token bucket `rate R/min + burst B` ≈ a fixed
-window with `limit = R + B` per minute (login 40, launch 80, callback
-ceiling 400 at defaults). Fixed window's boundary effect allows ≤2×limit
+window with `limit = R + B` per minute (login 80, launch 80, callback
+ceiling 800 at defaults). Fixed window's boundary effect allows ≤2×limit
 inside any <2 min span — same order as today's surge overshoot and as
 the token bucket's own `burst + rate` draw-down, so no new abuse
 magnitude. If the advisor wants the edge tighter, the standard estimator
