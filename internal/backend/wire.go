@@ -657,6 +657,8 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	}
 	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas).
 		WithAuditSink(appAudit)
+	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
+		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
@@ -682,7 +684,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit, sessionLimit, callbackLimit)
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -696,6 +698,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
 	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
+	adminUserLimits *api.AdminUserLimitsHandler,
 	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
@@ -710,6 +713,9 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	api.MountQuotaRoutes(mux, authn, quota)
 	if adminQuota != nil {
 		api.MountAdminQuotaRoutes(mux, authn, adminQuota)
+	}
+	if adminUserLimits != nil {
+		api.MountAdminUserLimitRoutes(mux, authn, adminUserLimits)
 	}
 	return mux
 }

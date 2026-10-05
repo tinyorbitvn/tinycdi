@@ -78,6 +78,31 @@ export default {
   "admin.quota.edit.invalid":
     "Nhập số từ 0 trở lên; số workspace đang chạy và dung lượng lưu trữ phải là số nguyên.",
 
+  // Per-user limits section (running-workspace cap per principal).
+  "admin.userLimits.title": "Giới hạn theo người dùng",
+  "admin.userLimits.description":
+    "Số workspace tối đa một người dùng được chạy đồng thời, ngoài hạn mức tenant.",
+  "admin.userLimits.loading": "Đang tải giới hạn theo người dùng",
+  "admin.userLimits.caption": "Giới hạn workspace đang chạy theo người dùng",
+  "admin.userLimits.empty": "Chưa có người dùng nào.",
+  "admin.userLimits.default": "Giới hạn mặc định mỗi người dùng:",
+  "admin.userLimits.unlimited": "Không giới hạn",
+  "admin.userLimits.inherit": "Mặc định",
+  "admin.userLimits.column.running": "Đang chạy",
+  "admin.userLimits.column.limit": "Ghi đè",
+  "admin.userLimits.column.effective": "Áp dụng",
+  "admin.userLimits.editDefault": "Đặt mặc định",
+  "admin.userLimits.edit.action": "Đặt giới hạn",
+  "admin.userLimits.edit.userTitle": "Giới hạn workspace đang chạy — {user}",
+  "admin.userLimits.edit.defaultTitle": "Giới hạn mặc định mỗi người dùng",
+  "admin.userLimits.edit.descriptionUser":
+    "Số workspace tối đa người dùng này được chạy đồng thời. Để trống để theo mặc định của tenant.",
+  "admin.userLimits.edit.descriptionDefault":
+    "Số workspace tối đa mỗi người dùng được chạy đồng thời. Để trống nếu không đặt giới hạn mặc định.",
+  "admin.userLimits.edit.field": "Workspace đang chạy",
+  "admin.userLimits.edit.save": "Lưu giới hạn",
+  "admin.userLimits.edit.invalid": "Nhập một số nguyên từ 0 trở lên, hoặc để trống.",
+
   // Template catalog page.
   "admin.templates.title": "Danh mục template",
   "admin.templates.description":

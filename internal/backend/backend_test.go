@@ -361,7 +361,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
 	pass := func(h http.Handler) http.Handler { return h }
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, pass, pass, pass)
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, pass, pass, pass)
 	b := &Backend{log: testLog(), metrics: m}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
