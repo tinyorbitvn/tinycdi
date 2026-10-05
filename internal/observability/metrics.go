@@ -104,6 +104,8 @@ var (
 		"workspace.delete": {}, "connection.create": {},
 		"data.attach": {}, "data.purge": {},
 		"admin.quota.get": {}, "admin.quota.set": {}, "admin.quota.config_apply": {},
+		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
+		"admin.user_limit.default.set": {}, "admin.user_limit.default.clear": {},
 		"launch.redeem": {}, "launch.host_mismatch": {},
 	}
 )
