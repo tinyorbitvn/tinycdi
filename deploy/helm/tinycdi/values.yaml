@@ -337,6 +337,8 @@ operator:
   # standby; the standby takes over the leader-election Lease when the
   # leader goes away. Single-replica installs may set replicas: 1;
   # leaderElect can stay true (one replica simply holds the lease).
+  # leaderElect=false with replicas>1 fails the render — unelected
+  # replicas would double-drive reconciliation.
   replicas: 2
   leaderElect: true
   webhookPort: -1           # -1 disables the webhook server

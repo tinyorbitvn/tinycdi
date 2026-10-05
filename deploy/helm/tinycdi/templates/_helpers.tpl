@@ -251,6 +251,13 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if not (has (printf "%v" .Values.backend.sessionCookieMode) (list "lax" "partitioned")) -}}
 {{- fail (printf "backend.sessionCookieMode must be lax or partitioned (got %q)" (printf "%v" .Values.backend.sessionCookieMode)) -}}
 {{- end -}}
+{{- /* E4: election off with more than one operator replica runs two
+        active reconcilers double-driving the same Workspaces — refuse the
+        render; the binary cannot see the Deployment's replica count, so
+        the guard lives here. replicas<=1 without election stays legal. */ -}}
+{{- if and (gt (int .Values.operator.replicas) 1) (not .Values.operator.leaderElect) -}}
+{{- fail "operator.leaderElect=false is refused when operator.replicas > 1 — unelected replicas would double-drive reconciliation; set operator.replicas: 1 for a single-replica install without election" -}}
+{{- end -}}
 {{- /* FX-R34 drain budget: the propagation wait plus the drain window
         must leave >= 4 s of the backend's 24 s shared shutdown deadline
         for listener shutdown (the binary enforces the same bound at

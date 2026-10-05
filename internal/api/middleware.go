@@ -19,7 +19,7 @@ import (
 // writeError is the package-local convenience wrapper around WriteError
 // (errors.go) that pulls the request ID from context.
 func writeError(w http.ResponseWriter, r *http.Request, code ErrorCode, msg string) {
-	WriteError(w, RequestIDFromContext(r.Context()), NewError(code, msg))
+	WriteError(w, r, NewError(code, msg))
 }
 
 // ---------------------------------------------------------------------------

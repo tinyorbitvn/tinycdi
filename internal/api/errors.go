@@ -144,8 +144,20 @@ const ReasonReleasePending = "release_pending"
 // ReasonUserLimitReached is the details.reason value of a QUOTA_EXHAUSTED
 // refused by a per-principal running limit rather than the tenant quota:
 // the caller already holds their maximum of concurrent running
-// workspaces. Params carry "limit" and "current".
+// workspaces. Params carry ParamKeyLimit and ParamKeyCurrent.
 const ReasonUserLimitReached = "UserLimitReached"
+
+// Params keys of the UserLimitReached detail — the contract the docs and
+// the portal copy interpolate against; tests assert these constants so a
+// rename cannot drift the wire keys away from the documentation.
+const (
+	// ParamKeyLimit is the principal's maximum concurrent running
+	// workspaces.
+	ParamKeyLimit = "limit"
+	// ParamKeyCurrent is the running workspaces the principal already
+	// holds.
+	ParamKeyCurrent = "current"
+)
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 
@@ -162,9 +174,13 @@ func NewError(code ErrorCode, message string) *Error {
 // WriteError renders e as the JSON error body: Content-Type application/json,
 // status from the code, RequestID filled from the request-scoped correlation
 // ID. Callers must pass already-sanitized messages — this never adds internal
-// details.
-func WriteError(w http.ResponseWriter, requestID string, e *Error) {
-	e.RequestID = requestID
+// details. When the request runs inside an audited route the stable code is
+// recorded on the route's audit event.
+func WriteError(w http.ResponseWriter, r *http.Request, e *Error) {
+	if ra := routeAuditFromContext(r.Context()); ra != nil {
+		ra.errCode = string(e.Code)
+	}
+	e.RequestID = RequestIDFromContext(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Code.HTTPStatus())
 	_ = json.NewEncoder(w).Encode(e)
@@ -185,7 +201,7 @@ func writeQuotaExceeded(w http.ResponseWriter, r *http.Request, err error, retry
 		e.Retryable = true
 		e.Details = &ErrorDetails{Reason: ReasonReleasePending}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterClamped(retryAfter)))
-		WriteError(w, RequestIDFromContext(r.Context()), e)
+		WriteError(w, r, e)
 		return
 	}
 	writeError(w, r, CodeQuotaExhausted, "quota exhausted")
@@ -216,8 +232,8 @@ func writeUserLimitReached(w http.ResponseWriter, r *http.Request, err error, re
 		e.Details = &ErrorDetails{
 			Reason: ReasonUserLimitReached,
 			Params: map[string]string{
-				"limit":   strconv.FormatInt(u.Limit, 10),
-				"current": strconv.FormatInt(u.Current, 10),
+				ParamKeyLimit:   strconv.FormatInt(u.Limit, 10),
+				ParamKeyCurrent: strconv.FormatInt(u.Current, 10),
 			},
 		}
 		if u.ReleasePending {
@@ -225,7 +241,7 @@ func writeUserLimitReached(w http.ResponseWriter, r *http.Request, err error, re
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterClamped(retryAfter)))
 		}
 	}
-	WriteError(w, RequestIDFromContext(r.Context()), e)
+	WriteError(w, r, e)
 }
 
 // writeImageStale renders an E3 stale-image refusal: the message names the
@@ -244,5 +260,5 @@ func writeImageStale(w http.ResponseWriter, r *http.Request, err error) {
 			Pinned:       ise.Pinned,
 		}
 	}
-	WriteError(w, RequestIDFromContext(r.Context()), e)
+	WriteError(w, r, e)
 }
