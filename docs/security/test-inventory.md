@@ -150,6 +150,11 @@ substitute for review).
   `-dev-insecure-db`, trusted-proxies parsing.
 - `internal/backend/leader_lock_test.go`, `leader_test.go`,
   `migrate_lock_test.go` — leader/migration locking.
+- `internal/backend/postrestore_test.go` — `backend post-restore`
+  (runbook kill-steps): dry-run writes nothing, epoch rotation rejects
+  every restored session (S17), lease/ticket denial, CR intent
+  alignment, refusal while a backend holds the leader lock, the
+  no-Kubernetes SQL fallback.
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
   `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR

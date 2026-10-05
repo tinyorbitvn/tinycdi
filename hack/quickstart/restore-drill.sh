@@ -17,9 +17,11 @@
 #            post-restore SQL. Asserts the signed-out session resurrects
 #            and the revoked lease row comes back 'active' (the hazards the
 #            runbook exists for).
-#   fix    — the documented post-restore block (session_epoch rotation +
-#            revoke all restored leases + deny all unconsumed tickets), the
-#            workspaces↔CR reconcile, reopen, invariants.
+#   fix    — the documented post-restore step: `backend post-restore` as a
+#            Job (dry-run plan, then -apply -i-have-scaled-down: session_epoch
+#            rotation + revoke all restored leases + deny all unconsumed
+#            tickets + align workspaces rows to live CRs), reopen,
+#            invariants.
 #
 # Lease-TTL note: a revoked lease resurrects as 'active' with its
 # session_digest; whether the old gateway cookie still serves depends on
@@ -221,22 +223,53 @@ lease_state=$(psql_t "SELECT state FROM connection_lease WHERE workspace_id='$WS
   || die "restored lease is $lease_state, expected active — resurrection mechanism not reproduced"
 log "  OBSERVED: revoked lease row restored as 'active' (session_digest intact)"
 
-# ---- fix: documented post-restore block ---------------------------------------
-log "fix: freeze, post-restore SQL, reconcile, reopen"
-scale_platform 0
-psql <<'SQL' >/dev/null
-CREATE TABLE IF NOT EXISTS platform_meta (key text PRIMARY KEY, value text NOT NULL);
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS epoch text NOT NULL DEFAULT '';
-INSERT INTO platform_meta (key, value)
-VALUES ('session_epoch', gen_random_uuid()::text)
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-UPDATE connection_lease SET state = 'revoked', closed_at = now() WHERE state = 'active';
-UPDATE launch_ticket SET revoked_at = now() WHERE consumed_at IS NULL AND revoked_at IS NULL;
-SQL
+# ---- fix: documented post-restore step --------------------------------------
+# post_restore_job <name> [post-restore args...]: run the subcommand as a
+# Job whose pod template is deploy/backend's — same image, DSN env, DB TLS
+# mount, backend ServiceAccount (its backend-workspaces RoleBindings give
+# CR read in the managed namespaces). app.kubernetes.io/instance is
+# dropped so the backend Service never selects the pod; the remaining
+# labels keep the pod under the existing DB + apiserver egress policies.
+post_restore_job() {
+  local name="$1"; shift
+  kc -n "$NS_SYSTEM" delete job "$name" --ignore-not-found >/dev/null 2>&1 || true
+  kc -n "$NS_SYSTEM" get deploy backend -o json | python3 -c '
+import json, sys
+name, args = sys.argv[1], sys.argv[2:]
+tpl = json.load(sys.stdin)["spec"]["template"]
+tpl["metadata"]["labels"].pop("app.kubernetes.io/instance", None)
+tpl["spec"]["restartPolicy"] = "Never"
+c = tpl["spec"]["containers"][0]
+for k in ("ports", "livenessProbe", "readinessProbe", "startupProbe", "lifecycle"):
+    c.pop(k, None)
+c["args"] = ["post-restore"] + args
+print(json.dumps({"apiVersion": "batch/v1", "kind": "Job",
+                  "metadata": {"name": name},
+                  "spec": {"backoffLimit": 0, "template": tpl}}))
+' "$name" "$@" | kc -n "$NS_SYSTEM" apply -f - >/dev/null
+  if ! kc -n "$NS_SYSTEM" wait --for=condition=complete "job/$name" --timeout=180s >/dev/null 2>&1; then
+    kc -n "$NS_SYSTEM" logs "job/$name" >&2 || true
+    die "post-restore job $name did not complete"
+  fi
+  kc -n "$NS_SYSTEM" logs "job/$name" | tee "$DRILL_DIR/$name.log" | sed 's/^/    /' >&2
+}
 
-# Reopening is safe the moment the kill-SQL lands — the reconcile steps
-# need the platform up anyway (the orphan CR's finalizer talks to the
-# backend control surface).
+log "fix: freeze, backend post-restore Job (dry-run then apply), reopen"
+scale_platform 0
+post_restore_job post-restore-drill-dry
+post_restore_job post-restore-drill-apply -apply -i-have-scaled-down
+
+# The Job aligned WS_A's diverged row and reported the orphan CR for B.
+grep -q "$WS_A" "$DRILL_DIR/post-restore-drill-apply.log" \
+  || die "post-restore did not report workspace $WS_A"
+grep -q "orphan CR $NS_TENANT/ws-${WS_B#ws_}" "$DRILL_DIR/post-restore-drill-apply.log" \
+  || die "post-restore did not flag the orphan CR for $WS_B"
+grep -q "aligned 1 workspace rows" "$DRILL_DIR/post-restore-drill-apply.log" \
+  || die "post-restore aligned no row — expected $WS_A to trail its CR"
+
+# Reopening is safe the moment the Job lands — the orphan-CR delete below
+# needs the platform up anyway (the finalizer talks to the backend control
+# surface).
 scale_platform 2
 
 # reconcile: orphan CR (B, created post-dump) gets deleted.
@@ -245,20 +278,6 @@ if kc -n "$NS_TENANT" get workspace "$B_CR" >/dev/null 2>&1; then
   kc -n "$NS_TENANT" delete workspace "$B_CR" --timeout=120s
   log "  orphan CR $B_CR deleted (no workspaces row — created after the dump)"
 fi
-# reconcile: align diverged rows to their live CRs (intent fence).
-# workspaces.id = ws_<hex>, CR name = ws-<hex>.
-for row in $(psql_t "SELECT id FROM workspaces WHERE state='active'"); do
-  cr="ws-${row#ws_}"
-  applied=$(kc -n "$NS_TENANT" get workspace "$cr" \
-    -o jsonpath='{.metadata.annotations.workspaces\.cdi\.tinyorbit\.vn/applied-intent}' 2>/dev/null || true)
-  [ -n "$applied" ] || continue
-  rev=$(printf '%s' "$applied" | python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])')
-  desired=$(kc -n "$NS_TENANT" get workspace "$cr" -o jsonpath='{.spec.desiredState}')
-  gen=$(kc -n "$NS_TENANT" get workspace "$cr" -o jsonpath='{.spec.runtimeGeneration}')
-  psql_t "UPDATE workspaces SET desired_state='$desired', runtime_generation=$gen,
-            intent_revision=$rev WHERE id='$row' AND intent_revision < $rev" >/dev/null
-  log "  $row aligned to CR (desired=$desired gen=$gen rev=$rev)"
-done
 
 # ---- invariants ----------------------------------------------------------------
 log "invariants"

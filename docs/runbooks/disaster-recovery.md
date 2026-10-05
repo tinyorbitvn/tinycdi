@@ -216,29 +216,85 @@ Steps 1–3 are the parts that differ from backup-restore.md.
 2. **Load the dump** exactly as backup-restore.md step 3: drop and
    recreate schema `public`, replay the `pg_dump --no-owner` output.
    `store.Migrate` fills any schema gap when the api comes back.
-3. **Kill all restored access — unconditionally, before scaling back.**
+3. **Kill all restored access and align intent rows — with the backend
+   `post-restore` one-shot, before scaling back.** The backend binary
+   carries a `post-restore` subcommand so the kill-steps cannot be skipped
+   or partially applied by hand. `-apply` performs, in order:
 
-   ```sql
-   -- session epoch rotation (F5): every restored session row is rejected
-   -- on its next read, revoked or not. Defensive DDL keeps this working
-   -- against dumps taken before migration 009.
-   CREATE TABLE IF NOT EXISTS platform_meta (key text PRIMARY KEY, value text NOT NULL);
-   ALTER TABLE sessions ADD COLUMN IF NOT EXISTS epoch text NOT NULL DEFAULT '';
-   INSERT INTO platform_meta (key, value)
-   VALUES ('session_epoch', gen_random_uuid()::text)
-   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+   - `session_epoch` rotation (F5/S17): every restored session row is
+     rejected on its next read, revoked or not — the defensive DDL keeps
+     this working against dumps taken before migration 009;
+   - `connection_lease` revoke: resurrected leases carry live
+     `session_digest` bindings — the old gateway cookie rehydrates to them
+     with no portal-session check;
+   - `launch_ticket` deny for every unconsumed row;
+   - `workspaces` alignment: every `state='active'` row whose live CR is
+     ahead is set to the CR's `spec.desiredState`,
+     `spec.runtimeGeneration`, `spec.intentRevision` (see step 5 for why
+     that fence matters). Rows with no CR (ghosts) and CRs with no row
+     (orphans) are counted and printed for step 5 — never deleted here.
 
-   -- resurrected leases carry live session_digest bindings: the old
-   -- gateway cookie rehydrates to them with no portal-session check.
-   UPDATE connection_lease SET state = 'revoked', closed_at = now()
-     WHERE state = 'active';
+   The subcommand is idempotent; `-apply` requires `-i-have-scaled-down`
+   and additionally refuses while any backend replica holds the leader
+   advisory lock — the flag is the operator's freeze acknowledgement, the
+   lock probe the hard backstop (a serving replica set elects a leader
+   within seconds). It logs one summary line per run. With no flag the
+   command is a dry-run: the plan plus affected counts, no writes.
 
-   -- re-armed or un-revoked tickets.
-   UPDATE launch_ticket SET revoked_at = now()
-     WHERE consumed_at IS NULL AND revoked_at IS NULL;
+   Run it as a Job in the release namespace, reusing the backend pod
+   template — the `backend` ServiceAccount's `backend-workspaces`
+   RoleBindings give it read on Workspace CRs in the managed namespaces,
+   and the labels below place the pod under the existing DB/apiserver
+   egress NetworkPolicies. Deriving the manifest from
+   `deploy/backend`'s pod template keeps image, DSN env and TLS mounts in
+   sync; a static equivalent:
+
+   ```yaml
+   apiVersion: batch/v1
+   kind: Job
+   metadata: {name: tinycdi-post-restore, namespace: <release-ns>}
+   spec:
+     backoffLimit: 0
+     template:
+       metadata:
+         labels:
+           # under the backend DB-egress + apiserver-egress policies; do
+           # NOT add app.kubernetes.io/instance — the backend Service must
+           # never select this pod.
+           app.kubernetes.io/name: backend
+           cdi.tinyorbit.vn/needs-apiserver: "true"
+       spec:
+         serviceAccountName: backend
+         restartPolicy: Never
+         containers:
+         - name: post-restore
+           image: <same image as deploy/backend>
+           # first run with [] (dry-run) to read the plan, then:
+           args: ["post-restore", "-apply", "-i-have-scaled-down"]
+           env:
+             - name: TCDI_DATABASE_URL
+               valueFrom:
+                 secretKeyRef:
+                   {name: <database.existingSecret>, key: <database.urlKey>}
+             - {name: PGSSLMODE, value: "<database.tls.mode>"}
+             - {name: PGSSLROOTCERT, value: "/etc/db-ca/ca.crt"}
+             - {name: TCDI_TENANT_NAMESPACES, value: "<tenant=ns,...>"}
+           volumeMounts:
+             - {name: db-ca, mountPath: /etc/db-ca, readOnly: true}
+         volumes:
+           - name: db-ca
+             secret: {secretName: <database.tls.caSecret.name>}
    ```
 
-   This block is what turns "dead within one TTL, if you're lucky" into
+   The DB steps need no ServiceAccount token at all
+   (`automountServiceAccountToken: false` is fine): without Kubernetes
+   read access the tool still rotates/revokes/denies, then prints the
+   per-workspace `UPDATE` — with the `kubectl … -o jsonpath` that fills
+   each CR-derived value — and exits non-zero so the incomplete run is
+   not silently green. `backend post-restore` alone is a dry-run usable
+   in the same Job shape before `-apply`.
+
+   This step is what turns "dead within one TTL, if you're lucky" into
    "dead deterministically". Skipping it is the unsafe restore the drill
    below demonstrates.
 4. **Scale `operator` and `backend` back up.** With the kill-SQL landed,
@@ -264,14 +320,17 @@ Steps 1–3 are the parts that differ from backup-restore.md.
      writes afterwards land at or under the applied revision and are
      **silently ignored** — the drill hit this: the restored row claimed
      `Running` over a `Stopped` CR, so `start` was refused by the API's
-     own desired-state check. For every diverged workspace, align the
-     row with the live CR:
+     own desired-state check. The step-3 Job already aligned every
+     diverged row to its live CR (`desired_state`/`runtime_generation`/
+     `intent_revision` from the CR's `spec`); when the Job ran without
+     Kubernetes access it printed the equivalent `UPDATE` per row — apply
+     those statements now, reading the values off the CRs:
 
      ```sql
      UPDATE workspaces
         SET desired_state      = '<CR spec.desiredState>',
             runtime_generation = <CR spec.runtimeGeneration>,
-            intent_revision    = <CR's applied-intent revision>
+            intent_revision    = <CR spec.intentRevision>
       WHERE id = '<ws_...>';
      ```
 

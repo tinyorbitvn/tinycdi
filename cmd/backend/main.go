@@ -19,14 +19,22 @@ import (
 )
 
 func main() {
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// One-shot subcommand: deterministic post-restore cleanup
+	// (docs/runbooks/disaster-recovery.md). Runnable as a Job — the DB
+	// steps need no ServiceAccount token.
+	if len(os.Args) > 1 && os.Args[1] == "post-restore" {
+		os.Exit(backend.PostRestoreMain(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, log))
+	}
+
 	cfg, err := backend.ParseFlags(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(2)
 	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	b, err := backend.New(ctx, cfg, log)
 	if err != nil {
