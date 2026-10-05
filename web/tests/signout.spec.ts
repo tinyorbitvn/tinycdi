@@ -37,7 +37,7 @@ test("account menu: keyboard reachable, axe-clean, Escape returns focus", async 
   await trigger.focus();
   await expect(trigger).toBeFocused();
   await page.keyboard.press("ArrowDown");
-  const signOut = page.getByRole("menuitem", { name: "Sign out" });
+  const signOut = page.getByRole("menuitem", { name: "Sign out", exact: true });
   await expect(signOut).toBeFocused();
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
@@ -50,7 +50,7 @@ test("sign out without a provider end-session lands on the signed-out page and d
   await login(page);
   const seen = recordApi(page);
   await page.getByRole("button", { name: "Ada Lovelace" }).click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
 
   await page.waitForURL("**/signed-out");
   await expect(page.getByRole("heading", { name: "You have signed out" })).toBeVisible();
@@ -85,11 +85,33 @@ test("sign out continues at the identity provider when the backend returns an en
   );
   await login(page);
   await page.getByRole("button", { name: "Ada Lovelace" }).click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
 
   await page.waitForURL(IDP_LOGOUT);
   await expect(page.getByRole("heading", { name: "Logged out at the provider" })).toBeVisible();
   // The portal session is gone: the probe says so.
+  const probe = await page.request.get("/v1/session");
+  expect(await probe.json()).toEqual({ authenticated: false });
+});
+
+// ADR 0007: "Sign out everywhere" confirms (naming the tenant scope), then
+// POSTs /v1/me/sessions:revoke-all and lands on the same signed-out page.
+test("sign out everywhere confirms the tenant scope, then ends all sessions", async ({ page }) => {
+  await login(page);
+  const seen = recordApi(page);
+  await page.getByRole("button", { name: "Ada Lovelace" }).click();
+  await page.getByRole("menuitem", { name: "Sign out everywhere" }).click();
+
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("tenant acme");
+  await expect(dialog).toContainText("including this one");
+  expect(seen.filter((s) => s.includes("revoke-all"))).toEqual([]);
+
+  await dialog.getByRole("button", { name: "Sign out everywhere" }).click();
+  await page.waitForURL("**/signed-out");
+  await expect(page.getByRole("heading", { name: "You have signed out" })).toBeVisible();
+  expect(seen).toContain("POST /v1/me/sessions:revoke-all");
   const probe = await page.request.get("/v1/session");
   expect(await probe.json()).toEqual({ authenticated: false });
 });
