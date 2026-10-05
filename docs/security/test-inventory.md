@@ -54,11 +54,33 @@ substitute for review).
   session intact when the store transaction fails (503 when unwired).
 - `internal/api/tenant_scope_test.go`, `events_test.go`, `statusview_test.go`,
   `me_test.go`, `owner_test.go`, `principal.go` — tenant scoping, curated
-  events, principal directory fallbacks.
+  events, principal directory fallbacks; `TestProjectConditions_IntentBehind`
+  covers the intent-drift condition projection (#125).
 - `internal/api/workspaces_handlers_test.go` — SEC-01 (retainedDataRef owner
   bypass) and SEC-I7 (malformed pageToken) regression coverage.
 - `internal/api/adminquota_test.go`, `quota_test.go`,
   `internal/backend/tenantquota_test.go` — quota enforcement paths.
+- `internal/api/adminuserlimit_test.go`,
+  `internal/provisioning/userlimit_test.go` — per-principal running limits
+  (#121): tenant-admin authz and cross-tenant denial, set/clear/default
+  writes with audit (`admin.user_limit.*`, incl. denied attempts),
+  `UserLimitReached` → 409 mapping, enforcement inside the reservation tx
+  (`TestUserLimit_ConcurrentLaunches`, `TestUserLimit_ReleasePending`,
+  `TestUserLimit_RetainDiskOnlyHold`, `TestUserLimit_NoRowsUnlimited`,
+  `TestUserLimit_MissingWorkspaceRowFailsClosed`), caller-facing
+  `userLimits` view on `GET /v1/quota` (`TestQuota_UserLimitFields`);
+  migration 022 tables.
+- `internal/api/auditroutes_test.go` — dedicated audit events on every
+  mutating + `/v1/admin/` route (#120): `TestAuditCoverage_SpecMatchesTable`
+  pins the openapi↔table pairing, denied admin attempts record
+  `denied`+actor, `role=tenant-admin` marks elevated use,
+  `TestAudit_SinkFailureStillSucceeds` /
+  `TestAudit_HandlerPanicStillEmits` pin the sink-failure and panic paths.
+- `internal/observability/audit_test.go` — `JSONSink` schema, `ActorRef`
+  pseudonymisation, sensitive-key redaction, and `GuardedSink` failure
+  signalling (`TestGuardedSink_ReportsFailureNeverPropagates`);
+  `internal/observability/metrics_test.go` pins the audit-write-error
+  metric label bounds (`TestIncAuditWriteError`).
 - `internal/api/openapi_contract_test.go` — public API contract vs
   `openapi.yaml`.
 
@@ -82,7 +104,10 @@ substitute for review).
 - `internal/gateway/proxy_test.go` — response policy pinning (SEC-07),
   upstream path canonicalization + allowlist (SEC-20), control-surface
   bearer auth and revoke isolation (SEC-1/2), strict upgrade detection
-  (SEC-3), lease/cookie plumbing.
+  (SEC-3), lease/cookie plumbing; `TestProxy_StripsClientAuth` pins the
+  broker-injected `Authorization` overwrite (ADR 0008) and
+  `TestControlAudit_OperatorSurface` the control-surface audit events
+  incl. bearer denials (#120).
 - `internal/gateway/rehydrate_test.go` — digest → lease rehydration,
   singleflight per digest, expired/revoked rejection.
 - `internal/gateway/authorization.go` fencing covered by
@@ -147,9 +172,12 @@ substitute for review).
   (caller's included), leases revoked principal-scoped (pre-digest rows
   covered) with drain accounting, outstanding tickets revoked, replayed
   cookies resolve to dead leases, tenant boundary held, idempotent, both
-  redeem/revoke interleavings pinned on real row locks, and a `-race`
+  redeem/revoke interleavings pinned on real row locks, a `-race`
   revoke-all × redeem × per-session-sign-out run proving no deadlock and no
-  live lease left for a destroyed session; migration 023 indexes.
+  live lease left for a destroyed session, and
+  `TestRevokePrincipalSessions_MultiTicketInversion` racing the sweep
+  against a multi-ticket redeem (the deterministic `lockByKeysInOrderTx`
+  order); migration 023 indexes (`TestMigration023_Idempotent`).
 - `internal/broker/lease_session_test.go` — bound-portal-session re-check on
   every live-lease read (S17 defence-in-depth): renew/attach/claim revoke a
   lease whose session row was deleted, epoch-staled (restored dump) or
@@ -223,10 +251,19 @@ substitute for review).
   template snapshot image-digest verification (SEC-10).
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
-  ownership and lifecycle edges.
+  ownership and lifecycle edges; `intent_drift_test.go`
+  (`TestIntentBehindDrift`) covers the `IntentBehind` condition +
+  edge-triggered Warning event on intent-fence drift (#125), and
+  `internal/provisioning/k8sapplier_test.go`
+  (`TestK8sApplierIntentDrift`) the `intent-behind` marker stamping on a
+  dropped drifted intent.
 - `deploy/helm/chart_test.go` — chart hardening/render guards (SEC-02, 06,
   08, 09, 29, 31–37): ServiceAccount scoping, TLS-required edges,
   NetworkPolicy rendering, metrics exposure, schema guards.
+- `deploy/helm/chart_guards_test.go` — render guards (#119):
+  `TestOperatorLeaderElectionGuard` fails `leaderElect=false` with
+  `replicas>1`, `TestMetricsListenerIsolation` pins the metrics port to
+  `allow-metrics-scrape`/`prometheusPeers` in every edgeIngress mode.
 - `deploy/helm/chart_hardening_test.go`, `chart_edgepolicy_test.go`,
   `chart_sessiondomain_test.go`, `chart_sessiondomain_case_test.go`,
   `chart_signout_test.go`, `chart_tenantquota_test.go`,
@@ -245,7 +282,10 @@ Security-relevant subset:
 - `session_cookie_liveness_test.go` — two-replica cookie survival through
   streaming + restarts (FX-R26).
 - `session_idtoken_test.go` — sealed id_token round trip on real Postgres.
-- `api_admission_test.go` — admission/authn boundary incl. SEC-03/SEC-27.
+- `api_admission_test.go` — admission/authn boundary incl. SEC-03/SEC-27;
+  `TestSessionEpochRotation` proves `platform_meta.session_epoch` rotation
+  kills every restored session row (S23), `TestIntentRevisionOrdering`
+  the intent-fence ordering on real Postgres.
 - `principal_directory_test.go` — directory-driven display identity.
 - `kasm_adapter_test.go` — adapter contract vs real kasmweb images.
 - `postgres_outage_test.go`, `backend_restart_test.go`,
@@ -381,5 +421,16 @@ context):
   (`tests/integration/rate_limit_pg_test.go`, B6); `/v1/launch` shares
   the same limiter construction but has no two-replica abuse drill of
   its own.
+- The post-restore drill (`hack/quickstart/restore-drill.sh`, S23) is a
+  manual kind runbook script — executed and recorded once
+  (`docs/runbooks/disaster-recovery.md` "Restore drill — executed"), not
+  a per-PR or scheduled CI gate, so bit-rot in the drill/tool pair is
+  only caught when someone runs it.
+- The audit stream is stdout JSONL behind `GuardedSink`: emission and
+  shape are guaranteed, sink loss is signalled via
+  `tinycdi_audit_write_errors_total`, but durability and tamper-evidence
+  depend entirely on the operator's log pipeline — there is no
+  signed/hashed audit log test because the product does not produce one
+  (runbook "Log integrity").
 - Branch-protection drift is only as good as the last run of
   `setup-repo-protection.sh`.
