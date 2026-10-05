@@ -300,6 +300,10 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	// The pod cannot observe its Deployment's replica count (no RBAC for it
+	// and it should not need any), so "multiple replicas without election"
+	// is a deploy-time hazard only the chart can catch — tinycdi.validate
+	// fails the render on operator.replicas>1 with operator.leaderElect=false.
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
