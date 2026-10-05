@@ -139,7 +139,9 @@ type Config struct {
 	// request carries a live session (FX-R30), else it derives like
 	// ratelimit.ClientKey: the socket peer, or the right-most untrusted
 	// X-Forwarded-For entry when the peer sits inside TrustedProxies.
-	LaunchLimiter *ratelimit.Limiter
+	// The backend supplies a Postgres-window SharedLimiter in merged mode
+	// and a per-replica Limiter in split mode (ADR 0006 G2).
+	LaunchLimiter ratelimit.Allower
 	// TrustedProxies lists the CIDRs of reverse proxies in front of the
 	// session listener whose X-Forwarded-For claims are trusted (S18):
 	// it feeds both the launch limiter's client key and the forwarded

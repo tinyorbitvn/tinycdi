@@ -245,7 +245,7 @@ func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.H
 		RevokeDeadline:      150 * time.Millisecond,
 		ControlToken:        "control-test-token",
 	}
-	if err := b.newGateway(cfg, bc, broker.GatewayIdentity{ID: "gw-test", Audience: "session.test"}, nil, nil); err != nil {
+	if err := b.newGateway(cfg, bc, broker.GatewayIdentity{ID: "gw-test", Audience: "session.test"}, nil, nil, nil); err != nil {
 		t.Fatalf("newGateway: %v", err)
 	}
 	t.Cleanup(func() { b.gw.Close() })

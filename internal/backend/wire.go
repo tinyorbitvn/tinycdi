@@ -47,34 +47,18 @@ const defaultMergedGatewayID = "backend"
 
 // E7 rate-limit tuning: bursts are fixed per route family (the flags set
 // the per-minute rate only) and buckets are LRU-bounded so a sprayed
-// client-key space cannot grow memory. Rate and burst are divided by
-// -rate-limit-replicas so the aggregate across replicas approximates the
-// configured bound (RL-1) — the flags name the Deployment-wide budget,
-// not one pod's.
+// client-key space cannot grow memory. In merged mode the bound is
+// enforced by a Postgres fixed window shared across replicas (ADR 0006
+// option B); -rate-limit-replicas divides each budget into the
+// per-replica LOCAL ceiling — the fail-open fallback during a store
+// outage and the cap no single pod may exceed while the store is
+// healthy. In split mode (no database) the divided local limiter is the
+// whole enforcement.
 const (
 	loginRateBurst   = 10
 	launchRateBurst  = 20
 	rateLimitMaxKeys = 100_000
 )
-
-// launchLimiter builds the /v1/launch limiter for cfg: the flag names the
-// aggregate bound and the replica count divides it so an even spread
-// grants one key ~the configured rate total, not N× (RL-1). now injects a
-// clock for tests; nil means time.Now.
-func launchLimiter(cfg Config, now func() time.Time) *ratelimit.Limiter {
-	rate, burst := ratelimit.PerReplica(cfg.LaunchRate, launchRateBurst, cfg.RateLimitReplicas)
-	return ratelimit.New(rate, burst, rateLimitMaxKeys, now)
-}
-
-// loginLimiters builds the login-family limiter pair for cfg — the shared
-// bucket (login start, session probe, callback) and the per-IP callback
-// ceiling at 10× the *divided* login budget so the FX-R30 multiplier
-// stays exact per replica (RL-1).
-func loginLimiters(cfg Config, now func() time.Time) (shared, ceiling *ratelimit.Limiter) {
-	rate, burst := ratelimit.PerReplica(cfg.LoginRate, loginRateBurst, cfg.RateLimitReplicas)
-	return ratelimit.New(rate, burst, rateLimitMaxKeys, now),
-		ratelimit.New(10*rate, 10*burst, rateLimitMaxKeys, now)
-}
 
 // wire resolves secrets, builds every handler, binds every enabled listener
 // and records the background loops and closers on b. On error the caller
@@ -410,6 +394,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		expiry.Run(ctx, broker.NewK8sRunningSource(kcache), cfg.ExpiryInterval, log)
 	})
 
+	// Rate-limit window sweep (ADR 0006): expired fixed-window rows are
+	// deleted on the leader's tick — the DELETE is idempotent, the lock
+	// just keeps every replica from paying the scan.
+	b.singletons = append(b.singletons, rateLimitWindowSweepLoop(db, log))
+
 	// The loops registered above are read-modify-write without a claim, so
 	// only the replica holding the Postgres leader lock runs them.
 	b.electSingletons(db, leaderRetryInterval)
@@ -468,7 +457,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		if err != nil {
 			return err
 		}
-		if err := b.newGateway(cfg, lg, id, metrics, lg); err != nil {
+		if err := b.newGateway(cfg, lg, id, metrics, lg, sharedLaunchLimiter(cfg, db, log, b.rateLimitErrHook(), b.rateLimitDegradedHook())); err != nil {
 			return err
 		}
 	}
@@ -500,13 +489,16 @@ func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, id broke
 	// wait for.
 	b.markCacheSynced()
 	// P6: split/test mode has no session directory — sessions live in this
-	// process, exactly as in v0.1.
-	return b.newGateway(cfg, bc, id, metrics, nil)
+	// process, exactly as in v0.1. G2 (ADR 0006): split mode owns no
+	// Postgres handle, so /v1/launch keeps the divided local limiter.
+	return b.newGateway(cfg, bc, id, metrics, nil, launchLimiter(cfg, nil))
 }
 
 // newGateway builds the session gateway handler and records it for Drain.
-// sessions is the optional session directory (nil in split mode).
-func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.GatewayIdentity, metrics *observability.Metrics, sessions gateway.SessionDirectory) error {
+// sessions is the optional session directory (nil in split mode); launch
+// is the /v1/launch limiter — Postgres-backed in merged mode, divided
+// local in split mode (ADR 0006).
+func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.GatewayIdentity, metrics *observability.Metrics, sessions gateway.SessionDirectory, launch ratelimit.Allower) error {
 	upCA, err := upstreamCAPool(cfg.UpstreamCA)
 	if err != nil {
 		return err
@@ -537,7 +529,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		ControlToken:   cfg.ControlToken,
 		RenewInterval:  cfg.RenewInterval,
 		RevokeDeadline: cfg.RevokeDeadline,
-		LaunchLimiter:  launchLimiter(cfg, nil),
+		LaunchLimiter:  launch,
 		TrustedProxies: trusted,
 		Metrics:        metrics,
 		Audit:          observability.NewJSONSink(os.Stdout),
@@ -651,21 +643,23 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
 
-	// E7 + FX-R30: the login family shares one token bucket per KEY —
-	// /v1/login, /v1/auth/callback and the session probe (backlog 12).
-	// /v1/login keeps the plain client-IP key: it is the anonymous login
-	// start, and keying it by cookie would buy every forged value a store
-	// read before the refusal (advisor review). The probe keys on a
-	// validated session digest and the callback on its validated OIDC
-	// state — plus a per-IP ceiling at 10x the login budget, so states an
-	// attacker mints through IP-limited logins cannot amplify throughput
-	// past a bounded multiplier. Anonymous fallback everywhere is the
-	// trusted-proxy client key (S18), unchanged.
+	// E7 + FX-R30: the login family shares one budget per KEY —
+	// /v1/login, /v1/auth/callback and the session probe (backlog 12),
+	// backed in merged mode by the Postgres window over the divided local
+	// ceiling (ADR 0006). /v1/login keeps the plain client-IP key: it is
+	// the anonymous login start, and keying it by cookie would buy every
+	// forged value a store read before the refusal (advisor review). The
+	// probe keys on a validated session digest and the callback on its
+	// validated OIDC state — plus a per-IP ceiling at 10x the login
+	// budget, so states an attacker mints through IP-limited logins
+	// cannot amplify throughput past a bounded multiplier. Anonymous
+	// fallback everywhere is the trusted-proxy client key (S18),
+	// unchanged.
 	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
-	loginLimiter, callbackCeiling := loginLimiters(cfg, nil)
+	loginLimiter, callbackCeiling := sharedLoginLimiters(cfg, db, b.log, b.rateLimitErrHook(), b.rateLimitDegradedHook())
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())

@@ -1,9 +1,60 @@
 # ADR 0006 — rate-limiter state placement (per-replica vs Postgres-backed)
 
-Status: **proposed** — options priced for the v0.4 decision. The advisor
-picks before the build tasks; this note changes no behaviour.
+Status: **accepted — implemented** (v0.4; see Decision below)
 
 Date: 2026-10-05
+
+## Decision
+
+The advisor picked **option B** (2026-10-05), with these guardrails:
+
+- **G1 — fail-open with a floor.** A store error falls back to the
+  divided local limiter, never to unlimited and never to a hard refusal:
+  every limited route's completion already needs Postgres, so the outage
+  degrades to option-A behaviour.
+- **G2 — split mode stays local-only.** A `-broker-url` session gateway
+  owns no Postgres handle, so `/v1/launch` there keeps the divided local
+  bucket rather than growing a broker RPC.
+- **i — effective bound = min(shared window, local ceiling).** The
+  divided local bucket stays on BOTH as the fail-open fallback AND as a
+  per-replica ceiling while Postgres is healthy: a locally-refused
+  request never reaches the store, which also bounds the upsert rate a
+  key spray can cause.
+- **ii — one upsert per check; leader-only cleanup.** The check is a
+  single `INSERT ... ON CONFLICT` returning the count (no second query);
+  expired windows are deleted only by the replica holding the Postgres
+  leader lock (the existing singleton machinery).
+- **iii — observability.** `tinycdi_rate_limit_store_errors_total{route}`
+  counts real store failures only — checks skipped while the circuit
+  breaker is open never reach the store, so a sustained outage shows
+  ~one increment per 10 s cool-down per limiter, not one per request;
+  `tinycdi_rate_limit_store_degraded{route}` (gauge) mirrors the
+  breaker. Fallback ENTRY and EXIT each log one line (edge-triggered,
+  never per request).
+- **iii-bis — latency bound + circuit breaker.** Every store check runs
+  under a 500 ms deadline (`storeCallTimeout`, always — healthy or
+  probing), so a slow-but-alive Postgres can add at most ~500 ms to one
+  request. A store error/timeout opens a 10 s cool-down: checks skip
+  the store entirely (the divided local limiter decides), then exactly
+  one request probes — single-flight, the rest keep their local
+  verdict. Probe success closes the circuit; failure reopens it for
+  another cool-down.
+- **iv — migration.** `rate_limit_window` (route, bucket_key,
+  window_start, count) + an index on `window_start`; expand-only, no
+  backfill, rolling-upgrade safe.
+- `-rate-limit-replicas` keeps its value and rendering
+  (`backend.replicas`) but its meaning changed: it divides each budget
+  into the per-replica LOCAL ceiling, not the aggregate bound — the
+  shared window makes the flags exact aggregates at every replica count.
+
+Implemented: `internal/store/rate_limit.go` (one-statement window
+check + sweep), `internal/ratelimit/shared.go` (`SharedLimiter` —
+min(Postgres window, divided local), fail-open, 500 ms per-call
+deadline + 10 s single-flight-probe circuit breaker, edge-triggered
+logs), wiring in `internal/backend/wire.go`, migration
+`021_rate_limit_window`. The B6 gate lives in
+`tests/integration/rate_limit_pg_test.go` (two-replica shared-window
+abuse + Postgres outage fail-open/recovery).
 
 ## Context
 
@@ -314,6 +365,10 @@ routes can complete anyway.
   decision (floor divisor vs deprecation), and the split-mode launch
   carve-out. The B6 multi-replica abuse test becomes the correctness
   gate.
+- Post-review hardening (PR #109, MINOR finding): the store check
+  carries a 500 ms per-call deadline and a 10 s open-circuit cool-down
+  with a single-flight probe — a persistently slow Postgres costs one
+  bounded probe per cool-down instead of a per-request stall.
 - If A is kept: pin guidance stays documentation-only; the three
   inaccuracies are accepted as documented bounds and B6 only needs to
   *measure* them, not gate on exactness.

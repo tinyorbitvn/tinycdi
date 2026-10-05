@@ -10,6 +10,26 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
+// TestWiredLimiters_SharedWindow (ADR 0006): the merged-mode builders must
+// wrap the divided local buckets in the Postgres-window limiter — if the
+// wiring ever hands a bare *Limiter to a listener, the aggregate bound
+// silently reverts to per-replica enforcement. (db is nil here only to
+// keep the test store-free; nothing calls Allow on it.)
+func TestWiredLimiters_SharedWindow(t *testing.T) {
+	cfg := Config{LoginRate: 30, LaunchRate: 60, RateLimitReplicas: 2}
+	shared, ceiling := sharedLoginLimiters(cfg, nil, nil, nil, nil)
+	if _, ok := shared.(*ratelimit.SharedLimiter); !ok {
+		t.Fatalf("login limiter = %T, want *ratelimit.SharedLimiter", shared)
+	}
+	if _, ok := ceiling.(*ratelimit.SharedLimiter); !ok {
+		t.Fatalf("callback ceiling = %T, want *ratelimit.SharedLimiter", ceiling)
+	}
+	l := sharedLaunchLimiter(cfg, nil, nil, nil, nil)
+	if _, ok := l.(*ratelimit.SharedLimiter); !ok {
+		t.Fatalf("launch limiter = %T, want *ratelimit.SharedLimiter", l)
+	}
+}
+
 // TestWiredLimiters_ReplicaDivision (RL-1) guards the PerReplica call in
 // the limiter builders: it asserts the *effective* rate and burst of the
 // limiters wire hands to the listeners, so dropping the division (which
