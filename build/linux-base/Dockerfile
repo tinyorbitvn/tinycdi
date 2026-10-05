@@ -36,6 +36,10 @@ ARG LIBEXPAT1_APT_VERSION=2.5.0-1+deb12u4
 # apt pin per docs/compatibility.md: the base digest ships
 # 10.42-1+deb12u1; deb12u2 fixes CVE-2026-103111 (HIGH).
 ARG LIBPCRE2_APT_VERSION=10.42-1+deb12u2
+# apt pin per docs/compatibility.md: the base digest ships
+# 5.36.0-7+deb12u3; deb12u4 fixes CVE-2026-13221, -8376, -42496,
+# -42497, -48962, -57432 and -57433 across the perl family.
+ARG PERL_APT_VERSION=5.36.0-7+deb12u4
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -44,7 +48,10 @@ RUN apt-get update \
       x11-xserver-utils x11-utils dbus-x11 \
       fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-mono \
       fonts-wqy-microhei \
-      perl libswitch-perl libyaml-tiny-perl libhash-merge-simple-perl \
+      "perl=${PERL_APT_VERSION}" "perl-base=${PERL_APT_VERSION}" \
+      "perl-modules-5.36=${PERL_APT_VERSION}" \
+      "libperl5.36=${PERL_APT_VERSION}" \
+      libswitch-perl libyaml-tiny-perl libhash-merge-simple-perl \
       libscalar-list-utils-perl liblist-moreutils-perl libtry-tiny-perl \
       libdatetime-perl libdatetime-timezone-perl \
       ssl-cert xauth x11-xkb-utils xkb-data procps \
