@@ -300,9 +300,7 @@ Controls:
   for WebSocket (SEC-23, `internal/backend/listeners.go:15-62`).
 
 Open questions: A6-S4's residual window (two streams for at most one renew
-cycle when a replica dies mid-claim); A6-S18's remainder — whether KasmVNC's
-own brute-force protection still means anything behind an authenticating
-proxy, and what else the client can influence in the forwarded chain.
+cycle when a replica dies mid-claim).
 
 ### Boundary 6 — session listener ↔ workspace pod / KasmVNC
 
@@ -458,7 +456,7 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
 | S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Tests `signout_test.go` (api, broker, gateway) |
-| S18 | Client address chain gateway → KasmVNC | Partially closed: client XFF never reaches the runtime and only trusted proxies shift rate-limit keys (`forwarded_test.go`); open: whether pod-side brute-force protection is meaningful behind the authenticating gateway |
+| S18 | Client address chain gateway → KasmVNC | Closed (ADR 0008): client XFF never reaches the runtime and only trusted proxies shift the forwarded keys (`forwarded_test.go`); the pod-side 5/10 blacklist is correctly keyed on the derived client address and stays as defence-in-depth — credential guesses are unreachable by construction since `Authorization` is broker-injected on every proxied request (`TestProxy_StripsClientAuth`) |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's
 ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is
@@ -477,11 +475,19 @@ Additional items found while writing this document (not from A6):
 - **Portal idle-extension depends on lease activity** — verify a stolen
   portal cookie alone cannot extend itself, and that idle extension only
   credits input activity measured server-side.
-- **Metrics listener** is scrape-only but has no auth; confirm chart
-  NetworkPolicy + docs keep it off the edge path.
-- **Operator leader election off by default** — two simultaneous operators
-  would double-drive reconciliation; a deploy-time footgun rather than a
-  code bug.
+- **Metrics listener** is scrape-only but has no auth — Implemented:
+  served on the dedicated ClusterIP `backend-metrics` Service; the only
+  rule opening the metrics port is `allow-metrics-scrape` admitting
+  exactly `networkPolicy.prometheusPeers`, and no edge rule (ipBlock, any
+  or cilium `edgeIngress`) carries it (`TestMetricsListenerIsolation`,
+  `TestEdgePolicyNeverOpensInternalPort`); the observability runbook tells
+  operators to keep it off the edge path.
+- **Operator leader election off by default** — Implemented: election is
+  on by default since v0.3.0 and `operator.leaderElect=false` with
+  `operator.replicas>1` now fails the chart render (`tinycdi.validate`;
+  `TestOperatorLeaderElectionGuard`); the binary cannot observe the
+  replica count, so the guard is chart-side only (cmd/operator note).
+  Single-replica installs (`replicas: 1`) may still run unelected.
 - **`kasmweb/*` third-party images** — the adapter neutralizes their startup
   but they carry KasmVNC 1.4.0 (vs the pinned 1.5.0 in TinyCDI-built images);
   the catalog gate enforces a floor — reviewer should confirm the floor and
