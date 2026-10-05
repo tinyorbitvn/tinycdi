@@ -300,9 +300,7 @@ Controls:
   for WebSocket (SEC-23, `internal/backend/listeners.go:15-62`).
 
 Open questions: A6-S4's residual window (two streams for at most one renew
-cycle when a replica dies mid-claim); A6-S18's remainder — whether KasmVNC's
-own brute-force protection still means anything behind an authenticating
-proxy, and what else the client can influence in the forwarded chain.
+cycle when a replica dies mid-claim).
 
 ### Boundary 6 — session listener ↔ workspace pod / KasmVNC
 
@@ -458,7 +456,7 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
 | S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Tests `signout_test.go` (api, broker, gateway) |
-| S18 | Client address chain gateway → KasmVNC | Partially closed: client XFF never reaches the runtime and only trusted proxies shift rate-limit keys (`forwarded_test.go`); open: whether pod-side brute-force protection is meaningful behind the authenticating gateway |
+| S18 | Client address chain gateway → KasmVNC | Closed (ADR 0008): client XFF never reaches the runtime and only trusted proxies shift the forwarded keys (`forwarded_test.go`); the pod-side 5/10 blacklist is correctly keyed on the derived client address and stays as defence-in-depth — credential guesses are unreachable by construction since `Authorization` is broker-injected on every proxied request (`TestProxy_StripsClientAuth`) |
 | S19 | Sign-out-everywhere vs the principal's other sessions | Implemented (ADR 0007; `RevokeAllSessionsHandler` → `Broker.RevokePrincipalSessions`, `internal/api/revokeall.go`, `internal/broker/sessions.go`): `POST /v1/me/sessions:revoke-all` destroys every portal session of the principal **in the caller's tenant** — caller's own session included — and revokes its active leases and outstanding tickets in one store transaction (lock order tickets → sessions → leases, identical to `RedeemTicket`/`RevokePortalSession`; both redeem interleavings and a `-race` three-way run are pinned on real row locks). Streams die within one renew cycle on every replica; every revoked session's cookie replays to 401. Failure rolls back whole (500, caller stays signed in — never a partial revoke reported as success). No IdP back-channel logout; the provider session ends only via the same RP-initiated `endSessionUrl` as logout. Tests `revokeall_test.go` (api, broker, gateway) |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's

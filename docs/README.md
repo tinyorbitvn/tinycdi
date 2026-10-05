@@ -71,6 +71,9 @@
 - [adr/0007-sign-out-everywhere.md](adr/0007-sign-out-everywhere.md) —
   principal-scoped revocation of all portal sessions, leases and tickets
   (proposed)
+- [adr/0008-kasmvnc-bruteforce.md](adr/0008-kasmvnc-bruteforce.md) —
+  KasmVNC endpoint brute-force posture: reachability and credential
+  channel analysis closing threat-model S18 (accepted — no build)
 
 ## Elsewhere in the repo
 
