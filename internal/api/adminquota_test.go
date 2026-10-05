@@ -89,7 +89,8 @@ func (f *fakeAdminQuotaSource) currentVersion() string {
 
 // newAdminQuotaEnv mounts GET/PUT /v1/admin/tenants/{tenant}/quota backed by
 // src; managed lists the tenants declared via -tenant-quotas (config-owned).
-func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]bool) *testEnv {
+// opts apply With* knobs (e.g. WithAuditSink) to the handler before mount.
+func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]bool, opts ...func(*AdminQuotaHandler)) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
@@ -108,9 +109,13 @@ func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]boo
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	mux := http.NewServeMux()
+	h := NewAdminQuotaHandler(src, newFakeDirectory(), defaultTenants(), managed)
+	for _, o := range opts {
+		o(h)
+	}
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(src, newFakeDirectory(), defaultTenants(), managed))
+	MountAdminQuotaRoutes(mux, a, h)
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
