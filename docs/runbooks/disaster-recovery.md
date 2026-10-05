@@ -352,9 +352,12 @@ Steps 1–3 are the parts that differ from backup-restore.md.
 
      The dump-side desired state is *not* forced onto the cluster — the
      live CR is the truth for workload state; the row is aligned to
-     describe it. A stopped-after-dump workspace stays stopped; users
-     re-drive from there (each new intent is adoptable once the row no
-     longer trails the CR).
+     describe it. Alignment is **forward-only**: `intent_revision` moves
+     up to the CR's, never down — rewinding a row re-presents revisions
+     the fence already recorded and breaks the gapless outbox stream. A
+     stopped-after-dump workspace stays stopped; users re-drive from
+     there (each new intent is adoptable once the row no longer trails
+     the CR).
 6. **Rebuild retained inventory + reconcile quota** as in the rebuild
    path (steps 7–8): `RetainedSync`/`ImportRetained` for PVC-side truth,
    one recovery pass for held reservations, `tinycdi_quota_drift` at 0
