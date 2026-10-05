@@ -49,27 +49,60 @@ type Lease struct {
 	ExpiresAt       time.Time `json:"expiresAt"`
 }
 
-// loadLease fetches the lease row including its lifecycle state.
-func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, error) {
+// portalSessionCheck is the liveness of the lease's bound portal session,
+// evaluated in the same statement that loads the lease row.
+type portalSessionCheck string
+
+const (
+	// portalSessionOK — no binding recorded, or the bound row is live.
+	portalSessionOK portalSessionCheck = "ok"
+	// portalSessionAbsent — the bound sessions row is gone.
+	portalSessionAbsent portalSessionCheck = "absent"
+	// portalSessionInvalid — the bound row exists but fails the epoch or
+	// absolute-expiry check (same semantics as RedeemTicket's re-check).
+	portalSessionInvalid portalSessionCheck = "invalid"
+)
+
+// currentSessionEpochSQL resolves the session epoch inside the lease read,
+// mirroring store.currentEpochSQL: a rotation (the restore procedure)
+// invalidates every bound lease on its very next check.
+const currentSessionEpochSQL = `(SELECT value FROM platform_meta WHERE key = 'session_epoch')`
+
+// loadLease fetches the lease row including its lifecycle state and the
+// liveness of its bound portal session (S17 defence-in-depth): the CASE
+// rides the same row read, joined to sessions by primary key, so the check
+// costs one extra indexed probe per call — no additional round trip.
+func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, portalSessionCheck, error) {
 	var (
 		l          Lease
 		state      string
 		ownerTab   *string
 		ownerEpoch *int64
+		portalSess portalSessionCheck
 	)
 	err := b.db.Pool().QueryRow(ctx,
-		`SELECT id, workspace_id, tenant_id, principal_subject,
-			runtime_generation, runtime_uid, fencing_version, gateway_id,
-			state, expires_at, stream_epoch, stream_owner_tab, stream_owner_epoch
-		 FROM connection_lease WHERE id = $1`, leaseID).
+		`SELECT l.id, l.workspace_id, l.tenant_id, l.principal_subject,
+			l.runtime_generation, l.runtime_uid, l.fencing_version, l.gateway_id,
+			l.state, l.expires_at, l.stream_epoch, l.stream_owner_tab, l.stream_owner_epoch,
+			CASE
+				WHEN l.portal_session_digest IS NULL THEN 'ok'
+				WHEN s.id IS NULL THEN 'absent'
+				WHEN s.epoch IS DISTINCT FROM `+currentSessionEpochSQL+`
+				  OR (s.expires_at IS NOT NULL AND s.expires_at <= now()) THEN 'invalid'
+				ELSE 'ok'
+			END
+		 FROM connection_lease l
+		 LEFT JOIN sessions s ON s.id = encode(l.portal_session_digest, 'hex')
+		 WHERE l.id = $1`, leaseID).
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
-			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch)
+			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch,
+			&portalSess)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Lease{}, "", ErrLeaseInvalid
+		return Lease{}, "", "", ErrLeaseInvalid
 	}
 	if err != nil {
-		return Lease{}, "", fmt.Errorf("broker: lease lookup: %w", err)
+		return Lease{}, "", "", fmt.Errorf("broker: lease lookup: %w", err)
 	}
 	// The stored owner id counts only while it names the current stream
 	// (stream_owner_epoch = stream_epoch): a replica predating the columns
@@ -79,7 +112,7 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		uint64(*ownerEpoch) == l.StreamEpoch {
 		l.StreamOwnerTab = *ownerTab
 	}
-	return l, state, nil
+	return l, state, portalSess, nil
 }
 
 // closeStreamsTx zeroes a runtime generation's open_streams and anchors
@@ -100,8 +133,10 @@ func closeStreamsTx(ctx context.Context, tx store.Tx, wsUID string, gen uint64, 
 
 // liveLease validates a loaded lease: unknown -> ErrLeaseInvalid;
 // revoked/superseded/time-expired -> ErrRevoked (the lease is dead);
-// foreign gateway -> ErrDenied. Time-expired rows are lazily marked
-// 'expired' so the partial unique index frees the workspace.
+// bound portal session gone or invalid -> the lease is revoked on the spot
+// and -> ErrRevoked (S17 defence-in-depth); foreign gateway -> ErrDenied.
+// Time-expired rows are lazily marked 'expired' so the partial unique
+// index frees the workspace.
 //
 // The lazy expiry is authoritative for drain accounting, like RevokeLease:
 // the lease's streams can no longer report their close (every gateway path
@@ -111,7 +146,7 @@ func closeStreamsTx(ctx context.Context, tx store.Tx, wsUID string, gen uint64, 
 // concurrent transition (RowsAffected = 0) skips the accounting — whoever
 // moved the row owned it.
 func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID string, now time.Time) (Lease, error) {
-	l, state, err := b.loadLease(ctx, leaseID)
+	l, state, portalSess, err := b.loadLease(ctx, leaseID)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -133,10 +168,57 @@ func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID stri
 		})
 		return Lease{}, ErrRevoked
 	}
+	// S17 defence-in-depth: a lease minted under a portal session that is
+	// gone or no longer valid (signed out, absolutely expired, or carrying
+	// a pre-rotation epoch after a database restore) must die however it is
+	// reached — the sign-out revoke is one barrier, this check is the
+	// second, so a revoked lease resurrected by a DB restore cannot be
+	// renewed past its residual TTL and a copied cookie can never
+	// rehydrate it. The check rode the lease read (no extra round trip).
+	// The revoke runs before the gateway-identity check so ANY caller —
+	// renew, attach, claim, resolve, foreign probe — kills the dead row.
+	//
+	// Leases with NULL portal_session_digest are exempt by design: rows
+	// minted before the binding column existed carry no session to verify
+	// against, and revoking them on sight would mass-kill sessions still
+	// being renewed by pre-upgrade replicas during a rolling deploy. They
+	// keep the plain TTL lifecycle — a dying gateway stops renewing and
+	// the lease lapses inside one TTL — and the DR runbook's unconditional
+	// post-restore lease sweep covers them (RevokePortalSession cannot:
+	// it matches on the digest they lack).
+	if portalSess != portalSessionOK {
+		b.revokeDeadSessionLease(ctx, l, portalSess)
+		return Lease{}, ErrRevoked
+	}
 	if l.GatewayID != gw.ID {
 		return Lease{}, ErrDenied
 	}
 	return l, nil
+}
+
+// revokeDeadSessionLease revokes a live lease whose bound portal session
+// failed the liveness check — the same single-statement revoke plus
+// in-transaction drain accounting RevokeLeaseChanged performs — then
+// counts the detection and emits one log line. A concurrent transition
+// (another replica's renew won the revoke) counts nothing: the winner
+// already logged it.
+func (b *Broker) revokeDeadSessionLease(ctx context.Context, l Lease, reason portalSessionCheck) {
+	changed, err := b.RevokeLeaseChanged(ctx, l.ID)
+	switch {
+	case err != nil:
+		if b.log != nil {
+			b.log.Warn("portal-session lease revoke failed",
+				"lease", l.ID, "reason", string(reason), "err", err)
+		}
+	case changed:
+		if b.metrics != nil {
+			b.metrics.IncLeaseSessionMissing(string(reason))
+		}
+		if b.log != nil {
+			b.log.Info("lease revoked: bound portal session no longer valid",
+				"lease", l.ID, "reason", string(reason))
+		}
+	}
 }
 
 // boundCurrent verifies the lease's pinned incarnation is still the one the
