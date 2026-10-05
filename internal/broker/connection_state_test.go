@@ -221,7 +221,7 @@ func TestConnection_StreamOwnerTab(t *testing.T) {
 	db, b, clock, src := setup(t)
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
 	src.set(readyBinding(ws, "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	lease := leaseForSess(t, b, gwA, broker.PlatformID(ws), false, portalSess)
+	lease := leaseForSess(t, db, b, gwA, broker.PlatformID(ws), false, portalSess)
 
 	// Two claims of the same tab inside one poll interval: the owner is
 	// that tab on both — a restart re-claim stays "ours".
@@ -281,7 +281,7 @@ func TestConnection_StreamOwnerEpochStale(t *testing.T) {
 	db, b, clock, src := setup(t)
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
 	src.set(readyBinding(ws, "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	lease := leaseForSess(t, b, gwA, broker.PlatformID(ws), false, portalSess)
+	lease := leaseForSess(t, db, b, gwA, broker.PlatformID(ws), false, portalSess)
 
 	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), tabA); err != nil {
 		t.Fatalf("claim: %v", err)
