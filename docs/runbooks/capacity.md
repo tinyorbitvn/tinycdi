@@ -238,6 +238,7 @@ exposes no metrics endpoint (the chart pins `--metrics-bind-address=0`).
 | Lease health | `tinycdi_lease_failures_total{reason}` | any sustained increase — gateway↔broker or fencing issue |
 | Rehydration | `tinycdi_gateway_rehydrations_total{result}` | `miss`/`error` growth — restarts losing sessions or directory trouble |
 | Stream fencing | `tinycdi_gateway_streams_fenced_total` | spikes — replicas fighting over one lease's stream |
+| Session-bound lease kills | `tinycdi_lease_session_missing_total{reason}` | any increase — a sign-out revoke never landed, or a DB restore left leases bound to absent/stale sessions |
 | Logins | `tinycdi_logins_total{outcome}` | `denied`/`error` growth — IdP or gate misconfiguration, brute force |
 | Image age | `tinycdi_runtime_image_age_seconds{family}` | approaches `-image-stale-after` (default 14 d) — publish train overdue |
 | Rate limits | `tinycdi_rate_limited_total{route}` | sustained refusals — attack or too-tight limits |

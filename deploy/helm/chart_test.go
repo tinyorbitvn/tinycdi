@@ -3427,6 +3427,7 @@ var exportedMetricNames = map[string]bool{
 	"tinycdi_logins_total":                          true,
 	"tinycdi_runtime_image_age_seconds":             true,
 	"tinycdi_rate_limited_total":                    true,
+	"tinycdi_lease_session_missing_total":           true,
 }
 
 var metricNameRe = regexp.MustCompile(`tinycdi_[a-z0-9_]+`)

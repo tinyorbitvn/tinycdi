@@ -50,6 +50,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncRateLimitStoreError("login")
 	m.SetRateLimitStoreDegraded("login", true)
 	m.IncFrameReload("iframe")
+	m.IncSessionRevocation("ok")
+	m.IncLeaseSessionMissing("absent")
 	m.IncAuditWriteError("workspace.create")
 
 	want := []string{
@@ -72,6 +74,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_rate_limit_store_errors_total",
 		"tinycdi_rate_limit_store_degraded",
 		"tinycdi_session_frame_reloads_total",
+		"tinycdi_session_revocations_total",
+		"tinycdi_lease_session_missing_total",
 		"tinycdi_audit_write_errors_total",
 	}
 	fams := gatherFamilies(t, reg)
