@@ -132,6 +132,13 @@ substitute for review).
   digest-bound leases revoked with drain accounting, outstanding tickets
   revoked, redemption denied once the issuing session's row is gone,
   idempotent; migration 020 indexes.
+- `internal/broker/lease_session_test.go` — bound-portal-session re-check on
+  every live-lease read (S17 defence-in-depth): renew/attach/claim revoke a
+  lease whose session row was deleted, epoch-staled (restored dump) or
+  absolutely expired, with drain accounting and the
+  `tinycdi_lease_session_missing_total{reason}` counter; NULL-digest leases
+  stay exempt (rolling-upgrade safe); foreign-gateway and multi-replica
+  shapes.
 - `internal/broker/credentials_envtest_test.go` — per-workspace Secret
   credential reads.
 - `internal/broker/operator_stopped_test.go` +

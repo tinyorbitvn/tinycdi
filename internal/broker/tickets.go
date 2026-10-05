@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -115,6 +117,20 @@ func WithCredentialSource(src CredentialSource) Option {
 	return func(b *Broker) { b.creds = src }
 }
 
+// WithMetrics attaches the platform metric set: the broker counts leases it
+// revokes because the bound portal session is gone or invalid
+// (tinycdi_lease_session_missing_total). Nil disables the count.
+func WithMetrics(m *observability.Metrics) Option {
+	return func(b *Broker) { b.metrics = m }
+}
+
+// WithLogger attaches the logger for broker-initiated lease revocations
+// (the one-line record emitted when a bound portal session check fails).
+// Nil disables it.
+func WithLogger(l *slog.Logger) Option {
+	return func(b *Broker) { b.log = l }
+}
+
 // PlatformID is the platform workspace identity ("ws_<hex>") the broker
 // and the DB route on — aliased because the broker speaks it natively.
 // The Workspace CR's metadata.uid (RuntimeBinding.CRUID / linux.CRUID) is
@@ -182,6 +198,11 @@ type Broker struct {
 	maxBindingAge time.Duration
 	audience      string
 	creds         CredentialSource
+	// metrics counts broker-initiated lease revocations on a dead portal
+	// session; nil disables them.
+	metrics *observability.Metrics
+	// log emits the one-line records for those revocations; nil disables.
+	log *slog.Logger
 	// inputHook is invoked with the lease's principal on each recorded
 	// "input" activity event (D18); nil disables it.
 	inputHook func(ctx context.Context, principal string)

@@ -120,7 +120,7 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 	// whose renew loop merely hiccuped. A revoked/superseded/expired lease
 	// (a closed session) still fails with ErrLeaseInvalid — rendered 410 by
 	// the internal API.
-	l, state, err := b.loadLease(ctx, leaseID)
+	l, state, _, err := b.loadLease(ctx, leaseID)
 	if err != nil {
 		return err
 	}
