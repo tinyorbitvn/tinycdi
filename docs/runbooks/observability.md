@@ -131,3 +131,70 @@ only once the replica is serving **and** the Workspace informer is synced;
 and `/healthz` also on the session listener's in-cluster control surface.
 The frontend serves `/healthz` on its HTTPS port; the operator serves
 `/healthz` + `/readyz` on its probe port.
+
+## Audit events
+
+Security-significant actions are emitted as a dedicated **audit event
+stream**: one JSON object per line on the component's stdout
+(`observability.JSONSink`), separate from the per-request `http_request`
+structured-log record that covers every HTTP call. Ship the backend and
+gateway container logs to your log backend and the audit events arrive
+inline; they are distinguishable by the `action` field naming a domain
+action rather than `http.request`.
+
+Every record carries:
+
+| Field | Content |
+|---|---|
+| `time` | UTC emission timestamp |
+| `actor` | pseudonymous principal ref — `oidc:` + truncated SHA-256 of `issuer\|subject`, stable per user; `"anonymous"` when unauthenticated; `"gateway:<id>"` for gateway-side events; `"config:tenant-quotas"` for the config-driven quota apply |
+| `action` | the domain action (table below) |
+| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; empty for actions whose target is created inside the call |
+| `tenant` | the verified tenant of the caller |
+| `requestId` | the request's `X-Request-Id` correlation id (`"startup"` for the config apply) |
+| `outcome` | `success`, `failure` or `denied` (401/403) |
+| `errorCode` | the stable API error code on refusals (e.g. `CSRF_FAILED`, `QUOTA_MANAGED_BY_CONFIG`) |
+| `details` | non-secret context — attempted quota limits, `role=tenant-admin` when a shared route was used with the elevated role, `takeover` on ticket issue, `retained_data` on attach-creates, `workspace` on data attach, `leases_revoked` on sign-out |
+
+Emitted events:
+
+| `action` | Source | Covers |
+|---|---|---|
+| `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals and `QUOTA_MANAGED_BY_CONFIG` rejections; `details` carry the attempted limits |
+| `admin.quota.config_apply` | `-tenant-quotas` startup singleton | the platform-level quota write performed from configuration (leader replica only) |
+| `workspace.create` / `.start` / `.stop` / `.delete` | `/v1/workspaces` mutations | every lifecycle write, owner- and admin-scoped alike — `role=tenant-admin` marks elevated use |
+| `data.attach` / `data.purge` | `/v1/data/{id}/attach`/`/purge` | retained-disk claims and destructive purges, incl. admin action on other owners' records |
+| `connection.create` | `POST /v1/workspaces/{id}/connections` | launch-ticket issue — the ticket itself is never recorded |
+| `session.logout` | `POST /v1/logout` | the sign-out request |
+| `session.revoke` | sign-out + `POST /v1/control/revoke` | revocation of session-bound lease material; bearer-denied control attempts record `denied`/`unauthorized` |
+| `session.list` | `GET /v1/control/session` | the operator's replica-local session listing |
+| `session.host_mismatch` | gateway | a session cookie presented on the wrong workspace host |
+| `launch.redeem` / `launch.host_mismatch` | gateway `/v1/launch` | ticket redemption and per-workspace host binding denials |
+
+Redaction is enforced in the sink, not by convention: detail keys matching
+credentials (`token`, `cookie`, `session`, `authorization`, …) are replaced
+with `[REDACTED]` on write, request/response headers, bodies and query
+strings are never logged, and raw OIDC subjects/emails never reach the
+record — only the salted ref.
+
+### Log integrity — what TinyCDI guarantees vs what you must provide
+
+TinyCDI guarantees **emission and shape**: every audited action above
+produces exactly one record with a verified (not caller-supplied) actor,
+a per-process serialized write, and redaction of credential material.
+It does **not** guarantee delivery or tamper evidence — the stream is
+stdout JSONL, so it inherits whatever integrity your log pipeline gives
+it. For a trustworthy trail the operator must provide:
+
+- **collection of every replica's stdout** (backend and gateway alike)
+  with retention matching your compliance horizon — audit completeness
+  ends where collection ends;
+- **integrity protection downstream** (WORM/object-lock storage or a
+  signed/log-hashed pipeline) — TinyCDI does not sign records;
+- **synchronized clocks** so cross-replica ordering by `time` +
+  `requestId` is meaningful;
+- **Kubernetes audit logging** for platform-level admin actions that
+  never pass through TinyCDI: `WorkspaceTemplate` CRD writes (the
+  template/catalog ops), namespace and Helm-value changes
+  (`-tenant-quotas`, tenant map). Those are recorded by the Kubernetes
+  API server's audit log, not by TinyCDI.

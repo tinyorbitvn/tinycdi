@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -144,6 +145,16 @@ type WorkspaceHandler struct {
 	// the Retry-After header of a release-pending QUOTA_EXHAUSTED. Nil
 	// reports the 30 s cadence ceiling.
 	releaseRetryAfter func() int
+	// audit is the dedicated audit-event sink the mutating routes emit
+	// through (nil = no domain audit events).
+	audit observability.AuditSink
+}
+
+// WithAuditSink attaches the audit sink the workspace mutation routes
+// write their dedicated audit events to.
+func (h *WorkspaceHandler) WithAuditSink(s observability.AuditSink) *WorkspaceHandler {
+	h.audit = s
+	return h
 }
 
 // WithReleaseRetryAfter sets the Retry-After estimate used for a
@@ -199,14 +210,21 @@ func (h *WorkspaceHandler) WithImageBlockAfter(d time.Duration) *WorkspaceHandle
 // on writes.
 func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *WorkspaceHandler, th *TemplateHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
-	unsafe := func(h http.Handler) http.Handler { return authn.RequireAuth(authn.RequireCSRF(h)) }
+	// unsafe mounts an audited mutation route: RequireAuth verifies the
+	// principal, audited records the request's outcome on the shared
+	// routeAudit cell, RequireCSRF guards the state change itself, so a
+	// CSRF refusal is emitted as a denied audit event too.
+	unsafe := func(pattern string, next http.Handler) {
+		mux.Handle(pattern, authn.RequireAuth(
+			audited(h.audit, pattern, authn.RequireCSRF(next))))
+	}
 	mux.Handle("GET /v1/workspaces", safe(http.HandlerFunc(h.List)))
-	mux.Handle("POST /v1/workspaces", unsafe(http.HandlerFunc(h.Create)))
+	unsafe(routeWorkspaceCreate, http.HandlerFunc(h.Create))
 	mux.Handle("GET /v1/workspaces/{id}", safe(http.HandlerFunc(h.Get)))
 	mux.Handle("GET /v1/workspaces/{id}/events", safe(http.HandlerFunc(h.Events)))
-	mux.Handle("DELETE /v1/workspaces/{id}", unsafe(http.HandlerFunc(h.Delete)))
-	mux.Handle("POST /v1/workspaces/{id}/start", unsafe(http.HandlerFunc(h.Start)))
-	mux.Handle("POST /v1/workspaces/{id}/stop", unsafe(http.HandlerFunc(h.Stop)))
+	unsafe(routeWorkspaceDelete, http.HandlerFunc(h.Delete))
+	unsafe(routeWorkspaceStart, http.HandlerFunc(h.Start))
+	unsafe(routeWorkspaceStop, http.HandlerFunc(h.Stop))
 	if th != nil {
 		mux.Handle("GET /v1/templates", safe(http.HandlerFunc(th.List)))
 	}
@@ -526,6 +544,10 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeBackendError(w, r, err)
 		return
+	}
+	auditSetTarget(r.Context(), rec.ID)
+	if req.RetainedDataRef != "" {
+		auditSetDetail(r.Context(), "retained_data", req.RetainedDataRef)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

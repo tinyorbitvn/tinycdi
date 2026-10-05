@@ -82,7 +82,7 @@ func TestTenantQuotaStartup_TwoReplicasWriteOnce(t *testing.T) {
 	const retry = 200 * time.Millisecond
 	seen := &quotaPasses{}
 	loop := func() func(context.Context) {
-		return tenantQuotaSingleton(testLog(), db, quotas, retry, seen.observe)
+		return tenantQuotaSingleton(testLog(), db, quotas, retry, seen.observe, nil)
 	}
 	a := startReplica(t, db, "a", retry, nil, loop())
 	b := startReplica(t, db, "b", retry, nil, loop())
@@ -143,7 +143,7 @@ func TestTenantQuotaStartup_RetriesUntilDatabaseAnswers(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tenantQuotaSingleton(testLog(), db, quotas, 50*time.Millisecond, seen.observe)(loopCtx)
+		tenantQuotaSingleton(testLog(), db, quotas, 50*time.Millisecond, seen.observe, nil)(loopCtx)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 

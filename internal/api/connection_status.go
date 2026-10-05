@@ -116,7 +116,7 @@ func (h *ConnectionStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	st, apiErr := h.stater.ConnectionState(r.Context(), id, sessionID)
 	if apiErr != nil {
-		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
+		WriteError(w, r, apiErr)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
