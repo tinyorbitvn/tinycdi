@@ -170,8 +170,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	}
 	// One JSONL audit sink serves every app-plane audit event: the authn
 	// session.revoke records, the dedicated events the mutating API routes
-	// emit, and the config-driven quota apply below.
-	appAudit := observability.NewJSONSink(os.Stdout)
+	// emit, and the config-driven quota apply below. The guard turns a
+	// failing sink into a counted metric + rate-limited warning instead of
+	// silent audit loss (the write never fails the request).
+	appAudit := observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log,
+		metrics.IncAuditWriteError)
 	if len(quotas) > 0 {
 		// Declared quotas: written by the singleton leader only, so replicas
 		// starting together do not race (FX-R17).
@@ -536,8 +539,9 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		LaunchLimiter:  launch,
 		TrustedProxies: trusted,
 		Metrics:        metrics,
-		Audit:          observability.NewJSONSink(os.Stdout),
-		Logger:         b.log,
+		Audit: observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), b.log,
+			metrics.IncAuditWriteError),
+		Logger: b.log,
 	})
 	if err != nil {
 		return fmt.Errorf("gateway init: %w", err)

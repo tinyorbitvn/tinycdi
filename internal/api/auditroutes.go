@@ -112,6 +112,9 @@ func auditSetDetail(ctx context.Context, key, value string) {
 // Requests denied before RequireAuth never reach the wrapper — they are
 // covered by the "http.request" record. Wire inside RequireAuth so the
 // principal is in context; a nil sink passes requests through unrecorded.
+// The emit is deferred so a handler panic still produces its event
+// (failure/"panic"): recover() is deliberately not called, the panic keeps
+// unwinding to net/http's per-connection recovery unchanged.
 // An unregistered pattern panics at mount time: every audited route must
 // have a table entry (the coverage test enforces the reverse direction).
 func audited(sink observability.AuditSink, pattern string, next http.Handler) http.Handler {
@@ -130,28 +133,40 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 		}
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRouteAudit, ra))
 		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r)
-		var actor, tenant string
-		if p, ok := PrincipalFromContext(r.Context()); ok {
-			actor = observability.ActorRef(p.Issuer, p.Subject)
-			tenant = p.TenantID
-			if p.InGroup(TenantAdminGroup) {
-				// Mark the elevated role explicitly: on shared endpoints the
-				// record must distinguish an admin acting tenant-wide from
-				// an owner acting on their own resource.
-				auditSetDetail(r.Context(), "role", TenantAdminGroup)
+		completed := false
+		defer func() {
+			var actor, tenant string
+			if p, ok := PrincipalFromContext(r.Context()); ok {
+				actor = observability.ActorRef(p.Issuer, p.Subject)
+				tenant = p.TenantID
+				if p.InGroup(TenantAdminGroup) {
+					// Mark the elevated role explicitly: on shared endpoints the
+					// record must distinguish an admin acting tenant-wide from
+					// an owner acting on their own resource.
+					auditSetDetail(r.Context(), "role", TenantAdminGroup)
+				}
 			}
-		}
-		_ = sink.WriteAudit(r.Context(), observability.AuditEvent{
-			Actor:     actorOrAnonymous(actor),
-			Action:    rt.action,
-			TargetUID: ra.target,
-			Tenant:    tenant,
-			RequestID: RequestIDFromContext(r.Context()),
-			Outcome:   outcomeFor(statusOrOK(rec.status)),
-			ErrorCode: ra.errCode,
-			Details:   ra.details,
-		})
+			outcome := outcomeFor(statusOrOK(rec.status))
+			errCode := ra.errCode
+			if !completed {
+				outcome = observability.OutcomeFailure
+				if errCode == "" {
+					errCode = "panic"
+				}
+			}
+			_ = sink.WriteAudit(r.Context(), observability.AuditEvent{
+				Actor:     actorOrAnonymous(actor),
+				Action:    rt.action,
+				TargetUID: ra.target,
+				Tenant:    tenant,
+				RequestID: RequestIDFromContext(r.Context()),
+				Outcome:   outcome,
+				ErrorCode: errCode,
+				Details:   ra.details,
+			})
+		}()
+		next.ServeHTTP(rec, r)
+		completed = true
 	})
 }
 

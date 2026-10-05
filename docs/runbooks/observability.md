@@ -149,7 +149,7 @@ Every record carries:
 | `time` | UTC emission timestamp |
 | `actor` | pseudonymous principal ref — `oidc:` + truncated SHA-256 of `issuer\|subject`, stable per user; `"anonymous"` when unauthenticated; `"gateway:<id>"` for gateway-side events; `"config:tenant-quotas"` for the config-driven quota apply |
 | `action` | the domain action (table below) |
-| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; empty for actions whose target is created inside the call |
+| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; create actions record the id the call just made (`workspace.create` fills the new `ws_*` once known) |
 | `tenant` | the verified tenant of the caller |
 | `requestId` | the request's `X-Request-Id` correlation id (`"startup"` for the config apply) |
 | `outcome` | `success`, `failure` or `denied` (401/403) |
@@ -161,7 +161,7 @@ Emitted events:
 | `action` | Source | Covers |
 |---|---|---|
 | `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals and `QUOTA_MANAGED_BY_CONFIG` rejections; `details` carry the attempted limits |
-| `admin.quota.config_apply` | `-tenant-quotas` startup singleton | the platform-level quota write performed from configuration (leader replica only) |
+| `admin.quota.config_apply` | `-tenant-quotas` startup singleton | the platform-level quota write performed from configuration (leader replica only); a failed pass records `failure`/`apply_failed` with `changed: "0"` (the transaction rolls back) |
 | `workspace.create` / `.start` / `.stop` / `.delete` | `/v1/workspaces` mutations | every lifecycle write, owner- and admin-scoped alike — `role=tenant-admin` marks elevated use |
 | `data.attach` / `data.purge` | `/v1/data/{id}/attach`/`/purge` | retained-disk claims and destructive purges, incl. admin action on other owners' records |
 | `connection.create` | `POST /v1/workspaces/{id}/connections` | launch-ticket issue — the ticket itself is never recorded |
@@ -170,6 +170,11 @@ Emitted events:
 | `session.list` | `GET /v1/control/session` | the operator's replica-local session listing |
 | `session.host_mismatch` | gateway | a session cookie presented on the wrong workspace host |
 | `launch.redeem` / `launch.host_mismatch` | gateway `/v1/launch` | ticket redemption and per-workspace host binding denials |
+
+Requests refused before authentication (no session → `401` from
+`RequireAuth`) emit no dedicated event by design — the wrapper sits inside
+the authenticator, so those refusals are covered by the per-request
+`http_request` log record that every HTTP call produces.
 
 Redaction is enforced in the sink, not by convention: detail keys matching
 credentials (`token`, `cookie`, `session`, `authorization`, …) are replaced
@@ -181,7 +186,12 @@ record — only the salted ref.
 
 TinyCDI guarantees **emission and shape**: every audited action above
 produces exactly one record with a verified (not caller-supplied) actor,
-a per-process serialized write, and redaction of credential material.
+a per-process serialized write, and redaction of credential material — a
+handler panic still emits its record (`outcome` `failure`, `errorCode`
+`panic`). A failing sink never fails the request; the loss is signalled by
+the `tinycdi_audit_write_errors_total{event}` counter and a rate-limited
+`audit sink write failed` warning — alert on it, since a silent gap is
+worse than a loud one.
 It does **not** guarantee delivery or tamper evidence — the stream is
 stdout JSONL, so it inherits whatever integrity your log pipeline gives
 it. For a trustworthy trail the operator must provide:

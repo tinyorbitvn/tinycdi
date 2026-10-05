@@ -27,13 +27,20 @@ const tenantQuotaRetry = 5 * time.Second
 // or ctx ends — until then creates are refused with QUOTA_NOT_CONFIGURED.
 // observe, when set, is told how many rows each completed pass changed.
 // sink, when set, receives one admin.quota.config_apply audit event for the
-// completed pass: the platform-level quota write must be reconstructable
-// from the audit stream like the admin API's own writes (the apply is the
-// operator's action — actor "config:tenant-quotas", no request id exists,
-// so the correlation field carries the fixed "startup" marker).
+// completed pass — and for every failed pass, so a persistently failing
+// apply is auditable too (outcome failure/"apply_failed", changed=0: the
+// transaction rolls back, so nothing was applied). The platform-level
+// quota write must be reconstructable from the audit stream like the
+// admin API's own writes (the apply is the operator's action — actor
+// "config:tenant-quotas", no request id exists, so the correlation field
+// carries the fixed "startup" marker).
 func tenantQuotaSingleton(log *slog.Logger, db *store.DB, quotas []provisioning.TenantQuota,
 	retry time.Duration, observe func(changed int), sink observability.AuditSink) func(context.Context) {
 	return func(ctx context.Context) {
+		names := make([]string, 0, len(quotas))
+		for _, q := range quotas {
+			names = append(names, q.TenantID)
+		}
 		for {
 			changed, err := provisioning.ApplyTenantQuotas(ctx, db, quotas)
 			if err == nil {
@@ -41,28 +48,14 @@ func tenantQuotaSingleton(log *slog.Logger, db *store.DB, quotas []provisioning.
 				if observe != nil {
 					observe(changed)
 				}
-				if sink != nil {
-					names := make([]string, 0, len(quotas))
-					for _, q := range quotas {
-						names = append(names, q.TenantID)
-					}
-					_ = sink.WriteAudit(ctx, observability.AuditEvent{
-						Actor:     "config:tenant-quotas",
-						Action:    "admin.quota.config_apply",
-						RequestID: "startup",
-						Outcome:   observability.OutcomeSuccess,
-						Details: map[string]string{
-							"tenants": strings.Join(names, ","),
-							"changed": strconv.Itoa(changed),
-						},
-					})
-				}
+				writeQuotaApplyAudit(ctx, sink, names, observability.OutcomeSuccess, "", changed)
 				return
 			}
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return
 			}
 			log.Error("tenant quota pass failed; retrying", "err", err, "retry_in", retry)
+			writeQuotaApplyAudit(ctx, sink, names, observability.OutcomeFailure, "apply_failed", 0)
 			select {
 			case <-ctx.Done():
 				return
@@ -70,4 +63,26 @@ func tenantQuotaSingleton(log *slog.Logger, db *store.DB, quotas []provisioning.
 			}
 		}
 	}
+}
+
+// writeQuotaApplyAudit emits the admin.quota.config_apply audit record for
+// one pass of the startup apply — success carries the changed-row count,
+// failure carries the stable "apply_failed" code and changed=0 (the
+// transaction rolled back). A nil sink is a no-op.
+func writeQuotaApplyAudit(ctx context.Context, sink observability.AuditSink, names []string,
+	outcome observability.AuditOutcome, errCode string, changed int) {
+	if sink == nil {
+		return
+	}
+	_ = sink.WriteAudit(ctx, observability.AuditEvent{
+		Actor:     "config:tenant-quotas",
+		Action:    "admin.quota.config_apply",
+		RequestID: "startup",
+		Outcome:   outcome,
+		ErrorCode: errCode,
+		Details: map[string]string{
+			"tenants": strings.Join(names, ","),
+			"changed": strconv.Itoa(changed),
+		},
+	})
 }

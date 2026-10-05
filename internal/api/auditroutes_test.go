@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -483,5 +484,67 @@ func TestAudit_Logout(t *testing.T) {
 	e := requireEvent(t, sink, auditActionSessionLogout)
 	if e.Outcome != observability.OutcomeSuccess || !strings.HasPrefix(e.Actor, "oidc:") {
 		t.Fatalf("logout audit wrong: %+v", e)
+	}
+}
+
+// failAuditSink fails every write — proves a broken sink cannot fail the
+// request once wrapped, and that the failure is surfaced.
+type failAuditSink struct{}
+
+func (failAuditSink) WriteAudit(context.Context, observability.AuditEvent) error {
+	return errors.New("sink down")
+}
+
+// TestAudit_SinkFailureStillSucceeds (R-V5a): with a failing sink behind
+// GuardedSink the request succeeds, the failure is counted via the metric
+// callback and one warn line is emitted — a broken sink means a loud,
+// countable audit gap, never a failed request or silent loss.
+func TestAudit_SinkFailureStillSucceeds(t *testing.T) {
+	var failures int
+	var logBuf bytes.Buffer
+	sink := observability.NewGuardedSink(failAuditSink{},
+		slog.New(slog.NewTextHandler(&logBuf, nil)),
+		func(string) { failures++ })
+	mux := http.NewServeMux()
+	mux.Handle(routeWorkspaceStart, audited(sink, routeWorkspaceStart,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_1/start", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d, want 204 — audit failure must not fail the request", rec.Code)
+	}
+	if failures != 1 {
+		t.Fatalf("audit error counter = %d, want 1", failures)
+	}
+	if !strings.Contains(logBuf.String(), "audit sink write failed") {
+		t.Fatalf("no warn emitted for the sink failure: %q", logBuf.String())
+	}
+}
+
+// TestAudit_HandlerPanicStillEmits (R-V5a): a panicking handler still
+// produces exactly one event — failure/"panic" — emitted from the deferred
+// path; the wrapper must not recover, the panic propagates unchanged.
+func TestAudit_HandlerPanicStillEmits(t *testing.T) {
+	sink := &captureSink{}
+	h := RequestID(audited(sink, routeWorkspaceDelete, http.HandlerFunc(
+		func(http.ResponseWriter, *http.Request) { panic("boom") })))
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_9", nil)
+	req.SetPathValue("id", "ws_9")
+	panicked := false
+	func() {
+		defer func() { panicked = recover() != nil }()
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	if !panicked {
+		t.Fatal("the panic was swallowed — recover semantics changed")
+	}
+	e := requireEvent(t, sink, auditActionWorkspaceDelete)
+	if e.Outcome != observability.OutcomeFailure || e.ErrorCode != "panic" {
+		t.Fatalf("panic event outcome=%q err=%q, want failure/panic", e.Outcome, e.ErrorCode)
+	}
+	if e.TargetUID != "ws_9" || e.Actor != "anonymous" {
+		t.Fatalf("panic event fields wrong: %+v", e)
 	}
 }

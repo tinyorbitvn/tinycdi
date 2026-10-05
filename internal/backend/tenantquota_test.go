@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -155,4 +156,82 @@ func TestTenantQuotaStartup_RetriesUntilDatabaseAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, 10*time.Second, "the retried pass", func() bool { _, c := seen.snapshot(); return c == 1 })
+}
+
+// quotaAuditSink captures emitted audit events for assertions.
+type quotaAuditSink struct {
+	mu     sync.Mutex
+	events []observability.AuditEvent
+}
+
+func (s *quotaAuditSink) WriteAudit(_ context.Context, e observability.AuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+	return nil
+}
+
+func (s *quotaAuditSink) count(outcome observability.AuditOutcome) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, e := range s.events {
+		if e.Action == "admin.quota.config_apply" && e.Outcome == outcome {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *quotaAuditSink) last(outcome observability.AuditOutcome) (observability.AuditEvent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if s.events[i].Action == "admin.quota.config_apply" && s.events[i].Outcome == outcome {
+			return s.events[i], true
+		}
+	}
+	return observability.AuditEvent{}, false
+}
+
+// TestTenantQuotaStartup_AuditsFailedPasses (R-V5a): a failed apply pass
+// emits admin.quota.config_apply with outcome failure/"apply_failed" and
+// changed=0 — the failed attempt is auditable, not just a retry log line —
+// and the landing retry emits the success record.
+func TestTenantQuotaStartup_AuditsFailedPasses(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	if _, err := db.Pool().Exec(ctx, `ALTER TABLE tenant_quota RENAME TO tenant_quota_away`); err != nil {
+		t.Fatal(err)
+	}
+	quotas, _ := provisioning.ParseTenantQuotas(goodTenantQuotas)
+	sink := &quotaAuditSink{}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tenantQuotaSingleton(testLog(), db, quotas, 50*time.Millisecond, nil, sink)(loopCtx)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitFor(t, 10*time.Second, "a failed-apply audit event", func() bool {
+		return sink.count(observability.OutcomeFailure) >= 1
+	})
+	e, ok := sink.last(observability.OutcomeFailure)
+	if !ok || e.ErrorCode != "apply_failed" || e.Actor != "config:tenant-quotas" ||
+		e.RequestID != "startup" || e.Details["changed"] != "0" ||
+		e.Details["tenants"] != "tenant-a" {
+		t.Fatalf("failed-apply event wrong: %+v", e)
+	}
+
+	if _, err := db.Pool().Exec(ctx, `ALTER TABLE tenant_quota_away RENAME TO tenant_quota`); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the successful-apply audit event", func() bool {
+		return sink.count(observability.OutcomeSuccess) == 1
+	})
+	e, ok = sink.last(observability.OutcomeSuccess)
+	if !ok || e.ErrorCode != "" || e.Details["changed"] != "1" {
+		t.Fatalf("success-apply event wrong: %+v", e)
+	}
 }
