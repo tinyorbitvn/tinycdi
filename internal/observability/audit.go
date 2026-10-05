@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -108,4 +109,73 @@ func (s *JSONSink) WriteAudit(_ context.Context, e AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return json.NewEncoder(s.w).Encode(e)
+}
+
+// GuardedSink wraps an AuditSink so a write failure can never break the
+// caller and never goes unnoticed: every failure is counted via onError
+// (the tinycdi_audit_write_errors_total{event} metric in wiring) and
+// reported on the warn log, rate-limited to one line per warnEvery so a
+// permanently broken sink cannot flood the stream — the emitted line
+// carries how many failures were suppressed since the previous warning.
+// WriteAudit always returns nil: audit delivery problems are signalled,
+// never propagated into the request path.
+type GuardedSink struct {
+	inner     AuditSink
+	log       *slog.Logger
+	onError   func(action string)
+	warnEvery time.Duration
+	now       func() time.Time
+
+	mu         sync.Mutex
+	lastWarn   time.Time
+	suppressed int
+}
+
+// NewGuardedSink wraps inner, which must be non-nil. log defaults to
+// slog.Default(); onError (called with the failed event's action) may be
+// nil when no metric is wired.
+func NewGuardedSink(inner AuditSink, log *slog.Logger, onError func(action string)) *GuardedSink {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &GuardedSink{
+		inner:     inner,
+		log:       log,
+		onError:   onError,
+		warnEvery: time.Minute,
+		now:       time.Now,
+	}
+}
+
+// WriteAudit forwards the event to the inner sink; a failure is reported
+// via report() and swallowed — the caller's request always proceeds.
+func (s *GuardedSink) WriteAudit(ctx context.Context, e AuditEvent) error {
+	if err := s.inner.WriteAudit(ctx, e); err != nil {
+		s.report(e.Action, err)
+	}
+	return nil
+}
+
+// report counts the failure and warns at most once per warnEvery; the warn
+// line names the action and carries the number of failures suppressed
+// since the previous warning.
+func (s *GuardedSink) report(action string, err error) {
+	if s.onError != nil {
+		s.onError(action)
+	}
+	s.mu.Lock()
+	now := s.now()
+	emit := s.lastWarn.IsZero() || now.Sub(s.lastWarn) >= s.warnEvery
+	suppressed := s.suppressed
+	if emit {
+		s.lastWarn = now
+		s.suppressed = 0
+	} else {
+		s.suppressed++
+	}
+	s.mu.Unlock()
+	if emit {
+		s.log.Warn("audit sink write failed; audit record lost",
+			"action", action, "err", err, "suppressed_since_last", suppressed)
+	}
 }

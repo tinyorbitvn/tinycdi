@@ -150,9 +150,13 @@ func NewError(code ErrorCode, message string) *Error {
 // WriteError renders e as the JSON error body: Content-Type application/json,
 // status from the code, RequestID filled from the request-scoped correlation
 // ID. Callers must pass already-sanitized messages — this never adds internal
-// details.
-func WriteError(w http.ResponseWriter, requestID string, e *Error) {
-	e.RequestID = requestID
+// details. When the request runs inside an audited route the stable code is
+// recorded on the route's audit event.
+func WriteError(w http.ResponseWriter, r *http.Request, e *Error) {
+	if ra := routeAuditFromContext(r.Context()); ra != nil {
+		ra.errCode = string(e.Code)
+	}
+	e.RequestID = RequestIDFromContext(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Code.HTTPStatus())
 	_ = json.NewEncoder(w).Encode(e)
@@ -180,7 +184,7 @@ func writeQuotaExceeded(w http.ResponseWriter, r *http.Request, err error, retry
 			secs = 30
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		WriteError(w, RequestIDFromContext(r.Context()), e)
+		WriteError(w, r, e)
 		return
 	}
 	writeError(w, r, CodeQuotaExhausted, "quota exhausted")
@@ -202,5 +206,5 @@ func writeImageStale(w http.ResponseWriter, r *http.Request, err error) {
 			Pinned:       ise.Pinned,
 		}
 	}
-	WriteError(w, RequestIDFromContext(r.Context()), e)
+	WriteError(w, r, e)
 }

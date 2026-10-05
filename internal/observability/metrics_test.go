@@ -1,10 +1,12 @@
 package observability
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func gatherFamilies(t *testing.T, reg *prometheus.Registry) map[string][]string {
@@ -50,6 +52,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncFrameReload("iframe")
 	m.IncSessionRevocation("ok")
 	m.IncLeaseSessionMissing("absent")
+	m.IncAuditWriteError("workspace.create")
 
 	want := []string{
 		"tinycdi_http_requests_total",
@@ -73,6 +76,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_session_frame_reloads_total",
 		"tinycdi_session_revocations_total",
 		"tinycdi_lease_session_missing_total",
+		"tinycdi_audit_write_errors_total",
 	}
 	fams := gatherFamilies(t, reg)
 	for _, name := range want {
@@ -208,6 +212,7 @@ func TestReasonAndResultLabelsBounded(t *testing.T) {
 	m.ObserveProvisioningLatency("success", time.Second)
 	m.ObserveProvisioningLatency("weird-outcome", time.Second)
 	m.IncFrameReload("iframe")
+	m.IncAuditWriteError("workspace.create")
 	m.IncFrameReload("nested-iframe")
 
 	// Check label *values*, not names, stay inside the bounded sets.
@@ -237,5 +242,27 @@ func TestReasonAndResultLabelsBounded(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestIncAuditWriteError: the audit-sink failure counter is labelled by the
+// bounded action (unknown actions fold into "other") and is nil-receiver
+// safe so wiring can pass it whether or not the metrics listener is on.
+func TestIncAuditWriteError(t *testing.T) {
+	var nilM *Metrics
+	nilM.IncAuditWriteError("workspace.create") // must not panic
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, nil)
+	m.IncAuditWriteError("workspace.create")
+	m.IncAuditWriteError("some.future.action")
+	err := testutil.GatherAndCompare(reg, strings.NewReader(
+		`# HELP tinycdi_audit_write_errors_total Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.
+# TYPE tinycdi_audit_write_errors_total counter
+tinycdi_audit_write_errors_total{event="workspace.create"} 1
+tinycdi_audit_write_errors_total{event="other"} 1
+`), "tinycdi_audit_write_errors_total")
+	if err != nil {
+		t.Fatalf("audit write error metrics mismatch:\n%v", err)
 	}
 }

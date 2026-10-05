@@ -9,10 +9,12 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -191,6 +193,16 @@ type AdminQuotaHandler struct {
 	tenants TenantResolver
 	managed map[string]bool
 	maxBody int64
+	// audit is the dedicated audit-event sink the admin routes emit
+	// through (nil = no domain audit events).
+	audit observability.AuditSink
+}
+
+// WithAuditSink attaches the audit sink the admin quota routes write their
+// dedicated audit events to.
+func (h *AdminQuotaHandler) WithAuditSink(s observability.AuditSink) *AdminQuotaHandler {
+	h.audit = s
+	return h
 }
 
 // NewAdminQuotaHandler wires the handler. dir may be nil; owner display
@@ -200,11 +212,16 @@ func NewAdminQuotaHandler(src AdminQuotaSource, dir Directory, t TenantResolver,
 	return &AdminQuotaHandler{source: src, dir: dir, tenants: t, managed: managed, maxBody: 16 << 10}
 }
 
-// MountAdminQuotaRoutes registers the admin quota routes: RequireAuth on
-// the read, RequireAuth+RequireCSRF on the write.
+// MountAdminQuotaRoutes registers the admin quota routes audited (see
+// MountWorkspaceRoutes): RequireAuth+audit on the read, RequireAuth+audit+
+// RequireCSRF on the write — the read is inside the wrapper too, so admin
+// API coverage is total: every /v1/admin/ request leaves an audit event.
 func MountAdminQuotaRoutes(mux *http.ServeMux, authn *Authenticator, h *AdminQuotaHandler) {
-	mux.Handle("GET /v1/admin/tenants/{tenant}/quota", authn.RequireAuth(http.HandlerFunc(h.Get)))
-	mux.Handle("PUT /v1/admin/tenants/{tenant}/quota", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(h.Put))))
+	mux.Handle(routeAdminQuotaGet, authn.RequireAuth(
+		audited(h.audit, routeAdminQuotaGet, http.HandlerFunc(h.Get))))
+	mux.Handle(routeAdminQuotaSet, authn.RequireAuth(
+		audited(h.audit, routeAdminQuotaSet,
+			authn.RequireCSRF(http.HandlerFunc(h.Put)))))
 }
 
 // adminPrincipal gates the endpoint: the caller must be a tenant
@@ -320,6 +337,12 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 			"limits must set non-negative runningWorkspaces, cpuMillicores, memoryMib and storageGib ("+field+")")
 		return
 	}
+	// Record the requested limits in display units so the audit event —
+	// success or refusal — carries what the write attempted.
+	auditSetDetail(r.Context(), "running_workspaces", strconv.FormatInt(v.RunningSlots, 10))
+	auditSetDetail(r.Context(), "cpu_millicores", strconv.FormatInt(v.CPUMillis, 10))
+	auditSetDetail(r.Context(), "memory_mib", strconv.FormatInt(v.MemoryBytes>>20, 10))
+	auditSetDetail(r.Context(), "storage_gib", strconv.FormatInt(v.DiskBytes>>30, 10))
 	if err := h.source.SetLimits(r.Context(), tenant, v, ifMatch); err != nil {
 		if errors.Is(err, ErrQuotaVersionMismatch) {
 			writeError(w, r, CodePreconditionFailed,

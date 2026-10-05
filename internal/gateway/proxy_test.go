@@ -783,6 +783,49 @@ func TestControlRevoke_UnknownOrDeadLeaseNotRevoked(t *testing.T) {
 	}
 }
 
+// TestControlAudit_OperatorSurface: the operator control surface is fully
+// audited — a successful session list emits session.list, and a
+// bearer-denied attempt emits a denied event under the action it tried to
+// reach (denies are audited).
+func TestControlAudit_OperatorSurface(t *testing.T) {
+	fb := newFakeBroker(t)
+	audit := &auditRecorder{}
+	srv := newGateway(t, fb, func(c *gateway.Config) { c.Audit = audit })
+
+	if status, _ := controlRoundTrip(t, srv, http.MethodGet, "/v1/control/session",
+		"control-test-token", ""); status != http.StatusOK {
+		t.Fatalf("control session list = %d, want 200", status)
+	}
+	// Wrong bearer: the attempt never reaches the handler but must still
+	// leave a denied audit record naming the operation.
+	if status, _ := controlRoundTrip(t, srv, http.MethodPost, "/v1/control/revoke",
+		"wrong-token", `{"leaseId":"lease-1"}`); status != http.StatusUnauthorized {
+		t.Fatalf("bad bearer = %d, want 401", status)
+	}
+
+	var list, denied *observability.AuditEvent
+	audit.mu.Lock()
+	for i := range audit.events {
+		e := &audit.events[i]
+		switch {
+		case e.Action == "session.list" && e.Outcome == observability.OutcomeSuccess:
+			list = e
+		case e.Action == "session.revoke" && e.Outcome == observability.OutcomeDenied:
+			denied = e
+		}
+	}
+	audit.mu.Unlock()
+	if list == nil {
+		t.Fatalf("no session.list audit event in %v", audit.auditActions())
+	}
+	if denied == nil || denied.ErrorCode != "unauthorized" {
+		t.Fatalf("no denied session.revoke audit for the bad bearer: %+v", denied)
+	}
+	if denied.Actor == "" {
+		t.Fatal("denied audit must still name an actor (gateway identity)")
+	}
+}
+
 // TestControlRevoke_BrokerErrorIs503: a revoke the broker did not accept is
 // not reported as done — the operator retries.
 func TestControlRevoke_BrokerErrorIs503(t *testing.T) {

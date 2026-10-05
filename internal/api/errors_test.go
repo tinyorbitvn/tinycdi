@@ -128,7 +128,9 @@ func TestErrorCodeTableCoverage(t *testing.T) {
 // the code, requestId filled from the call, and no internal detail leaking.
 func TestWriteError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, "req_9", NewError(CodeNotFound, "workspace not found"))
+	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	req = req.WithContext(contextWithRequestID(req.Context(), "req_9"))
+	WriteError(rec, req, NewError(CodeNotFound, "workspace not found"))
 
 	res := rec.Result()
 	defer res.Body.Close()
