@@ -99,7 +99,8 @@ type setUserLimitDefaultRequest struct {
 // /v1/admin/tenants/{tenant}/user-limits[...]. Unlike tenant quota,
 // per-principal limits are API-managed only — there is no config
 // declaration — so writes are never refused as QUOTA_MANAGED_BY_CONFIG.
-// Every write emits a dedicated audit record through the configured sink.
+// Every request emits a dedicated audit record through the audited
+// wrapper (see MountAdminUserLimitRoutes).
 type AdminUserLimitsHandler struct {
 	source  UserLimitSource
 	dir     Directory
@@ -114,20 +115,27 @@ func NewAdminUserLimitsHandler(src UserLimitSource, dir Directory, t TenantResol
 	return &AdminUserLimitsHandler{source: src, dir: dir, tenants: t, maxBody: 16 << 10}
 }
 
-// WithAuditSink attaches the sink user-limit writes are audited to; nil
-// disables the dedicated records (the http.request middleware audit still
-// covers the requests).
+// WithAuditSink attaches the audit sink the user-limit routes emit their
+// dedicated audit events to (nil = no domain audit events).
 func (h *AdminUserLimitsHandler) WithAuditSink(s observability.AuditSink) *AdminUserLimitsHandler {
 	h.audit = s
 	return h
 }
 
-// MountAdminUserLimitRoutes registers the routes: RequireAuth on the read,
-// RequireAuth+RequireCSRF on the writes.
+// MountAdminUserLimitRoutes registers the routes audited (see
+// MountAdminQuotaRoutes): RequireAuth+audit on the read,
+// RequireAuth+audit+RequireCSRF on the writes — denied (non-admin,
+// cross-tenant) attempts emit the route's table action with outcome
+// denied; a write that decodes resolves to the set or clear variant.
 func MountAdminUserLimitRoutes(mux *http.ServeMux, authn *Authenticator, h *AdminUserLimitsHandler) {
-	mux.Handle("GET /v1/admin/tenants/{tenant}/user-limits", authn.RequireAuth(http.HandlerFunc(h.Get)))
-	mux.Handle("PUT /v1/admin/tenants/{tenant}/user-limits", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(h.Put))))
-	mux.Handle("PUT /v1/admin/tenants/{tenant}/user-limits/default", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(h.PutDefault))))
+	mux.Handle(routeAdminUserLimitsGet, authn.RequireAuth(
+		audited(h.audit, routeAdminUserLimitsGet, http.HandlerFunc(h.Get))))
+	mux.Handle(routeAdminUserLimitsPut, authn.RequireAuth(
+		audited(h.audit, routeAdminUserLimitsPut,
+			authn.RequireCSRF(http.HandlerFunc(h.Put)))))
+	mux.Handle(routeAdminUserLimitDefault, authn.RequireAuth(
+		audited(h.audit, routeAdminUserLimitDefault,
+			authn.RequireCSRF(http.HandlerFunc(h.PutDefault)))))
 }
 
 // Get handles GET /v1/admin/tenants/{tenant}/user-limits.
@@ -137,7 +145,7 @@ func (h *AdminUserLimitsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.view(r.Context(), r.PathValue("tenant"))
 	if err != nil {
-		writeError(w, r, CodeInternal, "internal error")
+		writeStoreError(w, r, err)
 		return
 	}
 	respondJSON(w, out)
@@ -149,8 +157,7 @@ func (h *AdminUserLimitsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // principal with no usage is accepted — it applies at their next launch.
 // Writes are upserts (last write wins) and audited.
 func (h *AdminUserLimitsHandler) Put(w http.ResponseWriter, r *http.Request) {
-	p, ok := tenantAdminPrincipal(h.tenants, w, r)
-	if !ok {
+	if _, ok := tenantAdminPrincipal(h.tenants, w, r); !ok {
 		return
 	}
 	tenant := r.PathValue("tenant")
@@ -166,21 +173,19 @@ func (h *AdminUserLimitsHandler) Put(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInvalidRequest, "limit must be a non-negative integer")
 		return
 	}
+	// Record the resolved action and the attempted write on the in-flight
+	// audit event — success or refusal carries them alike.
+	auditSetDetail(r.Context(), "owner", targetActorRef(req.OwnerRef))
 	var err error
-	action := "user_limit.set"
 	if req.Limit == nil {
-		action = "user_limit.clear"
+		auditSetAction(r.Context(), auditActionAdminUserLimitClear)
 		err = h.source.ClearOverride(r.Context(), tenant, req.OwnerRef)
 	} else {
+		auditSetDetail(r.Context(), "max_running", strconv.FormatInt(*req.Limit, 10))
 		err = h.source.SetOverride(r.Context(), tenant, req.OwnerRef, *req.Limit)
 	}
-	details := map[string]string{"owner": targetActorRef(req.OwnerRef)}
-	if req.Limit != nil {
-		details["max_running"] = strconv.FormatInt(*req.Limit, 10)
-	}
-	h.writeAudit(r, p, action, err, details)
 	if err != nil {
-		writeError(w, r, CodeInternal, "internal error")
+		writeStoreError(w, r, err)
 		return
 	}
 	h.respondView(w, r, tenant)
@@ -189,8 +194,7 @@ func (h *AdminUserLimitsHandler) Put(w http.ResponseWriter, r *http.Request) {
 // PutDefault handles PUT /v1/admin/tenants/{tenant}/user-limits/default:
 // it sets (limit) or clears (null) the tenant-wide fallback.
 func (h *AdminUserLimitsHandler) PutDefault(w http.ResponseWriter, r *http.Request) {
-	p, ok := tenantAdminPrincipal(h.tenants, w, r)
-	if !ok {
+	if _, ok := tenantAdminPrincipal(h.tenants, w, r); !ok {
 		return
 	}
 	tenant := r.PathValue("tenant")
@@ -203,20 +207,15 @@ func (h *AdminUserLimitsHandler) PutDefault(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var err error
-	action := "user_limit_default.set"
 	if req.Limit == nil {
-		action = "user_limit_default.clear"
+		auditSetAction(r.Context(), auditActionAdminUserLimitDefaultClear)
 		err = h.source.ClearDefault(r.Context(), tenant)
 	} else {
+		auditSetDetail(r.Context(), "max_running", strconv.FormatInt(*req.Limit, 10))
 		err = h.source.SetDefault(r.Context(), tenant, *req.Limit)
 	}
-	details := map[string]string{}
-	if req.Limit != nil {
-		details["max_running"] = strconv.FormatInt(*req.Limit, 10)
-	}
-	h.writeAudit(r, p, action, err, details)
 	if err != nil {
-		writeError(w, r, CodeInternal, "internal error")
+		writeStoreError(w, r, err)
 		return
 	}
 	h.respondView(w, r, tenant)
@@ -238,10 +237,21 @@ func (h *AdminUserLimitsHandler) decodeBody(w http.ResponseWriter, r *http.Reque
 func (h *AdminUserLimitsHandler) respondView(w http.ResponseWriter, r *http.Request, tenant string) {
 	out, err := h.view(r.Context(), tenant)
 	if err != nil {
-		writeError(w, r, CodeInternal, "internal error")
+		writeStoreError(w, r, err)
 		return
 	}
 	respondJSON(w, out)
+}
+
+// writeStoreError maps a store-level failure onto the honest status: a
+// transport outage (the request never reached a store verdict) answers a
+// retryable 503 UNAVAILABLE, everything else a plain 500.
+func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	if store.IsTransient(err) {
+		writeError(w, r, CodeUnavailable, "service unavailable")
+		return
+	}
+	writeError(w, r, CodeInternal, "internal error")
 }
 
 // view unions the principals with usage and the ones with a stored
@@ -290,30 +300,6 @@ func (h *AdminUserLimitsHandler) view(ctx context.Context, tenantID string) (adm
 		out.Users = append(out.Users, entry)
 	}
 	return out, nil
-}
-
-// writeAudit emits the dedicated user-limit write record. The target
-// principal appears only as its pseudonymous ActorRef; denied and
-// malformed requests are already covered by the http.request audit.
-func (h *AdminUserLimitsHandler) writeAudit(r *http.Request, p Principal, action string, writeErr error, details map[string]string) {
-	if h.audit == nil {
-		return
-	}
-	outcome := observability.OutcomeSuccess
-	errCode := ""
-	if writeErr != nil {
-		outcome = observability.OutcomeFailure
-		errCode = string(CodeInternal)
-	}
-	_ = h.audit.WriteAudit(r.Context(), observability.AuditEvent{
-		Actor:     observability.ActorRef(p.Issuer, p.Subject),
-		Action:    action,
-		Tenant:    p.TenantID,
-		RequestID: RequestIDFromContext(r.Context()),
-		Outcome:   outcome,
-		ErrorCode: errCode,
-		Details:   details,
-	})
 }
 
 // targetActorRef pseudonymizes an "issuer|sub" owner reference for audit

@@ -302,3 +302,18 @@ func TestUserLimit_NoRowsUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// TestUserLimit_MissingWorkspaceRowFailsClosed: every real path writes the
+// workspaces row before reserving, so a reservation naming a workspace
+// with no row breaks the invariant — the check must refuse (aborting the
+// transaction), never silently skip the principal's limit.
+func TestUserLimit_MissingWorkspaceRowFailsClosed(t *testing.T) {
+	db, _, _ := ulEnv(t, "tenant-ul7")
+	ctx := context.Background()
+	err := db.WithTx(ctx, func(tx store.Tx) error {
+		return provisioning.Reserve(ctx, tx, "tenant-ul7", "ws_missing_row", quotaVec)
+	})
+	if !errors.Is(err, provisioning.ErrWorkspaceNotFound) {
+		t.Fatalf("reserve without workspaces row: err=%v, want ErrWorkspaceNotFound (fail closed)", err)
+	}
+}

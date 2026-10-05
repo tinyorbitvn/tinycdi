@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -344,24 +346,10 @@ func TestAdminUserLimits_Validation(t *testing.T) {
 	}
 }
 
-// TestAdminUserLimits_Audit: every write emits a dedicated audit record —
-// pseudonymous actor and target, action naming the mutation, outcome.
-func TestAdminUserLimits_Audit(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
-	buf := &bytes.Buffer{}
-	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
-	sess, csrf := loginAdmin(t, env, "admin-a")
-	me := env.issuer.URL() + "|user-a"
-
-	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":2}`, nil)
-	r.Body.Close()
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
-	r.Body.Close()
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":null}`, nil)
-	r.Body.Close()
-
+// userLimitAuditEvents returns the dedicated user-limit events a sink
+// captured, in emission order.
+func userLimitAuditEvents(t *testing.T, buf *bytes.Buffer) []observability.AuditEvent {
+	t.Helper()
 	var events []observability.AuditEvent
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
 		if line == "" {
@@ -371,14 +359,45 @@ func TestAdminUserLimits_Audit(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("audit line %q: %v", line, err)
 		}
-		if strings.HasPrefix(e.Action, "user_limit") {
+		if strings.HasPrefix(e.Action, "admin.user_limit") {
 			events = append(events, e)
 		}
 	}
-	if len(events) != 3 {
-		t.Fatalf("audit events=%d, want 3: %v", len(events), events)
+	return events
+}
+
+// TestAdminUserLimits_Audit: every request emits a dedicated audit record
+// through the route wrapper — the read and each write, with the resolved
+// set/clear action, the pseudonymous actor and target owner, the tenant
+// as target.
+func TestAdminUserLimits_Audit(t *testing.T) {
+	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	buf := &bytes.Buffer{}
+	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	me := env.issuer.URL() + "|user-a"
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, userLimitsPath, "", nil)
+	r.Body.Close()
+	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
+		`{"ownerRef":"`+me+`","limit":2}`, nil)
+	r.Body.Close()
+	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
+	r.Body.Close()
+	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
+		`{"ownerRef":"`+me+`","limit":null}`, nil)
+	r.Body.Close()
+
+	events := userLimitAuditEvents(t, buf)
+	if len(events) != 4 {
+		t.Fatalf("audit events=%d, want 4: %v", len(events), events)
 	}
-	want := []string{"user_limit.set", "user_limit_default.set", "user_limit.clear"}
+	want := []string{
+		auditActionAdminUserLimitGet,
+		auditActionAdminUserLimitSet,
+		auditActionAdminUserLimitDefaultSet,
+		auditActionAdminUserLimitClear,
+	}
 	for i, e := range events {
 		if e.Action != want[i] {
 			t.Fatalf("event[%d].action=%q, want %q", i, e.Action, want[i])
@@ -386,15 +405,108 @@ func TestAdminUserLimits_Audit(t *testing.T) {
 		if e.Outcome != observability.OutcomeSuccess || e.Tenant != "tenant-a" || e.RequestID == "" {
 			t.Fatalf("event[%d]=%+v, want success on tenant-a with request id", i, e)
 		}
+		if e.TargetUID != "tenant-a" {
+			t.Fatalf("event[%d].target=%q, want the tenant", i, e.TargetUID)
+		}
 		if !strings.HasPrefix(e.Actor, "oidc:") {
 			t.Fatalf("event[%d].actor=%q, want pseudonymous ref", i, e.Actor)
 		}
+		if e.Details["role"] != TenantAdminGroup {
+			t.Fatalf("event[%d] lacks role=%q: %+v", i, TenantAdminGroup, e)
+		}
 	}
-	if events[0].Details["owner"] == me {
+	if events[1].Details["owner"] == me {
 		t.Fatal("audit must pseudonymize the target owner, not store the raw ref")
 	}
-	if events[0].Details["max_running"] != "2" || events[1].Details["max_running"] != "3" {
-		t.Fatalf("details=%v %v, want max_running recorded", events[0].Details, events[1].Details)
+	if events[1].Details["max_running"] != "2" || events[2].Details["max_running"] != "3" {
+		t.Fatalf("details=%v %v, want max_running recorded", events[1].Details, events[2].Details)
+	}
+}
+
+// TestAdminUserLimits_AuditDenied: non-admin and cross-tenant attempts
+// land in the audit stream as denied events carrying the caller's actor
+// and FORBIDDEN — like admin quota, not only the http.request record.
+func TestAdminUserLimits_AuditDenied(t *testing.T) {
+	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	buf := &bytes.Buffer{}
+	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
+
+	// Non-admin PUT: denied under the route's attempt action (the body
+	// never decoded, so the set/clear variant does not resolve).
+	sess, csrf := login(t, env, "user-a")
+	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
+		`{"ownerRef":"iss|sub","limit":3}`, nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin PUT: status=%d, want 403", r.StatusCode)
+	}
+
+	// Tenant admin of tenant-a reading tenant-b: cross-tenant denied.
+	sessA, csrfA := loginAdmin(t, env, "admin-a")
+	r = doReq(t, env, sessA, csrfA, http.MethodGet,
+		"/v1/admin/tenants/tenant-b/user-limits", "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-tenant GET: status=%d, want 403", r.StatusCode)
+	}
+
+	events := userLimitAuditEvents(t, buf)
+	if len(events) != 2 {
+		t.Fatalf("audit events=%d, want 2: %v", len(events), events)
+	}
+	if e := events[0]; e.Action != auditActionAdminUserLimitSet ||
+		e.Outcome != observability.OutcomeDenied || e.ErrorCode != string(CodeForbidden) ||
+		e.TargetUID != "tenant-a" {
+		t.Fatalf("non-admin PUT audit=%+v, want denied admin.user_limit.set FORBIDDEN on tenant-a", e)
+	}
+	if e := events[1]; e.Action != auditActionAdminUserLimitGet ||
+		e.Outcome != observability.OutcomeDenied || e.ErrorCode != string(CodeForbidden) ||
+		e.TargetUID != "tenant-b" {
+		t.Fatalf("cross-tenant GET audit=%+v, want denied admin.user_limit.get FORBIDDEN on tenant-b", e)
+	}
+	for _, e := range events {
+		if !strings.HasPrefix(e.Actor, "oidc:") {
+			t.Fatalf("denied event lacks the caller actor: %+v", e)
+		}
+	}
+}
+
+// TestAdminUserLimits_StoreErrors: store-level failures map to honest
+// codes — a transport outage is retryable 503 UNAVAILABLE, a permanent
+// failure 500 INTERNAL — and the audited event carries the real code.
+func TestAdminUserLimits_StoreErrors(t *testing.T) {
+	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	buf := &bytes.Buffer{}
+	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	me := env.issuer.URL() + "|user-a"
+
+	src.setErr = fmt.Errorf("dial postgres: %w", context.DeadlineExceeded)
+	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
+		`{"ownerRef":"`+me+`","limit":2}`, nil)
+	e := decodeBody[Error](t, r)
+	r.Body.Close()
+	if r.StatusCode != http.StatusServiceUnavailable || e.Code != CodeUnavailable {
+		t.Fatalf("transient store error: status=%d code=%q, want 503 UNAVAILABLE", r.StatusCode, e.Code)
+	}
+
+	src.setErr = errors.New("pg: check constraint violated")
+	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
+	e = decodeBody[Error](t, r)
+	r.Body.Close()
+	if r.StatusCode != http.StatusInternalServerError || e.Code != CodeInternal {
+		t.Fatalf("permanent store error: status=%d code=%q, want 500 INTERNAL", r.StatusCode, e.Code)
+	}
+
+	events := userLimitAuditEvents(t, buf)
+	if len(events) != 2 {
+		t.Fatalf("audit events=%d, want 2: %v", len(events), events)
+	}
+	if events[0].ErrorCode != string(CodeUnavailable) || events[0].Outcome != observability.OutcomeFailure {
+		t.Fatalf("transient audit=%+v, want failure/UNAVAILABLE", events[0])
+	}
+	if events[1].ErrorCode != string(CodeInternal) || events[1].Outcome != observability.OutcomeFailure {
+		t.Fatalf("permanent audit=%+v, want failure/INTERNAL", events[1])
 	}
 }
 
@@ -428,7 +540,7 @@ func TestUserLimitReachedMapping(t *testing.T) {
 	if e.Details == nil || e.Details.Reason != ReasonUserLimitReached {
 		t.Fatalf("details=%+v, want reason %q", e.Details, ReasonUserLimitReached)
 	}
-	if e.Details.Params["limit"] != "1" || e.Details.Params["current"] != "1" {
+	if e.Details.Params[ParamKeyLimit] != "1" || e.Details.Params[ParamKeyCurrent] != "1" {
 		t.Fatalf("params=%v, want limit=1 current=1", e.Details.Params)
 	}
 

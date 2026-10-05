@@ -436,12 +436,14 @@ func checkUserLimit(ctx context.Context, tx store.Tx, tenantID, workspaceID stri
 	}
 	// The workspaces row is written before its reservation on every path
 	// (create, attach, restart), so its owner is visible in this
-	// transaction.
+	// transaction. A missing row breaks that invariant — fail closed:
+	// skipping the check here would let a slot in over the principal's
+	// limit.
 	var owner string
 	err := tx.QueryRow(ctx, `
 		SELECT owner_subject FROM workspaces WHERE id = $1`, workspaceID).Scan(&owner)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return fmt.Errorf("user limit: workspace %s: %w", workspaceID, ErrWorkspaceNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("user limit: read owner %w", err)

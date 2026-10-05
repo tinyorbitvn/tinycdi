@@ -96,7 +96,8 @@ disks and released reservations never count.
 - `PUT /v1/admin/tenants/{tenant}/user-limits/default` with
   `{"limit": 2}` sets the tenant default; `"limit": null` clears it back
   to unlimited.
-- Every write is audited (`user_limit.*` actions); writes are upserts —
+- Every request is audited (`admin.user_limit.*` actions, reads and
+  denied attempts included); writes are upserts —
   last write wins.
 
 Resolution order is **override → tenant default → unlimited**, and an

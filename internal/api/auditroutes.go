@@ -29,6 +29,12 @@ const (
 	auditActionDataPurge        = "data.purge"
 	auditActionAdminQuotaGet    = "admin.quota.get"
 	auditActionAdminQuotaSet    = "admin.quota.set"
+
+	auditActionAdminUserLimitGet          = "admin.user_limit.get"
+	auditActionAdminUserLimitSet          = "admin.user_limit.set"
+	auditActionAdminUserLimitClear        = "admin.user_limit.clear"
+	auditActionAdminUserLimitDefaultSet   = "admin.user_limit.default.set"
+	auditActionAdminUserLimitDefaultClear = "admin.user_limit.default.clear"
 )
 
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
@@ -44,6 +50,10 @@ const (
 	routeDataPurge        = "POST /v1/data/{dataId}/purge"
 	routeAdminQuotaGet    = "GET /v1/admin/tenants/{tenant}/quota"
 	routeAdminQuotaSet    = "PUT /v1/admin/tenants/{tenant}/quota"
+
+	routeAdminUserLimitsGet    = "GET /v1/admin/tenants/{tenant}/user-limits"
+	routeAdminUserLimitsPut    = "PUT /v1/admin/tenants/{tenant}/user-limits"
+	routeAdminUserLimitDefault = "PUT /v1/admin/tenants/{tenant}/user-limits/default"
 )
 
 // auditedRoute binds a route pattern to its audit action and the path-value
@@ -68,6 +78,13 @@ var auditedRoutes = map[string]auditedRoute{
 	routeDataPurge:        {auditActionDataPurge, "dataId"},
 	routeAdminQuotaGet:    {auditActionAdminQuotaGet, "tenant"},
 	routeAdminQuotaSet:    {auditActionAdminQuotaSet, "tenant"},
+	// The PUTs carry both halves of a set/clear pair: the table action is
+	// the attempt (what a pre-decode denial is audited as) and the handler
+	// replaces it with the clear variant via auditSetAction once the body
+	// decodes.
+	routeAdminUserLimitsGet:    {auditActionAdminUserLimitGet, "tenant"},
+	routeAdminUserLimitsPut:    {auditActionAdminUserLimitSet, "tenant"},
+	routeAdminUserLimitDefault: {auditActionAdminUserLimitDefaultSet, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the
@@ -76,6 +93,7 @@ var auditedRoutes = map[string]auditedRoute{
 // handler returns (same shared-cell convention as auditCollector).
 type routeAudit struct {
 	target  string
+	action  string
 	errCode string
 	details map[string]string
 }
@@ -90,6 +108,16 @@ func routeAuditFromContext(ctx context.Context) *routeAudit {
 func auditSetTarget(ctx context.Context, target string) {
 	if ra := routeAuditFromContext(ctx); ra != nil {
 		ra.target = target
+	}
+}
+
+// auditSetAction replaces the audited-route table action on the in-flight
+// record — for routes whose single method covers a set/clear pair (the
+// resolved action is known only after the body decodes; requests denied
+// earlier keep the table action). No-op without the wrapper.
+func auditSetAction(ctx context.Context, action string) {
+	if ra := routeAuditFromContext(ctx); ra != nil {
+		ra.action = action
 	}
 }
 
@@ -154,9 +182,13 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 					errCode = "panic"
 				}
 			}
+			action := rt.action
+			if ra.action != "" {
+				action = ra.action
+			}
 			_ = sink.WriteAudit(r.Context(), observability.AuditEvent{
 				Actor:     actorOrAnonymous(actor),
-				Action:    rt.action,
+				Action:    action,
 				TargetUID: ra.target,
 				Tenant:    tenant,
 				RequestID: RequestIDFromContext(r.Context()),
