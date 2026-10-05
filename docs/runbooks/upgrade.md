@@ -758,6 +758,17 @@ local ceiling** each pod keeps as a cap and as the fail-open limiter
 during a Postgres outage. Keep it at `backend.replicas` (the chart still
 renders it so); an HPA should pin it to `maxReplicas` as before.
 
+The default sign-in and launch budgets double on v0.4: `-login-rate`
+defaults to 60/minute with burst 20 and `-launch-rate` to 120/minute with
+burst 40 (the shared-window bounds become 80/minute and 160/minute), and
+the per-IP OIDC-callback ceiling follows at 10× the login budget. The
+raise equals the effective two-replica aggregate v0.3.0 granted (each
+pod's undivided bucket) before v0.3.1's RL-1 made the flags aggregate
+bounds — the exact shared window leaves no per-replica slack, and the
+unchanged defaults produced 429s on a 20-user sign-in burst from one
+egress in e2e testing. Installs that set the flags explicitly keep
+their values.
+
 ## Rollback
 
 - **Binary rollback is supported:** `helm rollback tinycdi -n <release-ns>`

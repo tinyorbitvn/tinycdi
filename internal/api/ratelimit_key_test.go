@@ -74,9 +74,9 @@ func probeRequest(t *testing.T, srv *httptest.Server, session *http.Cookie) *htt
 func TestSessionProbe_SessionKeyedBehindNAT(t *testing.T) {
 	store := NewInMemorySessionStore(30 * time.Minute)
 	a := sessionKeyTestAuth(store)
-	// Production shape (30/min, burst 10): 60 probes from one address
-	// keyed by IP would refuse 50.
-	l := ratelimit.New(30, 10, 1000, nil)
+	// Production shape (60/min, burst 20): 60 probes from one address
+	// keyed by IP would refuse 40.
+	l := ratelimit.New(60, 20, 1000, nil)
 	mux := http.NewServeMux()
 	MountSessionProbeRoute(mux, a, RateLimitWithKey(l, nil, nil, a.SessionRateLimitKey()))
 	srv := httptest.NewServer(mux)
