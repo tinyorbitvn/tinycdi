@@ -30,11 +30,15 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: portal
+  name: {{ .Values.gatewayApi.portalRouteName }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
-  {{- with .Values.gatewayApi.annotations }}
+  {{- /* Per-route annotations merge OVER the shared map — the per-route
+         value wins on a key collision (same rule as
+         ingress.portalAnnotations). */ -}}
+  {{- $ann := merge (deepCopy .Values.gatewayApi.portalAnnotations) .Values.gatewayApi.annotations }}
+  {{- with $ann }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -57,11 +61,12 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: session
+  name: {{ .Values.gatewayApi.sessionRouteName }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
-  {{- with .Values.gatewayApi.annotations }}
+  {{- $sann := merge (deepCopy .Values.gatewayApi.sessionAnnotations) .Values.gatewayApi.annotations }}
+  {{- with $sann }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

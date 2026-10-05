@@ -225,6 +225,8 @@ objects. It **keeps**:
 | `ingress.portalAnnotations` / `.sessionAnnotations` | `{}` | per-edge annotations |
 | `gatewayApi.enabled` / `.parentRefs` / `.annotations` | `false`/`[]`/`{}` | one `HTTPRoute` per host; backends are HTTPS — gateway must re-encrypt/pass through. API-server-defaulted route fields (parentRef `group`/`kind`, rule `matches`, backendRef `group`/`kind`/`weight`) render explicitly so GitOps shows no drift |
 | `gatewayApi.portalParentRefs` / `.sessionParentRefs` | `[]` | per-route `parentRefs` overrides: a non-empty list replaces `gatewayApi.parentRefs` for that HTTPRoute — e.g. different Gateway listeners for the portal host (`cdi-https`) vs the wildcard session domain (`wildcard-https`); empty falls back to the shared list |
+| `gatewayApi.portalAnnotations` / `.sessionAnnotations` | `{}` | per-route annotations merged over `gatewayApi.annotations` — on a key collision the per-route value wins (e.g. a CDN proxy flag ON for the portal route, OFF for the long-lived-websocket session route) |
+| `gatewayApi.portalRouteName` / `.sessionRouteName` | `portal`/`session` | HTTPRoute object names (DNS-1123 subdomain, must differ); the defaults match every earlier release — rename to pair hand-written routes by convention, e.g. a `<name>-redirect` route |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
 ### Per-component tuning (`backend`, `operator`, `frontend`)
