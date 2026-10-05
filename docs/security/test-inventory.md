@@ -153,8 +153,12 @@ substitute for review).
 - `internal/backend/postrestore_test.go` — `backend post-restore`
   (runbook kill-steps): dry-run writes nothing, epoch rotation rejects
   every restored session (S17), lease/ticket denial, CR intent
-  alignment, refusal while a backend holds the leader lock, the
-  no-Kubernetes SQL fallback.
+  alignment, refusal with zero writes while the leader lock is held,
+  the tool holding the lock for the whole apply (a concurrent lock
+  attempt fails mid-run) and releasing it on success and on a mid-run
+  error, refusal while backend connections remain in pg_stat_activity
+  plus the `-i-know-backends-are-running` override, the no-Kubernetes
+  SQL fallback.
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
   `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR

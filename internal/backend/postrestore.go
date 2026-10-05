@@ -20,12 +20,18 @@ package backend
 //     applied-intent fence.
 //
 // The default is a dry-run that prints the plan and the affected row
-// counts; -apply executes. -apply requires -i-have-scaled-down AND refuses
-// while any backend replica still holds the leader advisory lock. The
-// acknowledgement flag is the operator's statement that the platform is
-// frozen — a Job cannot distinguish scaled-to-zero from serving replicas
-// — and the lock probe is the hard backstop because any serving replica
-// set elects a leader within leaderRetryInterval.
+// counts; -apply executes. -apply requires -i-have-scaled-down, then takes
+// the leader advisory lock on a dedicated connection and holds it for the
+// whole run: pg_try_advisory_lock is atomic (no probe-then-act window —
+// a serving replica or a second post-restore run already holding it means
+// refusal with zero writes), and while the tool holds it no replica scaled
+// up mid-apply can elect a leader. It also refuses while backend
+// connections remain in pg_stat_activity (non-leader replicas can still
+// create sessions and renew leases) unless -i-know-backends-are-running
+// overrides. The acknowledgement flag is the operator's statement that the
+// platform is frozen — a Job cannot distinguish scaled-to-zero from
+// serving replicas — and the held lock is the hard backstop because any
+// serving replica set elects a leader within leaderRetryInterval.
 //
 // The CR-alignment phase needs Kubernetes read access (a kubeconfig, or an
 // in-cluster ServiceAccount token — a Job may run with
@@ -46,6 +52,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,6 +78,11 @@ plan and the affected row counts and writes nothing.
   -dry-run             explicit dry-run; mutually exclusive with -apply
   -i-have-scaled-down  required with -apply: acknowledges backend and
                        operator are scaled to 0
+  -i-know-backends-are-running
+                       UNSUPPORTED, dangerous: with -apply, proceed even
+                       though backend connections are still present in
+                       pg_stat_activity — serving replicas can create
+                       sessions and renew leases mid-apply
   -database-url        PostgreSQL DSN (env TCDI_DATABASE_URL)
   -dev-insecure-db     allow a non-verifying database sslmode (env
                        TCDI_DEV_INSECURE_DB; local development only)
@@ -92,6 +104,7 @@ type postRestoreConfig struct {
 	apply            bool
 	dryRun           bool
 	scaledDownAck    bool
+	backendsRunning  bool
 }
 
 func parsePostRestoreFlags(args []string, getenv func(string) string) (postRestoreConfig, error) {
@@ -105,6 +118,7 @@ func parsePostRestoreFlags(args []string, getenv func(string) string) (postResto
 	fs.BoolVar(&c.apply, "apply", false, "execute")
 	fs.BoolVar(&c.dryRun, "dry-run", false, "plan only (default)")
 	fs.BoolVar(&c.scaledDownAck, "i-have-scaled-down", false, "freeze acknowledgement")
+	fs.BoolVar(&c.backendsRunning, "i-know-backends-are-running", false, "UNSUPPORTED: apply despite live backend connections")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -118,6 +132,8 @@ func parsePostRestoreFlags(args []string, getenv func(string) string) (postResto
 		return c, errors.New("-apply requires -i-have-scaled-down: post-restore runs only while backend and operator are scaled to 0")
 	case !c.apply && c.scaledDownAck:
 		return c, errors.New("-i-have-scaled-down only applies to -apply")
+	case !c.apply && c.backendsRunning:
+		return c, errors.New("-i-know-backends-are-running only applies to -apply")
 	}
 	if c.databaseURL == "" {
 		return c, errors.New("required: -database-url (env TCDI_DATABASE_URL)")
@@ -142,7 +158,9 @@ func PostRestoreMain(ctx context.Context, args []string, getenv func(string) str
 		fmt.Fprintf(errOut, "post-restore: %v\n", err)
 		return 2
 	}
-	db, err := store.Open(ctx, cfg.databaseURL)
+	// The tool's own connections carry a distinct application_name so the
+	// backend-connection guard never counts this run.
+	db, err := store.OpenWithAppName(ctx, cfg.databaseURL, postRestoreAppName)
 	if err != nil {
 		fmt.Fprintf(errOut, "post-restore: %v\n", err)
 		return 1
@@ -155,7 +173,7 @@ func PostRestoreMain(ctx context.Context, args []string, getenv func(string) str
 		return 2
 	}
 	src, srcErr := newLiveCRSource(cfg.kubeconfig, tenants)
-	return postRestore(ctx, db, src, srcErr, tenants, cfg.apply, out, errOut, log.With("mode", mode))
+	return postRestore(ctx, db, src, srcErr, tenants, cfg.apply, cfg.backendsRunning, out, errOut, log.With("mode", mode))
 }
 
 // workspaceRow is the restored DB side of a workspace.
@@ -285,18 +303,58 @@ func liveCRFromWorkspace(ws *workspacev1alpha1.Workspace) liveCR {
 
 // postRestore runs the whole mode and returns the exit code.
 func postRestore(ctx context.Context, db *store.DB, src liveCRSource, srcErr error,
-	tenants provisioning.TenantNamespaces, apply bool, out, errOut io.Writer, log *slog.Logger) int {
+	tenants provisioning.TenantNamespaces, apply, backendsRunning bool, out, errOut io.Writer, log *slog.Logger) int {
 
-	// Freeze guard: refuse while any serving backend holds the leader lock.
-	held, err := leaderLockHeld(ctx, db)
-	if err != nil {
-		fmt.Fprintf(errOut, "post-restore: leader lock probe: %v\n", err)
-		return 1
-	}
-	if apply && held {
-		fmt.Fprintln(errOut, "post-restore: refusing: a backend replica still holds the leader lock — "+
-			"scale backend and operator to 0 before running the post-restore steps")
-		return 1
+	// Freeze guard. Dry-run only probes (it may run while the platform is
+	// still serving). -apply takes the leader lock itself and holds it for
+	// the entire run — a try-lock is atomic, so there is no window where a
+	// replica scaled up between a probe and the first write can elect a
+	// leader, and a second post-restore run cannot start either.
+	var held bool
+	var backendConns int64
+	if apply {
+		lockConn, err := takeLeaderLock(ctx, db)
+		if errors.Is(err, errLeaderLockHeld) {
+			fmt.Fprintln(errOut, "post-restore: refusing: the leader lock is held — a backend "+
+				"replica (or another post-restore run) is still active; scale backend and "+
+				"operator to 0 before running the post-restore steps")
+			return 1
+		}
+		if err != nil {
+			fmt.Fprintf(errOut, "post-restore: %v\n", err)
+			return 1
+		}
+		defer releaseLeaderLock(ctx, lockConn)
+
+		// A replica that has not (yet) elected a leader can still serve
+		// logins, create sessions and renew leases — refuse while any of
+		// its connections remain.
+		backendConns, err = backendConnCount(ctx, db)
+		if err != nil {
+			fmt.Fprintf(errOut, "post-restore: backend connection probe: %v\n", err)
+			return 1
+		}
+		if backendConns > 0 && !backendsRunning {
+			fmt.Fprintf(errOut, "post-restore: refusing: %d backend connection(s) present in "+
+				"pg_stat_activity (application_name %q) — scale backend to 0 first, or pass "+
+				"-i-know-backends-are-running (UNSUPPORTED) to override\n", backendConns, backendAppName)
+			return 1
+		}
+		if backendConns > 0 {
+			fmt.Fprintf(out, "  WARNING: -i-know-backends-are-running: applying with %d live "+
+				"backend connection(s) — they can create sessions and renew leases mid-apply\n",
+				backendConns)
+		}
+	} else {
+		var err error
+		if held, err = leaderLockHeld(ctx, db); err != nil {
+			fmt.Fprintf(errOut, "post-restore: leader lock probe: %v\n", err)
+			return 1
+		}
+		if backendConns, err = backendConnCount(ctx, db); err != nil {
+			fmt.Fprintf(errOut, "post-restore: backend connection probe: %v\n", err)
+			return 1
+		}
 	}
 
 	if apply {
@@ -325,6 +383,10 @@ func postRestore(ctx context.Context, db *store.DB, src liveCRSource, srcErr err
 	fmt.Fprintf(out, "  workspace rows (state='active'):    %d\n", len(p.rows))
 	if held {
 		fmt.Fprintln(out, "  NOTE: a backend leader lock is currently held — the platform does not look frozen")
+	}
+	if backendConns > 0 {
+		fmt.Fprintf(out, "  NOTE: %d backend connection(s) present in pg_stat_activity — the platform does not look frozen\n",
+			backendConns)
 	}
 
 	var rotated, revokedLeases, deniedTickets int64
@@ -534,6 +596,68 @@ UPDATE workspaces
  WHERE id = '%s' AND state = 'active';
 `, r.id, r.tenantID, ns, name, r.id)
 	}
+}
+
+// postRestoreAppName is the application_name the tool stamps on its own
+// connections so the backend-connection guard never counts this run.
+const postRestoreAppName = "tcdi-post-restore"
+
+// errLeaderLockHeld means the try-lock came back false: another session —
+// a serving backend replica or a concurrent post-restore run — holds the
+// leader advisory lock.
+var errLeaderLockHeld = errors.New("leader lock already held")
+
+// takeLeaderLock grabs the leader advisory lock on its own dedicated
+// connection, reusing the backend's keepalive settings. The lock is
+// session-scoped, so the caller holds it for the whole run simply by
+// keeping the connection open; releaseLeaderLock (or the kernel, if the
+// process dies) releases it.
+func takeLeaderLock(ctx context.Context, db *store.DB) (*pgx.Conn, error) {
+	cfg := leaderConnConfig(db)
+	if cfg.RuntimeParams == nil {
+		cfg.RuntimeParams = map[string]string{}
+	}
+	cfg.RuntimeParams["application_name"] = postRestoreAppName
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("leader lock connect: %w", err)
+	}
+	var held bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLockKey).Scan(&held); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, fmt.Errorf("leader lock: %w", err)
+	}
+	if !held {
+		_ = conn.Close(context.Background())
+		return nil, errLeaderLockHeld
+	}
+	return conn, nil
+}
+
+// releaseLeaderLock unlocks and closes the dedicated lock connection —
+// closing alone would drop the session lock, but the explicit unlock makes
+// the release ordered and visible in pg_locks before the socket goes away.
+// It runs on a fresh context so an already-cancelled run still releases.
+func releaseLeaderLock(ctx context.Context, conn *pgx.Conn) {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaderConnCloseTimeout)
+	defer cancel()
+	_, _ = conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, leaderLockKey)
+	_ = conn.Close(uctx)
+}
+
+// backendConnCount reports how many live backend connections this database
+// shows — serving replicas are identifiable because the backend stamps
+// application_name on every pooled connection (wireMerged). The calling
+// connection is excluded even though the tool's own application_name
+// already keeps it out.
+func backendConnCount(ctx context.Context, db *store.DB) (int64, error) {
+	var n int64
+	err := db.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM pg_stat_activity
+		 WHERE datname = current_database()
+		   AND application_name = $1
+		   AND pid <> pg_backend_pid()`, backendAppName).Scan(&n)
+	return n, err
 }
 
 // leaderLockHeld reports whether any backend replica currently holds the

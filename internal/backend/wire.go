@@ -45,6 +45,12 @@ import (
 // per-replica cert-CN derivation only exists in split mode.
 const defaultMergedGatewayID = "backend"
 
+// backendAppName is the application_name stamped on every pooled backend
+// connection. pg_stat_activity rows carrying it identify serving replicas —
+// the post-restore tool counts them to refuse applying while any backend
+// is still connected.
+const backendAppName = "tcdi-backend"
+
 // E7 rate-limit tuning: bursts are fixed per route family (the flags set
 // the per-minute rate only) and buckets are LRU-bounded so a sprayed
 // client-key space cannot grow memory. In merged mode the bound is
@@ -150,7 +156,7 @@ func (b *Backend) localGateway(brk *broker.Broker, id broker.GatewayIdentity) (*
 func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayIdentity, metrics *observability.Metrics) error {
 	log := b.log
 
-	db, err := store.Open(ctx, cfg.DatabaseURL)
+	db, err := store.OpenWithAppName(ctx, cfg.DatabaseURL, backendAppName)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}

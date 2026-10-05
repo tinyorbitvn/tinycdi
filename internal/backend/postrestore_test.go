@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -112,7 +114,7 @@ func TestPostRestoreDryRunMakesNoWrites(t *testing.T) {
 	code := postRestore(ctx, db, fakeCRSource{crs: []liveCR{{
 		uid: "ws_aaaa", namespace: "ns-a", name: "ws-aaaa",
 		desiredState: "Running", runtimeGeneration: 1, intentRevision: 1,
-	}}}, nil, testTenants, false, &out, &errOut, testLog())
+	}}}, nil, testTenants, false, false, &out, &errOut, testLog())
 	if code != 0 {
 		t.Fatalf("dry-run exit %d: %s", code, errOut.String())
 	}
@@ -150,7 +152,7 @@ func TestPostRestoreApplyRotatesRevokesDenies(t *testing.T) {
 	code := postRestore(ctx, db, fakeCRSource{crs: []liveCR{{
 		uid: "ws_aaaa", namespace: "ns-a", name: "ws-aaaa",
 		desiredState: "Running", runtimeGeneration: 1, intentRevision: 1,
-	}}}, nil, testTenants, true, &out, &errOut, testLog())
+	}}}, nil, testTenants, true, false, &out, &errOut, testLog())
 	if code != 0 {
 		t.Fatalf("apply exit %d: %s", code, errOut.String())
 	}
@@ -185,7 +187,7 @@ func TestPostRestoreApplyIdempotent(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		var out, errOut bytes.Buffer
-		if code := postRestore(ctx, db, src, nil, testTenants, true, &out, &errOut, testLog()); code != 0 {
+		if code := postRestore(ctx, db, src, nil, testTenants, true, false, &out, &errOut, testLog()); code != 0 {
 			t.Fatalf("apply run %d exit %d: %s", i, code, errOut.String())
 		}
 	}
@@ -218,7 +220,7 @@ func TestPostRestoreAlignsDivergedRow(t *testing.T) {
 	}}
 
 	var out, errOut bytes.Buffer
-	if code := postRestore(ctx, db, src, nil, testTenants, true, &out, &errOut, testLog()); code != 0 {
+	if code := postRestore(ctx, db, src, nil, testTenants, true, false, &out, &errOut, testLog()); code != 0 {
 		t.Fatalf("apply exit %d: %s", code, errOut.String())
 	}
 	var rev int64
@@ -250,7 +252,7 @@ func TestPostRestoreRowAheadOfCRIsAnomaly(t *testing.T) {
 		desiredState: "Stopped", runtimeGeneration: 2, intentRevision: 4,
 	}}}
 	var out, errOut bytes.Buffer
-	if code := postRestore(ctx, db, src, nil, testTenants, true, &out, &errOut, testLog()); code != 0 {
+	if code := postRestore(ctx, db, src, nil, testTenants, true, false, &out, &errOut, testLog()); code != 0 {
 		t.Fatalf("apply exit %d: %s", code, errOut.String())
 	}
 	if got := scalarInt(t, db, `SELECT intent_revision FROM workspaces WHERE id='ws_aaaa'`); got != 9 {
@@ -280,16 +282,173 @@ func TestPostRestoreRefusesWhileLeaderHeld(t *testing.T) {
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, leaderLockKey) }()
 
+	epochBefore := scalarStr(t, db, `SELECT value FROM platform_meta WHERE key='session_epoch'`)
 	var out, errOut bytes.Buffer
-	code := postRestore(ctx, db, fakeCRSource{}, nil, testTenants, true, &out, &errOut, testLog())
+	code := postRestore(ctx, db, fakeCRSource{}, nil, testTenants, true, false, &out, &errOut, testLog())
 	if code != 1 {
 		t.Fatalf("expected refusal exit 1, got %d", code)
 	}
 	if !strings.Contains(errOut.String(), "leader lock") {
 		t.Fatalf("refusal message missing: %s", errOut.String())
 	}
+	if got := scalarStr(t, db, `SELECT value FROM platform_meta WHERE key='session_epoch'`); got != epochBefore {
+		t.Fatal("refused run still rotated the session epoch")
+	}
 	if got := scalarInt(t, db, `SELECT count(*) FROM connection_lease WHERE state='active'`); got != 1 {
 		t.Fatal("refused run still revoked a lease")
+	}
+}
+
+// probeLeaderLock tries pg_try_advisory_lock on a fresh pool connection —
+// true means the lock was free. A successful probe unlocks at once so the
+// pooled connection never leaks the session lock to its next borrower.
+func probeLeaderLock(t *testing.T, db *store.DB) bool {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("probe acquire: %v", err)
+	}
+	defer conn.Release()
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLockKey).Scan(&ok); err != nil {
+		t.Fatalf("probe try-lock: %v", err)
+	}
+	if ok {
+		if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, leaderLockKey); err != nil {
+			t.Fatalf("probe unlock: %v", err)
+		}
+	}
+	return ok
+}
+
+// hookCRSource runs probe inside List — which postRestore calls mid-run,
+// while an apply must still be holding the leader lock.
+type hookCRSource struct {
+	crs   []liveCR
+	err   error
+	probe func()
+}
+
+func (h hookCRSource) List(ctx context.Context) ([]liveCR, error) {
+	if h.probe != nil {
+		h.probe()
+	}
+	return h.crs, h.err
+}
+
+// openAs opens a connection stamped with the given application_name —
+// standing in for a serving component's pool connection in
+// pg_stat_activity.
+func openAs(t *testing.T, db *store.DB, appName string) *pgx.Conn {
+	t.Helper()
+	cfg := db.Pool().Config().ConnConfig.Copy()
+	params := map[string]string{}
+	for k, v := range cfg.RuntimeParams {
+		params[k] = v
+	}
+	params["application_name"] = appName
+	cfg.RuntimeParams = params
+	conn, err := pgx.ConnectConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect as %s: %v", appName, err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	return conn
+}
+
+func TestPostRestoreHoldsLeaderLockForRun(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	seedWorkspaceFull(t, db, "ws_aaaa", "Running", 1, 1)
+
+	// src.List runs mid-apply: a concurrent leader-lock attempt — what a
+	// scaled-up backend replica would do — must fail while it runs.
+	var lockFreeMidRun *bool
+	src := hookCRSource{
+		crs: []liveCR{{
+			uid: "ws_aaaa", namespace: "ns-a", name: "ws-aaaa",
+			desiredState: "Running", runtimeGeneration: 1, intentRevision: 1,
+		}},
+		probe: func() { free := probeLeaderLock(t, db); lockFreeMidRun = &free },
+	}
+	var out, errOut bytes.Buffer
+	if code := postRestore(ctx, db, src, nil, testTenants, true, false, &out, &errOut, testLog()); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, errOut.String())
+	}
+	if lockFreeMidRun == nil {
+		t.Fatal("probe never ran")
+	}
+	if *lockFreeMidRun {
+		t.Fatal("a concurrent leader-lock attempt succeeded mid-apply — the tool did not hold the lock")
+	}
+	if !probeLeaderLock(t, db) {
+		t.Fatal("leader lock still held after a successful apply")
+	}
+}
+
+func TestPostRestoreReleasesLeaderLockOnError(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	seedWorkspaceFull(t, db, "ws_aaaa", "Running", 1, 1)
+
+	// The no-Kubernetes path is a mid-run exit (DB writes already applied):
+	// the deferred release must still drop the lock.
+	var out, errOut bytes.Buffer
+	code := postRestore(ctx, db, nil, errors.New("in-cluster config: no service account token"),
+		testTenants, true, false, &out, &errOut, testLog())
+	if code != postRestoreExitKubeUnavailable {
+		t.Fatalf("expected exit %d, got %d", postRestoreExitKubeUnavailable, code)
+	}
+	if !probeLeaderLock(t, db) {
+		t.Fatal("leader lock still held after a mid-run error exit")
+	}
+}
+
+func TestPostRestoreRefusesWithBackendConnections(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	seedWorkspaceFull(t, db, "ws_aaaa", "Running", 1, 1)
+	seedLease(t, db, "lease-1", "ws_aaaa")
+	epochBefore := scalarStr(t, db, `SELECT value FROM platform_meta WHERE key='session_epoch'`)
+
+	// A serving replica's pool connection, stamped exactly like the real
+	// backend's (wireMerged).
+	openAs(t, db, backendAppName)
+
+	var out, errOut bytes.Buffer
+	code := postRestore(ctx, db, fakeCRSource{}, nil, testTenants, true, false, &out, &errOut, testLog())
+	if code != 1 {
+		t.Fatalf("expected refusal exit 1, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "backend connection") {
+		t.Fatalf("refusal message missing: %s", errOut.String())
+	}
+	if got := scalarStr(t, db, `SELECT value FROM platform_meta WHERE key='session_epoch'`); got != epochBefore {
+		t.Fatal("refused run rotated the session epoch")
+	}
+	if got := scalarInt(t, db, `SELECT count(*) FROM connection_lease WHERE state='active'`); got != 1 {
+		t.Fatal("refused run revoked a lease")
+	}
+	if !probeLeaderLock(t, db) {
+		t.Fatal("leader lock not released after the backend-connection refusal")
+	}
+
+	// The UNSUPPORTED override proceeds anyway and warns.
+	out.Reset()
+	errOut.Reset()
+	code = postRestore(ctx, db, fakeCRSource{}, nil, testTenants, true, true, &out, &errOut, testLog())
+	if code != 0 {
+		t.Fatalf("override apply exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "-i-know-backends-are-running") {
+		t.Fatalf("override warning missing:\n%s", out.String())
+	}
+	if got := scalarInt(t, db, `SELECT count(*) FROM connection_lease WHERE state='active'`); got != 0 {
+		t.Fatal("override run did not revoke the lease")
+	}
+	if !probeLeaderLock(t, db) {
+		t.Fatal("leader lock still held after the override apply")
 	}
 }
 
@@ -300,7 +459,7 @@ func TestPostRestoreNoKubeAccessPrintsSQL(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := postRestore(ctx, db, nil, errors.New("in-cluster config: no service account token"),
-		testTenants, true, &out, &errOut, testLog())
+		testTenants, true, false, &out, &errOut, testLog())
 	if code != postRestoreExitKubeUnavailable {
 		t.Fatalf("expected exit %d, got %d", postRestoreExitKubeUnavailable, code)
 	}
@@ -326,11 +485,20 @@ func TestPostRestoreFlagValidation(t *testing.T) {
 	if _, err := parsePostRestoreFlags([]string{"-i-have-scaled-down"}, getenv); err == nil {
 		t.Fatal("ack without -apply accepted")
 	}
+	if _, err := parsePostRestoreFlags([]string{"-i-know-backends-are-running", "-database-url", "postgres://x"}, getenv); err == nil {
+		t.Fatal("backend-connection override without -apply accepted")
+	}
 	if _, err := parsePostRestoreFlags(nil, getenv); err == nil {
 		t.Fatal("missing -database-url accepted")
 	}
 	c, err := parsePostRestoreFlags([]string{"-database-url", "postgres://x"}, getenv)
 	if err != nil || c.apply {
 		t.Fatalf("default mode: %v %+v", err, c)
+	}
+	c, err = parsePostRestoreFlags([]string{
+		"-database-url", "postgres://x", "-apply", "-i-have-scaled-down", "-i-know-backends-are-running",
+	}, getenv)
+	if err != nil || !c.backendsRunning {
+		t.Fatalf("override apply: %v %+v", err, c)
 	}
 }

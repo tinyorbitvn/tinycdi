@@ -21,7 +21,25 @@ type DB struct {
 
 // Open connects to PostgreSQL at url and verifies the connection.
 func Open(ctx context.Context, url string) (*DB, error) {
-	pool, err := pgxpool.New(ctx, url)
+	return OpenWithAppName(ctx, url, "")
+}
+
+// OpenWithAppName connects like Open, stamping every pool connection's
+// application_name so pg_stat_activity can tell components apart (the
+// post-restore tool relies on it to spot live backends). A name set in the
+// DSN is overridden — the identity belongs to the binary, not the DSN.
+func OpenWithAppName(ctx context.Context, url, appName string) (*DB, error) {
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse/connect %w", err)
+	}
+	if appName != "" {
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		cfg.ConnConfig.RuntimeParams["application_name"] = appName
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: parse/connect %w", err)
 	}

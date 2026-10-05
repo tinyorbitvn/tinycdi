@@ -234,12 +234,20 @@ Steps 1–3 are the parts that differ from backup-restore.md.
      that fence matters). Rows with no CR (ghosts) and CRs with no row
      (orphans) are counted and printed for step 5 — never deleted here.
 
-   The subcommand is idempotent; `-apply` requires `-i-have-scaled-down`
-   and additionally refuses while any backend replica holds the leader
-   advisory lock — the flag is the operator's freeze acknowledgement, the
-   lock probe the hard backstop (a serving replica set elects a leader
-   within seconds). It logs one summary line per run. With no flag the
-   command is a dry-run: the plan plus affected counts, no writes.
+   The subcommand is idempotent; `-apply` requires `-i-have-scaled-down`,
+   then takes the leader advisory lock on its own connection and holds it
+   for the whole run — a failed `pg_try_advisory_lock` means a serving
+   replica (or a second `post-restore` run) still has it, and while the
+   tool holds it a replica scaled up mid-apply cannot elect a leader. It
+   also refuses while `pg_stat_activity` still shows connections with
+   `application_name = 'tcdi-backend'` — a replica that never led can still
+   serve logins, mint sessions and renew leases — so a refusal there means
+   the freeze did not take; scale `backend` to 0 and re-run.
+   `-i-know-backends-are-running` (UNSUPPORTED, dangerous) overrides that
+   second refusal only. The flag is the operator's freeze acknowledgement;
+   the held lock is the hard backstop. It logs one summary line per run.
+   With no flag the command is a dry-run: the plan plus affected counts
+   and the same two freeze probes, no writes, no lock taken.
 
    Run it as a Job in the release namespace, reusing the backend pod
    template — the `backend` ServiceAccount's `backend-workspaces`
