@@ -168,9 +168,11 @@ Controls:
   present so NAT-shared users keep separate buckets
   (`internal/api/ratelimit_key.go`, FX-R30); the callback is additionally
   capped by a 10× per-IP ceiling so validated-state spray stays bounded.
-  The effective bound is `min(shared window, divided local bucket)` —
-  `PerReplica` still divides the configured budget into each pod's local
-  ceiling and fail-open fallback for a store outage (RL-1). Degraded-mode
+  While the store is healthy the window is the exact aggregate bound and
+  each pod's local bucket is the undivided rate+burst — a
+  store-protection prefilter (RL-CEILING amendment); the `PerReplica`
+  divided bucket is the fail-open floor, engaged only while the circuit
+  breaker is open (RL-1). Degraded-mode
   cost is bounded by a circuit breaker: every store call carries a 500 ms
   deadline, an error opens the circuit for a 10 s cool-down during which
   checks skip the store entirely, and one single-flight probe re-tests it

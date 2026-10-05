@@ -469,15 +469,16 @@ minute boundary — the same overshoot class the old per-replica buckets
 had. Split mode (`backend.brokerURL`, no database) keeps the divided
 in-memory limiter.
 
-Every pod additionally keeps its divided in-memory bucket — the chart
-passes `-rate-limit-replicas=backend.replicas` — which now plays two
-roles: a **per-replica ceiling** while Postgres is healthy (effective
-bound = `min(shared window, pod share)`, so one pod can never serve more
-than its `max(1, rate÷N)`/min + `max(1, burst÷N)` burst, and a locally
-refused key never reaches the store) and the **fail-open fallback**
-during a Postgres outage — every limited route needs Postgres to
-complete anyway, so an outage degrades to per-replica limiting rather
-than a lifted cap or a hard 429. Store errors count on
+Every pod additionally keeps two in-memory buckets. While Postgres is
+healthy the **per-replica ceiling** is the *undivided* budget (full
+rate/min + burst) — a store-protection prefilter only, so a locally
+refused key never reaches the store but an uneven spread across pods is
+never under-limited. While the store is unreachable the bound is the
+**divided floor**: `max(1, rate÷N)`/min + `max(1, burst÷N)` burst per
+pod (the chart passes `-rate-limit-replicas=backend.replicas`) — the
+fail-open fallback during a Postgres outage, since every limited route
+needs Postgres to complete anyway and an outage degrades to per-replica
+limiting rather than a lifted cap or a hard 429. Store errors count on
 `tinycdi_rate_limit_store_errors_total{route}` — real failures only:
 each check runs under a 500 ms deadline and a failure opens a 10 s
 circuit breaker that skips the store until one probe succeeds, so a
@@ -489,11 +490,11 @@ Expired window rows are deleted by the leader replica's periodic sweep
 
 Three edge cases to know:
 
-- **Sticky load-balancing still sees the pod share.** A key pinned to
-  one pod (cookie/IP-hash affinity) is bounded by that pod's 1/N ceiling
-  even while the shared window has room — the ceiling is deliberate (it
-  bounds what one pod may serve) and only loosens if you raise
-  `-rate-limit-replicas` **downward** or spread traffic.
+- **Sticky load-balancing sees the pod share only in an outage.** While
+  Postgres is healthy a key pinned to one pod (cookie/IP-hash affinity)
+  draws the full aggregate from the shared window — the pod's undivided
+  prefilter is not a share. Only in degraded mode does the pod's 1/N
+  floor bind.
 - **A configured rate below the replica count still clamps up.** During
   a Postgres outage (`-login-rate=2` with `backend.replicas: 3`) each
   pod's floor is 1/min — ~N/min aggregate, above the flag, never
@@ -506,8 +507,8 @@ Three edge cases to know:
   enforces the aggregate at every replica count regardless.
 
 When reading `tinycdi_rate_limited_total` during an outage remember the
-replica count — each pod's local ceiling is 1/N of the aggregate; while
-Postgres is healthy the series measures the shared bound.
+replica count — each pod's degraded-mode floor is 1/N of the aggregate;
+while Postgres is healthy the series measures the shared bound.
 
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted

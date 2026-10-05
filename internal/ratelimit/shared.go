@@ -51,13 +51,23 @@ const storeCooldown = 10 * time.Second
 // (the boundary effect admits at most ~2×limit inside any <2-minute
 // span — the same overshoot class the per-replica bucket already had).
 //
-// Guardrails (advisor decision):
-//   - the local divided limiter stays BOTH as the fail-open fallback AND
-//     as a per-replica ceiling while the store is healthy: a request must
-//     pass the local bucket before the shared window is consulted, so the
-//     effective bound is min(shared window, divided local) and a
-//     locally-refused key never reaches the store (which also bounds the
-//     write rate one replica's key spray can cause to its local ceiling);
+// Guardrails (advisor decisions):
+//   - healthy mode: the shared window is the exact aggregate bound and
+//     the local ceiling is the UNDIVIDED rate+burst budget (RL-CEILING
+//     amendment to ADR 0006(i)) — a store-protection prefilter only: a
+//     locally-refused key never reaches the store, bounding the upsert
+//     rate one replica's key spray can cause, but an uneven spread of
+//     one key across pods can no longer 429 below the aggregate;
+//   - degraded mode: while the circuit is open the local bound is the
+//     DIVIDED rate/N + burst/N bucket — the unchanged fail-open floor
+//     (G1). The breaker picks one bucket per request; neither bucket is
+//     ever reset at a transition — their token state simply stops (or
+//     resumes) being drawn and refills lazily on next touch, so no
+//     reset storm can follow a flap. Transition note: right at a
+//     healthy→degraded switch a pod may briefly have admitted up to
+//     rate+burst locally (the just-failed request itself drew a ceiling
+//     token) before the divided floor binds, and a key the floor never
+//     saw starts the outage with a fresh divided burst;
 //   - a store error fails OPEN to the local bucket — every limited
 //     route's real work needs Postgres anyway, so the outage degrades to
 //     pre-window per-replica limiting rather than a lifted cap or a hard
@@ -74,7 +84,8 @@ const storeCooldown = 10 * time.Second
 //     sustained outage) and the onDegraded hook follows the open/closed
 //     state for the gauge.
 type SharedLimiter struct {
-	local        *Limiter
+	ceiling      *Limiter // undivided rate+burst — healthy-mode prefilter
+	floor        *Limiter // divided rate/N+burst/N — degraded-mode floor
 	store        WindowStore
 	route        string // 'login' | 'callback_ceiling' | 'launch'
 	limit        int64  // window bound: undivided rate + burst per minute
@@ -89,19 +100,22 @@ type SharedLimiter struct {
 	probing     bool       // a post-cool-down probe is in flight (single-flight)
 }
 
-// NewShared wraps local with the shared window. local is the per-replica
-// ceiling/fallback built by New(rate/n, burst/n, ...); limit is the
-// UNDIVIDED rate+burst the shared window enforces per minute; route is
-// the window's route label and the metric label of both hooks. store nil
-// degrades the limiter to the local bucket (used where no database
-// exists — split mode). log nil uses the default logger; onStoreError
-// nil skips the error metric, onDegraded nil skips the state gauge.
-func NewShared(local *Limiter, store WindowStore, route string, limit int, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) *SharedLimiter {
+// NewShared wraps the shared window between the two local buckets.
+// ceiling is the undivided-budget bucket built by New(rate, burst, ...)
+// — consulted while the store is reachable; floor is the divided bucket
+// built by New(rate/n, burst/n, ...) — consulted while the circuit is
+// open, and always when store is nil (no shared window exists — the
+// split-mode shape). limit is the UNDIVIDED rate+burst the shared window
+// enforces per minute; route is the window's route label and the metric
+// label of both hooks. log nil uses the default logger; onStoreError nil
+// skips the error metric, onDegraded nil skips the state gauge.
+func NewShared(ceiling, floor *Limiter, store WindowStore, route string, limit int, log *slog.Logger, onStoreError func(string), onDegraded func(string, bool)) *SharedLimiter {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &SharedLimiter{
-		local:        local,
+		ceiling:      ceiling,
+		floor:        floor,
 		store:        store,
 		route:        route,
 		limit:        int64(limit),
@@ -113,22 +127,23 @@ func NewShared(local *Limiter, store WindowStore, route string, limit int, log *
 }
 
 // Allow reports whether key may proceed, with the same contract as
-// Limiter.Allow. Order: the local per-replica ceiling runs first — a
-// refusal is final and never touches the store; then the shared window
-// increments and the request passes iff its count is within limit. A
-// store error degrades the answer to the local verdict (fail-open) and
-// opens the circuit; while the circuit is open the store is skipped
-// until a cool-down probe closes it again.
+// Limiter.Allow. Order: the breaker picks the local bucket (undivided
+// ceiling while healthy, divided floor while open), its refusal is
+// final and never touches the store; then the shared window increments
+// and the request passes iff its count is within limit. A store error
+// degrades the answer to the local verdict (fail-open) and opens the
+// circuit; while the circuit is open the store is skipped until a
+// cool-down probe closes it again.
 func (s *SharedLimiter) Allow(key string) (bool, time.Duration) {
-	if s == nil || s.local == nil || s.local.perSec <= 0 || s.limit <= 0 {
+	if s == nil || s.ceiling == nil || s.ceiling.perSec <= 0 || s.limit <= 0 {
 		// A zero configured rate disables the limiter entirely — the
 		// disabled case must never touch the store.
 		return true, 0
 	}
-	ok, retry := s.local.Allow(key)
+	ok, retry := s.localBucket().Allow(key)
 	if !ok || s.store == nil {
-		// Locally refused (or no store): the divided bucket's answer is
-		// final — min(shared, local) can only tighten it.
+		// Locally refused (or no store): the picked bucket's answer is
+		// final — the window can only ever tighten it.
 		return ok, retry
 	}
 	if !s.mayUseStore() {
@@ -151,6 +166,23 @@ func (s *SharedLimiter) Allow(key string) (bool, time.Duration) {
 		return false, resetIn
 	}
 	return true, 0
+}
+
+// localBucket picks the local bucket this request draws from: the
+// divided floor while the circuit is open — and permanently when no
+// store exists (split mode's local-only shape) — the undivided ceiling
+// otherwise. The pick and the mayUseStore call below read the breaker
+// separately, so they can straddle a transition; that is benign in both
+// directions — a request either spends a token from the larger ceiling
+// or the tighter floor, and the store decision is taken fresh under the
+// same mutex.
+func (s *SharedLimiter) localBucket() *Limiter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.degraded || s.store == nil {
+		return s.floor
+	}
+	return s.ceiling
 }
 
 // mayUseStore reports whether this request should consult the store:

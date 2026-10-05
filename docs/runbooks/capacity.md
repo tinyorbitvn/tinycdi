@@ -193,22 +193,26 @@ What that means for sizing:
   one key draws at most rate+burst in a window — `-login-rate` 60/min +
   burst 20 admits an anonymous IP 80 requests inside any wall-clock
   minute (the fixed-window edge admits up to 2× across a boundary — the
-  same overshoot class the old per-replica buckets had). Every pod also
-  keeps a divided in-memory bucket (`max(1, rate÷N)`/min, `max(1,
-  burst÷N)` burst via `-rate-limit-replicas=backend.replicas`) as a
-  per-replica ceiling, so the effective bound is
-  `min(shared window, this pod's share)` — a key pinned to one pod by
-  sticky load-balancing still sees only that pod's 1/N share. Every
-  window check runs under a 500 ms deadline, and a store error opens a
-  10 s circuit breaker — checks skip the store until one probe closes
-  it — so a slow-but-alive Postgres stalls at most one request per
-  cool-down, not every login/launch. During a
-  Postgres outage each pod falls back to its divided local bucket
-  (fail-open — the limited routes all need Postgres to complete anyway),
-  which makes `-rate-limit-replicas` the ceiling divisor; a flag smaller
-  than the replica count clamps to 1/min per pod (~N/min aggregate,
-  the one overshoot). Size `-login-rate`/`-launch-rate` as the aggregate
-  you want to allow.
+  same overshoot class the old per-replica buckets had). While Postgres
+  is healthy each pod also runs an UNDIVIDED in-memory bucket (full
+  rate/min + burst) purely as a store-protection prefilter — a request
+  refused there never reaches the database — so an uneven spread, or a
+  key pinned to one pod by sticky load-balancing, still gets the whole
+  aggregate (v0.5 RL-CEILING amendment; the divided per-pod ceiling that
+  used to 429 such traffic is gone). Every window check runs under a
+  500 ms deadline, and a store error opens a 10 s circuit breaker —
+  checks skip the store until one probe closes it — so a slow-but-alive
+  Postgres stalls at most one request per cool-down, not every
+  login/launch. During a Postgres outage each pod falls back to its
+  DIVIDED local bucket (`max(1, rate÷N)`/min, `max(1, burst÷N)` burst
+  via `-rate-limit-replicas=backend.replicas`) — fail-open, since the
+  limited routes all need Postgres to complete anyway — so the flag is
+  now only the outage-floor divisor; a flag smaller than the replica
+  count clamps to 1/min per pod (~N/min aggregate, the one overshoot).
+  Right at a healthy→degraded switch a pod may briefly have admitted up
+  to rate+burst locally before the divided floor binds — the just-failed
+  request draws a healthy-ceiling token. Size `-login-rate`/
+  `-launch-rate` as the aggregate you want to allow.
 - The per-key limits and the limiter's key-space bound are unchanged;
   `backend.trustedProxies` must still name the edge's CIDRs or every user
   collapses into the edge's own IP bucket regardless.

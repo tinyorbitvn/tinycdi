@@ -215,8 +215,10 @@ substitute for review).
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
   `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR
-  0006): fixed-window bound, local ceiling consulted first
-  (min(shared, local)), fail-open to the divided bucket on store error,
+  0006 + RL-CEILING): fixed-window bound, undivided healthy ceiling
+  consulted first, uneven-split bound (15/5, 20/0 across two instances),
+  degraded-mode division to the per-pod floor, healthy↔degraded
+  transition bounds with no bucket resets, fail-open on store error,
   edge-triggered fallback logs + per-error metric, disabled-rate and
   nil-store paths, and the circuit breaker — 500 ms per-call deadline
   under a stalled store, no store contact inside the 10 s cool-down,
@@ -226,8 +228,9 @@ substitute for review).
 - `tests/integration/rate_limit_pg_test.go` — store-level window upsert
   and sweep semantics on real Postgres, plus the B6 gate: two backend
   replicas sharing one database admit one hammered key exactly R+B per
-  window (window-edge bound documented in the README), and a Postgres
-  outage fails open to the divided local limiter and recovers —
+  window — including an uneven 15/5 and 20/0 spread, the RL-CEILING
+  regression — (window-edge bound documented in the README), and a
+  Postgres outage fails open to the divided local limiter and recovers —
   `tinycdi_rate_limit_store_errors_total{route}` asserted on /metrics.
 
 ## 5. Store
