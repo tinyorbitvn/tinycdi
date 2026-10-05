@@ -140,7 +140,7 @@ type WorkspaceStatus struct {
 
 	// conditions represent the current state of the Workspace resource.
 	// Condition types: Admitted, StorageReady, RuntimeReady, ConnectionReady,
-	// Degraded, IntentBehind.
+	// Degraded.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
