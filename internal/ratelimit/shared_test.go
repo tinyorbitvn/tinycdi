@@ -141,9 +141,11 @@ func testSharedLog(l *logBuf) *slog.Logger {
 // TestShared_WindowBound: the shared window admits exactly limit hits —
 // count <= limit passes, count > limit is refused with the store's
 // reported reset as Retry-After, and a fresh window resets the budget.
+// The floor is deliberately tiny: healthy-mode checks must never draw
+// from it.
 func TestShared_WindowBound(t *testing.T) {
 	ws := newFakeWindowStore()
-	l := NewShared(New(6000, 100, 100, nil), ws, "login", 5, nil, nil, nil)
+	l := NewShared(New(6000, 100, 100, nil), New(1, 1, 100, nil), ws, "login", 5, nil, nil, nil)
 
 	for i := 0; i < 5; i++ {
 		if ok, _ := l.Allow("k"); !ok {
@@ -169,16 +171,15 @@ func TestShared_WindowBound(t *testing.T) {
 	}
 }
 
-// TestShared_LocalCeilingFirst: the divided local bucket is the
-// per-replica ceiling — its refusal is final and never spends a store
-// write (min(shared, local), and the local ceiling bounds the upsert
-// rate a key spray can cause).
+// TestShared_LocalCeilingFirst: the undivided local ceiling still runs
+// before the store — its refusal is final and never spends a store
+// write (the prefilter bounds the upsert rate a key spray can cause).
 func TestShared_LocalCeilingFirst(t *testing.T) {
 	ws := newFakeWindowStore()
-	// Local bucket: 1 token/min, burst 2 — exhausts after 2 hits. The
+	// Ceiling bucket: 1 token/min, burst 2 — exhausts after 2 hits. The
 	// store would still have room (limit 100), so a denial can only
 	// have come from the local ceiling.
-	l := NewShared(New(1, 2, 100, nil), ws, "login", 100, nil, nil, nil)
+	l := NewShared(New(1, 2, 100, nil), New(1, 2, 100, nil), ws, "login", 100, nil, nil, nil)
 
 	if ok, _ := l.Allow("k"); !ok {
 		t.Fatal("first hit refused")
@@ -187,16 +188,215 @@ func TestShared_LocalCeilingFirst(t *testing.T) {
 		t.Fatal("second hit refused")
 	}
 	if ok, _ := l.Allow("k"); ok {
-		t.Fatal("third hit allowed past the local ceiling — min() violated")
+		t.Fatal("third hit allowed past the local ceiling")
 	}
 	if got := ws.callCount(); got != 2 {
 		t.Fatalf("store calls = %d, want 2 — a local refusal must not write", got)
 	}
 }
 
-// TestShared_FailOpen: a store error degrades the check to the local
-// bucket — never a lifted cap, never a hard refusal. The error metric
-// counts REAL store failures only (requests skipped inside the
+// TestShared_UnevenSplitUsesWindowBound (RL-CEILING) is the E2E-V050-RAMP
+// regression: two limiter instances sharing one window — an uneven split
+// of one key must not draw a local 429 below the aggregate bound. While
+// the store is healthy each replica's ceiling is the UNDIVIDED budget
+// (here rate 5/min + burst 20 → bound 25, floor the divided 2/min + 10):
+// a 15/5 split and a 20/0 split are admitted in full, and the window —
+// not a pod's share — refuses the 26th hit.
+func TestShared_UnevenSplitUsesWindowBound(t *testing.T) {
+	ws := newFakeWindowStore()
+	clock := newFakeClock()
+	newPod := func() *SharedLimiter {
+		l := NewShared(New(5, 20, 100, clock.Now), New(2, 10, 100, clock.Now), ws, "login", 25, nil, nil, nil)
+		l.now = clock.Now
+		return l
+	}
+	a, b := newPod(), newPod()
+
+	// 15/5 on one key: the divided ceiling (burst 10) would have refused
+	// pod a's 11th hit — the undivided ceiling admits all 20.
+	for i := 0; i < 15; i++ {
+		if ok, _ := a.Allow("k"); !ok {
+			t.Fatalf("pod-a hit %d of a 15/5 split refused below the window bound", i+1)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if ok, _ := b.Allow("k"); !ok {
+			t.Fatalf("pod-b hit %d of a 15/5 split refused below the window bound", i+1)
+		}
+	}
+	// Window count matches the admitted traffic — the bound is exactly
+	// the aggregate, kept by the store alone.
+	if got := ws.counts["login/k"]; got != 20 {
+		t.Fatalf("window count = %d, want 20 — every admitted hit must reach the store", got)
+	}
+
+	// 5 more hits on pod b reach the bound; the 26th is refused by the
+	// window's own count (pod b's ceiling still has burst left).
+	for i := 0; i < 5; i++ {
+		if ok, _ := b.Allow("k"); !ok {
+			t.Fatalf("hit %d of 25 refused — the aggregate bound is exactly rate+burst", 21+i)
+		}
+	}
+	if ok, _ := b.Allow("k"); ok {
+		t.Fatal("26th aggregate hit allowed — the window bound did not hold")
+	}
+	if got := ws.counts["login/k"]; got != 26 {
+		t.Fatalf("window count = %d, want 26 — the over-bound refusal is the store's", got)
+	}
+
+	// 20/0 on a fresh key: one pod alone serves the whole burst — no
+	// local refusal below the bound.
+	for i := 0; i < 20; i++ {
+		if ok, _ := a.Allow("solo"); !ok {
+			t.Fatalf("single-pod hit %d of 20 refused below the window bound", i+1)
+		}
+	}
+}
+
+// TestShared_DegradedModeDivides (RL-CEILING): with the circuit open the
+// local bound is the divided floor again — R/N + B/N per pod, the G1
+// fail-open floor unchanged by the healthy-ceiling amendment.
+func TestShared_DegradedModeDivides(t *testing.T) {
+	ws := newFakeWindowStore()
+	ws.err = errors.New("down")
+	clock := newFakeClock()
+	// Bound 25 (5/min + 20); N=2 → floor 2/min + burst 10 per pod.
+	newPod := func() *SharedLimiter {
+		l := NewShared(New(5, 20, 100, clock.Now), New(2, 10, 100, clock.Now), ws, "login", 25, nil, nil, nil)
+		l.now = clock.Now
+		return l
+	}
+	a, b := newPod(), newPod()
+
+	// Each pod: the first hit draws a ceiling token and fails the store
+	// check (fail-open admit — the transition note's allowed overshoot),
+	// opening the breaker; the floor then admits exactly its divided
+	// burst 10, and the 12th hit is refused locally. Aggregate over the
+	// outage: 2×11 ≈ the R+B bound.
+	for _, l := range []*SharedLimiter{a, b} {
+		for i := 0; i < 11; i++ {
+			if ok, _ := l.Allow("k"); !ok {
+				t.Fatalf("degraded hit %d refused — want 1 fail-open + floor burst 10", i+1)
+			}
+		}
+		if ok, _ := l.Allow("k"); ok {
+			t.Fatal("12th degraded hit allowed — the divided floor did not bind")
+		}
+	}
+	// Each pod touched the store once (the failing check); every later
+	// hit was a floor verdict inside the cool-down.
+	if got := ws.callCount(); got != 2 {
+		t.Fatalf("store calls = %d, want 2 — outage traffic must not reach the store", got)
+	}
+	if ws.counts["login/k"] != 0 {
+		t.Fatalf("window counted %d outage hits, want 0 — failed checks never write", ws.counts["login/k"])
+	}
+}
+
+// TestShared_TransitionKeepsBounds (RL-CEILING): healthy → degraded →
+// healthy keeps each phase's bound, and neither bucket is reset at a
+// switch — the floor's untouched state grants a fresh divided burst the
+// moment the breaker opens, and a drained ceiling bucket stays drained
+// (lazy refill only) when the breaker closes again.
+func TestShared_TransitionKeepsBounds(t *testing.T) {
+	ws := newFakeWindowStore()
+	logs := &logBuf{}
+	clock := newFakeClock()
+	newPod := func() *SharedLimiter {
+		l := NewShared(New(5, 20, 100, clock.Now), New(2, 10, 100, clock.Now), ws, "login", 25,
+			testSharedLog(logs), nil, nil)
+		l.now = clock.Now
+		return l
+	}
+	a, b := newPod(), newPod()
+
+	// Healthy: 13/12 uneven on "k" — the whole bound is admitted; the
+	// 26th hit is the window's refusal.
+	for i := 0; i < 13; i++ {
+		if ok, _ := a.Allow("k"); !ok {
+			t.Fatalf("healthy hit %d refused", i+1)
+		}
+	}
+	for i := 0; i < 12; i++ {
+		if ok, _ := b.Allow("k"); !ok {
+			t.Fatalf("healthy hit %d refused", 14+i)
+		}
+	}
+	if ok, _ := b.Allow("k"); ok {
+		t.Fatal("26th healthy hit allowed past the window bound")
+	}
+	callsHealthy := ws.callCount()
+
+	// Degraded: the store drops. On a fresh key each pod admits 1
+	// ceiling fail-open (the failing check itself) + the floor's divided
+	// burst 10 — a bucket reset at the switch would show up as a
+	// different count. The clock stays inside the cool-down, so nothing
+	// else reaches the store.
+	ws.err = errors.New("down")
+	for _, l := range []*SharedLimiter{a, b} {
+		for i := 0; i < 11; i++ {
+			if ok, _ := l.Allow("d"); !ok {
+				t.Fatalf("degraded hit %d refused — want fail-open + floor burst 10", i+1)
+			}
+		}
+		if ok, _ := l.Allow("d"); ok {
+			t.Fatal("12th degraded hit allowed — the divided floor did not bind")
+		}
+	}
+	if got := ws.callCount(); got != callsHealthy+2 {
+		t.Fatalf("store calls = %d, want %d — one failing check per pod, then silence",
+			got, callsHealthy+2)
+	}
+
+	// Healthy again: the cool-down lapses, the first hit probes and
+	// closes the breaker, and a fresh key gets the full window bound
+	// back — 13/12 uneven admitted, 26th refused.
+	ws.err = nil
+	clock.Advance(storeCooldown + time.Second)
+	for i := 0; i < 13; i++ {
+		if ok, _ := a.Allow("r"); !ok {
+			t.Fatalf("post-recovery hit %d refused — the probe must restore the window", i+1)
+		}
+	}
+	for i := 0; i < 12; i++ {
+		if ok, _ := b.Allow("r"); !ok {
+			t.Fatalf("post-recovery hit %d refused", 14+i)
+		}
+	}
+	if ok, _ := b.Allow("r"); ok {
+		t.Fatal("26th post-recovery hit allowed — the window bound was lost")
+	}
+
+	// No reset storm either way: a SECOND outage shows the floor bucket
+	// for "d" kept its drained state — after the one ceiling fail-open
+	// it is refused outright (a reset would grant a fresh burst 10),
+	// while a key the floor never saw still gets the full divided burst.
+	ws.err = errors.New("down")
+	if ok, _ := a.Allow("d"); !ok {
+		t.Fatal("second outage's first hit refused — the ceiling fail-open must serve")
+	}
+	if ok, _ := a.Allow("d"); ok {
+		t.Fatal("'d' allowed through a drained floor — the outage reset its bucket")
+	}
+	// The breaker is already open when "e" arrives, so ALL of its hits
+	// draw floor tokens — a fresh key gets exactly the divided burst 10.
+	for i := 0; i < 10; i++ {
+		if ok, _ := a.Allow("e"); !ok {
+			t.Fatalf("fresh-key floor hit %d refused — want the divided burst 10", i+1)
+		}
+	}
+	if ok, _ := a.Allow("e"); ok {
+		t.Fatal("11th fresh-key hit allowed — want the divided burst 10")
+	}
+	// Entry logs: a+b in outage 1, a again in outage 2 — edge-triggered.
+	if n := strings.Count(logs.String(), "enforcing local per-replica limit"); n != 3 {
+		t.Fatalf("fallback entries = %d, want 3 (a+b in outage 1, a in outage 2)", n)
+	}
+}
+
+// TestShared_FailOpen: a store error degrades the check to the divided
+// floor bucket — never a lifted cap, never a hard refusal. The error
+// metric counts REAL store failures only (requests skipped inside the
 // cool-down never reach the store); the log gets ONE entry line and ONE
 // exit line, not a line per request.
 func TestShared_FailOpen(t *testing.T) {
@@ -204,7 +404,8 @@ func TestShared_FailOpen(t *testing.T) {
 	logs := &logBuf{}
 	var storeErrs int
 	clock := newFakeClock()
-	l := NewShared(New(60, 10, 100, nil), ws, "launch", 80,
+	// Buckets share the fake clock so the cool-down advance also refills.
+	l := NewShared(New(60, 10, 100, clock.Now), New(60, 5, 100, clock.Now), ws, "launch", 80,
 		testSharedLog(logs), func(string) { storeErrs++ }, nil)
 	l.now = clock.Now
 
@@ -218,14 +419,18 @@ func TestShared_FailOpen(t *testing.T) {
 		t.Fatalf("log written while healthy: %s", logs.String())
 	}
 
-	// Outage: the first check fails and opens the circuit — the rest of
-	// the cool-down skips the store and answers on the local bucket, so
-	// five outage requests count ONE real store error and log one entry.
+	// Outage: the first check fails on a ceiling token and opens the
+	// circuit — the rest of the cool-down skips the store and answers
+	// on the floor, so six outage requests count ONE real store error
+	// and log one entry; the seventh exceeds the floor's burst 5.
 	ws.err = errors.New("connection refused")
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		if ok, _ := l.Allow("k"); !ok {
-			t.Fatalf("store error %d refused — fail-open must admit within the local ceiling", i+1)
+			t.Fatalf("store error %d refused — fail-open must admit within the floor", i+1)
 		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("7th outage hit allowed — the divided floor must bound degraded traffic")
 	}
 	if storeErrs != 1 {
 		t.Fatalf("store error metric = %d, want 1 (skipped checks never count)", storeErrs)
@@ -258,19 +463,25 @@ func TestShared_FailOpen(t *testing.T) {
 }
 
 // TestShared_FailOpenHonoursLocalDeny: during a store outage a key past
-// its local ceiling is still refused — degraded mode is the divided
+// its divided floor is still refused — degraded mode is the divided
 // limiter, not an open gate.
 func TestShared_FailOpenHonoursLocalDeny(t *testing.T) {
 	ws := newFakeWindowStore()
 	ws.err = errors.New("down")
-	l := NewShared(New(1, 1, 100, nil), ws, "login", 100, nil, nil, nil)
+	// Floor 1/min + burst 1. Hit 1 draws a ceiling token and fails the
+	// check (fail-open); hit 2 draws the floor's single token; hit 3 is
+	// refused.
+	l := NewShared(New(60, 10, 100, nil), New(1, 1, 100, nil), ws, "login", 100, nil, nil, nil)
 
 	if ok, _ := l.Allow("k"); !ok {
-		t.Fatal("first hit refused during outage — local burst must still serve")
+		t.Fatal("first hit refused during outage — the ceiling fail-open must serve")
+	}
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("second hit refused during outage — the floor burst must still serve")
 	}
 	ok, retry := l.Allow("k")
 	if ok {
-		t.Fatal("second hit allowed past the exhausted local bucket")
+		t.Fatal("third hit allowed past the exhausted floor bucket")
 	}
 	if retry <= 0 {
 		t.Fatal("local denial returned no Retry-After")
@@ -286,7 +497,7 @@ func TestShared_FailOpenHonoursLocalDeny(t *testing.T) {
 func TestShared_BrownOutStoreDeadline(t *testing.T) {
 	ws := &sleepyStore{}
 	clock := newFakeClock()
-	l := NewShared(New(6000, 100, 100, nil), ws, "login", 5, nil, nil, nil)
+	l := NewShared(New(6000, 100, 100, nil), New(6000, 100, 100, nil), ws, "login", 5, nil, nil, nil)
 	l.now = clock.Now
 
 	start := time.Now()
@@ -336,7 +547,7 @@ func TestShared_BrownOutStoreDeadline(t *testing.T) {
 func TestShared_CircuitProbeRestoresShared(t *testing.T) {
 	ws := newFakeWindowStore()
 	clock := newFakeClock()
-	l := NewShared(New(6000, 100, 100, nil), ws, "login", 5, nil, nil, nil)
+	l := NewShared(New(6000, 100, 100, nil), New(6000, 100, 100, nil), ws, "login", 5, nil, nil, nil)
 	l.now = clock.Now
 
 	ws.err = errors.New("down")
@@ -383,7 +594,7 @@ func TestShared_ProbeIsSingleFlight(t *testing.T) {
 	ws := newFakeWindowStore()
 	ws.err = errors.New("down")
 	clock := newFakeClock()
-	l := NewShared(New(6000, 100, 100, nil), ws, "login", 100, nil, nil, nil)
+	l := NewShared(New(6000, 100, 100, nil), New(6000, 100, 100, nil), ws, "login", 100, nil, nil, nil)
 	l.now = clock.Now
 
 	l.Allow("k") // fails — opens the circuit
@@ -443,7 +654,7 @@ func TestShared_ProbeIsSingleFlight(t *testing.T) {
 // limiter entirely — nothing is written to the window store.
 func TestShared_DisabledSkipsStore(t *testing.T) {
 	ws := newFakeWindowStore()
-	l := NewShared(New(0, 0, 100, nil), ws, "login", 0, nil, nil, nil)
+	l := NewShared(New(0, 0, 100, nil), New(0, 0, 100, nil), ws, "login", 0, nil, nil, nil)
 	for i := 0; i < 10; i++ {
 		if ok, _ := l.Allow(fmt.Sprintf("k%d", i)); !ok {
 			t.Fatal("disabled limiter refused")
@@ -455,9 +666,9 @@ func TestShared_DisabledSkipsStore(t *testing.T) {
 }
 
 // TestShared_NilStoreIsLocalOnly: split mode wires no WindowStore — the
-// limiter then IS the divided local bucket.
+// limiter then IS the divided floor bucket, regardless of the ceiling.
 func TestShared_NilStoreIsLocalOnly(t *testing.T) {
-	l := NewShared(New(60, 2, 100, nil), nil, "launch", 80, nil, nil, nil)
+	l := NewShared(New(6000, 100, 100, nil), New(60, 2, 100, nil), nil, "launch", 80, nil, nil, nil)
 	if ok, _ := l.Allow("k"); !ok {
 		t.Fatal("first hit refused")
 	}
@@ -481,7 +692,7 @@ func TestShared_PanicProbeReprobes(t *testing.T) {
 	var storeErrs int
 	degraded := false
 	clock := newFakeClock()
-	l := NewShared(New(6000, 100, 100, nil), ws, "login", 5,
+	l := NewShared(New(6000, 100, 100, nil), New(6000, 100, 100, nil), ws, "login", 5,
 		testSharedLog(logs), func(string) { storeErrs++ },
 		func(_ string, d bool) { degraded = d })
 	l.now = clock.Now

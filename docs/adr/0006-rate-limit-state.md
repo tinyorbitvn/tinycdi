@@ -15,11 +15,16 @@ The advisor picked **option B** (2026-10-05), with these guardrails:
 - **G2 — split mode stays local-only.** A `-broker-url` session gateway
   owns no Postgres handle, so `/v1/launch` there keeps the divided local
   bucket rather than growing a broker RPC.
-- **i — effective bound = min(shared window, local ceiling).** The
-  divided local bucket stays on BOTH as the fail-open fallback AND as a
-  per-replica ceiling while Postgres is healthy: a locally-refused
-  request never reaches the store, which also bounds the upsert rate a
-  key spray can cause.
+- **i — effective bound.** While Postgres is healthy the shared window
+  is the exact aggregate bound and each pod's local bucket is the
+  UNDIVIDED rate+burst — a store-protection prefilter only (a
+  locally-refused request still never reaches the store, which bounds
+  the upsert rate a key spray can cause). Only in degraded mode
+  (breaker open / store error) does the DIVIDED rate/N + burst/N bucket
+  decide — the fail-open floor. **Amended by RL-CEILING** (below): the
+  original text kept the divided bucket as the healthy-mode per-replica
+  ceiling too — effective bound min(shared, local) — which re-created
+  the sticky-spread under-limit option B exists to remove.
 - **ii — one upsert per check; leader-only cleanup.** The check is a
   single `INSERT ... ON CONFLICT` returning the count (no second query);
   expired windows are deleted only by the replica holding the Postgres
@@ -44,17 +49,19 @@ The advisor picked **option B** (2026-10-05), with these guardrails:
   backfill, rolling-upgrade safe.
 - `-rate-limit-replicas` keeps its value and rendering
   (`backend.replicas`) but its meaning changed: it divides each budget
-  into the per-replica LOCAL ceiling, not the aggregate bound — the
-  shared window makes the flags exact aggregates at every replica count.
+  into the degraded-mode local FLOOR only — the shared window makes the
+  flags exact aggregates at every replica count, and the healthy-mode
+  ceiling is undivided.
 
 Implemented: `internal/store/rate_limit.go` (one-statement window
 check + sweep), `internal/ratelimit/shared.go` (`SharedLimiter` —
-min(Postgres window, divided local), fail-open, 500 ms per-call
-deadline + 10 s single-flight-probe circuit breaker, edge-triggered
-logs), wiring in `internal/backend/wire.go`, migration
-`021_rate_limit_window`. The B6 gate lives in
-`tests/integration/rate_limit_pg_test.go` (two-replica shared-window
-abuse + Postgres outage fail-open/recovery).
+Postgres window bound + undivided healthy ceiling / divided degraded
+floor, fail-open, 500 ms per-call deadline + 10 s single-flight-probe
+circuit breaker, edge-triggered logs), wiring in
+`internal/backend/wire.go`, migration `021_rate_limit_window`. The B6
+gate lives in `tests/integration/rate_limit_pg_test.go` (two-replica
+shared-window abuse incl. uneven spread + Postgres outage
+fail-open/recovery).
 
 Amendment (RL-DEFAULT): the implemented defaults are `-login-rate`
 60/minute with burst 20 and `-launch-rate` 120/minute with burst 40 —
@@ -64,6 +71,28 @@ bucket), before v0.3.1's RL-1 made the flags aggregate bounds: the
 exact shared window leaves no per-replica slack, and the unchanged
 defaults produced 429s on a 20-user sign-in burst from one egress in
 E2E-V040. The callback ceiling follows at 10×.
+
+Amendment (RL-CEILING): while the shared store is HEALTHY the local
+per-replica ceiling is the UNDIVIDED rate+burst budget — a
+store-protection prefilter only; the Postgres window alone keeps the
+exact aggregate. Only in DEGRADED mode (breaker open / store error) is
+the local bound the divided rate/N + burst/N — the fail-open floor,
+unchanged. Trigger: E2E-V050-RAMP run 3 — a 20-lane sign-in ramp split
+11/9 across two pods drew a local 429 on the busier pod while the
+window held only 19 of the 80 aggregate; the divided healthy ceiling
+had re-created the sticky-spread under-limit option B was chosen to
+remove. The implementation carries two local buckets per route
+(undivided ceiling, divided floor) and the breaker picks one per
+request; neither bucket is ever reset at a transition — token state
+persists and refills lazily, so a breaker flap cannot storm resets.
+Transition note: right at a healthy→degraded switch a pod may briefly
+have admitted up to R+B locally (the just-failed request itself drew a
+ceiling token) before the divided floor binds, and a key the floor
+never saw starts the outage with a fresh divided burst; conversely a
+ceiling bucket drained before the switch stays drained — it refills at
+the configured rate, not on recovery. Applies to every shared-window
+route (login family, launch). Split-mode `/v1/launch` keeps the divided
+local-only limiter, unchanged (G2).
 
 ## Context
 
