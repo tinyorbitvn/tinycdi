@@ -82,22 +82,27 @@ func TestTwoReplicas_PreStopDrainServesWholeWindow(t *testing.T) {
 		}
 	}
 
-	// Poll every 50 ms for the whole window, measured from the cancel —
-	// the true window ends strictly after this deadline (Run creates the
-	// drain context only after observing the cancel), so every poll that
-	// lands inside it must see reads 200, upgrades 503 + Retry-After, and
-	// no refused connection. A probe issued in the deadline's last
-	// instant is not provably inside the window, though: its dial can
-	// land after the listeners close at the true window end — strictly
-	// past this deadline but by an unspecified lag — so the refusal is a
-	// probe-timing artifact, not an early close. Probes are issued only
-	// while probeSlack of window remains, enough for the dial to land
-	// inside even under load (probes observed taking single-digit ms).
-	const probeSlack = 100 * time.Millisecond
-	inside := func() bool { return time.Until(start.Add(window)) > probeSlack }
+	// Poll every 50 ms through the window and past its nominal end,
+	// measured from the cancel — the true window ends strictly after
+	// this deadline (Run creates the drain context only after observing
+	// the cancel), so every poll the listeners still answer must see
+	// reads 200, upgrades 503 + Retry-After, and a refused connection
+	// can only mean the socket is already closed. Refusals are judged
+	// by when the dial attempt completes, not when it was issued: a
+	// refusal completing BEFORE the deadline is a proven early close,
+	// while the first refusal at or after it is the measured window end
+	// — polling stops there, the listeners having held at least their
+	// nominal length. (A dial issued in the deadline's last instant can
+	// land after the true close; refusing it is the window ending, not
+	// a violation.)
 	var connErrs, reads, refused int
-	for inside() {
+	deadline := start.Add(window)
+	pastEnd := func() bool { return !time.Now().Before(deadline) }
+	for time.Now().Before(deadline.Add(10 * time.Second)) {
 		if resp, err := f.sessionGetTry(t, a, "/", cookie); err != nil {
+			if pastEnd() {
+				break
+			}
 			connErrs++
 		} else {
 			code := resp.StatusCode
@@ -107,10 +112,10 @@ func TestTwoReplicas_PreStopDrainServesWholeWindow(t *testing.T) {
 			}
 			reads++
 		}
-		if !inside() {
-			break
-		}
 		if resp := f.wsTry(a, cookie); resp == nil {
+			if pastEnd() {
+				break
+			}
 			connErrs++
 		} else {
 			code := resp.StatusCode
@@ -121,10 +126,10 @@ func TestTwoReplicas_PreStopDrainServesWholeWindow(t *testing.T) {
 			}
 			refused++
 		}
-		if !inside() {
-			break
-		}
 		if resp, err := a.client.Get(a.appURL + "/healthz"); err != nil {
+			if pastEnd() {
+				break
+			}
 			connErrs++
 		} else {
 			code := resp.StatusCode
