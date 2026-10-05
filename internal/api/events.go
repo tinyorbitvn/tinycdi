@@ -6,9 +6,11 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,18 +59,22 @@ func (l serviceIntentLog) IntentHistory(ctx context.Context, tenantID, workspace
 
 // WorkspaceEvent is one curated lifecycle or condition event (openapi
 // WorkspaceEvent). Messages are fixed catalog strings — raw Kubernetes or
-// operator error text is never forwarded to the portal.
+// operator error text is never forwarded to the portal. Params carries the
+// structured values the message (or its event id) interpolates — revision,
+// recorded cause, condition type/status, teardown step — so a client can
+// localize the full text without parsing English.
 type WorkspaceEvent struct {
 	// ID is stable across reads: the condition type + reason for observed
 	// conditions, the reason + intent revision for lifecycle steps. Clients
 	// use it as a list key.
-	ID             string     `json:"id"`
-	Type           string     `json:"type"` // Normal | Warning
-	Reason         string     `json:"reason"`
-	Message        string     `json:"message"`
-	Count          int64      `json:"count,omitempty"`
-	FirstTimestamp *time.Time `json:"firstTimestamp,omitempty"`
-	LastTimestamp  *time.Time `json:"lastTimestamp,omitempty"`
+	ID             string            `json:"id"`
+	Type           string            `json:"type"` // Normal | Warning
+	Reason         string            `json:"reason"`
+	Message        string            `json:"message"`
+	Params         map[string]string `json:"params,omitempty"`
+	Count          int64             `json:"count,omitempty"`
+	FirstTimestamp *time.Time        `json:"firstTimestamp,omitempty"`
+	LastTimestamp  *time.Time        `json:"lastTimestamp,omitempty"`
 }
 
 // WorkspaceEventList is the events response, newest first.
@@ -93,6 +99,8 @@ func curatedReason(raw string) string {
 
 // intentEvent maps one recorded lifecycle intent to its curated event.
 // Unknown kinds are skipped — forward-compatible with new intent kinds.
+// Params carries the intent revision (the same value the event id
+// interpolates) and, for platform-initiated stops, the recorded cause.
 func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 	ts := in.At
 	ev := WorkspaceEvent{Type: "Normal", FirstTimestamp: &ts, LastTimestamp: &ts}
@@ -103,8 +111,13 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 		ev.Reason, ev.Message = "StartRequested", "Starting the workspace was requested."
 	case string(provisioning.IntentStop):
 		ev.Reason, ev.Message = "StopRequested", "Stopping the workspace was requested."
-		if in.Reason == "max_duration" {
+		switch in.Reason {
+		case "max_duration":
 			ev.Reason, ev.Message = "MaxDurationReached", "The workspace reached its maximum running time and was stopped."
+		case "idle_timeout":
+			ev.Reason, ev.Message = "IdleTimeout", "The workspace was stopped after the input-idle timeout."
+		case "disconnect_timeout":
+			ev.Reason, ev.Message = "DisconnectTimeout", "The workspace was stopped after the disconnect grace window."
 		}
 	case string(provisioning.IntentDelete):
 		ev.Reason, ev.Message = "DeleteRequested", "Deleting the workspace was requested."
@@ -112,6 +125,10 @@ func intentEvent(in IntentRecord) (WorkspaceEvent, bool) {
 		return WorkspaceEvent{}, false
 	}
 	ev.ID = fmt.Sprintf("%s.%d", ev.Reason, in.Revision)
+	ev.Params = map[string]string{"revision": strconv.FormatUint(in.Revision, 10)}
+	if in.Kind == string(provisioning.IntentStop) && in.Reason != "" {
+		ev.Params["cause"] = in.Reason
+	}
 	return ev, true
 }
 
@@ -144,6 +161,7 @@ func templateSkipEvent(in IntentRecord) (WorkspaceEvent, bool) {
 		Type:           "Warning",
 		Reason:         "TemplateUpdateSkipped",
 		Message:        msg,
+		Params:         map[string]string{"revision": strconv.FormatUint(in.Revision, 10), "skipReason": in.Reason},
 		FirstTimestamp: &ts,
 		LastTimestamp:  &ts,
 	}, true
@@ -152,13 +170,22 @@ func templateSkipEvent(in IntentRecord) (WorkspaceEvent, bool) {
 // conditionEvent maps one observed condition state to its curated event.
 // The message comes only from this table — never from the CR's free-text
 // message, which may contain node names, image references or other
-// platform internals.
+// platform internals. Params names the condition type and status that
+// selected the message plus any structured values the operator recorded
+// alongside the condition (teardown step, drain budget).
 func conditionEvent(c workspaceCondition) WorkspaceEvent {
 	ts := c.LastTransitionTime
+	// Operator params first so the API's own derived values win: a CR
+	// annotation key colliding with condition/status must not be able to
+	// claim a type or status the condition does not have.
+	params := map[string]string{}
+	maps.Copy(params, c.Params)
+	params["condition"], params["status"] = c.Type, c.Status
 	ev := WorkspaceEvent{
 		ID:             c.Type + "." + curatedReason(c.Reason),
 		Type:           "Normal",
 		Reason:         curatedReason(c.Reason),
+		Params:         params,
 		FirstTimestamp: &ts,
 		LastTimestamp:  &ts,
 	}

@@ -626,8 +626,21 @@ export interface components {
             reason: string;
             /** @description Optional human-readable detail; not part of the contract. */
             message?: string;
+            params?: components["schemas"]["ReasonParams"];
             /** Format: date-time */
             lastTransitionTime: string;
+        };
+        /**
+         * @description Structured parameters of a `reason`'s message, as a flat string map —
+         *     the same values the server interpolated into `message` (or used to
+         *     select it), so a client can localize the full text instead of
+         *     parsing English. Keys are lowerCamelCase tokens; the set a given
+         *     reason carries is documented in docs/lifecycle-reasons.md. Never
+         *     carries secrets, tokens or internal hostnames. Absent when the
+         *     message interpolates nothing.
+         */
+        ReasonParams: {
+            [key: string]: string;
         };
         /** @description Immutable template+revision the workspace was created from. */
         TemplateSummary: {
@@ -750,6 +763,7 @@ export interface components {
              * @example Starting the workspace was requested.
              */
             message: string;
+            params?: components["schemas"]["ReasonParams"];
             count?: number;
             /** Format: date-time */
             firstTimestamp?: string;

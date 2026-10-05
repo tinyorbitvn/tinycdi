@@ -51,7 +51,7 @@ export function blockingReason(ws: WorkspaceView): Blocker | null {
     return conn
       ? {
           key: "workspaces.detail.blocker.connectionReady",
-          params: { status: conn.status, reason: reasonText(conn.reason) },
+          params: { status: conn.status, reason: reasonText(conn.reason, conn.params) },
         }
       : { key: "workspaces.detail.blocker.noConnection" };
   }

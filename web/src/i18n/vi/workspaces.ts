@@ -50,6 +50,7 @@ export default {
   "templates.format.duration.m": "{m} phút",
   "templates.format.duration.h": "{h} giờ",
   "templates.format.duration.hm": "{h} giờ {m} phút",
+  "templates.format.duration.s": "{n} giây",
 
   "workspaces.list.title": "Workspace",
   "workspaces.list.loading": "Đang tải…",
@@ -177,7 +178,7 @@ export default {
     "Workspace đạt thời gian chạy tối đa và đã bị dừng.",
   "workspaces.reason.deleteRequested": "Đã yêu cầu xoá workspace.",
   "workspaces.reason.templateUpdateSkipped":
-    "Workspace giữ nguyên revision template đã ghi nhận.",
+    "Workspace giữ nguyên revision template đã ghi nhận {revision} ({skipReason}).",
   "workspaces.reason.admitted": "Nền tảng đã chấp nhận yêu cầu workspace.",
   "workspaces.reason.templateResolved": "Snapshot template đã được ghi nhận.",
   "workspaces.reason.templateNotFound": "Không tìm thấy template đã ghi nhận.",
@@ -186,11 +187,12 @@ export default {
   "workspaces.reason.templateSnapshotInvalid":
     "Snapshot template đã ghi nhận không qua được kiểm tra; hỏi quản trị viên.",
   "workspaces.reason.intentApplied": "Thay đổi được yêu cầu đã được áp dụng.",
-  "workspaces.reason.quotaReserved": "Đã dành sẵn tài nguyên cho workspace.",
+  "workspaces.reason.quotaReserved":
+    "Đã dành sẵn tài nguyên: {cpuMillicores}, {memoryMiB} bộ nhớ, {storageGiB} đĩa.",
   "workspaces.reason.provisioning": "Nền tảng đang thiết lập workspace.",
   "workspaces.reason.waitingForDisk":
     "Đang chờ đĩa giữ lại được bàn giao cho workspace này.",
-  "workspaces.reason.volumeBound": "Đã gắn đĩa của workspace.",
+  "workspaces.reason.volumeBound": "Đã gắn đĩa của workspace ({sizeGiB}).",
   "workspaces.reason.ready": "Bước này đã sẵn sàng.",
   "workspaces.reason.runtimeUp": "Runtime đã hoạt động.",
   "workspaces.reason.streamEndpointUp": "Điểm cuối streaming đã hoạt động.",
@@ -208,10 +210,11 @@ export default {
   "workspaces.reason.disconnectTimeout": "Đã dừng sau thời gian gia hạn ngắt kết nối.",
   "workspaces.reason.maxDuration": "Đã dừng khi đạt thời gian chạy tối đa.",
   "workspaces.reason.streamDraining": "Đang chờ các phiên mở đóng lại.",
-  "workspaces.reason.drainTimedOut": "Các phiên không đóng kịp; tiếp tục gỡ bỏ.",
+  "workspaces.reason.drainTimedOut":
+    "Các phiên mở không đóng trong hạn {budgetSeconds}; tiếp tục gỡ bỏ.",
   "workspaces.reason.retentionPending":
     "Bước giữ lại chưa xong; việc gỡ bỏ phải chờ.",
-  "workspaces.reason.cleanupRetry": "Một bước dọn dẹp thất bại và sẽ được thử lại.",
+  "workspaces.reason.cleanupRetry": "Bước gỡ bỏ {step} bị chặn; đang thử lại.",
   "workspaces.reason.failedCleanup": "Incarnation lỗi đang được gỡ bỏ.",
   "workspaces.reason.missingWorkspaceID":
     "Bản ghi workspace thiếu ID nền tảng; việc gỡ bỏ bị giữ lại.",
@@ -238,4 +241,16 @@ export default {
   "workspaces.reason.sessionStarted": "Một phiên tương tác đã bắt đầu.",
   "workspaces.reason.sessionTakenOver": "Một phiên tương tác đã bị tiếp quản.",
   "workspaces.reason.guestAgentUnreachable": "Không kết nối được guest agent.",
+
+  // Reason `params` values (B3-PARAMS): localized step and skip-cause text.
+  "workspaces.reason.param.step.blockConnects": "chặn kết nối",
+  "workspaces.reason.param.step.revokeLeases": "thu hồi lease",
+  "workspaces.reason.param.step.drainStreams": "dọn stream",
+  "workspaces.reason.param.step.stopRuntime": "dừng runtime",
+  "workspaces.reason.param.step.retention": "lưu giữ dữ liệu",
+  "workspaces.reason.param.step.cleanup": "dọn dẹp",
+  "workspaces.reason.param.skipReason.runtimeChanged": "runtime đã thay đổi",
+  "workspaces.reason.param.skipReason.experienceChanged": "experience đã thay đổi",
+  "workspaces.reason.param.skipReason.dataPolicyChanged": "chính sách dữ liệu đã thay đổi",
+  "workspaces.reason.param.skipReason.storageSmaller": "dung lượng nhỏ hơn",
 } satisfies Record<keyof typeof workspaces, string>;

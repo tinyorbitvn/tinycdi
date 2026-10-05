@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -393,5 +394,88 @@ func TestEvents_TemplateSkipReasons(t *testing.T) {
 	}
 	if _, ok := templateSkipEvent(IntentRecord{Kind: "stop", Revision: 7, Reason: provisioning.SkipReasonStorageSmaller}); ok {
 		t.Fatal("skip reason on a non-start intent must not produce a skip event")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B3-PARAMS: structured event params
+// ---------------------------------------------------------------------------
+
+// TestEvents_IntentParams: every intent-derived event carries the intent
+// revision it embeds in its id; platform-initiated stops also report the
+// recorded cause, with idle/disconnect/max-duration expiries mapping to
+// their own tokens.
+func TestEvents_IntentParams(t *testing.T) {
+	base := time.Now()
+	for _, tc := range []struct {
+		name       string
+		in         IntentRecord
+		wantReason string
+		wantCause  string // "" = no cause param
+	}{
+		{"create", IntentRecord{Kind: "create", Revision: 1, At: base}, "Created", ""},
+		{"start", IntentRecord{Kind: "start", Revision: 4, At: base}, "StartRequested", ""},
+		{"user stop", IntentRecord{Kind: "stop", Revision: 5, At: base}, "StopRequested", ""},
+		{"idle stop", IntentRecord{Kind: "stop", Revision: 6, At: base, Reason: "idle_timeout"}, "IdleTimeout", "idle_timeout"},
+		{"disconnect stop", IntentRecord{Kind: "stop", Revision: 7, At: base, Reason: "disconnect_timeout"}, "DisconnectTimeout", "disconnect_timeout"},
+		{"max duration", IntentRecord{Kind: "stop", Revision: 8, At: base, Reason: "max_duration"}, "MaxDurationReached", "max_duration"},
+		{"explicit requested", IntentRecord{Kind: "stop", Revision: 9, At: base, Reason: "requested"}, "StopRequested", "requested"},
+		{"delete", IntentRecord{Kind: "delete", Revision: 10, At: base}, "DeleteRequested", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, ok := intentEvent(tc.in)
+			if !ok {
+				t.Fatal("intent produced no event")
+			}
+			if ev.Reason != tc.wantReason {
+				t.Fatalf("reason = %q, want %q", ev.Reason, tc.wantReason)
+			}
+			if ev.Params["revision"] != fmt.Sprint(tc.in.Revision) {
+				t.Fatalf("params.revision = %q, want %d", ev.Params["revision"], tc.in.Revision)
+			}
+			if got := ev.Params["cause"]; got != tc.wantCause {
+				t.Fatalf("params.cause = %q, want %q", got, tc.wantCause)
+			}
+			// The id stays the reason+revision pair clients key on.
+			if ev.ID != fmt.Sprintf("%s.%d", tc.wantReason, tc.in.Revision) {
+				t.Fatalf("id = %q", ev.ID)
+			}
+		})
+	}
+}
+
+// TestEvents_TemplateSkipParams: the skip event params the same guard token
+// its message parenthesizes, plus the start intent's revision.
+func TestEvents_TemplateSkipParams(t *testing.T) {
+	ev, ok := templateSkipEvent(IntentRecord{Kind: "start", Revision: 7, Reason: provisioning.SkipReasonStorageSmaller})
+	if !ok {
+		t.Fatal("no skip event")
+	}
+	if ev.Params["skipReason"] != provisioning.SkipReasonStorageSmaller {
+		t.Fatalf("params.skipReason = %q", ev.Params["skipReason"])
+	}
+	if ev.Params["revision"] != "7" {
+		t.Fatalf("params.revision = %q", ev.Params["revision"])
+	}
+	if !strings.Contains(ev.Message, "("+ev.Params["skipReason"]+")") {
+		t.Fatalf("message %q does not interpolate its skipReason param", ev.Message)
+	}
+}
+
+// TestEvents_ConditionParams: a condition event params the type and status
+// that selected its curated message, plus any operator-recorded params the
+// condition itself carried (teardown step, drain budget).
+func TestEvents_ConditionParams(t *testing.T) {
+	c := workspaceCondition{
+		Type: "Degraded", Status: "True", Reason: "CleanupRetry",
+		Message: "teardown step cleanup blocked; retrying",
+		Params:  map[string]string{"step": "cleanup"},
+	}
+	ev := conditionEvent(c)
+	if ev.Params["condition"] != "Degraded" || ev.Params["status"] != "True" {
+		t.Fatalf("params = %v, want condition+status", ev.Params)
+	}
+	if ev.Params["step"] != "cleanup" {
+		t.Fatalf("operator params not forwarded: %v", ev.Params)
 	}
 }

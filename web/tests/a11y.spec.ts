@@ -10,8 +10,8 @@ const MOCK = "http://127.0.0.1:4310";
 const SEED_WS = "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E";
 
 const READY_CONDITIONS = [
-  { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-09-30T10:00:00Z" },
-  { type: "StorageReady", status: "True", reason: "VolumeBound", lastTransitionTime: "2026-09-30T10:01:00Z" },
+  { type: "Admitted", status: "True", reason: "QuotaReserved", params: { cpuMillicores: "4000", memoryMiB: "8192", storageGiB: "20" }, lastTransitionTime: "2026-09-30T10:00:00Z" },
+  { type: "StorageReady", status: "True", reason: "VolumeBound", params: { sizeGiB: "20" }, lastTransitionTime: "2026-09-30T10:01:00Z" },
   { type: "RuntimeReady", status: "True", reason: "RuntimeUp", lastTransitionTime: "2026-09-30T10:02:00Z" },
   { type: "ConnectionReady", status: "True", reason: "StreamEndpointUp", lastTransitionTime: "2026-09-30T10:02:30Z" },
 ];

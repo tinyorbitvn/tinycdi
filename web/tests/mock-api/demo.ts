@@ -116,8 +116,8 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     desiredState: "Running",
     dataPolicy: "Retain",
     conditions: [
-      { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-10-01T09:20:00Z" },
-      { type: "StorageReady", status: "True", reason: "VolumeBound", lastTransitionTime: "2026-10-01T09:20:20Z" },
+      { type: "Admitted", status: "True", reason: "QuotaReserved", params: { cpuMillicores: "8000", memoryMiB: "16384", storageGiB: "50" }, lastTransitionTime: "2026-10-01T09:20:00Z" },
+      { type: "StorageReady", status: "True", reason: "VolumeBound", params: { sizeGiB: "50" }, lastTransitionTime: "2026-10-01T09:20:20Z" },
       {
         type: "RuntimeReady",
         status: "False",
@@ -141,8 +141,8 @@ export const DEMO_WORKSPACES: WorkspaceFixture[] = [
     dataPolicy: "Retain",
     failureReason: "RuntimeStartTimeout: the Windows VM did not report ready within 10m",
     conditions: [
-      { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-10-01T07:00:00Z" },
-      { type: "StorageReady", status: "True", reason: "VolumeBound", lastTransitionTime: "2026-10-01T07:00:40Z" },
+      { type: "Admitted", status: "True", reason: "QuotaReserved", params: { cpuMillicores: "4000", memoryMiB: "8192", storageGiB: "64" }, lastTransitionTime: "2026-10-01T07:00:00Z" },
+      { type: "StorageReady", status: "True", reason: "VolumeBound", params: { sizeGiB: "64" }, lastTransitionTime: "2026-10-01T07:00:40Z" },
       {
         type: "RuntimeReady",
         status: "False",
@@ -196,8 +196,8 @@ export const DEMO_EVENTS: Record<string, WorkspaceEventFixture[]> = {
       firstTimestamp: "2026-10-01T09:20:25Z",
       lastTimestamp: "2026-10-01T09:21:10Z",
     },
-    { type: "Normal", reason: "VolumeBound", message: "Persistent volume bound (50 GiB)", lastTimestamp: "2026-10-01T09:20:20Z" },
-    { type: "Normal", reason: "Admitted", message: "Quota reserved: 8 CPU, 16 GiB memory, 50 GiB storage", lastTimestamp: "2026-10-01T09:20:00Z" },
+    { type: "Normal", reason: "VolumeBound", message: "Persistent volume bound (50 GiB)", params: { sizeGiB: "50" }, lastTimestamp: "2026-10-01T09:20:20Z" },
+    { type: "Normal", reason: "QuotaReserved", message: "Quota reserved: 8 CPU, 16 GiB memory, 50 GiB storage", params: { cpuMillicores: "8000", memoryMiB: "16384", storageGiB: "50" }, lastTimestamp: "2026-10-01T09:20:00Z" },
   ],
   ws_01J4ZH4D5E6F7G8H9J0K1M2N3P: [
     {

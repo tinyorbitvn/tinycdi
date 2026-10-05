@@ -33,6 +33,14 @@ const (
 	AnnotationRequestID = "workspaces.cdi.tinyorbit.vn/request-id"
 )
 
+// AnnotationConditionParams carries the structured message parameters of
+// status.conditions as JSON {"<type>.<reason>": {"<name>": "<value>"}} —
+// metav1.Condition itself cannot hold them. The operator writes it and the
+// API projects the entry that matches a condition's type and reason onto
+// the public condition's params; the single shared name keeps writer and
+// reader from drifting.
+const AnnotationConditionParams = "workspaces.cdi.tinyorbit.vn/condition-params"
+
 // PlatformID is the platform workspace identity the API mints
 // ("ws_<hex>", stored as workspaces.id). It is stamped into the
 // workspace-uid label ON THE Workspace CR and is what every broker/DB seam

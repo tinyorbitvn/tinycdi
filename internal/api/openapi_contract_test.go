@@ -135,6 +135,10 @@ func TestOpenAPIContract_WorkspaceView(t *testing.T) {
 		Phase: "Ready",
 		Conditions: []workspaceCondition{{
 			Type: "RuntimeReady", Status: "True", Reason: "PodReady", LastTransitionTime: now,
+		}, {
+			Type: "Degraded", Status: "True", Reason: "CleanupRetry",
+			Message: "teardown step cleanup blocked; retrying",
+			Params:  map[string]string{"step": "cleanup"}, LastTransitionTime: now,
 		}},
 		DesiredState:    "Running",
 		DataPolicy:      "Retain",
@@ -201,6 +205,7 @@ func TestOpenAPIContract_WorkspaceEventList(t *testing.T) {
 	items := []WorkspaceEvent{{
 		ID: "StartRequested.4", Type: "Normal", Reason: "StartRequested",
 		Message: "Starting the workspace was requested.", Count: 1, FirstTimestamp: &ts, LastTimestamp: &ts,
+		Params: map[string]string{"revision": "4"},
 	}}
 	requireValid(t, "WorkspaceEventList", WorkspaceEventList{Items: items})
 	requireValid(t, "WorkspaceEventList", WorkspaceEventList{Items: items, Stale: true})

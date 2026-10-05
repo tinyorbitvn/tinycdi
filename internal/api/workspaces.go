@@ -227,11 +227,16 @@ type templateSummary struct {
 }
 
 type workspaceCondition struct {
-	Type               string    `json:"type"`
-	Status             string    `json:"status"`
-	Reason             string    `json:"reason"`
-	Message            string    `json:"message,omitempty"`
-	LastTransitionTime time.Time `json:"lastTransitionTime"`
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message,omitempty"`
+	// Params carries the structured values the message interpolates (for
+	// example the teardown step a CleanupRetry names) so clients can
+	// localize the full text without parsing English. Projected from the
+	// operator's condition-params annotation, absent when none apply.
+	Params             map[string]string `json:"params,omitempty"`
+	LastTransitionTime time.Time         `json:"lastTransitionTime"`
 }
 
 // WorkspaceView is the public workspace record (openapi WorkspaceView).

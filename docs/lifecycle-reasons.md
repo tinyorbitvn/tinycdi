@@ -55,3 +55,39 @@ teardown step in progress, in this order:
 ran out) → `StoppingRuntime` → `ApplyingRetention` (Retain keeps the disk,
 Ephemeral destroys it; `Degraded/RetentionPending` while it is blocked) →
 `CleaningUp` (`Degraded/CleanupRetry` when a step failed and will retry).
+
+## Events
+
+`GET /v1/workspaces/{id}/events` serves curated lifecycle and condition
+events. The `reason` tokens are the ones above plus the intent steps
+`Created`, `StartRequested`, `StopRequested`, `IdleTimeout`,
+`DisconnectTimeout`, `MaxDurationReached`, `DeleteRequested` and
+`TemplateUpdateSkipped` (a start whose family re-point the compatibility
+guard refused), and one `Failed.<reason>` warning synthesized from
+`status.phase = Failed`.
+
+## Message parameters (`params`)
+
+Since v0.4, `WorkspaceEvent` and `WorkspaceCondition` may carry `params`: a
+flat string map holding the values the message interpolates (or used to
+select it), so a client can localize the full text instead of parsing the
+English. `params` is additive and optional — an absent key means the value
+was not recorded, and clients must keep treating `message` as the fallback
+rendering. Params never carry secrets, tickets or internal hostnames.
+
+| param | produced on | meaning |
+|---|---|---|
+| `revision` | every intent-derived event (`Created`, `StartRequested`, `StopRequested`, `IdleTimeout`, `DisconnectTimeout`, `MaxDurationReached`, `DeleteRequested`, `TemplateUpdateSkipped`) | the intent revision the event id embeds (`StartRequested.4` → `4`) |
+| `cause` | stop events recorded with a platform cause | the broker-recorded stop reason (`idle_timeout`, `disconnect_timeout`, `max_duration`, `requested`) |
+| `skipReason` | `TemplateUpdateSkipped` | the guard token the message parenthesizes: `runtime-changed`, `experience-changed`, `data-policy-changed`, `storage-smaller` |
+| `condition` | every condition-derived event | the `WorkspaceCondition.type` that produced the event |
+| `status` | every condition-derived event | its status (`True`/`False`/`Unknown`) |
+| `step` | teardown marks (`BlockingConnects`…`CleaningUp` on `RuntimeReady`; `CleanupRetry`, `RetentionPending`, `StreamDraining`, `DrainTimedOut` on `Degraded`) | the teardown step token: `block-connects`, `revoke-leases`, `drain-streams`, `stop-runtime`, `retention`, `cleanup` |
+| `budgetSeconds` | `Degraded/StreamDraining`, `Degraded/DrainTimedOut` | the stream-drain budget in seconds |
+
+Condition params travel on the
+`workspaces.cdi.tinyorbit.vn/condition-params` object annotation, keyed
+`"<type>.<reason>"`; the API projects only the entry matching each
+condition's type and reason, so a stale entry under a different reason
+never applies. An operator older than v0.4 writes no annotation — the
+conditions then carry no `params` and clients fall back to `message`.

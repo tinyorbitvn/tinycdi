@@ -40,12 +40,14 @@ function condition(
   status: ConditionFixture["status"],
   reason: string,
   message?: string,
+  params?: Record<string, string>,
 ): ConditionFixture {
   return {
     type,
     status,
     reason,
     ...(message ? { message } : {}),
+    ...(params ? { params } : {}),
     lastTransitionTime: ctx.nowIso(),
   };
 }
@@ -153,7 +155,13 @@ export function workspacesArea(ctx: MockContext): MockArea {
       dataPolicy: (typeof dataPolicy === "string"
         ? dataPolicy
         : tpl.dataPolicyDefault) as WorkspaceFixture["dataPolicy"],
-      conditions: [condition(ctx, "Admitted", "True", "QuotaReserved")],
+      conditions: [
+        condition(ctx, "Admitted", "True", "QuotaReserved", undefined, {
+          cpuMillicores: String(tpl.resources.cpuMillicores),
+          memoryMiB: String(tpl.resources.memoryMib),
+          storageGiB: String(tpl.resources.storageGib),
+        }),
+      ],
       ...(typeof retainedDataRef === "string" ? { retainedDataRef } : {}),
       createdAt: ts,
       updatedAt: ts,
@@ -161,8 +169,13 @@ export function workspacesArea(ctx: MockContext): MockArea {
     state.workspaces.set(ws.id, ws);
     ctx.recordEvent(ws.id, {
       type: "Normal",
-      reason: "Admitted",
+      reason: "QuotaReserved",
       message: `Quota reserved for template ${tpl.name}@${tpl.revision}`,
+      params: {
+        cpuMillicores: String(tpl.resources.cpuMillicores),
+        memoryMiB: String(tpl.resources.memoryMib),
+        storageGiB: String(tpl.resources.storageGib),
+      },
     });
     idem.record(201, ws);
     return ok(201, ws);
@@ -305,7 +318,9 @@ export function workspacesArea(ctx: MockContext): MockArea {
       case "Pending":
         ws.phase = ws.desiredState === "Running" ? "Provisioning" : "Stopped";
         if (ws.phase === "Stopped") {
-          setCondition(ws, condition(ctx, "StorageReady", "True", "VolumeBound"));
+          const storage = state.templates.find((x) => x.id === ws.template.id)?.resources.storageGib;
+          setCondition(ws, condition(ctx, "StorageReady", "True", "VolumeBound", undefined,
+            storage !== undefined ? { sizeGiB: String(storage) } : undefined));
           ctx.recordEvent(ws.id, { type: "Normal", reason: "Stopped", message: "Created stopped; volume bound" });
         }
         return;

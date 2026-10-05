@@ -1245,9 +1245,24 @@ components:
         message:
           type: string
           description: Optional human-readable detail; not part of the contract.
+        params:
+          $ref: "#/components/schemas/ReasonParams"
         lastTransitionTime:
           type: string
           format: date-time
+
+    ReasonParams:
+      type: object
+      additionalProperties:
+        type: string
+      description: |
+        Structured parameters of a `reason`'s message, as a flat string map —
+        the same values the server interpolated into `message` (or used to
+        select it), so a client can localize the full text instead of
+        parsing English. Keys are lowerCamelCase tokens; the set a given
+        reason carries is documented in docs/lifecycle-reasons.md. Never
+        carries secrets, tokens or internal hostnames. Absent when the
+        message interpolates nothing.
 
     TemplateSummary:
       type: object
@@ -1412,6 +1427,8 @@ components:
           type: string
           description: Human-readable, curated event text.
           example: Starting the workspace was requested.
+        params:
+          $ref: "#/components/schemas/ReasonParams"
         count:
           type: integer
           minimum: 1

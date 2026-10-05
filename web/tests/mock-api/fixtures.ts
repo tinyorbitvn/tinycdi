@@ -14,6 +14,9 @@ export interface WorkspaceEventFixture {
   type: "Normal" | "Warning";
   reason: string;
   message: string;
+  // Structured message parameters (B3-PARAMS): the values the message
+  // interpolates, as the real API's WorkspaceEvent.params carries them.
+  params?: Record<string, string>;
   count?: number;
   firstTimestamp?: string;
   lastTimestamp: string;
@@ -77,6 +80,7 @@ export const WORKSPACE_STOPPED: WorkspaceFixture = {
       type: "Admitted",
       status: "True",
       reason: "QuotaReserved",
+      params: { cpuMillicores: "4000", memoryMiB: "8192", storageGiB: "20" },
       lastTransitionTime: "2026-09-30T10:00:00Z",
     },
     {
@@ -115,8 +119,9 @@ export const SEED_EVENTS: WorkspaceEventFixture[] = [
   },
   {
     type: "Normal",
-    reason: "Admitted",
+    reason: "QuotaReserved",
     message: "Quota reserved: 4 CPU, 8 GiB memory, 20 GiB storage",
+    params: { cpuMillicores: "4000", memoryMiB: "8192", storageGiB: "20" },
     lastTimestamp: "2026-09-30T10:00:00Z",
   },
 ];
@@ -131,12 +136,14 @@ export const READY_CONDITIONS: ConditionFixture[] = [
     type: "Admitted",
     status: "True",
     reason: "QuotaReserved",
+    params: { cpuMillicores: "4000", memoryMiB: "8192", storageGiB: "20" },
     lastTransitionTime: "2026-09-30T10:00:00Z",
   },
   {
     type: "StorageReady",
     status: "True",
     reason: "VolumeBound",
+    params: { sizeGiB: "20" },
     lastTransitionTime: "2026-09-30T10:01:00Z",
   },
   {

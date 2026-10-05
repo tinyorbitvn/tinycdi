@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
+	"strconv"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -198,10 +201,11 @@ func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (
 		if f.AllowMissingWorkspaceID {
 			uid = provisioning.PlatformID(ws.UID)
 		} else {
-			SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
-				metav1.ConditionTrue, ReasonMissingWorkspaceID,
-				"CR lacks the platform workspace id label; teardown held until it is restored", now)
-			if uerr := f.Client.Status().Update(ctx, ws); uerr != nil {
+			if uerr := f.updateStatus(ctx, ws, func() {
+				SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
+					metav1.ConditionTrue, ReasonMissingWorkspaceID,
+					"CR lacks the platform workspace id label; teardown held until it is restored", now)
+			}); uerr != nil {
 				return false, fmt.Errorf("mark missing workspace id: %w", uerr)
 			}
 			return false, nil
@@ -240,8 +244,9 @@ func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (
 			}
 		}
 		if serr != nil {
-			MarkFinalizerStepBlocked(ws, step, serr, now)
-			if uerr := f.Client.Status().Update(ctx, ws); uerr != nil {
+			if uerr := f.updateStatus(ctx, ws, func() {
+				MarkFinalizerStepBlocked(ws, step, serr, now)
+			}); uerr != nil {
 				return false, fmt.Errorf("record blocked step %s: %w", step, uerr)
 			}
 			return false, serr
@@ -276,6 +281,31 @@ func teardownStepReason(step FinalizerStep) string {
 	return "Terminating"
 }
 
+// updateStatus persists a condition stamp AND its condition-params
+// annotation. The /status subresource drops metadata writes, so the
+// annotation only lands through a main-resource update — but that update's
+// response carries the stored object whose status is still the old one, so
+// the stamp is re-applied before the status write. A stamp that leaves the
+// annotations untouched skips the main update, and one that changes
+// nothing at all (a repeated drain stamp) writes nothing — each write
+// would only bump resourceVersion and self-trigger a reconcile.
+func (f *Finalizer) updateStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, stamp func()) error {
+	conditions := slices.Clone(ws.Status.Conditions)
+	annotations := maps.Clone(ws.Annotations)
+	stamp()
+	metaChanged := !maps.Equal(annotations, ws.Annotations)
+	if !metaChanged && slices.Equal(conditions, ws.Status.Conditions) {
+		return nil
+	}
+	if metaChanged {
+		if err := f.Client.Update(ctx, ws); err != nil {
+			return err
+		}
+		stamp()
+	}
+	return f.Client.Status().Update(ctx, ws)
+}
+
 // markStep records the step about to run on RuntimeReady=False. It is
 // progress display only, so it is best effort: a failed write never blocks
 // or fails the teardown (the next step's mark, or the final delete, makes
@@ -286,9 +316,11 @@ func (f *Finalizer) markStep(ctx context.Context, ws *workspacesv1alpha1.Workspa
 		cur.Status == metav1.ConditionFalse && cur.Reason == reason {
 		return
 	}
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
-		metav1.ConditionFalse, reason, "teardown step "+string(step)+" in progress", f.now())
-	_ = f.Client.Status().Update(ctx, ws)
+	_ = f.updateStatus(ctx, ws, func() {
+		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionRuntimeReady,
+			metav1.ConditionFalse, reason, "teardown step "+string(step)+" in progress",
+			map[string]string{"step": string(step)}, f.now())
+	})
 }
 
 // probe routes backend-owned steps through the internal test hook when one
@@ -351,21 +383,28 @@ func (f *Finalizer) runDrain(ctx context.Context, ws *workspacesv1alpha1.Workspa
 	if drained {
 		return true, nil
 	}
+	drainParams := map[string]string{
+		"step":          string(StepDrainStreams),
+		"budgetSeconds": strconv.FormatInt(int64(f.drainBudget()/time.Second), 10),
+	}
 	if !now.Before(prog.DrainStartedAt.Add(f.drainBudget())) {
 		// Budget exhausted: proceed without the gateway; fail-closed
 		// streams die with the runtime anyway.
-		SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
-			metav1.ConditionTrue, ReasonDrainTimedOut,
-			"gateway streams did not close inside the drain budget; continuing teardown", now)
-		if err := f.Client.Status().Update(ctx, ws); err != nil {
+		if err := f.updateStatus(ctx, ws, func() {
+			SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+				metav1.ConditionTrue, ReasonDrainTimedOut,
+				"gateway streams did not close inside the drain budget; continuing teardown",
+				drainParams, now)
+		}); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
-		metav1.ConditionTrue, ReasonStreamDraining,
-		"waiting for gateway streams to close", now)
-	if err := f.Client.Status().Update(ctx, ws); err != nil {
+	if err := f.updateStatus(ctx, ws, func() {
+		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+			metav1.ConditionTrue, ReasonStreamDraining,
+			"waiting for gateway streams to close", drainParams, now)
+	}); err != nil {
 		return false, err
 	}
 	return false, nil
