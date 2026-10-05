@@ -92,6 +92,33 @@ func IsReleasePending(err error) bool {
 	return errors.As(err, &q) && q.ReleasePending
 }
 
+// UserLimitError is returned when a reservation would push the workspace's
+// owner over their effective per-principal running-workspace limit (the
+// owner override when one is stored, else the tenant default). The API maps
+// it to 409 QUOTA_EXHAUSTED with details.reason UserLimitReached.
+type UserLimitError struct {
+	TenantID  string
+	Owner     string // issuer|sub, as workspaces.owner_subject stores it
+	Limit     int64
+	Current   int64
+	Requested int64
+	// ReleasePending is set when the refusal would disappear once the
+	// owner's own teardown-pending reservations are settled — see
+	// QuotaExceededError.ReleasePending.
+	ReleasePending bool
+}
+
+func (e *UserLimitError) Error() string {
+	return fmt.Sprintf("per-user limit reached for %q in tenant %q: running %d + requested %d > limit %d",
+		e.Owner, e.TenantID, e.Current, e.Requested, e.Limit)
+}
+
+// IsUserLimit reports whether err is a per-principal limit rejection.
+func IsUserLimit(err error) bool {
+	var u *UserLimitError
+	return errors.As(err, &u)
+}
+
 var (
 	// ErrNoQuota is returned when a tenant has no configured quota row;
 	// the control plane fails closed instead of granting unlimited.
@@ -211,6 +238,10 @@ func Reserve(ctx context.Context, tx store.Tx, tenantID, workspaceID string, v R
 		return e
 	}
 
+	if err := checkUserLimit(ctx, tx, tenantID, workspaceID, v.RunningSlots); err != nil {
+		return err
+	}
+
 	if state == "released" {
 		// Restart path: a previously released reservation for the same
 		// workspace is re-held with the new vector.
@@ -316,6 +347,9 @@ func reacquireCompute(ctx context.Context, tx store.Tx, tenantID, workspaceID st
 		}
 		return e
 	}
+	if err := checkUserLimit(ctx, tx, tenantID, workspaceID, v.RunningSlots); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE quota_reservation
 		SET running_slots = $3, cpu_millis = $4, memory_bytes = $5,
@@ -378,4 +412,94 @@ func pendingReleaseVector(ctx context.Context, tx store.Tx, tenantID string) (Re
 		WHERE qr.tenant_id = $1 AND (`+settleCandidateSQL+`)`, tenantID).
 		Scan(&p.RunningSlots, &p.CPUMillis, &p.MemoryBytes, &p.DiskBytes)
 	return p, err
+}
+
+// checkUserLimit refuses a grant of `slots` running slots when the
+// workspace's owner would exceed their effective per-principal limit: the
+// override stored in user_session_limit when one exists, else the tenant
+// default in tenant_user_limit_default, else unlimited (no rows — the
+// upgrade default). It runs under the caller's tenant_quota row lock, so
+// the owner's count cannot change between the read here and the
+// reservation write that follows — the same serialization the tenant-wide
+// check relies on.
+//
+// The count is derived live from quota_reservation: 'held' rows with
+// running slots still held, exactly the workspaces that occupy a running
+// slot under the tenant quota. A stopped Retain workspace's disk-only
+// hold (running_slots = 0), retained data disks and released rows never
+// count, so the existing settle/release paths decrement the count with no
+// extra bookkeeping. Requests that hold no running slot (pure disk)
+// always pass.
+func checkUserLimit(ctx context.Context, tx store.Tx, tenantID, workspaceID string, slots int64) error {
+	if slots <= 0 {
+		return nil
+	}
+	// The workspaces row is written before its reservation on every path
+	// (create, attach, restart), so its owner is visible in this
+	// transaction.
+	var owner string
+	err := tx.QueryRow(ctx, `
+		SELECT owner_subject FROM workspaces WHERE id = $1`, workspaceID).Scan(&owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("user limit: read owner %w", err)
+	}
+	var limit *int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT max_running FROM user_session_limit
+			 WHERE tenant_id = $1 AND owner_subject = $2),
+			(SELECT max_running FROM tenant_user_limit_default
+			 WHERE tenant_id = $1))`,
+		tenantID, owner).Scan(&limit); err != nil {
+		return fmt.Errorf("user limit: read limit %w", err)
+	}
+	if limit == nil {
+		return nil
+	}
+	var used int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(qr.running_slots), 0)
+		FROM quota_reservation qr
+		JOIN workspaces w ON w.id = qr.workspace_id
+		WHERE qr.tenant_id = $1 AND w.owner_subject = $2
+		  AND qr.state = 'held' AND qr.running_slots > 0`,
+		tenantID, owner).Scan(&used); err != nil {
+		return fmt.Errorf("user limit: usage %w", err)
+	}
+	if used+slots <= *limit {
+		return nil
+	}
+	e := &UserLimitError{
+		TenantID: tenantID, Owner: owner,
+		Limit: *limit, Current: used, Requested: slots,
+	}
+	// Transient when the owner's own teardown-pending holds cover the
+	// shortfall — the same release-pending signal as the tenant check, so
+	// the API can ask the client to retry instead of failing hard.
+	pending, perr := userPendingReleaseSlots(ctx, tx, tenantID, owner)
+	if perr != nil {
+		return fmt.Errorf("user limit: pending release %w", perr)
+	}
+	if used-pending+slots <= *limit {
+		e.ReleasePending = true
+	}
+	return e
+}
+
+// userPendingReleaseSlots sums the running slots the owner's settle
+// candidates (settleCandidateSQL — held compute on deleted or stopped
+// workspaces) will free once their runtime absence is proven. It is the
+// per-principal analogue of pendingReleaseVector.
+func userPendingReleaseSlots(ctx context.Context, tx store.Tx, tenantID, owner string) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(qr.running_slots), 0)
+		FROM quota_reservation qr
+		JOIN workspaces w ON w.id = qr.workspace_id
+		WHERE qr.tenant_id = $1 AND w.owner_subject = $2 AND (`+settleCandidateSQL+`)`,
+		tenantID, owner).Scan(&n)
+	return n, err
 }

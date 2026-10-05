@@ -79,6 +79,31 @@ export default {
   "admin.quota.edit.invalid":
     "Enter numbers of 0 or more; running workspaces and storage must be whole numbers.",
 
+  // Per-user limits section (running-workspace cap per principal).
+  "admin.userLimits.title": "Per-user limits",
+  "admin.userLimits.description":
+    "How many workspaces one user may run at once, on top of the tenant limits.",
+  "admin.userLimits.loading": "Loading per-user limits",
+  "admin.userLimits.caption": "Per-user running limits",
+  "admin.userLimits.empty": "No users yet.",
+  "admin.userLimits.default": "Default per-user limit:",
+  "admin.userLimits.unlimited": "Unlimited",
+  "admin.userLimits.inherit": "Default",
+  "admin.userLimits.column.running": "Running",
+  "admin.userLimits.column.limit": "Override",
+  "admin.userLimits.column.effective": "Effective",
+  "admin.userLimits.editDefault": "Set default",
+  "admin.userLimits.edit.action": "Set limit",
+  "admin.userLimits.edit.userTitle": "Running limit — {user}",
+  "admin.userLimits.edit.defaultTitle": "Default per-user limit",
+  "admin.userLimits.edit.descriptionUser":
+    "Most workspaces this user may run at once. Leave empty to inherit the tenant default.",
+  "admin.userLimits.edit.descriptionDefault":
+    "Most workspaces each user may run at once. Leave empty for no default limit.",
+  "admin.userLimits.edit.field": "Running workspaces",
+  "admin.userLimits.edit.save": "Save limit",
+  "admin.userLimits.edit.invalid": "Enter a whole number of 0 or more, or leave empty.",
+
   // Template catalog page.
   "admin.templates.title": "Template catalog",
   "admin.templates.description":

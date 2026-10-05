@@ -129,11 +129,23 @@ type ErrorDetails struct {
 	AgeDays      int    `json:"ageDays,omitempty"`
 	LimitDays    int    `json:"limitDays,omitempty"`
 	Pinned       bool   `json:"pinned,omitempty"`
+	// Params carries the values a reason's message interpolates, as a
+	// flat string map (the same convention as WorkspaceEvent.params).
+	// UserLimitReached sets "limit" (the principal's maximum concurrent
+	// running workspaces) and "current" (the running workspaces the
+	// principal already holds).
+	Params map[string]string `json:"params,omitempty"`
 }
 
 // ReasonReleasePending is the details.reason value of a transient,
 // teardown-pending QUOTA_EXHAUSTED (see ErrorDetails).
 const ReasonReleasePending = "release_pending"
+
+// ReasonUserLimitReached is the details.reason value of a QUOTA_EXHAUSTED
+// refused by a per-principal running limit rather than the tenant quota:
+// the caller already holds their maximum of concurrent running
+// workspaces. Params carry "limit" and "current".
+const ReasonUserLimitReached = "UserLimitReached"
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 
@@ -172,18 +184,48 @@ func writeQuotaExceeded(w http.ResponseWriter, r *http.Request, err error, retry
 		e := NewError(CodeQuotaExhausted, "quota exhausted")
 		e.Retryable = true
 		e.Details = &ErrorDetails{Reason: ReasonReleasePending}
-		secs := retryAfter
-		switch {
-		case secs < 1:
-			secs = 1
-		case secs > 30:
-			secs = 30
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterClamped(retryAfter)))
 		WriteError(w, RequestIDFromContext(r.Context()), e)
 		return
 	}
 	writeError(w, r, CodeQuotaExhausted, "quota exhausted")
+}
+
+// retryAfterClamped bounds a Retry-After estimate to [1, 30]: the recovery
+// cadence is 30 s, so a release can never be further out than that.
+func retryAfterClamped(secs int) int {
+	switch {
+	case secs < 1:
+		return 1
+	case secs > 30:
+		return 30
+	}
+	return secs
+}
+
+// writeUserLimitReached maps a per-principal limit refusal onto
+// QUOTA_EXHAUSTED with details.reason UserLimitReached and params
+// {limit, current}. As with the tenant-level release_pending variant, a
+// refusal whose shortfall is covered only by the owner's own
+// teardown-pending holds is transient: it keeps the same code and reason
+// but carries retryable=true and a Retry-After header.
+func writeUserLimitReached(w http.ResponseWriter, r *http.Request, err error, retryAfter int) {
+	var u *provisioning.UserLimitError
+	e := NewError(CodeQuotaExhausted, "per-user running-workspace limit reached")
+	if errors.As(err, &u) {
+		e.Details = &ErrorDetails{
+			Reason: ReasonUserLimitReached,
+			Params: map[string]string{
+				"limit":   strconv.FormatInt(u.Limit, 10),
+				"current": strconv.FormatInt(u.Current, 10),
+			},
+		}
+		if u.ReleasePending {
+			e.Retryable = true
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterClamped(retryAfter)))
+		}
+	}
+	WriteError(w, RequestIDFromContext(r.Context()), e)
 }
 
 // writeImageStale renders an E3 stale-image refusal: the message names the

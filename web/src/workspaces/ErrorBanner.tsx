@@ -33,6 +33,14 @@ function guidance(e: PortalApiError): string {
   // A teardown-pending quota refusal resolves on the next recovery pass —
   // distinct copy from a real exhaustion.
   if (isReleasePending(e)) return t("errors.code.quotaReleasePending");
+  // A per-principal limit refusal names the caller's own cap in
+  // details.params (limit/current).
+  if (e.code === "QUOTA_EXHAUSTED" && e.details?.reason === "UserLimitReached") {
+    return t("errors.code.userLimitReached", {
+      limit: e.details.params?.limit ?? "?",
+      current: e.details.params?.current ?? "?",
+    });
+  }
   if (e.code === "IMAGE_STALE") return imageStaleGuidance(e);
   return t(GUIDANCE_KEYS[e.code]);
 }

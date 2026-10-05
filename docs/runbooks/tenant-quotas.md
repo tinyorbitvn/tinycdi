@@ -66,6 +66,7 @@ kubectl -n <release-ns> logs -l app.kubernetes.io/name=backend --tail=-1 | grep 
 |---|---|---|---|
 | Tenant has no quota row | `409 QUOTA_NOT_CONFIGURED` | no | admission fails closed; an administrator must declare a quota (chart `quota` block). The user-facing message says exactly that |
 | Over a configured limit | `409 QUOTA_EXHAUSTED` | no | genuine headroom shortage — free resources or raise the limit |
+| Over a per-user running limit | `409 QUOTA_EXHAUSTED` + `details.reason: UserLimitReached` + `details.params.limit`/`current` | no* | the caller already runs their maximum of concurrent running workspaces — stop or delete one, or raise their limit. \*Like `release_pending`, the refusal carries `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
 | Over limit only because of teardown-pending holds | `409 QUOTA_EXHAUSTED` + `details.reason: release_pending` + `Retry-After` | **yes** | a deleted or stopped workspace still holds the reservation pending the runtime-absence proof; the release is usually within seconds (event-driven settle) and at most ~30 s (the recovery tick is the catch-all), so the portal can retry automatically |
 
 Quota accounting detail: compute (`runningWorkspaces`, `cpu`, `memory`) is
@@ -74,6 +75,39 @@ is proven gone. Disk (`storage`) is held while the volume exists. A
 **Stopped** workspace under the Retain data policy releases compute and
 keeps only a disk-only hold; Start re-reserves the vector it was admitted
 with. Retained disks keep their storage quota until purge.
+
+## Per-user running limits
+
+On top of the tenant quota, a tenant administrator can cap **concurrent
+running workspaces per principal** — a tenant-wide default and optional
+per-user overrides. The dimension is the same `runningWorkspaces` the
+tenant quota counts: a workspace occupies its owner's slot while its
+reservation holds compute — from the create/start intent until the runtime
+is proven gone. A stopped Retain workspace's disk-only hold, retained data
+disks and released reservations never count.
+
+- `GET /v1/admin/tenants/{tenant}/user-limits` shows the tenant `default`
+  (`null` = unlimited) and one row per principal with a stored `limit`
+  override (`null` = inherit the default), the resolved `effective` value
+  and the `running` workspaces they currently hold.
+- `PUT /v1/admin/tenants/{tenant}/user-limits` with
+  `{"ownerRef": "iss|sub", "limit": 3}` sets an override;
+  `"limit": null` clears it.
+- `PUT /v1/admin/tenants/{tenant}/user-limits/default` with
+  `{"limit": 2}` sets the tenant default; `"limit": null` clears it back
+  to unlimited.
+- Every write is audited (`user_limit.*` actions); writes are upserts —
+  last write wins.
+
+Resolution order is **override → tenant default → unlimited**, and an
+upgrade carries no rows at all: nothing changes until an administrator
+sets a value. Enforcement runs inside the same transaction — and the same
+`tenant_quota` row lock — as the quota reservation, so concurrent launches
+by one user can never overshoot. A refusal is `409 QUOTA_EXHAUSTED` with
+`details.reason: UserLimitReached` and `details.params` `limit`/`current`;
+lowering a limit below current usage is safe — running workspaces keep
+running, new ones are refused. `GET /v1/quota` reports the caller's own
+effective limit in `userLimits` and each user's in `users[].limit`.
 
 ## Operations checklist
 

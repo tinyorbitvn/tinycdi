@@ -711,6 +711,123 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/user-limits:
+    get:
+      operationId: getAdminUserLimits
+      summary: Per-user running-workspace limits
+      description: |
+        Administrator view of one tenant's per-principal running-workspace
+        limits: the tenant-wide `default` (`null` = unlimited) and one row
+        per principal who has usage or a stored override. Each row carries
+        the stored `limit` (`null` = inherit the default), the resolved
+        `effective` limit (`null` = unlimited) and the `running` workspaces
+        the principal currently holds — the same held reservations
+        admission counts. Requires the tenant-admin role on the named
+        tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Per-user limits for the named tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserLimitsView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: putAdminUserLimit
+      summary: Set or clear a user's running-workspace limit
+      description: |
+        Sets (integer `limit`) or clears (`limit: null`) one principal's
+        running-workspace override. An override wins over the tenant
+        default; clearing restores the default. `ownerRef` is the
+        `issuer|sub` pair `GET` reports; a limit on a principal with no
+        usage is accepted and applies at their next launch. Enforcement is
+        race-free: the check runs inside the same transaction and row lock
+        as the tenant quota reservation, and a refused launch answers
+        `409 QUOTA_EXHAUSTED` with `details.reason: UserLimitReached`.
+        Limits below current usage are accepted: running workspaces keep
+        running, new ones are refused. Every write is audited. Requires
+        the tenant-admin role on the named tenant and the `X-CSRF-Token`
+        header.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetUserLimitRequest"
+      responses:
+        "200":
+          description: The updated per-user limits view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserLimitsView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/admin/tenants/{tenant}/user-limits/default:
+    put:
+      operationId: putAdminUserLimitDefault
+      summary: Set or clear the tenant's default user limit
+      description: |
+        Sets (integer `limit`) or clears (`limit: null`) the tenant-wide
+        fallback running-workspace limit applied to every principal
+        without an override. Clearing restores unlimited — the upgrade
+        default. Every write is audited. Requires the tenant-admin role on
+        the named tenant and the `X-CSRF-Token` header.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetUserLimitDefaultRequest"
+      responses:
+        "200":
+          description: The updated per-user limits view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserLimitsView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -1104,7 +1221,7 @@ components:
         | `INVALID_TEMPLATE` | 422 | false | templateRef unknown, unpublished or disallowed |
         | `INVALID_STATE` | 409 | true | phase/record state forbids the op now; retry once it settles to a compatible state |
         | `IDEMPOTENCY_CONFLICT` | 409 | false | Idempotency-Key reused with a different body; generate a new key |
-        | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried |
+        | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. A refusal by a per-principal running limit carries `details.reason: UserLimitReached` with `details.params.limit`/`details.params.current`. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried. A `UserLimitReached` refusal can likewise carry `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
         | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
         | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
         | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale quota version; reload the resource and retry |
@@ -1169,8 +1286,14 @@ components:
                 `QUOTA_EXHAUSTED` means the refused amount is held only by
                 workspaces whose quota release is already pending teardown
                 — the response then also carries `retryable: true` and a
-                `Retry-After` header.
-              enum: [release_pending]
+                `Retry-After` header. `UserLimitReached` on
+                `QUOTA_EXHAUSTED` means the refusal came from a
+                per-principal running-workspace limit, not the tenant
+                quota; `params` carries `limit` and `current`, and the
+                response may also carry `retryable: true` + `Retry-After`
+                when the caller's own teardown-pending holds cover the
+                shortfall.
+              enum: [release_pending, UserLimitReached]
             templateName:
               type: string
               description: |
@@ -1189,6 +1312,16 @@ components:
                 stale revision (`imageUpdate: Pinned` or a guard-refused
                 move) — it can start again only after an administrator
                 publishes a fresh image.
+            params:
+              type: object
+              additionalProperties:
+                type: string
+              description: |
+                Flat string map of values a reason's message interpolates
+                (the same convention as `WorkspaceEvent.params`).
+                `UserLimitReached` sets `limit` (the principal's maximum
+                concurrent running workspaces) and `current` (the running
+                workspaces the principal already holds).
 
     WorkspacePhase:
       type: string
@@ -1496,6 +1629,12 @@ components:
           description: Name from the principal directory; falls back to `subject`.
         usage:
           $ref: "#/components/schemas/QuotaAmounts"
+        limit:
+          type: integer
+          description: |
+            The user's effective per-principal running-workspace limit —
+            their stored override when set, else the tenant default.
+            Absent when the user is unlimited.
 
     QuotaView:
       type: object
@@ -1505,9 +1644,12 @@ components:
         Tenant quota snapshot. `configured` is false when the tenant has no
         quota row: new workspaces are then refused, so the absence of
         `limits` must never be read as "unlimited". `limits` is absent in that
-        state. `userLimits` is absent
-        in v0.2 — there is no per-user limit store. `users` lists every tenant member for tenant
-        administrators and only the caller for regular users.
+        state. `userLimits` is present only when the caller has an
+        effective per-principal running-workspace limit; inside it only
+        `runningWorkspaces` is meaningful (the other dimensions stay zero —
+        per-user limits cover the running count only). `users` lists every
+        tenant member for tenant administrators and only the caller for
+        regular users.
       properties:
         tenant:
           type: string
@@ -1606,6 +1748,92 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UserUsage"
+
+    AdminUserLimitsView:
+      type: object
+      additionalProperties: false
+      required: [tenant, default, users]
+      description: |
+        Per-principal running-workspace limits for one tenant: the
+        tenant-wide `default` (`null` = unlimited — the upgrade default)
+        and one row per principal who has usage or a stored override.
+        Limits cap concurrent running workspaces — a workspace counts
+        while its reservation holds a running slot (from the start/create
+        intent until the runtime is proven gone); stopped Retain
+        workspaces' disk-only holds and retained disks never count.
+      properties:
+        tenant:
+          type: string
+        default:
+          type: integer
+          nullable: true
+          description: Tenant-wide fallback limit; `null` = unlimited.
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUserLimitEntry"
+
+    AdminUserLimitEntry:
+      type: object
+      additionalProperties: false
+      required: [ownerRef, subject, displayName, limit, effective, running]
+      description: One principal's per-user limit row.
+      properties:
+        ownerRef:
+          type: string
+          description: |
+            The `issuer|sub` owner reference admission enforces on — the
+            value `PUT` writes back.
+        subject:
+          type: string
+          description: Bare OIDC subject of the user.
+        displayName:
+          type: string
+          description: Name from the principal directory; falls back to `subject`.
+        limit:
+          type: integer
+          nullable: true
+          description: Stored override; `null` = inherits the tenant default.
+        effective:
+          type: integer
+          nullable: true
+          description: Resolved limit (override, else default); `null` = unlimited.
+        running:
+          type: integer
+          description: Running workspaces the principal currently holds.
+
+    SetUserLimitRequest:
+      type: object
+      additionalProperties: false
+      required: [ownerRef]
+      description: |
+        Write one principal's running-workspace override. `limit` sets it;
+        `null` (or absent) clears the override so the tenant default (or
+        unlimited) applies again.
+      properties:
+        ownerRef:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The `issuer|sub` owner reference of the principal.
+        limit:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: Maximum concurrent running workspaces; `null` clears the override.
+
+    SetUserLimitDefaultRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Write the tenant-wide fallback running-workspace limit. `limit`
+        sets it; `null` (or absent) clears it back to unlimited.
+      properties:
+        limit:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: Maximum concurrent running workspaces per principal; `null` clears the default.
 
     CreateWorkspaceRequest:
       type: object
