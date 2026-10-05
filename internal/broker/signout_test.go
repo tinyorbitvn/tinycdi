@@ -269,7 +269,9 @@ func TestRevokePortalSession_RedeemCommitThenRevoke(t *testing.T) {
 		n, err := b.RevokePortalSession(ctx, "sess-1")
 		revoked <- revokeRes{n, err}
 	}()
-	waitForLockWait(t, db, `%UPDATE launch_ticket%`)
+	// The revoke now blocks on its ordered ticket FOR UPDATE lock — taken
+	// before the UPDATE — so the probe matches the lock statement.
+	waitForLockWait(t, db, `%SELECT 1 FROM launch_ticket%FOR UPDATE%`)
 
 	// The redemption finishes — RedeemTicket's own two writes — and
 	// commits, releasing the lock the revoke waits on.

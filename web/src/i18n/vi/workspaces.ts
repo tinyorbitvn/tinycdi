@@ -218,6 +218,8 @@ export default {
   "workspaces.reason.failedCleanup": "Incarnation lỗi đang được gỡ bỏ.",
   "workspaces.reason.missingWorkspaceID":
     "Bản ghi workspace thiếu ID nền tảng; việc gỡ bỏ bị giữ lại.",
+  "workspaces.reason.intentBehind":
+    "Luồng intent của nền tảng đang chậm hơn workspace này (revision luồng {rowRevision}, revision workspace {crRevision}); các thao tác mới bị giữ lại cho đến khi đồng bộ — hãy liên hệ quản trị viên.",
   "workspaces.reason.blockingConnects": "Đang chặn kết nối mới.",
   "workspaces.reason.revokingLeases": "Đang thu hồi lease phiên.",
   "workspaces.reason.drainingStreams": "Đang đóng các phiên mở.",

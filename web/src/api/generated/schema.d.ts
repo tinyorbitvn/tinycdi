@@ -91,6 +91,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/sessions:revoke-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign out everywhere
+         * @description Ends **every** portal session the caller's principal holds **in the
+         *     caller's current tenant** — the calling session included, with no
+         *     keep-self opt-out — and revokes, in the same store transaction, the
+         *     session-layer material minted under them: every active connection
+         *     lease (streams on any gateway replica close within one renew cycle
+         *     and a replayed workspace-host cookie resolves to a revoked lease,
+         *     `401`) and every still-outstanding launch ticket. Sessions and
+         *     material under **other tenants are not touched**. Requires the
+         *     session cookie and the `X-CSRF-Token` header (`401` without a
+         *     session, `403` without a valid token).
+         *
+         *     Like `POST /v1/logout`, the answer is `200` with
+         *     `{"endSessionUrl"}` when the identity provider advertises an
+         *     `end_session_endpoint` and the deployment has `oidc.endSession` on;
+         *     the portal navigates the browser there. The URL is assembled only
+         *     from discovery and configuration — never from the request.
+         *
+         *     The revocation is atomic: a store failure rolls the whole
+         *     transaction back, so nothing is destroyed, the caller stays signed
+         *     in, and the answer is `500` — retrying is safe (the operation is
+         *     idempotent).
+         */
+        post: operations["revokeAllSessions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces": {
         parameters: {
             query?: never;
@@ -694,7 +734,7 @@ export interface components {
         /** @enum {string} */
         ExperienceKind: "Desktop" | "Browser";
         /** @enum {string} */
-        ConditionType: "Admitted" | "StorageReady" | "RuntimeReady" | "ConnectionReady" | "Degraded";
+        ConditionType: "Admitted" | "StorageReady" | "RuntimeReady" | "ConnectionReady" | "Degraded" | "IntentBehind";
         /** @enum {string} */
         ConditionStatus: "True" | "False" | "Unknown";
         /**
@@ -1579,6 +1619,39 @@ export interface operations {
                 };
             };
             /** @description Portal session ended; nothing more to do. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    revokeAllSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All portal sessions ended; continue at the identity provider. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogoutResult"];
+                };
+            };
+            /** @description All portal sessions ended; nothing more to do. */
             204: {
                 headers: {
                     [name: string]: unknown;

@@ -326,13 +326,21 @@ Steps 1–3 are the parts that differ from backup-restore.md.
      are ahead of the restored row's `intent_revision`, and the operator
      adopts only `intentRevision > applied.revision`. Intents the API
      writes afterwards land at or under the applied revision and are
-     **silently ignored** — the drill hit this: the restored row claimed
-     `Running` over a `Stopped` CR, so `start` was refused by the API's
-     own desired-state check. The step-3 Job already aligned every
-     diverged row to its live CR (`desired_state`/`runtime_generation`/
-     `intent_revision` from the CR's `spec`); when the Job ran without
-     Kubernetes access it printed the equivalent `UPDATE` per row — apply
-     those statements now, reading the values off the CRs:
+     dropped — **surfaced, not silent**: the workspace's
+     `IntentBehind=True` condition (params `crRevision`/`rowRevision`)
+     and an `IntentBehind` Warning event mark exactly these workspaces, so
+     `kubectl get workspaces` + `kubectl describe workspace` (or the
+     portal's conditions table) lists what still needs realigning — the
+     drill hit this wedge before the condition existed: the restored row
+     claimed `Running` over a `Stopped` CR, so `start` was refused by
+     the API's own desired-state check. The step-3 Job already aligned
+     every diverged row to its live CR (`desired_state`/
+     `runtime_generation`/`intent_revision` from the CR's `spec`), so
+     after the post-restore apply Workspaces should clear `IntentBehind`;
+     one that stays `True` still trails its live CR — align its row now.
+     When the Job ran without Kubernetes access it printed the
+     equivalent `UPDATE` per row — apply those statements, reading the
+     values off the CRs:
 
      ```sql
      UPDATE workspaces
@@ -368,9 +376,12 @@ Steps 1–3 are the parts that differ from backup-restore.md.
   workspace's pod) persist — the reconcile above aligns the record with
   them rather than rewinding workloads.
 - **One benign wedge if step 5 is skipped:** intents on a diverged
-  workspace are silently dropped until its `intent_revision` passes the
-  CR's applied revision — a user-visible "button does nothing", not a
-  security hole.
+  workspace are dropped until its `intent_revision` passes the CR's
+  applied revision — a user-visible "button does nothing", not a security
+  hole. The wedge is no longer silent: each wedged workspace carries
+  `IntentBehind=True` on its conditions and gets one `IntentBehind`
+  Warning event, so `kubectl get workspaces -A` (condition column /
+  `describe`) enumerates what is left.
 
 ### Invariant checklist — live-cluster restore
 
@@ -385,7 +396,8 @@ Run after step 6, in addition to the rebuild list in backup-restore.md:
 - [ ] `kubectl get workspaces -A` and `SELECT id FROM workspaces WHERE
       state='active'` agree on the workspace set — no orphans, no ghosts.
 - [ ] Every `workspaces.intent_revision` >= the matching CR's
-      applied-intent revision.
+      applied-intent revision — equivalently, zero Workspace CRs report
+      `IntentBehind=True` (`kubectl get workspaces -A` / describe).
 - [ ] `quota_reservation` `held` rows ↔ running runtimes + retained disks
       exactly once; `tinycdi_quota_drift` = 0.
 - [ ] Fresh login → ticket → redeem → stream works on a live workspace.

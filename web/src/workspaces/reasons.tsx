@@ -63,6 +63,7 @@ const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   CleanupRetry: "workspaces.reason.cleanupRetry",
   FailedCleanup: "workspaces.reason.failedCleanup",
   MissingWorkspaceID: "workspaces.reason.missingWorkspaceID",
+  IntentBehind: "workspaces.reason.intentBehind",
 
   // Finalizer step marks on RuntimeReady during teardown.
   BlockingConnects: "workspaces.reason.blockingConnects",
@@ -172,6 +173,9 @@ const REASON_PARAM_TABLE: Readonly<Record<string, Readonly<Record<string, ParamF
   RetentionPending: { step: "step" },
   StreamDraining: { step: "step", budgetSeconds: "durationSeconds" },
   DrainTimedOut: { step: "step", budgetSeconds: "durationSeconds" },
+
+  // Intent-fence drift: the revisions the IntentBehind condition reports.
+  IntentBehind: { crRevision: "int", rowRevision: "int" },
 
   // Mock/demo tokens whose fixture messages interpolate resource sizes.
   QuotaReserved: { cpuMillicores: "cpu", memoryMiB: "mib", storageGiB: "gib" },

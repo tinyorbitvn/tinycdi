@@ -347,7 +347,7 @@ test("partitioned cookie mode: CHIPS session cookie across the session lifecycle
 
   // ---- 5. logout -> portal session gone; old cookie stays rejected ----------
   await page.locator("button:has(.tc-topbar__user)").click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
   // RP-initiated logout lands back on the public signed-out page.
   await page.waitForURL("**/signed-out", { timeout: 60_000 });
   expect(

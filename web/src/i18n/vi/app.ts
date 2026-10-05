@@ -23,6 +23,12 @@ export default {
   "app.user.signedInAs": "Đã đăng nhập là {name}",
   "app.user.tenant": "Tenant {tenant}",
   "app.user.signOut": "Đăng xuất",
+  "app.user.signOutAll": "Đăng xuất khỏi mọi nơi",
+  "app.user.signOutAll.title": "Đăng xuất khỏi mọi nơi?",
+  "app.user.signOutAll.body":
+    "Thao tác này kết thúc mọi phiên của bạn trong tenant {tenant} — trên tất cả trình duyệt và thiết bị, kể cả thiết bị này. Các phiên desktop đang chạy sẽ đóng trong vài giây. Phiên ở tenant khác không bị ảnh hưởng.",
+  "app.user.signOutAll.confirm": "Đăng xuất khỏi mọi nơi",
+  "app.user.signOutAll.busy": "Đang đăng xuất…",
   "app.user.signOutFailed.title": "Không đăng xuất được",
   "app.user.signOutFailed.body": "Thử lại. Nếu vẫn lỗi, hãy đóng cửa sổ trình duyệt này.",
 

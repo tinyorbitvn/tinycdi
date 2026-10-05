@@ -989,3 +989,26 @@ func TestStaleConditions_DropsParams(t *testing.T) {
 		}
 	}
 }
+
+// INTENT-DRIFT: the operator's IntentBehind condition is projected like
+// any other enum'd condition, with the crRevision/rowRevision params it
+// recorded through the condition-params annotation.
+func TestProjectConditions_IntentBehind(t *testing.T) {
+	cond := metav1.Condition{
+		Type:   workspacesv1alpha1.ConditionIntentBehind,
+		Status: metav1.ConditionTrue, Reason: "IntentBehind",
+		Message: "the platform's intent stream is behind this workspace; new intents are held until it is realigned",
+	}
+	ann := map[string]string{
+		provisioning.AnnotationConditionParams: `{
+			"IntentBehind.IntentBehind": {"crRevision": "5", "rowRevision": "3"}
+		}`,
+	}
+	out := projectConditions([]metav1.Condition{cond}, ann)
+	if len(out) != 1 {
+		t.Fatalf("projected %d conditions, want 1", len(out))
+	}
+	if out[0].Params["crRevision"] != "5" || out[0].Params["rowRevision"] != "3" {
+		t.Fatalf("params = %v, want {crRevision: 5, rowRevision: 3}", out[0].Params)
+	}
+}

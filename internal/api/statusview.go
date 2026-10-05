@@ -52,6 +52,7 @@ var viewConditionTypes = map[string]bool{
 	workspacesv1alpha1.ConditionRuntimeReady:    true,
 	workspacesv1alpha1.ConditionConnectionReady: true,
 	workspacesv1alpha1.ConditionDegraded:        true,
+	workspacesv1alpha1.ConditionIntentBehind:    true,
 }
 
 // ObservedStatus is the projected, UI-safe slice of a Workspace CR's

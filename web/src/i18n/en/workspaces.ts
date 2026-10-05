@@ -218,6 +218,8 @@ export default {
   "workspaces.reason.failedCleanup": "The failed incarnation is being torn down.",
   "workspaces.reason.missingWorkspaceID":
     "The workspace record is missing its platform ID; teardown is held.",
+  "workspaces.reason.intentBehind":
+    "The platform's intent stream is behind this workspace (stream revision {rowRevision}, workspace revision {crRevision}); new actions are held until it is realigned — contact an administrator.",
   "workspaces.reason.blockingConnects": "Blocking new connections.",
   "workspaces.reason.revokingLeases": "Revoking session leases.",
   "workspaces.reason.drainingStreams": "Closing open sessions.",

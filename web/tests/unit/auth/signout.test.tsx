@@ -4,7 +4,7 @@ import { ApiProvider } from "../../../src/api/context";
 import { createApi } from "../../../src/api/client";
 import { App } from "../../../src/App";
 import { SignedOut } from "../../../src/auth/SignedOut";
-import { SIGN_IN_AGAIN_URL, SIGNED_OUT_PATH, signOut } from "../../../src/auth/signOut";
+import { SIGN_IN_AGAIN_URL, SIGNED_OUT_PATH, signOut, signOutEverywhere } from "../../../src/auth/signOut";
 import { AppShell, BrandingProvider } from "../../../src/app/shell";
 import { MeProvider, type Me } from "../../../src/app/me";
 import { ThemeProvider } from "../../../src/app/theme";
@@ -77,6 +77,40 @@ describe("signOut", () => {
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch;
     await expect(signOut(createApi(failing), assign)).rejects.toMatchObject({ httpStatus: 500 });
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+describe("signOutEverywhere (ADR 0007)", () => {
+  beforeEach(() => loginCookies());
+  afterEach(() => clearCookies());
+
+  it("posts the revoke-all endpoint and leaves for the signed-out page on 204", async () => {
+    const api = createMockApi();
+    const assign = vi.fn();
+    await signOutEverywhere(createApi(stubFetch(api)), assign);
+    expect(assign).toHaveBeenCalledExactlyOnceWith(SIGNED_OUT_PATH);
+    expect(api.state.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "POST /v1/me/sessions:revoke-all",
+    ]);
+  });
+
+  it("200: continues at the provider end-session URL like plain sign-out", async () => {
+    const api = createMockApi();
+    setEndSession(api, IDP_LOGOUT);
+    const assign = vi.fn();
+    await signOutEverywhere(createApi(stubFetch(api)), assign);
+    expect(assign).toHaveBeenCalledExactlyOnceWith(IDP_LOGOUT);
+  });
+
+  it("rejects on failure — the caller stays signed in", async () => {
+    const assign = vi.fn();
+    const failing = (async () =>
+      new Response(JSON.stringify({ code: "INTERNAL", message: "boom", retryable: true }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    await expect(signOutEverywhere(createApi(failing), assign)).rejects.toMatchObject({ httpStatus: 500 });
     expect(assign).not.toHaveBeenCalled();
   });
 });
@@ -193,6 +227,39 @@ describe("user menu", () => {
       Object.defineProperty(window, "location", { value: loc, configurable: true });
     }
     expect(logout.mock.calls.some(([r]) => r.method === "POST" && r.path === "/v1/logout")).toBe(true);
+  });
+
+  it("'Sign out everywhere' confirms, naming the tenant, then posts revoke-all", async () => {
+    const { api } = renderShell();
+    const trigger = await screen.findByRole("button", { name: "Ada Admin" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sign out everywhere" }));
+
+    // The confirm dialog names the tenant scope before anything is sent.
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent("tenant acme");
+    expect(dialog).toHaveTextContent("including this one");
+    expect(api.state.requests.some((r) => r.path.includes("revoke-all"))).toBe(false);
+
+    const loc = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", { value: { ...loc, assign, pathname: loc.pathname }, configurable: true });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Sign out everywhere" }));
+      await waitFor(() => expect(assign).toHaveBeenCalledWith(SIGNED_OUT_PATH));
+    } finally {
+      Object.defineProperty(window, "location", { value: loc, configurable: true });
+    }
+    expect(api.state.requests.map((r) => `${r.method} ${r.path}`)).toContain("POST /v1/me/sessions:revoke-all");
+  });
+
+  it("the revoke-all confirm can be cancelled without any request", async () => {
+    const { api } = renderShell();
+    fireEvent.click(await screen.findByRole("button", { name: "Ada Admin" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sign out everywhere" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(api.state.requests.some((r) => r.path.includes("revoke-all"))).toBe(false);
   });
 
   it("a failed sign-out stays on the page and says so", async () => {

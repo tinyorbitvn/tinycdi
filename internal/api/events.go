@@ -194,6 +194,8 @@ func conditionEvent(c workspaceCondition) WorkspaceEvent {
 		ev.Type = "Warning"
 	case c.Type == "Degraded" && c.Status == "True":
 		ev.Type = "Warning"
+	case c.Type == "IntentBehind" && c.Status == "True":
+		ev.Type = "Warning"
 	}
 	switch c.Type {
 	case "Admitted":
@@ -227,6 +229,12 @@ func conditionEvent(c workspaceCondition) WorkspaceEvent {
 			ev.Message = "The workspace's reported state is stale; the last known state is shown."
 		} else {
 			ev.Message = "The workspace reports no problems."
+		}
+	case "IntentBehind":
+		if c.Status == "True" {
+			ev.Message = "The platform's intent stream is behind this workspace; new actions are held until it is realigned."
+		} else {
+			ev.Message = "The intent stream is aligned with the workspace again."
 		}
 	default:
 		ev.Message = "The workspace reported a status change."
