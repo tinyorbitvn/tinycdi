@@ -81,22 +81,27 @@ func (a *Authenticator) RevokeAllSessionsHandler(w http.ResponseWriter, r *http.
 	revCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionRevokeTimeout)
 	res, err := a.principalRevoker.RevokePrincipalSessions(revCtx, p.TenantID, p.Issuer, p.Subject)
 	cancel()
-	actor := observability.ActorRef(p.Issuer, p.Subject)
 	if err != nil {
 		a.log.Warn("sign-out-everywhere: principal revocation failed",
 			"request_id", RequestIDFromContext(ctx),
-			"actor", actor, "err", err)
+			"actor", observability.ActorRef(p.Issuer, p.Subject), "err", err)
 		if a.metrics != nil {
 			a.metrics.IncSessionRevokeAll("error")
 		}
-		a.writeRevokeAllAudit(r, actor, p.TenantID, observability.OutcomeFailure, "revoke_failed", RevokeAllResult{})
 		writeError(w, r, CodeInternal, "could not sign out everywhere")
 		return
 	}
 	if a.metrics != nil {
 		a.metrics.IncSessionRevokeAll("ok")
 	}
-	a.writeRevokeAllAudit(r, actor, p.TenantID, observability.OutcomeSuccess, "", res)
+	// The audited() wrapper emits the single session.revoke_all event for
+	// this route (auditedRoutes); the per-kind counts ride on it. Detail
+	// keys naming sessions/tickets would be redacted on write
+	// (observability.sensitiveFieldRe matches the substring), so the counts
+	// travel inside one neutral key's value.
+	auditSetDetail(ctx, "counts", "sessions="+strconv.Itoa(res.Sessions)+
+		",tickets="+strconv.Itoa(res.Tickets)+
+		",leases="+strconv.Itoa(res.Leases))
 
 	http.SetCookie(w, a.sessionCookie("", -1))
 	if end := a.endSessionURL(sess.IDToken); end != "" {
@@ -109,32 +114,7 @@ func (a *Authenticator) RevokeAllSessionsHandler(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeRevokeAllAudit emits the session.revoke_all audit record — the
-// principal-scoped sibling of session.revoke — with the per-kind counts on
-// success. Session material never reaches the record (Detail keys still
-// pass through observability.RedactDetails on write).
-func (a *Authenticator) writeRevokeAllAudit(r *http.Request, actor, tenant string, outcome observability.AuditOutcome, errCode string, res RevokeAllResult) {
-	if a.auditSink == nil {
-		return
-	}
-	var details map[string]string
-	if outcome == observability.OutcomeSuccess {
-		// Detail keys naming sessions/tickets would be redacted on write
-		// (observability.sensitiveFieldRe matches the substring), so the
-		// per-kind counts travel inside one neutral key's value.
-		details = map[string]string{
-			"counts": "sessions=" + strconv.Itoa(res.Sessions) +
-				",tickets=" + strconv.Itoa(res.Tickets) +
-				",leases=" + strconv.Itoa(res.Leases),
-		}
-	}
-	_ = a.auditSink.WriteAudit(r.Context(), observability.AuditEvent{
-		Actor:     actorOrAnonymous(actor),
-		Action:    "session.revoke_all",
-		Tenant:    tenant,
-		RequestID: RequestIDFromContext(r.Context()),
-		Outcome:   outcome,
-		ErrorCode: errCode,
-		Details:   details,
-	})
-}
+// The route's audit record is the audited() wrapper's session.revoke_all
+// event (auditedRoutes) — exactly one emission per call, carrying the
+// actor, outcome and errorCode automatically; the handler's only
+// contribution is the per-kind counts detail recorded on success above.

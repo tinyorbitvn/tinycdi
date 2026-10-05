@@ -105,7 +105,7 @@ func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*Au
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
 	mux.Handle("/auth/logout", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(a.LogoutHandler))))
-	mux.Handle("/auth/revoke-all", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(a.RevokeAllSessionsHandler))))
+	MountRevokeAllRoute(mux, a)
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountSessionProbeRoute(mux, a)
 	mux.Handle("/v1/echo-owner", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))

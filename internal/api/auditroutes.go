@@ -20,6 +20,7 @@ import (
 // mutating or admin route is added to the spec without an entry here.
 const (
 	auditActionSessionLogout    = "session.logout"
+	auditActionSessionRevokeAll = "session.revoke_all"
 	auditActionWorkspaceCreate  = "workspace.create"
 	auditActionWorkspaceStart   = "workspace.start"
 	auditActionWorkspaceStop    = "workspace.stop"
@@ -41,6 +42,7 @@ const (
 // pattern can never drift from its action.
 const (
 	routeLogout           = "POST /v1/logout"
+	routeSessionRevokeAll = "POST /v1/me/sessions:revoke-all"
 	routeWorkspaceCreate  = "POST /v1/workspaces"
 	routeWorkspaceDelete  = "DELETE /v1/workspaces/{id}"
 	routeWorkspaceStart   = "POST /v1/workspaces/{id}/start"
@@ -69,6 +71,7 @@ type auditedRoute struct {
 // under /v1/admin/.
 var auditedRoutes = map[string]auditedRoute{
 	routeLogout:           {auditActionSessionLogout, ""},
+	routeSessionRevokeAll: {auditActionSessionRevokeAll, ""},
 	routeWorkspaceCreate:  {auditActionWorkspaceCreate, ""},
 	routeWorkspaceDelete:  {auditActionWorkspaceDelete, "id"},
 	routeWorkspaceStart:   {auditActionWorkspaceStart, "id"},
@@ -209,4 +212,38 @@ func MountLogoutRoute(mux *http.ServeMux, authn *Authenticator) {
 	mux.Handle(routeLogout, authn.RequireAuth(
 		audited(authn.auditSink, routeLogout,
 			authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler)))))
+}
+
+// lateAuditSink resolves the inner sink at write time: mounts capture the
+// wrapper (and the auditedRoutes table entry) once, while the authenticator
+// may have its sink attached any time before the first request — the same
+// late binding the handlers' own audit writes use.
+type lateAuditSink struct {
+	get func() observability.AuditSink
+}
+
+// WriteAudit forwards to the currently attached sink, or drops the event
+// when none is wired — matching audited()'s nil-sink pass-through.
+func (s lateAuditSink) WriteAudit(ctx context.Context, e observability.AuditEvent) error {
+	if inner := s.get(); inner != nil {
+		return inner.WriteAudit(ctx, e)
+	}
+	return nil
+}
+
+// MountRevokeAllRoute registers POST /v1/me/sessions:revoke-all audited
+// with the authenticator's sink — the handler records the per-kind revoke
+// counts on the in-flight event via auditSetDetail, so exactly one
+// session.revoke_all record is emitted per call (ADR 0007). The optional
+// middleware wraps the whole chain (the production mount applies the
+// session-digest-keyed login-family limiter: the op is self-scoped and
+// idempotent, the limit only bounds repeat DB churn).
+func MountRevokeAllRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+	var h http.Handler = authn.RequireAuth(
+		audited(lateAuditSink{func() observability.AuditSink { return authn.auditSink }}, routeSessionRevokeAll,
+			authn.RequireCSRF(http.HandlerFunc(authn.RevokeAllSessionsHandler))))
+	for _, w := range wrap {
+		h = w(h)
+	}
+	mux.Handle(routeSessionRevokeAll, h)
 }

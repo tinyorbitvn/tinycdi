@@ -387,6 +387,11 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 // claims the workspace's single active lease in one transaction, bound to the
 // incarnation recorded at issuance. A ticket never redeems twice, and a
 // revoked ticket never redeems. On success it returns the new Lease.
+//
+// Lock order matches the session revokes — ticket row first, then the
+// lease row. Both are single-row locks taken by primary key, so the path
+// is deterministic by construction and never crosses waits with the
+// ascending-order sweeps.
 func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque string) (Lease, error) {
 	now := b.now()
 	hash := ticketHash(opaque)

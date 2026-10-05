@@ -12,11 +12,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -296,7 +299,9 @@ func TestRevokePrincipalSessions_RedeemCommitThenRevoke(t *testing.T) {
 		res, err := b.RevokePrincipalSessions(ctx, "tenant-a", alice.Issuer, alice.Subject)
 		revoked <- revokeRes{res, err}
 	}()
-	waitForLockWait(t, db, `%UPDATE launch_ticket%`)
+	// The revoke now blocks on its ordered ticket FOR UPDATE lock — taken
+	// before the UPDATE — so the probe matches the lock statement.
+	waitForLockWait(t, db, `%SELECT 1 FROM launch_ticket%FOR UPDATE%`)
 
 	// The redemption finishes — its own two writes — and commits,
 	// releasing the lock the revoke waits on.
@@ -511,6 +516,194 @@ func TestRevokePrincipalSessions_ConcurrentNoDeadlock(t *testing.T) {
 	}
 	if _, err := b.RedeemTicket(ctx, gwA, tkDead.Token); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("late redeem = %v, want ErrRevoked", err)
+	}
+}
+
+// isDeadlockError reports a PostgreSQL deadlock abort (40P01) — the
+// signal the lock-ordering guard exists to eliminate.
+func isDeadlockError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
+
+// ticketOrderInverted reports whether the principal's outstanding ticket
+// rows come back in a different order under ticket_hash than under
+// insertion (ctid) order — the disagreement that lets unordered
+// multi-row writes take the same rows in opposite sequences.
+func ticketOrderInverted(t *testing.T, db *store.DB, principal string) bool {
+	t.Helper()
+	collect := func(orderBy string) []string {
+		rows, err := db.Pool().Query(ctx, `
+			SELECT encode(ticket_hash, 'hex') FROM launch_ticket
+			WHERE tenant_id = 'tenant-a' AND principal_subject = $1
+			  AND consumed_at IS NULL AND revoked_at IS NULL
+			ORDER BY `+orderBy, principal)
+		if err != nil {
+			t.Fatalf("ticket order probe: %v", err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var h string
+			if err := rows.Scan(&h); err != nil {
+				t.Fatalf("ticket order scan: %v", err)
+			}
+			out = append(out, h)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("ticket order rows: %v", err)
+		}
+		return out
+	}
+	byCtid, byHash := collect("ctid"), collect("ticket_hash")
+	if len(byCtid) < 2 {
+		t.Fatalf("inversion probe needs >= 2 outstanding tickets, got %d", len(byCtid))
+	}
+	return !slices.Equal(byCtid, byHash)
+}
+
+// TestRevokePrincipalSessions_MultiTicketInversion is the lock-ordering
+// guard the advisor asked for (R-V5a MINOR): several outstanding tickets
+// per session, revoke-all racing per-session sign-outs AND real
+// redemptions of covered tickets. Tickets are minted round-robin across
+// the sessions until insertion (ctid) order and ticket_hash order
+// provably disagree — the shape that let the pre-fix sweeps walk the
+// shared rows in opposite orders, since each UPDATE locked rows in its
+// own index's scan order. Every mutator now locks its covered rows in
+// ascending-PK order first (lockByKeysInOrderTx), so repeated -race runs
+// must produce zero deadlocks and no live lease for a revoked session.
+func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
+	db, b, clock, src := setup(t)
+	for i := 1; i <= 30; i++ {
+		ws := fmt.Sprintf("ws-%d", i)
+		seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
+		src.set(readyBinding(broker.PlatformID(ws), "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	}
+	sessions := []string{"sess-1", "sess-2", "sess-3"}
+	for _, s := range sessions {
+		seedSessionRowFor(t, db, s, alice.Issuer, alice.Subject, "tenant-a")
+	}
+	// One live lease per session — the lease sweeps overlap the same way.
+	leaseForSess(t, db, b, gwA, "ws-28", false, "sess-1")
+	leaseForSess(t, db, b, gwA, "ws-29", false, "sess-2")
+	leaseForSess(t, db, b, gwA, "ws-30", false, "sess-3")
+
+	// Mint outstanding tickets round-robin across the sessions — three
+	// per session — until the set provably contains an order inversion.
+	// ticket_hash is a SHA-256, so a handful of tickets almost surely
+	// inverts; the loop just makes the forcing deterministic.
+	type racingTicket struct {
+		token   string
+		session string
+	}
+	var outstanding []racingTicket
+	wsSeq := 0
+	for round := 0; round < 8; round++ {
+		for _, s := range sessions {
+			wsSeq++
+			tk, err := b.IssueTicket(ctx, alice,
+				broker.PlatformID(fmt.Sprintf("ws-%d", wsSeq)), false, "", s)
+			if err != nil {
+				t.Fatalf("IssueTicket round %d %s: %v", round, s, err)
+			}
+			outstanding = append(outstanding, racingTicket{tk.Token, s})
+		}
+		if round >= 2 && ticketOrderInverted(t, db, alice.Owner()) {
+			break
+		}
+	}
+	if !ticketOrderInverted(t, db, alice.Owner()) {
+		t.Fatalf("%d tickets minted without an order inversion", len(outstanding))
+	}
+
+	// Race: revoke-all vs the per-session sign-outs of sess-1 and sess-2
+	// (logout's delete-then-revoke shape) vs redemptions of one covered
+	// ticket each from sess-1 and sess-3. A barrier maximizes overlap.
+	redeemOf := func(sess string) *racingTicket {
+		for i := range outstanding {
+			if outstanding[i].session == sess {
+				return &outstanding[i]
+			}
+		}
+		return nil
+	}
+	tkS1, tkS3 := redeemOf("sess-1"), redeemOf("sess-3")
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	wg.Add(5)
+	go func() { wg.Wait(); close(done) }()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		if _, err := b.RevokePrincipalSessions(ctx, "tenant-a", alice.Issuer, alice.Subject); err != nil {
+			t.Errorf("RevokePrincipalSessions: %v (deadlock=%v)", err, isDeadlockError(err))
+		}
+	}()
+	for _, s := range []string{"sess-1", "sess-2"} {
+		go func(sess string) {
+			defer wg.Done()
+			<-start
+			sum := sha256.Sum256([]byte(sess))
+			if _, err := db.Pool().Exec(ctx,
+				`DELETE FROM sessions WHERE id = $1`, hex.EncodeToString(sum[:])); err != nil {
+				t.Errorf("delete %s: %v", sess, err)
+			}
+			if _, err := b.RevokePortalSession(ctx, sess); err != nil {
+				t.Errorf("RevokePortalSession(%s): %v (deadlock=%v)", sess, err, isDeadlockError(err))
+			}
+		}(s)
+	}
+	for _, tk := range []*racingTicket{tkS1, tkS3} {
+		go func(tk *racingTicket) {
+			defer wg.Done()
+			<-start
+			// Win or lose the outcome is bounded: a minted lease dies in
+			// the same sweep, a revoked ticket redeems as ErrRevoked.
+			if _, err := b.RedeemTicket(ctx, gwA, tk.token); err != nil &&
+				!errors.Is(err, broker.ErrRevoked) &&
+				!errors.Is(err, broker.ErrTicketInvalid) &&
+				!errors.Is(err, broker.ErrConnectionInUse) {
+				t.Errorf("RedeemTicket(%s ticket): %v (deadlock=%v)", tk.session, err, isDeadlockError(err))
+			}
+		}(tk)
+	}
+	close(start)
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("multi-ticket revoke-all / sign-out / redeem race deadlocked")
+	}
+
+	// Whatever the interleave, the principal's tenant-a material is gone:
+	// no live lease, no outstanding ticket, no session rows.
+	var live int
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM connection_lease
+		 WHERE tenant_id = 'tenant-a' AND principal_subject = $1 AND state = 'active'`,
+		alice.Owner()).Scan(&live); err != nil {
+		t.Fatalf("live lease count: %v", err)
+	}
+	if live != 0 {
+		t.Fatalf("%d active lease(s) survived the inversion race", live)
+	}
+	var openTickets int
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM launch_ticket
+		 WHERE tenant_id = 'tenant-a' AND principal_subject = $1
+		   AND consumed_at IS NULL AND revoked_at IS NULL`,
+		alice.Owner()).Scan(&openTickets); err != nil {
+		t.Fatalf("outstanding ticket count: %v", err)
+	}
+	if openTickets != 0 {
+		t.Fatalf("%d outstanding ticket(s) survived the inversion race", openTickets)
+	}
+	for _, id := range sessions {
+		if sessionAlive(t, db, id) {
+			t.Fatalf("session %s survived the inversion race", id)
+		}
 	}
 }
 

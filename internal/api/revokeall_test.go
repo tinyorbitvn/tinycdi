@@ -42,7 +42,7 @@ func (f *fakePrincipalRevoker) RevokePrincipalSessions(ctx context.Context, tena
 
 func (e *testEnv) postRevokeAll(t *testing.T, sess *http.Cookie, csrf string) *http.Response {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, e.server.URL+"/auth/revoke-all", nil)
+	req, _ := http.NewRequest(http.MethodPost, e.server.URL+"/v1/me/sessions:revoke-all", nil)
 	if sess != nil {
 		req.AddCookie(sess)
 	}
