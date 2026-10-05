@@ -124,6 +124,13 @@ surfaced.
    Rotation is automatic in restore.sh; if you restore by hand, run
    `SELECT`/`UPDATE` on `platform_meta` per that script before scaling
    the api back up.
+
+   **Restoring onto a cluster that kept running?** The fencing above
+   assumes dead runtimes and a foreign gateway — a live-cluster restore
+   resurrects leases and diverges the workspaces table. Runbook
+   `disaster-recovery.md` §"Postgres-only restore onto a live cluster"
+   has the freeze + kill-SQL + reconcile procedure; epoch rotation
+   alone is not sufficient there.
 6. **Reconcile quota** — after DB restore, compare `quota_reservation`
    `held` rows against observed runtimes (recovery path) and against
    `retained_data` rows for disk bytes. The drill observed the api recovery
