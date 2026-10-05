@@ -762,11 +762,12 @@ The default sign-in and launch budgets double on v0.4: `-login-rate`
 defaults to 60/minute with burst 20 and `-launch-rate` to 120/minute with
 burst 40 (the shared-window bounds become 80/minute and 160/minute), and
 the per-IP OIDC-callback ceiling follows at 10× the login budget. The
-defaults are chosen to match the v0.3.x effective aggregate at two
-replicas, where each pod enforced the undivided 30/minute + burst 10
-login and 60/minute + burst 20 launch buckets — an exact window at the
-old flags would have halved every two-replica install's budgets.
-Installs that set the flags explicitly keep their values.
+raise equals the effective two-replica aggregate v0.3.0 granted (each
+pod's undivided bucket) before v0.3.1's RL-1 made the flags aggregate
+bounds — the exact shared window leaves no per-replica slack, and the
+unchanged defaults produced 429s on a 20-user sign-in burst from one
+egress in e2e testing. Installs that set the flags explicitly keep
+their values.
 
 ## Rollback
 

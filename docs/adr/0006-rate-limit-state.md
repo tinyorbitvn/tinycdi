@@ -58,11 +58,12 @@ abuse + Postgres outage fail-open/recovery).
 
 Amendment (RL-DEFAULT): the implemented defaults are `-login-rate`
 60/minute with burst 20 and `-launch-rate` 120/minute with burst 40 —
-the numbers below are read at those defaults — chosen to match the
-v0.3.x effective aggregate at two replicas, where each pod enforced the
-undivided 30/minute + burst 10 login and 60/minute + burst 20 launch
-buckets (an exact window at the old flags would have halved every
-two-replica install's budgets). The callback ceiling follows at 10×.
+the numbers below are read at those defaults. The raise equals the
+effective two-replica aggregate v0.3.0 granted (each pod's undivided
+bucket), before v0.3.1's RL-1 made the flags aggregate bounds: the
+exact shared window leaves no per-replica slack, and the unchanged
+defaults produced 429s on a 20-user sign-in burst from one egress in
+E2E-V040. The callback ceiling follows at 10×.
 
 ## Context
 

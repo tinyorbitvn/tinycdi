@@ -96,32 +96,32 @@ func (w *countWindow) RateLimitWindowHit(_ context.Context, route, _ string) (in
 	return w.n[route], time.Minute, nil
 }
 
-// TestRateLimitDefaults_V3EffectiveBudget (RL-DEFAULT): the default
-// login and launch budgets restore the aggregate a two-replica v0.3.x
-// install granted one client key — each pod enforced the undivided
-// bucket (login 30/min + burst 10, launch 60/min + burst 20) — under
-// the exact shared window (ADR 0006): -login-rate 60/min +
-// loginRateBurst 20 map to an 80/minute window, -launch-rate 120/min +
-// launchRateBurst 40 to 160/minute, and the per-IP callback ceiling
-// stays derived at 10x the login budget. At the chart's
-// backend.replicas=2 every pod's local ceiling is back to exactly the
-// v0.3.x per-pod budget.
-func TestRateLimitDefaults_V3EffectiveBudget(t *testing.T) {
+// TestRateLimitDefaults_V040 (RL-DEFAULT): the v0.4.0 defaults double
+// the flag budgets — equal to v0.3.0's effective two-replica aggregate
+// (each pod's undivided bucket: login 30/min + burst 10, launch 60/min +
+// burst 20), before v0.3.1's RL-1 made the flags aggregate bounds.
+// Under the exact shared window (ADR 0006) there is no per-replica
+// slack: -login-rate 60/min + loginRateBurst 20 map to an 80/minute
+// window, -launch-rate 120/min + launchRateBurst 40 to 160/minute, and
+// the per-IP callback ceiling stays derived at 10x the login budget. At
+// the chart's backend.replicas=2 each pod's local ceiling equals the
+// share one v0.3.x pod enforced under RL-1's division.
+func TestRateLimitDefaults_V040(t *testing.T) {
 	cfg, err := ParseFlags(mergedArgs(), noEnv)
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
 	if cfg.LoginRate != 60 {
-		t.Fatalf("default -login-rate = %d, want 60 (2 x the v0.3.x per-pod 30/min)", cfg.LoginRate)
+		t.Fatalf("default -login-rate = %d, want 60 (2 x the v0.3.0 per-pod 30/min)", cfg.LoginRate)
 	}
 	if loginRateBurst != 20 {
-		t.Fatalf("loginRateBurst = %d, want 20 (2 x the v0.3.x per-pod burst 10)", loginRateBurst)
+		t.Fatalf("loginRateBurst = %d, want 20 (2 x the v0.3.0 per-pod burst 10)", loginRateBurst)
 	}
 	if cfg.LaunchRate != 120 {
-		t.Fatalf("default -launch-rate = %d, want 120 (2 x the v0.3.x per-pod 60/min)", cfg.LaunchRate)
+		t.Fatalf("default -launch-rate = %d, want 120 (2 x the v0.3.0 per-pod 60/min)", cfg.LaunchRate)
 	}
 	if launchRateBurst != 40 {
-		t.Fatalf("launchRateBurst = %d, want 40 (2 x the v0.3.x per-pod burst 20)", launchRateBurst)
+		t.Fatalf("launchRateBurst = %d, want 40 (2 x the v0.3.0 per-pod burst 20)", launchRateBurst)
 	}
 
 	// Shared window bounds: rate+burst on each bucket — 80 login, 160
@@ -155,19 +155,18 @@ func TestRateLimitDefaults_V3EffectiveBudget(t *testing.T) {
 		t.Fatal("hit 161 inside the launch window allowed — want bound 160 (120+40)")
 	}
 
-	// Two replicas: the divided local ceilings are again the v0.3.x
-	// per-pod budgets — login 30/min + burst 10, launch 60/min + burst
-	// 20.
+	// Two replicas: the divided local ceilings equal one v0.3.x pod's
+	// RL-1 share — login 30/min + burst 10, launch 60/min + burst 20.
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	local, localCeiling := loginLimiters(Config{LoginRate: cfg.LoginRate, RateLimitReplicas: 2}, clock)
 	for i := 0; i < 10; i++ {
 		if ok, _ := local.Allow("k"); !ok {
-			t.Fatalf("local burst %d refused — want the v0.3.x per-pod burst 10 (20/2)", i+1)
+			t.Fatalf("local burst %d refused — want the per-pod burst 10 (20/2)", i+1)
 		}
 	}
 	if ok, retry := local.Allow("k"); ok {
-		t.Fatal("11th local request allowed — want the v0.3.x per-pod burst 10")
+		t.Fatal("11th local request allowed — want the per-pod burst 10")
 	} else if got := ratelimit.RetryAfterSeconds(retry); got != 2 {
 		t.Fatalf("local Retry-After = %ds, want 2 (30/min per pod)", got)
 	}
@@ -182,11 +181,11 @@ func TestRateLimitDefaults_V3EffectiveBudget(t *testing.T) {
 	localLaunch := launchLimiter(Config{LaunchRate: cfg.LaunchRate, RateLimitReplicas: 2}, clock)
 	for i := 0; i < 20; i++ {
 		if ok, _ := localLaunch.Allow("k"); !ok {
-			t.Fatalf("local launch burst %d refused — want the v0.3.x per-pod burst 20 (40/2)", i+1)
+			t.Fatalf("local launch burst %d refused — want the per-pod burst 20 (40/2)", i+1)
 		}
 	}
 	if ok, retry := localLaunch.Allow("k"); ok {
-		t.Fatal("21st local launch allowed — want the v0.3.x per-pod burst 20")
+		t.Fatal("21st local launch allowed — want the per-pod burst 20")
 	} else if got := ratelimit.RetryAfterSeconds(retry); got != 1 {
 		t.Fatalf("local launch Retry-After = %ds, want 1 (60/min per pod)", got)
 	}
