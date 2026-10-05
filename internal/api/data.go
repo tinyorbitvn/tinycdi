@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -211,6 +212,9 @@ type DataHandler struct {
 	// the Retry-After header of a release-pending QUOTA_EXHAUSTED. Nil
 	// reports the 30 s cadence ceiling.
 	releaseRetryAfter func() int
+	// audit is the dedicated audit-event sink the mutating routes emit
+	// through (nil = no domain audit events).
+	audit observability.AuditSink
 }
 
 // NewDataHandler wires the handler. catalog resolves the attach
@@ -218,6 +222,13 @@ type DataHandler struct {
 func NewDataHandler(d RetainedDataStore, c TemplateCatalog, t TenantResolver) *DataHandler {
 	return &DataHandler{data: d, catalog: c, tenants: t,
 		maxBody: 64 << 10, now: time.Now}
+}
+
+// WithAuditSink attaches the audit sink the retained-data mutation routes
+// write their dedicated audit events to.
+func (h *DataHandler) WithAuditSink(s observability.AuditSink) *DataHandler {
+	h.audit = s
+	return h
 }
 
 // WithReleaseRetryAfter sets the Retry-After estimate used for a
@@ -247,11 +258,15 @@ func (h *DataHandler) WithDirectory(d Directory) *DataHandler {
 // list read, RequireAuth+RequireCSRF on attach/purge writes.
 func MountDataRoutes(mux *http.ServeMux, authn *Authenticator, h *DataHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
-	unsafe := func(h http.Handler) http.Handler { return authn.RequireAuth(authn.RequireCSRF(h)) }
+	// unsafe mounts an audited mutation route (see MountWorkspaceRoutes).
+	unsafe := func(pattern string, next http.Handler) {
+		mux.Handle(pattern, authn.RequireAuth(
+			audited(h.audit, pattern, authn.RequireCSRF(next))))
+	}
 	mux.Handle("GET /v1/data", safe(http.HandlerFunc(h.List)))
 	mux.Handle("GET /v1/data/{dataId}", safe(http.HandlerFunc(h.Get)))
-	mux.Handle("POST /v1/data/{dataId}/attach", unsafe(http.HandlerFunc(h.Attach)))
-	mux.Handle("POST /v1/data/{dataId}/purge", unsafe(http.HandlerFunc(h.Purge)))
+	unsafe(routeDataAttach, http.HandlerFunc(h.Attach))
+	unsafe(routeDataPurge, http.HandlerFunc(h.Purge))
 }
 
 // principalOrFail resolves the verified principal and gates tenant
@@ -399,6 +414,7 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		h.writeDataError(w, r, err)
 		return
 	}
+	auditSetDetail(r.Context(), "workspace", rec.ID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	v := recordToView(&rec)

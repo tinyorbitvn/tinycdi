@@ -356,7 +356,16 @@ func (g *Gateway) controlAuth(r *http.Request) bool {
 // serveControl is reached only on a control host (ServeHTTP gates the
 // path); the bearer check is the remaining gate.
 func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
+	// The action name mirrors the endpoint so a refused attempt audits
+	// under the operation it tried to reach.
+	action := map[string]string{
+		"/v1/control/session": "session.list",
+		"/v1/control/revoke":  "session.revoke",
+	}[r.URL.Path]
 	if !g.controlAuth(r) {
+		if action != "" {
+			g.audit(r, action, "", observability.OutcomeDenied, "unauthorized")
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -402,6 +411,7 @@ func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, v)
 	}
+	g.audit(r, "session.list", "", observability.OutcomeSuccess, "")
 	writeJSON(w, http.StatusOK, map[string]any{"active": len(out) > 0, "sessions": out})
 }
 

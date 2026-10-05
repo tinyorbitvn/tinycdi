@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
@@ -51,6 +52,9 @@ type ConnectionHandler struct {
 	// ticket can record it (WithClipboardSource); nil records nothing.
 	clipboard func(ctx context.Context, p Principal, workspaceUID string) (string, error)
 	maxBody   int64
+	// audit is the dedicated audit-event sink the route emits through
+	// (nil = no domain audit events).
+	audit observability.AuditSink
 }
 
 // NewConnectionHandler wires the handler. domain is the session domain the
@@ -73,10 +77,20 @@ func (h *ConnectionHandler) WithClipboardSource(fn func(ctx context.Context, p P
 	return h
 }
 
-// MountConnectionRoutes registers the connections route with authn + CSRF.
+// WithAuditSink attaches the audit sink the ticket-issue route writes its
+// dedicated audit event to. The minted ticket is a bearer credential and
+// is never recorded — only the action, actor, target and outcome.
+func (h *ConnectionHandler) WithAuditSink(s observability.AuditSink) *ConnectionHandler {
+	h.audit = s
+	return h
+}
+
+// MountConnectionRoutes registers the connections route with authn + CSRF
+// inside the dedicated audit wrapper (see MountWorkspaceRoutes).
 func MountConnectionRoutes(mux *http.ServeMux, authn *Authenticator, h *ConnectionHandler) {
-	mux.Handle("POST /v1/workspaces/{id}/connections",
-		authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(h.Create))))
+	mux.Handle(routeConnectionCreate,
+		authn.RequireAuth(audited(h.audit, routeConnectionCreate,
+			authn.RequireCSRF(http.HandlerFunc(h.Create)))))
 }
 
 type createConnectionRequest struct {
@@ -141,8 +155,11 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sessionID)
 	if apiErr != nil {
-		WriteError(w, RequestIDFromContext(r.Context()), apiErr)
+		WriteError(w, r, apiErr)
 		return
+	}
+	if req.Takeover {
+		auditSetDetail(r.Context(), "takeover", "true")
 	}
 	// The response carries a bearer-equivalent ticket: it must never be
 	// stored by a shared/private cache (SEC-I7).
