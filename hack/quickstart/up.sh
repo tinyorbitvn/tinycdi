@@ -41,6 +41,7 @@ case "$IMAGES" in build | published) ;; *) die "TCDI_QS_IMAGES must be build or 
 
 helm_major="$(helm version --template '{{.Version}}' | sed -E 's/^v([0-9]+)\..*/\1/')"
 [ "$helm_major" -ge 4 ] || die "Helm v4 or newer is required (found $(helm version --short))"
+[ -z "$VALUES_OVERLAY" ] || [ -f "$VALUES_OVERLAY" ] || die "TCDI_QS_VALUES_OVERLAY does not exist: $VALUES_OVERLAY"
 
 cluster_exists() { kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; }
 
@@ -285,6 +286,7 @@ GEN="$STATE_DIR/values-generated.yaml"
 log "installing TinyCDI from ${CHART}${CHART_VERSION:+ (version ${CHART_VERSION})}"
 helm_args=(upgrade --install "$RELEASE" "$CHART" -n "$NS_SYSTEM"
   -f "$VALUES_FILE" -f "$GEN" --wait --timeout 10m)
+[ -z "$VALUES_OVERLAY" ] || helm_args+=(-f "$VALUES_OVERLAY")
 [ -z "$CHART_VERSION" ] || helm_args+=(--version "$CHART_VERSION")
 helm "${helm_args[@]}" \
   >"$STATE_DIR/logs/helm-tinycdi.log" 2>&1 || { tail -n 40 "$STATE_DIR/logs/helm-tinycdi.log" >&2; die "TinyCDI install failed"; }

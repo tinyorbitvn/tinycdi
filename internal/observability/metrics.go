@@ -78,6 +78,13 @@ var (
 	frameReloadDests = map[string]struct{}{
 		"iframe": {}, "document": {},
 	}
+	// sessionRevokeResults are the sign-out revocation outcomes (S17):
+	// ok = the lease store accepted the revoke (zero or more of the
+	// session's leases and outstanding tickets ended); error = the store
+	// could not answer — the sign-out still completed locally.
+	sessionRevokeResults = map[string]struct{}{
+		"ok": {}, "error": {},
+	}
 )
 
 func boundValue(v string, allowed map[string]struct{}) string {
@@ -110,6 +117,7 @@ type Metrics struct {
 	rateLimitStore *prometheus.CounterVec
 	rateLimitDown  *prometheus.GaugeVec
 	frameReloads   *prometheus.CounterVec
+	sessionRevokes *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -200,6 +208,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "session_frame_reloads_total",
 			Help: "Session-frame document loads re-navigating a session whose lease already had a stream, by bounded destination. Only same-tab reloads count: a load whose embedded claiming tab id differs from the lease's stream owner (second-tab takeover) is excluded, and the client's in-frame websocket retries never produce a document load.",
 		}, []string{"dest"}),
+		sessionRevokes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "session_revocations_total",
+			Help: "Sign-out revocations of session-bound leases/tickets, by bounded result.",
+		}, []string{"result"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -209,7 +221,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
-		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads,
+		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -357,4 +369,11 @@ func (m *Metrics) SetRateLimitStoreDegraded(route string, degraded bool) {
 // to {iframe, document, other}.
 func (m *Metrics) IncFrameReload(dest string) {
 	m.frameReloads.WithLabelValues(boundValue(dest, frameReloadDests)).Inc()
+}
+
+// IncSessionRevocation counts one sign-out revocation of a portal session's
+// session-bound leases/tickets (S17); result is bounded to {ok, error,
+// other}.
+func (m *Metrics) IncSessionRevocation(result string) {
+	m.sessionRevokes.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
 }

@@ -18,6 +18,7 @@ substitute for review).
 | Soak harness | `npm ci`, `tsc`, vitest + drills dry-run | `ci.yml` job `soak harness`; live soak out of band |
 | Go fuzz | `go test -fuzz=<target>` | `ci.yml` job `go fuzz`: 30 s per target on PRs touching the fuzzed packages, 10 m per target on the weekly schedule; crashers uploaded as artifacts |
 | Quickstart e2e | `hack/quickstart/up.sh` on kind + Playwright portal smoke | `ci.yml` job `quickstart` |
+| Partitioned-cookie e2e | quickstart + `values-partitioned.yaml` overlay + `partitioned.spec.ts` | `ci.yml` job `partitioned` (gated + weekly) |
 | Upgrade drill | previous release → tree on kind | `ci.yml` job `upgrade` |
 
 ## 2. Auth, session and API surface
@@ -41,8 +42,10 @@ substitute for review).
 - `internal/api/session_probe_test.go` — the unauthenticated session probe.
 - `internal/api/logout_test.go` — sign-out destroys the session and expires
   cookies; `endSessionURL` built only from discovery+config (no open
-  redirect). Note: no test asserts lease revocation on logout — see
-  threat-model S17.
+  redirect); `TestLogout_RevokesSessionBoundMaterial` /
+  `TestLogout_RevokeFailureStillSignsOut` — sign-out revokes session-bound
+  leases/tickets at the store, audits `session.revoke`, and a store failure
+  never blocks the sign-out (S17).
 - `internal/api/tenant_scope_test.go`, `events_test.go`, `statusview_test.go`,
   `me_test.go`, `owner_test.go`, `principal.go` — tenant scoping, curated
   events, principal directory fallbacks.
@@ -84,6 +87,9 @@ substitute for review).
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
+- `internal/gateway/signout_test.go` — S17 propagation: a store-level
+  revoke ends a live stream on a sibling replica within one renew cycle,
+  and the workspace cookie replays to 401 on any replica.
 
 ### Fuzz targets (stdlib `testing.F`, run by the `go fuzz` CI job)
 
@@ -122,6 +128,10 @@ substitute for review).
   `sessions_test.go`, `bindings_envtest_test.go`/`bindings_internal_test.go`,
   `targets_internal_test.go` — lease lifecycle, fencing/freshness, stale
   binding, target resolution.
+- `internal/broker/signout_test.go` — `RevokePortalSession` semantics (S17):
+  digest-bound leases revoked with drain accounting, outstanding tickets
+  revoked, redemption denied once the issuing session's row is gone,
+  idempotent; migration 020 indexes.
 - `internal/broker/credentials_envtest_test.go` — per-workspace Secret
   credential reads.
 - `internal/broker/operator_stopped_test.go` +
@@ -236,6 +246,7 @@ Security-relevant subset:
 | `workflow-policy` | `.github/tests/*.test.sh` regression suite, `.trivyignore` expiry policy (`check-trivyignore.sh`), kasm-catalog policy (`check-kasm-catalog.sh`) |
 | `kasm-contract` | adapter contract test + catalog scan (trivy gate + engine freshness floor); weekly + kasm-relevant PRs |
 | `quickstart` | kind e2e + Playwright portal smoke; `shellcheck` on quickstart scripts |
+| `partitioned` | kind e2e with `backend.sessionCookieMode: partitioned` — CHIPS Set-Cookie attributes, in-frame reconnect across a backend rollout (digest rehydrate), revoked-lease cookie rejection, logout; `partitioned.spec.ts` on the pinned Chromium (CHIPS ≥ 118) |
 | `upgrade` | previous release → tree upgrade drill on kind |
 | `workflow lint` | actionlint + yamllint + zizmor on all workflows (sha256-pinned tools) |
 
@@ -319,9 +330,10 @@ context):
 
 ## 11. Gaps a reviewer will notice
 
-- No automated test asserts that sign-out revokes live leases (open item
-  S17).
-- `partitioned` cookie mode coverage is unit-level; no kind/e2e coverage.
+- `partitioned` cookie mode now has kind e2e coverage (`ci.yml` job
+  `partitioned`); a cross-SITE deployment shape (portal and session on
+  different registrable domains) is still not exercised — kind resolves
+  everything under one domain.
 - Soak/drill harness exists (`tests/soak/`) but runs out of band, not per PR.
 - Rate-limit multi-replica coverage now exists for the login window
   (`tests/integration/rate_limit_pg_test.go`, B6); `/v1/launch` shares

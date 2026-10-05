@@ -187,7 +187,7 @@ function latestMigration(): number {
 
 // ---- the test ----------------------------------------------------------------
 
-test("v0.2.0 -> working tree: state and live session survive the upgrade", async ({ page, browser, baseURL }) => {
+test("v0.3.1 -> working tree: state and live session survive the upgrade", async ({ page, browser, baseURL }) => {
   test.setTimeout(40 * 60_000);
   const stamp = Date.now().toString(36);
   const keepName = `upg-keep-${stamp}`;
@@ -328,13 +328,13 @@ test("v0.2.0 -> working tree: state and live session survive the upgrade", async
 
   // ---------- post-upgrade assertions ----------
   // Portal session survives: the same browser context still reaches the
-  // app. The pods terminating in THIS upgrade are the old v0.2.0
-  // frontends, which have no drain — FX-R35's drain only helps rollouts
-  // that START from v0.3.1 binaries — so the edge can serve the SPA
-  // shell from one pod while a sub-request lands on a terminating peer:
-  // GET / 200, /assets/* 504, blank page forever (run 37215806246). A
-  // single navigation cannot see that, so settle briefly, then reload
-  // until one full load comes back clean (bounded, <= 60 s).
+  // app. The pods terminating in this upgrade are v0.3.1 frontends, which
+  // drain like the new ones (FX-R35) — but a sub-request can still land
+  // on a terminating peer mid-rollout: GET / 200, /assets/* 504, blank
+  // page forever (run 37215806246, from the v0.2.0 baseline whose
+  // frontends had no drain at all). A single navigation cannot see that,
+  // so settle briefly, then reload until one full load comes back clean
+  // (bounded, <= 60 s).
   await page.waitForTimeout(5_000);
   const reloadDeadline = Date.now() + 60_000;
   let portalUp = await loadPortal(page, "/");

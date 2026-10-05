@@ -327,6 +327,10 @@ Install-time invariants. Rendering FAILS when violated:
 {{- fail "every gatewayApi parentRef entry needs sectionName naming a TLS listener — a bare parentRef binds every listener including plain HTTP" -}}
 {{- end -}}
 {{- end -}}
+{{- /* Two HTTPRoutes sharing one metadata.name collide on apply. */ -}}
+{{- if eq .Values.gatewayApi.portalRouteName .Values.gatewayApi.sessionRouteName -}}
+{{- fail "gatewayApi.portalRouteName and gatewayApi.sessionRouteName must differ — two HTTPRoutes cannot share one metadata.name" -}}
+{{- end -}}
 {{- end -}}
 {{- /* SEC-02: InternetOnly templates need the cluster CIDRs declared. */ -}}
 {{- $internetOnly := false -}}

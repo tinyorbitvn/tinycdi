@@ -489,7 +489,20 @@ gatewayApi:
   # falls back to the shared parentRefs.
   portalParentRefs: []
   sessionParentRefs: []
+  # Annotations applied to BOTH HTTPRoutes.
   annotations: {}
+  # Extra annotations per route, merged OVER the shared annotations —
+  # on a key collision the per-route value wins (e.g. a CDN proxy flag
+  # ON for the portal route, OFF for the long-lived-websocket session
+  # route; a link annotation on the portal route only).
+  portalAnnotations: {}
+  sessionAnnotations: {}
+  # HTTPRoute object names — the defaults render the same names every
+  # earlier chart release produced; rename only if your GitOps wrapper
+  # pairs hand-written routes by name (e.g. a <name>-redirect route
+  # next to each).
+  portalRouteName: portal
+  sessionRouteName: session
 
 # Optional Prometheus ServiceMonitor for the backend metrics endpoint
 # (backend.metrics) — served by the dedicated ClusterIP

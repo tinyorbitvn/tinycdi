@@ -118,7 +118,8 @@ Controls that exist today:
   (`deploy/helm/tinycdi/templates/networkpolicy.yaml`, `edgeIngressRule`).
 
 Open questions: A6-S5 (Host-header parsing as a boundary — see boundary 5),
-cookie-mode `partitioned` has less e2e coverage than the default `lax` mode.
+cookie-mode `partitioned` cross-site behaviour (a deployment topology the
+kind e2e cannot reproduce).
 
 ### Boundary 2 — edge ↔ frontend :8443 / backend app :8443
 
@@ -195,9 +196,9 @@ PKCE means a secretless public client also works), RP-initiated logout.
 
 Controls: exact issuer/audience match via go-oidc; `endSessionURL` is built
 only from discovery + static configuration so request input cannot produce an
-open redirect (`internal/api/auth.go:655-677`);
+open redirect (`internal/api/auth.go:770-787`);
 `PostLogoutRedirect` is validated as an absolute http(s) URL at startup
-(auth.go:341). Client secret comes from `oidc.existingSecret` (chart).
+(auth.go:359). Client secret comes from `oidc.existingSecret` (chart).
 Tests: `auth_test.go`, `logout_test.go`, `oidctest/` in-memory IdP.
 
 Open question: A6-S2 — replay of the sealed login cookie within its TTL
@@ -456,13 +457,23 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | **Implemented since** (`internal/ratelimit` + Postgres windows, ADR 0006 — FX-R30 keying, shared bound with per-replica ceiling and fail-open fallback); reviewer verifies coverage, ceilings, bypass resistance and the outage degradation path |
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
-| S17 | Sign-out vs live desktop streams | **Still open**: `LogoutHandler` destroys the portal session but does not revoke connection leases or the workspace-host session cookie (`internal/api/auth.go:621-650`); a live stream survives sign-out until lease expiry — needs a product decision, then review |
+| S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Tests `signout_test.go` (api, broker, gateway) |
 | S18 | Client address chain gateway → KasmVNC | Partially closed: client XFF never reaches the runtime and only trusted proxies shift rate-limit keys (`forwarded_test.go`); open: whether pod-side brute-force protection is meaningful behind the authenticating gateway |
+
+*Review note — S17:* the ticket-lock serialization claim (a redeem's
+ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is
+the load-bearing ordering argument — it is driven deterministically by
+`TestRevokePortalSession_RedeemCommitThenRevoke` and
+`TestRevokePortalSession_RevokeCommitThenRedeem`, which pin both
+interleavings on real row locks.
 
 Additional items found while writing this document (not from A6):
 
-- **Cookie-mode `partitioned`** has materially less e2e coverage than the
-  default `lax` mode.
+- **Cookie-mode `partitioned`** — e2e coverage added on kind
+  (`hack/quickstart` + `values-partitioned.yaml`, `partitioned.spec.ts`,
+  `ci.yml` job `partitioned`): real Set-Cookie attributes, in-frame
+  reconnect across a backend rollout, revoked-lease cookie rejection.
+  Same-site topology only; a cross-site deployment is not exercised.
 - **Portal idle-extension depends on lease activity** — verify a stolen
   portal cookie alone cannot extend itself, and that idle extension only
   credits input activity measured server-side.
