@@ -175,6 +175,15 @@ substitute for review).
   `-dev-insecure-db`, trusted-proxies parsing.
 - `internal/backend/leader_lock_test.go`, `leader_test.go`,
   `migrate_lock_test.go` — leader/migration locking.
+- `internal/backend/postrestore_test.go` — `backend post-restore`
+  (runbook kill-steps): dry-run writes nothing, epoch rotation rejects
+  every restored session (S17), lease/ticket denial, CR intent
+  alignment, refusal with zero writes while the leader lock is held,
+  the tool holding the lock for the whole apply (a concurrent lock
+  attempt fails mid-run) and releasing it on success and on a mid-run
+  error, refusal while backend connections remain in pg_stat_activity
+  plus the `-i-know-backends-are-running` override, the no-Kubernetes
+  SQL fallback.
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
   `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR
@@ -254,6 +263,14 @@ Security-relevant subset:
 - `template_update_test.go`, `imagestale`-adjacent coverage — image
   freshness signals (see also `internal/api/imageblock_test.go`,
   `imagestale_test.go`, `imagestale_r4_test.go`).
+
+Pattern note — "vacuous test" traps: a test that severs, revokes or
+deletes must assert it acted on >= 1 object, otherwise a broken selector
+silently passes on an empty set. Example: `severDB` in
+`backend_restart_test.go` counts `pg_terminate_backend` rows and fails
+when it terminated zero connections — a wrong `application_name` tag
+can never produce a vacuous "severed" pass. Apply the same
+fail-when-nothing-happens rule to any new kill/revoke drill.
 
 ## 8. CI scanners and gates
 
