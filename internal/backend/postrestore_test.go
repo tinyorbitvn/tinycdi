@@ -452,6 +452,29 @@ func TestPostRestoreRefusesWithBackendConnections(t *testing.T) {
 	}
 }
 
+func TestPostRestoreCountsComposedBackendAppName(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+
+	// A replica whose DSN carries its own application_name tag is stamped
+	// "tcdi-backend/<tag>" (store.OpenWithAppName composes rather than
+	// overrides). It is still a serving backend connection — the guard
+	// must count it by prefix, not only the bare "tcdi-backend" name.
+	openAs(t, db, backendAppName+"/tcdi-it-a")
+
+	var out, errOut bytes.Buffer
+	code := postRestore(ctx, db, fakeCRSource{}, nil, testTenants, true, false, &out, &errOut, testLog())
+	if code != 1 {
+		t.Fatalf("expected refusal exit 1, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "backend connection") {
+		t.Fatalf("refusal message missing: %s", errOut.String())
+	}
+	if !probeLeaderLock(t, db) {
+		t.Fatal("leader lock not released after the backend-connection refusal")
+	}
+}
+
 func TestPostRestoreNoKubeAccessPrintsSQL(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()

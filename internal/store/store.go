@@ -5,10 +5,16 @@ package store
 import (
 	"context"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// maxAppNameLen is Postgres' application_name limit (NAMEDATALEN-1); the
+// server silently truncates beyond it, so composed names are cut here
+// first to control where the cut lands.
+const maxAppNameLen = 63
 
 // Tx is the transaction handle accepted by quota/outbox/idempotency
 // operations so each multi-write request stays atomic.
@@ -26,8 +32,13 @@ func Open(ctx context.Context, url string) (*DB, error) {
 
 // OpenWithAppName connects like Open, stamping every pool connection's
 // application_name so pg_stat_activity can tell components apart (the
-// post-restore tool relies on it to spot live backends). A name set in the
-// DSN is overridden — the identity belongs to the binary, not the DSN.
+// post-restore tool relies on it to spot live backends). A name already
+// set in the DSN is composed as a suffix — "appName/dsn-name" — so the
+// binary's identity leads (prefix matchers such as the post-restore guard
+// still see it) while a per-caller tag survives; the restart drill uses
+// that tag to sever one replica's connections. Postgres keeps only the
+// first 63 bytes of application_name, so the composed name is truncated
+// there (on a rune boundary), keeping the appName prefix whole.
 func OpenWithAppName(ctx context.Context, url, appName string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
@@ -36,6 +47,16 @@ func OpenWithAppName(ctx context.Context, url, appName string) (*DB, error) {
 	if appName != "" {
 		if cfg.ConnConfig.RuntimeParams == nil {
 			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		if dsnName := cfg.ConnConfig.RuntimeParams["application_name"]; dsnName != "" {
+			appName += "/" + dsnName
+		}
+		if len(appName) > maxAppNameLen {
+			n := maxAppNameLen
+			for n > 0 && !utf8.RuneStart(appName[n]) {
+				n--
+			}
+			appName = appName[:n]
 		}
 		cfg.ConnConfig.RuntimeParams["application_name"] = appName
 	}

@@ -240,7 +240,7 @@ Steps 1–3 are the parts that differ from backup-restore.md.
    replica (or a second `post-restore` run) still has it, and while the
    tool holds it a replica scaled up mid-apply cannot elect a leader. It
    also refuses while `pg_stat_activity` still shows connections with
-   `application_name = 'tcdi-backend'` — a replica that never led can still
+   `application_name LIKE 'tcdi-backend%'` — a replica that never led can still
    serve logins, mint sessions and renew leases — so a refusal there means
    the freeze did not take; scale `backend` to 0 and re-run.
    `-i-know-backends-are-running` (UNSUPPORTED, dangerous) overrides that

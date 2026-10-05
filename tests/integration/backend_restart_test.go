@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -561,7 +562,9 @@ func (f *restartFixture) seedWorkspace(t *testing.T, upPort int32) {
 
 // dsnFor returns this fixture's DSN tagged with a per-replica
 // application_name, so tests can sever one replica's connections in
-// pg_stat_activity without touching the other's.
+// pg_stat_activity without touching the other's. The backend composes it
+// under its own tag — the live name is "tcdi-backend/tcdi-it-<replica>"
+// (store.OpenWithAppName) — which is what severDB matches.
 func (f *restartFixture) dsnFor(replica string) string {
 	return f.dsn + "&application_name=tcdi-it-" + replica
 }
@@ -1397,20 +1400,39 @@ func (f *restartFixture) lockLeaseRow(t *testing.T, leaseID string) (unlock func
 
 // severDB terminates every backend connection of the named replica, then
 // keeps reaping new ones — pgx pools reconnect, so a single kill would only
-// hiccup. The returned function stops the reaper.
+// hiccup. The replica's connections carry the composed application_name
+// ("tcdi-backend/<dsn tag>" — the backend stamps its identity in front of
+// the DSN-provided tag, store.OpenWithAppName), so that is what the reaper
+// matches. It fails the test when it terminated zero connections: a
+// severed-set of zero could also mean the tag never matched anything, and
+// the drill must never pass on a vacuous sever. The returned function
+// stops the reaper.
 func (f *restartFixture) severDB(t *testing.T, replica string) (unsever func()) {
 	t.Helper()
-	appName := "tcdi-it-" + replica
+	appName := "tcdi-backend/tcdi-it-" + replica
+	var terminated atomic.Int64
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	// Idempotent, and registered as cleanup before the proof waits so a
+	// fatal below cannot leak the reaper into the rest of the test.
+	var stopOnce sync.Once
+	unsever = func() {
+		stopOnce.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
+	t.Cleanup(unsever)
 	go func() {
 		defer close(done)
 		for {
-			if _, err := f.db.Pool().Exec(context.Background(), `
+			if tag, err := f.db.Pool().Exec(context.Background(), `
 				SELECT pg_terminate_backend(pid)
 				FROM pg_stat_activity
 				WHERE application_name = $1 AND pid <> pg_backend_pid()`, appName); err != nil {
 				t.Logf("terminate %s conns: %v", appName, err)
+			} else {
+				terminated.Add(tag.RowsAffected())
 			}
 			select {
 			case <-stop:
@@ -1419,8 +1441,8 @@ func (f *restartFixture) severDB(t *testing.T, replica string) (unsever func()) 
 			}
 		}
 	}()
-	// Prove the sever bit before returning: no live connection of the
-	// replica remains.
+	// Prove the sever bit before returning: the reaper really killed at
+	// least one of the replica's connections and none remain live.
 	eventually(t, "replica "+replica+" connections severed", 10*time.Second, func() bool {
 		var n int
 		if err := f.db.Pool().QueryRow(context.Background(), `
@@ -1428,15 +1450,10 @@ func (f *restartFixture) severDB(t *testing.T, replica string) (unsever func()) 
 			appName).Scan(&n); err != nil {
 			return false
 		}
-		return n == 0
+		return n == 0 && terminated.Load() > 0
 	})
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(stop)
-			<-done
-		})
-	}
+	t.Logf("severDB: terminated %d connection(s) tagged %q", terminated.Load(), appName)
+	return unsever
 }
 
 // TestSvcDNS_ResolvesUpstream guards the fixture machinery itself: cluster

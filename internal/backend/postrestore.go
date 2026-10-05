@@ -336,8 +336,8 @@ func postRestore(ctx context.Context, db *store.DB, src liveCRSource, srcErr err
 		}
 		if backendConns > 0 && !backendsRunning {
 			fmt.Fprintf(errOut, "post-restore: refusing: %d backend connection(s) present in "+
-				"pg_stat_activity (application_name %q) — scale backend to 0 first, or pass "+
-				"-i-know-backends-are-running (UNSUPPORTED) to override\n", backendConns, backendAppName)
+				"pg_stat_activity (application_name LIKE %q) — scale backend to 0 first, or pass "+
+				"-i-know-backends-are-running (UNSUPPORTED) to override\n", backendConns, backendAppName+"%")
 			return 1
 		}
 		if backendConns > 0 {
@@ -647,16 +647,19 @@ func releaseLeaderLock(ctx context.Context, conn *pgx.Conn) {
 
 // backendConnCount reports how many live backend connections this database
 // shows — serving replicas are identifiable because the backend stamps
-// application_name on every pooled connection (wireMerged). The calling
-// connection is excluded even though the tool's own application_name
-// already keeps it out.
+// application_name on every pooled connection (wireMerged). The match is a
+// prefix: OpenWithAppName composes a DSN-provided name as
+// "tcdi-backend/<dsn-name>", and those connections are serving
+// connections too. The tool's own application_name (tcdi-post-restore)
+// doesn't share the prefix, and the calling connection is also excluded
+// by pid.
 func backendConnCount(ctx context.Context, db *store.DB) (int64, error) {
 	var n int64
 	err := db.Pool().QueryRow(ctx, `
 		SELECT count(*) FROM pg_stat_activity
 		 WHERE datname = current_database()
-		   AND application_name = $1
-		   AND pid <> pg_backend_pid()`, backendAppName).Scan(&n)
+		   AND application_name LIKE $1
+		   AND pid <> pg_backend_pid()`, backendAppName+"%").Scan(&n)
 	return n, err
 }
 
