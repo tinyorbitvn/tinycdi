@@ -5,6 +5,7 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -136,7 +137,7 @@ func (s *SharedLimiter) Allow(key string) (bool, time.Duration) {
 		return true, 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeCallTimeout)
-	count, resetIn, err := s.store.RateLimitWindowHit(ctx, s.route, key)
+	count, resetIn, err := s.windowHit(ctx, key)
 	cancel()
 	if err != nil {
 		s.storeFailed(err)
@@ -167,6 +168,26 @@ func (s *SharedLimiter) mayUseStore() bool {
 	}
 	s.probing = true
 	return true
+}
+
+// windowHit performs the deadline-bounded store check and converts a
+// panic inside it into an error. Without the recover a panicking check
+// would unwind Allow with probing still set — the circuit could never
+// re-probe and the limiter would stick in degraded mode forever (no
+// exit log, no gauge flip). Recovering — rather than re-panicking —
+// keeps the limiter working: the panic counts as a store failure via
+// the error return, re-arms a full cool-down through storeFailed, and
+// is logged once per occurrence (a probe can panic at most once per
+// cool-down, so this stays edge-bounded like the other outage logs).
+func (s *SharedLimiter) windowHit(ctx context.Context, key string) (count int64, resetIn time.Duration, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("rate-limit store check panicked: %v", p)
+			s.log.Warn("rate-limit store check panicked — treating as a store failure",
+				"route", s.route, "panic", p)
+		}
+	}()
+	return s.store.RateLimitWindowHit(ctx, s.route, key)
 }
 
 // storeFailed records a check error or deadline: the error metric counts

@@ -77,6 +77,23 @@ func (b *blockedStore) RateLimitWindowHit(ctx context.Context, _, _ string) (int
 	}
 }
 
+// panickyStore panics on every check until healed — a store double for
+// the probe-panic case: the recovered panic must release the probe slot
+// so the next cool-down probes again instead of wedging the breaker.
+type panickyStore struct {
+	calls  atomic.Int32
+	hits   atomic.Int64
+	healed atomic.Bool
+}
+
+func (p *panickyStore) RateLimitWindowHit(context.Context, string, string) (int64, time.Duration, error) {
+	p.calls.Add(1)
+	if !p.healed.Load() {
+		panic("store exploded")
+	}
+	return p.hits.Add(1), 30 * time.Second, nil
+}
+
 // fakeClock is a hand-advanced clock for the breaker cool-down.
 type fakeClock struct {
 	mu  sync.Mutex
@@ -449,5 +466,99 @@ func TestShared_NilStoreIsLocalOnly(t *testing.T) {
 	}
 	if ok, _ := l.Allow("k"); ok {
 		t.Fatal("third hit allowed past the local-only bucket")
+	}
+}
+
+// TestShared_PanicProbeReprobes: a panic inside the store check must not
+// wedge the breaker. The recovered panic counts as a store error and
+// re-arms a full cool-down — crucially it releases the probe slot, so
+// the next cool-down probes again (a stuck probing flag would leave the
+// call count frozen and the limiter degraded forever), and once the
+// store heals the probe closes the circuit normally.
+func TestShared_PanicProbeReprobes(t *testing.T) {
+	ws := &panickyStore{}
+	logs := &logBuf{}
+	var storeErrs int
+	degraded := false
+	clock := newFakeClock()
+	l := NewShared(New(6000, 100, 100, nil), ws, "login", 5,
+		testSharedLog(logs), func(string) { storeErrs++ },
+		func(_ string, d bool) { degraded = d })
+	l.now = clock.Now
+
+	// The very first check panics: the request fails open, the panic is
+	// logged once and counted as a store error, and the circuit opens.
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("panicking store refused — must fail open")
+	}
+	if got := ws.calls.Load(); got != 1 {
+		t.Fatalf("store calls = %d, want 1", got)
+	}
+	if storeErrs != 1 {
+		t.Fatalf("store errors = %d, want 1 — a panic counts as a store error", storeErrs)
+	}
+	if !degraded {
+		t.Fatal("circuit did not open on a panicking check")
+	}
+	if n := strings.Count(logs.String(), "panic="); n != 1 {
+		t.Fatalf("panic logged %d times, want 1", n)
+	}
+
+	// Cool-down requests skip the store entirely.
+	for i := 0; i < 5; i++ {
+		l.Allow("k")
+	}
+	if got := ws.calls.Load(); got != 1 {
+		t.Fatalf("store calls = %d, want 1 — cool-down must skip the store", got)
+	}
+
+	// The first probe past the cool-down panics too. The recover must
+	// release the probe slot and re-arm a FULL cool-down: requests right
+	// after it stay local, and the NEXT cool-down probes again — calls
+	// reaching 3 proves probing did not wedge.
+	clock.Advance(storeCooldown + time.Second)
+	l.Allow("k") // probe — panics
+	for i := 0; i < 3; i++ {
+		l.Allow("k")
+	}
+	if got := ws.calls.Load(); got != 2 {
+		t.Fatalf("store calls = %d, want 2 — one probe per cool-down, then skip", got)
+	}
+	clock.Advance(storeCooldown + time.Second)
+	l.Allow("k") // second probe — panics again
+	if got := ws.calls.Load(); got != 3 {
+		t.Fatalf("store calls = %d, want 3 — the panic must release the probe slot", got)
+	}
+	if storeErrs != 3 {
+		t.Fatalf("store errors = %d, want 3 — every panicking check counts", storeErrs)
+	}
+	if !degraded {
+		t.Fatal("circuit closed while the store still panics")
+	}
+
+	// Heal the store: the next cool-down's probe succeeds, the breaker
+	// closes (exit log + gauge) and the shared window is authoritative —
+	// hits 2..5 pass, the 6th is refused by the store's count.
+	ws.healed.Store(true)
+	clock.Advance(storeCooldown + time.Second)
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("recovery probe refused on a healed store")
+	}
+	if got := ws.calls.Load(); got != 4 {
+		t.Fatalf("store calls = %d, want 4 — the recovery probe", got)
+	}
+	if degraded {
+		t.Fatal("gauge still degraded after a successful probe")
+	}
+	if n := strings.Count(logs.String(), "shared window limiting resumed"); n != 1 {
+		t.Fatalf("recovery logged %d times, want 1", n)
+	}
+	for i := 0; i < 4; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("hit %d refused — shared window must be live again", i+2)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("6th shared hit allowed — the window bound was lost after recovery")
 	}
 }
