@@ -160,7 +160,8 @@ Controls:
   is absent (tests: `middleware_test.go` CSRF/Origin cases).
 - **Rate limits** — shared Postgres fixed-minute windows (ADR 0006) over
   per-replica token buckets in `internal/ratelimit`, applied to
-  `/v1/login`, `/v1/auth/callback` and the `GET /v1/session` probe
+  `/v1/login`, `/v1/auth/callback`, the `GET /v1/session` probe and
+  `POST /v1/me/sessions:revoke-all`
   (`internal/api/middleware.go:252-316`, wiring `internal/backend/wire.go`,
   store `internal/store/rate_limit.go`, migration 021). Keys: client IP,
   or a digest of the *validated* session ID / OIDC login state when
@@ -169,10 +170,18 @@ Controls:
   capped by a 10× per-IP ceiling so validated-state spray stays bounded.
   The effective bound is `min(shared window, divided local bucket)` —
   `PerReplica` still divides the configured budget into each pod's local
-  ceiling and fail-open fallback for a store outage (RL-1). Client IPs
-  derive from the socket peer, or the right-most untrusted X-Forwarded-For
-  entry when the peer sits inside `-trusted-proxies` CIDRs
-  (`ratelimit.go:174`, `ParseTrustedProxies`).
+  ceiling and fail-open fallback for a store outage (RL-1). Degraded-mode
+  cost is bounded by a circuit breaker: every store call carries a 500 ms
+  deadline, an error opens the circuit for a 10 s cool-down during which
+  checks skip the store entirely, and one single-flight probe re-tests it
+  (`internal/ratelimit/shared.go`; tests `shared_test.go`,
+  `tests/integration/rate_limit_pg_test.go`). The v0.4.0 flag defaults
+  restore the v0.3.x effective two-replica budgets as window bounds
+  (login 80/min, launch 160/min, callback ceiling 800;
+  `TestRateLimitDefaults_V040Budgets`). Client IPs derive from the socket
+  peer, or the right-most untrusted X-Forwarded-For entry when the peer
+  sits inside `-trusted-proxies` CIDRs (`ratelimit.go:174`,
+  `ParseTrustedProxies`).
 - **Passive auth** — `GET /v1/connections/.../status` authenticates via
   `RequireAuthPassive`, which never extends the idle clock
   (`internal/api/middleware.go:83-86`, `internal/api/connection_status.go:78`) —
@@ -182,12 +191,37 @@ Controls:
   curated, not raw (`internal/api/events.go`, `statusview.go`;
   tests `tenant_scope_test.go`, `events_test.go`). `tenant_id` must come from
   an admin-controlled IdP mapper (SECURITY.md operator checklist).
-- **Quotas** — per-user and per-tenant limits (`internal/api/quota.go`,
-  `adminquota.go`; `internal/backend/tenantquota.go`).
+- **Quotas** — per-tenant limits (`internal/api/quota.go`,
+  `adminquota.go`; `internal/backend/tenantquota.go`) plus per-principal
+  running-workspace limits (#121): a tenant default and per-owner
+  overrides (migration 022) are written through the tenant-admin
+  `/v1/admin/tenants/{tenant}/user-limits` API
+  (`internal/api/adminuserlimit.go`, `RequireAuth` + audit + `RequireCSRF`)
+  and enforced inside the reservation transaction under the
+  `tenant_quota` row lock (`checkUserLimit`,
+  `internal/provisioning/quota.go:433-492`) — the live count comes from
+  `quota_reservation` `held` rows, disk-only holds and retained disks
+  never count, a missing workspace row fails closed, and refusal is 409
+  `QUOTA_EXHAUSTED` with `details.reason` `UserLimitReached`
+  (`internal/api/errors.go`). No rows means unlimited, so a fresh upgrade
+  changes nothing until an admin sets a limit.
 - **Branding** — the frontend serves an operator-supplied directory at
   `/branding/` with traversal and symlink containment checks
   (`build/frontend/main.go:271-353`; tests `TestBrandingDir_NoTraversal`,
   `TestBrandingDir_NoListing`, `TestBrandingDir_OtherNamesStay404`) — A6-S10.
+- **Audit trail** — every mutating API route and every `/v1/admin/` read
+  emits exactly one dedicated domain event via `audited()`
+  (`internal/api/auditroutes.go`): the actor is pseudonymised
+  (`observability.ActorRef`), the outcome derives from the response
+  status, `role=tenant-admin` marks elevated use of shared routes, and a
+  handler panic still emits `failure`/`panic`; the openapi↔table pairing
+  is pinned by `TestAuditCoverage_SpecMatchesTable` (#120). The sink is
+  `GuardedSink` wrapping JSONL stdout — a write failure is counted on
+  `tinycdi_audit_write_errors_total{event}` plus a rate-limited warning
+  and never propagated into the request (`internal/observability/audit.go`;
+  wiring `internal/backend/wire.go`). Durability and tamper-evidence of
+  the stream are the operator's log pipeline (`docs/runbooks/observability.md`
+  "Log integrity").
 
 ### Boundary 3 — backend app listener ↔ OIDC IdP
 
@@ -216,8 +250,13 @@ Controls: the DSN's `sslmode` must verify the server certificate —
 the chart defaults `database.tls.mode: verify-full` and feeds
 `PGSSLMODE`/`PGSSLROOTCERT`. Session rows store only SHA-256 digests and
 sealed `id_token` blobs (SEC-27, above). Ticket and cookie values are stored
-hashed (`ticketHash`, `sessionDigest`). Migration startup takes a lock so
-concurrent replicas can't race schema creation
+hashed (`ticketHash`, `sessionDigest`). Session rows also carry
+`platform_meta.session_epoch` at insert and every read compares it to the
+current value in the same statement (`internal/store/sessions.go`
+`currentEpochSQL`), so rotating the epoch — the `post-restore` kill-step —
+makes every row a restored dump brought back dead on its next read,
+including sessions deleted after the dump (S23). Migration startup takes
+a lock so concurrent replicas can't race schema creation
 (`internal/backend/migrate_lock_test.go`). NetworkPolicy: DB egress allowed
 only to configured `database.allowedPeers` (chart; empty list fails render —
 SECURITY.md checklist).
@@ -262,7 +301,14 @@ Controls:
   `internal/gateway/authorization.go:1-104`). Renew every ~10 s; a lease that
   stops renewing fails closed within 30 s (revoke/expiry/supersede all kill;
   tests `leases_test.go`, `wsclose_test.go`, `owner_tab_test.go` for the
-  owner-tab takeover flow).
+  owner-tab takeover flow). Since #123, every lease read that feeds
+  renew/attach/claim — and the `LeaseBySession` cookie→lease resolve —
+  re-validates the bound `portal_session_digest` against a live,
+  current-epoch session row in the same indexed read and revokes the lease
+  on the spot when it fails (`liveLease`, `internal/broker/leases.go:75-190`;
+  `tinycdi_lease_session_missing_total{reason}`) — the second barrier behind
+  the sign-out revoke, and what kills a lease a Postgres restore resurrected
+  (S17, S23).
 - **Rehydration** — a cookie unknown to RAM is resolved by SHA-256 digest to
   the lease and the session rebuilt on any replica; expired/revoked leases
   reject (`internal/gateway/rehydrate.go:42-146`; tests `rehydrate_test.go`,
@@ -385,7 +431,17 @@ Controls: scoped RBAC in `deploy/helm/tinycdi/templates/rbac.yaml` +
 operator-wide default knob, nil leaves the pod field unset
 (`internal/runtime/linux/backend.go:295-298,1097-1103`). Image-digest
 verification of the running template snapshot:
-`internal/operator/snapshot_verify_test.go`.
+`internal/operator/snapshot_verify_test.go`. Intent delivery is fenced:
+the operator converges a Workspace only to the newest recorded intent
+(`spec.intentRevision` vs the `applied-intent` annotation — a spec at or
+behind the record is ignored, so a replayed stale intent can never flip
+`desiredState` back; `internal/operator/workspace_controller.go`). Since
+#125 a dropped intent that evidences stream drift — a strictly-behind
+revision, or an equal revision with diverged fields — stamps the
+`workspaces.cdi.tinyorbit.vn/intent-behind` marker annotation
+(`intentFenceDrifted`, `internal/provisioning/k8sapplier.go`), which the
+operator reconciles into an `IntentBehind` condition plus one
+edge-triggered Warning event until the stream realigns (S24).
 
 ## 5. Cross-cutting controls
 
@@ -436,6 +492,8 @@ verification of the running template snapshot:
 
 The post-MVP review (A6) phrased each item as a *question for the reviewer*,
 not a confirmed bug. Status below is against `main` at the time of writing.
+S1–S18 are the A6 questions; S19 onward continue the numbering for the v0.5
+items that landed since.
 
 | # | Item | State today |
 |---|---|---|
@@ -452,19 +510,28 @@ not a confirmed bug. Status below is against `main` at the time of writing.
 | S11 | KASM-2 risk acceptance | The risk acceptance lapsed with v0.2; the kasm adapter + catalog scan ship now. Reviewer should confirm the catalog gate (`check-kasm-catalog.sh`, `kasm-contract` job) actually covers the documented minimum engine floor |
 | S12 | Runtime image release train | Live (`runtime-images.yml`); intentionally no human gate — review job permissions, keyless identity, train-vs-release image distinguishability |
 | S13 | G0–G5 merged without independent review | Standing: the whole v0.1→v0.3 delta has had no external security review — this document exists to scope it |
-| S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | **Implemented since** (`internal/ratelimit` + Postgres windows, ADR 0006 — FX-R30 keying, shared bound with per-replica ceiling and fail-open fallback); reviewer verifies coverage, ceilings, bypass resistance and the outage degradation path |
+| S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | Implemented (v0.4: `internal/ratelimit` + Postgres fixed-minute windows, ADR 0006 — FX-R30 keying, `min(shared window, divided local)` bound, fail-open on store error). Since then: a circuit breaker bounds degraded-mode cost (500 ms per-call deadline, 10 s cool-down skipping the store, single-flight probe — `internal/ratelimit/shared.go`, `shared_test.go`), the v0.4.0 defaults restore the v0.3.x effective budgets as window bounds (`TestRateLimitDefaults_V040Budgets`), and `/v1/me/sessions:revoke-all` joined the session-keyed limiter. Reviewer verifies coverage, ceilings, bypass resistance and the outage degradation path |
 | S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases |
 | S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes |
-| S17 | Sign-out vs live desktop streams | Implemented (`LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:682-765`, `internal/broker/sessions.go:89-164`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row. Defence-in-depth (v0.5, DR): every lease read that feeds renew/attach/claim (`liveLease`, `internal/broker/leases.go`) re-validates the bound portal session row — epoch + absolute expiry, same semantics as the redeem-time check — in the same indexed read, and revokes the lease in one statement when it fails (`tinycdi_lease_session_missing_total{reason=absent\|invalid}` + one log line). A lease resurrected as `active` by a Postgres restore therefore dies at its next renew or attach even when the sign-out revoke itself was lost in the dump window; leases with a NULL `portal_session_digest` (pre-018 rows) are exempt — nothing to verify against, and revoking them on sight would mass-kill sessions mid-rolling-upgrade — they keep the TTL lifecycle and are covered by the DR runbook's post-restore lease sweep. Tests `internal/broker/lease_session_test.go`, `signout_test.go` (api, broker, gateway) |
+| S17 | Sign-out vs live desktop streams | Implemented (#107 + #123; `LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:685`, `internal/broker/sessions.go:109`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row (`internal/broker/tickets.go`). Since the SIGNOUT-FIX pass both revoke sweeps pre-lock their covered rows in a deterministic key order (`lockByKeysInOrderTx`, `sessions.go:418` — tickets by `ticket_hash`, sessions by `id`, leases by `id`), so overlapping sweeps serialize on the first contested row instead of crossing waits. Defence-in-depth (#123, DR): every lease read that feeds renew/attach/claim or the cookie→lease resolve (`liveLease`/`LeaseBySession`, `internal/broker/leases.go`) re-validates the bound portal session row — epoch + absolute expiry, same semantics as the redeem-time check — in the same indexed read, and revokes the lease in one statement when it fails (`tinycdi_lease_session_missing_total{reason=absent\|invalid}` + one log line). A lease resurrected as `active` by a Postgres restore therefore dies at its next renew or attach even when the sign-out revoke itself was lost in the dump window; leases with a NULL `portal_session_digest` (pre-018 rows) are exempt — nothing to verify against, and revoking them on sight would mass-kill sessions mid-rolling-upgrade — they keep the TTL lifecycle and are covered by the DR runbook's post-restore lease sweep. Tests `internal/broker/lease_session_test.go`, `signout_test.go` (api, broker, gateway) |
 | S18 | Client address chain gateway → KasmVNC | Closed (ADR 0008): client XFF never reaches the runtime and only trusted proxies shift the forwarded keys (`forwarded_test.go`); the pod-side 5/10 blacklist is correctly keyed on the derived client address and stays as defence-in-depth — credential guesses are unreachable by construction since `Authorization` is broker-injected on every proxied request (`TestProxy_StripsClientAuth`) |
-| S19 | Sign-out-everywhere vs the principal's other sessions | Implemented (ADR 0007; `RevokeAllSessionsHandler` → `Broker.RevokePrincipalSessions`, `internal/api/revokeall.go`, `internal/broker/sessions.go`): `POST /v1/me/sessions:revoke-all` destroys every portal session of the principal **in the caller's tenant** — caller's own session included — and revokes its active leases and outstanding tickets in one store transaction (lock order tickets → sessions → leases, identical to `RedeemTicket`/`RevokePortalSession`; both redeem interleavings and a `-race` three-way run are pinned on real row locks). Streams die within one renew cycle on every replica; every revoked session's cookie replays to 401. Failure rolls back whole (500, caller stays signed in — never a partial revoke reported as success). No IdP back-channel logout; the provider session ends only via the same RP-initiated `endSessionUrl` as logout. Tests `revokeall_test.go` (api, broker, gateway) |
+| S19 | Sign-out-everywhere vs the principal's other sessions | Implemented (ADR 0007; `RevokeAllSessionsHandler` → `Broker.RevokePrincipalSessions`, `internal/api/revokeall.go`, `internal/broker/sessions.go`): `POST /v1/me/sessions:revoke-all` destroys every portal session of the principal **in the caller's tenant** — caller's own session included — and revokes its active leases and outstanding tickets in one store transaction (lock order tickets → sessions → leases, identical to `RedeemTicket`/`RevokePortalSession` and deterministic within each kind via `lockByKeysInOrderTx`; both redeem interleavings, a multi-ticket inversion and a `-race` three-way run are pinned on real row locks). Streams die within one renew cycle on every replica; every revoked session's cookie replays to 401. Failure rolls back whole (500, caller stays signed in — never a partial revoke reported as success). No IdP back-channel logout; the provider session ends only via the same RP-initiated `endSessionUrl` as logout. Tests `revokeall_test.go` (api, broker, gateway) |
+| S20 | Per-principal running-workspace limits | Implemented (#121, migration 022): `tenant_user_limit_default` + `user_session_limit` tables written through tenant-admin routes `/v1/admin/tenants/{tenant}/user-limits[/default]` (`internal/api/adminuserlimit.go` — auth + audit + CSRF, set/clear audited under `admin.user_limit.*`); admission enforces the effective limit inside the reservation transaction under the `tenant_quota` row lock (`checkUserLimit`, `internal/provisioning/quota.go:433-492`), counting only `held` running slots — disk-only holds and retained disks are exempt, a missing workspace row fails closed, refusal maps to 409 `UserLimitReached`. No rows means unlimited, so upgrades change nothing until an admin acts. Tests `adminuserlimit_test.go`, `provisioning/userlimit_test.go`; reviewer checks the owner→principal identity mapping (`issuer\|sub`) and cross-tenant authz |
+| S21 | Audit coverage of admin and mutating routes | Implemented (#120): `audited()` emits exactly one domain event per covered route — every non-GET API route plus the `/v1/admin/` reads — with a pseudonymous actor, status-derived outcome, `role=tenant-admin` marker and a deferred emit that survives handler panic (`internal/api/auditroutes.go`; `TestAuditCoverage_SpecMatchesTable` fails when a mutating/admin route is added to the spec without a table entry). The gateway's control surface audits `session.list`/`session.revoke` including bearer denials (`proxy.go`, `TestControlAudit_OperatorSurface`). `GuardedSink` makes a failing sink loud-but-never-blocking: `tinycdi_audit_write_errors_total{event}` + rate-limited warn (`internal/observability/audit.go`, `TestGuardedSink_ReportsFailureNeverPropagates`). What the platform does NOT provide: tamper-evident/durable storage — the stream is stdout JSONL and inherits the operator's log pipeline (runbook "Log integrity") |
+| S22 | Deploy-time guards for hazardous value combinations | Implemented (#119): `tinycdi.validate` now fails the render on `operator.leaderElect=false` with `operator.replicas>1` — unelected replicas would double-drive reconciliation and the binary cannot observe the Deployment's replica count (`templates/_helpers.tpl`, `cmd/operator` note; `TestOperatorLeaderElectionGuard`). Metrics-port isolation is pinned for every `edgeIngress` mode: only `allow-metrics-scrape` opens :9090, to exactly `networkPolicy.prometheusPeers` (`TestMetricsListenerIsolation`, `TestEdgePolicyNeverOpensInternalPort`). Residual: single-replica installs (`replicas: 1`) may still run unelected, and guards only constrain chart-rendered manifests — hand-rolled manifests bypass them |
+| S23 | Postgres-only restore onto a live cluster (DR) | Implemented (#122 runbook + #124 tool): `docs/runbooks/disaster-recovery.md` §"Postgres-only restore onto a live cluster" enumerates what an older dump resurrects — `sessions` rows including post-dump sign-outs (killed by `platform_meta.session_epoch` rotation — `SessionStore.Get` compares epoch in the same read), `'active'` `connection_lease` rows including post-dump revokes (a non-NULL `portal_session_digest` dies at next renew/attach via the S17 check, but the tool revokes every restored lease unconditionally anyway — NULL-digest rows have no barrier), unconsumed `launch_ticket` rows re-arming (denied; redeem also re-checks the session), and `workspaces` rows trailing live CRs (aligned to `spec.desiredState`/`runtimeGeneration`/`intentRevision` so the applied-intent fence is not bypassed). `backend post-restore` is the one-shot implementation: dry-run by default; `-apply` requires `-i-have-scaled-down`, takes the leader advisory lock on a dedicated connection and holds it for the whole run (a serving replica or concurrent run means refusal with zero writes), refuses while backend connections remain in `pg_stat_activity` unless `-i-know-backends-are-running`, and exits non-zero printing per-workspace SQL when Kubernetes read access for CR alignment is absent (`internal/backend/postrestore.go`; tests `postrestore_test.go`, `TestSessionEpochRotation`). The `hack/quickstart/restore-drill.sh` kind drill is manual, not a per-PR gate |
+| S24 | Intent-stream drift vs the applied-intent fence | Implemented (#125): after a DB restore the platform's `workspaces.intent_revision` can trail the fence the CR already recorded, and every new intent would be dropped as stale — silently. The applier now detects the two unreachable-by-replay shapes (strictly-behind revision; equal revision with diverged `desiredState`/`runtimeGeneration`) and stamps `workspaces.cdi.tinyorbit.vn/intent-behind` `{rowRevision, crRevision}` (`intentFenceDrifted`, `internal/provisioning/k8sapplier.go`); the operator raises `ConditionIntentBehind` with the revision params plus one edge-triggered Warning event, and clears it once the stream applies forward again (`internal/operator/workspace_controller.go`, `api/v1alpha1/validation.go`; events `create`/`patch` RBAC added). The fence itself is unchanged — a stale intent is still never applied; drift is only surfaced. Surfaced to users via the conditions/events projection (`statusview.go`, `events.go`; `TestIntentBehindDrift`, `TestK8sApplierIntentDrift`, `TestProjectConditions_IntentBehind`) |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's
 ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is
 the load-bearing ordering argument — it is driven deterministically by
 `TestRevokePortalSession_RedeemCommitThenRevoke` and
 `TestRevokePortalSession_RevokeCommitThenRedeem`, which pin both
-interleavings on real row locks.
+interleavings on real row locks. Since the SIGNOUT-FIX pass the sweeps
+also pre-lock in deterministic key order (`lockByKeysInOrderTx`), and
+`TestRevokePrincipalSessions_MultiTicketInversion` runs the principal-
+scoped sweep against a multi-ticket redeem under `-race` to pin the
+no-deadlock claim.
 
 Additional items found while writing this document (not from A6):
 
@@ -493,11 +560,45 @@ Additional items found while writing this document (not from A6):
   but they carry KasmVNC 1.4.0 (vs the pinned 1.5.0 in TinyCDI-built images);
   the catalog gate enforces a floor — reviewer should confirm the floor and
   the exception file's expiry policy together.
-- **Postgres backup/restore of digest-keyed sessions** — restore semantics
-  vs live leases is undocumented for a DR scenario.
-- **Audit trail completeness** — `session.host_mismatch`, denies and revokes
-  are audited; confirm coverage of admin operations (quota writes, tenant
-  actions) and log integrity expectations.
+- **Postgres backup/restore of digest-keyed sessions** — covered by S23:
+  the restore semantics are documented and the resurrection risks have a
+  tool + tests; what remains manual is running the procedure and the
+  drill.
+- **Audit trail completeness** — coverage of admin operations and
+  mutating routes is implemented (#120, S21); what remains for review is
+  integrity/durability of the stdout JSONL stream, which is delegated to
+  the operator's log pipeline (runbook "Log integrity"), and the fact
+  that platform-level admin actions that never pass through TinyCDI —
+  `WorkspaceTemplate` CRD writes, Helm-value changes — are only in the
+  Kubernetes API audit log.
+
+### What the v1.0 reviewer should re-verify
+
+Load-bearing claims the tests pin today, worth re-checking on the tree
+under review:
+
+- **Upstream `Authorization` overwrite** — the session proxy must
+  *replace* (not merely strip) a client-supplied `Authorization` header
+  on every proxied path, since the pod-side credential check is only
+  unreachable while broker injection is unconditional
+  (`TestProxy_StripsClientAuth`; S18, ADR 0008).
+- **Per-workspace NetworkPolicy assumes an enforcing CNI** —
+  `ws-<uid>-boundary` policies bind only where the cluster CNI implements
+  NetworkPolicy (`docs/compatibility.md` lists Cilium; the kind e2e runs
+  on one that enforces). A non-enforcing CNI silently reverts workspace
+  ingress/egress to open — confirm the supported-deployments matrix keeps
+  that assumption explicit.
+- **Lease renew/attach session check coverage** — `liveLease`
+  re-validates the bound portal session on every renew/attach/claim and
+  on the `LeaseBySession` cookie resolve (S17). Re-verify that every new
+  lease-read path funnels through it and that the NULL-digest exemption
+  still matches the rolling-upgrade story.
+- **Deterministic lock order** — the no-deadlock argument for the
+  session-layer revokes is `lockByKeysInOrderTx` (tickets → sessions →
+  leases, ascending key order within each; `sessions.go:418`), pinned by
+  the two redeem/revoke interleaving tests and the `-race`
+  multi-ticket inversion run. Re-check when new session-layer mutators
+  land.
 
 ## 7. What the reviewer should read first
 

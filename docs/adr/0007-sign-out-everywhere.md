@@ -1,6 +1,6 @@
 # ADR 0007 — Sign out everywhere (principal-scoped session revocation)
 
-Status: **proposed**
+Status: **accepted** (implemented in #117)
 
 Date: 2026-10-05
 
@@ -156,6 +156,45 @@ unpruned append-mostly tables —
 
 - `connection_lease (tenant_id, principal_subject) WHERE state='active'`
 - `launch_ticket (tenant_id, principal_subject) WHERE consumed_at IS NULL AND revoked_at IS NULL`
+
+## Implementation notes (as merged in #117)
+
+- **Migration 023** landed as designed:
+  `internal/store/migrations/023_principal_revocation_indexes.sql` adds the
+  two partial indexes (`connection_lease (tenant_id, principal_subject)
+  WHERE state='active'`, `launch_ticket (tenant_id, principal_subject)
+  WHERE consumed_at IS NULL AND revoked_at IS NULL`), expand-only and
+  idempotent (`TestMigration023_Idempotent`).
+- **Lock order** — the coarse *tickets → sessions → leases* order above is
+  implemented with an additional deterministic within-kind ordering: each
+  sweep first takes `FOR UPDATE` locks in ascending key order via
+  `lockByKeysInOrderTx` (tickets by `ticket_hash`, sessions by `id`,
+  leases by `id`) before its UPDATE/DELETE
+  (`internal/broker/sessions.go:418`). `RevokePortalSession` was switched
+  to the same discipline, closing the residual window where two sweeps
+  could lock overlapping rows in different index-scan orders. The
+  ordering argument is pinned by both redeem/revoke interleavings
+  (`TestRevokePrincipalSessions_RedeemCommitThenRevoke` /
+  `..._RevokeCommitThenRedeem`), a `-race` three-way run
+  (`TestRevokePrincipalSessions_ConcurrentNoDeadlock`), and
+  `TestRevokePrincipalSessions_MultiTicketInversion`.
+- **Single audit event** — the `audited()` wrapper emits exactly one
+  `session.revoke_all` record per call (including denials); the handler
+  attaches the per-kind counts to the in-flight event via
+  `auditSetDetail(ctx, "counts", "sessions=N,tickets=N,leases=N")`
+  (`internal/api/revokeall.go`) — the neutral `counts` key survives the
+  sink's credential-key redaction. No second audit write exists.
+- **Metric** — `tinycdi_session_revoke_all_total{result}` with
+  `result ∈ {ok, error}` as designed (`internal/observability/metrics.go`).
+- **Rate limiting** — the production mount applies the session-keyed
+  login-family limiter (`internal/backend/wire.go` `MountRevokeAllRoute`).
+- The revoke runs detached-but-bounded (`context.WithoutCancel` +
+  `sessionRevokeTimeout`): a client disconnect mid-call cannot abort a
+  committed decision (`TestRevokeAll_RevokeSurvivesClientDisconnect`).
+- Tests: `internal/api/revokeall_test.go`,
+  `internal/broker/revokeall_test.go`, `internal/gateway/revokeall_test.go`;
+  portal e2e `web/tests/signout.spec.ts` ("sign out everywhere confirms
+  the tenant scope, then ends all sessions").
 
 ## Consequences
 
