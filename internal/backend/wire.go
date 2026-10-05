@@ -56,7 +56,7 @@ const defaultMergedGatewayID = "backend"
 // whole enforcement.
 const (
 	loginRateBurst   = 20
-	launchRateBurst  = 20
+	launchRateBurst  = 40
 	rateLimitMaxKeys = 100_000
 )
 

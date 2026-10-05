@@ -436,7 +436,7 @@ the single option that decides how the edge reaches the public listeners.
 
 The backend rate-limits its unauthenticated surface **per client address**:
 `-login-rate` (60/min, burst 20) covers `GET /v1/login`,
-`GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate` (60/min, burst 20)
+`GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate` (120/min, burst 40)
 covers the session listener's `POST /v1/launch`. A client over its budget gets
 `429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
 (`backend.extraArgs`, e.g. `-login-rate=0`).
@@ -513,8 +513,8 @@ The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
 `X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value
 is required, not optional**: with it empty every user arriving through the
-same edge keys on the edge's own address — one shared bucket (~30 logins and
-~60 launches per minute for the whole organisation) and a self-inflicted
+same edge keys on the edge's own address — one shared bucket (~60 logins and
+~120 launches per minute for the whole organisation) and a self-inflicted
 outage. The backend logs a startup warning while a limit is on and the list
 is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
 `X-Real-IP` headers the workspace pod sees — client-supplied values are

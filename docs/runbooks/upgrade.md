@@ -758,14 +758,15 @@ local ceiling** each pod keeps as a cap and as the fail-open limiter
 during a Postgres outage. Keep it at `backend.replicas` (the chart still
 renders it so); an HPA should pin it to `maxReplicas` as before.
 
-The default sign-in budget doubles on v0.4: `-login-rate` defaults to
-60/minute with burst 20 (the shared-window bound becomes 80/minute), and
-the per-IP OIDC-callback ceiling follows at 10×. The defaults are chosen
-to match the v0.3.x effective aggregate at two replicas, where each pod
-enforced the undivided 30/minute + burst 10 bucket — an exact 30/minute
-window would have halved every two-replica install's sign-in budget.
-`-launch-rate` is unchanged (60/minute, burst 20); installs that set the
-flags explicitly keep their values.
+The default sign-in and launch budgets double on v0.4: `-login-rate`
+defaults to 60/minute with burst 20 and `-launch-rate` to 120/minute with
+burst 40 (the shared-window bounds become 80/minute and 160/minute), and
+the per-IP OIDC-callback ceiling follows at 10× the login budget. The
+defaults are chosen to match the v0.3.x effective aggregate at two
+replicas, where each pod enforced the undivided 30/minute + burst 10
+login and 60/minute + burst 20 launch buckets — an exact window at the
+old flags would have halved every two-replica install's budgets.
+Installs that set the flags explicitly keep their values.
 
 ## Rollback
 

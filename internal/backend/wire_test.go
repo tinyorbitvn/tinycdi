@@ -67,16 +67,16 @@ func TestWiredLimiters_ReplicaDivision(t *testing.T) {
 		t.Fatal("61st request inside the divided ceiling allowed — want burst 60")
 	}
 
-	// LaunchRate 60 / 2 replicas -> rate 30/min, burst 20/2 = 10 per pod.
+	// LaunchRate 60 / 2 replicas -> rate 30/min, burst 40/2 = 20 per pod.
 	l := launchLimiter(Config{LaunchRate: 60, RateLimitReplicas: 2}, clock)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		if ok, _ := l.Allow("k"); !ok {
-			t.Fatalf("launch burst %d refused — want burst 10 (20/2)", i+1)
+			t.Fatalf("launch burst %d refused — want burst 20 (40/2)", i+1)
 		}
 	}
 	ok, retry = l.Allow("k")
 	if ok {
-		t.Fatal("11th launch inside the divided burst allowed — want burst 10")
+		t.Fatal("21st launch inside the divided burst allowed — want burst 20")
 	}
 	if got := ratelimit.RetryAfterSeconds(retry); got != 2 {
 		t.Fatalf("launch Retry-After = %ds, want 2 (30/min per replica)", got)
@@ -96,14 +96,17 @@ func (w *countWindow) RateLimitWindowHit(_ context.Context, route, _ string) (in
 	return w.n[route], time.Minute, nil
 }
 
-// TestLoginDefaults_V3EffectiveBudget (RL-DEFAULT): the default login
-// budget restores the aggregate a two-replica v0.3.x install granted one
-// client key — each pod enforced the undivided 30/min + burst 10 —
-// under the exact shared window (ADR 0006): -login-rate 60/min +
-// loginRateBurst 20 map to an 80/minute window, and the per-IP callback
-// ceiling stays derived at 10x. At the chart's backend.replicas=2 every
-// pod's local ceiling is back to exactly the v0.3.x per-pod budget.
-func TestLoginDefaults_V3EffectiveBudget(t *testing.T) {
+// TestRateLimitDefaults_V3EffectiveBudget (RL-DEFAULT): the default
+// login and launch budgets restore the aggregate a two-replica v0.3.x
+// install granted one client key — each pod enforced the undivided
+// bucket (login 30/min + burst 10, launch 60/min + burst 20) — under
+// the exact shared window (ADR 0006): -login-rate 60/min +
+// loginRateBurst 20 map to an 80/minute window, -launch-rate 120/min +
+// launchRateBurst 40 to 160/minute, and the per-IP callback ceiling
+// stays derived at 10x the login budget. At the chart's
+// backend.replicas=2 every pod's local ceiling is back to exactly the
+// v0.3.x per-pod budget.
+func TestRateLimitDefaults_V3EffectiveBudget(t *testing.T) {
 	cfg, err := ParseFlags(mergedArgs(), noEnv)
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
@@ -114,11 +117,17 @@ func TestLoginDefaults_V3EffectiveBudget(t *testing.T) {
 	if loginRateBurst != 20 {
 		t.Fatalf("loginRateBurst = %d, want 20 (2 x the v0.3.x per-pod burst 10)", loginRateBurst)
 	}
+	if cfg.LaunchRate != 120 {
+		t.Fatalf("default -launch-rate = %d, want 120 (2 x the v0.3.x per-pod 60/min)", cfg.LaunchRate)
+	}
+	if launchRateBurst != 40 {
+		t.Fatalf("launchRateBurst = %d, want 40 (2 x the v0.3.x per-pod burst 20)", launchRateBurst)
+	}
 
-	// Shared window bounds: rate+burst on the login bucket (80), 10x on
-	// the callback ceiling (800). A fresh key per request clears the
-	// local ceiling (each new key starts with a full burst), so the
-	// window count alone decides.
+	// Shared window bounds: rate+burst on each bucket — 80 login, 160
+	// launch — and 10x login on the callback ceiling (800). A fresh key
+	// per request clears the local ceiling (each new key starts with a
+	// full burst), so the window count alone decides.
 	shared, ceiling := sharedLoginLimiters(cfg, &countWindow{}, nil, nil, nil)
 	for i := 1; i <= 80; i++ {
 		if ok, _ := shared.Allow(fmt.Sprintf("k%d", i)); !ok {
@@ -136,9 +145,19 @@ func TestLoginDefaults_V3EffectiveBudget(t *testing.T) {
 	if ok, _ := ceiling.Allow("c801"); ok {
 		t.Fatal("hit 801 inside the callback ceiling allowed — want bound 800 (10x login)")
 	}
+	launch := sharedLaunchLimiter(cfg, &countWindow{}, nil, nil, nil)
+	for i := 1; i <= 160; i++ {
+		if ok, _ := launch.Allow(fmt.Sprintf("l%d", i)); !ok {
+			t.Fatalf("launch window refused hit %d — want bound 160 (120+40)", i)
+		}
+	}
+	if ok, _ := launch.Allow("l161"); ok {
+		t.Fatal("hit 161 inside the launch window allowed — want bound 160 (120+40)")
+	}
 
-	// Two replicas: the divided local ceiling is again the v0.3.x
-	// per-pod budget — rate 30/min, burst 10.
+	// Two replicas: the divided local ceilings are again the v0.3.x
+	// per-pod budgets — login 30/min + burst 10, launch 60/min + burst
+	// 20.
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	local, localCeiling := loginLimiters(Config{LoginRate: cfg.LoginRate, RateLimitReplicas: 2}, clock)
@@ -159,5 +178,16 @@ func TestLoginDefaults_V3EffectiveBudget(t *testing.T) {
 	}
 	if ok, _ := localCeiling.Allow("k"); ok {
 		t.Fatal("101st local ceiling request allowed — want burst 100 (10x divided)")
+	}
+	localLaunch := launchLimiter(Config{LaunchRate: cfg.LaunchRate, RateLimitReplicas: 2}, clock)
+	for i := 0; i < 20; i++ {
+		if ok, _ := localLaunch.Allow("k"); !ok {
+			t.Fatalf("local launch burst %d refused — want the v0.3.x per-pod burst 20 (40/2)", i+1)
+		}
+	}
+	if ok, retry := localLaunch.Allow("k"); ok {
+		t.Fatal("21st local launch allowed — want the v0.3.x per-pod burst 20")
+	} else if got := ratelimit.RetryAfterSeconds(retry); got != 1 {
+		t.Fatalf("local launch Retry-After = %ds, want 1 (60/min per pod)", got)
 	}
 }

@@ -315,7 +315,7 @@ Day-2 quota operations (reading usage, `QUOTA_EXHAUSTED` vs
 
 `GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited
 to 60 requests/min per client address (burst 20); `POST /v1/launch` to
-60/min (burst 20). Over the limit the API answers `429 RATE_LIMITED` with
+120/min (burst 40). Over the limit the API answers `429 RATE_LIMITED` with
 `Retry-After`.
 
 The client address is the socket peer unless the peer is inside

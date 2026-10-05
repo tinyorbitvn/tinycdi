@@ -156,7 +156,7 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
 The backend throttles its unauthenticated surface **per client IP**:
 `-login-rate` (60/min, burst 20) covers `GET /v1/login`,
 `GET /v1/auth/callback` and `GET /v1/session`; `-launch-rate`
-(60/min, burst 20) covers `POST /v1/launch`. Authenticated requests get
+(120/min, burst 40) covers `POST /v1/launch`. Authenticated requests get
 their own keys instead — `GET /v1/session` keys on a digest of the
 *validated* session cookie, `/v1/launch` likewise once the session is
 live on the serving replica (a cookie issued by a sibling and not yet
@@ -413,7 +413,7 @@ reasons found on the night:
   per-wave guard stays as the hard safety.
 - **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
   behind one source IP tripped the then-default `login-rate 30/min` (covers `/v1/login`,
-  `/v1/auth/callback`, `GET /v1/session`) and `launch-rate 60/min` —
+  `/v1/auth/callback`, `GET /v1/session`) and the then-default `launch-rate 60/min` —
   152 × 429 in ~15 min, logins failed, connect p95 hit 65 s. The e2e
   run raised both to 600/min as a recorded deviation (restored after);
   production ramps from many IPs are unaffected. On rc.3 this is fixed by
