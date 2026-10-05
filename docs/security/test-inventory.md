@@ -246,6 +246,14 @@ Security-relevant subset:
   freshness signals (see also `internal/api/imageblock_test.go`,
   `imagestale_test.go`, `imagestale_r4_test.go`).
 
+Pattern note — "vacuous test" traps: a test that severs, revokes or
+deletes must assert it acted on >= 1 object, otherwise a broken selector
+silently passes on an empty set. Example: `severDB` in
+`backend_restart_test.go` counts `pg_terminate_backend` rows and fails
+when it terminated zero connections — a wrong `application_name` tag
+can never produce a vacuous "severed" pass. Apply the same
+fail-when-nothing-happens rule to any new kill/revoke drill.
+
 ## 8. CI scanners and gates
 
 `.github/workflows/ci.yml` (PRs, main pushes, weekly):
