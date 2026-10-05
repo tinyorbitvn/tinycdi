@@ -85,6 +85,13 @@ var (
 	sessionRevokeResults = map[string]struct{}{
 		"ok": {}, "error": {},
 	}
+	// leaseSessionMissingReasons are the bound-portal-session check
+	// outcomes that revoked a live lease (S17 defence-in-depth):
+	// absent = the sessions row is gone; invalid = the row exists but
+	// fails the epoch or absolute-expiry check (e.g. a restored dump).
+	leaseSessionMissingReasons = map[string]struct{}{
+		"absent": {}, "invalid": {},
+	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route
 	// events, the gateway events, http.request and the config apply); a
@@ -137,6 +144,7 @@ type Metrics struct {
 	sessionRevokes *prometheus.CounterVec
 	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
 	sessionRevokeAlls *prometheus.CounterVec
+	leaseSessGone     *prometheus.CounterVec
 	auditWriteErrs    *prometheus.CounterVec
 
 	tenants map[string]struct{}
@@ -236,6 +244,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "session_revoke_all_total",
 			Help: "Sign-out-everywhere principal-scoped revocations (ADR 0007), by bounded result.",
 		}, []string{"result"}),
+		leaseSessGone: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "lease_session_missing_total",
+			Help: "Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (S17 defence-in-depth), by bounded reason.",
+		}, []string{"reason"}),
 		auditWriteErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "audit_write_errors_total",
 			Help: "Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.",
@@ -250,7 +262,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
-		m.sessionRevokeAlls, m.auditWriteErrs,
+		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -413,6 +425,13 @@ func (m *Metrics) IncSessionRevocation(result string) {
 // unexpected into "other".
 func (m *Metrics) IncSessionRevokeAll(result string) {
 	m.sessionRevokeAlls.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
+}
+
+// IncLeaseSessionMissing counts one lease revoked because its bound portal
+// session no longer validates at renew/attach time (S17 defence-in-depth);
+// reason is bounded to {absent, invalid, other}.
+func (m *Metrics) IncLeaseSessionMissing(reason string) {
+	m.leaseSessGone.WithLabelValues(boundValue(reason, leaseSessionMissingReasons)).Inc()
 }
 
 // IncAuditWriteError counts one audit sink write failure; event is bounded

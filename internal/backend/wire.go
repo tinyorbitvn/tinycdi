@@ -391,7 +391,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	brk := broker.New(db, bindings,
 		broker.WithGatewayAudience(id.Audience),
-		broker.WithCredentialSource(broker.NewK8sCredentialSource(kc, tenants)))
+		broker.WithCredentialSource(broker.NewK8sCredentialSource(kc, tenants)),
+		broker.WithMetrics(metrics),
+		broker.WithLogger(log))
 
 	// Expiry planner (design §8): periodically evaluate running workspaces
 	// against recorded session activity and emit generation-fenced stop
