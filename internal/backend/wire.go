@@ -168,10 +168,17 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("-tenant-quotas: %w", err)
 	}
+	// One JSONL audit sink serves every app-plane audit event: the authn
+	// session.revoke records, the dedicated events the mutating API routes
+	// emit, and the config-driven quota apply below. The guard turns a
+	// failing sink into a counted metric + rate-limited warning instead of
+	// silent audit loss (the write never fails the request).
+	appAudit := observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log,
+		metrics.IncAuditWriteError)
 	if len(quotas) > 0 {
 		// Declared quotas: written by the singleton leader only, so replicas
 		// starting together do not race (FX-R17).
-		b.singletons = append(b.singletons, tenantQuotaSingleton(log, db, quotas, tenantQuotaRetry, nil))
+		b.singletons = append(b.singletons, tenantQuotaSingleton(log, db, quotas, tenantQuotaRetry, nil, appAudit))
 	}
 
 	rcfg, err := restConfig(cfg.Kubeconfig)
@@ -464,7 +471,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	// App listener: OIDC login + the public API mux.
 	if cfg.Listen != "" {
-		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, cachedKC, tenants, retained, brk, quotas); err != nil {
+		if err := b.newAppHandler(ctx, cfg, db, svc, statusView, kc, cachedKC, tenants, retained, brk, quotas, appAudit); err != nil {
 			return err
 		}
 	}
@@ -532,8 +539,9 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		LaunchLimiter:  launch,
 		TrustedProxies: trusted,
 		Metrics:        metrics,
-		Audit:          observability.NewJSONSink(os.Stdout),
-		Logger:         b.log,
+		Audit: observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), b.log,
+			metrics.IncAuditWriteError),
+		Logger: b.log,
 	})
 	if err != nil {
 		return fmt.Errorf("gateway init: %w", err)
@@ -549,7 +557,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	svc *provisioning.Service, statusView *api.K8sStatusView, kc, cachedKC client.Client,
 	tenants provisioning.TenantNamespaces, retained *provisioning.RetainedStore, brk *broker.Broker,
-	declaredQuotas []provisioning.TenantQuota) error {
+	declaredQuotas []provisioning.TenantQuota, appAudit observability.AuditSink) error {
 
 	// Pending OIDC logins ride in an AEAD-sealed cookie (D20): the first
 	// key file seals, every configured key opens, so a login can start on
@@ -590,7 +598,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// Sign-out-everywhere (ADR 0007): one store tx ends every session of
 	// the principal in the tenant — leases, tickets and session rows.
 	authn.WithPrincipalRevoker(broker.PublicRevoker{B: brk})
-	authn.WithAuditSink(observability.NewJSONSink(os.Stdout))
+	authn.WithAuditSink(appAudit)
 
 	// The session domain maps workspace IDs to per-workspace launch hosts
 	// (D9) — launch URLs resolve to ws-<suffix>.<SessionDomain>/v1/launch.
@@ -612,7 +620,8 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithImageCatalog(catalogAdapter{c: provisioning.NewK8sTemplateCatalog(cachedKC, tenants)}).
 		WithDirectory(directory).
 		WithIntentLog(api.NewIntentLog(svc)).
-		WithReleaseRetryAfter(b.recoveryTickETA)
+		WithReleaseRetryAfter(b.recoveryTickETA).
+		WithAuditSink(appAudit)
 	tplHandler := api.NewTemplateHandler(catalog, tenants).
 		WithImageStaleAfter(cfg.ImageStaleAfter).
 		WithImageBlockAfter(cfg.ImageBlockAfter)
@@ -627,12 +636,14 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 				return "", err
 			}
 			return e.ClipboardPolicy, nil
-		})
+		}).
+		WithAuditSink(appAudit)
 	meHandler := api.NewMeHandler(sessionDomain.String())
 	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
 	dataHandler := api.NewDataHandler(retained, catalog, tenants).
 		WithDirectory(directory).
-		WithReleaseRetryAfter(b.recoveryTickETA)
+		WithReleaseRetryAfter(b.recoveryTickETA).
+		WithAuditSink(appAudit)
 	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
 
 	// Tenants declared in -tenant-quotas are config-managed: the admin quota
@@ -641,7 +652,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	for _, q := range declaredQuotas {
 		managedQuotas[q.TenantID] = true
 	}
-	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas)
+	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas).
+		WithAuditSink(appAudit)
+	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
+		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
@@ -667,7 +681,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, loginLimit, sessionLimit, callbackLimit)
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -681,15 +695,13 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
 	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
+	adminUserLimits *api.AdminUserLimitsHandler,
 	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
 	mux.Handle("GET /v1/auth/callback", callbackLimit(http.HandlerFunc(authn.CallbackHandler)))
-	mux.Handle("POST /v1/logout", authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler))))
-	// Sign-out-everywhere (ADR 0007): same auth+CSRF pair as logout, plus
-	// the session-digest-keyed login-family limiter — the op is
-	// self-scoped and idempotent; the limit only bounds repeat DB churn.
-	mux.Handle("POST /v1/me/sessions:revoke-all", sessionLimit(authn.RequireAuth(authn.RequireCSRF(http.HandlerFunc(authn.RevokeAllSessionsHandler)))))
+	api.MountLogoutRoute(mux, authn)
+	api.MountRevokeAllRoute(mux, authn, sessionLimit)
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
@@ -699,6 +711,9 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	api.MountQuotaRoutes(mux, authn, quota)
 	if adminQuota != nil {
 		api.MountAdminQuotaRoutes(mux, authn, adminQuota)
+	}
+	if adminUserLimits != nil {
+		api.MountAdminUserLimitRoutes(mux, authn, adminUserLimits)
 	}
 	return mux
 }

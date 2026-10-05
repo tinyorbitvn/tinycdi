@@ -43,7 +43,7 @@ func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, t
 	return f.ticket, f.err
 }
 
-func newConnectionEnv(t *testing.T, issuer ConnectionIssuer) *testEnv {
+func newConnectionEnv(t *testing.T, issuer ConnectionIssuer, opts ...func(*ConnectionHandler)) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
@@ -66,6 +66,9 @@ func newConnectionEnv(t *testing.T, issuer ConnectionIssuer) *testEnv {
 		t.Fatalf("sessionhost.ParseDomain: %v", err)
 	}
 	h := NewConnectionHandler(issuer, defaultTenants(), d)
+	for _, o := range opts {
+		o(h)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))

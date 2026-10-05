@@ -85,6 +85,23 @@ var (
 	sessionRevokeResults = map[string]struct{}{
 		"ok": {}, "error": {},
 	}
+	// auditEventActions bounds the {event} label of the audit-write-error
+	// counter to the action names the codebase can emit (the app route
+	// events, the gateway events, http.request and the config apply); a
+	// future action not yet listed folds into "other" instead of minting
+	// a new series.
+	auditEventActions = map[string]struct{}{
+		"http.request": {}, "session.logout": {}, "session.revoke": {},
+		"session.revoke_all": {},
+		"session.list": {}, "session.host_mismatch": {},
+		"workspace.create": {}, "workspace.start": {}, "workspace.stop": {},
+		"workspace.delete": {}, "connection.create": {},
+		"data.attach": {}, "data.purge": {},
+		"admin.quota.get": {}, "admin.quota.set": {}, "admin.quota.config_apply": {},
+		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
+		"admin.user_limit.default.set": {}, "admin.user_limit.default.clear": {},
+		"launch.redeem": {}, "launch.host_mismatch": {},
+	}
 )
 
 func boundValue(v string, allowed map[string]struct{}) string {
@@ -120,6 +137,7 @@ type Metrics struct {
 	sessionRevokes *prometheus.CounterVec
 	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
 	sessionRevokeAlls *prometheus.CounterVec
+	auditWriteErrs    *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -218,6 +236,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "session_revoke_all_total",
 			Help: "Sign-out-everywhere principal-scoped revocations (ADR 0007), by bounded result.",
 		}, []string{"result"}),
+		auditWriteErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "audit_write_errors_total",
+			Help: "Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.",
+		}, []string{"event"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -228,7 +250,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
-		m.sessionRevokeAlls,
+		m.sessionRevokeAlls, m.auditWriteErrs,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -387,7 +409,18 @@ func (m *Metrics) IncSessionRevocation(result string) {
 
 // IncSessionRevokeAll counts one sign-out-everywhere revocation of a
 // principal's sessions/leases/tickets (ADR 0007); result is bounded to
-// {ok, error, other} — the same outcomes as the per-session counter.
+// sessionRevokeResults — {ok, error}, with boundValue folding anything
+// unexpected into "other".
 func (m *Metrics) IncSessionRevokeAll(result string) {
 	m.sessionRevokeAlls.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
+}
+
+// IncAuditWriteError counts one audit sink write failure; event is bounded
+// to the emitted action names. Nil-receiver safe: wiring may pass it
+// unconditionally whether or not the metrics listener is configured.
+func (m *Metrics) IncAuditWriteError(event string) {
+	if m == nil {
+		return
+	}
+	m.auditWriteErrs.WithLabelValues(boundValue(event, auditEventActions)).Inc()
 }

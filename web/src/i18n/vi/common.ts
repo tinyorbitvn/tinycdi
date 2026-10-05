@@ -20,6 +20,8 @@ export default {
     "Một workspace vẫn đang tắt; hạn mức của nó được giải phóng trong khoảng 30 giây. Thử lại sau ít phút.",
   "errors.code.quotaNotConfigured":
     "Tenant của bạn chưa được cấu hình hạn mức. Nhờ quản trị viên thiết lập.",
+  "errors.code.userLimitReached":
+    "Bạn đã đạt giới hạn workspace đang chạy của mình ({current}/{limit}). Hãy dừng hoặc xoá một workspace, hoặc nhờ quản trị viên tăng giới hạn.",
   "errors.code.invalidTemplate":
     "Template đó không khả dụng (chưa phát hành hoặc không được phép cho tenant của bạn). Hãy chọn template khác.",
   "errors.code.idempotencyConflict":
