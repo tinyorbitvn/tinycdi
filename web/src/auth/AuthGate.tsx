@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
-import { POLL_HEADERS, unwrap } from "../api/client";
+import { unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 
 // Login lives on the portal origin ahead of the API (OIDC-backed session
@@ -49,11 +49,8 @@ export function AuthGate({
           if (!cancelled) onUnauthenticated();
           return;
         }
-        // MeProvider reads the body again once the gate opens. Retries
-        // after the first failure are background traffic — they carry the
-        // poll marker so a gate stuck retrying cannot hold the idle window
-        // open (D18); the first attempt rides on the page load itself.
-        unwrap(await api.GET("/v1/me", failures > 0 ? { headers: POLL_HEADERS } : {}));
+        // MeProvider reads the body again once the gate opens.
+        unwrap(await api.GET("/v1/me"));
         if (!cancelled) setReady(true);
       } catch (e) {
         if (cancelled) return;

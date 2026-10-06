@@ -104,7 +104,7 @@ func TestInputHook_CalledWithPrincipal(t *testing.T) {
 		got []string
 	)
 	b := broker.New(db, src, broker.WithClock(clock),
-		broker.WithInputHook(func(_ context.Context, principal string) {
+		broker.WithInputHook(func(_ context.Context, principal, sessionDigest string) {
 			mu.Lock()
 			got = append(got, principal)
 			mu.Unlock()

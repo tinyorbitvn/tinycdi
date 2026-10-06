@@ -89,10 +89,7 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const admin = isTenantAdmin(me.data);
   const [scope, setScope] = useState<Scope>("mine");
   const effectiveScope: Scope = admin ? scope : "mine";
-  const load = useCallback(
-    (background: boolean) => listRetainedData(api, effectiveScope, background),
-    [api, effectiveScope],
-  );
+  const load = useCallback(() => listRetainedData(api, effectiveScope), [api, effectiveScope]);
   const list = useResource(load, (data) => purgePollDelay(data, pollIntervalMs));
 
   const [attaching, setAttaching] = useState<ScopedRetainedData | null>(null);

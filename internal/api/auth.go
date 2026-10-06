@@ -196,6 +196,12 @@ type SessionStore interface {
 	// (D18). principal is the "issuer|subject" owner string. Returns the
 	// number of sessions touched.
 	TouchPrincipal(ctx context.Context, principal string) (int64, error)
+	// TouchSessionDigest slides last_seen_at for exactly one session — the
+	// row keyed by digestHex (hex of SHA-256(session id), the form a lease
+	// records) — while it is still inside the idle window and before its
+	// absolute expiry (SR-1-F3). Returns the number of sessions touched
+	// (0 or 1).
+	TouchSessionDigest(ctx context.Context, digestHex string) (int64, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -290,6 +296,20 @@ func (s *InMemorySessionStore) TouchPrincipal(_ context.Context, principal strin
 		n++
 	}
 	return n, nil
+}
+
+// TouchSessionDigest slides last_seen_at for the single session the
+// digestHex row key names (SR-1-F3) — same liveness guards as
+// TouchPrincipal, so an expired session is never revived.
+func (s *InMemorySessionStore) TouchSessionDigest(_ context.Context, digestHex string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.peekLocked(digestHex, s.now())
+	if sess == nil {
+		return 0, nil
+	}
+	sess.LastSeenAt = s.now()
+	return 1, nil
 }
 
 func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
@@ -866,26 +886,33 @@ const inputTouchMinInterval = time.Minute
 const inputThrottleMaxEntries = 10_000
 
 // InputHook returns the broker input hook (broker.WithInputHook): each
-// recorded "input" event slides the portal idle timer of the lease's
-// principal — the Principal.Owner() string "issuer|subject" — throttled to
-// one store write per principal per minute. Input never revives a session
-// that already expired; the store's TouchPrincipal WHERE clause excludes
-// sessions outside the idle window (D18).
-func (a *Authenticator) InputHook() func(ctx context.Context, principal string) {
+// recorded "input" event slides the portal idle timer of the session the
+// input arrived under — the lease's bound portal_session_digest — throttled
+// to one store write per key per minute (SR-1-F3). A legacy lease carrying
+// no digest falls back to the principal-wide touch. Input never revives a
+// session that already expired; the store's WHERE clauses exclude sessions
+// outside the idle window (D18).
+func (a *Authenticator) InputHook() func(ctx context.Context, principal, sessionDigest string) {
 	hook, _ := a.newInputHook(inputThrottleMaxEntries)
 	return hook
 }
 
 // newInputHook builds the throttled hook over an LRU of at most max
-// principals; size reports the current entry count (tests).
-func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, principal string), size func() int) {
+// keys — a session digest when the lease names one, else the principal —
+// so a multi-session principal throttles per session, not per identity;
+// size reports the current entry count (tests).
+func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, principal, sessionDigest string), size func() int) {
 	var mu sync.Mutex
 	order := list.New() // front = most recently seen; elements are *throttleEntry
-	byPrincipal := map[string]*list.Element{}
-	hook = func(ctx context.Context, principal string) {
+	byKey := map[string]*list.Element{}
+	hook = func(ctx context.Context, principal, sessionDigest string) {
+		key := "p:" + principal
+		if sessionDigest != "" {
+			key = "s:" + sessionDigest
+		}
 		now := a.now()
 		mu.Lock()
-		if el, ok := byPrincipal[principal]; ok {
+		if el, ok := byKey[key]; ok {
 			e := el.Value.(*throttleEntry)
 			order.MoveToFront(el)
 			if now.Sub(e.at) < inputTouchMinInterval {
@@ -894,15 +921,21 @@ func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, pr
 			}
 			e.at = now
 		} else {
-			byPrincipal[principal] = order.PushFront(&throttleEntry{principal: principal, at: now})
+			byKey[key] = order.PushFront(&throttleEntry{key: key, at: now})
 			if order.Len() > max {
 				oldest := order.Back()
 				order.Remove(oldest)
-				delete(byPrincipal, oldest.Value.(*throttleEntry).principal)
+				delete(byKey, oldest.Value.(*throttleEntry).key)
 			}
 		}
 		mu.Unlock()
-		if _, err := a.sessions.TouchPrincipal(ctx, principal); err != nil {
+		var err error
+		if sessionDigest != "" {
+			_, err = a.sessions.TouchSessionDigest(ctx, sessionDigest)
+		} else {
+			_, err = a.sessions.TouchPrincipal(ctx, principal)
+		}
+		if err != nil {
 			a.log.Warn("session idle touch failed", "err", err)
 		}
 	}
@@ -914,11 +947,12 @@ func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, pr
 	return hook, size
 }
 
-// throttleEntry is one LRU element: when the principal's session was last
-// touched.
+// throttleEntry is one LRU element: when this key's session(s) were last
+// touched — "s:"+digest keys a single bound session, "p:"+principal the
+// legacy principal-wide touch.
 type throttleEntry struct {
-	principal string
-	at        time.Time
+	key string
+	at  time.Time
 }
 
 func (a *Authenticator) tenantAllowed(tenant string) bool {

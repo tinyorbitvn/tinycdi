@@ -119,11 +119,12 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, p
 }
 
 // WithInputHook registers fn to be called with the lease's principal
-// (principal_subject — the "issuer|subject" owner string) on each recorded
-// "input" activity event. The portal wires this to slide the owning user's
-// portal session idle timer (D18); connected/disconnect events and rejected
-// reports never invoke it.
-func WithInputHook(fn func(ctx context.Context, principal string)) Option {
+// (principal_subject — the "issuer|subject" owner string — plus the lease's
+// bound portal_session_digest, "" for legacy NULL rows) on each recorded
+// "input" activity event. The portal wires this to slide the idle timer of
+// the session the input arrived under (D18, SR-1-F3);
+// connected/disconnect events and rejected reports never invoke it.
+func WithInputHook(fn func(ctx context.Context, principal, sessionDigest string)) Option {
 	return func(b *Broker) { b.inputHook = fn }
 }
 

@@ -456,7 +456,7 @@ func TestSessionIdleAndAbsoluteExpiry(t *testing.T) {
 	resp.Body.Close()
 	sess = findCookie(cookies, env.auth.SessionCookieName())
 	fc.Advance(30 * time.Second)
-	r = env.authedGet(t, sess, "/v1/me") // touches idle
+	r = env.authedGet(t, sess, "/v1/me") // passive read — does not touch idle
 	r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("second session rejected early: %d", r.StatusCode)

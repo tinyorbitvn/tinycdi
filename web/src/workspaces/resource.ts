@@ -24,14 +24,7 @@ export type PollInterval<T> = number | null | ((data: T | undefined) => number |
 
 const MAX_BACKOFF_MS = 30_000;
 
-// The `background` flag tells the loader whether the call is a scheduled
-// poll tick (true → the request carries POLL_HEADERS and cannot slide the
-// portal idle window) or user-facing activity (false → mount loads,
-// manual refresh, return-to-visible reloads all slide normally).
-export function useResource<T>(
-  load: (background: boolean) => Promise<T>,
-  interval: PollInterval<T> = null,
-): Resource<T> {
+export function useResource<T>(load: () => Promise<T>, interval: PollInterval<T> = null): Resource<T> {
   const [data, setData] = useState<T | undefined>(undefined);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -50,29 +43,26 @@ export function useResource<T>(
   // poll is untouched, so always-on consumers are unchanged.
   const scheduleRef = useRef<() => void>(() => {});
 
-  const run = useCallback(
-    async (background: boolean) => {
-      const started = epoch.current;
-      try {
-        const d = await load(background);
-        if (started !== epoch.current) return;
-        dataRef.current = d;
-        failures.current = 0;
-        retryAfterMs.current = null;
-        setData(d);
-        setError(null);
-      } catch (e) {
-        if (started !== epoch.current) return;
-        failures.current += 1;
-        const ra = (e as { retryAfterMs?: unknown }).retryAfterMs;
-        retryAfterMs.current = typeof ra === "number" && Number.isFinite(ra) ? ra : null;
-        setError(e);
-      } finally {
-        if (started === epoch.current) setLoading(false);
-      }
-    },
-    [load],
-  );
+  const run = useCallback(async () => {
+    const started = epoch.current;
+    try {
+      const d = await load();
+      if (started !== epoch.current) return;
+      dataRef.current = d;
+      failures.current = 0;
+      retryAfterMs.current = null;
+      setData(d);
+      setError(null);
+    } catch (e) {
+      if (started !== epoch.current) return;
+      failures.current += 1;
+      const ra = (e as { retryAfterMs?: unknown }).retryAfterMs;
+      retryAfterMs.current = typeof ra === "number" && Number.isFinite(ra) ? ra : null;
+      setError(e);
+    } finally {
+      if (started === epoch.current) setLoading(false);
+    }
+  }, [load]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -98,17 +88,15 @@ export function useResource<T>(
       armed = false;
       const delay = nextDelay();
       if (delay === null || document.visibilityState === "hidden") return;
-      timer = setTimeout(() => void tick(true), delay);
+      timer = setTimeout(() => void tick(), delay);
       armed = true;
     };
-    const tick = async (background: boolean) => {
-      await run(background);
+    const tick = async () => {
+      await run();
       schedule();
     };
     const onVisible = () => {
-      // Returning to a hidden tab is the user showing up — the reload
-      // counts as activity; only the timer-driven ticks are background.
-      if (document.visibilityState === "visible") void tick(false);
+      if (document.visibilityState === "visible") void tick();
       else {
         clearTimeout(timer);
         armed = false;
@@ -117,7 +105,7 @@ export function useResource<T>(
     scheduleRef.current = () => {
       if (!armed) schedule();
     };
-    void tick(false);
+    void tick();
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       stopped = true;
@@ -138,7 +126,7 @@ export function useResource<T>(
 
   const refresh = useCallback(() => {
     epoch.current += 1;
-    return run(false).then(() => scheduleRef.current());
+    return run().then(() => scheduleRef.current());
   }, [run]);
 
   const clearError = useCallback(() => setError(null), []);

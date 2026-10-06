@@ -27,18 +27,18 @@ info:
       transactional outbox (see ADR 0002); Kubernetes RBAC denies direct CR
       writes by end users.
 
-    ## Session idle timeout and background polling
+    ## Session idle timeout
 
-    Sessions carry a sliding idle timeout: an authenticated request normally
-    slides the idle deadline, while a request carrying the header
-    `X-TCDI-Poll: background` is authenticated identically but does **not**
-    slide it. The portal sends the marker on its interval polls so a
-    visible-but-unattended tab cannot hold a session open; interactive
-    desktop input slides the same window through a server-measured signal,
-    not through this API. The marker is honoured on every authenticated
-    endpoint — it can only withhold an idle slide, never earn one, so a
-    client gains nothing by sending it. `GET /v1/session` and
-    `GET /v1/workspaces/{workspaceId}/connection` are always passive.
+    Sessions carry a sliding idle timeout (default 30 min) inside a fixed
+    absolute cap. The server decides what counts as activity — never the
+    client: **every `GET` endpoint on this API is passive** and
+    authenticates without extending the idle deadline, so the portal's
+    interval polls cannot hold a visible-but-unattended session open. Only
+    mutations (any non-`GET` endpoint, `POST /v1/logout` included) and
+    server-measured interactive desktop input slide the window. A session
+    that has idled out is dead everywhere: lease redeem, renew and
+    rehydrate consult the same window, so an open desktop stream dies with
+    the session it was launched under within one renew cycle.
 
     ## Idempotency
 

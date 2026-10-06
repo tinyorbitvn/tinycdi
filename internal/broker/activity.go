@@ -158,11 +158,13 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 	if err := b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev, now); err != nil {
 		return err
 	}
-	// Desktop input extends the owning user's PORTAL session idle timer
-	// (D18): the hook receives the lease's principal — the "iss|sub" owner
-	// string — after the event is durably recorded.
+	// Desktop input extends the owning session's PORTAL idle timer (D18):
+	// the hook receives the lease's principal and the bound
+	// portal_session_digest — input credits exactly the session the
+	// stream was launched under (SR-1-F3); a legacy NULL digest degrades
+	// to the principal-wide touch — after the event is durably recorded.
 	if ev.Type == ActivityInput && b.inputHook != nil {
-		b.inputHook(ctx, l.PrincipalSubject)
+		b.inputHook(ctx, l.PrincipalSubject, l.PortalSessionDigest)
 	}
 	return nil
 }

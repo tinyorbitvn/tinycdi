@@ -213,11 +213,11 @@ func NewAdminQuotaHandler(src AdminQuotaSource, dir Directory, t TenantResolver,
 }
 
 // MountAdminQuotaRoutes registers the admin quota routes audited (see
-// MountWorkspaceRoutes): RequireAuth+audit on the read, RequireAuth+audit+
-// RequireCSRF on the write — the read is inside the wrapper too, so admin
+// MountWorkspaceRoutes): RequireAuthPassive+audit on the read,
+// RequireAuth+audit+RequireCSRF on the write — the read is inside the wrapper too, so admin
 // API coverage is total: every /v1/admin/ request leaves an audit event.
 func MountAdminQuotaRoutes(mux *http.ServeMux, authn *Authenticator, h *AdminQuotaHandler) {
-	mux.Handle(routeAdminQuotaGet, authn.RequireAuth(
+	mux.Handle(routeAdminQuotaGet, authn.RequireAuthPassive(
 		audited(h.audit, routeAdminQuotaGet, http.HandlerFunc(h.Get))))
 	mux.Handle(routeAdminQuotaSet, authn.RequireAuth(
 		audited(h.audit, routeAdminQuotaSet,

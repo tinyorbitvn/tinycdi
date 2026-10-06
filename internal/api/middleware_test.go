@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -382,6 +381,9 @@ func (s failingSessionStore) Peek(context.Context, string) (*Session, error) { r
 func (s failingSessionStore) TouchPrincipal(context.Context, string) (int64, error) {
 	return 0, s.err
 }
+func (s failingSessionStore) TouchSessionDigest(context.Context, string) (int64, error) {
+	return 0, s.err
+}
 func (s failingSessionStore) Delete(context.Context, string) error { return s.err }
 
 // TestRequireAuth_SessionStoreErrors: a store error is not "no session".
@@ -432,96 +434,5 @@ func TestRequireAuth_SessionStoreErrors(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestRequireAuth_BackgroundPollMarker (FIX-IDLE): a request carrying
-// X-TCDI-Poll: background authenticates but never slides the idle window,
-// so the portal's interval polls cannot keep a visible-but-unattended
-// session alive. An unmarked request on the same RequireAuth route still
-// slides; once the window lapses both shapes answer 401.
-func TestRequireAuth_BackgroundPollMarker(t *testing.T) {
-	fc := &fakeClock{now: time.Now()}
-	store := NewInMemorySessionStore(time.Minute).WithClock(fc.Now)
-	auth := &Authenticator{
-		cfg:      &AuthConfig{SessionCookieName: "__Host-tcdi_session"},
-		sessions: store,
-		now:      fc.Now,
-	}
-	save := func(id string) {
-		if err := store.Save(context.Background(), &Session{
-			ID:         id,
-			Principal:  Principal{Issuer: "iss", Subject: "sub", TenantID: "tenant-a"},
-			CreatedAt:  fc.Now(),
-			LastSeenAt: fc.Now(),
-			ExpiresAt:  fc.Now().Add(time.Hour),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	handler := auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	do := func(id string, marked bool) int {
-		req := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
-		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: id})
-		if marked {
-			// Literal wire values, not PollHeader/PollHeaderValue, so this
-			// file still compiles on a tree without the marker — where the
-			// "poll past idle" step then fails, proving the regression.
-			req.Header.Set("X-TCDI-Poll", "background")
-		}
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		return rec.Code
-	}
-
-	// Marked polls authenticate but never slide: created at t=0, the poll
-	// at +50s succeeds yet the window still lapses at +60s.
-	save("sess-poll")
-	fc.Advance(50 * time.Second)
-	if code := do("sess-poll", true); code != http.StatusNoContent {
-		t.Fatalf("marked poll inside the window rejected: %d", code)
-	}
-	fc.Advance(15 * time.Second) // t=65s — past idle despite the +50s poll
-	if code := do("sess-poll", true); code != http.StatusUnauthorized {
-		t.Fatalf("marked poll past idle: %d, want 401", code)
-	}
-
-	// The marker is opt-out only: a wrong value is ordinary activity.
-	save("sess-other-value")
-	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
-	req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: "sess-other-value"})
-	req.Header.Set("X-TCDI-Poll", "1")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("other marker value rejected: %d", rec.Code)
-	}
-	sess, err := store.Get(context.Background(), "sess-other-value")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !sess.LastSeenAt.Equal(fc.Now()) {
-		t.Fatalf("unrecognized marker value did not slide: LastSeenAt=%v now=%v", sess.LastSeenAt, fc.Now())
-	}
-
-	// Without the marker the same cadence slides the window as before.
-	save("sess-active")
-	fc.Advance(50 * time.Second)
-	if code := do("sess-active", false); code != http.StatusNoContent {
-		t.Fatalf("unmarked request rejected: %d", code)
-	}
-	fc.Advance(50 * time.Second) // 50s since the slide — still inside
-	if code := do("sess-active", false); code != http.StatusNoContent {
-		t.Fatalf("unmarked request past one window: %d", code)
-	}
-
-	// Idle expiry answers 401 to marked and unmarked requests alike.
-	fc.Advance(61 * time.Second)
-	for _, marked := range []bool{false, true} {
-		if code := do("sess-active", marked); code != http.StatusUnauthorized {
-			t.Fatalf("expired session marked=%v: %d, want 401", marked, code)
-		}
 	}
 }

@@ -24,7 +24,7 @@ func TestInputHookThrottle_Bounded(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3*max; i++ {
-		hook(ctx, fmt.Sprintf("%s|user-%d", env.issuer.URL(), i))
+		hook(ctx, fmt.Sprintf("%s|user-%d", env.issuer.URL(), i), "")
 		if n := size(); n > max {
 			t.Fatalf("throttle map holds %d entries after %d principals, want <= %d", n, i+1, max)
 		}
@@ -39,13 +39,13 @@ func TestInputHookThrottle_Bounded(t *testing.T) {
 	counting := &countingTouchStore{SessionStore: env.auth.sessions, n: &touches}
 	env.auth.sessions = counting
 	recent := fmt.Sprintf("%s|user-%d", env.issuer.URL(), 3*max-1)
-	hook(ctx, recent)
+	hook(ctx, recent, "")
 	if touches != 0 {
 		t.Fatalf("recent principal touched the store again within the minute (%d writes)", touches)
 	}
 	// …and writes again once the minute has passed.
 	fc.Advance(inputTouchMinInterval + time.Second)
-	hook(ctx, recent)
+	hook(ctx, recent, "")
 	if touches != 1 {
 		t.Fatalf("principal not touched after the throttle interval (%d writes)", touches)
 	}

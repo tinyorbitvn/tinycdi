@@ -72,23 +72,10 @@ func RequestIDFromContext(ctx context.Context) string {
 // Authentication
 // ---------------------------------------------------------------------------
 
-// PollHeader marks a request as portal background polling — automated
-// traffic, not user activity. When it carries PollHeaderValue the session
-// is read with Peek instead of Get, so the request authenticates normally
-// but cannot slide the idle deadline. It is honoured on every
-// authenticated route and any method: the marker can only withhold an
-// idle slide, never earn one, so a forged marker gains nothing (P4, D18).
-const PollHeader = "X-TCDI-Poll"
-
-// PollHeaderValue is the marker value the portal sends on its interval
-// polls; any other value leaves the request a normal activity touch.
-const PollHeaderValue = "background"
-
 // RequireAuth rejects requests without a valid server-side session (opaque
 // host-only cookie) and attaches the verified Principal and Session to the
 // request context. Handlers must derive owner/tenant from that principal.
-// Each authenticated request slides the session's idle deadline (Get)
-// unless the client marked it background polling (PollHeader).
+// Each authenticated request slides the session's idle deadline (Get).
 func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 	return a.requireAuth(next, true)
 }
@@ -108,7 +95,7 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			return
 		}
 		var sess *Session
-		if slide && r.Header.Get(PollHeader) != PollHeaderValue {
+		if slide {
 			sess, err = a.sessions.Get(r.Context(), c.Value)
 		} else {
 			sess, err = a.sessions.Peek(r.Context(), c.Value)

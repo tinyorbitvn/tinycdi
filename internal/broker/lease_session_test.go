@@ -368,3 +368,99 @@ func TestLeaseSession_NoDoubleCount(t *testing.T) {
 		t.Fatalf("metric mismatch:\n%v", err)
 	}
 }
+
+// idleOutPortalSession ages the seeded sessions row's last_seen_at beyond
+// any configured idle window — the shape an unattended session has when
+// the lease layer next consults it (SR-1-F2).
+func idleOutPortalSession(t *testing.T, db *store.DB, portalSessionID string) {
+	t.Helper()
+	tag, err := db.Pool().Exec(ctx,
+		`UPDATE sessions SET last_seen_at = now() - interval '1 hour' WHERE id = $1`,
+		portalSessionRowKey(portalSessionID))
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("idle-out portal session: %v (rows=%d)", err, tag.RowsAffected())
+	}
+}
+
+// TestLeaseSession_IdleDeadSessionRevokesOnRenew (SR-1-F2): the portal idle
+// window is honoured at the lease layer — a bound session whose
+// last_seen_at is older than the window is dead exactly as RequireAuth
+// reports it, so the next renew revokes the lease (reason 'invalid') and
+// the cookie resolve fails closed; a freshly-touched session renews fine.
+func TestLeaseSession_IdleDeadSessionRevokesOnRenew(t *testing.T) {
+	db, _, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	b := broker.New(db, src, broker.WithClock(clock), broker.WithMetrics(m),
+		broker.WithSessionIdle(time.Minute))
+
+	lease := leaseForSess(t, db, b, gwA, "ws-1", false, "sess-1")
+	d := digestOf("cookie-1")
+	if err := b.BindSession(ctx, gwA, lease.ID, d); err != nil {
+		t.Fatalf("BindSession: %v", err)
+	}
+
+	// Inside the window the lease renews.
+	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); err != nil {
+		t.Fatalf("renew under live session = %v", err)
+	}
+
+	idleOutPortalSession(t, db, "sess-1")
+
+	// The next renew is terminal — same ErrRevoked the S17 barrier emits.
+	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("renew under idle-dead session = %v, want ErrRevoked", err)
+	}
+	state, closed := leaseState(t, db, lease.ID)
+	if state != "revoked" || !closed {
+		t.Fatalf("lease state=%q closed=%v, want revoked+closed_at", state, closed)
+	}
+	if err := testutil.GatherAndCompare(reg,
+		strings.NewReader(leaseMissingSeries("invalid", 1)),
+		"tinycdi_lease_session_missing_total"); err != nil {
+		t.Fatalf("metric mismatch:\n%v", err)
+	}
+
+	// Rehydrate (cookie -> lease resolve) fails closed too.
+	if _, err := b.LeaseBySession(ctx, gwA, d); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("rehydrate under idle-dead session = %v, want ErrRevoked", err)
+	}
+}
+
+// TestLeaseSession_RedeemRejectsIdleDeadSession (SR-1-F2): a ticket minted
+// while the portal session was live cannot redeem once the session has
+// idled out — the redeem-time re-check consults the same idle window.
+func TestLeaseSession_RedeemRejectsIdleDeadSession(t *testing.T) {
+	db, _, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	b := broker.New(db, src, broker.WithClock(clock), broker.WithSessionIdle(time.Minute))
+
+	seedPortalSession(t, db, "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	if err != nil {
+		t.Fatalf("IssueTicket: %v", err)
+	}
+	idleOutPortalSession(t, db, "sess-1")
+	if _, err := b.RedeemTicket(ctx, gwA, tk.Token); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("redeem under idle-dead session = %v, want ErrRevoked", err)
+	}
+}
+
+// TestLeaseSession_IdleCheckDisabledWithoutOption: a broker configured
+// without WithSessionIdle keeps the S17 predicate exactly as before —
+// epoch + absolute expiry only — so replicas that never wire the option
+// degrade to the old behaviour rather than revoking on sight.
+func TestLeaseSession_IdleCheckDisabledWithoutOption(t *testing.T) {
+	db, b, clock, src := setup(t) // no WithSessionIdle
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+
+	lease := leaseForSess(t, db, b, gwA, "ws-1", false, "sess-1")
+	idleOutPortalSession(t, db, "sess-1")
+	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); err != nil {
+		t.Fatalf("renew without idle option = %v, want nil", err)
+	}
+}

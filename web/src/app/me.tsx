@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { POLL_HEADERS, setCsrfToken, unwrap, type ApiClient } from "../api/client";
+import { setCsrfToken, unwrap, type ApiClient } from "../api/client";
 import { useApi } from "../api/context";
 import type { components } from "../api/generated/schema";
 
@@ -77,13 +77,8 @@ export function isTransientMeError(e: unknown): boolean {
   return e instanceof TypeError;
 }
 
-// background marks a retry-loop attempt as automated traffic: the request
-// authenticates without sliding the portal idle window (POLL_HEADERS).
-export async function fetchMe(background = false, fetchImpl: typeof fetch = fetch): Promise<Me> {
-  const res = await fetchImpl("/v1/me", {
-    credentials: "same-origin",
-    headers: { Accept: "application/json", ...(background ? POLL_HEADERS : {}) },
-  });
+export async function fetchMe(fetchImpl: typeof fetch = fetch): Promise<Me> {
+  const res = await fetchImpl("/v1/me", { credentials: "same-origin", headers: { Accept: "application/json" } });
   if (res.status === 404 || res.status === 501) return STUB_ME;
   if (!res.ok) throw new MeHttpError(res.status);
   return parseMe(await res.json());
@@ -100,8 +95,8 @@ export function MeProvider({
   load = fetchMe,
 }: {
   children: ReactNode;
-  /** Injectable for tests; `background` marks a backoff retry. */
-  load?: (background: boolean) => Promise<Me>;
+  /** Injectable for tests. */
+  load?: () => Promise<Me>;
 }) {
   const [state, setState] = useState<MeState>({ status: "loading", me: null });
   useEffect(() => {
@@ -110,10 +105,7 @@ export function MeProvider({
     let failures = 0;
     const attempt = async () => {
       try {
-        // The first attempt is part of the page load — real navigation;
-        // backoff retries are background and must not slide the idle
-        // window while the shell sits on an unreachable API (D18).
-        const me = await load(failures > 0);
+        const me = await load();
         if (cancelled) return;
         // The API client reads the token from module state, not from a
         // cookie (D17) — install what /v1/me published.
@@ -238,37 +230,24 @@ type Query = Record<string, string | number | undefined>;
 interface LooseGet {
   GET(
     path: string,
-    init: { params?: { query?: Query }; headers?: Record<string, string> },
+    init: { params?: { query?: Query } },
   ): Promise<{ data?: unknown; error?: unknown; response: Response }>;
 }
 
-export async function get<T>(
-  api: ApiClient,
-  path: string,
-  query?: Query,
-  background = false,
-): Promise<T> {
+export async function get<T>(api: ApiClient, path: string, query?: Query): Promise<T> {
   const loose = api as unknown as LooseGet;
-  return unwrap(
-    await loose.GET(path, {
-      ...(query ? { params: { query } } : {}),
-      // background marks an automated poll: the server authenticates the
-      // request without sliding the portal idle window (D18).
-      ...(background ? { headers: POLL_HEADERS } : {}),
-    }),
-  ) as T;
+  return unwrap(await loose.GET(path, query ? { params: { query } } : {})) as T;
 }
 
 export async function listAll<T>(
   api: ApiClient,
   path: string,
   query: Query,
-  background = false,
 ): Promise<{ items: T[]; truncated: boolean }> {
   const items: T[] = [];
   let pageToken: string | undefined;
   for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await get<Page<T>>(api, path, { ...query, limit: PAGE_LIMIT, pageToken }, background);
+    const page = await get<Page<T>>(api, path, { ...query, limit: PAGE_LIMIT, pageToken });
     items.push(...page.items);
     if (!page.nextPageToken) return { items, truncated: false };
     pageToken = page.nextPageToken;

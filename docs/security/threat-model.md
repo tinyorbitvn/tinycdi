@@ -184,15 +184,15 @@ Controls:
   peer, or the right-most untrusted X-Forwarded-For entry when the peer
   sits inside `-trusted-proxies` CIDRs (`ratelimit.go:174`,
   `ParseTrustedProxies`).
-- **Passive auth** — `GET /v1/connections/.../status` authenticates via
+- **Passive auth** — since FIX-IDLE every cookie-authenticated `GET` mounts
   `RequireAuthPassive`, which never extends the idle clock
-  (`internal/api/middleware.go`, `internal/api/connection_status.go`) —
-  A6-S6's second authenticated path exists to be reviewed. The portal's
-  interval polls additionally carry `X-TCDI-Poll: background`, which makes
-  `requireAuth` read the session with `Peek` on any route: a
-  visible-but-unattended tab cannot hold a session open, and the marker
-  can only withhold an idle slide so a forged one gains nothing
-  (`TestRequireAuth_BackgroundPollMarker`).
+  (`internal/api/middleware.go`, and the `safe`/`RequireAuthPassive` mounts
+  in `workspaces.go`, `data.go`, `me.go`, `quota.go`, `adminquota.go`,
+  `adminuserlimit.go`): the portal's interval polls can no longer hold a
+  visible-but-unattended session open. Only mutations and server-measured
+  desktop input slide the window. `GET /v1/session` is anonymous (Peek) and
+  `GET /v1/connections/.../status` was already passive — A6-S6's second
+  authenticated path exists to be reviewed.
 - **Tenant scoping** — the principal is built only from verified claims
   (`internal/api/principal.go`); tenant-admin surface is scoped and events are
   curated, not raw (`internal/api/events.go`, `statusview.go`;
@@ -547,27 +547,23 @@ Additional items found while writing this document (not from A6):
   `ci.yml` job `partitioned`): real Set-Cookie attributes, in-frame
   reconnect across a backend rollout, revoked-lease cookie rejection.
   Same-site topology only; a cross-site deployment is not exercised.
-- **Portal idle-extension depends on lease activity** — verify a stolen
-  portal cookie alone cannot extend itself, and that idle extension only
-  credits input activity measured server-side.
-- **Portal background polling vs the idle window** — Implemented: before
-  this fix the SPA's interval polls of `GET /v1/workspaces`,
-  `/v1/workspaces/{id}` and `/v1/workspaces/{id}/events` (all mounted
-  behind sliding `RequireAuth`) kept a visible-but-unattended tab's
-  session alive forever. The SPA now marks timer-driven reads with
-  `X-TCDI-Poll: background` (useResource ticks, the session page's
-  "starting" poll, `/v1/me` backoff retries) and `requireAuth` peeks
-  instead of sliding on marked requests; navigation, user-triggered
-  refresh, return-to-visible reloads and mutations still slide. Desktop
-  streams keep the window open only through server-measured RFB input
-  (`InputHook` → `TouchPrincipal`, throttle 1/min per principal), so an
-  active desktop user is not signed out mid-work while an open-but-idle
-  stream is not portal activity. Residual, unchanged here: lease
-  redeem/renew/rehydrate never consult the portal idle window — a lease
-  outlives idle expiry by design and dies on its own TTL, on revoke, or
-  on the bound session's absolute expiry (S17), so tearing an open stream
-  down at portal-idle expiry remains a separate decision, not covered by
-  this fix.
+- **Portal idle-extension depends on lease activity** — Implemented
+  (FIX-IDLE): portal reads are all passive server-side, so no HTTP request
+  a client can shape extends the idle window; extension only ever credits
+  (a) mutations and (b) RFB input measured broker-side. That input touch
+  is now scoped to the bound portal session digest — the session the
+  stream's lease was minted under — rather than every session of the
+  principal (SR-1-F3; `TouchSessionDigest`,
+  `internal/store/sessions.go`), with the principal-wide path kept only
+  as the NULL-digest fallback for pre-binding leases. Lease
+  redeem/renew/rehydrate honour the portal idle window (SR-1-F2): the
+  liveness re-checks in `loadLease` and `RedeemTicket` consult
+  `last_seen_at` under `WithSessionIdle`, so an idled-out session's lease
+  is revoked at the next renew (reason `invalid`) and a stale cookie
+  cannot rehydrate it. Renew deliberately does NOT slide the window —
+  otherwise a connected-but-idle stream would pin the session open
+  forever — so an abandoned desktop tab dies with its portal session
+  inside one renew cycle.
 - **Metrics listener** is scrape-only but has no auth — Implemented:
   served on the dedicated ClusterIP `backend-metrics` Service; the only
   rule opening the metrics port is `allow-metrics-scrape` admitting
