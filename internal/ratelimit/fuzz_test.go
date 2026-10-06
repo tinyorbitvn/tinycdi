@@ -95,7 +95,7 @@ func FuzzClientKey(f *testing.F) {
 				entries = append(entries, e)
 			}
 		}
-		want := peer
+		want := canon(peer)
 		if trustedPeer := inTrusted(peer, trusted); trustedPeer {
 			leftmost := ""
 			for i := len(entries) - 1; i >= 0; i-- {

@@ -90,6 +90,75 @@ func TestClientKey_RightmostUntrusted(t *testing.T) {
 	}
 }
 
+// TestClientKey_IPv6FoldedTo64 pins the per-client budget at the /64 —
+// the prefix one subscriber controls: every address inside it (temporary
+// privacy addresses, deliberate rotation) shares one bucket, while a
+// different /64 is a different client. Covers both the socket-peer path
+// and the right-most-untrusted XFF path.
+func TestClientKey_IPv6FoldedTo64(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	xf := func(xff string) *http.Request {
+		return &http.Request{
+			RemoteAddr: "10.1.2.3:443",
+			Header:     http.Header{"X-Forwarded-For": {xff}},
+		}
+	}
+	k1 := ClientKey(xf("2001:db8::1"), trusted)
+	k2 := ClientKey(xf("2001:db8::ffff"), trusted)
+	if k1 != k2 {
+		t.Fatalf("addresses in one /64 keyed separately: %q vs %q", k1, k2)
+	}
+	if k3 := ClientKey(xf("2001:db8:0:1::1"), trusted); k3 == k1 {
+		t.Fatalf("different /64 shares a key: %q", k3)
+	}
+	// A direct (untrusted peer) IPv6 client folds the same way.
+	peer := &http.Request{RemoteAddr: "[2001:db8::5]:5150", Header: http.Header{}}
+	if k := ClientKey(peer, nil); k != k1 {
+		t.Fatalf("socket peer key = %q, want the same /64 bucket %q", k, k1)
+	}
+
+	// The folded key is what the bucket sees: 101 addresses inside one
+	// /64 draw from ONE budget, not 101.
+	l := New(1, 1, 100000, nil) // 1/min, burst 1
+	mk := func(xff string) string { return ClientKey(xf(xff), trusted) }
+	if ok, _ := l.Allow(mk("2001:db8::1")); !ok {
+		t.Fatal("first request refused")
+	}
+	for i := 2; i <= 101; i++ {
+		if ok, _ := l.Allow(mk(fmt.Sprintf("2001:db8::%x", i))); ok {
+			t.Fatalf("rotation to 2001:db8::%x escaped the /64 budget", i)
+		}
+	}
+	// A different /64 is a different client and gets its own budget.
+	if ok, _ := l.Allow(mk("2001:db8:0:1::1")); !ok {
+		t.Fatal("first request from a different /64 refused")
+	}
+}
+
+// TestClientKey_MappedFormsUnified: the IPv4-mapped spellings of one
+// address — "::ffff:1.2.3.4", "0:0:0:0:0:ffff:1.2.3.4" and the native
+// "1.2.3.4" — must land on the single IPv4 key, so a dual-stack client
+// cannot double its budget by switching spelling.
+func TestClientKey_MappedFormsUnified(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	mk := func(xff string) string {
+		return ClientKey(&http.Request{
+			RemoteAddr: "10.1.2.3:443",
+			Header:     http.Header{"X-Forwarded-For": {xff}},
+		}, trusted)
+	}
+	k1 := mk("1.2.3.4")
+	for _, form := range []string{"::ffff:1.2.3.4", "0:0:0:0:0:ffff:1.2.3.4"} {
+		if k := mk(form); k != k1 {
+			t.Fatalf("mapped form %q keyed %q, want %q", form, k, k1)
+		}
+	}
+	// The mapped spelling of a direct socket peer unifies too.
+	if k := ClientKey(&http.Request{RemoteAddr: "[::ffff:1.2.3.4]:443", Header: http.Header{}}, nil); k != k1 {
+		t.Fatalf("mapped socket peer keyed %q, want %q", k, k1)
+	}
+}
+
 func TestClientKey_MultipleHeadersAndNonIP(t *testing.T) {
 	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 	r := &http.Request{

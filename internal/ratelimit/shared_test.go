@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -771,5 +773,42 @@ func TestShared_PanicProbeReprobes(t *testing.T) {
 	}
 	if ok, _ := l.Allow("k"); ok {
 		t.Fatal("6th shared hit allowed — the window bound was lost after recovery")
+	}
+}
+
+// TestShared_IPv6WindowAndLocalShareKey pins the single-key invariant
+// under the /64 fold: requests ClientKey folds into one IPv6 /64 hit ONE
+// Postgres window row AND one local bucket — the two enforcement layers
+// can never disagree about which client a hit belongs to, because both
+// are keyed by the same canonical string end to end.
+func TestShared_IPv6WindowAndLocalShareKey(t *testing.T) {
+	ws := newFakeWindowStore()
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	l := NewShared(New(6000, 100, 100, nil), New(1, 1, 100, nil), ws, "login", 2, nil, nil, nil)
+
+	mk := func(xff string) *http.Request {
+		return &http.Request{
+			RemoteAddr: "10.1.2.3:443",
+			Header:     http.Header{"X-Forwarded-For": {xff}},
+		}
+	}
+	k1 := ClientKey(mk("2001:db8::1"), trusted)
+	k2 := ClientKey(mk("2001:db8::2"), trusted)
+	if k1 != k2 {
+		t.Fatalf("/64 fold diverged: %q vs %q", k1, k2)
+	}
+	// Both hits land on the single folded window row; the third —
+	// another address in the same /64 — is refused by the window bound.
+	if ok, _ := l.Allow(k1); !ok {
+		t.Fatal("first hit refused")
+	}
+	if ok, _ := l.Allow(k2); !ok {
+		t.Fatal("second hit refused — same /64, same window row")
+	}
+	if ok, _ := l.Allow(ClientKey(mk("2001:db8::3"), trusted)); ok {
+		t.Fatal("third hit inside the /64 allowed past window limit 2")
+	}
+	if got := ws.counts["login/"+k1]; got != 3 {
+		t.Fatalf("window row login/%q counted %d, want 3 — every hit keyed identically", k1, got)
 	}
 }
