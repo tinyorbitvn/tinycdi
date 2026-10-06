@@ -65,7 +65,7 @@ func newConnectionEnv(t *testing.T, issuer ConnectionIssuer, opts ...func(*Conne
 	if err != nil {
 		t.Fatalf("sessionhost.ParseDomain: %v", err)
 	}
-	h := NewConnectionHandler(issuer, defaultTenants(), d)
+	h := NewConnectionHandler(issuer, defaultTenants(), d).WithLogger(logger)
 	for _, o := range opts {
 		o(h)
 	}
@@ -161,6 +161,61 @@ func TestCreateConnection_RequiresAuthAndCSRF(t *testing.T) {
 	}
 	if fi.calls != 0 {
 		t.Fatalf("issuer called %d times on rejected requests", fi.calls)
+	}
+}
+
+// TestCreateConnection_InvalidBodyGenericMessage: a malformed body answers
+// 400 INVALID_REQUEST with the generic message every other handler uses —
+// the decoder detail is logged server-side, never echoed (SEC-I7).
+func TestCreateConnection_InvalidBodyGenericMessage(t *testing.T) {
+	fi := &fakeIssuer{}
+	env := newConnectionEnv(t, fi)
+	sess, csrf := login(t, env, "alice")
+
+	r := doReq(t, env, sess, csrf, http.MethodPost,
+		"/v1/workspaces/ws_00000000000000000000000001/connections",
+		`{"takeover":true,"attacker_field":1}`, nil)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("status=%d body=%s, want 400", r.StatusCode, b)
+	}
+	b, _ := io.ReadAll(r.Body)
+	var e Error
+	if err := json.Unmarshal(b, &e); err != nil {
+		t.Fatalf("error body not JSON: %q", b)
+	}
+	if e.Code != CodeInvalidRequest || e.Message != "invalid request body" {
+		t.Fatalf("code=%q message=%q, want INVALID_REQUEST + generic message", e.Code, e.Message)
+	}
+	if bytes.Contains(b, []byte("attacker_field")) {
+		t.Fatalf("decoder detail echoed to client: %s", b)
+	}
+	if !strings.Contains(env.logs.String(), "attacker_field") {
+		t.Fatalf("decoder detail missing from server log: %s", env.logs.String())
+	}
+	if fi.calls != 0 {
+		t.Fatal("issuer called on an invalid body")
+	}
+}
+
+// TestCreateConnection_TrailingJSONRejected: the shared decoder accepts
+// exactly one document — a second JSON value after the request object is a
+// 400 like everywhere else.
+func TestCreateConnection_TrailingJSONRejected(t *testing.T) {
+	fi := &fakeIssuer{}
+	env := newConnectionEnv(t, fi)
+	sess, csrf := login(t, env, "alice")
+
+	r := doReq(t, env, sess, csrf, http.MethodPost,
+		"/v1/workspaces/ws_00000000000000000000000001/connections",
+		`{"takeover":true} {"extra":true}`, nil)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", r.StatusCode)
+	}
+	if fi.calls != 0 {
+		t.Fatal("issuer called on trailing data")
 	}
 }
 
