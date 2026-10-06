@@ -657,6 +657,11 @@ type LogoutResult struct {
 // response.
 const sessionRevokeTimeout = 5 * time.Second
 
+// logoutRetryAfter is the Retry-After hint on the 503 a sign-out answers
+// when the session store could not delete the session row: a transient
+// store failure, safe to retry once the store is back.
+const logoutRetryAfter = "5"
+
 // LogoutHandler destroys the server-side session and expires all login- and
 // session-scoped cookies. Route it behind RequireAuth + RequireCSRF.
 //
@@ -669,6 +674,17 @@ const sessionRevokeTimeout = 5 * time.Second
 // can never rehydrate anywhere. A revoke failure is logged, counted and
 // audited but never kept back the sign-out: the portal cookie is cleared
 // and the session destroyed regardless.
+//
+// The session-row delete is the point of no return and is ordered first for
+// exactly that reason: when it fails the handler answers a retryable 503
+// (UNAVAILABLE + Retry-After) and tears NOTHING down — no cookie expiry, no
+// lease or ticket revoke. The answer "not signed out, retry" then matches
+// the world: the session still validates and its desktops are still alive.
+// Revoking material first would leave a live session with dead streams — a
+// half-revoked state a 503 would be lying about — and expiring the cookie
+// would tell the browser it is signed out while a copied cookie still works.
+// A retry re-runs the whole destroy; the material revoke is a no-op re-run
+// when it already committed.
 //
 // RP-initiated logout: when EndSession is on and the provider advertises
 // end_session_endpoint, it answers 200 {"endSessionUrl"} so the portal can
@@ -691,6 +707,9 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		if err := a.sessions.Delete(ctx, c.Value); err != nil {
 			a.log.Warn("sign-out: session delete failed",
 				"request_id", RequestIDFromContext(ctx), "err", err)
+			w.Header().Set("Retry-After", logoutRetryAfter)
+			writeError(w, r, CodeUnavailable, "could not sign out; retry")
+			return
 		}
 		a.revokeSessionMaterial(r, c.Value)
 	}
