@@ -195,6 +195,71 @@ func TestRevokeAll_NoRevokerIs503(t *testing.T) {
 	}
 }
 
+// txPrincipalRevoker mirrors what the wired broker revoker actually does:
+// on success the principal's session rows are gone for real (the in-memory
+// store stands in for the transaction), on error nothing changes.
+type txPrincipalRevoker struct {
+	fakePrincipalRevoker
+	store *InMemorySessionStore
+}
+
+func (f *txPrincipalRevoker) RevokePrincipalSessions(ctx context.Context, tenantID, issuer, subject string) (RevokeAllResult, error) {
+	res, err := f.fakePrincipalRevoker.RevokePrincipalSessions(ctx, tenantID, issuer, subject)
+	if err != nil {
+		return res, err
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	for key, s := range f.store.sessions {
+		if s.Principal.Issuer == issuer && s.Principal.Subject == subject && s.Principal.TenantID == tenantID {
+			delete(f.store.sessions, key)
+			res.Sessions++
+		}
+	}
+	return res, nil
+}
+
+// TestRevokeAll_StoreFailureThenRetrySignsOut: a revoke-all that fails
+// answers a non-success status and destroys nothing — the caller stays
+// signed in and retries. Once the store recovers, the same call commits:
+// the caller's session no longer validates and the cookie expires.
+func TestRevokeAll_StoreFailureThenRetrySignsOut(t *testing.T) {
+	env := newTestEnv(t, nil)
+	rv := &txPrincipalRevoker{fakePrincipalRevoker: fakePrincipalRevoker{err: errors.New("lease store down")}, store: env.store}
+	env.auth.WithPrincipalRevoker(rv)
+	sess := env.loginSession(t)
+
+	resp := env.postRevokeAll(t, sess, csrfTokenFor(sess.Value))
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		t.Fatalf("failed revocation answered success: %d", resp.StatusCode)
+	}
+	for _, h := range resp.Header.Values("Set-Cookie") {
+		if strings.Contains(h, "Max-Age=0") {
+			t.Fatal("session cookie cleared despite failed revoke")
+		}
+	}
+	r := env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("session gone after failed revoke-all: %d", r.StatusCode)
+	}
+
+	// The store recovers: a retry commits — the caller's session no
+	// longer validates and the cookie dies with the response.
+	rv.err = nil
+	resp = env.postRevokeAll(t, sess, csrfTokenFor(sess.Value))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("retry status = %d, want 204", resp.StatusCode)
+	}
+	r = env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session still valid after retried revoke-all: %d", r.StatusCode)
+	}
+}
+
 // TestRevokeAll_RevokeSurvivesClientDisconnect: a client that disconnects
 // mid-call must not abort the revocation — the revoker runs on a detached,
 // bounded context.
