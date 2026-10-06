@@ -512,7 +512,14 @@ while Postgres is healthy the series measures the shared bound.
 
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
-`X-Forwarded-For` entry stands in. **Behind any ingress or Gateway the value
+`X-Forwarded-For` entry stands in. Recognized client addresses are
+canonicalised before keying: IPv4-mapped spellings (`::ffff:a.b.c.d` in any
+notation) unify with the native IPv4 key, and an IPv6 address keys by its
+**/64 prefix** — the smallest block a single subscriber is delegated — so
+temporary/privacy-address rotation inside one prefix draws from one
+budget instead of minting a fresh one per address. IPv4 stays per-/32.
+
+**Behind any ingress or Gateway the value
 is required, not optional**: with it empty every user arriving through the
 same edge keys on the edge's own address — one shared bucket (~60 logins and
 ~120 launches per minute for the whole organisation) and a self-inflicted
@@ -521,6 +528,18 @@ is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
 `X-Real-IP` headers the workspace pod sees — client-supplied values are
 stripped and rebuilt from the trusted chain only (S18), so a spoofed address
 can never poison the runtime's brute-force blacklist.
+
+The right-most-untrusted derivation is only as good as the list's coverage
+of the proxy chain. Every hop in front that terminates the client
+connection must appear — a trusted hop that *passes* a client-supplied
+`X-Forwarded-For` through instead of appending the address it observed
+(an L4 load balancer that forwards the header, for example) hands the
+rate-limit key to unverified client bytes. Conversely a real hop missing
+from the list becomes "the client": every user behind it shares its one
+bucket. **Dual-stack edges must list their IPv6 ranges alongside the IPv4
+ones** — a proxy that reaches the backend over IPv6 but is only listed by
+its v4 CIDR is untrusted on the v6 path and collapses every v6 client
+into that proxy's /64 bucket.
 
 ```yaml
 # Cilium Gateway API / Ingress — the edge envoy runs host-network, so the

@@ -213,9 +213,26 @@ What that means for sizing:
   to rate+burst locally before the divided floor binds — the just-failed
   request draws a healthy-ceiling token. Size `-login-rate`/
   `-launch-rate` as the aggregate you want to allow.
-- The per-key limits and the limiter's key-space bound are unchanged;
-  `backend.trustedProxies` must still name the edge's CIDRs or every user
-  collapses into the edge's own IP bucket regardless.
+- **The client key is canonicalised, not the literal address.** An IPv6
+  client keys by its **/64 prefix** — the smallest block one subscriber
+  is delegated — so temporary/privacy-address rotation inside the
+  prefix draws one budget instead of minting a fresh bucket per /128;
+  IPv4-mapped spellings (`::ffff:a.b.c.d`, any notation) unify with the
+  native IPv4 key, and IPv4 itself stays per-/32. The one canonical
+  string keys the local buckets AND the shared Postgres window rows, so
+  every enforcement layer agrees on the client. The right-most-untrusted
+  XFF derivation behind that key is only as good as
+  `backend.trustedProxies`' coverage: it must name EVERY proxy hop in
+  front — a trusted hop that passes a client-supplied XFF through
+  instead of appending the observed address hands the key to unverified
+  bytes, and a dual-stack edge missing its IPv6 ranges collapses every
+  v6 client into the proxy's own /64 bucket.
+- **Key format changed once at v1.0 — no migration.** Window rows are
+  keyed by the canonical string, so IPv6 clients move from per-address
+  to per-/64 rows on upgrade (IPv4 keys are unchanged). Rows written
+  under the old format simply expire inside their minute window on the
+  normal sweep; the only effect is that an IPv6 client mid-window at
+  upgrade time gets at most one fresh window's budget.
 
 Set the flags through `backend.extraArgs`
 (`deploy/helm/tinycdi/README.md`, "Rate limits and trusted proxies").

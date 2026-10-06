@@ -831,7 +831,9 @@ func (g *Gateway) direct(r *http.Request) {
 // value must never reach the pod. The derived client is the same
 // ratelimit.ClientKey result the launch limiter uses: the socket peer, or
 // the right-most untrusted chain entry when the peer is inside
-// TrustedProxies. When the peer itself is the client the header is left
+// TrustedProxies — an IPv6 client appears as its /64 base address, so the
+// runtime blacklist folds at the same granularity the limiter bills.
+// When the peer itself is the client the header is left
 // unset — the ReverseProxy appends the socket address itself; when the
 // peer is a trusted proxy the derived client is prepended and the proxy
 // still appends the peer, so the runtime sees "<client>, <peer>".
