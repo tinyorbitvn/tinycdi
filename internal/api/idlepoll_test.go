@@ -135,14 +135,24 @@ func TestSessionTouch_SlidesIdleWindow(t *testing.T) {
 		t.Fatalf("idle-expired session accepted: %d", r.StatusCode)
 	}
 
-	// No CSRF token: denied and no slide.
+	// No CSRF token: denied, and the denied request must NOT slide — the
+	// chain is RequireAuthPassive + RequireCSRF, so a cookie-only POST can
+	// never extend the window. The session then expires on schedule.
 	sess2, _ := login(t, env, "user-b")
+	fc.Advance(50 * time.Second)
 	r = doReq(t, env, sess2, &http.Cookie{Value: "forged"}, http.MethodPost,
 		"/v1/session:touch", "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("touch without CSRF: %d, want 403", r.StatusCode)
 	}
+	fc.Advance(15 * time.Second) // past idle — the denied touch did not slide
+	r = env.authedGet(t, sess2, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("denied touch slid the idle window: %d", r.StatusCode)
+	}
+
 	// Anonymous: 401.
 	r = doReq(t, env, &http.Cookie{Value: "no-such-session"}, csrf,
 		http.MethodPost, "/v1/session:touch", "", nil)

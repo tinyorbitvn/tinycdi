@@ -571,12 +571,13 @@ Additional items found while writing this document (not from A6):
   (FIX-IDLE): portal reads are all passive server-side, so no GET a client
   can shape extends the idle window; extension only ever credits
   (a) mutations — including the explicit activity beat
-  `POST /v1/session:touch` (RequireAuth+CSRF, login-family rate limit keyed
-  on the session digest; the SPA sends it on pointer/key/navigation events
-  throttled to 1/min, never from timer polls) — and (b) RFB input measured
-  broker-side. Forging a touch requires the session cookie + CSRF token —
-  the same bar as any mutation, so the beat grants nothing a caller could
-  not already do. That input touch
+  `POST /v1/session:touch` — passive auth + CSRF with the slide applied
+  explicitly only after the token check, so a cookie-only request never
+  earns a slide; login-family rate limit keyed on the session digest; the
+  SPA sends it on pointer/key/navigation events throttled to 1/min, never
+  from timer polls — and (b) RFB input measured broker-side. Forging a
+  touch requires the session cookie + CSRF token — the same bar as any
+  mutation, so the beat grants nothing a caller could not already do. That input touch
   is now scoped to the bound portal session digest — the session the
   stream's lease was minted under — rather than every session of the
   principal (SR-1-F3; `TouchSessionDigest`,

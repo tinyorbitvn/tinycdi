@@ -149,13 +149,14 @@ paths:
       operationId: touchSession
       summary: Activity beat
       description: |
-        The explicit "the user is here" signal (FIX-IDLE). Reaching this
-        endpoint slides the session's idle deadline — the sliding session
-        read inside authentication IS the touch — and the handler answers
-        `204` with no body. It exists because every `GET` on this API is
-        passive: the portal calls it only on real user interaction
-        (pointer, key, navigation), never from a timer-driven poll, and
-        throttles to at most one call per minute.
+        The explicit "the user is here" signal (FIX-IDLE). The session is
+        authenticated passively, the CSRF token checked, and only then does
+        the handler slide the idle deadline explicitly — a cookie-only
+        request that fails the token check can never extend the window.
+        The handler answers `204` with no body. It exists because every
+        `GET` on this API is passive: the portal calls it only on real
+        user interaction (pointer, key, navigation), never from a
+        timer-driven poll, and throttles to at most one call per minute.
 
         Requires the session cookie and the `X-CSRF-Token` header (`401`
         without a session, `403` without a valid token) — forging a touch
