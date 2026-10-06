@@ -35,6 +35,12 @@ build_store() {
     echo "{\"spdxVersion\":\"SPDX-2.3\",\"name\":\"$img\"}" \
       > "$dl/sbom-$img/sbom-$img.spdx.json"
   done
+  # dedicated SBOMs for the packaged chart and the release binaries (SEC-17)
+  for extra in chart binaries; do
+    mkdir -p "$dl/sbom-$extra"
+    echo "{\"spdxVersion\":\"SPDX-2.3\",\"name\":\"$extra\"}" \
+      > "$dl/sbom-$extra/sbom-$extra.spdx.json"
+  done
 
   # packaged chart: real stamp script + real tar layout
   local cd_="$WORK/chart-src"
@@ -92,8 +98,12 @@ expect_ok() {
     || { echo "FAIL: bundle lacks kasmvnc sha256"; fails=1; }
   [ "$(find "$WORK/out/refs" -name '*.ref' | wc -l)" -eq "${#IMGS[@]}" ] \
     || { echo "FAIL: refs dir wrong"; fails=1; }
-  [ "$(find "$WORK/out/sboms" -name '*.json' | wc -l)" -eq "${#IMGS[@]}" ] \
+  [ "$(find "$WORK/out/sboms" -name '*.json' | wc -l)" -eq "$(( ${#IMGS[@]} + 2 ))" ] \
     || { echo "FAIL: sboms dir wrong"; fails=1; }
+  for extra in chart binaries; do
+    [ -f "$WORK/out/bundle/sbom-$extra.spdx.json" ] \
+      || { echo "FAIL: bundle lacks sbom-$extra.spdx.json"; fails=1; }
+  done
   echo "ok: happy path"
 }
 
@@ -136,6 +146,8 @@ mut_bad_chart() {
 }
 mut_no_kasmvnc()     { rm -f "$1/release-assets/kasmvnc-$KV-corresponding-source.tar.gz.sha256"; }
 mut_bad_sbom()       { echo 'not json' > "$1/sbom-backend/sbom-backend.spdx.json"; }
+mut_no_chart_sbom()  { rm -rf "$1/sbom-chart"; }
+mut_bad_bins_sbom()  { echo 'not json' > "$1/sbom-binaries/sbom-binaries.spdx.json"; }
 mut_missing_bin()    { rm -f "$1/release-assets/tinycdi-backend-$VERSION-linux-amd64"; }
 # v0.2 removed the api/gateway commands — a stale binary must not ride along.
 mut_stale_bin()      { local c=api; echo old > "$1/release-assets/tinycdi-$c-$VERSION-linux-amd64"; }
@@ -151,6 +163,8 @@ expect_fail "ref digest != chart digest" "digest" mut_wrong_digest
 expect_fail "chart stamped with wrong digests" "digest" mut_bad_chart
 expect_fail "missing kasmvnc checksum" "KasmVNC" mut_no_kasmvnc
 expect_fail "invalid sbom json" "not valid JSON" mut_bad_sbom
+expect_fail "missing chart sbom artifact" "artifact folder set" mut_no_chart_sbom
+expect_fail "invalid binaries sbom json" "not valid JSON" mut_bad_bins_sbom
 expect_fail "missing release binary" "missing" mut_missing_bin
 expect_fail "stale removed-component binary" "unexpected release-assets file" mut_stale_bin
 expect_fail "removed image artifact" "artifact folder set" mut_removed_image

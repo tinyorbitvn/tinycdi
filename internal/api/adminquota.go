@@ -345,7 +345,7 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req adminQuotaLimits
-	if !decodeJSON(body, &req) {
+	if decodeJSON(body, &req) != nil {
 		writeError(w, r, CodeInvalidRequest, "invalid request body")
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -426,7 +427,6 @@ func TestSessionFixationPrevented(t *testing.T) {
 
 func TestSessionIdleAndAbsoluteExpiry(t *testing.T) {
 	env := newTestEnv(t, func(c *AuthConfig) {
-		c.IdleTimeout = time.Minute
 		c.AbsoluteTimeout = 10 * time.Minute
 	})
 	fc := &fakeClock{now: time.Now()}
@@ -477,10 +477,17 @@ func TestTenantMembershipRequired(t *testing.T) {
 	}
 }
 
-func TestTenantNotInAllowlistRejected(t *testing.T) {
-	env := newTestEnv(t, func(c *AuthConfig) { c.AllowedTenants = []string{"tenant-b"} })
-	if status, code := callbackStatus(t, env); status != http.StatusForbidden || code != string(CodeForbidden) {
-		t.Fatalf("status=%d code=%q", status, code)
+// AuthConfig must not grow knobs that cannot be wired to a flag: an
+// operator-facing field that is parsed but never populated or consumed is a
+// misleading security surface. The session idle window belongs to the
+// session store (-session-idle / TCDI_SESSION_IDLE); the login gate is
+// -required-groups. Keep the struct free of both dead fields.
+func TestAuthConfig_NoDeadSessionKnobs(t *testing.T) {
+	typ := reflect.TypeOf(AuthConfig{})
+	for _, field := range []string{"IdleTimeout", "AllowedTenants"} {
+		if _, ok := typ.FieldByName(field); ok {
+			t.Fatalf("AuthConfig.%s is a dead knob — wire it to a flag or remove it", field)
+		}
 	}
 }
 

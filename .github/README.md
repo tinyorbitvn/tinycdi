@@ -9,7 +9,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 | `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` (and, for firefox-esr, `build/linux-desktop/Dockerfile` — the desktop image carries the same Firefox pin) + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
-| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
+| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest (+ `attest-build-provenance` under `TRAIN_ATTESTATIONS_ENABLED`, off by default) → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` sign-blob'd and attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
 
@@ -47,7 +47,9 @@ split publish rights from scanner execution (SEC-04/SEC-05):
    the chart tgz + static binaries + CRD bundle + KasmVNC source bundle in
    the release bundle, and the digests stamped into the packaged chart
    must equal the image refs. The images.yml promote job validates refs
-   against the same strict regex (`validate-image-refs.sh`).
+   against the same strict regex (`validate-image-refs.sh`). Scan jobs
+   apply the same strict form to artifact-supplied refs **before**
+   writing them to `$GITHUB_ENV` (SUPF-10).
 
 A non-publishing run (`release.yml` dry_run, `images.yml` on a non-main ref)
 exports the image as a `type=docker` tar artifact instead; the scan job scans
@@ -116,6 +118,7 @@ Created by `setup-repo-protection.sh --apply` (or manually under
 |---|---|---|
 | `CODE_SCANNING_ENABLED` | `true` | trivy SARIF also pushed to Security → Code scanning; dependency-review runs on PRs. Both need Advanced Security on private repos — off today |
 | `ATTESTATIONS_ENABLED` | `true` | additionally emits `actions/attest-build-provenance` for each release image. Attestation storage on private repos needs GitHub Enterprise (SEC-I12) — off until the repo goes public |
+| `TRAIN_ATTESTATIONS_ENABLED` | `true` | same for the runtime train's publish job (`runtime-images.yml`) — a separate variable so train provenance stays off until verified on a tag build. NOT set by `setup-repo-protection.sh`; create it manually when enabling |
 | `BASE_MIRROR_REGISTRY` | registry host | optional private mirror for Dockerfile `FROM` bases — when set, build jobs docker-login to it with the `BASE_MIRROR_*` secrets below |
 | unset | (default) | the gated steps are skipped; SARIF/SBOM artifacts and cosign signing are unaffected |
 
@@ -211,6 +214,18 @@ Train images verify like `:main`-channel images, with the
 
 ```sh
 cosign verify ghcr.io/tinyorbitvn/tinycdi-browser:rt-<date>.<n> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity \
+  'https://github.com/tinyorbitvn/tinycdi/.github/workflows/runtime-images.yml@refs/heads/main'
+```
+
+`runtime-images.json` itself is signed — `cosign sign-blob` in the same
+publish job — and the release carries `runtime-images.json.sigstore.json`
+next to it. Verify the manifest before taking digests from it:
+
+```sh
+cosign verify-blob --bundle runtime-images.json.sigstore.json \
+  runtime-images.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity \
   'https://github.com/tinyorbitvn/tinycdi/.github/workflows/runtime-images.yml@refs/heads/main'
