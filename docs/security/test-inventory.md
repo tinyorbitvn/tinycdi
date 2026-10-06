@@ -350,11 +350,17 @@ fail-when-nothing-happens rule to any new kill/revoke drill.
   scan chain, then a minimal-permission `publish` job: cosign signs +
   attests digests (plus `attest-build-provenance` when enabled), signs the
   Helm chart, and only then promotes tags / drafts the release
-  (`docs/security/provenance.md`).
+  (`docs/security/provenance.md`). Dedicated SPDX SBOMs cover the packaged
+  chart (`sbom-chart.spdx.json`) and the static binaries
+  (`sbom-binaries.spdx.json`) — validated by `collect-publish-inputs.sh`
+  and signed like every other asset.
 
 `.github/workflows/runtime-images.yml` — the runtime image train: daily
 check → pin-bump PR → build/trivy-scan/cosign-sign/publish `runtime-*`
-releases. Intentionally no human gate on publish (A6-S12).
+releases; `runtime-images.json` carries a `cosign sign-blob` Sigstore
+bundle, and GitHub build-provenance legs run under the
+`TRAIN_ATTESTATIONS_ENABLED` variable (off by default). Intentionally no
+human gate on publish (A6-S12).
 
 `.github/workflows/runtime-freshness.yml` — daily: fails while a pinned
 Chromium/Firefox-ESR build is stale (opens a pin-bump PR); fails when the
@@ -377,7 +383,7 @@ newest `runtime-*` release is older than the 14-day SLO.
   `workflow-expressions.test.sh`, `release-topology.test.sh`,
   `publish-inputs.test.sh`, `setup-repo-protection.test.sh`,
   `validate-release-version.test.sh`, `release-notes-review-status.test.sh`,
-  `preflight.test.sh`.
+  `supply-chain-hardening.test.sh`, `preflight.test.sh`.
 - `hack/preflight/preflight.sh` — pre-install environment checks (includes
   node/AppArmor posture detection relevant to A6-S16).
 

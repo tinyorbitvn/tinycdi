@@ -146,8 +146,9 @@ Controls:
   verifier are bound to the initiating browser (SEC-03).
 - **Portal session** — server-side, opaque cookie value; rows keyed by
   SHA-256 digest of the session ID so a DB/backup read never yields a usable
-  cookie (`internal/store/sessions.go:23,63,102`). Sliding 30 min idle,
-  12 h absolute cap (`auth.go:133-137` config defaults); the backend extends
+  cookie (`internal/store/sessions.go:23,63,102`). Sliding 30 min idle
+  (`-session-idle`/`TCDI_SESSION_IDLE` → `store.NewSessionStore`), 12 h
+  absolute cap (`AuthConfig.AbsoluteTimeout`); the backend extends
   idle on server-measured input activity. The retained `id_token` is sealed
   at rest with the same keys under a purpose-bound AAD
   (`internal/api/idtoken.go`); on read failure logout degrades to a
@@ -238,8 +239,9 @@ PKCE means a secretless public client also works), RP-initiated logout.
 Controls: exact issuer/audience match via go-oidc; `endSessionURL` is built
 only from discovery + static configuration so request input cannot produce an
 open redirect (`internal/api/auth.go:770-787`);
-`PostLogoutRedirect` is validated as an absolute http(s) URL at startup
-(auth.go:359). Client secret comes from `oidc.existingSecret` (chart).
+`PostLogoutRedirect` is validated as an absolute https URL at startup
+(auth.go) — http is accepted only for loopback dev hosts. Client secret
+comes from `oidc.existingSecret` (chart).
 Tests: `auth_test.go`, `logout_test.go`, `oidctest/` in-memory IdP.
 
 Open question: A6-S2 — replay of the sealed login cookie within its TTL
@@ -482,6 +484,21 @@ edge-triggered Warning event until the stream realigns (S24).
   intentional for daily runs (A6-S12: review each job's permissions, the
   keyless signing identity, and whether consumers can distinguish a train
   image from a release image).
+- The train's deployment manifest is signed too (v1.0 fix — it was the
+  one unsigned artifact): `runtime-images.json` ships a
+  `cosign sign-blob` Sigstore bundle on every `runtime-*` release;
+  consumers verify it before pinning digests (`.github/README.md`).
+- Scan jobs validate artifact-supplied image refs against the strict
+  `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<64hex>` form before writing
+  them to `$GITHUB_ENV` (SUPF-10; v1.0 fix — previously unvalidated).
+- Build jobs push by digest before the scan gate; a gate-failed digest
+  stays pullable-by-digest but is never tagged or signed, so it carries
+  no release trust — accepted residual, documented in `provenance.md`
+  "Digest-addressable does not mean released".
+- The train publish job emits `attest-build-provenance` only under the
+  dedicated `TRAIN_ATTESTATIONS_ENABLED` repo variable (off by default,
+  SEC-I12), and the release ships dedicated `sbom-chart` /
+  `sbom-binaries` SPDX SBOMs for the packaged chart and static binaries.
 - Required checks and enforce-admins are codified in
   `.github/scripts/setup-repo-protection.sh`.
 
@@ -528,6 +545,9 @@ items that landed since.
 | S22 | Deploy-time guards for hazardous value combinations | Implemented (#119): `tinycdi.validate` now fails the render on `operator.leaderElect=false` with `operator.replicas>1` — unelected replicas would double-drive reconciliation and the binary cannot observe the Deployment's replica count (`templates/_helpers.tpl`, `cmd/operator` note; `TestOperatorLeaderElectionGuard`). Metrics-port isolation is pinned for every `edgeIngress` mode: only `allow-metrics-scrape` opens :9090, to exactly `networkPolicy.prometheusPeers` (`TestMetricsListenerIsolation`, `TestEdgePolicyNeverOpensInternalPort`). Residual: single-replica installs (`replicas: 1`) may still run unelected, and guards only constrain chart-rendered manifests — hand-rolled manifests bypass them |
 | S23 | Postgres-only restore onto a live cluster (DR) | Implemented (#122 runbook + #124 tool): `docs/runbooks/disaster-recovery.md` §"Postgres-only restore onto a live cluster" enumerates what an older dump resurrects — `sessions` rows including post-dump sign-outs (killed by `platform_meta.session_epoch` rotation — `SessionStore.Get` compares epoch in the same read), `'active'` `connection_lease` rows including post-dump revokes (a non-NULL `portal_session_digest` dies at next renew/attach via the S17 check, but the tool revokes every restored lease unconditionally anyway — NULL-digest rows have no barrier), unconsumed `launch_ticket` rows re-arming (denied; redeem also re-checks the session), and `workspaces` rows trailing live CRs (aligned to `spec.desiredState`/`runtimeGeneration`/`intentRevision` so the applied-intent fence is not bypassed). `backend post-restore` is the one-shot implementation: dry-run by default; `-apply` requires `-i-have-scaled-down`, takes the leader advisory lock on a dedicated connection and holds it for the whole run (a serving replica or concurrent run means refusal with zero writes), refuses while backend connections remain in `pg_stat_activity` unless `-i-know-backends-are-running`, and exits non-zero printing per-workspace SQL when Kubernetes read access for CR alignment is absent (`internal/backend/postrestore.go`; tests `postrestore_test.go`, `TestSessionEpochRotation`). The `hack/quickstart/restore-drill.sh` kind drill is manual, not a per-PR gate |
 | S24 | Intent-stream drift vs the applied-intent fence | Implemented (#125): after a DB restore the platform's `workspaces.intent_revision` can trail the fence the CR already recorded, and every new intent would be dropped as stale — silently. The applier now detects the two unreachable-by-replay shapes (strictly-behind revision; equal revision with diverged `desiredState`/`runtimeGeneration`) and stamps `workspaces.cdi.tinyorbit.vn/intent-behind` `{rowRevision, crRevision}` (`intentFenceDrifted`, `internal/provisioning/k8sapplier.go`); the operator raises `ConditionIntentBehind` with the revision params plus one edge-triggered Warning event, and clears it once the stream applies forward again (`internal/operator/workspace_controller.go`, `api/v1alpha1/validation.go`; events `create`/`patch` RBAC added). The fence itself is unchanged — a stale intent is still never applied; drift is only surfaced. Surfaced to users via the conditions/events projection (`statusview.go`, `events.go`; `TestIntentBehindDrift`, `TestK8sApplierIntentDrift`, `TestProjectConditions_IntentBehind`) |
+| S25 | Dead/misleading auth config knobs | Fixed: `AuthConfig` carried `IdleTimeout` — defaulted at startup but never consumed (the session idle window is owned by the session store: `-session-idle`/`TCDI_SESSION_IDLE` → `store.NewSessionStore`) — and `AllowedTenants` — enforced in `tenantAllowed` but with no flag/env/chart path able to populate it, so the gate could never engage; `-required-groups` (`oidc.requiredGroups`) remains the supported login gate. Both knobs were deleted rather than wired: wiring `IdleTimeout` would have created a second source of truth for the store's window, and `AllowedTenants` had no reachable configuration. Guard: `TestAuthConfig_NoDeadSessionKnobs` fails if either field returns |
+| S26 | Post-logout redirect accepted plaintext `http` | Fixed: `AuthConfig.PostLogoutRedirect` and the discovered `end_session_endpoint` now require an absolute https URL — `http` is accepted only for loopback hosts (`localhost`, 127.0.0.0/8, `::1`; strict `netip` parse — mapped/octal spellings do not count), matching the dev plain-http-on-loopback IdP convention (`oidctest`); the chart schema already required `^https://` (`values.schema.json`). Tests: `TestNewAuthenticator_RejectsBadPostLogoutRedirect`, `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`, `TestLogout_UntrustedDiscoveredEndpointIs204` |
+| S27 | create-connection echoed JSON decoder detail | Fixed: `ConnectionHandler.Create` decodes via the shared `decodeJSON` helper — which also rejects trailing data after the first document, a check the previous inline decode lacked — answers 400 `INVALID_REQUEST` with the generic "invalid request body", and logs the decode detail server-side with the request id (SEC-I7). `decodeJSON` now returns the error so callers can log it without echoing it. Tests: `TestCreateConnection_InvalidBodyGenericMessage`, `TestCreateConnection_TrailingJSONRejected` |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's
 ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is

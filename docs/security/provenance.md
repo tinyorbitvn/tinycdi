@@ -23,7 +23,9 @@ the Helm chart:
    them).
 2. **SBOM** — SPDX JSON generated with pinned syft in the **build job**
    (the scan and promote jobs never consume scan-job outputs — SUPR-2).
-   Release assets additionally carry `sbom-<image>.spdx.json` files.
+   Release assets additionally carry `sbom-<image>.spdx.json` files plus
+   dedicated `sbom-chart.spdx.json` (the packaged Helm chart) and
+   `sbom-binaries.spdx.json` (the static release binaries).
 3. **Vulnerability report** — trivy SARIF + table per image/arch, produced
    by the no-secrets scan job; the gate semantics live in
    [vulnerability-policy.md](vulnerability-policy.md).
@@ -52,14 +54,22 @@ ambiguity):
 |---|---|---|
 | `:main` / `:sha-*` images | images.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/images.yml@refs/heads/main` |
 | release images + chart + blobs | release.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/v<X.Y.Z>` |
+| `rt-*` images + `runtime-images.json` | runtime-images.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/runtime-images.yml@refs/heads/main` |
 
 Release runs additionally `cosign sign` the pushed OCI chart digest
 (`oci://ghcr.io/tinyorbitvn/charts/tinycdi`) and `cosign sign-blob` every
 release asset (`<asset>.sigstore.json` bundles), then `gh release create`.
+The runtime train does the same for its deployment manifest: every
+`runtime-*` release carries `runtime-images.json` **and**
+`runtime-images.json.sigstore.json` — verify it with `cosign
+verify-blob` against the train identity above before pinning digests
+from it (exact command in `.github/README.md`).
 GitHub build-provenance attestations (`actions/attest-build-provenance`)
 are emitted only when the `ATTESTATIONS_ENABLED` repo variable is set —
 attestation storage on private repos requires GitHub Enterprise; the cosign
-SBOM attestations attached to the digests are unaffected.
+SBOM attestations attached to the digests are unaffected. The runtime
+train has its own gate, `TRAIN_ATTESTATIONS_ENABLED` (unset = off until
+verified on a tag build).
 
 The provenance predicate records, at minimum:
 
@@ -97,3 +107,26 @@ verification is out of MVP scope; the Helm chart already refuses
 non-digest image references in seeded templates and requires a pinned tag
 or digest for the node-profiles installer image, which is the MVP-level
 guarantee.
+
+## Digest-addressable does not mean released
+
+Build jobs push `type=registry,push-by-digest=true` **before** the scan
+gate runs, so a gate-failed (or never-promoted) build leaves an unsigned
+manifest that stays pullable by digest —
+`ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` resolves on GHCR and
+nothing prunes it. That residual is acceptable by construction:
+
+- it is **never tagged** — tags (`rt-*`, `:<ver>`, `:latest`, `:main`,
+  `:sha-*`) are promoted only by the publish job, after the trivy gate
+  passes and the digest is signed (SUPR-13);
+- it is **never signed or attested** — `cosign verify` /
+  `verify-attestation` against the digest fails, and no signed manifest
+  (`runtime-images.json`, the packaged chart's `images.*.digest`, the
+  release `images.txt`) references it;
+- consumers pin digests only out of signed manifests and verify the
+  signature first — pulling a never-promoted digest is
+  indistinguishable from pulling any other unsigned image, so the
+  digest-addressable leftover carries no release trust.
+
+Pruning untagged, unsigned manifests is a possible hygiene cleanup; it is
+not a security boundary.

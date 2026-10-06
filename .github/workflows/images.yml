@@ -515,12 +515,18 @@ jobs:
 
       - name: resolve scan target
         run: |
+          # SUPF-10: the ref file is artifact content — validate the
+          # strict repo@sha256 form before it lands in $GITHUB_ENV; a
+          # newline in a forged ref would otherwise inject env vars.
           REF="$(cat "refs/$IMG.ref")"
           if [ "$REF" = "local" ]; then
             echo "SCAN_MODE=tar" >> "$GITHUB_ENV"
-          else
+          elif [[ "$REF" =~ ^ghcr\.io/tinyorbitvn/tinycdi-${IMG}@sha256:[0-9a-f]{64}$ ]]; then
             echo "SCAN_MODE=registry" >> "$GITHUB_ENV"
             echo "SCAN_REF=$REF" >> "$GITHUB_ENV"
+          else
+            echo "::error::ref for '$IMG' is not ghcr.io/tinyorbitvn/tinycdi-$IMG@sha256:<64hex>"
+            exit 1
           fi
 
       - name: download image tar (non-publishing runs)

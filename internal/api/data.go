@@ -369,7 +369,7 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req attachDataRequest
-	if !decodeJSON(body, &req) {
+	if decodeJSON(body, &req) != nil {
 		writeError(w, r, CodeInvalidRequest, "invalid request body")
 		return
 	}
@@ -445,7 +445,7 @@ func (h *DataHandler) Purge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req purgeDataRequest
-	if !decodeJSON(body, &req) {
+	if decodeJSON(body, &req) != nil {
 		writeError(w, r, CodeInvalidRequest, "invalid request body")
 		return
 	}

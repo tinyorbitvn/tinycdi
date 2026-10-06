@@ -227,7 +227,7 @@ func (h *AdminUserLimitsHandler) decodeBody(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, CodeInvalidRequest, "unreadable or oversized body")
 		return false
 	}
-	if !decodeJSON(body, v) {
+	if decodeJSON(body, v) != nil {
 		writeError(w, r, CodeInvalidRequest, "invalid request body")
 		return false
 	}

@@ -166,7 +166,10 @@ per user matters.
 4. Pin digests: `images.{backend,frontend,operator}.digest` for the
    platform release; `images.{linuxDesktop,browser}.digest` (with
    `builtAt`/`engines`) and `images.linuxBase.digest` from
-   `runtime-images.json` for the runtime train.
+   `runtime-images.json` for the runtime train — that manifest is
+   sigstore-signed; verify it (`cosign verify-blob` against
+   `runtime-images.json.sigstore.json`, command in `.github/README.md`)
+   before taking digests from it.
 5. `helm template | kubectl diff`, then `helm upgrade` — the shared
    "Procedure" below has the full commands (its steps 3–4).
 6. Watch the rollouts in order — `deployment/backend` (each pod's

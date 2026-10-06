@@ -650,7 +650,8 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 			}
 			return e.ClipboardPolicy, nil
 		}).
-		WithAuditSink(appAudit)
+		WithAuditSink(appAudit).
+		WithLogger(b.log)
 	meHandler := api.NewMeHandler(sessionDomain.String())
 	connStatusHandler := api.NewConnectionStatusHandler(broker.PublicStater{B: brk}, svc, tenants)
 	dataHandler := api.NewDataHandler(retained, catalog, tenants).
