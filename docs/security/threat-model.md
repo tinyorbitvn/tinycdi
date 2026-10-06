@@ -479,6 +479,21 @@ edge-triggered Warning event until the stream realigns (S24).
   intentional for daily runs (A6-S12: review each job's permissions, the
   keyless signing identity, and whether consumers can distinguish a train
   image from a release image).
+- The train's deployment manifest is signed too (v1.0 fix — it was the
+  one unsigned artifact): `runtime-images.json` ships a
+  `cosign sign-blob` Sigstore bundle on every `runtime-*` release;
+  consumers verify it before pinning digests (`.github/README.md`).
+- Scan jobs validate artifact-supplied image refs against the strict
+  `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<64hex>` form before writing
+  them to `$GITHUB_ENV` (SUPF-10; v1.0 fix — previously unvalidated).
+- Build jobs push by digest before the scan gate; a gate-failed digest
+  stays pullable-by-digest but is never tagged or signed, so it carries
+  no release trust — accepted residual, documented in `provenance.md`
+  "Digest-addressable does not mean released".
+- The train publish job emits `attest-build-provenance` only under the
+  dedicated `TRAIN_ATTESTATIONS_ENABLED` repo variable (off by default,
+  SEC-I12), and the release ships dedicated `sbom-chart` /
+  `sbom-binaries` SPDX SBOMs for the packaged chart and static binaries.
 - Required checks and enforce-admins are codified in
   `.github/scripts/setup-repo-protection.sh`.
 

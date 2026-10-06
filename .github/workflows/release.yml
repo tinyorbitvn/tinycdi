@@ -48,6 +48,8 @@
 #   tinycdi-crds-<ver>.yaml                           config/crd/bases bundle
 #   tinycdi-<chartver>.tgz                            helm chart
 #   sbom-<image>.spdx.json                             SPDX SBOM per image
+#   sbom-chart.spdx.json                               packaged chart SBOM
+#   sbom-binaries.spdx.json                            release binaries SBOM
 #   kasmvnc-<ver>-corresponding-source.tar.gz(.sha256) GPL-2.0 source
 #                                                    offer (PUB-2)
 #   sha256sums.txt                                     checksums over the above
@@ -761,12 +763,18 @@ jobs:
 
       - name: resolve scan target
         run: |
+          # SUPF-10: the ref file is artifact content — validate the
+          # strict repo@sha256 form before it lands in $GITHUB_ENV; a
+          # newline in a forged ref would otherwise inject env vars.
           REF="$(cat "refs/$IMG.ref")"
           if [ "$REF" = "local" ]; then
             echo "SCAN_MODE=tar" >> "$GITHUB_ENV"
-          else
+          elif [[ "$REF" =~ ^ghcr\.io/tinyorbitvn/tinycdi-${IMG}@sha256:[0-9a-f]{64}$ ]]; then
             echo "SCAN_MODE=registry" >> "$GITHUB_ENV"
             echo "SCAN_REF=$REF" >> "$GITHUB_ENV"
+          else
+            echo "::error::ref for '$IMG' is not ghcr.io/tinyorbitvn/tinycdi-$IMG@sha256:<64hex>"
+            exit 1
           fi
 
       - name: download image tar (dry-run)
@@ -962,6 +970,36 @@ jobs:
             --destination dist
           ls -l dist/
 
+      - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_TGZ_SHA256}  /tmp/syft.tgz" | sha256sum -c -
+          tar -xzf /tmp/syft.tgz -C "$PWD/bin" syft
+
+      - name: syft SBOM for the packaged chart (SPDX JSON)
+        # SEC-17: the chart tgz is a release asset — its contents get a
+        # dedicated SPDX SBOM (scanned from the packaged archive, not the
+        # source dir), signed + shipped like every other bundle member.
+        # SUPR-8: the config is generated HERE — a committed .syft.yaml
+        # can never steer the tool. file.metadata.selection=all gives the
+        # SBOM a real per-file inventory with sha256 checksums.
+        run: |
+          printf 'file:\n  metadata:\n    selection: all\n' > /tmp/syft-files.yaml
+          mkdir -p "$RUNNER_TEMP/chart-src"
+          tar -xzf "dist/tinycdi-$CHART_VERSION.tgz" -C "$RUNNER_TEMP/chart-src"
+          "$PWD/bin/syft" --config /tmp/syft-files.yaml \
+            --source-name "tinycdi-$CHART_VERSION.tgz" \
+            "dir:$RUNNER_TEMP/chart-src" -o spdx-json=sbom-chart.spdx.json
+
+      - name: upload chart SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-chart
+          path: sbom-chart.spdx.json
+          retention-days: 30
+
       - name: upload chart artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -997,6 +1035,25 @@ jobs:
           # `var version` — the stamp is wired so the first version var that
           # lands lights it up (see .github/README.md).
 
+      - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_TGZ_SHA256}  /tmp/syft.tgz" | sha256sum -c -
+          tar -xzf /tmp/syft.tgz -C "$PWD/bin" syft
+
+      - name: syft SBOM for the release binaries (SPDX JSON)
+        # SEC-17: dist/ holds exactly the two static binaries at this
+        # point — the dedicated SBOM covers them before the CRD bundle
+        # and KasmVNC source join dist/. The go-binary cataloger reads
+        # each binary's embedded module list.
+        run: |
+          : > /tmp/syft-empty.yaml   # SUPR-8: never load a repo .syft.yaml
+          "$PWD/bin/syft" --config /tmp/syft-empty.yaml \
+            --source-name tinycdi-binaries --source-version "$VERSION" \
+            dir:dist -o spdx-json=sbom-binaries.spdx.json
+
       - name: CRDs bundle
         run: |
           for f in config/crd/bases/*.yaml; do
@@ -1024,6 +1081,13 @@ jobs:
         with:
           name: release-assets
           path: dist/
+          retention-days: 30
+
+      - name: upload binaries SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-binaries
+          path: sbom-binaries.spdx.json
           retention-days: 30
 
   publish:
@@ -1094,6 +1158,8 @@ jobs:
           done
           gh run download "$GITHUB_RUN_ID" -n release-chart -D dl/release-chart
           gh run download "$GITHUB_RUN_ID" -n release-assets -D dl/release-assets
+          gh run download "$GITHUB_RUN_ID" -n sbom-chart -D dl/sbom-chart
+          gh run download "$GITHUB_RUN_ID" -n sbom-binaries -D dl/sbom-binaries
 
       - name: validate publish inputs (strict allowlist)
         # SUPF-1: every artifact folder must hold exactly its expected

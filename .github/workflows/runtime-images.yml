@@ -38,7 +38,11 @@
 #                     validates refs (validate-image-refs.sh), cosign
 #                     keyless signs + attests the digests BEFORE
 #                     `imagetools create` promotes the rt tag (SUPR-13),
-#                     then writes the manifest and the GitHub Release.
+#                     plus var-gated GitHub build-provenance
+#                     (TRAIN_ATTESTATIONS_ENABLED, off by default —
+#                     SEC-I12), then sign-blobs runtime-images.json and
+#                     attaches manifest + Sigstore bundle to the GitHub
+#                     Release.
 #
 # No shared GHA build cache (SEC-16): like release.yml, train builds do
 # not read or write `type=gha` scopes — main-branch CI cache is a
@@ -512,12 +516,18 @@ jobs:
 
       - name: resolve scan target
         run: |
+          # SUPF-10: the ref file is artifact content — validate the
+          # strict repo@sha256 form before it lands in $GITHUB_ENV; a
+          # newline in a forged ref would otherwise inject env vars.
           REF="$(cat "refs/$IMG.ref")"
           if [ "$REF" = "local" ]; then
             echo "SCAN_MODE=tar" >> "$GITHUB_ENV"
-          else
+          elif [[ "$REF" =~ ^ghcr\.io/tinyorbitvn/tinycdi-${IMG}@sha256:[0-9a-f]{64}$ ]]; then
             echo "SCAN_MODE=registry" >> "$GITHUB_ENV"
             echo "SCAN_REF=$REF" >> "$GITHUB_ENV"
+          else
+            echo "::error::ref for '$IMG' is not ghcr.io/tinyorbitvn/tinycdi-$IMG@sha256:<64hex>"
+            exit 1
           fi
 
       - name: download image tar (non-publishing runs)
@@ -652,7 +662,8 @@ jobs:
     permissions:
       contents: write  # gh release create + the runtime-* tag
       packages: write  # imagetools retag + cosign signatures to ghcr
-      id-token: write  # cosign keyless
+      id-token: write  # cosign keyless + provenance OIDC
+      attestations: write  # attest-build-provenance (var-gated, SEC-I12)
       actions: read    # gh run download of this run's artifacts (SUPF-1)
     env:
       RT_TAG: ${{ needs.meta.outputs.rt_tag }}
@@ -730,6 +741,45 @@ jobs:
               --predicate "sboms/sbom-$name.spdx.json" "$ref"
           done
 
+      - name: resolve attestation subjects
+        # SEC-I12: GitHub build-provenance attestations are gated on the
+        # TRAIN_ATTESTATIONS_ENABLED repo variable (defaults off — set it
+        # only once verified on a tag build; .github/README.md).
+        if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'
+        id: refs
+        run: |
+          for f in refs/*.ref; do
+            img="$(basename "$f" .ref)"
+            ref="$(tr -d '[:space:]' < "$f")"
+            key="${img//-/_}"
+            echo "name_$key=${ref%@*}" >> "$GITHUB_OUTPUT"
+            echo "digest_$key=${ref#*@}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: attest build provenance — linux-base
+        if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_linux_base }}
+          subject-digest: ${{ steps.refs.outputs.digest_linux_base }}
+          push-to-registry: true
+
+      - name: attest build provenance — linux-desktop
+        if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_linux_desktop }}
+          subject-digest: ${{ steps.refs.outputs.digest_linux_desktop }}
+          push-to-registry: true
+
+      - name: attest build provenance — browser
+        if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.name_browser }}
+          subject-digest: ${{ steps.refs.outputs.digest_browser }}
+          push-to-registry: true
+
       - name: derive rt tag at publish time
         # Backlog 15: N numbers successful publishes, not run attempts —
         # it is the next free number over the day's already-promoted
@@ -772,26 +822,41 @@ jobs:
           .github/scripts/write-runtime-manifest.sh refs sboms runtime-images.json
           jq . runtime-images.json
 
+      - name: cosign sign-blob runtime-images.json
+        # SEC-17: the manifest is the deployment contract consumers pin
+        # digests from — it must not be the one unsigned artifact in the
+        # chain. The Sigstore bundle ships next to it on the runtime-*
+        # release; the verify-blob line is in .github/README.md.
+        run: |
+          cosign sign-blob --yes \
+            --bundle runtime-images.json.sigstore.json \
+            runtime-images.json
+
       - name: upload manifest artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: runtime-images-manifest
-          path: runtime-images.json
+          path: |
+            runtime-images.json
+            runtime-images.json.sigstore.json
           retention-days: 30
 
       - name: create or update the runtime release
         # P7: one runtime-YYYY.MM.DD release per day carrying
-        # runtime-images.json; a second run the same day re-uploads the
-        # manifest instead of minting another release.
+        # runtime-images.json + its Sigstore bundle; a second run the
+        # same day re-uploads both instead of minting another release.
         # --latest=false: the repo's "Latest release" is the control-plane
         # v* release (release.yml); a runtime release must never take it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "$REL_TAG" >/dev/null 2>&1; then
-            gh release upload "$REL_TAG" runtime-images.json --clobber
+            gh release upload "$REL_TAG" \
+              runtime-images.json runtime-images.json.sigstore.json \
+              --clobber
           else
-            gh release create "$REL_TAG" runtime-images.json \
+            gh release create "$REL_TAG" \
+              runtime-images.json runtime-images.json.sigstore.json \
               --target "$GITHUB_SHA" \
               --latest=false \
               --title "Runtime images ${REL_TAG#runtime-}" \
@@ -801,7 +866,9 @@ jobs:
           \`runtime-images.json\` pins the signed digests this train
           shipped under \`$RT_TAG\`; deployments bump
           \`images.*.digest\`/\`images.*.builtAt\` from it (chart values
-          are GitOps-owned — nothing else is mutated).
+          are GitOps-owned — nothing else is mutated). Verify the
+          manifest against \`runtime-images.json.sigstore.json\` with
+          the cosign verify-blob line in .github/README.md.
           EOF
           fi
 

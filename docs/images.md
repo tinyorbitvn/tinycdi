@@ -73,8 +73,10 @@ the manifest `runtime-images.json` (three images; the profiles also record the
 browser versions they actually installed — `chromium` + `firefox` on
 `browser`, `firefox` on `linux-desktop`, read from each image's attested
 SPDX SBOM at publish time) is attached to the GitHub Release
-`runtime-YYYY.MM.DD` (see `.github/README.md` for the manifest shape and
-the cosign verify line). Deployments pin `images.*.digest`/`builtAt`
+`runtime-YYYY.MM.DD` **together with its Sigstore bundle**
+`runtime-images.json.sigstore.json` — verify the manifest with
+`cosign verify-blob` before pinning digests from it (exact command in
+`.github/README.md`). Deployments pin `images.*.digest`/`builtAt`
 from that manifest — the GitOps bump copies the engine versions from it
 too (`images.<key>.engines.chromium`/`.firefox`), so the template's
 stale-image view shows both — values are GitOps-owned and never written
@@ -306,8 +308,10 @@ measured memory and 4× the p95 CPU. See `docs/runbooks/capacity.md`.
 `tcdi/linux-base` is the runtime contract with nothing on top: build your own
 desktop (another environment, your applications, your branding) by extending
 it. Take the digest from the `runtime-images.json` of a `runtime-*` release
-(or `images.linuxBase.digest` of a released chart) and verify it with the
-cosign line in `.github/README.md`.
+(or `images.linuxBase.digest` of a released chart) — the manifest is
+sigstore-signed (`runtime-images.json.sigstore.json` rides the same
+release; `cosign verify-blob` line in `.github/README.md`) — and verify
+the image with the cosign line in `.github/README.md`.
 
 ```dockerfile
 FROM ghcr.io/tinyorbitvn/tinycdi-linux-base@sha256:<digest>
@@ -483,7 +487,10 @@ findings, and the XFCE packages bring none the gate can act on.
 
 Local builds are not pinned anywhere. The digests that matter are the
 signed ones in `runtime-images.json` of each `runtime-*` GitHub Release (and
-`images.*.digest` of a released chart).
+`images.*.digest` of a released chart). The manifest itself is signed:
+verify `runtime-images.json.sigstore.json` with `cosign verify-blob`
+(command in `.github/README.md`) before trusting it, then verify each
+image digest with `cosign verify`.
 
 ## Known limitations
 
