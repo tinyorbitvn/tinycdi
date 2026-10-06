@@ -282,4 +282,37 @@ describe("user menu", () => {
       Object.defineProperty(window, "location", { value: loc, configurable: true });
     }
   });
+
+  it("a refused sign-out (503 UNAVAILABLE) can simply be retried", async () => {
+    const api = createMockApi();
+    const base = api.handle;
+    let storeDown = true;
+    api.handle = (req) =>
+      storeDown && req.path === "/v1/logout"
+        ? {
+            status: 503,
+            headers: { "content-type": "application/json", "retry-after": "5" },
+            body: { code: "UNAVAILABLE", message: "could not sign out; retry", retryable: true },
+          }
+        : base(req);
+    renderShell(api);
+    const loc = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", { value: { ...loc, assign, pathname: loc.pathname }, configurable: true });
+    try {
+      fireEvent.click(await screen.findByRole("button", { name: "Ada Admin" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+      // Still on the page, still signed in — the failure is surfaced.
+      expect(await screen.findByText("Could not sign out")).toBeInTheDocument();
+      expect(assign).not.toHaveBeenCalled();
+
+      // The store recovers: the same menu action retries and signs out.
+      storeDown = false;
+      fireEvent.click(await screen.findByRole("button", { name: "Ada Admin" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+      await waitFor(() => expect(assign).toHaveBeenCalledWith(SIGNED_OUT_PATH));
+    } finally {
+      Object.defineProperty(window, "location", { value: loc, configurable: true });
+    }
+  });
 });
