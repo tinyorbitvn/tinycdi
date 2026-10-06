@@ -61,7 +61,7 @@ want=()
 for img in "${expected[@]}"; do
   want+=("image-ref-$img" "sbom-$img")
 done
-want+=(release-chart release-assets)
+want+=(release-chart release-assets sbom-chart sbom-binaries)
 mapfile -t got < <(find "$DL" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
 [ "$(printf '%s\n' "${got[@]:-}")" = "$(printf '%s\n' "${want[@]}" | sort)" ] \
   || die "artifact folder set is [${got[*]:-none}] — expected exactly [${want[*]}]"
@@ -77,8 +77,10 @@ done
 "$SCRIPT_DIR/validate-image-refs.sh" "$OUT/refs" "${expected[@]}"
 
 # ---- 2. SBOMs: one per image, allowlisted name, valid JSON -------------
+#     sbom-chart / sbom-binaries are the dedicated SBOMs for the packaged
+#     Helm chart and the release binaries (SEC-17) — same shape check.
 mkdir -p "$OUT/sboms"
-for img in "${expected[@]}"; do
+for img in "${expected[@]}" chart binaries; do
   exact_files "$DL/sbom-$img" "sbom-$img.spdx.json"
   f="$DL/sbom-$img/sbom-$img.spdx.json"
   [ -s "$f" ] || die "missing SBOM for '$img'"
