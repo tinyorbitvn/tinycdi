@@ -283,8 +283,11 @@ backend:
   # rate limits and the runtime-bound forwarded headers derive the client
   # from the right-most untrusted chain entry. REQUIRED behind an ingress
   # or Gateway — empty keys every limit on the edge's own address, so all
-  # users share one bucket (the backend logs a startup warning). See the
-  # README "Rate limits and trusted proxies" for Cilium/Traefik examples.
+  # users share one bucket (the backend logs a startup warning). List
+  # every hop in front; a dual-stack edge needs its IPv6 CIDRs alongside
+  # the IPv4 ones or v6 clients collapse into the proxy's /64 bucket.
+  # See the README "Rate limits and trusted proxies" for Cilium/Traefik
+  # examples.
   # Authenticated traffic keys per session (session probe, live-session
   # re-launches) or per validated OIDC state (callback, bounded by a 10x
   # per-IP ceiling), not per client IP; the anonymous surface — login
