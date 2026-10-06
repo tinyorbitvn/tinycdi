@@ -218,7 +218,12 @@ What that means for sizing:
   is delegated — so temporary/privacy-address rotation inside the
   prefix draws one budget instead of minting a fresh bucket per /128;
   IPv4-mapped spellings (`::ffff:a.b.c.d`, any notation) unify with the
-  native IPv4 key, and IPv4 itself stays per-/32. The one canonical
+  native IPv4 key, and IPv4 itself stays per-/32. The corollary: all
+  hosts inside ONE shared /64 — a LAN segment, or subscribers an ISP
+  gives a single prefix — share one rate-limit budget (billing
+  granularity only: the forwarded `X-Forwarded-For`/`Forwarded`/
+  `X-Real-IP` headers and audit attribution still carry the client's
+  real, unmapped-but-unfolded address). The one canonical
   string keys the local buckets AND the shared Postgres window rows, so
   every enforcement layer agrees on the client. The right-most-untrusted
   XFF derivation behind that key is only as good as

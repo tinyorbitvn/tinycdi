@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 // fwdRecorder is the fake runtime for these tests: it captures the
@@ -115,6 +116,49 @@ func TestProxy_XFFFromTrustedChainOnly(t *testing.T) {
 	}
 	if fwd != "for=198.51.100.9, for=127.0.0.1" {
 		t.Fatalf("forwarded = %q, want derived chain only", fwd)
+	}
+}
+
+// TestProxy_IPv6ForwardsExactAddrKeyFolds: the /64 fold applies to the
+// rate-limit KEY only — the runtime-bound headers carry the client's real
+// address. One request is billed against the "2001:db8::" /64 bucket while
+// the runtime still attributes it to the exact "2001:db8::5".
+func TestProxy_IPv6ForwardsExactAddrKeyFolds(t *testing.T) {
+	fb := newFakeBroker(t)
+	rec := newFwdRecorder(t)
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	srv, cookie := launchOn(t, fb, rec, func(c *gateway.Config) {
+		c.TrustedProxies = trusted
+	})
+
+	resp := proxied(t, srv, testHost, "/", cookie, map[string]string{
+		"X-Forwarded-For": "2001:db8::5",
+	})
+	defer drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxied GET = %d, want 200", resp.StatusCode)
+	}
+	xff, fwd, real := rec.seen()
+	if xff != "2001:db8::5, 127.0.0.1" {
+		t.Fatalf("xff = %q, want the exact client address + peer, not the /64 base", xff)
+	}
+	if fwd != `for="[2001:db8::5]", for=127.0.0.1` {
+		t.Fatalf("forwarded = %q, want the exact v6 address", fwd)
+	}
+	if real != "2001:db8::5" {
+		t.Fatalf("x-real-ip = %q, want the real address", real)
+	}
+
+	// The same request's limiter key is the folded /64 base.
+	r := &http.Request{
+		RemoteAddr: "127.0.0.1:9999",
+		Header:     http.Header{"X-Forwarded-For": {"2001:db8::5"}},
+	}
+	if k := ratelimit.ClientKey(r, trusted); k != "2001:db8::" {
+		t.Fatalf("limiter key = %q, want the /64 base 2001:db8::", k)
+	}
+	if a := ratelimit.ClientAddr(r, trusted); a != "2001:db8::5" {
+		t.Fatalf("forwarded client addr = %q, want the exact 2001:db8::5", a)
 	}
 }
 

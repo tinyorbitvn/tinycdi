@@ -7,10 +7,12 @@
 // throttles /v1/login, /v1/auth/callback and GET /v1/session, the session
 // gateway throttles /v1/launch, and both derive the client key the same
 // way — the socket peer, or the right-most untrusted X-Forwarded-For entry
-// when the peer sits inside the configured trusted CIDRs. Recognized
-// client addresses are canonicalised (IPv4-mapped forms unmapped, IPv6
-// folded to its /64) so address-spelling and in-prefix rotation cannot
-// multiply one client's budget.
+// when the peer sits inside the configured trusted CIDRs. One selection
+// feeds two renders: rate-limit keys (ClientKey) fold harder — mapped
+// spellings unmapped, IPv6 collapsed to its /64 — so address-spelling and
+// in-prefix rotation cannot multiply one client's budget, while the
+// address consumers (ClientAddr: the gateway's forwarded headers) carry
+// the real, unmapped-but-unfolded client address.
 package ratelimit
 
 import (
@@ -176,15 +178,33 @@ func PeerIP(remoteAddr string) string {
 // not claim). An entry or peer that does not parse as an IP is never
 // trusted, so client-supplied bytes cannot claim a proxy's place; when
 // every hop is trusted the left-most entry is the closest observable
-// claim. Recognized addresses are canonicalised by canon: mapped forms
+// claim. The selected claim is canonicalised by canon: mapped forms
 // unify with the native IPv4 key and IPv6 folds to its /64. The one
 // string keys every enforcement layer — the local buckets and the shared
 // Postgres window rows — so the layers always agree on which client a
 // hit belongs to.
 func ClientKey(r *http.Request, trusted []netip.Prefix) string {
+	return canon(selectClient(r, trusted))
+}
+
+// ClientAddr returns the SAME selected client claim as ClientKey but
+// rendered as the real address — IPv4-mapped forms unmapped, IPv6 NOT
+// folded — for consumers that need the literal client address rather than
+// a billing bucket: the gateway's forwarded-header rebuild toward the
+// runtime (S18). A non-IP claim passes through verbatim so the caller's
+// parse check still discriminates it.
+func ClientAddr(r *http.Request, trusted []netip.Prefix) string {
+	return canonAddr(selectClient(r, trusted))
+}
+
+// selectClient picks the raw client claim both renders share: the socket
+// peer, or under a trusted peer the right-most XFF entry outside the
+// trusted set — else the left-most claim when every hop is trusted, else
+// the peer.
+func selectClient(r *http.Request, trusted []netip.Prefix) string {
 	peer := PeerIP(r.RemoteAddr)
 	if !inTrusted(peer, trusted) {
-		return canon(peer)
+		return peer
 	}
 	var leftmost string
 	entries := xffEntries(r)
@@ -192,28 +212,23 @@ func ClientKey(r *http.Request, trusted []netip.Prefix) string {
 		e := entries[i]
 		leftmost = e
 		if !inTrusted(e, trusted) {
-			return canon(e)
+			return e
 		}
 	}
 	if leftmost != "" {
-		return canon(leftmost)
+		return leftmost
 	}
-	return canon(peer)
+	return peer
 }
 
-// canon renders a rate-limit key canonically. A parseable address is
-// first Unmap'd, so the IPv4-mapped spellings "::ffff:a.b.c.d" (any
-// notation) and the native "a.b.c.d" land on one key — a dual-stack
-// client cannot double its budget by switching family spelling. An IPv6
-// address folds to its /64 — rendered as the prefix's base address — so
-// every address inside the prefix one subscriber controls (SLAAC, privacy
-// / temporary addresses, deliberate rotation) shares one budget; /64 is
+// canon renders a rate-limit key canonically — canonAddr plus the IPv6
+// /64 fold: the address collapses to the prefix's base address, so every
+// address inside the prefix one subscriber controls (SLAAC, privacy /
+// temporary addresses, deliberate rotation) shares one budget; /64 is
 // the smallest prefix an end site is delegated, hence the granularity a
 // single client can still rotate inside. IPv4 stays the address itself
 // (/32). Anything that does not parse passes through verbatim so it
-// still discriminates one key from another. The result stays a valid
-// address (or the original token) — consumers that re-parse it, like the
-// gateway's forwarded-header rebuild, keep working.
+// still discriminates one key from another.
 func canon(s string) string {
 	a, err := netip.ParseAddr(s)
 	if err != nil {
@@ -224,6 +239,17 @@ func canon(s string) string {
 		return netip.PrefixFrom(a, 64).Masked().Addr().String()
 	}
 	return a.String()
+}
+
+// canonAddr renders the real client address canonically: a parseable
+// address is Unmap'd — the "::ffff:a.b.c.d" spellings become the native
+// "a.b.c.d" — and printed in netip canonical form, never folded; anything
+// else passes through verbatim.
+func canonAddr(s string) string {
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.Unmap().String()
+	}
+	return s
 }
 
 // inTrusted reports whether s parses as an address inside the trusted

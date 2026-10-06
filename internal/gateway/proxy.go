@@ -829,10 +829,10 @@ func (g *Gateway) direct(r *http.Request) {
 // stripped and re-derived from the trusted chain only. The runtime keys
 // its brute-force blacklist on the forwarded address, so a spoofed client
 // value must never reach the pod. The derived client is the same
-// ratelimit.ClientKey result the launch limiter uses: the socket peer, or
-// the right-most untrusted chain entry when the peer is inside
-// TrustedProxies — an IPv6 client appears as its /64 base address, so the
-// runtime blacklist folds at the same granularity the limiter bills.
+// selection the launch limiter keys on — ratelimit.ClientAddr shares
+// ClientKey's chain walk — but rendered as the real client address
+// (unmapped, never folded to its /64): the limiter's per-prefix billing
+// granularity must not blur the address attribution the runtime sees.
 // When the peer itself is the client the header is left
 // unset — the ReverseProxy appends the socket address itself; when the
 // peer is a trusted proxy the derived client is prepended and the proxy
@@ -841,7 +841,7 @@ func (g *Gateway) direct(r *http.Request) {
 // derived client for runtimes that key on it.
 func (g *Gateway) rewriteForwarded(r *http.Request) {
 	peer := ratelimit.PeerIP(r.RemoteAddr)
-	client := ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+	client := ratelimit.ClientAddr(r, g.cfg.TrustedProxies)
 	if _, err := netip.ParseAddr(client); err != nil {
 		// A non-IP right-most entry (spoofed or "unknown") is not a
 		// usable client address: fall back to the verified peer rather

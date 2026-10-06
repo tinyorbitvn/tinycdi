@@ -518,6 +518,12 @@ notation) unify with the native IPv4 key, and an IPv6 address keys by its
 **/64 prefix** — the smallest block a single subscriber is delegated — so
 temporary/privacy-address rotation inside one prefix draws from one
 budget instead of minting a fresh one per address. IPv4 stays per-/32.
+The corollary: every host inside ONE shared /64 — a LAN segment, or
+subscribers an ISP delegates a single prefix to — shares one rate-limit
+budget. This affects only billing granularity: the `X-Forwarded-For` /
+`Forwarded` / `X-Real-IP` headers the workspace pod sees still carry the
+client's real (unmapped, unfolded) address, and audit attribution stays
+per-address.
 
 **Behind any ingress or Gateway the value
 is required, not optional**: with it empty every user arriving through the
