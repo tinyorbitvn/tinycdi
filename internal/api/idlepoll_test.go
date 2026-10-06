@@ -102,3 +102,52 @@ func TestMeRead_DoesNotSlideIdleWindow(t *testing.T) {
 		t.Fatalf("idle-expired session kept alive by /v1/me reads: %d", r.StatusCode)
 	}
 }
+
+// TestSessionTouch_SlidesIdleWindow (FIX-IDLE): POST /v1/session:touch is
+// the explicit user-activity beat — RequireAuth's sliding read extends the
+// window while the passive reads around it never do. CSRF is required like
+// every mutation; a missing token answers 403 and does not slide.
+func TestSessionTouch_SlidesIdleWindow(t *testing.T) {
+	env := newTestEnv(t, nil)
+	fc := &fakeClock{now: time.Now()}
+	env.store.WithClock(fc.Now)
+	env.auth.now = fc.Now
+	env.store.idle = time.Minute
+
+	sess, csrf := login(t, env, "user-a")
+
+	fc.Advance(50 * time.Second)
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/session:touch", "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("touch rejected: %d", r.StatusCode)
+	}
+	fc.Advance(50 * time.Second) // inside idle only because the touch slid
+	r = env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("session rejected inside the window a touch opened: %d", r.StatusCode)
+	}
+	fc.Advance(61 * time.Second)
+	r = env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("idle-expired session accepted: %d", r.StatusCode)
+	}
+
+	// No CSRF token: denied and no slide.
+	sess2, _ := login(t, env, "user-b")
+	r = doReq(t, env, sess2, &http.Cookie{Value: "forged"}, http.MethodPost,
+		"/v1/session:touch", "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("touch without CSRF: %d, want 403", r.StatusCode)
+	}
+	// Anonymous: 401.
+	r = doReq(t, env, &http.Cookie{Value: "no-such-session"}, csrf,
+		http.MethodPost, "/v1/session:touch", "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("touch without session: %d, want 401", r.StatusCode)
+	}
+}

@@ -109,6 +109,7 @@ func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*Au
 	MountRevokeAllRoute(mux, a)
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountSessionProbeRoute(mux, a)
+	MountSessionTouchRoute(mux, a)
 	mux.Handle("/v1/echo-owner", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))
 
 	var h http.Handler = mux

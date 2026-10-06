@@ -99,8 +99,8 @@ var (
 	// a new series.
 	auditEventActions = map[string]struct{}{
 		"http.request": {}, "session.logout": {}, "session.revoke": {},
-		"session.revoke_all": {},
-		"session.list":       {}, "session.host_mismatch": {},
+		"session.revoke_all": {}, "session.touch": {},
+		"session.list": {}, "session.host_mismatch": {},
 		"workspace.create": {}, "workspace.start": {}, "workspace.stop": {},
 		"workspace.delete": {}, "connection.create": {},
 		"data.attach": {}, "data.purge": {},

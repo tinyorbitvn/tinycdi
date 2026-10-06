@@ -716,6 +716,7 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	mux.Handle("GET /v1/auth/callback", callbackLimit(http.HandlerFunc(authn.CallbackHandler)))
 	api.MountLogoutRoute(mux, authn)
 	api.MountRevokeAllRoute(mux, authn, sessionLimit)
+	api.MountSessionTouchRoute(mux, authn, sessionLimit)
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)

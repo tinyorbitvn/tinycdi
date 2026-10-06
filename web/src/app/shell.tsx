@@ -20,6 +20,7 @@ import {
   useToast,
 } from "../design";
 import { useApi } from "../api/context";
+import { useActivityTouch } from "../session/activity";
 import { signOut, signOutEverywhere } from "../auth/signOut";
 import { Link, navigate, NavLink, usePathname } from "./router";
 import {
@@ -223,6 +224,10 @@ function routeTitle(result: RouteResult): string | undefined {
 
 export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
   const pathname = usePathname();
+  // Real user interaction keeps the portal session alive (FIX-IDLE): the
+  // read surface is passive, so pointer/key/route events send the
+  // throttled POST /v1/session:touch beat — never polls.
+  useActivityTouch(useApi());
   const meState = useMe();
   const branding = useBranding();
   const { resolved: resolvedTheme } = useTheme();

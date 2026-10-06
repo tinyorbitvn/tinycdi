@@ -60,6 +60,11 @@ export function authArea(_ctx: MockContext): MockArea {
       endSessionUrl = null;
     },
     api: (req) => {
+      // POST /v1/session:touch (openapi.yaml touchSession): the activity
+      // beat — session cookie + CSRF were already enforced; the slide is
+      // implicit, the answer is empty.
+      if (req.path === "/v1/session:touch" && req.method === "POST")
+        return { status: 204, headers: {}, body: "" };
       // POST /v1/me/sessions:revoke-all (openapi.yaml revokeAllSessions):
       // same answer shape as logout — the caller's session dies too.
       if (req.path === "/v1/me/sessions:revoke-all" && req.method === "POST") return logout();
