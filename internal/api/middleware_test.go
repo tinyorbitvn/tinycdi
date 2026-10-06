@@ -466,7 +466,10 @@ func TestRequireAuth_BackgroundPollMarker(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
 		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: id})
 		if marked {
-			req.Header.Set(PollHeader, PollHeaderValue)
+			// Literal wire values, not PollHeader/PollHeaderValue, so this
+			// file still compiles on a tree without the marker — where the
+			// "poll past idle" step then fails, proving the regression.
+			req.Header.Set("X-TCDI-Poll", "background")
 		}
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -489,7 +492,7 @@ func TestRequireAuth_BackgroundPollMarker(t *testing.T) {
 	save("sess-other-value")
 	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
 	req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: "sess-other-value"})
-	req.Header.Set(PollHeader, "1")
+	req.Header.Set("X-TCDI-Poll", "1")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
