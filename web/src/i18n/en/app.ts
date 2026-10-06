@@ -28,7 +28,8 @@ export default {
   "app.user.signOutAll.confirm": "Sign out everywhere",
   "app.user.signOutAll.busy": "Signing out…",
   "app.user.signOutFailed.title": "Could not sign out",
-  "app.user.signOutFailed.body": "Try again. If it keeps failing, close this browser window.",
+  "app.user.signOutFailed.body":
+    "You are still signed in. Try again — if it keeps failing, close this browser window.",
 
   "auth.signedOut.title": "You have signed out",
   "auth.signedOut.body": "Your session has ended. Close this window or sign in again.",

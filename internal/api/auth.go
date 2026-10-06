@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -67,10 +68,11 @@ type AuthConfig struct {
 	// set it false for httptest servers, release builds must not.
 	SecureCookies *bool
 
-	// IdleTimeout is the sliding inactivity lifetime of a session
-	// (default 30m). AbsoluteTimeout is the hard cap from creation
-	// (default 12h).
-	IdleTimeout     time.Duration
+	// AbsoluteTimeout is the hard cap on a session's lifetime from
+	// creation (default 12h). The sliding idle timeout is not configured
+	// here: it is owned by the session store (-session-idle /
+	// TCDI_SESSION_IDLE -> store.NewSessionStore), which enforces it on
+	// every read.
 	AbsoluteTimeout time.Duration
 	// PendingTTL bounds how long a login attempt (state/nonce/PKCE
 	// verifier) stays valid (default 10m). It is sealed into the login
@@ -86,9 +88,6 @@ type AuthConfig struct {
 	// membership and group membership. Defaults: "tenant_id", "groups".
 	TenantClaim string
 	GroupsClaim string
-	// AllowedTenants, when non-empty, restricts login to principals whose
-	// TenantID is listed. TenantID empty is always rejected.
-	AllowedTenants []string
 	// RequiredGroups, when non-empty, additionally restricts login to
 	// principals whose Groups claim contains at least one listed group.
 	// The match is exact — the Keycloak full-path form "/platform-admins"
@@ -108,7 +107,7 @@ type AuthConfig struct {
 	// end-session URL (chart oidc.postLogoutRedirect). Empty omits it: the
 	// URI must be registered at the provider, so it is opt-in and the
 	// provider then shows its own logged-out page. Must be an absolute
-	// http(s) URL.
+	// https URL (http only for loopback dev hosts).
 	PostLogoutRedirect string
 }
 
@@ -128,9 +127,6 @@ func (c *AuthConfig) withDefaults() {
 	if c.SecureCookies == nil {
 		t := true
 		c.SecureCookies = &t
-	}
-	if c.IdleTimeout == 0 {
-		c.IdleTimeout = 30 * time.Minute
 	}
 	if c.AbsoluteTimeout == 0 {
 		c.AbsoluteTimeout = 12 * time.Hour
@@ -359,8 +355,8 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 	if log == nil {
 		log = slog.Default()
 	}
-	if cfg.PostLogoutRedirect != "" && !isAbsoluteHTTPURL(cfg.PostLogoutRedirect) {
-		return nil, errors.New("api: AuthConfig PostLogoutRedirect must be an absolute http(s) URL")
+	if cfg.PostLogoutRedirect != "" && !isHTTPSOrLoopbackURL(cfg.PostLogoutRedirect) {
+		return nil, errors.New("api: AuthConfig PostLogoutRedirect must be an absolute https URL (http only for loopback hosts)")
 	}
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
@@ -374,10 +370,10 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 		if err := provider.Claims(&disc); err != nil {
 			return nil, fmt.Errorf("api: OIDC discovery claims: %w", err)
 		}
-		if isAbsoluteHTTPURL(disc.EndSessionEndpoint) {
+		if isHTTPSOrLoopbackURL(disc.EndSessionEndpoint) {
 			endSession = disc.EndSessionEndpoint
 		} else if disc.EndSessionEndpoint != "" {
-			log.Warn("oidc end_session_endpoint ignored: not an absolute http(s) URL without credentials")
+			log.Warn("oidc end_session_endpoint ignored: not an absolute https URL (http only for loopback hosts) without credentials")
 		}
 	}
 	a := &Authenticator{
@@ -576,7 +572,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		DisplayName: displayNameClaim(claims),
 		Email:       displayClaim(stringClaim(claims, "email"), maxEmailLen),
 	}
-	if principal.TenantID == "" || !a.tenantAllowed(principal.TenantID) {
+	if principal.TenantID == "" {
 		writeError(w, r, CodeForbidden, "no tenant membership for this account")
 		return
 	}
@@ -661,6 +657,11 @@ type LogoutResult struct {
 // response.
 const sessionRevokeTimeout = 5 * time.Second
 
+// logoutRetryAfter is the Retry-After hint on the 503 a sign-out answers
+// when the session store could not delete the session row: a transient
+// store failure, safe to retry once the store is back.
+const logoutRetryAfter = "5"
+
 // LogoutHandler destroys the server-side session and expires all login- and
 // session-scoped cookies. Route it behind RequireAuth + RequireCSRF.
 //
@@ -673,6 +674,17 @@ const sessionRevokeTimeout = 5 * time.Second
 // can never rehydrate anywhere. A revoke failure is logged, counted and
 // audited but never kept back the sign-out: the portal cookie is cleared
 // and the session destroyed regardless.
+//
+// The session-row delete is the point of no return and is ordered first for
+// exactly that reason: when it fails the handler answers a retryable 503
+// (UNAVAILABLE + Retry-After) and tears NOTHING down — no cookie expiry, no
+// lease or ticket revoke. The answer "not signed out, retry" then matches
+// the world: the session still validates and its desktops are still alive.
+// Revoking material first would leave a live session with dead streams — a
+// half-revoked state a 503 would be lying about — and expiring the cookie
+// would tell the browser it is signed out while a copied cookie still works.
+// A retry re-runs the whole destroy; the material revoke is a no-op re-run
+// when it already committed.
 //
 // RP-initiated logout: when EndSession is on and the provider advertises
 // end_session_endpoint, it answers 200 {"endSessionUrl"} so the portal can
@@ -695,6 +707,9 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		if err := a.sessions.Delete(ctx, c.Value); err != nil {
 			a.log.Warn("sign-out: session delete failed",
 				"request_id", RequestIDFromContext(ctx), "err", err)
+			w.Header().Set("Retry-After", logoutRetryAfter)
+			writeError(w, r, CodeUnavailable, "could not sign out; retry")
+			return
 		}
 		a.revokeSessionMaterial(r, c.Value)
 	}
@@ -793,14 +808,32 @@ func (a *Authenticator) endSessionURL(idToken string) string {
 	return u.String()
 }
 
-// isAbsoluteHTTPURL reports whether s is an absolute http(s) URL with a host
-// and no embedded credentials.
-func isAbsoluteHTTPURL(s string) bool {
+// isHTTPSOrLoopbackURL reports whether s is an absolute URL the sign-out
+// flow may hand to the browser: https always; http only when the host is
+// loopback (localhost / 127.0.0.0/8 / ::1) — the codebase's dev convention
+// is a plain-http IdP on loopback (oidctest, a dev Keycloak), and plaintext
+// to anywhere else is never a legitimate navigation target. Embedded
+// credentials are rejected.
+func isHTTPSOrLoopbackURL(s string) bool {
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || u.User != nil {
 		return false
 	}
-	return u.Scheme == "https" || u.Scheme == "http"
+	if u.Scheme == "https" {
+		return true
+	}
+	return u.Scheme == "http" && isLoopbackHost(u.Hostname())
+}
+
+// isLoopbackHost reports whether host names a loopback address: the literal
+// "localhost" or an IP in the loopback range. Strict parsing — non-canonical
+// IP spellings (octal, hex, v4-in-v6 mapped) never count as loopback.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
 }
 
 // sessionCookie builds the host-only session cookie: no Domain attribute
@@ -900,18 +933,6 @@ func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, pr
 type throttleEntry struct {
 	principal string
 	at        time.Time
-}
-
-func (a *Authenticator) tenantAllowed(tenant string) bool {
-	if len(a.cfg.AllowedTenants) == 0 {
-		return true
-	}
-	for _, t := range a.cfg.AllowedTenants {
-		if t == tenant {
-			return true
-		}
-	}
-	return false
 }
 
 // groupsAllowed enforces RequiredGroups: with none configured the gate is

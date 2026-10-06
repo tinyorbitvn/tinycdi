@@ -310,7 +310,23 @@ func TestLogout_RequiresCSRFAndSession(t *testing.T) {
 }
 
 func TestNewAuthenticator_RejectsBadPostLogoutRedirect(t *testing.T) {
-	for _, redirect := range []string{"/signed-out", "javascript:alert(1)", "portal.test/signed-out", "ftp://portal.test/x"} {
+	for _, redirect := range []string{
+		"/signed-out",
+		"javascript:alert(1)",
+		"portal.test/signed-out",
+		"ftp://portal.test/x",
+		// Plain http is never a legitimate post-logout hop off-loopback —
+		// the browser would follow it over cleartext. Rejected outright,
+		// not downgraded.
+		"http://portal.test/signed-out",
+		"http://192.168.1.10/signed-out",
+		// Hostnames that only look loopback-adjacent are not loopback.
+		"http://localhost.evil.test/x",
+		"http://127.0.0.1.evil.test/x",
+		"http://2130706433/x", // dotted-quad decimal for 127.0.0.1 — strict parser rejects it
+		// Credentials in the URL are rejected on any scheme.
+		"https://user:pw@portal.test/x",
+	} {
 		iss, err := oidctest.NewIssuer()
 		if err != nil {
 			t.Fatal(err)
@@ -329,11 +345,51 @@ func TestNewAuthenticator_RejectsBadPostLogoutRedirect(t *testing.T) {
 	}
 }
 
-// A discovered endpoint that is not an absolute http(s) URL is not trusted:
-// sign-out degrades to the plain 204 instead of handing the browser an
-// attacker-shaped navigation target.
+// http stays acceptable on loopback only: the dev/test IdP convention is a
+// plain-http issuer on loopback (oidctest, a dev Keycloak), so
+// "http://localhost…" and "http://127.0.0.1…" redirect targets are dev
+// reality — anything off-loopback must be https.
+func TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect(t *testing.T) {
+	for _, redirect := range []string{
+		"https://portal.test/signed-out",
+		"http://localhost/signed-out",
+		"http://localhost:8080/signed-out",
+		"http://127.0.0.1:8080/signed-out",
+		"http://[::1]:8080/signed-out",
+	} {
+		iss, err := oidctest.NewIssuer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = NewAuthenticator(context.Background(), AuthConfig{
+			Issuer: iss.URL(), ClientID: iss.ClientID,
+			RedirectURL:        "https://portal.test/auth/callback",
+			LoginSealer:        testLoginSealer(t),
+			EndSession:         true,
+			PostLogoutRedirect: redirect,
+		}, NewInMemorySessionStore(time.Minute), slog.Default())
+		iss.Close()
+		if err != nil {
+			t.Fatalf("NewAuthenticator rejected PostLogoutRedirect %q: %v", redirect, err)
+		}
+	}
+}
+
+// A discovered endpoint that is not an absolute https URL (or http on a
+// loopback host) is not trusted: sign-out degrades to the plain 204 instead
+// of handing the browser an attacker-shaped navigation target.
 func TestLogout_UntrustedDiscoveredEndpointIs204(t *testing.T) {
-	for _, endpoint := range []string{"javascript:alert(1)", "/logout", "//evil.example/logout", "https://user:pw@idp.example/logout"} {
+	for _, endpoint := range []string{
+		"javascript:alert(1)",
+		"/logout",
+		"//evil.example/logout",
+		"https://user:pw@idp.example/logout",
+		// Plain http off-loopback is not a sign-out target either — a
+		// compromised or misconfigured discovery document cannot downgrade
+		// the browser to cleartext.
+		"http://idp.example/logout",
+		"http://localhost.evil.example/logout",
+	} {
 		env := newTestEnvIssuer(t, func(i *oidctest.Issuer) { i.EndSessionEndpoint = endpoint },
 			func(c *AuthConfig) { c.EndSession = true })
 		sess := env.loginSession(t)
@@ -505,5 +561,86 @@ func TestLogout_NoRevokerKeepsSignOut(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
+	}
+}
+
+// failingDeleteStore is a SessionStore whose Delete fails while fail is
+// set — a transient store outage — and passes through once it clears.
+type failingDeleteStore struct {
+	SessionStore
+	fail bool
+}
+
+func (s *failingDeleteStore) Delete(ctx context.Context, id string) error {
+	if s.fail {
+		return errors.New("session store down")
+	}
+	return s.SessionStore.Delete(ctx, id)
+}
+
+// TestLogout_StoreDeleteFailureReturns503: when the session store cannot
+// delete the session row the sign-out must fail closed — 503 UNAVAILABLE,
+// retryable, with Retry-After — and tear nothing down: the cookie is not
+// expired (no success claim the state contradicts), the session still
+// validates (a copied cookie keeps working), and the session-bound
+// material revoke never ran (no half-revoked live session). Once the
+// store recovers a plain retry completes the sign-out and the session no
+// longer validates.
+func TestLogout_StoreDeleteFailureReturns503(t *testing.T) {
+	env := newTestEnv(t, nil) // no end-session endpoint: the 204 path
+	rv := &fakeSessionRevoker{n: 1}
+	env.auth.WithSessionRevoker(rv)
+	fs := &failingDeleteStore{SessionStore: env.store, fail: true}
+	env.auth.sessions = fs
+	sess := env.loginSession(t)
+
+	resp := env.postLogout(t, sess, csrfTokenFor(sess.Value), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("logout status = %d, want 503", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("503 sign-out refusal carries no Retry-After")
+	}
+	var body Error
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Code != CodeUnavailable || !body.Retryable {
+		t.Fatalf("error body = %+v, want UNAVAILABLE retryable", body)
+	}
+	// No expired-cookie header: the response must not claim a sign-out
+	// that never committed.
+	for _, h := range resp.Header.Values("Set-Cookie") {
+		if strings.Contains(h, "Max-Age=0") {
+			t.Fatal("session cookie cleared despite failed delete")
+		}
+	}
+	// The session still validates — the state matches the refusal.
+	r := env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("session invalidated by a failed logout: %d", r.StatusCode)
+	}
+	// Nothing else was torn down: no lease/ticket revoke on a live
+	// session.
+	if len(rv.calls) != 0 {
+		t.Fatalf("session material revoked despite failed delete: %v", rv.calls)
+	}
+
+	// The store recovers: the same request, retried, signs out for real.
+	fs.fail = false
+	resp = env.postLogout(t, sess, csrfTokenFor(sess.Value), nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("retry status = %d, want 204", resp.StatusCode)
+	}
+	if len(rv.calls) != 1 || rv.calls[0] != sess.Value {
+		t.Fatalf("revocations after retry = %v, want exactly [%q]", rv.calls, sess.Value)
+	}
+	r = env.authedGet(t, sess, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session still valid after retried logout: %d", r.StatusCode)
 	}
 }

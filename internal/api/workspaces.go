@@ -26,16 +26,23 @@ func respondJSON(w http.ResponseWriter, v any) {
 
 // decodeJSON decodes exactly one JSON document from body into v: unknown
 // fields are rejected and trailing data after the first value is an error.
-// The error detail is never echoed to the client (SEC-I7); callers respond
-// with a generic "invalid request body".
-func decodeJSON(body []byte, v any) bool {
+// The returned detail is for server-side logs only — it is never echoed to
+// the client (SEC-I7); callers respond with a generic "invalid request
+// body".
+func decodeJSON(body []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return false
+		return err
 	}
 	var extra any
-	return dec.Decode(&extra) == io.EOF
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("json: unexpected trailing data")
+		}
+		return err
+	}
+	return nil
 }
 
 // TenantResolver maps a verified tenant ID to the Kubernetes namespace
@@ -454,7 +461,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createWorkspaceRequest
-	if !decodeJSON(body, &req) {
+	if decodeJSON(body, &req) != nil {
 		writeError(w, r, CodeInvalidRequest, "invalid request body")
 		return
 	}
@@ -606,7 +613,7 @@ func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, kind p
 	// be a single well-formed JSON document (SEC-I7).
 	if len(bytes.TrimSpace(body)) > 0 {
 		var v json.RawMessage
-		if !decodeJSON(body, &v) {
+		if decodeJSON(body, &v) != nil {
 			writeError(w, r, CodeInvalidRequest, "invalid request body")
 			return
 		}

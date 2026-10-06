@@ -390,7 +390,8 @@ back in. So, by default, sign-out continues at the provider
 - The target comes only from the discovery document and the chart values.
   Nothing in the sign-out request (query, body, headers, `Host`) can change
   it, so it is not an open redirect. A discovered endpoint that is not an
-  absolute `http(s)` URL is ignored and sign-out stays local.
+  absolute `https` URL — `http` is accepted only for loopback dev hosts —
+  is ignored and sign-out stays local.
 
 ```yaml
 oidc:

@@ -30,7 +30,8 @@ export default {
   "app.user.signOutAll.confirm": "Đăng xuất khỏi mọi nơi",
   "app.user.signOutAll.busy": "Đang đăng xuất…",
   "app.user.signOutFailed.title": "Không đăng xuất được",
-  "app.user.signOutFailed.body": "Thử lại. Nếu vẫn lỗi, hãy đóng cửa sổ trình duyệt này.",
+  "app.user.signOutFailed.body":
+    "Bạn vẫn đang đăng nhập. Thử lại — nếu vẫn lỗi, hãy đóng cửa sổ trình duyệt này.",
 
   "auth.signedOut.title": "Bạn đã đăng xuất",
   "auth.signedOut.body": "Phiên của bạn đã kết thúc. Đóng cửa sổ này hoặc đăng nhập lại.",

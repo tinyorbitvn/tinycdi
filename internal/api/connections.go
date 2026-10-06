@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -55,6 +56,7 @@ type ConnectionHandler struct {
 	// audit is the dedicated audit-event sink the route emits through
 	// (nil = no domain audit events).
 	audit observability.AuditSink
+	log   *slog.Logger
 }
 
 // NewConnectionHandler wires the handler. domain is the session domain the
@@ -66,7 +68,17 @@ func NewConnectionHandler(issuer ConnectionIssuer, tenants TenantResolver, domai
 		tenants: tenants,
 		domain:  domain,
 		maxBody: 16 << 10,
+		log:     slog.Default(),
 	}
+}
+
+// WithLogger attaches the logger the handler writes server-side detail to
+// (e.g. the request-body decode detail that never reaches the client).
+func (h *ConnectionHandler) WithLogger(l *slog.Logger) *ConnectionHandler {
+	if l != nil {
+		h.log = l
+	}
+	return h
 }
 
 // WithClipboardSource wires the resolver that supplies the workspace's
@@ -133,10 +145,12 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(bytes.TrimSpace(body)) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, r, CodeInvalidRequest, "invalid request body: "+err.Error())
+		// SEC-I7: decode detail is logged server-side and never echoed —
+		// the client gets the generic message every other handler uses.
+		if err := decodeJSON(body, &req); err != nil {
+			h.log.Warn("connection create: invalid request body",
+				"request_id", RequestIDFromContext(r.Context()), "err", err)
+			writeError(w, r, CodeInvalidRequest, "invalid request body")
 			return
 		}
 	}
