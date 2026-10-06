@@ -164,6 +164,13 @@ paths:
         `oidc.postLogoutRedirect` — never from the request (no open redirect).
         The session keeps no ID token, so `id_token_hint` is not sent.
         Otherwise the answer is `204` and the portal stays local.
+
+        The server-side session delete is the point of no return: when the
+        session store cannot delete it, the answer is `503` `UNAVAILABLE`
+        with `Retry-After` — the cookie is NOT expired and no session-bound
+        leases or launch tickets are revoked, so the caller is still fully
+        signed in and may simply retry. A success status is only ever sent
+        after the session row is gone.
       tags: [session]
       responses:
         "200":
