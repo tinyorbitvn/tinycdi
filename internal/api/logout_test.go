@@ -310,7 +310,23 @@ func TestLogout_RequiresCSRFAndSession(t *testing.T) {
 }
 
 func TestNewAuthenticator_RejectsBadPostLogoutRedirect(t *testing.T) {
-	for _, redirect := range []string{"/signed-out", "javascript:alert(1)", "portal.test/signed-out", "ftp://portal.test/x"} {
+	for _, redirect := range []string{
+		"/signed-out",
+		"javascript:alert(1)",
+		"portal.test/signed-out",
+		"ftp://portal.test/x",
+		// Plain http is never a legitimate post-logout hop off-loopback —
+		// the browser would follow it over cleartext. Rejected outright,
+		// not downgraded.
+		"http://portal.test/signed-out",
+		"http://192.168.1.10/signed-out",
+		// Hostnames that only look loopback-adjacent are not loopback.
+		"http://localhost.evil.test/x",
+		"http://127.0.0.1.evil.test/x",
+		"http://2130706433/x", // dotted-quad decimal for 127.0.0.1 — strict parser rejects it
+		// Credentials in the URL are rejected on any scheme.
+		"https://user:pw@portal.test/x",
+	} {
 		iss, err := oidctest.NewIssuer()
 		if err != nil {
 			t.Fatal(err)
@@ -329,11 +345,51 @@ func TestNewAuthenticator_RejectsBadPostLogoutRedirect(t *testing.T) {
 	}
 }
 
-// A discovered endpoint that is not an absolute http(s) URL is not trusted:
-// sign-out degrades to the plain 204 instead of handing the browser an
-// attacker-shaped navigation target.
+// http stays acceptable on loopback only: the dev/test IdP convention is a
+// plain-http issuer on loopback (oidctest, a dev Keycloak), so
+// "http://localhost…" and "http://127.0.0.1…" redirect targets are dev
+// reality — anything off-loopback must be https.
+func TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect(t *testing.T) {
+	for _, redirect := range []string{
+		"https://portal.test/signed-out",
+		"http://localhost/signed-out",
+		"http://localhost:8080/signed-out",
+		"http://127.0.0.1:8080/signed-out",
+		"http://[::1]:8080/signed-out",
+	} {
+		iss, err := oidctest.NewIssuer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = NewAuthenticator(context.Background(), AuthConfig{
+			Issuer: iss.URL(), ClientID: iss.ClientID,
+			RedirectURL:        "https://portal.test/auth/callback",
+			LoginSealer:        testLoginSealer(t),
+			EndSession:         true,
+			PostLogoutRedirect: redirect,
+		}, NewInMemorySessionStore(time.Minute), slog.Default())
+		iss.Close()
+		if err != nil {
+			t.Fatalf("NewAuthenticator rejected PostLogoutRedirect %q: %v", redirect, err)
+		}
+	}
+}
+
+// A discovered endpoint that is not an absolute https URL (or http on a
+// loopback host) is not trusted: sign-out degrades to the plain 204 instead
+// of handing the browser an attacker-shaped navigation target.
 func TestLogout_UntrustedDiscoveredEndpointIs204(t *testing.T) {
-	for _, endpoint := range []string{"javascript:alert(1)", "/logout", "//evil.example/logout", "https://user:pw@idp.example/logout"} {
+	for _, endpoint := range []string{
+		"javascript:alert(1)",
+		"/logout",
+		"//evil.example/logout",
+		"https://user:pw@idp.example/logout",
+		// Plain http off-loopback is not a sign-out target either — a
+		// compromised or misconfigured discovery document cannot downgrade
+		// the browser to cleartext.
+		"http://idp.example/logout",
+		"http://localhost.evil.example/logout",
+	} {
 		env := newTestEnvIssuer(t, func(i *oidctest.Issuer) { i.EndSessionEndpoint = endpoint },
 			func(c *AuthConfig) { c.EndSession = true })
 		sess := env.loginSession(t)
