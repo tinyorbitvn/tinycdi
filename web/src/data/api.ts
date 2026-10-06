@@ -24,11 +24,14 @@ export interface AttachDataBody {
 
 // GET /v1/data. `Purged` records are excluded server-side; the filter here
 // keeps the list honest if an old backend still returns them.
+// `background` marks a scheduled poll tick (useResource) — the request
+// authenticates without sliding the portal idle window (D18).
 export async function listRetainedData(
   api: ApiClient,
   scope: Scope,
+  background = false,
 ): Promise<{ items: ScopedRetainedData[]; truncated: boolean }> {
-  const page = await listAll<ScopedRetainedData>(api, "/v1/data", { scope });
+  const page = await listAll<ScopedRetainedData>(api, "/v1/data", { scope }, background);
   return { ...page, items: page.items.filter((r) => r.state !== "Purged") };
 }
 
@@ -38,9 +41,10 @@ export async function listRetainedData(
 export async function getRetainedData(
   api: ApiClient,
   id: string,
+  background = false,
 ): Promise<ScopedRetainedData | null> {
   try {
-    return await get<ScopedRetainedData>(api, `/v1/data/${encodeURIComponent(id)}`);
+    return await get<ScopedRetainedData>(api, `/v1/data/${encodeURIComponent(id)}`, undefined, background);
   } catch (e) {
     if (isPortalApiError(e) && e.httpStatus === 404) return null;
     throw e;

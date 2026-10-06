@@ -10,6 +10,15 @@ export type ApiClient = Client<paths>;
 // export reads document.cookie; the tcdi_csrf cookie is gone in v0.2.
 export const CSRF_HEADER = "X-CSRF-Token";
 
+// Background-poll marker (D18): reads issued by the portal's polling loops
+// carry `X-TCDI-Poll: background`; the server then authenticates them with
+// a peek at the session instead of a sliding read, so a visible but
+// unattended tab cannot hold the idle window open. The marker can only
+// withhold an idle slide, never earn one — there is nothing to spoof.
+// Navigation, user-triggered reloads and mutations send nothing.
+export const POLL_HEADER = "X-TCDI-Poll";
+export const POLL_HEADERS: Record<string, string> = { [POLL_HEADER]: "background" };
+
 let csrfToken: string | undefined;
 
 export function setCsrfToken(token: string | undefined): void {

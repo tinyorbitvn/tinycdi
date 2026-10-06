@@ -79,7 +79,7 @@ const COLUMNS: Column<WorkspaceView>[] = [
 
 export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const api = useApi();
-  const load = useCallback(() => listWorkspaces(api), [api]);
+  const load = useCallback((background: boolean) => listWorkspaces(api, background), [api]);
   const list = useResource(load, pollIntervalMs ?? pollDelay);
   const [announcement, setAnnouncement] = useState<string | null>(null);
 

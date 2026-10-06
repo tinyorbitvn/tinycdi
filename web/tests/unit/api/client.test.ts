@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createApi, setCsrfToken, CSRF_HEADER, unwrap } from "../../../src/api/client";
+import { createApi, setCsrfToken, CSRF_HEADER, POLL_HEADER, POLL_HEADERS, unwrap } from "../../../src/api/client";
+import { fetchMe } from "../../../src/app/me";
+import { getWorkspace, listWorkspaces } from "../../../src/workspaces/api";
 
 // The CSRF token arrives in the GET /v1/me body (P1/D17) and lives only in
 // module state — setCsrfToken installs it, the client echoes it on mutations,
@@ -119,5 +121,41 @@ describe("api client CSRF", () => {
     const posts = calls.filter((c) => c.method === "POST");
     expect(meCalls).toHaveLength(1);
     expect(posts).toHaveLength(2);
+  });
+});
+
+// FIX-IDLE — background polls carry X-TCDI-Poll: background so the server
+// authenticates them without sliding the portal idle window; foreground
+// reads send nothing.
+describe("background-poll marker", () => {
+  it("sends X-TCDI-Poll only on marked reads", async () => {
+    const { calls, fetchImpl } = recordingFetch(() => json(200, { items: [] }));
+    const client = createApi(fetchImpl);
+
+    await listWorkspaces(client, true);
+    await listWorkspaces(client);
+    await getWorkspace(client, WS, true);
+
+    const [markedList, plainList, markedGet] = calls;
+    expect(markedList.headers.get(POLL_HEADER)).toBe(POLL_HEADERS[POLL_HEADER]);
+    expect(plainList.headers.get(POLL_HEADER)).toBeNull();
+    expect(markedGet.headers.get(POLL_HEADER)).toBe(POLL_HEADERS[POLL_HEADER]);
+  });
+
+  it("fetchMe marks retry attempts", async () => {
+    const calls: Request[] = [];
+    // fetchMe hits the relative /v1/me, so give the Request a base URL.
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? new URL(input, "https://portal.test") : input;
+      const req = new Request(url, init);
+      calls.push(req);
+      return json(200, ME_BODY);
+    }) as typeof fetch;
+
+    await fetchMe(true, fetchImpl);
+    await fetchMe(false, fetchImpl);
+
+    expect(calls[0].headers.get(POLL_HEADER)).toBe(POLL_HEADERS[POLL_HEADER]);
+    expect(calls[1].headers.get(POLL_HEADER)).toBeNull();
   });
 });

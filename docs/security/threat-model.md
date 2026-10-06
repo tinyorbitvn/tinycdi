@@ -186,8 +186,13 @@ Controls:
   `ParseTrustedProxies`).
 - **Passive auth** — `GET /v1/connections/.../status` authenticates via
   `RequireAuthPassive`, which never extends the idle clock
-  (`internal/api/middleware.go:83-86`, `internal/api/connection_status.go:78`) —
-  A6-S6's second authenticated path exists to be reviewed.
+  (`internal/api/middleware.go`, `internal/api/connection_status.go`) —
+  A6-S6's second authenticated path exists to be reviewed. The portal's
+  interval polls additionally carry `X-TCDI-Poll: background`, which makes
+  `requireAuth` read the session with `Peek` on any route: a
+  visible-but-unattended tab cannot hold a session open, and the marker
+  can only withhold an idle slide so a forged one gains nothing
+  (`TestRequireAuth_BackgroundPollMarker`).
 - **Tenant scoping** — the principal is built only from verified claims
   (`internal/api/principal.go`); tenant-admin surface is scoped and events are
   curated, not raw (`internal/api/events.go`, `statusview.go`;
@@ -545,6 +550,24 @@ Additional items found while writing this document (not from A6):
 - **Portal idle-extension depends on lease activity** — verify a stolen
   portal cookie alone cannot extend itself, and that idle extension only
   credits input activity measured server-side.
+- **Portal background polling vs the idle window** — Implemented: before
+  this fix the SPA's interval polls of `GET /v1/workspaces`,
+  `/v1/workspaces/{id}` and `/v1/workspaces/{id}/events` (all mounted
+  behind sliding `RequireAuth`) kept a visible-but-unattended tab's
+  session alive forever. The SPA now marks timer-driven reads with
+  `X-TCDI-Poll: background` (useResource ticks, the session page's
+  "starting" poll, `/v1/me` backoff retries) and `requireAuth` peeks
+  instead of sliding on marked requests; navigation, user-triggered
+  refresh, return-to-visible reloads and mutations still slide. Desktop
+  streams keep the window open only through server-measured RFB input
+  (`InputHook` → `TouchPrincipal`, throttle 1/min per principal), so an
+  active desktop user is not signed out mid-work while an open-but-idle
+  stream is not portal activity. Residual, unchanged here: lease
+  redeem/renew/rehydrate never consult the portal idle window — a lease
+  outlives idle expiry by design and dies on its own TTL, on revoke, or
+  on the bound session's absolute expiry (S17), so tearing an open stream
+  down at portal-idle expiry remains a separate decision, not covered by
+  this fix.
 - **Metrics listener** is scrape-only but has no auth — Implemented:
   served on the dedicated ClusterIP `backend-metrics` Service; the only
   rule opening the metrics port is `allow-metrics-scrape` admitting

@@ -27,6 +27,19 @@ info:
       transactional outbox (see ADR 0002); Kubernetes RBAC denies direct CR
       writes by end users.
 
+    ## Session idle timeout and background polling
+
+    Sessions carry a sliding idle timeout: an authenticated request normally
+    slides the idle deadline, while a request carrying the header
+    `X-TCDI-Poll: background` is authenticated identically but does **not**
+    slide it. The portal sends the marker on its interval polls so a
+    visible-but-unattended tab cannot hold a session open; interactive
+    desktop input slides the same window through a server-measured signal,
+    not through this API. The marker is honoured on every authenticated
+    endpoint — it can only withhold an idle slide, never earn one, so a
+    client gains nothing by sending it. `GET /v1/session` and
+    `GET /v1/workspaces/{workspaceId}/connection` are always passive.
+
     ## Idempotency
 
     Mutating operations that allocate resources (`POST /v1/workspaces`,

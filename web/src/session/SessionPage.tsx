@@ -3,7 +3,7 @@ import { t, formatTime } from "../i18n";
 import { formatDuration } from "../templates/format";
 import { phaseLabelKey } from "../workspaces/helpers";
 import { useApi } from "../api/context";
-import { newIdempotencyKey, unwrap } from "../api/client";
+import { newIdempotencyKey, POLL_HEADERS, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { LifecycleProgress } from "../progress/LifecycleProgress";
 import { opPollMs, startInFlight, withJitter } from "../progress/derive";
@@ -678,8 +678,13 @@ export function SessionPage({
     let delay = 1_000;
     const tick = async () => {
       try {
+        // Timer-driven poll, not user activity: the marker keeps it from
+        // sliding the portal idle window (D18).
         const ws = unwrap(
-          await api.GET("/v1/workspaces/{workspaceId}", { params: { path: { workspaceId } } }),
+          await api.GET("/v1/workspaces/{workspaceId}", {
+            params: { path: { workspaceId } },
+            headers: POLL_HEADERS,
+          }),
         );
         if (cancelled || !mounted.current) return;
         failures = 0;

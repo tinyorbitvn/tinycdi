@@ -145,19 +145,22 @@ export function WorkspaceDetailPage({
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
 
-  const load = useCallback(async (): Promise<DetailData> => {
-    const [workspace, events] = await Promise.all([
-      getWorkspace(api, workspaceId),
-      listWorkspaceEvents(api, workspaceId),
-    ]);
-    // The retained disk this workspace mounts: named so the user can tell
-    // where its home came from (T5.4). Best effort — the record may be
-    // gone or not visible to this caller.
-    const retained = workspace.retainedDataRef
-      ? await getRetainedData(api, workspace.retainedDataRef).catch(() => null)
-      : null;
-    return { workspace, events, retained };
-  }, [api, workspaceId]);
+  const load = useCallback(
+    async (background: boolean): Promise<DetailData> => {
+      const [workspace, events] = await Promise.all([
+        getWorkspace(api, workspaceId, background),
+        listWorkspaceEvents(api, workspaceId, background),
+      ]);
+      // The retained disk this workspace mounts: named so the user can tell
+      // where its home came from (T5.4). Best effort — the record may be
+      // gone or not visible to this caller.
+      const retained = workspace.retainedDataRef
+        ? await getRetainedData(api, workspace.retainedDataRef, background).catch(() => null)
+        : null;
+      return { workspace, events, retained };
+    },
+    [api, workspaceId],
+  );
   const detail = useResource(load, pollIntervalMs ?? pollDelay);
   const { toast } = useToast();
   // A delete "completes" when the API drops the row (FX-R19 hides finalised

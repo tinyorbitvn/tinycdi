@@ -33,7 +33,10 @@ export function DataDetailPage({
   const api = useApi();
   const me = useMeLoaded();
   const admin = isTenantAdmin(me.data);
-  const load = useCallback(() => getRetainedData(api, dataId), [api, dataId]);
+  const load = useCallback(
+    (background: boolean) => getRetainedData(api, dataId, background),
+    [api, dataId],
+  );
   // Poll while the record is Purging (same cadence as the list); a Purged
   // record either stops being returned (404 -> null) or reports Purged —
   // either way the poll stops.
