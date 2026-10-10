@@ -79,9 +79,12 @@ const (
 	RuntimeServiceAccount = "tinycdi-runtime"
 
 	// AnnotationSeccompProfile is an optional WorkspaceTemplate annotation
-	// selecting the container seccomp profile. Only "localhost/<name>" is
-	// honored (the browser-sandbox Localhost profile); anything else is
-	// ignored and RuntimeDefault applies.
+	// selecting the container seccomp profile. Only "localhost/<name>" — a
+	// profile pre-loaded under the kubelet's seccomp root — and
+	// "runtime/default" are accepted; anything else (including "unconfined"
+	// or a localhost name that is not a clean relative path) rejects the
+	// template with ErrTemplateRejected rather than silently weakening or
+	// silently ignoring the selection.
 	AnnotationSeccompProfile = "workspaces.cdi.tinyorbit.vn/seccomp-profile"
 
 	// AnnotationAppArmorProfile is an optional WorkspaceTemplate annotation
@@ -238,10 +241,10 @@ func (e *conflictError) Error() string {
 func (e *conflictError) Is(target error) bool { return target == ErrNameConflict }
 
 // ErrTemplateRejected is returned when a WorkspaceTemplate requests a
-// runtime configuration outside policy (today: an apparmor-profile value
-// other than "localhost/<name>" or "runtime/default"). Ensure fails before
-// any child object is created; the operator surfaces the reason on the
-// Workspace's Degraded condition.
+// runtime configuration outside policy (a seccomp-profile or
+// apparmor-profile value other than "localhost/<name>" or
+// "runtime/default"). Ensure fails before any child object is created;
+// the operator surfaces the reason on the Workspace's Degraded condition.
 var ErrTemplateRejected = errors.New("linux backend: template rejected")
 
 type templateRejectedError struct {
@@ -413,7 +416,11 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 	// Policy gate: a template requesting an out-of-policy runtime profile
 	// is rejected before ANY child object is created — a half-converged
 	// workspace that can never become valid must not exist.
-	appArmor, err := resolveAppArmorProfile(tpl)
+	appArmor, err := resolveAppArmorProfile(tpl.Annotations)
+	if err != nil {
+		return runtime.Observation{}, err
+	}
+	seccomp, err := resolveSeccompProfile(tpl.Annotations)
 	if err != nil {
 		return runtime.Observation{}, err
 	}
@@ -435,7 +442,7 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 			return runtime.Observation{}, err
 		}
 	}
-	if err := b.ensurePod(ctx, ws, tpl, appArmor); err != nil {
+	if err := b.ensurePod(ctx, ws, tpl, appArmor, seccomp); err != nil {
 		return runtime.Observation{}, err
 	}
 	if err := b.ensureService(ctx, ws); err != nil {
@@ -732,13 +739,13 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspac
 	return pvc, nil
 }
 
-func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile) error {
+func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile) error {
 	uid := ws.UID
 	pod := &corev1.Pod{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
 	switch {
 	case apierrors.IsNotFound(err):
-		pod = buildPod(ws, tpl, appArmor, b.opts)
+		pod = buildPod(ws, tpl, appArmor, seccomp, b.opts)
 		if err := controllerutil.SetControllerReference(ws, pod, b.client.Scheme()); err != nil {
 			return err
 		}
@@ -817,8 +824,8 @@ func shmSizeLimit(tpl *workspacesv1alpha1.WorkspaceTemplate) resource.Quantity {
 // has already loaded (the D-NODE browser-sandbox profile). Everything else —
 // "unconfined", "docker/default", an empty localhost name — is a policy
 // rejection: Unconfined is never selectable from a template.
-func resolveAppArmorProfile(tpl *workspacesv1alpha1.WorkspaceTemplate) (*corev1.AppArmorProfile, error) {
-	v := tpl.Annotations[AnnotationAppArmorProfile]
+func resolveAppArmorProfile(ann map[string]string) (*corev1.AppArmorProfile, error) {
+	v := ann[AnnotationAppArmorProfile]
 	switch {
 	case v == "" || v == "runtime/default":
 		return &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault}, nil
@@ -844,23 +851,79 @@ func validAppArmorProfileName(name string) bool {
 	return true
 }
 
-func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, opts Options) *corev1.Pod {
+// resolveSeccompProfile maps the optional seccomp-profile template
+// annotation to a SecurityContext.SeccompProfile. Accepted values: unset
+// or "runtime/default" (RuntimeDefault — the containerd default, which is
+// also the build-time fallback), and "localhost/<name>" for a profile the
+// node has already loaded under the kubelet's seccomp root (the chart's
+// node-profiles DaemonSet installs the browser-sandbox profile there).
+// Everything else — "unconfined", a bare "localhost/", a name that could
+// escape the profiles root — is a policy rejection, the same posture
+// resolveAppArmorProfile takes: the name selects a node-trusted file, so
+// an invalid one is never silently widened or silently dropped.
+func resolveSeccompProfile(ann map[string]string) (*corev1.SeccompProfile, error) {
+	v := ann[AnnotationSeccompProfile]
+	switch {
+	case v == "" || v == "runtime/default":
+		return &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}, nil
+	case strings.HasPrefix(v, "localhost/") && validSeccompProfileName(v[len("localhost/"):]):
+		name := v[len("localhost/"):]
+		return &corev1.SeccompProfile{
+			Type:             corev1.SeccompProfileTypeLocalhost,
+			LocalhostProfile: &name,
+		}, nil
+	default:
+		return nil, &templateRejectedError{reason: fmt.Sprintf(
+			"annotation %s=%q: only \"localhost/<name>\" or \"runtime/default\" are accepted",
+			AnnotationSeccompProfile, v)}
+	}
+}
+
+// validSeccompProfileName: the node-loaded profile reference is a RELATIVE
+// path under the kubelet's seccomp root — the chart installs to
+// "<root>/profiles/<name>.json", so path segments are allowed but every
+// segment must be non-empty and neither "." nor "..": the name can never
+// escape the profiles root, address an absolute path, or carry whitespace
+// or a NUL-ish separator a downstream path join might reinterpret.
+func validSeccompProfileName(name string) bool {
+	if name == "" || strings.ContainsAny(name, " \t\n\\") {
+		return false
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateSeccompAnnotation re-checks the seccomp-profile annotation the
+// Ensure gate enforces — the admission-time counterpart for a caller that
+// must refuse an out-of-policy template before a recorded snapshot or a
+// built pod exists (SEC-10). nil means admissible; a rejection is the same
+// templateRejectedError Ensure raises, so callers can map it with
+// errors.Is(err, ErrTemplateRejected). The AppArmor annotation keeps its
+// own established gate (ErrTemplateRejected at Ensure) and is not checked
+// here.
+func ValidateSeccompAnnotation(annotations map[string]string) error {
+	_, err := resolveSeccompProfile(annotations)
+	return err
+}
+
+func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile, opts Options) *corev1.Pod {
 	if opts.AppArmorNotRequired && appArmor != nil && appArmor.Type == corev1.AppArmorProfileTypeRuntimeDefault {
 		appArmor = nil
+	}
+	// seccomp comes pre-resolved from the Ensure policy gate; a nil value
+	// falls back to the hardened default — never to an unset field (a nil
+	// container seccompProfile is unconfined on runtimes that do not
+	// default it).
+	if seccomp == nil {
+		seccomp = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
 	}
 	uid := ws.UID
 	l := labels(ws)
 	l[LabelRuntimeGeneration] = fmt.Sprintf("%d", ws.Spec.RuntimeGeneration)
-
-	seccomp := &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
-	if p := tpl.Annotations[AnnotationSeccompProfile]; len(p) > len("localhost/") &&
-		p[:len("localhost/")] == "localhost/" {
-		name := p[len("localhost/"):]
-		seccomp = &corev1.SeccompProfile{
-			Type:             corev1.SeccompProfileTypeLocalhost,
-			LocalhostProfile: &name,
-		}
-	}
 
 	home := corev1.Volume{
 		Name:         "home",
@@ -1172,14 +1235,15 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 	}
 	// Pre-stamp pod: only an exact rebuild match proves the record —
 	// anything looser lets a forged annotation claim an honest pod.
-	appArmor, err := resolveAppArmorProfile(tpl)
-	if err != nil || tpl.Spec.Linux == nil {
+	appArmor, err := resolveAppArmorProfile(tpl.Annotations)
+	seccomp, serr := resolveSeccompProfile(tpl.Annotations)
+	if err != nil || serr != nil || tpl.Spec.Linux == nil {
 		return false, nil
 	}
 	if tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm && b.opts.KasmAdapterImage == "" {
 		return false, nil
 	}
-	expected := buildPod(ws, tpl, appArmor, b.opts)
+	expected := buildPod(ws, tpl, appArmor, seccomp, b.opts)
 	return podSpecBuiltEqual(&pod.Spec, &expected.Spec), nil
 }
 
