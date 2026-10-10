@@ -4,6 +4,104 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
+## Upgrading from v0.5 to v1.0 — `status.templateSnapshot`
+
+v1.0 changes where the immutable per-workspace template snapshot lives.
+The `workspaces` CRD gains the optional `status.templateSnapshot` field —
+the ONLY copy trusted for pod building — and the operator starts writing
+it (the `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation becomes
+a read mirror kept for consumers). Apply the CRDs first as usual:
+`kubectl diff -f deploy/helm/tinycdi/crds/` then `kubectl apply -f
+deploy/helm/tinycdi/crds/` — Helm never upgrades `crds/`, and the new
+schema is additive (a new optional status field; existing objects stay
+valid, and a v0.5 binary ignores the field it does not know).
+
+**No data migration and no runtime disruption are needed.** During the
+rollout the operator's leader-election Lease hands reconcile to exactly
+one pod at a time: the outgoing v0.5 replicas keep serving until the new
+leader is up — there is no window in which both versions reconcile the
+same workspace (with the chart default `operator.leaderElect: true`; a
+single-replica `replicas: 1` install simply rolls the one pod and is
+uncovered only for its own restart gap, same as every upgrade).
+
+On its first reconcile of each workspace the new operator establishes
+the snapshot like this. The `template-snapshot` annotation is NEVER a
+source — not even as a lookup hint — so its bytes cannot leak into
+status:
+
+- **Running workspace whose pod carries the new template stamps** —
+  every pod the new operator builds is stamped with
+  `workspaces.cdi.tinyorbit.vn/template-name` /
+  `…/template-revision` / `…/template-hash` (operator-written pod
+  metadata a workspace writer cannot set). The pod's stamped name + a
+  matching revision string identify ONE live `WorkspaceTemplate` object;
+  the operator re-reads THAT object's content and writes it into
+  `status.templateSnapshot`. The pod is not restarted or replaced.
+- **Running workspace with a pre-stamp pod (every v0.5 pod)** — the pod
+  names nothing, so the operator computes ONE candidate: the live
+  revision `spec.templateRef` resolves to today (a catalog base name
+  resolves to its newest revision). It rebuilds the pod from that object
+  and compares field-for-field — scheduler and apiserver bookkeeping
+  discounted. On a match the LIVE object's content lands in
+  `status.templateSnapshot` and the identity stamps are backfilled onto
+  the running pod. No `Degraded`, no restart — a session started on the
+  current revision adopts silently. Note the compare can only disprove,
+  never distinguish pod-identical revisions: if a template rotation
+  produced a new revision object whose built pod is field-identical,
+  the record silently re-points to the newest revision (the live object
+  is trusted, so this is safe). Pods that were altered by mutating
+  admission webhooks after build, pods built from a forged snapshot, and
+  pods whose revision was rotated out or pruned do NOT match —
+  they hold `TemplateRevisionGone` as below.
+- **Running workspace whose revision cannot be proven** — the pod KEEPS
+  RUNNING untouched; the workspace holds `Pending` with
+  `Degraded`/`TemplateRevisionGone` and emits one Warning event (only
+  after the condition persisted — retries cannot duplicate it). Expect
+  this only on sessions started BEFORE the last template rollout —
+  i.e. pods built from a revision that has since been rotated or
+  pruned — and on webhook-altered or forged-spec pods. To clear, stop
+  and start the workspace: the next start re-snapshots the template
+  `spec.templateRef` resolves to today.
+- **Workspace without a running pod** (stopped or pending) — nothing is
+  adopted. The next start resolves `spec.templateRef` and snapshots the
+  live template exactly like a fresh admit; if the template was deleted
+  in the meantime the workspace holds `Degraded`/`TemplateInvalid` —
+  with one Warning event — until an admin republishes it, same as today.
+
+After the record lands, the annotation mirror is rewritten from status
+— a Workspace writer can still edit the annotation, but nothing in
+convergence reads it any more, so drift there is repaired on the next
+reconcile and is harmless in between (the broker's expiry projection
+reads status first and falls back to the annotation only for rows the
+operator has not reconciled post-upgrade — never for held workspaces).
+
+**No forged record survives the upgrade:** adoption requires the pod to
+name or match its own template revision — and the recorded content
+always comes from a live revision object — so a forged annotation can
+steer nothing. A workspace already running a pod built from a forged
+snapshot is covered too: its pod predates the stamps and cannot match
+the honest resolved revision, so it holds `TemplateRevisionGone` until
+a stop/start re-snapshots the live template — nothing of the forged
+record is adopted into status.
+
+Post-upgrade check:
+
+```
+kubectl -n <tenant-ns> get workspaces \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.templateSnapshot.name}{"\n"}{end}'
+```
+
+A workspace with an empty name and `Degraded`/`TemplateRevisionGone` is
+the expected hold for a pod whose revision was rotated or pruned (or
+whose build a webhook altered) — its pod is untouched; restart it to
+populate the record. While held, the broker's expiry planner ignores the
+annotation's lifecycle caps entirely — held sessions get the stricter
+of the resolved template's lifecycle and the chart defaults. Rollback:
+the annotation mirror
+stays fully populated, so a v0.5 operator (which reads only the
+annotation) keeps converging the same recorded revision — do not
+"un-apply" the v1.0 CRD, the extra status field is inert under v0.5.
+
 ## Upgrading from v0.2 to v0.3
 
 v0.3 ("Operate") keeps the v0.2 topology — the same `backend`,
@@ -696,9 +794,10 @@ cataloged browser image meets the gate the allowlist stays empty — see
 ## Running workspaces and images — read this before bumping template images
 
 - A Workspace records an **immutable template snapshot** at first admit
-  (`workspaces.cdi.tinyorbit.vn/template-snapshot` annotation, spec JSON +
-  sha256 — `internal/operator/workspace_controller.go`). The template
-  object is never re-read for that workspace.
+  (`status.templateSnapshot` — spec JSON + sha256, mirrored to the
+  `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation for readers;
+  `internal/operator/workspace_controller.go`). The template object is
+  never re-read for that workspace.
 - Therefore **upgrading the platform or replacing a WorkspaceTemplate does
   not change the image of any already-created workspace.** There is no
   rolling update of desktops in use — by design (plan global constraints).

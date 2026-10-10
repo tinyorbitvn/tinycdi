@@ -116,23 +116,23 @@ substitute for review).
   singleflight per digest, expired/revoked rejection.
 - `internal/gateway/lookup_limit_test.go`,
   `lookup_limit_config_test.go` — the unknown-cookie session-directory
-  lookup bound (S30): spray → bounded lookups + 429/`Retry-After`,
+  lookup bound (S31): spray → bounded lookups + 429/`Retry-After`,
   known/rehydrated/cookie-less requests never limited, a 121-cookie
   concurrent valid-session storm at defaults admits exactly 120 and
   refuses the overflow with `Retry-After` (valid-but-uncached cookies
   pay the pre-lookup gate), injected bucket + disable path, refusal
   audits `session.lookup`.
-- `internal/gateway/unattached_test.go` — ghost-session TTL (S31):
+- `internal/gateway/unattached_test.go` — ghost-session TTL (S32):
   redeem-then-abandon reaped with a lease revoke, attached sessions
   survive, a lease in use on a sibling replica is never revoked, reap
   proceeds on revoke failure.
 - `internal/gateway/unattached_race_test.go` — attach/reap
-  serialization (S31): an attach concurrent with the reap's in-flight
+  serialization (S32): an attach concurrent with the reap's in-flight
   revoke loses deterministically; the attach-vs-tick hammer asserts no
   end state ever shows a live session on a revoked lease.
 - `internal/gateway/coop_test.go` — `Cross-Origin-Opener-Policy:
   same-origin` pinned on every session-listener response and
-  upstream-supplied COOP stripped (S32); frame-ancestors unchanged.
+  upstream-supplied COOP stripped (S33); frame-ancestors unchanged.
 - `internal/gateway/authorization.go` fencing covered by
   `wsclose_test.go` (orderly WS close), `owner_tab_test.go` (owner-tab
   takeover), `activity_test.go`/`activity_internal_test.go`.
@@ -277,8 +277,16 @@ substitute for review).
 - `internal/runtime/linux/backend_kasm_test.go`,
   `backend_kasm_quota_test.go` — kasm adapter injection, wrapper/policy
   mounts, read-only rootfs, quota interaction.
-- `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go` —
-  template snapshot image-digest verification (SEC-10).
+- `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go`,
+  `snapshot_adopt_test.go` — template snapshot image-digest verification,
+  status-record authority over the annotation, and upgrade-adoption from
+  the pod-stamped template identity or the pre-stamp candidate match —
+  identity from pod metadata, content always from the LIVE revision
+  object, the annotation never a source (`TemplateRevisionGone` holds
+  for unprovable identities: pruned/republished/rotated/webhook-altered
+  or forged builds, foreign pods); `internal/broker/
+  operator_stopped_envtest_test.go` pins that held workspaces get the
+  stricter of template/defaults, never annotation caps (SEC-10).
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
   ownership and lifecycle edges; `intent_drift_test.go`
