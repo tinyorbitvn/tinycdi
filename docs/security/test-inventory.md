@@ -72,7 +72,11 @@ substitute for review).
   migration 022 tables.
 - `internal/api/auditroutes_test.go` — dedicated audit events on every
   mutating + `/v1/admin/` route (#120): `TestAuditCoverage_SpecMatchesTable`
-  pins the openapi↔table pairing, denied admin attempts record
+  pins the openapi↔table pairing,
+  `TestAuditCoverage_MountedMuxEmitsEventPerRoute` replays the mounted mux
+  and requires exactly one domain event per mutating/admin spec route —
+  a plainly-mounted route emits none and fails, denied admin
+  attempts record
   `denied`+actor, `role=tenant-admin` marks elevated use,
   `TestAudit_SinkFailureStillSucceeds` /
   `TestAudit_HandlerPanicStillEmits` pin the sink-failure and panic paths.
@@ -114,7 +118,9 @@ substitute for review).
   `wsclose_test.go` (orderly WS close), `owner_tab_test.go` (owner-tab
   takeover), `activity_test.go`/`activity_internal_test.go`.
 - `internal/gateway/forwarded_test.go` — client XFF never reaches the
-  runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / A6-S18).
+  runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / A6-S18);
+  `TestClientAddr_NonIPSelectedEntryFallsBackToPeer` pins that a non-IP
+  selected claim collapses to the socket peer on the forwarded path too.
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
@@ -213,7 +219,9 @@ substitute for review).
   plus the `-i-know-backends-are-running` override, the no-Kubernetes
   SQL fallback.
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
-  `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation.
+  `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation;
+  `TestClientKey_NonIPSelectedEntryFallsBackToPeer` pins that a non-IP
+  selected XFF claim never becomes a limiter key.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR
   0006 + RL-CEILING): fixed-window bound, undivided healthy ceiling
   consulted first, uneven-split bound (15/5, 20/0 across two instances),
