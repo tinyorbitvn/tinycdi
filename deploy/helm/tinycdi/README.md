@@ -186,7 +186,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant, quota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -331,6 +331,9 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
 | `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps pre-v0.3.1 packed-by-scoring placement |
+| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies. Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
+| `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
+| `runtime.networkProfiles.clusterOnly.egressPorts` | `[]` | optional port/protocol list on the same rule (`[{protocol: TCP, port: 443}]`); empty keeps every port open to the selected destinations |
 
 #### Nodes without AppArmor
 
@@ -732,6 +735,50 @@ values overwrite a hand-edited row for that tenant at the next backend
 start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
 flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
 usage, refusal codes, changing limits).
+
+### Namespace object quotas
+
+Each `managedNamespaces[]` entry may additionally carry a `namespaceQuota`
+block — **off by default**. It renders Kubernetes-side bounds into that
+namespace: a `ResourceQuota tinycdi-workspace-quota` (summed
+requests/limits and object counts across everything the workspaces
+create — pods, PVCs, Services) and/or a `LimitRange
+tinycdi-runtime-defaults` (resource defaults injected into pods that
+leave them unset). Where `quota` counts workspaces at the API layer,
+the ResourceQuota stops an over-sized or unbounded pod spec at
+apiserver admission — it bounds the blast radius of a workspace create
+that slips past the API:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+    namespaceQuota:
+      resourceQuota:
+        hard:                        # ~12 desktops at 2 CPU / 4Gi request each
+          requests.cpu: "24"
+          requests.memory: 48Gi
+          limits.cpu: "96"
+          limits.memory: 192Gi
+          requests.storage: 240Gi
+          persistentvolumeclaims: "24"
+          pods: "30"
+          services: "30"
+      limitRange:
+        limits:
+          - type: Container
+            defaultRequest: {cpu: "1", memory: 2Gi}
+            default: {cpu: "4", memory: 8Gi}
+```
+
+Keep `resourceQuota.hard` aligned with the tenant's `quota` block — a
+ResourceQuota that cannot cover the declared running workspaces leaves
+new ones refused at admission. Once `requests.*` quotas exist, every pod
+must carry requests: runtime pods do (they come from the template spec);
+the LimitRange covers anything else in the namespace. Either sub-object
+may be rendered alone; an empty `namespaceQuota` block is a schema
+error.
 
 ## Validation & tests
 
