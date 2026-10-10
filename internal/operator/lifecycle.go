@@ -130,8 +130,8 @@ func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Worksp
 	if applied.DesiredState != workspacesv1alpha1.DesiredStateRunning {
 		return 0
 	}
-	snap, err := templateSnapshotFor(ws)
-	if err != nil || snap == nil {
+	snap := recordedSnapshot(ws)
+	if snap == nil {
 		return 0
 	}
 

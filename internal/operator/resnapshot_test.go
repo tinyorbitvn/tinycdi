@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	schedv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -271,6 +272,276 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 	}
 }
 
+// TestSnapshot_UpgradeAdoption: the upgrade path end to end on a real
+// apiserver. A running workspace admitted before status.templateSnapshot
+// existed establishes its record from the incarnation pod's stamped
+// template identity + the LIVE revision object — the annotation is never
+// consulted. Pods that predate the stamps, or whose stamped revision is
+// gone, hold Degraded/TemplateRevisionGone with the pod left running;
+// stop/start re-snapshots.
+func TestSnapshot_UpgradeAdoption(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() {
+		if err := env.Stop(); err != nil {
+			t.Logf("envtest stop: %v", err)
+		}
+	}()
+
+	// seedRunning builds the workspace's pod from tpl through the real
+	// backend — stamped with the template's identity + hash the way a
+	// post-change operator builds it — and optionally marks it scheduled.
+	seedRunning := func(t *testing.T, ns string, ws *workspacesv1alpha1.Workspace,
+		tpl *workspacesv1alpha1.WorkspaceTemplate, nodeName string) *corev1.Pod {
+		t.Helper()
+		b := linux.New(c, linux.Options{})
+		if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
+			t.Fatalf("seed pod: %v", err)
+		}
+		pod := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKey{
+			Namespace: ns, Name: linux.PodName(ws.UID)}, pod); err != nil {
+			t.Fatalf("seeded pod: %v", err)
+		}
+		if nodeName != "" {
+			// Pod spec is immutable after create — rebuild the pod as a
+			// scheduled incarnation would look: nodeName set at bind
+			// time and a real PriorityClass stamped by priority
+			// admission.
+			pc := &schedv1.PriorityClass{
+				ObjectMeta: metav1.ObjectMeta{Name: "tcdi-session-priority-" + ns},
+				Value:      1234,
+			}
+			if err := c.Create(context.Background(), pc); err != nil {
+				t.Fatalf("seed priority class: %v", err)
+			}
+			scheduled := &corev1.Pod{
+				ObjectMeta: *pod.ObjectMeta.DeepCopy(),
+				Spec:       *pod.Spec.DeepCopy(),
+			}
+			prio := int32(1234)
+			scheduled.Spec.NodeName = nodeName
+			scheduled.Spec.PriorityClassName = pc.Name
+			scheduled.Spec.Priority = &prio
+			scheduled.Spec.DeprecatedServiceAccount = scheduled.Spec.ServiceAccountName
+			scheduled.ResourceVersion = ""
+			scheduled.UID = ""
+			scheduled.CreationTimestamp = metav1.Time{}
+			if err := c.Delete(context.Background(), pod); err != nil {
+				t.Fatalf("replace pod: %v", err)
+			}
+			if err := c.Create(context.Background(), scheduled); err != nil {
+				t.Fatalf("mark pod scheduled: %v", err)
+			}
+			pod = scheduled
+		}
+		return pod
+	}
+	seedAnnotation := func(t *testing.T, ws *workspacesv1alpha1.Workspace, ann string) {
+		t.Helper()
+		cur := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
+		if cur.Annotations == nil {
+			cur.Annotations = map[string]string{}
+		}
+		cur.Annotations[AnnotationTemplateSnapshot] = ann
+		if err := c.Update(context.Background(), cur); err != nil {
+			t.Fatalf("seed annotation: %v", err)
+		}
+	}
+	assertPodHeldGone := func(t *testing.T, key types.NamespacedName, pod *corev1.Pod) {
+		t.Helper()
+		got := getWorkspace(t, c, key)
+		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		if cond == nil || cond.Status != metav1.ConditionTrue ||
+			cond.Reason != ReasonTemplateRevisionGone {
+			t.Fatalf("want Degraded/TemplateRevisionGone, got %+v", got.Status.Conditions)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished on revision-gone hold: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("revision-gone hold recreated the pod")
+		}
+	}
+
+	t.Run("stamped pod adopts its live revision, pod untouched", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adopt", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
+
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		snap := got.Status.TemplateSnapshot
+		if snap == nil {
+			t.Fatal("stamped pod's revision was not adopted into status")
+		}
+		want, err := snapshotTemplate(live)
+		if err != nil {
+			t.Fatalf("snapshotTemplate: %v", err)
+		}
+		if snap.SpecHash != want.SpecHash || snap.UID != want.UID ||
+			snap.RuntimeGeneration != 1 || snap.SourceRef != "fam32" {
+			t.Fatalf("adopted snapshot = %+v, want record of fam32-aaaa1111", snap)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished after adoption: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("adoption recreated the pod")
+		}
+	})
+
+	t.Run("forged annotation never consulted", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptf", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "")
+		// Forge: valid hash over an attacker spec (control-plane
+		// placement + attacker image) claiming the honest revision.
+		forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
+		forged.Revision = "2026-10-a"
+		forged.Placement = &workspacesv1alpha1.PlacementSpec{
+			NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		}
+		fraw, _ := json.Marshal(forged)
+		fsum := sha256.Sum256(fraw)
+		var snap templateSnapshot
+		if err := json.Unmarshal([]byte(forgedSnapshot("fam32-aaaa1111",
+			string(live.UID), "2026-10-a", "sha256:"+hex.EncodeToString(fsum[:]),
+			forged, nil)), &snap); err != nil {
+			t.Fatal(err)
+		}
+		snap.SourceRef = "fam32"
+		snap.RuntimeGeneration = 1
+		annRaw, _ := json.Marshal(&snap)
+		seedAnnotation(t, ws, string(annRaw))
+
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		recorded := got.Status.TemplateSnapshot
+		if recorded == nil {
+			t.Fatal("stamped pod's revision was not adopted")
+		}
+		want, err := snapshotTemplate(live)
+		if err != nil {
+			t.Fatalf("snapshotTemplate: %v", err)
+		}
+		if recorded.SpecHash != want.SpecHash {
+			t.Fatalf("forged annotation content reached status: %q", recorded.SpecHash)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished: %v", err)
+		}
+		if img := cur.Spec.Containers[0].Image; img != resnapImageA {
+			t.Fatalf("pod rebuilt from forged spec: %q", img)
+		}
+	})
+
+	t.Run("stamped revision gone holds degraded", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptg", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "")
+		// The revision object was pruned since the pod was built.
+		if err := c.Delete(context.Background(), live); err != nil {
+			t.Fatalf("delete revision: %v", err)
+		}
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		assertPodHeldGone(t, key, pod)
+	})
+
+	t.Run("pre-stamp pod adopts resolved revision, pod untouched", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		// A v0.5.0 pod carries no identity stamps; its annotation — even
+		// an honest legacy-shaped one — is never a source. The resolved
+		// candidate is the live revision; the pod provably matches it.
+		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
+		delete(pod.Annotations, linux.AnnotationTemplateName)
+		delete(pod.Annotations, linux.AnnotationTemplateRevision)
+		delete(pod.Annotations, linux.AnnotationTemplateHash)
+		if err := c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("unstamp pod: %v", err)
+		}
+		seedAnnotation(t, ws, snapshotAnnotation(t, live, "", 0))
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		snap := got.Status.TemplateSnapshot
+		if snap == nil || snap.Name != "fam32-aaaa1111" {
+			t.Fatalf("pre-stamp pod's resolved revision was not adopted: %+v", snap)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("adoption recreated the pod")
+		}
+		// The identity stamps were backfilled onto the running pod.
+		if cur.Annotations[linux.AnnotationTemplateName] != "fam32-aaaa1111" {
+			t.Fatalf("identity stamps not backfilled: %+v", cur.Annotations)
+		}
+	})
+
+	t.Run("pre-stamp pod rotated revision holds degraded", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "")
+		delete(pod.Annotations, linux.AnnotationTemplateName)
+		delete(pod.Annotations, linux.AnnotationTemplateRevision)
+		delete(pod.Annotations, linux.AnnotationTemplateHash)
+		if err := c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("unstamp pod: %v", err)
+		}
+		// The pod was built from fam32-aaaa1111; a fresh revision object
+		// with different pod content now resolves the family — the pod
+		// disproves the candidate.
+		familyRevision(t, c, ns, "fam32-bbbb2222", "2026-10-b", resnapImageB)
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		assertPodHeldGone(t, key, pod)
+	})
+}
+
 // TestForgedSnapshotStillRejected (SEC-10, V3.2 regression): a forged
 // template-snapshot annotation still never reaches the backend — a bad
 // hash or an invariant-breaking spec is held, and a forged record under a
@@ -366,8 +637,13 @@ func legacySnapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTem
 }
 
 // legacyWorkspace seeds a Running workspace carrying a pre-V3.2 snapshot
-// (no sourceRef) of the recorded revision object.
+// (no sourceRef) of the recorded revision object — in status, as the
+// upgrade-adoption path records it, and in the mirrored annotation.
 func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspace {
+	var snap templateSnapshot
+	if err := json.Unmarshal([]byte(ann), &snap); err != nil {
+		panic(err)
+	}
 	return &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-legacy", Namespace: "tinycdi-tenant-a", UID: uid,
@@ -382,6 +658,7 @@ func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspa
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
 		},
+		Status: workspacesv1alpha1.WorkspaceStatus{TemplateSnapshot: &snap},
 	}
 }
 

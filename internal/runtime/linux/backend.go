@@ -28,9 +28,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -108,6 +111,25 @@ const (
 	// present too, or the backend refuses to build a home at all
 	// (ErrRetainedClaimMissing) instead of falling back to a new empty disk.
 	AnnotationRetainedDataRef = "workspaces.cdi.tinyorbit.vn/retained-data-ref"
+
+	// AnnotationTemplateHash stamps every built pod with the hash of the
+	// (spec, annotations) pair it was converged from. It binds the
+	// incarnation to the recorded template revision: the snapshot-upgrade
+	// adoption proof compares it against a candidate record before
+	// trusting a pre-status workspace's annotation.
+	AnnotationTemplateHash = "workspaces.cdi.tinyorbit.vn/template-hash"
+
+	// AnnotationTemplateName / AnnotationTemplateRevision stamp every
+	// built pod with the identity of the WorkspaceTemplate revision it
+	// was converged from — operator-written metadata a workspace writer
+	// cannot set. On upgrade the operator reads the identity from the
+	// pod itself and re-reads content from the LIVE template object of
+	// that revision; the (writer-controlled) snapshot annotation is
+	// never consulted. Annotations rather than labels: label values are
+	// capped at 63 chars and restrict characters, while template names
+	// and revision strings are not so constrained.
+	AnnotationTemplateName     = "workspaces.cdi.tinyorbit.vn/template-name"
+	AnnotationTemplateRevision = "workspaces.cdi.tinyorbit.vn/template-revision"
 
 	streamingPort int32 = 8443
 
@@ -998,42 +1020,49 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 			Namespace: ws.Namespace,
 			Labels:    l,
 		},
-		Spec: corev1.PodSpec{
-			RestartPolicy:                 corev1.RestartPolicyAlways,
-			ServiceAccountName:            RuntimeServiceAccount,
-			AutomountServiceAccountToken:  ptr(false),
-			EnableServiceLinks:            ptr(false),
-			TerminationGracePeriodSeconds: ptr(int64(30)),
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot:   ptr(true),
-				RunAsUser:      ptr(int64(1000)),
-				RunAsGroup:     ptr(int64(1000)),
-				FSGroup:        ptr(int64(1000)),
-				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
-			Containers: []corev1.Container{ctr},
-			Volumes: []corev1.Volume{
-				{Name: "secrets", VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName:  SecretName(uid),
-						DefaultMode: &secretMode,
-					}}},
-				{Name: "rt", VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{
-						Medium:    corev1.StorageMediumMemory,
-						SizeLimit: &rt,
-					}}},
-				{Name: "dshm", VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{
-						Medium:    corev1.StorageMediumMemory,
-						SizeLimit: &shm,
-					}}},
-				{Name: "tmp", VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{
-						SizeLimit: &tmp,
-					}}},
-				home,
-			},
+	}
+	pod.Annotations = map[string]string{
+		AnnotationTemplateName:     tpl.Name,
+		AnnotationTemplateRevision: tpl.Spec.Revision,
+	}
+	if h, herr := templateHash(tpl); herr == nil {
+		pod.Annotations[AnnotationTemplateHash] = h
+	}
+	pod.Spec = corev1.PodSpec{
+		RestartPolicy:                 corev1.RestartPolicyAlways,
+		ServiceAccountName:            RuntimeServiceAccount,
+		AutomountServiceAccountToken:  ptr(false),
+		EnableServiceLinks:            ptr(false),
+		TerminationGracePeriodSeconds: ptr(int64(30)),
+		SecurityContext: &corev1.PodSecurityContext{
+			RunAsNonRoot:   ptr(true),
+			RunAsUser:      ptr(int64(1000)),
+			RunAsGroup:     ptr(int64(1000)),
+			FSGroup:        ptr(int64(1000)),
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+		Containers: []corev1.Container{ctr},
+		Volumes: []corev1.Volume{
+			{Name: "secrets", VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  SecretName(uid),
+					DefaultMode: &secretMode,
+				}}},
+			{Name: "rt", VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium:    corev1.StorageMediumMemory,
+					SizeLimit: &rt,
+				}}},
+			{Name: "dshm", VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium:    corev1.StorageMediumMemory,
+					SizeLimit: &shm,
+				}}},
+			{Name: "tmp", VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: &tmp,
+				}}},
+			home,
 		},
 	}
 	if kasm {
@@ -1133,6 +1162,173 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 	}
 	pod.Spec.HostUsers = hostUsers
 	return pod
+}
+
+// templateHash binds a built pod to the exact (spec, annotations) pair it
+// was converged from: sha256 over the canonical JSON of both. Annotations
+// are covered deliberately — seccomp-profile/apparmor-profile change the
+// pod spec while a spec-only hash would not move, so a stamp covering only
+// the spec would let a forged record ride an honest hash.
+func templateHash(tpl *workspacesv1alpha1.WorkspaceTemplate) (string, error) {
+	raw, err := json.Marshal(struct {
+		Spec        workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
+		Annotations map[string]string                        `json:"annotations,omitempty"`
+	}{Spec: tpl.Spec, Annotations: tpl.Annotations})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// PodMatchesTemplate implements runtime.Backend: the adoption proof for
+// snapshots recorded before status.templateSnapshot existed. The
+// incarnation pod must exist, be operator-owned (controller ownerRef to
+// this Workspace UID plus the managed label set for the live
+// generation), and provably derive from tpl — a matching template-hash
+// stamp, or (pods built before the stamp) a spec equal to a fresh build
+// after discounting apiserver defaults. false means the record may not
+// be trusted.
+func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
+		return false, err
+	}
+	if stamp := pod.Annotations[AnnotationTemplateHash]; stamp != "" {
+		want, herr := templateHash(tpl)
+		if herr != nil {
+			return false, herr
+		}
+		return stamp == want, nil
+	}
+	// Pre-stamp pod: only an exact rebuild match proves the record —
+	// anything looser lets a forged annotation claim an honest pod.
+	appArmor, err := resolveAppArmorProfile(tpl)
+	if err != nil || tpl.Spec.Linux == nil {
+		return false, nil
+	}
+	if tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm && b.opts.KasmAdapterImage == "" {
+		return false, nil
+	}
+	expected := buildPod(ws, tpl, appArmor, b.opts)
+	return podSpecBuiltEqual(&pod.Spec, &expected.Spec), nil
+}
+
+// ownedPod returns the incarnation pod when it exists and is
+// operator-OWNED — a controller owner-reference to this Workspace UID
+// plus the full managed label set for the live generation. Anything
+// less and a foreign object squatting on the workspace-pod name could
+// "prove" a record it was never built from.
+func (b *Backend) ownedPod(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*corev1.Pod, bool, error) {
+	pod := &corev1.Pod{}
+	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(ws.UID), Namespace: ws.Namespace}, pod)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	if !metav1.IsControlledBy(pod, ws) {
+		return pod, false, nil
+	}
+	for k, v := range labels(ws) {
+		if pod.Labels[k] != v {
+			return pod, false, nil
+		}
+	}
+	if pod.Labels[LabelRuntimeGeneration] != fmt.Sprintf("%d", ws.Spec.RuntimeGeneration) {
+		return pod, false, nil
+	}
+	return pod, true, nil
+}
+
+// PodTemplateIdentity implements runtime.Backend: the template-revision
+// identity the incarnation pod was stamped with, when the pod exists and
+// is operator-owned. Empty Name/Revision mark a pod that predates the
+// stamps — the caller must not guess its revision from anywhere else.
+func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (runtime.PodTemplateIdentity, error) {
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
+		return runtime.PodTemplateIdentity{}, err
+	}
+	return runtime.PodTemplateIdentity{
+		Owned:    true,
+		Name:     pod.Annotations[AnnotationTemplateName],
+		Revision: pod.Annotations[AnnotationTemplateRevision],
+	}, nil
+}
+
+// StampPodTemplateIdentity implements runtime.Backend: backfill the
+// template-identity stamps onto an operator-owned pod whose provenance
+// was proven by the normalized rebuild — later reconciles and upgrades
+// read the identity directly instead of re-running the compare.
+func (b *Backend) StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error {
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
+		return err
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[AnnotationTemplateName] = tpl.Name
+	pod.Annotations[AnnotationTemplateRevision] = tpl.Spec.Revision
+	if h, herr := templateHash(tpl); herr == nil {
+		pod.Annotations[AnnotationTemplateHash] = h
+	}
+	return b.client.Update(ctx, pod)
+}
+
+// podSpecBuiltEqual reports whether actual (a stored pod spec) equals
+// expected (buildPod's fresh output) exactly, once the fields the
+// apiserver defaults but the template never supplies are discounted:
+// DNSPolicy, scheduler/priority bookkeeping, pull-policy and termination
+// plumbing on containers, probe thresholds, and the not-ready/unreachable
+// tolerations the DefaultTolerationSeconds admission plugin appends to
+// every pod.
+func podSpecBuiltEqual(actual, expected *corev1.PodSpec) bool {
+	a := actual.DeepCopy()
+	a.NodeName = ""
+	a.PriorityClassName = ""
+	a.DNSPolicy = ""
+	a.SchedulerName = ""
+	a.Priority = nil
+	a.PreemptionPolicy = nil
+	a.ShareProcessNamespace = nil
+	a.DeprecatedServiceAccount = ""
+	a.Tolerations = stripAdmissionTolerations(a.Tolerations)
+	norm := func(c *corev1.Container) {
+		c.ImagePullPolicy = ""
+		c.TerminationMessagePath = ""
+		c.TerminationMessagePolicy = ""
+		if p := c.ReadinessProbe; p != nil {
+			p.SuccessThreshold = 0
+			p.TerminationGracePeriodSeconds = nil
+		}
+	}
+	for i := range a.Containers {
+		norm(&a.Containers[i])
+	}
+	for i := range a.InitContainers {
+		norm(&a.InitContainers[i])
+	}
+	return apiequality.Semantic.DeepEqual(*a, *expected)
+}
+
+// stripAdmissionTolerations removes the tolerations the apiserver's
+// DefaultTolerationSeconds plugin adds to every pod (a bare
+// not-ready/unreachable Exists toleration carrying tolerationSeconds) —
+// buildPod never writes them, so they must be discounted in the compare.
+func stripAdmissionTolerations(tols []corev1.Toleration) []corev1.Toleration {
+	var out []corev1.Toleration
+	for _, t := range tols {
+		if t.Operator == corev1.TolerationOpExists && t.Value == "" &&
+			t.Effect == corev1.TaintEffectNoExecute && t.TolerationSeconds != nil &&
+			(t.Key == "node.kubernetes.io/not-ready" || t.Key == "node.kubernetes.io/unreachable") {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 func (b *Backend) ensureService(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -118,37 +120,73 @@ type snapshotPolicy struct {
 // catalog base name resolves to the newest revision — and a missing or
 // unresolvable template falls back to DefaultTimeoutPolicy, so a broken
 // reference never disables the caps.
+//
+// Held workspaces (snapshotHeld — status.templateSnapshot still empty and
+// the operator's Degraded/TemplateRevisionGone or TemplateInvalid
+// condition present) are the one case where the annotation is provably
+// untrusted: their caps come from the resolved template's lifecycle and
+// the chart defaults, the STRICTER of the two per cap — an annotation
+// carrying an inflated cap can never stretch a held session.
 func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) TimeoutPolicy {
-	lc := s.lifecycleFor(ctx, ws)
+	held := snapshotHeld(ws)
+	lc := s.lifecycleFor(ctx, ws, held)
 	pol := DefaultTimeoutPolicy
 	if lc == nil {
 		return pol
 	}
-	if d := lc.IdleTimeout.Duration; d > 0 {
+	if d := lc.IdleTimeout.Duration; d > 0 && (!held || d < pol.IdleTimeout) {
 		pol.IdleTimeout = d
 	}
-	if d := lc.DisconnectTimeout.Duration; d > 0 {
+	if d := lc.DisconnectTimeout.Duration; d > 0 && (!held || d < pol.DisconnectTimeout) {
 		pol.DisconnectTimeout = d
 	}
-	if d := lc.MaxDuration.Duration; d > 0 {
+	if d := lc.MaxDuration.Duration; d > 0 && (!held || d < pol.MaxDuration) {
 		pol.MaxDuration = d
 	}
 	return pol
 }
 
+// snapshotHeld reports whether the operator has placed the workspace on
+// a template hold: status.templateSnapshot is still empty AND a
+// Degraded=True condition latches one of the template-source reasons
+// (TemplateRevisionGone, TemplateInvalid). While held, the snapshot
+// annotation is provably untrusted — the operator already refused its
+// bytes — so no planner input may come from it.
+func snapshotHeld(ws *workspacesv1alpha1.Workspace) bool {
+	if ws.Status.TemplateSnapshot != nil {
+		return false
+	}
+	c := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+	return c != nil && c.Status == metav1.ConditionTrue &&
+		(c.Reason == operator.ReasonTemplateRevisionGone ||
+			c.Reason == operator.ReasonTemplateInvalid)
+}
+
 // lifecycleFor returns the recorded snapshot lifecycle, else the resolved
-// template's, else nil. A corrupt snapshot annotation resolves the live
-// template rather than failing closed — an unplannable workspace must
-// never silently drop its caps.
-func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.LifecycleDefaults {
-	if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
-		var snap snapshotPolicy
-		// An all-zero lifecycle — e.g. a snapshot written without the key —
-		// carries no recorded contract; resolve the live template instead.
-		if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
-			snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
-			lc := snap.Spec.Lifecycle
-			return &lc
+// template's, else nil. The operator-recorded status.templateSnapshot is
+// read first — it is the authoritative copy (workspaces/status is writable
+// by the operator service account alone). The annotation is a fallback
+// ONLY for pre-upgrade rows the operator has not reconciled yet — never
+// for held workspaces (held), where its bytes are provably untrusted —
+// and a corrupt annotation resolves the live template rather than
+// failing closed: an unplannable workspace must never silently drop its
+// caps.
+func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace, held bool) *workspacesv1alpha1.LifecycleDefaults {
+	if snap := ws.Status.TemplateSnapshot; snap != nil &&
+		snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+		lc := snap.Spec.Lifecycle
+		return &lc
+	}
+	if !held {
+		if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
+			var snap snapshotPolicy
+			// An all-zero lifecycle — e.g. a snapshot written without the key —
+			// carries no recorded contract; resolve the live template instead.
+			if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
+				snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+				lc := snap.Spec.Lifecycle
+				return &lc
+			}
 		}
 	}
 	if tpl := s.template(ctx, ws); tpl != nil {
