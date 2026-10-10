@@ -44,6 +44,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.AddSessionsActive(2)
 	m.IncRehydration("ok")
 	m.IncStreamsFenced()
+	m.AddConnectionTokensDropped(2)
 	m.IncLogin("success")
 	m.SetRuntimeImageAge("browser", 3600)
 	m.IncRateLimited("/v1/login")
@@ -69,6 +70,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_sessions_active",
 		"tinycdi_gateway_rehydrations_total",
 		"tinycdi_gateway_streams_fenced_total",
+		"tinycdi_gateway_connection_tokens_dropped_total",
 		"tinycdi_logins_total",
 		"tinycdi_runtime_image_age_seconds",
 		"tinycdi_rate_limited_total",

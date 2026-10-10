@@ -141,13 +141,16 @@ type Metrics struct {
 	sessionsActive prometheus.Gauge
 	rehydrations   *prometheus.CounterVec
 	streamsFenced  prometheus.Counter
-	logins         *prometheus.CounterVec
-	imageAge       *prometheus.GaugeVec
-	rateLimited    *prometheus.CounterVec
-	rateLimitStore *prometheus.CounterVec
-	rateLimitDown  *prometheus.GaugeVec
-	frameReloads   *prometheus.CounterVec
-	sessionRevokes *prometheus.CounterVec
+	// connTokensDropped counts client Connection-header tokens the session
+	// gateway dropped before proxying.
+	connTokensDropped prometheus.Counter
+	logins            *prometheus.CounterVec
+	imageAge          *prometheus.GaugeVec
+	rateLimited       *prometheus.CounterVec
+	rateLimitStore    *prometheus.CounterVec
+	rateLimitDown     *prometheus.GaugeVec
+	frameReloads      *prometheus.CounterVec
+	sessionRevokes    *prometheus.CounterVec
 	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
 	sessionRevokeAlls    *prometheus.CounterVec
 	leaseSessGone        *prometheus.CounterVec
@@ -219,6 +222,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "gateway_streams_fenced_total",
 			Help: "Streams closed because another replica claimed the lease's stream epoch.",
 		}),
+		connTokensDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "gateway_connection_tokens_dropped_total",
+			Help: "Client Connection-header tokens the session gateway dropped before proxying — tokens outside upgrade/keep-alive/close can name and strip headers, so they are never forwarded.",
+		}),
 		logins: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "logins_total",
 			Help: "Completed /v1/auth/callback login attempts, by bounded outcome.",
@@ -271,7 +278,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
-		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
+		m.sessionsActive, m.rehydrations, m.streamsFenced, m.connTokensDropped, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
 		m.internalAuthFailures,
@@ -366,6 +373,12 @@ func (m *Metrics) IncRehydration(result string) {
 // a stream epoch newer than the one this process claimed, so its streams
 // closed.
 func (m *Metrics) IncStreamsFenced() { m.streamsFenced.Inc() }
+
+// AddConnectionTokensDropped counts client Connection-header tokens the
+// session gateway dropped before proxying: a token outside the
+// upgrade/keep-alive/close allowlist names a header the stdlib hop-by-hop
+// strip would remove from the outbound request, so it is never forwarded.
+func (m *Metrics) AddConnectionTokensDropped(n float64) { m.connTokensDropped.Add(n) }
 
 // IncLogin counts one completed login-callback outcome; outcome is bounded
 // to {success, denied, error, other}.
