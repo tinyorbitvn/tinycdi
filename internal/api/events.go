@@ -140,6 +140,14 @@ var templateSkipMessages = map[string]string{
 	provisioning.SkipReasonExperienceChanged: "The workspace stayed on its recorded template revision (experience-changed): the newest published revision offers a different experience.",
 	provisioning.SkipReasonDataPolicyChanged: "The workspace stayed on its recorded template revision (data-policy-changed): the newest published revision declares a different data policy.",
 	provisioning.SkipReasonStorageSmaller:    "The workspace stayed on its recorded template revision (storage-smaller): the newest published revision requests less storage.",
+
+	provisioning.SkipReasonNetworkProfileChanged:  "The workspace stayed on its recorded template revision (network-profile-changed): the newest published revision uses a different network profile.",
+	provisioning.SkipReasonClipboardPolicyChanged: "The workspace stayed on its recorded template revision (clipboard-policy-changed): the newest published revision sets a different clipboard policy.",
+	provisioning.SkipReasonAdapterChanged:         "The workspace stayed on its recorded template revision (adapter-changed): the newest published revision selects a different runtime adapter.",
+	provisioning.SkipReasonHostUsersChanged:       "The workspace stayed on its recorded template revision (host-users-changed): the newest published revision changes the pod user-namespace contract.",
+	provisioning.SkipReasonPlacementChanged:       "The workspace stayed on its recorded template revision (placement-changed): the newest published revision changes pod placement.",
+	provisioning.SkipReasonSeccompProfileChanged:  "The workspace stayed on its recorded template revision (seccomp-profile-changed): the newest published revision selects a different seccomp profile.",
+	provisioning.SkipReasonAppArmorProfileChanged: "The workspace stayed on its recorded template revision (apparmor-profile-changed): the newest published revision selects a different AppArmor profile.",
 }
 
 // templateSkipEvent surfaces a start intent whose family re-point was

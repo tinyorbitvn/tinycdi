@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
 // TenantNamespaces maps a verified tenant ID to the Kubernetes namespace
@@ -367,6 +368,16 @@ type TemplateCatalogEntry struct {
 	DataPolicyDefault string
 	ClipboardPolicy   string
 	NetworkProfile    string
+	// The remaining security-relevant dimensions a family re-point must
+	// not silently change: the E2 compatibility guard (revisionIncompatible)
+	// compares them verbatim and refuses the move when any differs.
+	Adapter   string                           // spec.linux.adapter; "" for non-Linux runtimes
+	HostUsers *bool                            // spec.linux.hostUsers
+	Placement *workspacev1alpha1.PlacementSpec // spec.placement
+	// SeccompProfile/AppArmorProfile carry the raw confinement annotation
+	// values the backend honors (empty when the template declares none).
+	SeccompProfile  string
+	AppArmorProfile string
 	// ImageUpdate is the revision's lifecycle.imageUpdate policy
 	// (OnStart | Pinned); "" on objects published before the field existed,
 	// which callers must read as the OnStart default.
@@ -583,6 +594,13 @@ func templateEntry(t *workspacev1alpha1.WorkspaceTemplate) TemplateCatalogEntry 
 	e.DataPolicyDefault = string(t.Spec.Lifecycle.DataPolicy)
 	e.ClipboardPolicy = string(t.Spec.ClipboardPolicy)
 	e.NetworkProfile = string(t.Spec.NetworkProfile)
+	if t.Spec.Linux != nil {
+		e.Adapter = string(t.Spec.Linux.Adapter)
+		e.HostUsers = t.Spec.Linux.HostUsers
+	}
+	e.Placement = t.Spec.Placement
+	e.SeccompProfile = t.Annotations[linux.AnnotationSeccompProfile]
+	e.AppArmorProfile = t.Annotations[linux.AnnotationAppArmorProfile]
 	e.ImageBuiltAt = t.Annotations[AnnotationImageBuiltAt]
 	if v := t.Annotations[AnnotationImageChromium]; v != "" {
 		if e.ImageEngines == nil {

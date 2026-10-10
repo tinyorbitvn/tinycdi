@@ -383,6 +383,13 @@ func TestEvents_TemplateSkipReasons(t *testing.T) {
 		provisioning.SkipReasonExperienceChanged,
 		provisioning.SkipReasonDataPolicyChanged,
 		provisioning.SkipReasonStorageSmaller,
+		provisioning.SkipReasonNetworkProfileChanged,
+		provisioning.SkipReasonClipboardPolicyChanged,
+		provisioning.SkipReasonAdapterChanged,
+		provisioning.SkipReasonHostUsersChanged,
+		provisioning.SkipReasonPlacementChanged,
+		provisioning.SkipReasonSeccompProfileChanged,
+		provisioning.SkipReasonAppArmorProfileChanged,
 	} {
 		ev, ok := templateSkipEvent(IntentRecord{Kind: "start", Revision: 7, Reason: reason})
 		if !ok || ev.Reason != "TemplateUpdateSkipped" || !strings.Contains(ev.Message, reason) {
