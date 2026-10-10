@@ -32,7 +32,7 @@ containerd 2.x, Cilium 1.20, and
 ## Pending — pinned later
 
 - **Go toolchain** — controller-runtime v0.25 + k8s.io v0.37 require
-  Go >= 1.26; candidate image `golang:1.26@sha256:6c2a5538…`.
+  Go >= 1.26; candidate image `golang:1.26@sha256:d7722066…`.
 - **controller-runtime** — v0.25.x pairs with k8s.io v0.37 (server v1.37.x).
 - **PostgreSQL** — postgres:18.0 digest candidate; any Postgres >= 15 works.
 - **Chromium apt pin** — runtime Dockerfile installs bookworm Chromium;
