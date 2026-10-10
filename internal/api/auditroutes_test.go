@@ -152,6 +152,72 @@ func TestAuditCoverage_SpecMatchesTable(t *testing.T) {
 	}
 }
 
+// mountAllAppRoutesForCoverage replays every route mount
+// backend.appMux performs (internal/backend/wire.go), on a nil-dependency
+// authenticator and zero-value handlers — the mounts only assemble
+// handler chains, no request is served. Keep in sync with appMux: a mount
+// added there but not replayed here leaves its spec routes unresolved
+// below and fails the walk.
+func mountAllAppRoutesForCoverage(mux *http.ServeMux) {
+	authn := &Authenticator{}
+	mux.Handle("GET /v1/login", http.HandlerFunc(authn.LoginHandler))
+	mux.Handle("GET /v1/auth/callback", http.HandlerFunc(authn.CallbackHandler))
+	MountLogoutRoute(mux, authn)
+	MountRevokeAllRoute(mux, authn)
+	MountSessionTouchRoute(mux, authn)
+	MountSessionProbeRoute(mux, authn)
+	MountMeRoutes(mux, authn, &MeHandler{})
+	MountWorkspaceRoutes(mux, authn, &WorkspaceHandler{}, &TemplateHandler{})
+	MountConnectionRoutes(mux, authn, &ConnectionHandler{})
+	MountConnectionStatusRoutes(mux, authn, &ConnectionStatusHandler{})
+	MountDataRoutes(mux, authn, &DataHandler{})
+	MountQuotaRoutes(mux, authn, &QuotaHandler{})
+	MountAdminQuotaRoutes(mux, authn, &AdminQuotaHandler{})
+	MountAdminUserLimitRoutes(mux, authn, &AdminUserLimitsHandler{})
+}
+
+// TestAuditCoverage_MountedMuxWrapsEveryRoute walks the mounted mux —
+// the same mount calls the app listener runs — and fails when a mutating
+// (non-GET) or /v1/admin/ spec route resolves to a handler that never
+// passed through audited(). The spec↔table pin above proves the route
+// NAMES an action; this proves the mux actually WRAPS it: audited()
+// stamps every pattern it wraps (auditedMounts), so a plainly-mounted
+// route — spec and table updated, wrapper forgotten — cannot produce a
+// stamp for its spec operation. Registrations from other tests carry a
+// stale sequence and can never mask a missing mount here.
+func TestAuditCoverage_MountedMuxWrapsEveryRoute(t *testing.T) {
+	mux := http.NewServeMux()
+	auditedMounts.Lock()
+	before := auditedMounts.seq
+	auditedMounts.Unlock()
+	mountAllAppRoutesForCoverage(mux)
+	auditedMounts.Lock()
+	wrapped := map[string]bool{}
+	for p, at := range auditedMounts.at {
+		if at > before {
+			wrapped[p] = true
+		}
+	}
+	auditedMounts.Unlock()
+
+	for op := range specOps(t) {
+		space := strings.IndexByte(op, ' ')
+		method, path := op[:space], op[space+1:]
+		if method == http.MethodGet && !strings.HasPrefix(path, "/v1/admin/") {
+			continue
+		}
+		req := httptest.NewRequest(method, "https://api.test"+strings.ReplaceAll(path, "{}", "probe"), nil)
+		_, pattern := mux.Handler(req)
+		if pattern == "" {
+			t.Errorf("spec operation %s is not mounted on the app mux", op)
+			continue
+		}
+		if !wrapped[pattern] {
+			t.Errorf("spec operation %s is mounted without audited() (pattern %q)", op, pattern)
+		}
+	}
+}
+
 // TestAudit_AdminQuotaSet: PUT /v1/admin/tenants/{tenant}/quota emits
 // admin.quota.set with the verified admin actor, the tenant as target, the
 // request id and the attempted limits in details.

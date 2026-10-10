@@ -14,10 +14,11 @@ import (
 // RemoteAddr values, X-Forwarded-For lines and CIDR lists. Invariants:
 // the key is deterministic, an untrusted peer always keys to itself, and
 // a trusted peer keys to the right-most chain entry outside the trusted
-// set — spoofed deeper claims can never claim the bucket. The key itself
-// is an opaque discriminator, so non-IP peers/entries pass through
-// verbatim; ParseTrustedProxies is deterministic and accepts only
-// canonical CIDRs.
+// set — spoofed deeper claims can never claim the bucket. A selected
+// entry that is not a plain IP collapses to the peer, so client bytes
+// never mint keys; a non-IP socket peer still passes through verbatim —
+// it is one fixed value per connection, not a sprayable claim.
+// ParseTrustedProxies is deterministic and accepts only canonical CIDRs.
 func FuzzClientKey(f *testing.F) {
 	for _, c := range [][4]string{
 		// Corpus seeded from ratelimit_test.go plus edge inputs.
@@ -87,7 +88,8 @@ func FuzzClientKey(f *testing.F) {
 
 		// The contract, recomputed from the raw headers: an untrusted peer
 		// IS the client (spoofed chain ignored); a trusted peer yields the
-		// right-most entry outside the trusted set, else the left-most
+		// right-most entry outside the trusted set — unless that entry is
+		// not a plain IP, which collapses to the peer — else the left-most
 		// claim when the whole chain is trusted, else the peer itself.
 		var entries []string
 		for _, e := range strings.Split(xffA+","+xffB, ",") {
@@ -101,7 +103,9 @@ func FuzzClientKey(f *testing.F) {
 			for i := len(entries) - 1; i >= 0; i-- {
 				leftmost = entries[i]
 				if !inTrusted(entries[i], trusted) {
-					want = canon(entries[i])
+					if isPlainAddr(entries[i]) {
+						want = canon(entries[i])
+					}
 					leftmost = ""
 					break
 				}

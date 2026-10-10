@@ -741,11 +741,18 @@ v0.2 after the v0.4 upgrade without restoring the pre-upgrade dump.
   upgrade, restore the pre-upgrade `pg_dump` per
   `docs/runbooks/backup-restore.md` — that is a restore, not a rollback.
 
-v0.4 also adds two `portal_session_digest` indexes (migration 020): the
-plain `CREATE INDEX` builds briefly block writes on `connection_lease` and
-`launch_ticket` while running (`CONCURRENTLY` cannot run inside the
-migration transaction) — on large installs run the upgrade in a quiet
-window.
+v0.4 also adds two `portal_session_digest` indexes (migration 020), and
+v0.5 adds two principal-revocation indexes (migration 023): each is a
+plain `CREATE INDEX` whose build blocks **all writes** on
+`connection_lease`/`launch_ticket` for its duration — `CONCURRENTLY`
+cannot run inside the per-migration transaction, so this is a known
+write-lock window, not a bug (see `internal/store/migrations/README.md`
+for the rule new index migrations follow). On a small install each build
+finishes in well under a second and the stall is invisible; both tables
+are append-mostly and **never pruned**, so on a long-lived deployment the
+window grows with table size — ticket redemption, lease mint/renew and
+sign-out revocation all queue behind it. On large installs run the
+upgrade in a quiet window: low sign-in/launch traffic, off-peak hours.
 
 v0.3 → v0.4 also adds `021_rate_limit_window` — the `rate_limit_window`
 table behind the Postgres-backed login/launch rate limits (ADR 0006).

@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
@@ -93,6 +94,19 @@ var auditedRoutes = map[string]auditedRoute{
 	routeAdminUserLimitDefault: {auditActionAdminUserLimitDefaultSet, "tenant"},
 }
 
+// auditedMounts stamps every route pattern audited() wraps at mount time
+// with a sequence number, so the mux-walk coverage test
+// (TestAuditCoverage_MountedMuxWrapsEveryRoute) can ask "was this pattern
+// wrapped during THIS replay": the spec↔table pin cannot see a plainly
+// mounted route, but one can never land here — audited() is the only
+// registration path. Mounting is single-threaded startup work; the mutex
+// only guards test-time replays.
+var auditedMounts = struct {
+	sync.Mutex
+	seq uint64
+	at  map[string]uint64 // pattern -> seq of its last audited() wrap
+}{at: map[string]uint64{}}
+
 // routeAudit is the request-scoped record the audited wrapper places in the
 // context; WriteError and handlers fill errCode, target and details while
 // the request runs, and the wrapper emits the completed event after the
@@ -156,6 +170,10 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 	if !ok {
 		panic("audited: route " + pattern + " missing from auditedRoutes")
 	}
+	auditedMounts.Lock()
+	auditedMounts.seq++
+	auditedMounts.at[pattern] = auditedMounts.seq
+	auditedMounts.Unlock()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sink == nil {
 			next.ServeHTTP(w, r)

@@ -178,11 +178,13 @@ func PeerIP(remoteAddr string) string {
 // not claim). An entry or peer that does not parse as an IP is never
 // trusted, so client-supplied bytes cannot claim a proxy's place; when
 // every hop is trusted the left-most entry is the closest observable
-// claim. The selected claim is canonicalised by canon: mapped forms
-// unify with the native IPv4 key and IPv6 folds to its /64. The one
-// string keys every enforcement layer — the local buckets and the shared
-// Postgres window rows — so the layers always agree on which client a
-// hit belongs to.
+// claim. A selected entry that is not a plain IP address is NEVER a key:
+// it collapses to the socket peer, so a client whose own bytes reach the
+// selected slot cannot mint a fresh key per request. The selected claim
+// is canonicalised by canon: mapped forms unify with the native IPv4 key
+// and IPv6 folds to its /64. The one string keys every enforcement layer
+// — the local buckets and the shared Postgres window rows — so the
+// layers always agree on which client a hit belongs to.
 func ClientKey(r *http.Request, trusted []netip.Prefix) string {
 	return canon(selectClient(r, trusted))
 }
@@ -191,8 +193,9 @@ func ClientKey(r *http.Request, trusted []netip.Prefix) string {
 // rendered as the real address — IPv4-mapped forms unmapped, IPv6 NOT
 // folded — for consumers that need the literal client address rather than
 // a billing bucket: the gateway's forwarded-header rebuild toward the
-// runtime (S18). A non-IP claim passes through verbatim so the caller's
-// parse check still discriminates it.
+// runtime (S18). Like the key path, a non-IP claim can never reach this
+// render — it collapses to the socket peer — so the value is always a
+// parseable address the runtime can key on.
 func ClientAddr(r *http.Request, trusted []netip.Prefix) string {
 	return canonAddr(selectClient(r, trusted))
 }
@@ -200,7 +203,11 @@ func ClientAddr(r *http.Request, trusted []netip.Prefix) string {
 // selectClient picks the raw client claim both renders share: the socket
 // peer, or under a trusted peer the right-most XFF entry outside the
 // trusted set — else the left-most claim when every hop is trusted, else
-// the peer.
+// the peer. A right-most untrusted entry that is not a plain IP address
+// (unparseable, or a zoned IPv6 literal) collapses to the peer rather
+// than standing in as the claim: it is client-supplied bytes, and using
+// it verbatim would let that client mint an unbounded key per request —
+// and feed garbage into forwarded headers.
 func selectClient(r *http.Request, trusted []netip.Prefix) string {
 	peer := PeerIP(r.RemoteAddr)
 	if !inTrusted(peer, trusted) {
@@ -212,6 +219,9 @@ func selectClient(r *http.Request, trusted []netip.Prefix) string {
 		e := entries[i]
 		leftmost = e
 		if !inTrusted(e, trusted) {
+			if !isPlainAddr(e) {
+				return peer
+			}
 			return e
 		}
 	}
@@ -221,14 +231,25 @@ func selectClient(r *http.Request, trusted []netip.Prefix) string {
 	return peer
 }
 
+// isPlainAddr reports whether s is a bare IP address — parseable and
+// zone-free. A zoned IPv6 literal ("fe80::1%eth0") parses but names an
+// interface scope a proxy chain cannot have verified, and every zone
+// spelling would mint its own key, so it selects like any other non-IP
+// token.
+func isPlainAddr(s string) bool {
+	a, err := netip.ParseAddr(s)
+	return err == nil && a.Zone() == ""
+}
+
 // canon renders a rate-limit key canonically — canonAddr plus the IPv6
 // /64 fold: the address collapses to the prefix's base address, so every
 // address inside the prefix one subscriber controls (SLAAC, privacy /
 // temporary addresses, deliberate rotation) shares one budget; /64 is
 // the smallest prefix an end site is delegated, hence the granularity a
 // single client can still rotate inside. IPv4 stays the address itself
-// (/32). Anything that does not parse passes through verbatim so it
-// still discriminates one key from another.
+// (/32). Anything that does not parse passes through verbatim — reachable
+// only from a non-IP socket peer, one fixed value per connection rather
+// than a client claim — so it still discriminates one key from another.
 func canon(s string) string {
 	a, err := netip.ParseAddr(s)
 	if err != nil {
@@ -243,8 +264,9 @@ func canon(s string) string {
 
 // canonAddr renders the real client address canonically: a parseable
 // address is Unmap'd — the "::ffff:a.b.c.d" spellings become the native
-// "a.b.c.d" — and printed in netip canonical form, never folded; anything
-// else passes through verbatim.
+// "a.b.c.d" — and printed in netip canonical form, never folded. Anything
+// else passes through verbatim — reachable only from a non-IP socket
+// peer, never from an XFF claim (selectClient folds those to the peer).
 func canonAddr(s string) string {
 	if a, err := netip.ParseAddr(s); err == nil {
 		return a.Unmap().String()

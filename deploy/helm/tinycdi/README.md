@@ -512,7 +512,11 @@ while Postgres is healthy the series measures the shared bound.
 
 The client address is the socket peer — unless the peer is inside
 `backend.trustedProxies`, in which case the right-most untrusted
-`X-Forwarded-For` entry stands in. Recognized client addresses are
+`X-Forwarded-For` entry stands in. A selected entry that is not a plain
+IP address (a garbage token, `unknown`, a zoned IPv6 literal) can never
+become a key: it falls back to the socket peer, so a client whose own
+bytes reach the selected slot shares one peer bucket instead of minting
+fresh keys per request. Recognized client addresses are
 canonicalised before keying: IPv4-mapped spellings (`::ffff:a.b.c.d` in any
 notation) unify with the native IPv4 key, and an IPv6 address keys by its
 **/64 prefix** — the smallest block a single subscriber is delegated — so
