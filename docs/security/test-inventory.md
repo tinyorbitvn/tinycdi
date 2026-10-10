@@ -73,8 +73,9 @@ substitute for review).
 - `internal/api/auditroutes_test.go` — dedicated audit events on every
   mutating + `/v1/admin/` route (#120): `TestAuditCoverage_SpecMatchesTable`
   pins the openapi↔table pairing,
-  `TestAuditCoverage_MountedMuxWrapsEveryRoute` walks the mounted mux so a
-  mutating/admin route without the `audited()` wrapper fails, denied admin
+  `TestAuditCoverage_MountedMuxEmitsEventPerRoute` replays the mounted mux
+  and requires exactly one domain event per mutating/admin spec route —
+  a plainly-mounted route emits none and fails, denied admin
   attempts record
   `denied`+actor, `role=tenant-admin` marks elevated use,
   `TestAudit_SinkFailureStillSucceeds` /
