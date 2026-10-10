@@ -1,0 +1,74 @@
+# Optional admission hardening (S36) — NOT part of config/default.
+# Apply explicitly once the platform is installed:
+#
+#     kubectl apply -k config/admissionpolicy
+#
+# The workspaces.cdi.tinyorbit.vn/template-snapshot annotation is the
+# operator's read-only mirror of status.templateSnapshot — the only
+# snapshot surface trusted for pod building lives in status. This
+# ValidatingAdmissionPolicy + binding DENIES create/update of Workspace
+# objects that add, change or remove that annotation unless the caller is
+# the operator ServiceAccount. Requires Kubernetes >= 1.30
+# (admissionregistration.k8s.io/v1) and failurePolicy is Fail.
+#
+# EDIT BEFORE APPLYING:
+#   * operatorUsername — the sample below uses the identity the stock
+#     config/default overlay produces (namespace: platform-system +
+#     namePrefix: platform- over the rbac/service_account.yaml name
+#     controller-manager):
+#         system:serviceaccount:platform-system:platform-controller-manager
+#     If your overlay changes the manager namespace, prefix or SA name,
+#     recompute it as system:serviceaccount:<manager-namespace>:<sa-name>.
+#   * managedNamespaces — the matchConditions list below carries the
+#     chart's ci fixture names; replace them with the namespaces your
+#     deployment treats as managed (the same set the operator is
+#     configured to watch). Workspaces outside those namespaces are not
+#     matched by this policy.
+#   * extraAllowedUsernames — uncomment and list exact
+#     request.userInfo.username values that may also write the annotation
+#     (e.g. a restore controller replaying exported manifests — the
+#     backup-restore runbook keeps the annotation).
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tinycdi-template-snapshot
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["workspaces"]
+  matchConditions:
+  - name: managed-namespace
+    expression: object.metadata.namespace in ['tinycdi-tenant-a', 'tinycdi-tenant-b']
+  validations:
+  - message: >-
+      workspaces.cdi.tinyorbit.vn/template-snapshot is written by the
+      tinycdi operator only — a Workspace may not be created carrying it
+      by another identity
+    expression: >-
+      request.operation != 'CREATE'
+      || request.userInfo.username in ['system:serviceaccount:platform-system:platform-controller-manager']
+      || !('workspaces.cdi.tinyorbit.vn/template-snapshot' in (has(object.metadata.annotations) ? object.metadata.annotations : {}))
+  - message: >-
+      workspaces.cdi.tinyorbit.vn/template-snapshot is written by the
+      tinycdi operator only — another identity may not add, change or
+      remove it
+    expression: >-
+      request.operation != 'UPDATE'
+      || request.userInfo.username in ['system:serviceaccount:platform-system:platform-controller-manager']
+      || (has(object.metadata.annotations) && 'workspaces.cdi.tinyorbit.vn/template-snapshot' in object.metadata.annotations
+          ? [object.metadata.annotations['workspaces.cdi.tinyorbit.vn/template-snapshot']] : [])
+         == (has(oldObject.metadata.annotations) && 'workspaces.cdi.tinyorbit.vn/template-snapshot' in oldObject.metadata.annotations
+             ? [oldObject.metadata.annotations['workspaces.cdi.tinyorbit.vn/template-snapshot']] : [])
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tinycdi-template-snapshot
+spec:
+  policyName: tinycdi-template-snapshot
+  validationActions: [Deny]

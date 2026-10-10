@@ -389,6 +389,34 @@ the flag is overridden via `backend.extraArgs`, edit the rendered rule
 match your Prometheus Operator's `ruleSelector` (e.g.
 `{release: prometheus}`), the same convention as `serviceMonitor.labels`.
 
+### Admission policy — `admissionPolicy` (default OFF, S36)
+
+| Key | Default | Description |
+|---|---|---|
+| `admissionPolicy.enabled` | `false` | render a `ValidatingAdmissionPolicy` + binding (Kubernetes >= 1.30, `admissionregistration.k8s.io/v1` — the chart-wide `kubeVersion` floor) that denies create/update of `Workspace` objects adding, changing or removing the `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation |
+| `admissionPolicy.extraAllowedUsernames` | `[]` | additional `request.userInfo.username` identities allowed to write the annotation (exact matches, e.g. a restore controller's `system:serviceaccount:<ns>:<sa>`) — needed only when tooling legitimately replays the mirror |
+
+The annotation is the operator's read-only mirror of
+`status.templateSnapshot` — since the status record became the only
+trusted snapshot source, nothing in convergence reads the annotation,
+but other readers (and the pre-reconcile window) still see it. The
+policy makes the mirror read-only at the API boundary: match is
+restricted to `workspaces` in `managedNamespaces`, `failurePolicy` is
+`Fail`, and the binding action is `Deny`.
+
+The exempted identity is the operator ServiceAccount the chart itself
+renders — `system:serviceaccount:<release-namespace>:operator`
+(`serviceaccounts.yaml` names the account `operator` in
+`.Release.Namespace`). Any writer that legitimately replays the mirror —
+for example a DR restore re-applying exported Workspace manifests, which
+keep the annotation — must run as that identity or be listed in
+`extraAllowedUsernames`.
+
+The kustomize dev path ships the same policy as an opt-in sample under
+`config/admissionpolicy/` (not part of `config/default`; edit the
+operator ServiceAccount identity and managed-namespace list, then
+`kubectl apply -k config/admissionpolicy`).
+
 ### Host-network gateways (Cilium Gateway API / cilium-envoy)
 
 **Symptom.** On Cilium, with a Gateway API or Ingress edge whose envoy runs in the

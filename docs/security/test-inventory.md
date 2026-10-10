@@ -287,6 +287,11 @@ substitute for review).
   or forged builds, foreign pods); `internal/broker/
   operator_stopped_envtest_test.go` pins that held workspaces get the
   stricter of template/defaults, never annotation caps (SEC-10).
+- `internal/operator/snapshot_annotation_vap_envtest_test.go` — envtest
+  enforcement proof for the optional ValidatingAdmissionPolicy sample
+  (`config/admissionpolicy/`, S36): a real apiserver denies non-operator
+  create/update touching the `template-snapshot` annotation inside the
+  managed namespaces and stays inert outside them.
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
   ownership and lifecycle edges; `intent_drift_test.go`
@@ -306,7 +311,9 @@ substitute for review).
   `chart_sessiondomain_test.go`, `chart_sessiondomain_case_test.go`,
   `chart_signout_test.go`, `chart_tenantquota_test.go`,
   `kasm_adapter_test.go`, `chart_branding_test.go`,
-  `chart_explicitdefaults_test.go`, `chart_topologyspread_test.go`.
+  `chart_explicitdefaults_test.go`, `chart_topologyspread_test.go`,
+  `chart_admissionpolicy_test.go` (S36: opt-in VAP off by default,
+  rendered objects, operator-SA exemption, Deny binding).
 - `build/frontend/main_test.go` — security headers (SEC-22, SEC-26), server
   timeouts (SEC-23), CSP/COOP, no `/v1` proxy, branding-dir
   traversal/listing/fallback rules, TLS hot reload, drain.

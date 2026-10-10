@@ -69,6 +69,14 @@ Login gate: only IdP tokens carrying one of
   format, e.g. Keycloak "/group" vs "group").
 {{- end }}
 
+{{- if .Values.admissionPolicy.enabled }}
+
+Admission policy: ValidatingAdmissionPolicy '{{ .Release.Name }}-template-snapshot'
+  denies non-operator writers add/change/remove of the
+  workspaces.cdi.tinyorbit.vn/template-snapshot annotation on workspaces
+  in the managed namespaces (requires Kubernetes >= 1.30).
+{{- end }}
+
 {{- if .Values.nodeProfiles.install.enabled }}
 Node profiles (mode: {{ .Values.nodeProfiles.install.mode | default "install" }}):
   DaemonSet 'node-profiles' in the dedicated {{ .Values.nodeProfiles.install.namespace }}
