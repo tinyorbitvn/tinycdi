@@ -15,9 +15,15 @@ package gateway_test
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 )
 
 // TestRehydrate_UnknownCookieSprayBounded: hundreds of distinct random
@@ -117,19 +123,26 @@ func TestRehydrate_LimiterSkipsRehydratedSession(t *testing.T) {
 
 // TestRehydrate_ReconnectStormOneClient: the bound keys every cookie the
 // replica has never seen — including VALID sessions after a backend
-// rollout. A storm of 100 valid cookies landing on one replica from one
-// client address must fit inside the default burst (120): every
-// reconnecting session rehydrates and answers 200.
+// rollout. A concurrent storm of 121 valid cookies landing on one replica
+// from one client address at the default bound (300/min + burst 120)
+// sees the first 120 admitted and the last refused 429 + Retry-After
+// without spending a directory lookup. The gateway clock is frozen so
+// no refill can mask the boundary.
 func TestRehydrate_ReconnectStormOneClient(t *testing.T) {
 	fb := newFakeBroker(t)
 	gwA, srvA := newReplica(t, fb, "gw-A")
-	gwB, srvB := newReplica(t, fb, "gw-B")
-	// 200 live sessions would keep renewing until the binary exits —
+	clock := &fakeClock{now: time.Now()}
+	gwB, srvB := newGatewayHandle(t, fb, func(c *gateway.Config) {
+		c.Identity = broker.GatewayIdentity{ID: "gw-B", Audience: testDomain}
+		c.Sessions = fb
+		c.Now = clock.Now // the default limiter runs on the gateway clock
+	})
+	// 240 live sessions would keep renewing until the binary exits —
 	// close both replicas so later tests don't run under that churn.
 	t.Cleanup(gwA.Close)
 	t.Cleanup(gwB.Close)
 
-	const storm = 100
+	const storm = 121 // one past the default burst
 	cookies := make([]string, storm)
 	hosts := make([]string, storm)
 	for i := 0; i < storm; i++ {
@@ -138,17 +151,59 @@ func TestRehydrate_ReconnectStormOneClient(t *testing.T) {
 		fb.scriptTicket(fmt.Sprintf("tk-storm-%d", i), wsUID)
 		cookies[i] = launchOK(t, srvA, hosts[i], fmt.Sprintf("tk-storm-%d", i))
 	}
-	// Every cookie is valid but unknown to B — each draws one token from
-	// the same per-client bucket.
+
+	// Every cookie is valid but unknown to B — each request draws one
+	// token from the same per-client bucket, all fired at once.
+	type result struct {
+		code       int
+		retryAfter string
+	}
+	results := make(chan result, storm)
+	var wg sync.WaitGroup
 	for i := 0; i < storm; i++ {
-		resp := proxied(t, srvB, hosts[i], "/", cookies[i], nil)
-		drain(resp)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("reconnect %d of %d = %d, want 200 — a valid-session storm must fit the burst", i+1, storm, resp.StatusCode)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodGet, srvB.URL+"/", nil)
+			if err != nil {
+				results <- result{code: -1}
+				return
+			}
+			req.Host = hosts[i]
+			req.Header.Set("Cookie", gateway.SessionCookieName+"="+cookies[i])
+			resp, err := http.DefaultTransport.RoundTrip(req)
+			if err != nil {
+				results <- result{code: -1}
+				return
+			}
+			res := result{code: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After")}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			results <- res
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	admitted, refused := 0, 0
+	for res := range results {
+		switch res.code {
+		case http.StatusOK:
+			admitted++
+		case http.StatusTooManyRequests:
+			refused++
+			if res.retryAfter == "" {
+				t.Error("429 on the storm tail carries no Retry-After")
+			}
+		default:
+			t.Fatalf("storm request = %d, want 200 or 429", res.code)
 		}
 	}
-	if n := fb.lookupCount(); n != storm {
-		t.Fatalf("LeaseBySession calls = %d, want %d — each valid cookie rehydrates exactly once", n, storm)
+	if admitted != 120 || refused != 1 {
+		t.Fatalf("admitted=%d refused=%d, want 120/1 — the storm must fit the default burst and the first overflow must refuse", admitted, refused)
+	}
+	if n := fb.lookupCount(); n != 120 {
+		t.Fatalf("LeaseBySession calls = %d, want 120 — the refusal spends no lookup", n)
 	}
 }
 

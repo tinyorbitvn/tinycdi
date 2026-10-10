@@ -117,9 +117,11 @@ substitute for review).
 - `internal/gateway/lookup_limit_test.go`,
   `lookup_limit_config_test.go` — the unknown-cookie session-directory
   lookup bound (S30): spray → bounded lookups + 429/`Retry-After`,
-  known/rehydrated/cookie-less requests never limited, a 100-cookie
-  valid-session reconnect storm fits the default burst, injected bucket +
-  disable path, refusal audits `session.lookup`.
+  known/rehydrated/cookie-less requests never limited, a 121-cookie
+  concurrent valid-session storm at defaults admits exactly 120 and
+  refuses the overflow with `Retry-After` (valid-but-uncached cookies
+  pay the pre-lookup gate), injected bucket + disable path, refusal
+  audits `session.lookup`.
 - `internal/gateway/unattached_test.go` — ghost-session TTL (S31):
   redeem-then-abandon reaped with a lease revoke, attached sessions
   survive, a lease in use on a sibling replica is never revoked, reap
