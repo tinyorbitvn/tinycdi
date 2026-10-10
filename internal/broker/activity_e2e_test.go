@@ -429,3 +429,58 @@ func TestDrainStatus_SupersededRevokeKeepsSuccessorStreams(t *testing.T) {
 		t.Fatalf("drain after superseded revoke = %d,%v,%v want 1,false", open, drained, err)
 	}
 }
+
+// TestRevokeWorkspaceLeases_GenerationBounded: the fence PoC — a
+// runtimeGeneration beyond every generation the workspace has recorded is
+// refused, no workspace_revocation row is written, and a later restart is
+// never fenced. Before the bound, a call with runtimeGeneration=2^62
+// bricked the workspace permanently: the table has no delete path.
+func TestRevokeWorkspaceLeases_GenerationBounded(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	markRunning(t, db, "ws-1", 5)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 5, "rt-5", clock.Now()))
+
+	// Far-future generation: refused, and nothing is written.
+	if _, err := b.RevokeWorkspaceLeases(ctx, "ws-1", 1<<62); !errors.Is(err, broker.ErrGenerationUnbounded) {
+		t.Fatalf("revoke gen=2^62 = %v, want ErrGenerationUnbounded", err)
+	}
+	var fenced bool
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM workspace_revocation WHERE workspace_id = 'ws-1')`).Scan(&fenced); err != nil {
+		t.Fatalf("revocation lookup: %v", err)
+	}
+	if fenced {
+		t.Fatal("refused revoke still wrote a workspace_revocation row")
+	}
+
+	// The restart the refused row would have fenced reconnects normally.
+	markRunning(t, db, "ws-1", 6)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 6, "rt-6", clock.Now()))
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, "", ""); err != nil {
+		t.Fatalf("issue after refused revoke = %v, want nil", err)
+	}
+
+	// Bound edge: the current generation stays legal and idempotent, and
+	// one of observed-but-unprojected slack is allowed — beyond that the
+	// request is refused again.
+	if _, err := b.RevokeWorkspaceLeases(ctx, "ws-1", 6); err != nil {
+		t.Fatalf("revoke at current generation = %v, want nil", err)
+	}
+	if _, err := b.RevokeWorkspaceLeases(ctx, "ws-1", 6); err != nil {
+		t.Fatalf("idempotent revoke = %v, want nil", err)
+	}
+	if _, err := b.RevokeWorkspaceLeases(ctx, "ws-1", 7); err != nil {
+		t.Fatalf("revoke at current+1 slack = %v, want nil", err)
+	}
+	if _, err := b.RevokeWorkspaceLeases(ctx, "ws-1", 8); !errors.Is(err, broker.ErrGenerationUnbounded) {
+		t.Fatalf("revoke at current+2 = %v, want ErrGenerationUnbounded", err)
+	}
+
+	// An unknown workspace keeps its historical no-op shape: no fence can
+	// ever be written for it (the insert is EXISTS-guarded), so the
+	// operator's teardown retry stays idempotent.
+	if n, err := b.RevokeWorkspaceLeases(ctx, "ws-gone", 1<<62); err != nil || n != 0 {
+		t.Fatalf("revoke unknown workspace = %d,%v want 0,nil", n, err)
+	}
+}

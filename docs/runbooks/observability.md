@@ -69,6 +69,7 @@ cardinality cannot leak in.
 | `tinycdi_rate_limited_total` | counter | `route` | requests refused by the per-client rate limiters (E7) — a rising series means `429 RATE_LIMITED` responses; check `backend.trustedProxies` is set before blaming clients |
 | `tinycdi_rate_limit_store_errors_total` | counter | `route` | Postgres rate-limit window check failures (ADR 0006) — real store errors only: each check runs under a 500 ms deadline and a failure opens a 10 s circuit-breaker cool-down in which requests skip the store entirely, so a sustained outage shows ~one increment per 10 s per limiter, not one per request; `route` is the limiter family (`login`, `callback_ceiling`, `launch`) |
 | `tinycdi_rate_limit_store_degraded` | gauge | `route` | rate-limit store circuit-breaker state — `1` while open (Postgres checks skipped; each pod's divided local bucket enforces the bound — the limited routes need Postgres to complete anyway) and `0` while closed; `route` is the limiter family (`login`, `callback_ceiling`, `launch`) |
+| `tinycdi_internal_auth_failures_total` | counter | `reason` | mTLS identity rejections on the internal broker listener (`reason` is `no_cert`, `no_cn` or `spiffe_mismatch`) — the complete record of refused attempts; the matching warn line is rate-limited per reason. A rising series means bad or absent client certs are hitting :9443 — check internal cert issuance/rotation or a probing client |
 
 ## Dashboards
 
