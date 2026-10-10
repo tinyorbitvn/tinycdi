@@ -137,8 +137,9 @@ anything unverifiable falls back to the client-IP key.
 | `GET /v1/auth/callback` | app | `oidc:`+sha256(state) — `?state` must equal the sealed login-cookie state (SEC-03) | client IP | same shared login bucket: 60/min, burst 20 | per-IP ceiling 10×: 600/min, burst 200 |
 | `GET /v1/session` (probe) | app | `sess:`+sha256(session ID) via `Peek` — read-only, no idle slide | client IP | same shared login bucket: 60/min, burst 20 | — |
 | `POST /v1/launch` | session | `sess:`+sha256(cookie) iff the cookie maps to a session **live on this replica** (in-memory check only — the limiter never spends a directory read) | client IP | `-launch-rate` 120/min, burst 40 | — |
+| any workspace-host request with an unseen cookie | session | — (unseen cookies are anonymous by definition) | client IP | `-session-lookup-rate` 300/min, burst 60 — **LOCAL per replica, deliberately no shared window**: the lookup itself spends Postgres reads, so the bound must not | — |
 
-All four budgets are divided by `-rate-limit-replicas`
+The four window-backed budgets above are divided by `-rate-limit-replicas`
 (`ratelimit.PerReplica`, integer round-down, `max(1, ·)` clamps): at the
 chart default `backend.replicas=2` each pod enforces 30/min + burst 10
 (login family), 60/min + burst 20 (launch), 300/min + burst 100 (callback

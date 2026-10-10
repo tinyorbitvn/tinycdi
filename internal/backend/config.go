@@ -89,7 +89,8 @@ func rateLimitsUntrusted(c Config) bool {
 	if p, err := ratelimit.ParseTrustedProxies(c.TrustedProxies); err != nil || len(p) > 0 {
 		return false
 	}
-	return (c.Listen != "" && c.LoginRate > 0) || (c.SessionListen != "" && c.LaunchRate > 0)
+	return (c.Listen != "" && c.LoginRate > 0) ||
+		(c.SessionListen != "" && (c.LaunchRate > 0 || c.SessionLookupRate > 0))
 }
 
 // Config is the parsed flag set for the merged backend.
@@ -147,6 +148,13 @@ type Config struct {
 	// the close-first order.
 	DrainPropagationDelay time.Duration
 	LaunchRate            int // per-client launches/min on /v1/launch; 0 disables
+	// SessionLookupRate is the per-client bound on session-directory
+	// lookups for unseen cookies — the only pre-auth request that spends
+	// Postgres reads. LOCAL per replica (its purpose is keeping the
+	// cookie spray off the store, so there is no shared window); 0
+	// disables.
+	SessionLookupRate    int
+	UnattachedSessionTTL time.Duration // ghost-session reap TTL; <=0 uses the gateway default
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
 	InternalListen   string // empty disables the internal listener
@@ -281,6 +289,10 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&c.DrainPropagationDelay, "drain-propagation-delay", envDur(getenv, "TCDI_DRAIN_PROPAGATION_DELAY", 5*time.Second), "wait between the readiness drop and the stream close at drain start, so endpoint removal propagates before clients are told to reconnect (0 closes streams at once)")
 	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 120),
 		"per-client launches/minute on /v1/launch (burst 40), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
+	fs.IntVar(&c.SessionLookupRate, "session-lookup-rate", envInt(getenv, "TCDI_SESSION_LOOKUP_RATE", gateway.SessionLookupRate),
+		"per-client requests/minute carrying a session cookie this replica has never seen (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
+	fs.DurationVar(&c.UnattachedSessionTTL, "unattached-session-ttl", envDur(getenv, "TCDI_UNATTACHED_SESSION_TTL", gateway.UnattachedSessionTTL),
+		"how long a redeemed session that never served a request may hold its lease before the gateway revokes it — bounds the workspace pin a launch abandoned between redeem and the 303 leaves behind (env TCDI_UNATTACHED_SESSION_TTL)")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),
@@ -365,8 +377,8 @@ func (c *Config) validate() error {
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)
 	}
-	if c.LoginRate < 0 || c.LaunchRate < 0 {
-		return errors.New("-login-rate and -launch-rate must be >= 0 (0 disables the limit)")
+	if c.LoginRate < 0 || c.LaunchRate < 0 || c.SessionLookupRate < 0 {
+		return errors.New("-login-rate, -launch-rate and -session-lookup-rate must be >= 0 (0 disables the limit)")
 	}
 	if c.RateLimitReplicas < 1 {
 		return errors.New("-rate-limit-replicas must be >= 1")
