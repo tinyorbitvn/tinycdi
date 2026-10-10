@@ -102,7 +102,16 @@ const (
 	// spec.templateRef (the writer-controlled annotation is never
 	// trusted). Convergence is held — no runtime children — and one
 	// edge-triggered Warning event is emitted (SEC-10).
-	ReasonTemplateInvalid      = "TemplateInvalid"
+	ReasonTemplateInvalid = "TemplateInvalid"
+	// ReasonTemplateRevisionGone — upgrade-path hold: a running workspace
+	// has no status.templateSnapshot yet and its incarnation pod's
+	// recorded template revision cannot be proven (the pod predates the
+	// identity stamp, or the stamped revision object was pruned or
+	// republished). The pod keeps running untouched; the workspace holds
+	// Pending with Degraded=True and one edge-triggered Warning event
+	// (emitted after the status persist). A stop/start re-snapshots from
+	// the live template.
+	ReasonTemplateRevisionGone = "TemplateRevisionGone"
 	ReasonProvisioning         = "Provisioning"
 	ReasonReady                = "Ready"
 	ReasonStopped              = "Stopped"
@@ -396,14 +405,18 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	// record is kept as a mirror for readers and is never trusted.
 	snap := ws.Status.TemplateSnapshot
 	if snap == nil {
-		// Upgrade path: a workspace admitted before this field existed may
-		// adopt its recorded annotation ONCE — only while a live
-		// operator-owned pod proves the record is what the runtime was
-		// actually built from. Everything else is recorded fresh from the
-		// live template below.
-		adopted, aerr := r.adoptSnapshot(ctx, ws)
+		// Upgrade path: a RUNNING workspace's incarnation pod names its
+		// template revision in operator-written stamped metadata; the
+		// LIVE revision object supplies the record's content. The
+		// writer-controlled annotation is never consulted — no pod (or a
+		// stopped workspace) falls through to a fresh snapshot of the
+		// live template, and an unprovable identity holds Degraded.
+		adopted, hres, done, aerr := r.adoptSnapshotFromPod(ctx, ws, applied)
 		if aerr != nil {
-			return ctrl.Result{}, aerr
+			return hres, aerr
+		}
+		if done {
+			return hres, nil
 		}
 		if adopted != nil {
 			if err := r.recordSnapshot(ctx, ws, adopted); err != nil {
@@ -974,62 +987,117 @@ func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *
 	return r.Update(ctx, ws)
 }
 
-// adoptSnapshot is the one-time upgrade path for workspaces admitted before
-// status.templateSnapshot existed. The recorded annotation may be adopted
-// into status only while a live pod proves the record: the pod must be
-// owned by this workspace AND verifiably built from it — either it carries
-// a matching template-hash stamp, or (pods built before the stamp existed)
-// its spec equals a fresh build from the recorded spec byte-for-byte.
-// Anything else — no record, an invalid record, a missing or unproven pod —
-// adopts nothing and falls through to a fresh snapshot of the live
-// template.
-func (r *WorkspaceReconciler) adoptSnapshot(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*templateSnapshot, error) {
-	raw := ws.Annotations[AnnotationTemplateSnapshot]
-	if raw == "" {
-		return nil, nil
+// adoptSnapshotFromPod is the one-time upgrade path for workspaces
+// admitted before status.templateSnapshot existed. The running
+// incarnation pod — operator-owned, established by the backend — names
+// the template revision it was built from in its stamped metadata; the
+// LIVE WorkspaceTemplate object of that revision supplies the record's
+// content, so the writer-controlled snapshot annotation is never
+// consulted, and runtimeGeneration/sourceRef come from the workspace
+// alone. Returns (nil, _, false, nil) when there is no proving pod: the
+// caller falls through to a fresh snapshot of the live template. When
+// the pod exists but its revision cannot be proven — it predates the
+// stamps, the stamped object was pruned or republished, or the pod does
+// not provably match it — done is true and the returned ctrl.Result is
+// the Degraded/TemplateRevisionGone hold the caller must return.
+func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
+	ident, ierr := r.Backend.PodTemplateIdentity(ctx, ws)
+	if ierr != nil {
+		return nil, ctrl.Result{}, false, ierr
 	}
-	snap := &templateSnapshot{}
-	if err := json.Unmarshal([]byte(raw), snap); err != nil {
-		// Unadoptable record: treat it as absent — the live-template
-		// re-snapshot decides what (if anything) may converge.
-		return nil, nil
+	if !ident.Owned {
+		return nil, ctrl.Result{}, false, nil
 	}
-	if err := verifySnapshotRecord(snap); err != nil {
-		return nil, nil
+	gone := func(detail string) (*templateSnapshot, ctrl.Result, bool, error) {
+		hres, hErr := r.holdTemplateRevisionGone(ctx, ws, applied, detail)
+		return nil, hres, hErr == nil, hErr
 	}
-	ok, err := r.Backend.PodMatchesTemplate(ctx, ws, templateFromSnapshot(ws, snap))
-	if err != nil || !ok {
-		return nil, err
+	if ident.Name == "" {
+		return gone("the running pod predates the template-identity stamp")
 	}
+	live := &workspacesv1alpha1.WorkspaceTemplate{}
+	gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
+	switch {
+	case apierrors.IsNotFound(gerr):
+		return gone(fmt.Sprintf("recorded template revision %q no longer exists", ident.Name))
+	case gerr != nil:
+		return nil, ctrl.Result{}, false, gerr
+	}
+	if live.Spec.Revision != ident.Revision {
+		return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
+			ident.Name, live.Spec.Revision, ident.Revision))
+	}
+	// The pod must also provably derive from that object — stamp match
+	// or an exact rebuild — so a mislabeled pod cannot drag an unrelated
+	// revision into status.
+	ok, merr := r.Backend.PodMatchesTemplate(ctx, ws, live)
+	if merr != nil {
+		return nil, ctrl.Result{}, false, merr
+	}
+	if !ok {
+		return gone(fmt.Sprintf("the running pod does not match template %q", ident.Name))
+	}
+	snap, rerr := snapshotTemplate(live)
+	if rerr != nil {
+		return nil, ctrl.Result{}, false, rerr
+	}
+	snap.SourceRef = ws.Spec.TemplateRef.Name
+	snap.RuntimeGeneration = applied.RuntimeGeneration
 	logf.FromContext(ctx).Info("template snapshot adopted into status",
 		"name", snap.Name, "uid", snap.UID,
 		"runtimeGeneration", snap.RuntimeGeneration)
-	return snap, nil
+	return snap, ctrl.Result{}, false, nil
+}
+
+// holdDegraded persists a Pending phase with Degraded=True/reason and
+// emits exactly one Warning event on the transition into the hold —
+// after the status write that proves the transition. Runtime children
+// are left untouched: a held workspace keeps whatever incarnation it
+// had.
+func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, reason, eventMsg string) (ctrl.Result, error) {
+	obs := tcdiruntime.Observation{
+		RuntimeGeneration: applied.RuntimeGeneration,
+		Reason:            reason,
+	}
+	edge := func() bool {
+		cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+		return cur == nil || cur.Status != metav1.ConditionTrue || cur.Reason != reason
+	}()
+	err := r.writeStatus(ctx, ws, applied, obs,
+		workspacesv1alpha1.WorkspacePhasePending, errors.New(reason), nil)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if edge && r.Recorder != nil {
+		r.Recorder.Event(ws, corev1.EventTypeWarning, reason, eventMsg)
+	}
+	return ctrl.Result{RequeueAfter: requeueRetry}, nil
 }
 
 // holdTemplateInvalid is the fail-closed exit of snapshot resolution: no
 // operator-recorded snapshot is usable and nothing valid replaced it —
 // the writer-controlled annotation is never trusted (SEC-10). No runtime
 // children are built; the workspace holds Pending with Degraded=True
-// reason=TemplateInvalid, requeues (a later-published template still
-// resolves), and emits exactly one Warning event on the transition into
-// the hold.
+// reason=TemplateInvalid and requeues (a later-published template still
+// resolves).
 func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("no trustworthy template source; convergence held",
 		"detail", detail)
-	if r.Recorder != nil {
-		cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
-		if cur == nil || cur.Status != metav1.ConditionTrue || cur.Reason != ReasonTemplateInvalid {
-			r.Recorder.Event(ws, corev1.EventTypeWarning, ReasonTemplateInvalid,
-				"the workspace's template could not be established; runtime convergence is held")
-		}
-	}
-	obs := tcdiruntime.Observation{
-		RuntimeGeneration: applied.RuntimeGeneration,
-		Reason:            ReasonTemplateInvalid,
-	}
-	return ctrl.Result{RequeueAfter: requeueRetry}, r.writeStatus(ctx, ws, applied, obs,
-		workspacesv1alpha1.WorkspacePhasePending, errors.New(ReasonTemplateInvalid), nil)
+	return r.holdDegraded(ctx, ws, applied, ReasonTemplateInvalid,
+		"the workspace's template could not be established; runtime convergence is held")
+}
+
+// holdTemplateRevisionGone is the upgrade-path hold for a workspace whose
+// running pod exists but whose recorded template revision cannot be
+// proven — the pod predates identity stamps, the stamped object was
+// pruned or republished, or the pod does not match it. The pod keeps
+// running untouched; a stop/start re-snapshots from the live template.
+func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("recorded template revision unavailable; workspace held",
+		"detail", detail)
+	return r.holdDegraded(ctx, ws, applied, ReasonTemplateRevisionGone,
+		"the workspace's recorded template revision is no longer available; "+
+			"the runtime keeps running — stop and start the workspace to re-snapshot from the current template")
 }
 
 // snapshotStale reports whether the recorded snapshot must be re-taken for

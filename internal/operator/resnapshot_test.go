@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	schedv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -271,13 +272,13 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 	}
 }
 
-// TestSnapshot_UpgradeAdoption: the v0.5->v1.0 upgrade path end to end on
-// a real apiserver. A workspace admitted before status.templateSnapshot
-// existed carries only the annotation; the operator adopts it into status
-// ONCE — and only while a live operator-owned pod proves it (an unstamped
-// pre-stamp pod must equal a fresh build field-for-field, apiserver
-// defaults discounted). A forged record is never adopted: the live
-// template is re-snapshotted instead.
+// TestSnapshot_UpgradeAdoption: the upgrade path end to end on a real
+// apiserver. A running workspace admitted before status.templateSnapshot
+// existed establishes its record from the incarnation pod's stamped
+// template identity + the LIVE revision object — the annotation is never
+// consulted. Pods that predate the stamps, or whose stamped revision is
+// gone, hold Degraded/TemplateRevisionGone with the pod left running;
+// stop/start re-snapshots.
 func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
@@ -286,12 +287,11 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		}
 	}()
 
-	// seedPreUpgrade lets a linux backend build the workspace's pod from
-	// tpl as a v0.5.0 operator would have, strips the template-hash stamp
-	// (pre-stamp build), and leaves only the recorded annotation on the
-	// workspace — the upgrade-time shape.
-	seedPreUpgrade := func(t *testing.T, ns string, ws *workspacesv1alpha1.Workspace,
-		tpl *workspacesv1alpha1.WorkspaceTemplate, ann string) *corev1.Pod {
+	// seedRunning builds the workspace's pod from tpl through the real
+	// backend — stamped with the template's identity + hash the way a
+	// post-change operator builds it — and optionally marks it scheduled.
+	seedRunning := func(t *testing.T, ns string, ws *workspacesv1alpha1.Workspace,
+		tpl *workspacesv1alpha1.WorkspaceTemplate, nodeName string) *corev1.Pod {
 		t.Helper()
 		b := linux.New(c, linux.Options{})
 		if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
@@ -302,10 +302,42 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			Namespace: ns, Name: linux.PodName(ws.UID)}, pod); err != nil {
 			t.Fatalf("seeded pod: %v", err)
 		}
-		delete(pod.Annotations, linux.AnnotationTemplateHash)
-		if err := c.Update(context.Background(), pod); err != nil {
-			t.Fatalf("strip stamp: %v", err)
+		if nodeName != "" {
+			// Pod spec is immutable after create — rebuild the pod as a
+			// scheduled incarnation would look: nodeName set at bind
+			// time and a real PriorityClass stamped by priority
+			// admission.
+			pc := &schedv1.PriorityClass{
+				ObjectMeta: metav1.ObjectMeta{Name: "tcdi-session-priority-" + ns},
+				Value:      1234,
+			}
+			if err := c.Create(context.Background(), pc); err != nil {
+				t.Fatalf("seed priority class: %v", err)
+			}
+			scheduled := &corev1.Pod{
+				ObjectMeta: *pod.ObjectMeta.DeepCopy(),
+				Spec:       *pod.Spec.DeepCopy(),
+			}
+			prio := int32(1234)
+			scheduled.Spec.NodeName = nodeName
+			scheduled.Spec.PriorityClassName = pc.Name
+			scheduled.Spec.Priority = &prio
+			scheduled.Spec.DeprecatedServiceAccount = scheduled.Spec.ServiceAccountName
+			scheduled.ResourceVersion = ""
+			scheduled.UID = ""
+			scheduled.CreationTimestamp = metav1.Time{}
+			if err := c.Delete(context.Background(), pod); err != nil {
+				t.Fatalf("replace pod: %v", err)
+			}
+			if err := c.Create(context.Background(), scheduled); err != nil {
+				t.Fatalf("mark pod scheduled: %v", err)
+			}
+			pod = scheduled
 		}
+		return pod
+	}
+	seedAnnotation := func(t *testing.T, ws *workspacesv1alpha1.Workspace, ann string) {
+		t.Helper()
 		cur := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
 		if cur.Annotations == nil {
 			cur.Annotations = map[string]string{}
@@ -314,10 +346,25 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		if err := c.Update(context.Background(), cur); err != nil {
 			t.Fatalf("seed annotation: %v", err)
 		}
-		return pod
+	}
+	assertPodHeldGone := func(t *testing.T, key types.NamespacedName, pod *corev1.Pod) {
+		t.Helper()
+		got := getWorkspace(t, c, key)
+		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		if cond == nil || cond.Status != metav1.ConditionTrue ||
+			cond.Reason != ReasonTemplateRevisionGone {
+			t.Fatalf("want Degraded/TemplateRevisionGone, got %+v", got.Status.Conditions)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished on revision-gone hold: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("revision-gone hold recreated the pod")
+		}
 	}
 
-	t.Run("honest record adopted, pod undisturbed", func(t *testing.T) {
+	t.Run("stamped pod adopts its live revision, pod untouched", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adopt", "fam32", nil)
@@ -327,15 +374,14 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
 		}
-		pod := seedPreUpgrade(t, ns, ws, live,
-			snapshotAnnotation(t, live, "fam32", 1))
+		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
 
 		r := newReconciler(c)
 		reconcile(t, r, key)
 		got := getWorkspace(t, c, key)
 		snap := got.Status.TemplateSnapshot
 		if snap == nil {
-			t.Fatal("pod-proven annotation was not adopted into status")
+			t.Fatal("stamped pod's revision was not adopted into status")
 		}
 		want, err := snapshotTemplate(live)
 		if err != nil {
@@ -354,7 +400,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		}
 	})
 
-	t.Run("forged record never adopted", func(t *testing.T) {
+	t.Run("forged annotation never consulted", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptf", "fam32", nil)
@@ -364,6 +410,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
 		}
+		pod := seedRunning(t, ns, ws, live, "")
 		// Forge: valid hash over an attacker spec (control-plane
 		// placement + attacker image) claiming the honest revision.
 		forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
@@ -382,21 +429,21 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		snap.SourceRef = "fam32"
 		snap.RuntimeGeneration = 1
 		annRaw, _ := json.Marshal(&snap)
-		pod := seedPreUpgrade(t, ns, ws, live, string(annRaw))
+		seedAnnotation(t, ws, string(annRaw))
 
 		r := newReconciler(c)
 		reconcile(t, r, key)
 		got := getWorkspace(t, c, key)
 		recorded := got.Status.TemplateSnapshot
 		if recorded == nil {
-			t.Fatal("live-template re-snapshot did not record status")
+			t.Fatal("stamped pod's revision was not adopted")
 		}
 		want, err := snapshotTemplate(live)
 		if err != nil {
 			t.Fatalf("snapshotTemplate: %v", err)
 		}
 		if recorded.SpecHash != want.SpecHash {
-			t.Fatalf("forged spec adopted into status: %q", recorded.SpecHash)
+			t.Fatalf("forged annotation content reached status: %q", recorded.SpecHash)
 		}
 		cur := &corev1.Pod{}
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
@@ -405,9 +452,51 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		if img := cur.Spec.Containers[0].Image; img != resnapImageA {
 			t.Fatalf("pod rebuilt from forged spec: %q", img)
 		}
-		if len(cur.Spec.NodeSelector) != 0 && cur.Spec.NodeSelector["node-role.kubernetes.io/control-plane"] != "" {
-			t.Fatal("pod carries forged control-plane placement")
+	})
+
+	t.Run("stamped revision gone holds degraded", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptg", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
 		}
+		pod := seedRunning(t, ns, ws, live, "")
+		// The revision object was pruned since the pod was built.
+		if err := c.Delete(context.Background(), live); err != nil {
+			t.Fatalf("delete revision: %v", err)
+		}
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		assertPodHeldGone(t, key, pod)
+	})
+
+	t.Run("pre-stamp pod holds degraded", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "")
+		// A v0.5.0 pod carries no identity stamps; its annotation — even
+		// an honest legacy-shaped one — is never a source.
+		delete(pod.Annotations, linux.AnnotationTemplateName)
+		delete(pod.Annotations, linux.AnnotationTemplateRevision)
+		delete(pod.Annotations, linux.AnnotationTemplateHash)
+		if err := c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("unstamp pod: %v", err)
+		}
+		seedAnnotation(t, ws, snapshotAnnotation(t, live, "", 0))
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		assertPodHeldGone(t, key, pod)
 	})
 }
 

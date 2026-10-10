@@ -443,6 +443,39 @@ func TestTemplateInvalidEventEmittedOnce(t *testing.T) {
 	}
 }
 
+// The revision-gone hold emits its Warning once — after the Degraded
+// status persisted — and stays silent across repeated holds.
+func TestTemplateRevisionGoneEventEmittedOnce(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32", "", types.UID("ws-pre-ev"))
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
+	seedBuiltPod(t, c, ws, tpl) // stamped fam32-aaaa1111; the object is absent
+
+	rec := record.NewFakeRecorder(16)
+	r := &WorkspaceReconciler{Client: c, Scheme: s,
+		Backend: linux.New(c, linux.Options{}), Recorder: rec}
+	key := client.ObjectKeyFromObject(ws)
+	for i := 0; i < 4; i++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, ReasonTemplateRevisionGone) {
+			t.Fatalf("event %q, want reason %s", ev, ReasonTemplateRevisionGone)
+		}
+	default:
+		t.Fatal("no TemplateRevisionGone event emitted")
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Fatalf("second event emitted on a repeated hold: %q", ev)
+	default:
+	}
+}
+
 // The status copy is the source of truth: a workspace whose
 // status.templateSnapshot the operator recorded still converges on it
 // even when the annotation is replaced by a forgery — the mirror is

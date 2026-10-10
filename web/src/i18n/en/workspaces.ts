@@ -187,6 +187,8 @@ export default {
     "The recorded template snapshot failed verification; ask an administrator.",
   "workspaces.reason.templateInvalid":
     "The workspace's template could not be established; ask an administrator.",
+  "workspaces.reason.templateRevisionGone":
+    "The workspace's recorded template revision is unavailable; the session keeps running — restart the workspace to re-snapshot.",
   "workspaces.reason.intentApplied": "The requested change was applied.",
   "workspaces.reason.quotaReserved":
     "Capacity reserved: {cpuMillicores}, {memoryMiB} memory, {storageGiB} storage.",

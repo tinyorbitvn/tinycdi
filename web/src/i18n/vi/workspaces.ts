@@ -188,6 +188,8 @@ export default {
     "Snapshot template đã ghi nhận không qua được kiểm tra; hỏi quản trị viên.",
   "workspaces.reason.templateInvalid":
     "Không thiết lập được template của workspace; hỏi quản trị viên.",
+  "workspaces.reason.templateRevisionGone":
+    "Revision template đã ghi nhận của workspace không còn khả dụng; phiên vẫn chạy — khởi động lại workspace để snapshot lại.",
   "workspaces.reason.intentApplied": "Thay đổi được yêu cầu đã được áp dụng.",
   "workspaces.reason.quotaReserved":
     "Đã dành sẵn tài nguyên: {cpuMillicores}, {memoryMiB} bộ nhớ, {storageGiB} đĩa.",

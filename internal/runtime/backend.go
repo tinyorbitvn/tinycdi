@@ -88,4 +88,26 @@ type Backend interface {
 	// before status.templateSnapshot existed; a false answer means the
 	// record may NOT be trusted and convergence must re-snapshot.
 	PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error)
+
+	// PodTemplateIdentity returns the template-revision identity the
+	// runtime incarnation pod was stamped with — operator-written pod
+	// metadata, never user input. Owned is false when no pod exists or
+	// the pod is not operator-owned for ws; the caller then treats the
+	// workspace as having no proving incarnation.
+	PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (PodTemplateIdentity, error)
+}
+
+// PodTemplateIdentity is the stamped template-revision identity of a
+// workspace's runtime incarnation pod.
+type PodTemplateIdentity struct {
+	// Owned is true only when the pod exists and is operator-owned for
+	// the workspace (controller ownerRef to the Workspace UID plus the
+	// backend's managed label set for the live generation).
+	Owned bool
+	// Name is the WorkspaceTemplate object name the pod was built from.
+	// Empty means the pod predates the stamp — its revision cannot be
+	// proven.
+	Name string
+	// Revision is spec.revision of the template the pod was built from.
+	Revision string
 }

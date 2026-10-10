@@ -252,8 +252,11 @@ substitute for review).
   mounts, read-only rootfs, quota interaction.
 - `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go`,
   `snapshot_adopt_test.go` — template snapshot image-digest verification,
-  status-record authority over the annotation, and the upgrade-adoption
-  pod proof (SEC-10).
+  status-record authority over the annotation, and upgrade-adoption from
+  the pod-stamped template identity + live revision object — the
+  annotation is never a source (`TemplateRevisionGone` holds for
+  unprovable identities: pre-stamp pods, pruned/republished revisions,
+  foreign pods) (SEC-10).
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
   ownership and lifecycle edges; `intent_drift_test.go`

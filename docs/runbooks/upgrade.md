@@ -25,41 +25,50 @@ single-replica `replicas: 1` install simply rolls the one pod and is
 uncovered only for its own restart gap, same as every upgrade).
 
 On its first reconcile of each workspace the new operator establishes
-the snapshot like this:
+the snapshot like this. The `template-snapshot` annotation is NEVER a
+source — not even as a lookup hint — so its bytes cannot leak into
+status:
 
-- **Running workspace with an honest record** — the live pod carries the
-  workspace's owner reference and provably was built from the recorded
-  annotation (a `workspaces.cdi.tinyorbit.vn/template-hash` stamp match
-  on new builds; for pods built before the stamp existed, the stored pod
-  spec must equal a fresh build from the recorded spec field-for-field).
-  The record is adopted into `status.templateSnapshot` once, untouched —
-  the pod is not restarted or replaced.
-- **Running workspace whose record does not match its pod, and every
-  workspace without a live pod** (stopped ones included) — the operator
-  re-snapshots the live template named by `spec.templateRef`, exactly as
-  a fresh admit would. A stopped workspace whose template was deleted in
-  the meantime holds `Degraded`/`TemplateInvalid` — with one Warning
-  event — until an admin republishes a resolvable template; it never
-  falls back to the annotation.
-- **Corrupt or absent record** — same rule: re-snapshot the live
-  template or hold.
+- **Running workspace whose pod carries the new template stamps** —
+  every pod the new operator builds is stamped with
+  `workspaces.cdi.tinyorbit.vn/template-name` /
+  `…/template-revision` / `…/template-hash` (operator-written pod
+  metadata a workspace writer cannot set). The pod's stamped name + a
+  matching revision string identify ONE live `WorkspaceTemplate` object;
+  the operator re-reads THAT object's content and writes it into
+  `status.templateSnapshot`. The pod is not restarted or replaced.
+- **Running workspace whose revision cannot be proven — including every
+  workspace running a pod built before this release** — v0.5 pods carry
+  no identity stamps, so all of them land here, as do pods whose stamped
+  revision object was pruned or republished under another revision, and
+  pods that do not provably match the stamped object. The pod KEEPS
+  RUNNING untouched; the workspace holds `Pending` with
+  `Degraded`/`TemplateRevisionGone` and emits one Warning event (only
+  after the condition persisted — retries cannot duplicate it). To
+  clear, stop and start the workspace: the next start re-snapshots the
+  template `spec.templateRef` resolves to today. Expect this on every
+  pre-upgrade running workspace and on long-running sessions whose old
+  template revisions were pruned.
+- **Workspace without a running pod** (stopped or pending) — nothing is
+  adopted. The next start resolves `spec.templateRef` and snapshots the
+  live template exactly like a fresh admit; if the template was deleted
+  in the meantime the workspace holds `Degraded`/`TemplateInvalid` —
+  with one Warning event — until an admin republishes it, same as today.
 
-After adoption or re-snapshot the annotation mirror is rewritten from
-status — a Workspace writer can still edit the annotation, but nothing
-in convergence reads it any more, so drift there is repaired on the next
+After the record lands, the annotation mirror is rewritten from status
+— a Workspace writer can still edit the annotation, but nothing in
+convergence reads it any more, so drift there is repaired on the next
 reconcile and is harmless in between (the broker's expiry projection
 reads status first and falls back to the annotation only for rows that
 pre-date the field).
 
-**One honest caveat:** a workspace that is ALREADY running a pod built
-from a forged snapshot at upgrade time is adopted as-is — the pod proof
-is exactly what the upgrade relies on, and a forged record that matches
-the live pod is indistinguishable from an honest one. If you suspect a
-workspace's recorded snapshot was tampered with before the upgrade (e.g.
-a discovered annotation forgery), **stop the affected workspaces before rolling the
-operator** — a stopped workspace has no proving pod, so the new operator
-re-snapshots it from the live template instead of adopting the record,
-and its next start runs only what the template actually says.
+**No forged record survives the upgrade:** adoption requires the pod to
+name its own template revision and match it — and the recorded content
+always comes from the live revision object — so a forged annotation can
+steer nothing. A workspace already running a pod built from a forged
+snapshot is covered too: its pod predates the stamps, so it holds
+`TemplateRevisionGone` until a stop/start re-snapshots the live
+template — nothing of the forged record is adopted into status.
 
 Post-upgrade check:
 
@@ -68,11 +77,12 @@ kubectl -n <tenant-ns> get workspaces \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.templateSnapshot.name}{"\n"}{end}'
 ```
 
-Every running workspace should name the revision it was admitted under.
-Rollback: the annotation mirror stays fully populated, so a v0.5
-operator (which reads only the annotation) keeps converging the same
-recorded revision — do not "un-apply" the v1.0 CRD, the extra status
-field is inert under v0.5.
+A workspace with an empty name and `Degraded`/`TemplateRevisionGone` is
+the expected pre-stamp/pruned-revision hold — its pod is untouched;
+restart it to populate the record. Rollback: the annotation mirror
+stays fully populated, so a v0.5 operator (which reads only the
+annotation) keeps converging the same recorded revision — do not
+"un-apply" the v1.0 CRD, the extra status field is inert under v0.5.
 
 ## Upgrading from v0.2 to v0.3
 

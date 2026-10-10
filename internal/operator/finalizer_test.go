@@ -93,6 +93,11 @@ func (f *fakeBackend) PodMatchesTemplate(context.Context, *workspacesv1alpha1.Wo
 	return false, nil
 }
 
+// PodTemplateIdentity reports no owned pod: the fake keeps no pods.
+func (f *fakeBackend) PodTemplateIdentity(context.Context, *workspacesv1alpha1.Workspace) (tcdiruntime.PodTemplateIdentity, error) {
+	return tcdiruntime.PodTemplateIdentity{}, nil
+}
+
 // stepRecorder implements every finalizer seam, recording call order and
 // injecting failures: failLeft[step]>0 makes that step return an error and
 // decrements the counter (simulating a crash inside the step).

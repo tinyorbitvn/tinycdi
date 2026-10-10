@@ -119,6 +119,18 @@ const (
 	// trusting a pre-status workspace's annotation.
 	AnnotationTemplateHash = "workspaces.cdi.tinyorbit.vn/template-hash"
 
+	// AnnotationTemplateName / AnnotationTemplateRevision stamp every
+	// built pod with the identity of the WorkspaceTemplate revision it
+	// was converged from — operator-written metadata a workspace writer
+	// cannot set. On upgrade the operator reads the identity from the
+	// pod itself and re-reads content from the LIVE template object of
+	// that revision; the (writer-controlled) snapshot annotation is
+	// never consulted. Annotations rather than labels: label values are
+	// capped at 63 chars and restrict characters, while template names
+	// and revision strings are not so constrained.
+	AnnotationTemplateName     = "workspaces.cdi.tinyorbit.vn/template-name"
+	AnnotationTemplateRevision = "workspaces.cdi.tinyorbit.vn/template-revision"
+
 	streamingPort int32 = 8443
 
 	secretMountDir = "/run/secrets/tcdi"
@@ -978,8 +990,12 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 			Labels:    l,
 		},
 	}
+	pod.Annotations = map[string]string{
+		AnnotationTemplateName:     tpl.Name,
+		AnnotationTemplateRevision: tpl.Spec.Revision,
+	}
 	if h, herr := templateHash(tpl); herr == nil {
-		pod.Annotations = map[string]string{AnnotationTemplateHash: h}
+		pod.Annotations[AnnotationTemplateHash] = h
 	}
 	pod.Spec = corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -1143,29 +1159,9 @@ func templateHash(tpl *workspacesv1alpha1.WorkspaceTemplate) (string, error) {
 // after discounting apiserver defaults. false means the record may not
 // be trusted.
 func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
-	uid := ws.UID
-	pod := &corev1.Pod{}
-	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
-	switch {
-	case apierrors.IsNotFound(err):
-		return false, nil
-	case err != nil:
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
 		return false, err
-	}
-	// The pod must be operator-OWNED — a controller owner-reference to
-	// this Workspace UID plus the full managed label set for the live
-	// generation. Anything less and a foreign object squatting on the
-	// workspace-pod name could "prove" a forged record.
-	if !metav1.IsControlledBy(pod, ws) {
-		return false, nil
-	}
-	for k, v := range labels(ws) {
-		if pod.Labels[k] != v {
-			return false, nil
-		}
-	}
-	if pod.Labels[LabelRuntimeGeneration] != fmt.Sprintf("%d", ws.Spec.RuntimeGeneration) {
-		return false, nil
 	}
 	if stamp := pod.Annotations[AnnotationTemplateHash]; stamp != "" {
 		want, herr := templateHash(tpl)
@@ -1187,6 +1183,50 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 	return podSpecBuiltEqual(&pod.Spec, &expected.Spec), nil
 }
 
+// ownedPod returns the incarnation pod when it exists and is
+// operator-OWNED — a controller owner-reference to this Workspace UID
+// plus the full managed label set for the live generation. Anything
+// less and a foreign object squatting on the workspace-pod name could
+// "prove" a record it was never built from.
+func (b *Backend) ownedPod(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*corev1.Pod, bool, error) {
+	pod := &corev1.Pod{}
+	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(ws.UID), Namespace: ws.Namespace}, pod)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	if !metav1.IsControlledBy(pod, ws) {
+		return pod, false, nil
+	}
+	for k, v := range labels(ws) {
+		if pod.Labels[k] != v {
+			return pod, false, nil
+		}
+	}
+	if pod.Labels[LabelRuntimeGeneration] != fmt.Sprintf("%d", ws.Spec.RuntimeGeneration) {
+		return pod, false, nil
+	}
+	return pod, true, nil
+}
+
+// PodTemplateIdentity implements runtime.Backend: the template-revision
+// identity the incarnation pod was stamped with, when the pod exists and
+// is operator-owned. Empty Name/Revision mark a pod that predates the
+// stamps — the caller must not guess its revision from anywhere else.
+func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (runtime.PodTemplateIdentity, error) {
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
+		return runtime.PodTemplateIdentity{}, err
+	}
+	return runtime.PodTemplateIdentity{
+		Owned:    true,
+		Name:     pod.Annotations[AnnotationTemplateName],
+		Revision: pod.Annotations[AnnotationTemplateRevision],
+	}, nil
+}
+
 // podSpecBuiltEqual reports whether actual (a stored pod spec) equals
 // expected (buildPod's fresh output) exactly, once the fields the
 // apiserver defaults but the template never supplies are discounted:
@@ -1196,11 +1236,14 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 // every pod.
 func podSpecBuiltEqual(actual, expected *corev1.PodSpec) bool {
 	a := actual.DeepCopy()
+	a.NodeName = ""
+	a.PriorityClassName = ""
 	a.DNSPolicy = ""
 	a.SchedulerName = ""
 	a.Priority = nil
 	a.PreemptionPolicy = nil
 	a.ShareProcessNamespace = nil
+	a.DeprecatedServiceAccount = ""
 	a.Tolerations = stripAdmissionTolerations(a.Tolerations)
 	norm := func(c *corev1.Container) {
 		c.ImagePullPolicy = ""
