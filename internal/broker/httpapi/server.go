@@ -25,6 +25,8 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 // SPIFFE trust-domain prefix for gateway identities.
@@ -74,6 +76,13 @@ type Config struct {
 	OperatorCN string
 	// Logger receives request logs; nil means silent.
 	Logger *slog.Logger
+	// Metrics counts identify-layer rejections on this listener
+	// (tinycdi_internal_auth_failures_total{reason}); nil disables.
+	Metrics *observability.Metrics
+	// AuthLogLimit bounds the rejection warn line per reason class; nil
+	// installs the default token bucket (1/s sustained, burst 10).
+	// Tests inject a stubbed Allower.
+	AuthLogLimit ratelimit.Allower
 }
 
 type ctxKey int
@@ -87,6 +96,9 @@ const ctxKeyGateway ctxKey = iota
 func NewHandler(cfg Config) http.Handler {
 	if cfg.OperatorCN == "" {
 		cfg.OperatorCN = DefaultOperatorCN
+	}
+	if cfg.AuthLogLimit == nil {
+		cfg.AuthLogLimit = ratelimit.New(authFailLogPerMinute, authFailLogBurst, 8, nil)
 	}
 	s := &server{cfg: cfg}
 	mux := http.NewServeMux()
@@ -102,29 +114,73 @@ func NewHandler(cfg Config) http.Handler {
 
 type server struct{ cfg Config }
 
+// identify-layer refusal classes — the bounded `reason` label values of
+// tinycdi_internal_auth_failures_total and the rate-limit keys of the
+// rejection warn line.
+const (
+	authFailNoCert = "no_cert"
+	authFailNoCN   = "no_cn"
+	authFailSpiffe = "spiffe_mismatch"
+)
+
+const (
+	// authFailLogPerMinute is the sustained warn-line budget per reason
+	// class (1/second); authFailLogBurst is the bucket's capacity.
+	authFailLogPerMinute = 60
+	authFailLogBurst     = 10
+)
+
 // identify maps the verified peer certificate onto broker.GatewayIdentity.
 func (s *server) identify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			writeErr(w, r, http.StatusUnauthorized, api.CodeUnauthenticated, "client certificate required")
+			s.rejectAuth(w, r, http.StatusUnauthorized, api.CodeUnauthenticated,
+				"client certificate required", authFailNoCert)
 			return
 		}
 		cert := r.TLS.PeerCertificates[0]
 		id := cert.Subject.CommonName
 		if id == "" {
-			writeErr(w, r, http.StatusUnauthorized, api.CodeUnauthenticated, "client certificate has no gateway CN")
+			s.rejectAuth(w, r, http.StatusUnauthorized, api.CodeUnauthenticated,
+				"client certificate has no gateway CN", authFailNoCN)
 			return
 		}
 		for _, u := range cert.URIs {
 			if strings.HasPrefix(u.String(), spiffePrefix) &&
 				strings.TrimPrefix(u.String(), spiffePrefix) != id {
-				writeErr(w, r, http.StatusForbidden, api.CodeForbidden, "SPIFFE id does not match certificate CN")
+				s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden,
+					"SPIFFE id does not match certificate CN", authFailSpiffe)
 				return
 			}
 		}
 		gw := broker.GatewayIdentity{ID: id, Audience: s.cfg.Audience}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyGateway, gw)))
 	})
+}
+
+// rejectAuth answers an identify-layer refusal. The request never reaches
+// logRequests (identify wraps it), so the refusal is recorded here instead:
+// counted unconditionally on tinycdi_internal_auth_failures_total{reason}
+// and logged as a warn line rate-limited per reason class. The log carries
+// the peer, the reason class and the REDACTED path — the raw path embeds
+// the lease id, bearer material on this listener (SEC-41). Certificate,
+// key or SAN material is never logged.
+func (s *server) rejectAuth(w http.ResponseWriter, r *http.Request, status int, code api.ErrorCode, msg, reason string) {
+	if s.cfg.Metrics != nil {
+		s.cfg.Metrics.IncInternalAuthFailure(reason)
+	}
+	if s.cfg.Logger != nil {
+		if ok, _ := s.cfg.AuthLogLimit.Allow(reason); ok {
+			s.cfg.Logger.Warn("internal_auth_rejected",
+				"request_id", api.RequestIDFromContext(r.Context()),
+				"method", r.Method,
+				"path", redactPath(r.URL.Path),
+				"status", status,
+				"reason", reason,
+				"peer", r.RemoteAddr)
+		}
+	}
+	writeErr(w, r, status, code, msg)
 }
 
 func gatewayFrom(ctx context.Context) broker.GatewayIdentity {
@@ -170,6 +226,30 @@ func (s *server) logRequests(next http.Handler) http.Handler {
 func redactID(id string) string {
 	sum := sha256.Sum256([]byte(id))
 	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+// internalPathVocab is the fixed route vocabulary served on this listener;
+// every other path segment is an identifier (lease id, workspace uid).
+var internalPathVocab = map[string]struct{}{
+	"internal": {}, "v1": {}, "broker": {}, "redeem": {},
+	"leases": {}, "renew": {}, "target": {}, "revoke": {}, "activity": {},
+	"workspaces": {}, "drain": {},
+}
+
+// redactPath renders a request path for the identify-layer rejection log —
+// where r.Pattern is not yet set, so logRequests' route-template rule
+// cannot apply. Segments inside the fixed route vocabulary pass through;
+// everything else is replaced by its truncated hash (SEC-41, same rule as
+// redactID). The route shape stays legible and requests stay correlatable,
+// while bearer material never reaches the log even on auth-failed calls.
+func redactPath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		if _, ok := internalPathVocab[seg]; seg != "" && !ok {
+			segs[i] = redactID(seg)
+		}
+	}
+	return strings.Join(segs, "/")
 }
 
 type statusWriter struct {
@@ -235,6 +315,8 @@ func brokerError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErr(w, r, http.StatusConflict, api.CodeInvalidState, "workspace not ready")
 	case errors.Is(err, broker.ErrNotFound):
 		writeErr(w, r, http.StatusNotFound, api.CodeNotFound, "not found")
+	case errors.Is(err, broker.ErrGenerationUnbounded):
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "runtime generation beyond recorded bound")
 	default:
 		writeErr(w, r, http.StatusInternalServerError, api.CodeInternal, "internal error")
 	}
