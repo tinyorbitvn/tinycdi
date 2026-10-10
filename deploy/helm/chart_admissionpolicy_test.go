@@ -1,4 +1,4 @@
-// S3x assertions for the optional ValidatingAdmissionPolicy guarding the
+// S36 assertions for the optional ValidatingAdmissionPolicy guarding the
 // operator-owned workspaces.cdi.tinyorbit.vn/template-snapshot mirror
 // annotation (admissionPolicy.enabled, default OFF).
 //
@@ -131,6 +131,17 @@ func TestAdmissionPolicyExpressions(t *testing.T) {
 		!strings.Contains(updateExpr, "object.metadata.annotations") ||
 		!strings.Contains(updateExpr, snapAnnot) {
 		t.Errorf("update validation does not diff oldObject vs object annotation:\n%s", updateExpr)
+	}
+}
+
+// TestManagedNamespaceNameSchema: managedNamespaces[].name interpolates
+// verbatim into the rendered matchCondition CEL list (and into namespace
+// object names) — the schema pins it to a DNS-1123 label so a hostile or
+// malformed name fails the render instead of reaching the expression.
+func TestManagedNamespaceNameSchema(t *testing.T) {
+	out := renderBad(t, "bad-managednamespace-name-values.yaml")
+	if !strings.Contains(out, "pattern") && !strings.Contains(out, "managedNamespaces") {
+		t.Errorf("bad managedNamespaces[].name should fail schema validation, got: %s", out)
 	}
 }
 

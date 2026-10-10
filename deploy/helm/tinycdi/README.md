@@ -386,7 +386,7 @@ the flag is overridden via `backend.extraArgs`, edit the rendered rule
 match your Prometheus Operator's `ruleSelector` (e.g.
 `{release: prometheus}`), the same convention as `serviceMonitor.labels`.
 
-### Admission policy — `admissionPolicy` (default OFF, S3x)
+### Admission policy — `admissionPolicy` (default OFF, S36)
 
 | Key | Default | Description |
 |---|---|---|

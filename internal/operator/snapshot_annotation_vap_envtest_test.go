@@ -4,7 +4,7 @@
 package operator
 
 // envtest coverage for the optional ValidatingAdmissionPolicy sample in
-// config/admissionpolicy/policy.yaml (S3x): applied verbatim against a
+// config/admissionpolicy/policy.yaml (S36): applied verbatim against a
 // real apiserver it must DENY create/update of Workspace objects that add,
 // change or remove the operator-owned
 // workspaces.cdi.tinyorbit.vn/template-snapshot mirror annotation, unless

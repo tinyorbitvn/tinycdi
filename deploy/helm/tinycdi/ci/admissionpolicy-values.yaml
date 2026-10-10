@@ -1,4 +1,4 @@
-# Optional admission hardening (S3x): renders the
+# Optional admission hardening (S36): renders the
 # ValidatingAdmissionPolicy + binding that keeps the operator-owned
 # workspaces.cdi.tinyorbit.vn/template-snapshot mirror annotation
 # read-only for every identity except the operator ServiceAccount.

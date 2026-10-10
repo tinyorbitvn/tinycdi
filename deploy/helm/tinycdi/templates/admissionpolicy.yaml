@@ -1,4 +1,4 @@
-{{- /* S3x hardening: the workspaces.cdi.tinyorbit.vn/template-snapshot
+{{- /* S36 hardening: the workspaces.cdi.tinyorbit.vn/template-snapshot
        annotation is an operator-owned mirror of status.templateSnapshot —
        never a trusted input (S30 moved the trusted copy to the status
        subresource). This optional ValidatingAdmissionPolicy makes the

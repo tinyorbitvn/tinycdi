@@ -48,7 +48,7 @@
         "required": ["name", "tenant"],
         "additionalProperties": false,
         "properties": {
-          "name": {"type": "string", "minLength": 1},
+          "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
           "tenant": {"type": "string", "minLength": 1},
           "quota": {
             "type": "object",

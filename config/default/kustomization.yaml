@@ -32,7 +32,7 @@ resources:
 # Allow webhook traffic from all sources.
 #- ../network-policy
 
-# [ADMISSION POLICY] Optional hardening (S3x): a ValidatingAdmissionPolicy
+# [ADMISSION POLICY] Optional hardening (S36): a ValidatingAdmissionPolicy
 # that keeps the operator-owned workspaces.cdi.tinyorbit.vn/template-snapshot
 # annotation writable only by the operator ServiceAccount. NOT part of this
 # overlay — do not add ../admissionpolicy as a resource here: this

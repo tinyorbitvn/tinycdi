@@ -543,7 +543,7 @@ alerts:
   # (2→0) from paging critical. 0 disables the floor.
   sessionDropFloor: 5
 
-# Optional admission hardening (S3x) — renders a ValidatingAdmissionPolicy
+# Optional admission hardening (S36) — renders a ValidatingAdmissionPolicy
 # + binding that DENIES create/update of Workspace objects in the
 # managedNamespaces when the request adds, changes or removes the
 # workspaces.cdi.tinyorbit.vn/template-snapshot annotation, unless the

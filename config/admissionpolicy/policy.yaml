@@ -1,4 +1,4 @@
-# Optional admission hardening (S3x) — NOT part of config/default.
+# Optional admission hardening (S36) — NOT part of config/default.
 # Apply explicitly once the platform is installed:
 #
 #     kubectl apply -k config/admissionpolicy
