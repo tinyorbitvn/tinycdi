@@ -73,8 +73,11 @@ const (
 	// cookies this replica has never seen — each miss costs the store
 	// 1-2 indexed reads. Per replica: the limiter's whole point is
 	// keeping a cookie spray off Postgres, so there is no shared window.
+	// The burst covers a rollout reconnect storm: every VALID cookie a
+	// replica has not cached draws one token, so a mid-size site behind
+	// one client address must fit inside it.
 	SessionLookupRate  = 300
-	SessionLookupBurst = 60
+	SessionLookupBurst = 120
 	// sessionLookupMaxKeys bounds the limiter's key space (LRU).
 	sessionLookupMaxKeys = 100_000
 )

@@ -14,6 +14,7 @@ package gateway_test
 // never limited.
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"testing"
@@ -28,7 +29,7 @@ func TestRehydrate_UnknownCookieSprayBounded(t *testing.T) {
 	fb := newFakeBroker(t)
 	gwB, srvB := newReplica(t, fb, "gw-B")
 
-	// Well past the default per-client bound (300/min + burst 60).
+	// Well past the default per-client bound (300/min + burst 120).
 	const requests = 420
 	refused, retryAfter := 0, 0
 	for i := 0; i < requests; i++ {
@@ -111,6 +112,43 @@ func TestRehydrate_LimiterSkipsRehydratedSession(t *testing.T) {
 	defer drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("request on the rehydrated session = %d, want 200 — it is a local hit, not a lookup", resp.StatusCode)
+	}
+}
+
+// TestRehydrate_ReconnectStormOneClient: the bound keys every cookie the
+// replica has never seen — including VALID sessions after a backend
+// rollout. A storm of 100 valid cookies landing on one replica from one
+// client address must fit inside the default burst (120): every
+// reconnecting session rehydrates and answers 200.
+func TestRehydrate_ReconnectStormOneClient(t *testing.T) {
+	fb := newFakeBroker(t)
+	gwA, srvA := newReplica(t, fb, "gw-A")
+	gwB, srvB := newReplica(t, fb, "gw-B")
+	// 200 live sessions would keep renewing until the binary exits —
+	// close both replicas so later tests don't run under that churn.
+	t.Cleanup(gwA.Close)
+	t.Cleanup(gwB.Close)
+
+	const storm = 100
+	cookies := make([]string, storm)
+	hosts := make([]string, storm)
+	for i := 0; i < storm; i++ {
+		wsUID := fmt.Sprintf("ws_%08x", 0x200+i)
+		hosts[i] = fmt.Sprintf("ws-%08x.%s", 0x200+i, testDomain)
+		fb.scriptTicket(fmt.Sprintf("tk-storm-%d", i), wsUID)
+		cookies[i] = launchOK(t, srvA, hosts[i], fmt.Sprintf("tk-storm-%d", i))
+	}
+	// Every cookie is valid but unknown to B — each draws one token from
+	// the same per-client bucket.
+	for i := 0; i < storm; i++ {
+		resp := proxied(t, srvB, hosts[i], "/", cookies[i], nil)
+		drain(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("reconnect %d of %d = %d, want 200 — a valid-session storm must fit the burst", i+1, storm, resp.StatusCode)
+		}
+	}
+	if n := fb.lookupCount(); n != storm {
+		t.Fatalf("LeaseBySession calls = %d, want %d — each valid cookie rehydrates exactly once", n, storm)
 	}
 }
 

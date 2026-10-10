@@ -116,6 +116,7 @@ var (
 		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
 		"admin.user_limit.default.set": {}, "admin.user_limit.default.clear": {},
 		"launch.redeem": {}, "launch.host_mismatch": {},
+		"session.lookup": {},
 	}
 )
 

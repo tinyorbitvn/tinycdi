@@ -18,14 +18,18 @@ import (
 
 // TestRehydrate_InjectedLookupLimiter: a tight injected bucket refuses
 // after its burst with the limiter's own Retry-After hint and spends no
-// directory lookup on refusals; the frozen clock then admits again.
+// directory lookup on refusals; the frozen clock then admits again. The
+// refusal audits `session.lookup` denied — an action the audit-error
+// metric's bounded label set must know.
 func TestRehydrate_InjectedLookupLimiter(t *testing.T) {
 	fb := newFakeBroker(t)
+	audit := &auditRecorder{}
 	now := time.Now()
 	lim := ratelimit.New(60, 2, 100, func() time.Time { return now }) // 1/s, burst 2
 	_, srv := newGatewayHandle(t, fb, func(c *gateway.Config) {
 		c.Sessions = fb
 		c.SessionLookupLimiter = lim
+		c.Audit = audit
 	})
 
 	// Two unknown cookies pass the burst — each a 401 with one lookup.
@@ -50,6 +54,15 @@ func TestRehydrate_InjectedLookupLimiter(t *testing.T) {
 	}
 	if n := fb.lookupCount(); n != 2 {
 		t.Fatalf("LeaseBySession calls = %d after the refusal, want 2 — a 429 spends no lookup", n)
+	}
+	found := false
+	for _, a := range audit.auditActions() {
+		if a == "session.lookup" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no session.lookup audit event in %v", audit.auditActions())
 	}
 	// Refill and the next lookup passes.
 	now = now.Add(2 * time.Second)

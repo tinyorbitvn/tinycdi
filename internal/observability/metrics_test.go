@@ -259,10 +259,12 @@ func TestIncAuditWriteError(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, nil)
 	m.IncAuditWriteError("workspace.create")
+	m.IncAuditWriteError("session.lookup") // gateway rehydrate-limit refusals
 	m.IncAuditWriteError("some.future.action")
 	err := testutil.GatherAndCompare(reg, strings.NewReader(
 		`# HELP tinycdi_audit_write_errors_total Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.
 # TYPE tinycdi_audit_write_errors_total counter
+tinycdi_audit_write_errors_total{event="session.lookup"} 1
 tinycdi_audit_write_errors_total{event="workspace.create"} 1
 tinycdi_audit_write_errors_total{event="other"} 1
 `), "tinycdi_audit_write_errors_total")

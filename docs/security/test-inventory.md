@@ -117,12 +117,17 @@ substitute for review).
 - `internal/gateway/lookup_limit_test.go`,
   `lookup_limit_config_test.go` — the unknown-cookie session-directory
   lookup bound (S30): spray → bounded lookups + 429/`Retry-After`,
-  known/rehydrated/cookie-less requests never limited, injected bucket +
-  disable path.
+  known/rehydrated/cookie-less requests never limited, a 100-cookie
+  valid-session reconnect storm fits the default burst, injected bucket +
+  disable path, refusal audits `session.lookup`.
 - `internal/gateway/unattached_test.go` — ghost-session TTL (S31):
   redeem-then-abandon reaped with a lease revoke, attached sessions
   survive, a lease in use on a sibling replica is never revoked, reap
   proceeds on revoke failure.
+- `internal/gateway/unattached_race_test.go` — attach/reap
+  serialization (S31): an attach concurrent with the reap's in-flight
+  revoke loses deterministically; the attach-vs-tick hammer asserts no
+  end state ever shows a live session on a revoked lease.
 - `internal/gateway/coop_test.go` — `Cross-Origin-Opener-Policy:
   same-origin` pinned on every session-listener response and
   upstream-supplied COOP stripped (S32); frame-ancestors unchanged.

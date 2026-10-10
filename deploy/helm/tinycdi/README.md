@@ -440,10 +440,13 @@ The backend rate-limits its unauthenticated surface **per client address**:
 covers the session listener's `POST /v1/launch`. A client over its budget gets
 `429 RATE_LIMITED` with `Retry-After`; `0` disables a limit
 (`backend.extraArgs`, e.g. `-login-rate=0`). A second, strictly **local**
-bound — `-session-lookup-rate` (300/min, burst 60 per replica) — covers
+bound — `-session-lookup-rate` (300/min, burst 120 per replica) — covers
 requests carrying a session cookie the serving replica has never seen:
 each miss costs Postgres an indexed lookup or two, so a random-cookie
-spray is refused before any store read. Cookies that resolve to a live
+spray is refused before any store read. The burst is sized for a
+rollout reconnect storm: every *valid* cookie the replica has not
+cached draws a token too, so a mid-size site behind one client address
+fits inside it. Cookies that resolve to a live
 session and cookie-less requests are never limited by it.
 
 Requests that prove a live session are **not** keyed on the address:
