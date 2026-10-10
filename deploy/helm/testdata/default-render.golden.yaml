@@ -308,6 +308,364 @@ spec:
                 description: stoppedAt is when the runtime last reached Stopped.
                 format: date-time
                 type: string
+              templateSnapshot:
+                description: |-
+                  templateSnapshot is the operator-recorded template copy the runtime
+                  converges on, written at first admit and re-recorded on a re-pointing
+                  start. It is the ONLY snapshot trusted for pod building — the
+                  template-snapshot annotation is a read-only mirror for consumers.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      annotations carries the admin-controlled template annotations the
+                      backend honors (seccomp-profile, apparmor-profile, storage-class) —
+                      the snapshot captures them since the template object is never
+                      re-read.
+                    type: object
+                  name:
+                    description: name of the WorkspaceTemplate object the snapshot
+                      was taken from.
+                    type: string
+                  revision:
+                    description: revision is the recorded spec.revision.
+                    type: string
+                  runtimeGeneration:
+                    description: |-
+                      runtimeGeneration is the applied spec.runtimeGeneration the snapshot
+                      was recorded under.
+                    format: int64
+                    type: integer
+                  sourceRef:
+                    description: |-
+                      sourceRef is the spec.templateRef.name the snapshot was taken from
+                      (the catalog base name the create path writes, or the revision object
+                      name a carried re-point writes). Empty on snapshots recorded before
+                      the re-snapshot machinery existed — the recorded object name is the
+                      fallback source for those.
+                    type: string
+                  spec:
+                    description: spec is the recorded template spec.
+                    properties:
+                      bootDeadline:
+                        description: |-
+                          bootDeadline bounds how long a workspace may take to become Ready
+                          before it is failed.
+                        type: string
+                      clipboardPolicy:
+                        description: |-
+                          clipboardPolicy selects clipboard redirection between client and
+                          workspace.
+                        enum:
+                        - Disabled
+                        - Send
+                        - Receive
+                        - Bidirectional
+                        type: string
+                      experience:
+                        description: experience selects the client experience.
+                        enum:
+                        - Desktop
+                        - Browser
+                        type: string
+                      lifecycle:
+                        description: |-
+                          lifecycle carries the default idle/disconnect/max-duration and data
+                          policy for workspaces from this template.
+                        properties:
+                          dataPolicy:
+                            description: |-
+                              dataPolicy is the default data policy for workspaces created from this
+                              template.
+                            enum:
+                            - Ephemeral
+                            - Retain
+                            type: string
+                          disconnectTimeout:
+                            description: |-
+                              disconnectTimeout is the grace period after the last interactive
+                              connection drops before the runtime is stopped.
+                            type: string
+                          idleTimeout:
+                            description: |-
+                              idleTimeout is how long an unused (no input) session may run before the
+                              platform stops it.
+                            type: string
+                          imageUpdate:
+                            default: OnStart
+                            description: |-
+                              imageUpdate selects how workspaces created from this template pick up
+                              newer published revisions of the same template family: OnStart moves a
+                              workspace to the newest revision on every Stopped -> Running start;
+                              Pinned keeps it on its recorded revision.
+                            enum:
+                            - OnStart
+                            - Pinned
+                            type: string
+                          maxDuration:
+                            description: maxDuration is the hard cap on a single Running
+                              generation.
+                            type: string
+                        required:
+                        - dataPolicy
+                        - disconnectTimeout
+                        - idleTimeout
+                        - maxDuration
+                        type: object
+                      linux:
+                        description: |-
+                          linux holds the LinuxContainer configuration. Required iff
+                          runtime=LinuxContainer, forbidden otherwise.
+                        properties:
+                          adapter:
+                            default: ""
+                            description: |-
+                              adapter selects an injected runtime adapter for the image: "kasm"
+                              runs UNMODIFIED kasmweb/* workspace images behind the adapter scripts
+                              the operator delivers via an initContainer (docs/kasm-images.md).
+                              Requires the operator to be configured with --kasm-adapter-image;
+                              empty keeps the image's own entrypoint contract (the tcdi/* images).
+                            enum:
+                            - ""
+                            - kasm
+                            type: string
+                          browserPolicy:
+                            description: |-
+                              browserPolicy restricts the in-session browser when experience is
+                              Browser.
+                            properties:
+                              allowedDomains:
+                                description: |-
+                                  allowedDomains is the allowlist of DNS domains the session browser may
+                                  reach. Empty means the network profile alone decides.
+                                items:
+                                  type: string
+                                type: array
+                              deniedDomains:
+                                description: deniedDomains is subtracted from the
+                                  allowlist.
+                                items:
+                                  type: string
+                                type: array
+                            type: object
+                          command:
+                            description: |-
+                              command is the fixed container command/args chosen by the admin. End
+                              users can never supply or override a container command. Forbidden with
+                              adapter=kasm — the adapter supplies the container command.
+                            items:
+                              type: string
+                            type: array
+                          hostUsers:
+                            description: |-
+                              hostUsers sets the pod's hostUsers field: false runs the runtime in a
+                              user namespace so its root is not node root. Unset leaves the pod
+                              field nil — the operator's default applies when configured. Opt-in in
+                              v0.2; it becomes the default only after the R1 spike proves
+                              KasmVNC + the Chromium sandbox + PVC on RKE2 (design §3.7, D26).
+                            type: boolean
+                          image:
+                            description: |-
+                              image is the OCI reference for the runtime image, digest-pinned:
+                              <repo>@sha256:<64 hex>. Tags without a digest are rejected.
+                            minLength: 1
+                            pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$
+                            type: string
+                          sessionCmd:
+                            description: |-
+                              sessionCmd is the session payload command the adapter runs inside the
+                              desktop session (exported to the runtime as TCDI_SESSION_CMD). For
+                              Chromium-family kasmweb images it MUST point past the image's
+                              --no-sandbox wrapper scripts at the real binary — per docs/kasm-images.md
+                              every cataloged image needs a wrapper audit. Only valid with
+                              adapter=kasm; empty runs the image's default desktop session.
+                            pattern: ^[ -~]{1,512}$
+                            type: string
+                        required:
+                        - image
+                        type: object
+                        x-kubernetes-validations:
+                        - message: sessionCmd is only valid with adapter=kasm
+                          rule: '!has(self.sessionCmd) || self.adapter == ''kasm'''
+                        - message: command must be empty with adapter=kasm; the adapter
+                            supplies the container command
+                          rule: self.adapter != 'kasm' || !has(self.command) || size(self.command)
+                            == 0
+                      networkProfile:
+                        description: networkProfile selects the permitted egress profile
+                          for the runtime.
+                        enum:
+                        - InternetOnly
+                        - ClusterOnly
+                        - Isolated
+                        type: string
+                      placement:
+                        description: |-
+                          placement controls where runtime pods are scheduled: node selector,
+                          tolerations, runtime class. Admin-only and immutable with the spec.
+                        properties:
+                          nodeSelector:
+                            additionalProperties:
+                              type: string
+                            description: nodeSelector pins runtime pods to nodes carrying
+                              these labels.
+                            type: object
+                          runtimeClassName:
+                            description: |-
+                              runtimeClassName selects the node container runtime handler (e.g.
+                              gvisor). Passed through to pod.spec.runtimeClassName; v0.2 does not
+                              maintain a tested handler matrix (design §3.7).
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            type: string
+                          tolerations:
+                            description: |-
+                              tolerations let runtime pods land on tainted nodes (the dedicated
+                              workspace pool). Capped at 16 — a scheduling hint, not a policy
+                              surface.
+                            items:
+                              description: |-
+                                The pod this Toleration is attached to tolerates any taint that matches
+                                the triple <key,value,effect> using the matching operator <operator>.
+                              properties:
+                                effect:
+                                  description: |-
+                                    Effect indicates the taint effect to match. Empty means match all taint effects.
+                                    When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                                  type: string
+                                key:
+                                  description: |-
+                                    Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                                    If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                                  type: string
+                                operator:
+                                  description: |-
+                                    Operator represents a key's relationship to the value.
+                                    Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                                    Exists is equivalent to wildcard for value, so that a pod can
+                                    tolerate all taints of a particular category.
+                                    Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                                  type: string
+                                tolerationSeconds:
+                                  description: |-
+                                    TolerationSeconds represents the period of time the toleration (which must be
+                                    of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                                    it is not set, which means tolerate the taint forever (do not evict). Zero and
+                                    negative values will be treated as 0 (evict immediately) by the system.
+                                  format: int64
+                                  type: integer
+                                value:
+                                  description: |-
+                                    Value is the taint value the toleration matches to.
+                                    If the operator is Exists, the value should be empty, otherwise just a regular string.
+                                  type: string
+                              type: object
+                            maxItems: 16
+                            type: array
+                        type: object
+                      resources:
+                        description: resources is the compute/storage profile for
+                          the runtime.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: cpu request/limit for the runtime.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: memory request/limit for the runtime.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storage:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              storage is the size of the per-workspace data volume (Linux home PVC or
+                              Windows boot disk clone).
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        required:
+                        - cpu
+                        - memory
+                        - storage
+                        type: object
+                      revision:
+                        description: |-
+                          revision is an admin-assigned identifier for this immutable template
+                          revision (e.g. "2026-09-a"). Immutable with the rest of spec.
+                        minLength: 1
+                        type: string
+                      runtime:
+                        description: runtime selects the runtime kind.
+                        enum:
+                        - LinuxContainer
+                        - WindowsVM
+                        type: string
+                      windows:
+                        description: |-
+                          windows holds the WindowsVM configuration. Required iff
+                          runtime=WindowsVM, forbidden otherwise.
+                        properties:
+                          sourceChecksum:
+                            description: |-
+                              sourceChecksum is the content checksum of the sealed source, recorded
+                              by the admin at seal time and used to detect a re-sealed or swapped
+                              source.
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          sourcePVCRef:
+                            description: sourcePVCRef is the sealed, golden-image
+                              PVC to clone per workspace.
+                            properties:
+                              name:
+                                description: name of the sealed source PVC in the
+                                  template's namespace.
+                                minLength: 1
+                                type: string
+                              namespace:
+                                description: |-
+                                  namespace must be omitted. The source PVC is always resolved in the
+                                  template's own namespace; setting this field is rejected.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        required:
+                        - sourceChecksum
+                        - sourcePVCRef
+                        type: object
+                    required:
+                    - bootDeadline
+                    - clipboardPolicy
+                    - experience
+                    - lifecycle
+                    - networkProfile
+                    - resources
+                    - revision
+                    - runtime
+                    type: object
+                  specHash:
+                    description: |-
+                      specHash is sha256 of the canonical spec JSON — provenance for the
+                      recorded revision.
+                    type: string
+                  uid:
+                    description: uid of that object at record time.
+                    type: string
+                required:
+                - name
+                - revision
+                - spec
+                - specHash
+                - uid
+                type: object
             type: object
         required:
         - spec
