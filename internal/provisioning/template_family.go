@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 )
@@ -33,6 +34,18 @@ const (
 	SkipReasonExperienceChanged = "experience-changed"
 	SkipReasonDataPolicyChanged = "data-policy-changed"
 	SkipReasonStorageSmaller    = "storage-smaller"
+	// The security-relevant dimensions: a newer family revision may
+	// freshen the image/version but must never silently move the
+	// workspace's exposure boundary — the egress profile, clipboard
+	// redirection, the runtime adapter, the user-namespace contract,
+	// pod placement, or the confinement profiles.
+	SkipReasonNetworkProfileChanged  = "network-profile-changed"
+	SkipReasonClipboardPolicyChanged = "clipboard-policy-changed"
+	SkipReasonAdapterChanged         = "adapter-changed"
+	SkipReasonHostUsersChanged       = "host-users-changed"
+	SkipReasonPlacementChanged       = "placement-changed"
+	SkipReasonSeccompProfileChanged  = "seccomp-profile-changed"
+	SkipReasonAppArmorProfileChanged = "apparmor-profile-changed"
 )
 
 // startTemplateTarget decides whether a Stopped -> Running start moves the
@@ -131,10 +144,21 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 }
 
 // revisionIncompatible is the E2 guard: a start may move a workspace only
-// to a revision with the same runtime, experience and data policy, whose
-// storage is not smaller than the recorded revision's. It returns "" when
-// compatible, else the SkipReason* token naming the first failing
-// dimension — the curated TemplateUpdateSkipped event's cause.
+// to a revision with the same runtime, experience, data policy and
+// security-relevant settings, whose storage is not smaller than the
+// recorded revision's. It returns "" when compatible, else the
+// SkipReason* token naming the first failing dimension — the curated
+// TemplateUpdateSkipped event's cause.
+//
+// Every security-relevant dimension is an exact-match gate — any change
+// is incompatible, even one that looks like a tightening
+// (InternetOnly→Isolated): an admin publishing a new revision expresses
+// intent for NEW workspaces; silently altering an existing workspace's
+// exposure boundary — in either direction — is never what a start was
+// admitted under. The egress profile and clipboard policy govern the
+// data boundary, adapter/hostUsers the sandbox contract, placement where
+// the pod lands, and the profile annotations which node-loaded
+// confinement the container runs under.
 func revisionIncompatible(cur, next *TemplateCatalogEntry) string {
 	switch {
 	case cur.Runtime != next.Runtime:
@@ -145,6 +169,20 @@ func revisionIncompatible(cur, next *TemplateCatalogEntry) string {
 		return SkipReasonDataPolicyChanged
 	case next.DiskBytes < cur.DiskBytes:
 		return SkipReasonStorageSmaller
+	case cur.NetworkProfile != next.NetworkProfile:
+		return SkipReasonNetworkProfileChanged
+	case cur.ClipboardPolicy != next.ClipboardPolicy:
+		return SkipReasonClipboardPolicyChanged
+	case cur.Adapter != next.Adapter:
+		return SkipReasonAdapterChanged
+	case !reflect.DeepEqual(cur.HostUsers, next.HostUsers):
+		return SkipReasonHostUsersChanged
+	case !reflect.DeepEqual(cur.Placement, next.Placement):
+		return SkipReasonPlacementChanged
+	case cur.SeccompProfile != next.SeccompProfile:
+		return SkipReasonSeccompProfileChanged
+	case cur.AppArmorProfile != next.AppArmorProfile:
+		return SkipReasonAppArmorProfileChanged
 	}
 	return ""
 }

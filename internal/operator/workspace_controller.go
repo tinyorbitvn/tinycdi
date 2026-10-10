@@ -96,12 +96,16 @@ const (
 	// runtime configuration (e.g. an out-of-policy apparmor-profile
 	// annotation value); no runtime children are created.
 	ReasonTemplateRejected = "TemplateRejected"
-	// ReasonTemplateInvalid — no trustworthy template source exists for
-	// the workspace: status.templateSnapshot is absent or failed
+	// ReasonTemplateInvalid — the workspace's template is unusable as a
+	// convergence source: status.templateSnapshot is absent or failed
 	// verification AND no valid live template resolves under
 	// spec.templateRef (the writer-controlled annotation is never
-	// trusted). Convergence is held — no runtime children — and one
-	// edge-triggered Warning event is emitted (SEC-10).
+	// trusted), or the resolved template's content is inadmissible (an
+	// out-of-policy seccomp-profile annotation). Convergence is held —
+	// no NEW runtime children are built; a pod already running on the
+	// adoption path keeps running untouched, same as
+	// TemplateRevisionGone — and one edge-triggered Warning event is
+	// emitted after the status persist (SEC-10).
 	ReasonTemplateInvalid = "TemplateInvalid"
 	// ReasonTemplateRevisionGone — upgrade-path hold: a running workspace
 	// has no status.templateSnapshot yet and its incarnation pod's
@@ -461,6 +465,13 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 				fmt.Sprintf("template %q does not resolve", ws.Spec.TemplateRef.Name))
 		case gerr != nil:
 			return ctrl.Result{}, gerr
+		}
+		// Admission: a live template whose seccomp-profile annotation is
+		// out of policy can never produce a pod — refuse to admit it into
+		// a recorded snapshot at all rather than converge on a rejection
+		// the backend would raise at Ensure.
+		if verr := linux.ValidateSeccompAnnotation(tpl.Annotations); verr != nil {
+			return r.holdTemplateInvalid(ctx, ws, applied, verr.Error())
 		}
 		recorded, rerr := snapshotTemplate(tpl)
 		if rerr != nil {
@@ -1022,6 +1033,14 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 		hres, hErr := r.holdTemplateRevisionGone(ctx, ws, applied, detail)
 		return nil, hres, hErr == nil, hErr
 	}
+	// invalid is the content-inadmissible hold: the running pod is left
+	// untouched exactly like gone's, but the Degraded reason names what
+	// failed — the candidate template's CONTENT, not the pod's provable
+	// revision identity.
+	invalid := func(detail string) (*templateSnapshot, ctrl.Result, bool, error) {
+		hres, hErr := r.holdTemplateInvalid(ctx, ws, applied, detail)
+		return nil, hres, hErr == nil, hErr
+	}
 	var live *workspacesv1alpha1.WorkspaceTemplate
 	if ident.Name == "" {
 		// Pre-stamp pod: the only trustworthy candidate is the live
@@ -1048,6 +1067,14 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 			return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
 				ident.Name, live.Spec.Revision, ident.Revision))
 		}
+	}
+	// Content gate: an inadmissible template — a live object whose
+	// seccomp-profile annotation is out of policy — is never adopted into
+	// status, whatever the pod proves. The running pod keeps running
+	// untouched; a stop/start re-snapshots the live template, whose own
+	// admission check then applies.
+	if verr := linux.ValidateSeccompAnnotation(live.Annotations); verr != nil {
+		return invalid(fmt.Sprintf("template %q carries an out-of-policy seccomp profile: %v", live.Name, verr))
 	}
 	// The pod must provably derive from that object — hash stamp, or an
 	// exact spec rebuild for pods built before the stamps — so a
@@ -1106,12 +1133,17 @@ func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1
 	return ctrl.Result{RequeueAfter: requeueRetry}, nil
 }
 
-// holdTemplateInvalid is the fail-closed exit of snapshot resolution: no
-// operator-recorded snapshot is usable and nothing valid replaced it —
-// the writer-controlled annotation is never trusted (SEC-10). No runtime
-// children are built; the workspace holds Pending with Degraded=True
-// reason=TemplateInvalid and requeues (a later-published template still
-// resolves).
+// holdTemplateInvalid is the fail-closed exit of snapshot resolution and
+// admission: no operator-recorded snapshot is usable and nothing valid
+// replaced it, or the only resolvable template's content is inadmissible
+// — the writer-controlled annotation is never trusted (SEC-10). No NEW
+// runtime children are built, but an existing incarnation is left
+// untouched: the adoption path's running pod keeps running until a
+// stop/start re-snapshots the live template — the same pod-untouched
+// hold as TemplateRevisionGone, split by failure class (content-invalid
+// vs identity-unprovable). The workspace holds Pending with
+// Degraded=True reason=TemplateInvalid and requeues (a later-published
+// template still resolves).
 func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("no trustworthy template source; convergence held",
 		"detail", detail)
@@ -1216,7 +1248,15 @@ func verifySnapshotRecord(snap *templateSnapshot) error {
 		return fmt.Errorf("header fields inconsistent: name=%q revision=%q spec.revision=%q",
 			snap.Name, snap.Revision, snap.Spec.Revision)
 	}
-	return validateSnapshotSpec(&snap.Spec)
+	if err := validateSnapshotSpec(&snap.Spec); err != nil {
+		return err
+	}
+	// The recorded annotations drive buildPod's confinement the same way
+	// the recorded spec drives its shape: a snapshot whose seccomp
+	// profile name is out of policy is not a usable record. It is
+	// replaced by a fresh snapshot of the live template — the admission
+	// check there then decides whether anything may be recorded at all.
+	return linux.ValidateSeccompAnnotation(snap.Annotations)
 }
 
 // validateSnapshotSpec re-checks the invariants the CRD enforces on a

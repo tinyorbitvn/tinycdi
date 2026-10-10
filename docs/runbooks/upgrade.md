@@ -62,6 +62,16 @@ status:
   pruned — and on webhook-altered or forged-spec pods. To clear, stop
   and start the workspace: the next start re-snapshots the template
   `spec.templateRef` resolves to today.
+- **Running workspace whose resolved template is inadmissible** — the
+  pod's revision proves fine, but the live template's content fails
+  admission (an out-of-policy `seccomp-profile` annotation): the pod
+  KEEPS RUNNING untouched exactly like the RevisionGone hold — the two
+  holds differ only in the Degraded reason, `TemplateInvalid` for
+  content-invalid versus `TemplateRevisionGone` for
+  identity-unprovable — and the same single Warning event fires after
+  the status persist. To clear, fix the template's annotation, then
+  stop and start the workspace: the next start re-snapshots the live
+  template and re-runs admission.
 - **Workspace without a running pod** (stopped or pending) — nothing is
   adopted. The next start resolves `spec.templateRef` and snapshots the
   live template exactly like a fresh admit; if the template was deleted

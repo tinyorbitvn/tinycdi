@@ -776,8 +776,8 @@ nodeProfiles:
 # kasmweb/* image) takes the template entry's own `imageBuiltAt` (RFC 3339).
 #
 # Placement/confinement fields map to the annotations the runtime backend
-# honors (only Localhost node profiles are accepted — anything else is
-# ignored (seccomp) or rejected (apparmor)):
+# honors (only Localhost node profiles are accepted — anything else
+# rejects the template):
 #   seccompProfile:  <name> -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
 #   appArmorProfile: <name> -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
 #   storageClass:    <name>  -> workspaces.cdi.tinyorbit.vn/storage-class

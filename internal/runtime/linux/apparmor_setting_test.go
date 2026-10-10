@@ -25,11 +25,15 @@ func aaBuild(t *testing.T, annotations map[string]string, kasm bool, opts Option
 		tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
 		opts.KasmAdapterImage = testAdapterImage
 	}
-	aa, err := resolveAppArmorProfile(tpl)
+	aa, err := resolveAppArmorProfile(tpl.Annotations)
 	if err != nil {
 		t.Fatalf("resolveAppArmorProfile: %v", err)
 	}
-	return buildPod(testWorkspace(), tpl, aa, opts)
+	sc, err := resolveSeccompProfile(tpl.Annotations)
+	if err != nil {
+		t.Fatalf("resolveSeccompProfile: %v", err)
+	}
+	return buildPod(testWorkspace(), tpl, aa, sc, opts)
 }
 
 // wantSecurityContext is the golden container security context of the

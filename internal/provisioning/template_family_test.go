@@ -12,15 +12,18 @@ package provisioning_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -85,7 +88,7 @@ func familyEntry(family, suffix, revLabel, policy string) provisioning.TemplateC
 
 // familyWorkspace seeds a tenant quota and a Stopped workspace created from
 // revision A of family linuxdesk.
-func familyWorkspace(t *testing.T, cat *fakeTemplateLookup) (*store.DB, *provisioning.Service, string) {
+func familyWorkspace(t *testing.T, cat provisioning.TemplateLookup) (*store.DB, *provisioning.Service, string) {
 	t.Helper()
 	db := recoveryDB(t)
 	ctx := context.Background()
@@ -438,6 +441,22 @@ func TestUpdate_SkippedReasonMatrix(t *testing.T) {
 		{"experience-changed", func(e *provisioning.TemplateCatalogEntry) { e.Experience = "Browser" }, provisioning.SkipReasonExperienceChanged},
 		{"data-policy-changed", func(e *provisioning.TemplateCatalogEntry) { e.DataPolicyDefault = "Retain" }, provisioning.SkipReasonDataPolicyChanged},
 		{"storage-smaller", func(e *provisioning.TemplateCatalogEntry) { e.DiskBytes -= 1 << 30 }, provisioning.SkipReasonStorageSmaller},
+		{"network-profile-changed", func(e *provisioning.TemplateCatalogEntry) { e.NetworkProfile = "InternetOnly" }, provisioning.SkipReasonNetworkProfileChanged},
+		{"clipboard-policy-changed", func(e *provisioning.TemplateCatalogEntry) { e.ClipboardPolicy = "Bidirectional" }, provisioning.SkipReasonClipboardPolicyChanged},
+		{"adapter-changed", func(e *provisioning.TemplateCatalogEntry) { e.Adapter = "kasm" }, provisioning.SkipReasonAdapterChanged},
+		{"host-users-changed", func(e *provisioning.TemplateCatalogEntry) {
+			hu := false
+			e.HostUsers = &hu
+		}, provisioning.SkipReasonHostUsersChanged},
+		{"placement-changed", func(e *provisioning.TemplateCatalogEntry) {
+			e.Placement = &workspacev1alpha1.PlacementSpec{NodeSelector: map[string]string{"workload": "runtime"}}
+		}, provisioning.SkipReasonPlacementChanged},
+		{"seccomp-profile-changed", func(e *provisioning.TemplateCatalogEntry) {
+			e.SeccompProfile = "localhost/profiles/chromium-userns.json"
+		}, provisioning.SkipReasonSeccompProfileChanged},
+		{"apparmor-profile-changed", func(e *provisioning.TemplateCatalogEntry) {
+			e.AppArmorProfile = "localhost/tinycdi-browser"
+		}, provisioning.SkipReasonAppArmorProfileChanged},
 		{"compatible", func(e *provisioning.TemplateCatalogEntry) { e.DiskBytes += 1 << 30 }, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -462,6 +481,115 @@ func TestUpdate_SkippedReasonMatrix(t *testing.T) {
 			}
 			if tc.want != "" && res.Template.ID != revA.ID {
 				t.Fatalf("skipped start must stay on %s, record = %+v", revA.ID, res.Template)
+			}
+		})
+	}
+}
+
+// famRevision builds a published WorkspaceTemplate revision object of
+// family in ns-fam — the shape templateEntry reads every E2 guard
+// dimension from.
+func famRevision(family, suffix, revLabel string, created time.Time,
+	mutate func(*workspacev1alpha1.WorkspaceTemplate)) *workspacev1alpha1.WorkspaceTemplate {
+	tpl := &workspacev1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              family + "-" + suffix,
+			Namespace:         "ns-fam",
+			Labels:            map[string]string{provisioning.LabelCatalogName: family},
+			CreationTimestamp: metav1.NewTime(created),
+		},
+		Spec: workspacev1alpha1.WorkspaceTemplateSpec{
+			Revision:   revLabel,
+			Runtime:    workspacev1alpha1.RuntimeLinuxContainer,
+			Experience: workspacev1alpha1.ExperienceDesktop,
+			Linux: &workspacev1alpha1.LinuxRuntimeSpec{
+				Image: "registry.example/tcdi/linux-desktop@sha256:" +
+					"0000000000000000000000000000000000000000000000000000000000000000",
+			},
+			ClipboardPolicy: workspacev1alpha1.ClipboardDisabled,
+			NetworkProfile:  workspacev1alpha1.NetworkProfileIsolated,
+			Lifecycle: workspacev1alpha1.LifecycleDefaults{
+				ImageUpdate: workspacev1alpha1.ImageUpdateOnStart,
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(tpl)
+	}
+	return tpl
+}
+
+// TestUpdate_SkippedOnSecurityFieldDrift (v1.0/SR-3-F6): the E2 guard
+// covers the security-relevant revision fields end to end — read off the
+// real WorkspaceTemplate objects by the catalog, not a hand-built entry.
+// A published successor that changes the egress boundary, clipboard
+// policy, runtime adapter, hostUsers, placement or the confinement
+// annotations is never adopted silently: the start stays on the recorded
+// revision and the skip reason names the field; a revision that only
+// freshens the image/revision label still flows.
+func TestUpdate_SkippedOnSecurityFieldDrift(t *testing.T) {
+	hostUsers := false
+	base := time.Now().Add(-2 * time.Hour)
+	for i, tc := range []struct {
+		name   string
+		mutate func(*workspacev1alpha1.WorkspaceTemplate)
+		want   string
+	}{
+		{"image-only", nil, ""},
+		{"network-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Spec.NetworkProfile = workspacev1alpha1.NetworkProfileInternetOnly
+		}, provisioning.SkipReasonNetworkProfileChanged},
+		{"clipboard-policy", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Spec.ClipboardPolicy = workspacev1alpha1.ClipboardBidirectional
+		}, provisioning.SkipReasonClipboardPolicyChanged},
+		{"adapter", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Spec.Linux.Adapter = workspacev1alpha1.AdapterKasm
+		}, provisioning.SkipReasonAdapterChanged},
+		{"host-users", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Spec.Linux.HostUsers = &hostUsers
+		}, provisioning.SkipReasonHostUsersChanged},
+		{"placement", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Spec.Placement = &workspacev1alpha1.PlacementSpec{
+				NodeSelector: map[string]string{"workload": "runtime"},
+			}
+		}, provisioning.SkipReasonPlacementChanged},
+		{"seccomp-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Annotations = map[string]string{
+				linux.AnnotationSeccompProfile: "localhost/profiles/chromium-userns.json",
+			}
+		}, provisioning.SkipReasonSeccompProfileChanged},
+		{"apparmor-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+			tpl.Annotations = map[string]string{
+				linux.AnnotationAppArmorProfile: "localhost/tinycdi-browser",
+			}
+		}, provisioning.SkipReasonAppArmorProfileChanged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			revA := famRevision("linuxdesk", "aaaa1111", "2026-10-a", base, nil)
+			revB := famRevision("linuxdesk", "bbbb2222", "2026-10-b", base.Add(time.Hour), tc.mutate)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(revA, revB).Build()
+			cat := provisioning.NewK8sTemplateCatalog(c,
+				provisioning.TenantNamespaces{familyTenant: "ns-fam"})
+			_, svc, ws := familyWorkspace(t, cat)
+
+			res, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "",
+				ws, fmt.Sprintf("fam-sec-%d", i), provisioning.IntentStart, []byte("{}"))
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			reason, _ := intentReason(t, svc, ws)
+			if reason != tc.want {
+				t.Fatalf("recorded reason = %q, want %q", reason, tc.want)
+			}
+			if tc.want == "" && res.Template.ID != "tpl_linuxdesk-bbbb2222" {
+				t.Fatalf("compatible start must move to revision B, record = %+v", res.Template)
+			}
+			if tc.want != "" && res.Template.ID != "tpl_linuxdesk-aaaa1111" {
+				t.Fatalf("skipped start must stay on revision A, record = %+v", res.Template)
 			}
 		})
 	}
