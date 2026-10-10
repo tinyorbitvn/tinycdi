@@ -3,7 +3,7 @@
 # with the portal security headers. It does not proxy /v1 — the edge routes
 # that path to the backend. Build context is the repo root.
 ARG NODE_IMAGE=docker.io/library/node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
-ARG BASE_IMAGE=docker.io/library/golang:1.26@sha256:6c2a5538f964f1c82f97ad14988bf05de100d922d159d0e398b54c7b0ca0c6c9
+ARG BASE_IMAGE=docker.io/library/golang:1.26@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89
 
 FROM ${NODE_IMAGE} AS web-builder
 WORKDIR /web
