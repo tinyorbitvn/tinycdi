@@ -1227,6 +1227,26 @@ func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha
 	}, nil
 }
 
+// StampPodTemplateIdentity implements runtime.Backend: backfill the
+// template-identity stamps onto an operator-owned pod whose provenance
+// was proven by the normalized rebuild — later reconciles and upgrades
+// read the identity directly instead of re-running the compare.
+func (b *Backend) StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error {
+	pod, owned, err := b.ownedPod(ctx, ws)
+	if err != nil || !owned {
+		return err
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[AnnotationTemplateName] = tpl.Name
+	pod.Annotations[AnnotationTemplateRevision] = tpl.Spec.Revision
+	if h, herr := templateHash(tpl); herr == nil {
+		pod.Annotations[AnnotationTemplateHash] = h
+	}
+	return b.client.Update(ctx, pod)
+}
+
 // podSpecBuiltEqual reports whether actual (a stored pod spec) equals
 // expected (buildPod's fresh output) exactly, once the fields the
 // apiserver defaults but the template never supplies are discounted:

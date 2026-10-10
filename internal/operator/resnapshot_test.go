@@ -474,7 +474,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		assertPodHeldGone(t, key, pod)
 	})
 
-	t.Run("pre-stamp pod holds degraded", func(t *testing.T) {
+	t.Run("pre-stamp pod adopts resolved revision, pod untouched", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32", nil)
@@ -484,9 +484,10 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
 		}
-		pod := seedRunning(t, ns, ws, live, "")
 		// A v0.5.0 pod carries no identity stamps; its annotation — even
-		// an honest legacy-shaped one — is never a source.
+		// an honest legacy-shaped one — is never a source. The resolved
+		// candidate is the live revision; the pod provably matches it.
+		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
 		delete(pod.Annotations, linux.AnnotationTemplateHash)
@@ -494,6 +495,47 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatalf("unstamp pod: %v", err)
 		}
 		seedAnnotation(t, ws, snapshotAnnotation(t, live, "", 0))
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		snap := got.Status.TemplateSnapshot
+		if snap == nil || snap.Name != "fam32-aaaa1111" {
+			t.Fatalf("pre-stamp pod's resolved revision was not adopted: %+v", snap)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("adoption recreated the pod")
+		}
+		// The identity stamps were backfilled onto the running pod.
+		if cur.Annotations[linux.AnnotationTemplateName] != "fam32-aaaa1111" {
+			t.Fatalf("identity stamps not backfilled: %+v", cur.Annotations)
+		}
+	})
+
+	t.Run("pre-stamp pod rotated revision holds degraded", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedRunning(t, ns, ws, live, "")
+		delete(pod.Annotations, linux.AnnotationTemplateName)
+		delete(pod.Annotations, linux.AnnotationTemplateRevision)
+		delete(pod.Annotations, linux.AnnotationTemplateHash)
+		if err := c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("unstamp pod: %v", err)
+		}
+		// The pod was built from fam32-aaaa1111; a fresh revision object
+		// with different pod content now resolves the family — the pod
+		// disproves the candidate.
+		familyRevision(t, c, ns, "fam32-bbbb2222", "2026-10-b", resnapImageB)
 		r := newReconciler(c)
 		reconcile(t, r, key)
 		assertPodHeldGone(t, key, pod)

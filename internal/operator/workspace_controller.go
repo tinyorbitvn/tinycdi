@@ -988,18 +988,28 @@ func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *
 }
 
 // adoptSnapshotFromPod is the one-time upgrade path for workspaces
-// admitted before status.templateSnapshot existed. The running
-// incarnation pod — operator-owned, established by the backend — names
-// the template revision it was built from in its stamped metadata; the
-// LIVE WorkspaceTemplate object of that revision supplies the record's
-// content, so the writer-controlled snapshot annotation is never
-// consulted, and runtimeGeneration/sourceRef come from the workspace
-// alone. Returns (nil, _, false, nil) when there is no proving pod: the
-// caller falls through to a fresh snapshot of the live template. When
-// the pod exists but its revision cannot be proven — it predates the
-// stamps, the stamped object was pruned or republished, or the pod does
-// not provably match it — done is true and the returned ctrl.Result is
-// the Degraded/TemplateRevisionGone hold the caller must return.
+// admitted before status.templateSnapshot existed. Two proofs, one
+// constant: the recorded content ALWAYS comes from a LIVE
+// WorkspaceTemplate object — the writer-controlled annotation is never
+// consulted — and runtimeGeneration/sourceRef come from the workspace
+// alone.
+//
+//   - Stamped pod (post-change builds): its operator-written
+//     template-name/template-revision annotations name the candidate
+//     object; the live object must carry the same revision and the pod
+//     must provably match it.
+//   - Pre-stamp pod (v0.5 builds): the candidate is the live revision
+//     spec.templateRef resolves to; the pod must equal a normalized
+//     rebuild of that object — a pod built from a rotated, pruned,
+//     webhook-altered or forged spec never matches and holds. On a
+//     match the identity stamps are backfilled onto the pod so the
+//     next upgrade reads them directly.
+//
+// Returns (nil, _, false, nil) when there is no proving pod: the caller
+// falls through to a fresh snapshot of the live template. When the pod
+// exists but its revision cannot be proven, done is true and the
+// returned ctrl.Result is the Degraded/TemplateRevisionGone hold the
+// caller must return — the pod is left running untouched.
 func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
 	ident, ierr := r.Backend.PodTemplateIdentity(ctx, ws)
 	if ierr != nil {
@@ -1012,30 +1022,52 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 		hres, hErr := r.holdTemplateRevisionGone(ctx, ws, applied, detail)
 		return nil, hres, hErr == nil, hErr
 	}
+	var live *workspacesv1alpha1.WorkspaceTemplate
 	if ident.Name == "" {
-		return gone("the running pod predates the template-identity stamp")
+		// Pre-stamp pod: the only trustworthy candidate is the live
+		// revision spec.templateRef resolves to — a catalog base name
+		// resolves to the newest revision, so a pod built from a
+		// rotated-out revision fails the rebuild and holds.
+		live, err = r.resolveTemplate(ctx, ws)
+		switch {
+		case apierrors.IsNotFound(err):
+			return gone("the running pod predates the identity stamp and spec.templateRef resolves nothing")
+		case err != nil:
+			return nil, ctrl.Result{}, false, err
+		}
+	} else {
+		live = &workspacesv1alpha1.WorkspaceTemplate{}
+		gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
+		switch {
+		case apierrors.IsNotFound(gerr):
+			return gone(fmt.Sprintf("recorded template revision %q no longer exists", ident.Name))
+		case gerr != nil:
+			return nil, ctrl.Result{}, false, gerr
+		}
+		if live.Spec.Revision != ident.Revision {
+			return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
+				ident.Name, live.Spec.Revision, ident.Revision))
+		}
 	}
-	live := &workspacesv1alpha1.WorkspaceTemplate{}
-	gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
-	switch {
-	case apierrors.IsNotFound(gerr):
-		return gone(fmt.Sprintf("recorded template revision %q no longer exists", ident.Name))
-	case gerr != nil:
-		return nil, ctrl.Result{}, false, gerr
-	}
-	if live.Spec.Revision != ident.Revision {
-		return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
-			ident.Name, live.Spec.Revision, ident.Revision))
-	}
-	// The pod must also provably derive from that object — stamp match
-	// or an exact rebuild — so a mislabeled pod cannot drag an unrelated
-	// revision into status.
+	// The pod must provably derive from that object — hash stamp, or an
+	// exact spec rebuild for pods built before the stamps — so a
+	// mislabeled, rotated, forged or webhook-altered pod can never drag
+	// an unrelated record into status.
 	ok, merr := r.Backend.PodMatchesTemplate(ctx, ws, live)
 	if merr != nil {
 		return nil, ctrl.Result{}, false, merr
 	}
 	if !ok {
-		return gone(fmt.Sprintf("the running pod does not match template %q", ident.Name))
+		return gone(fmt.Sprintf("the running pod does not match template %q", live.Name))
+	}
+	if ident.Name == "" {
+		// Backfill the stamps so later reconciles and upgrades read the
+		// proven identity off the pod itself. Best-effort: the record is
+		// already proven, the stamp only spares the next compare.
+		if serr := r.Backend.StampPodTemplateIdentity(ctx, ws, live); serr != nil {
+			logf.FromContext(ctx).Info("pod identity stamp backfill failed (continuing)",
+				"error", serr)
+		}
 	}
 	snap, rerr := snapshotTemplate(live)
 	if rerr != nil {

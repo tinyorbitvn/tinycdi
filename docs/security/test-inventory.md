@@ -261,10 +261,13 @@ substitute for review).
 - `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go`,
   `snapshot_adopt_test.go` — template snapshot image-digest verification,
   status-record authority over the annotation, and upgrade-adoption from
-  the pod-stamped template identity + live revision object — the
-  annotation is never a source (`TemplateRevisionGone` holds for
-  unprovable identities: pre-stamp pods, pruned/republished revisions,
-  foreign pods) (SEC-10).
+  the pod-stamped template identity or the pre-stamp candidate match —
+  identity from pod metadata, content always from the LIVE revision
+  object, the annotation never a source (`TemplateRevisionGone` holds
+  for unprovable identities: pruned/republished/rotated/webhook-altered
+  or forged builds, foreign pods); `internal/broker/
+  operator_stopped_envtest_test.go` pins that held workspaces get the
+  stricter of template/defaults, never annotation caps (SEC-10).
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
   ownership and lifecycle edges; `intent_drift_test.go`

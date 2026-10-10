@@ -37,18 +37,31 @@ status:
   matching revision string identify ONE live `WorkspaceTemplate` object;
   the operator re-reads THAT object's content and writes it into
   `status.templateSnapshot`. The pod is not restarted or replaced.
-- **Running workspace whose revision cannot be proven — including every
-  workspace running a pod built before this release** — v0.5 pods carry
-  no identity stamps, so all of them land here, as do pods whose stamped
-  revision object was pruned or republished under another revision, and
-  pods that do not provably match the stamped object. The pod KEEPS
+- **Running workspace with a pre-stamp pod (every v0.5 pod)** — the pod
+  names nothing, so the operator computes ONE candidate: the live
+  revision `spec.templateRef` resolves to today (a catalog base name
+  resolves to its newest revision). It rebuilds the pod from that object
+  and compares field-for-field — scheduler and apiserver bookkeeping
+  discounted. On a match the LIVE object's content lands in
+  `status.templateSnapshot` and the identity stamps are backfilled onto
+  the running pod. No `Degraded`, no restart — a session started on the
+  current revision adopts silently. Note the compare can only disprove,
+  never distinguish pod-identical revisions: if a template rotation
+  produced a new revision object whose built pod is field-identical,
+  the record silently re-points to the newest revision (the live object
+  is trusted, so this is safe). Pods that were altered by mutating
+  admission webhooks after build, pods built from a forged snapshot, and
+  pods whose revision was rotated out or pruned do NOT match —
+  they hold `TemplateRevisionGone` as below.
+- **Running workspace whose revision cannot be proven** — the pod KEEPS
   RUNNING untouched; the workspace holds `Pending` with
   `Degraded`/`TemplateRevisionGone` and emits one Warning event (only
-  after the condition persisted — retries cannot duplicate it). To
-  clear, stop and start the workspace: the next start re-snapshots the
-  template `spec.templateRef` resolves to today. Expect this on every
-  pre-upgrade running workspace and on long-running sessions whose old
-  template revisions were pruned.
+  after the condition persisted — retries cannot duplicate it). Expect
+  this only on sessions started BEFORE the last template rollout —
+  i.e. pods built from a revision that has since been rotated or
+  pruned — and on webhook-altered or forged-spec pods. To clear, stop
+  and start the workspace: the next start re-snapshots the template
+  `spec.templateRef` resolves to today.
 - **Workspace without a running pod** (stopped or pending) — nothing is
   adopted. The next start resolves `spec.templateRef` and snapshots the
   live template exactly like a fresh admit; if the template was deleted
@@ -59,16 +72,17 @@ After the record lands, the annotation mirror is rewritten from status
 — a Workspace writer can still edit the annotation, but nothing in
 convergence reads it any more, so drift there is repaired on the next
 reconcile and is harmless in between (the broker's expiry projection
-reads status first and falls back to the annotation only for rows that
-pre-date the field).
+reads status first and falls back to the annotation only for rows the
+operator has not reconciled post-upgrade — never for held workspaces).
 
 **No forged record survives the upgrade:** adoption requires the pod to
-name its own template revision and match it — and the recorded content
-always comes from the live revision object — so a forged annotation can
+name or match its own template revision — and the recorded content
+always comes from a live revision object — so a forged annotation can
 steer nothing. A workspace already running a pod built from a forged
-snapshot is covered too: its pod predates the stamps, so it holds
-`TemplateRevisionGone` until a stop/start re-snapshots the live
-template — nothing of the forged record is adopted into status.
+snapshot is covered too: its pod predates the stamps and cannot match
+the honest resolved revision, so it holds `TemplateRevisionGone` until
+a stop/start re-snapshots the live template — nothing of the forged
+record is adopted into status.
 
 Post-upgrade check:
 
@@ -78,8 +92,12 @@ kubectl -n <tenant-ns> get workspaces \
 ```
 
 A workspace with an empty name and `Degraded`/`TemplateRevisionGone` is
-the expected pre-stamp/pruned-revision hold — its pod is untouched;
-restart it to populate the record. Rollback: the annotation mirror
+the expected hold for a pod whose revision was rotated or pruned (or
+whose build a webhook altered) — its pod is untouched; restart it to
+populate the record. While held, the broker's expiry planner ignores the
+annotation's lifecycle caps entirely — held sessions get the stricter
+of the resolved template's lifecycle and the chart defaults. Rollback:
+the annotation mirror
 stays fully populated, so a v0.5 operator (which reads only the
 annotation) keeps converging the same recorded revision — do not
 "un-apply" the v1.0 CRD, the extra status field is inert under v0.5.

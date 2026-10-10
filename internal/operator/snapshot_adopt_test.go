@@ -336,23 +336,177 @@ func TestAdoptSnapshot_RevisionGone(t *testing.T) {
 	})
 }
 
-// A pod built before the identity stamps existed cannot name its
-// revision: TemplateRevisionGone, pod untouched — every pre-upgrade
-// running workspace lands here until a stop/start re-snapshots it.
-func TestAdoptSnapshot_UnstampedPod(t *testing.T) {
-	s := snapScheme(t)
-	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	ws := adoptWorkspace("fam32", snapshotAnnotation(t, tpl, "fam32", 1), types.UID("ws-pre-6"))
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
-	pod := seedBuiltPod(t, c, ws, tpl)
+// unstamp removes the identity stamps — the v0.5 pod shape.
+func unstamp(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
 	delete(pod.Annotations, linux.AnnotationTemplateName)
 	delete(pod.Annotations, linux.AnnotationTemplateRevision)
 	delete(pod.Annotations, linux.AnnotationTemplateHash)
 	if err := c.Update(context.Background(), pod); err != nil {
 		t.Fatalf("unstamp pod: %v", err)
 	}
+}
+
+// The pre-stamp candidate match: a pod built before the identity stamps
+// names nothing, so the candidate is the live revision spec.templateRef
+// resolves to. A pod that provably was built from it adopts the live
+// object into status — and gets its identity stamps backfilled — with no
+// Degraded and no restart. Scheduled or not.
+func TestAdoptSnapshot_UnstampedPodCandidateMatch(t *testing.T) {
+	for _, node := range []string{"", "node-9"} {
+		t.Run(fmt.Sprintf("nodeName=%q", node), func(t *testing.T) {
+			s := snapScheme(t)
+			tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+			ws := adoptWorkspace("fam32", "", types.UID("ws-pre-6"+node))
+			c := fake.NewClientBuilder().WithScheme(s).
+				WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
+			pod := seedBuiltPod(t, c, ws, tpl)
+			unstamp(t, c, pod)
+			if node != "" {
+				pod.Spec.NodeName = node
+				pod.Spec.PriorityClassName = "system-cluster-critical"
+				pod.Spec.DeprecatedServiceAccount = "tcdi-workspace"
+				if err := c.Update(context.Background(), pod); err != nil {
+					t.Fatalf("mark pod scheduled: %v", err)
+				}
+			}
+
+			got := adoptReconcile(t, s, c, ws)
+			snap := got.Status.TemplateSnapshot
+			if snap == nil {
+				t.Fatal("pre-stamp pod's resolved revision was not adopted")
+			}
+			want, err := snapshotTemplate(tpl)
+			if err != nil {
+				t.Fatalf("snapshotTemplate: %v", err)
+			}
+			if snap.SpecHash != want.SpecHash || snap.Name != "fam32-aaaa1111" {
+				t.Fatalf("adopted %q/%q, want live revision fam32-aaaa1111", snap.Name, snap.SpecHash)
+			}
+			cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+			if cond != nil && cond.Status == metav1.ConditionTrue {
+				t.Fatalf("Degraded set on a successful candidate match: %+v", cond)
+			}
+			// Identity stamps were backfilled onto the still-running pod.
+			cur := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+				t.Fatalf("pod vanished: %v", err)
+			}
+			if cur.UID != pod.UID {
+				t.Fatal("adoption recreated the pod")
+			}
+			if cur.Annotations[linux.AnnotationTemplateName] != "fam32-aaaa1111" ||
+				cur.Annotations[linux.AnnotationTemplateRevision] != "2026-10-a" {
+				t.Fatalf("identity stamps not backfilled: %+v", cur.Annotations)
+			}
+		})
+	}
+}
+
+// A pre-stamp pod that does NOT equal the resolved candidate's rebuild
+// holds Degraded/TemplateRevisionGone — the pod stays running, never
+// disproved-by-silence. Covers rotated-out revisions, pods built from a
+// forged spec, and webhook-altered pods.
+func TestAdoptSnapshot_UnstampedPodCandidateMismatch(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+
+	forgedBuilt := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	forgedBuilt.Spec.Linux.Image = "attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 4)
+	forgedBuilt.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+	}
+
+	cases := []struct {
+		name     string
+		podTpl   *workspacesv1alpha1.WorkspaceTemplate // what the pod was built from
+		liveTpl  *workspacesv1alpha1.WorkspaceTemplate // nil: family pruned
+		mungePod func(pod *corev1.Pod)
+	}{
+		{name: "forged-spec pod mismatch", podTpl: forgedBuilt, liveTpl: tpl},
+		{name: "webhook-altered pod mismatch", podTpl: tpl, liveTpl: tpl,
+			mungePod: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: "INJECTED_BY_WEBHOOK", Value: "1"})
+			}},
+		{name: "template pruned entirely", podTpl: tpl},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := adoptWorkspace("fam32", "", types.UID(fmt.Sprintf("ws-mm-%d", i)))
+			objs := []client.Object{ws}
+			if tc.liveTpl != nil {
+				objs = append(objs, tc.liveTpl)
+			}
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(ws).Build()
+			pod := seedBuiltPod(t, c, ws, tc.podTpl)
+			unstamp(t, c, pod)
+			if tc.mungePod != nil {
+				tc.mungePod(pod)
+				if err := c.Update(context.Background(), pod); err != nil {
+					t.Fatalf("munge pod: %v", err)
+				}
+			}
+			got := adoptReconcile(t, s, c, ws)
+			assertRevisionGone(t, got)
+			cur := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+				t.Fatalf("pod vanished on hold: %v", err)
+			}
+		})
+	}
+}
+
+// Rotated case (1): the family now resolves a revision whose built pod
+// differs — the pod disproves the candidate and holds.
+func TestAdoptSnapshot_UnstampedPodRotatedMismatch(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32", "", types.UID("ws-mm-rot"))
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
+	pod := seedBuiltPod(t, c, ws, tpl)
+	unstamp(t, c, pod)
+	// Rotate: the resolved revision now differs from what the pod was
+	// built from (spec is immutable — a republished object under the
+	// resolved name carries the new content).
+	rotated := tpl.DeepCopy()
+	rotated.Spec.Linux.Image = "cr.example/img@sha256:" + fmt.Sprintf("%064x", 0xb2)
+	if err := c.Update(context.Background(), rotated); err != nil {
+		t.Fatalf("rotate revision: %v", err)
+	}
 	got := adoptReconcile(t, s, c, ws)
 	assertRevisionGone(t, got)
+	cur := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+		t.Fatalf("pod vanished on hold: %v", err)
+	}
+	if cur.UID != pod.UID {
+		t.Fatal("hold recreated the pod")
+	}
+}
+
+// The rotated-but-pod-identical corner: spec.templateRef resolves a
+// NEWER revision object whose built pod is field-identical — the record
+// silently re-points to the live object (the pod cannot distinguish
+// revisions that build the same pod, and the live object is trusted).
+func TestAdoptSnapshot_UnstampedPodRotatedIdentical(t *testing.T) {
+	s := snapScheme(t)
+	old := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	// The resolved object: same pod-shaping content, newer revision name.
+	newer := adoptTemplate("tinycdi-tenant-a", "fam32-bbbb2222", types.UID("uid-b"))
+	newer.Spec.Revision = "2026-10-b"
+	ws := adoptWorkspace("fam32-bbbb2222", "", types.UID("ws-rot"))
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(ws, newer).WithStatusSubresource(ws).Build()
+	pod := seedBuiltPod(t, c, ws, old)
+	unstamp(t, c, pod)
+
+	got := adoptReconcile(t, s, c, ws)
+	snap := got.Status.TemplateSnapshot
+	if snap == nil || snap.Name != "fam32-bbbb2222" {
+		t.Fatalf("pod-identical newer revision was not adopted: %+v", snap)
+	}
 }
 
 // No pod: the workspace re-snapshots the live template like a fresh

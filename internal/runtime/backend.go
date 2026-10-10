@@ -95,6 +95,13 @@ type Backend interface {
 	// the pod is not operator-owned for ws; the caller then treats the
 	// workspace as having no proving incarnation.
 	PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (PodTemplateIdentity, error)
+
+	// StampPodTemplateIdentity backfills the template-identity stamps
+	// onto the workspace's operator-owned incarnation pod after its
+	// provenance was proven by another means (the pre-stamp upgrade
+	// path) — later reconciles and upgrades read the identity directly.
+	// No-op when no owned pod exists.
+	StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error
 }
 
 // PodTemplateIdentity is the stamped template-revision identity of a

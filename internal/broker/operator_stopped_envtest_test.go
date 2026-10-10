@@ -324,3 +324,140 @@ func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
 		t.Fatalf("policy = %+v, want the recorded snapshot's %+v, not the republished revision", got[0].Policy, want)
 	}
 }
+
+// TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation: a workspace the
+// operator has put on a template hold (Degraded=TemplateRevisionGone or
+// TemplateInvalid, no status.templateSnapshot yet) is the one case where
+// the snapshot annotation is provably untrusted — a Workspace writer
+// could inflate its lifecycle caps to keep a session alive past the
+// recorded contract. Held workspaces get caps from the resolved live
+// template and the chart defaults, the STRICTER of the two per cap;
+// the annotation is never read.
+func TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation(t *testing.T) {
+	kc, scheme, restCfg, nsName := brokerEnv(t)
+	ctx := context.Background()
+
+	// Inflated annotation caps — the bytes a forger would write.
+	inflated, _ := json.Marshal(struct {
+		Spec workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
+	}{Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+		Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			IdleTimeout:       metav1.Duration{Duration: 30 * 24 * time.Hour},
+			DisconnectTimeout: metav1.Duration{Duration: 30 * 24 * time.Hour},
+			MaxDuration:       metav1.Duration{Duration: 90 * 24 * time.Hour},
+		},
+	}})
+
+	mk := func(name, tplRef, reason string) {
+		t.Helper()
+		ws := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: nsName,
+				Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_" + name},
+				Annotations: map[string]string{operator.AnnotationTemplateSnapshot: string(inflated)},
+			},
+			Spec: workspacesv1alpha1.WorkspaceSpec{
+				TemplateRef:       workspacesv1alpha1.TemplateReference{Name: tplRef},
+				OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+				DesiredState:      workspacesv1alpha1.DesiredStateRunning,
+				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+				RuntimeGeneration: 1, IntentRevision: 1,
+			},
+		}
+		if err := kc.Create(ctx, ws); err != nil {
+			t.Fatal(err)
+		}
+		started := metav1.Now()
+		ws.Status = workspacesv1alpha1.WorkspaceStatus{
+			Phase:     workspacesv1alpha1.WorkspacePhaseReady,
+			StartedAt: &started,
+			Conditions: []metav1.Condition{{
+				Type:               string(workspacesv1alpha1.ConditionDegraded),
+				Status:             metav1.ConditionTrue,
+				Reason:             reason,
+				Message:            "held",
+				ObservedGeneration: ws.Generation,
+				LastTransitionTime: started,
+			}},
+		}
+		if err := kc.Status().Update(ctx, ws); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// (a) Held + inflated annotation, nothing resolves: pure defaults.
+	mk("held-none", "missing-tpl", "TemplateRevisionGone")
+	// (b) Held + laxer-than-default template: defaults win (stricter).
+	lax := &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tpl-lax", Namespace: nsName,
+			Labels: map[string]string{provisioning.LabelCatalogName: "tpl-lax"},
+		},
+		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+			Revision: "r1", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
+			Experience: workspacesv1alpha1.ExperienceDesktop,
+			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 9)},
+			Resources: workspacesv1alpha1.ResourceProfile{
+				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
+			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
+			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
+			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
+			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+				IdleTimeout: metav1.Duration{Duration: 10 * 24 * time.Hour},
+				MaxDuration: metav1.Duration{Duration: 30 * 24 * time.Hour},
+				DataPolicy:  workspacesv1alpha1.DataPolicyEphemeral,
+				// DisconnectTimeout unset — default applies.
+			},
+		},
+	}
+	if err := kc.Create(ctx, lax); err != nil {
+		t.Fatal(err)
+	}
+	mk("held-lax", "tpl-lax", "TemplateInvalid")
+	// (c) Held + stricter-than-default template: the template cap wins.
+	tight := lax.DeepCopy()
+	tight.Name = "tpl-tight"
+	tight.ResourceVersion = ""
+	tight.Labels = map[string]string{provisioning.LabelCatalogName: "tpl-tight"}
+	tight.Spec.Lifecycle = workspacesv1alpha1.LifecycleDefaults{
+		IdleTimeout:       metav1.Duration{Duration: 5 * time.Minute},
+		DisconnectTimeout: metav1.Duration{Duration: time.Minute},
+		MaxDuration:       metav1.Duration{Duration: 2 * time.Hour},
+		DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+	}
+	if err := kc.Create(ctx, tight); err != nil {
+		t.Fatal(err)
+	}
+	mk("held-tight", "tpl-tight", "TemplateRevisionGone")
+
+	src := brokerSource(t, scheme, restCfg, nsName)
+	var got map[string]broker.TimeoutPolicy
+	deadline := time.Now().Add(15 * time.Second)
+	for len(got) != 3 {
+		got = map[string]broker.TimeoutPolicy{}
+		running, err := src.RunningWorkspaces(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rw := range running {
+			got[string(rw.WorkspaceUID)] = rw.Policy
+		}
+		if len(got) == 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(got) != 3 {
+		t.Fatalf("running = %+v, want all three held workspaces", got)
+	}
+	if p := got["ws_held-none"]; p != broker.DefaultTimeoutPolicy {
+		t.Fatalf("held-none policy = %+v, want defaults (annotation must not inflate)", p)
+	}
+	if p := got["ws_held-lax"]; p != broker.DefaultTimeoutPolicy {
+		t.Fatalf("held-lax policy = %+v, want defaults — stricter of template/default", p)
+	}
+	want := broker.TimeoutPolicy{IdleTimeout: 5 * time.Minute, DisconnectTimeout: time.Minute, MaxDuration: 2 * time.Hour}
+	if p := got["ws_held-tight"]; p != want {
+		t.Fatalf("held-tight policy = %+v, want the stricter template caps %+v", p, want)
+	}
+}
