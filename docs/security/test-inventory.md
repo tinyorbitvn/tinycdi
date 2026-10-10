@@ -114,6 +114,25 @@ substitute for review).
   incl. bearer denials (#120).
 - `internal/gateway/rehydrate_test.go` — digest → lease rehydration,
   singleflight per digest, expired/revoked rejection.
+- `internal/gateway/lookup_limit_test.go`,
+  `lookup_limit_config_test.go` — the unknown-cookie session-directory
+  lookup bound (S31): spray → bounded lookups + 429/`Retry-After`,
+  known/rehydrated/cookie-less requests never limited, a 121-cookie
+  concurrent valid-session storm at defaults admits exactly 120 and
+  refuses the overflow with `Retry-After` (valid-but-uncached cookies
+  pay the pre-lookup gate), injected bucket + disable path, refusal
+  audits `session.lookup`.
+- `internal/gateway/unattached_test.go` — ghost-session TTL (S32):
+  redeem-then-abandon reaped with a lease revoke, attached sessions
+  survive, a lease in use on a sibling replica is never revoked, reap
+  proceeds on revoke failure.
+- `internal/gateway/unattached_race_test.go` — attach/reap
+  serialization (S32): an attach concurrent with the reap's in-flight
+  revoke loses deterministically; the attach-vs-tick hammer asserts no
+  end state ever shows a live session on a revoked lease.
+- `internal/gateway/coop_test.go` — `Cross-Origin-Opener-Policy:
+  same-origin` pinned on every session-listener response and
+  upstream-supplied COOP stripped (S33); frame-ancestors unchanged.
 - `internal/gateway/authorization.go` fencing covered by
   `wsclose_test.go` (orderly WS close), `owner_tab_test.go` (owner-tab
   takeover), `activity_test.go`/`activity_internal_test.go`.

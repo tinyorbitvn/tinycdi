@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 // session is one redeemed lease: the cookie value maps here, the renew loop
@@ -46,6 +47,14 @@ type session struct {
 	id    string // opaque cookie value — never the lease ID or ticket
 	lease broker.Lease
 	fence broker.Fence // pinned at redemption, refreshed from renews
+
+	// createdAt is the mint time — the anchor of the unattached TTL. A
+	// session is "attached" once a request carrying its cookie is
+	// admitted on its own host (the 303 landed in a browser); until then
+	// it is a ghost the renew loop reaps at UnattachedSessionTTL.
+	// attached lives under s.mu so the reap decision serializes against
+	// it — an attach that won the lock can never be revoked.
+	createdAt time.Time
 
 	// target/transport resolve lazily on first proxied request (broker
 	// ResolveTarget is internal-only and may change after redemption).
@@ -61,6 +70,7 @@ type session struct {
 	events chan activityEvent
 
 	mu          sync.Mutex
+	attached    bool      // a request was admitted on this session's own host (ghost-TTL exemption)
 	lastRenewOK time.Time // gateway clock time of the last successful renew
 	// lastInputReport rate-limits "input" activity reports to the broker.
 	lastInputReport time.Time
@@ -107,6 +117,7 @@ func newSession(cookieID string, l broker.Lease, now time.Time) *session {
 		id:            cookieID,
 		lease:         l,
 		fence:         fenceOf(l),
+		createdAt:     now,
 		lastRenewOK:   now,
 		streamEpoch:   l.StreamEpoch,
 		done:          make(chan struct{}),
@@ -159,6 +170,26 @@ func (s *session) workspaceUID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lease.WorkspaceUID
+}
+
+// noteAttached records that a request carrying this session's cookie was
+// admitted on its own host — the launch's 303 reached a browser. Until the
+// first such request the session is "unattached": a client that abandoned
+// the launch between ticket redemption and delivery left it a ghost no
+// browser holds. The write runs under s.mu so it serializes against the
+// reap decision — an attach that wins the lock aborts the reap.
+func (s *session) noteAttached() {
+	s.mu.Lock()
+	s.attached = true
+	s.mu.Unlock()
+}
+
+// pastUnattachedTTL reports whether the session minted longer ago than the
+// unattached TTL — the ghost-reap window. createdAt is immutable, so no
+// lock is needed; the attached/epoch decision itself happens under s.mu in
+// reapUnattached.
+func (s *session) pastUnattachedTTL(g *Gateway) bool {
+	return !g.now().Before(s.createdAt.Add(g.cfg.UnattachedSessionTTL))
 }
 
 // live reports whether the session is still usable: not explicitly dead and
@@ -564,6 +595,14 @@ func (g *Gateway) renewLoop(s *session) {
 			return
 		case <-t.C:
 		}
+		// The ghost TTL runs before the liveness check so an abandoned
+		// launch is always reaped through the lease-revoking path —
+		// never silently by the renew deadline. A session that admitted
+		// a request is attached forever and the reap decision refuses.
+		if s.pastUnattachedTTL(g) && g.reapUnattached(s) {
+			g.killSession(s, "unattached_expired")
+			return
+		}
 		if !s.live(g) {
 			g.killSession(s, "renew_deadline")
 			return
@@ -591,6 +630,43 @@ func (g *Gateway) renewLoop(s *session) {
 			return
 		}
 	}
+}
+
+// reapUnattached is the ghost reap's atomic decision, run under s.mu: if a
+// request already attached — or the lease's stream epoch is nonzero — the
+// reap refuses (returns false) and the renew loop carries on. Otherwise the
+// lease is revoked at the broker while the lock is still held — a live
+// lease is what pins the workspace (IssueTicket answers CONNECTION_IN_USE),
+// so revoking drops the pin in one round trip instead of at the lease's TTL
+// lapse or the bound portal session's absolute expiry — and true means the
+// caller must kill the session.
+//
+// The revoke inside the lock is what closes the attach/reap window: an
+// attach can only commit by taking s.mu, so it either lands before the
+// decision (the reap aborts and the session survives) or after it (the
+// request is attaching to a session already committed to die and loses —
+// its track() refuses once killSession runs). There is no ordering where
+// an attach that already won still gets revoked. The epoch check serializes
+// the same way: a claim from ANY replica bumps it through this replica's
+// renews, so a nonzero epoch proves the lease is in use elsewhere and the
+// revoke is skipped — only the local copy dies (the epoch is at most one
+// renew interval stale). A failed revoke still returns true: with renewal
+// stopped the lease lapses on its own inside one lease TTL.
+func (g *Gateway) reapUnattached(s *session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attached || s.deadLocked() {
+		return false
+	}
+	if s.streamEpoch == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := g.cfg.Broker.RevokeLease(ctx, s.lease.ID)
+		cancel()
+		if err != nil && g.cfg.Logger != nil {
+			g.cfg.Logger.Warn("unattached session: lease revoke failed — lease lapses at TTL", "err", err)
+		}
+	}
+	return true
 }
 
 // killSession tears s down and unmaps it — never touching a successor that
@@ -642,6 +718,18 @@ func (g *Gateway) lookupSession(r *http.Request, wsID string) (*session, error) 
 	}
 	if g.cfg.Sessions == nil {
 		return nil, nil
+	}
+	// Unknown cookie on a directory-enabled replica: this is the ONLY
+	// proxy-path request that spends Postgres reads before auth — a
+	// digest lookup plus an EXISTS probe on miss — so it carries its own
+	// per-client bound. A spray of random cookie values mints a fresh
+	// singleflight entry per request (the dedup cannot help), which would
+	// otherwise turn request rate directly into indexed reads. The key is
+	// the plain client key: an unseen cookie cannot key on a session.
+	if g.cfg.SessionLookupLimiter != nil {
+		if ok, retry := g.cfg.SessionLookupLimiter.Allow(ratelimit.ClientKey(r, g.cfg.TrustedProxies)); !ok {
+			return nil, &lookupLimitedError{retryAfter: retry}
+		}
 	}
 	return g.rehydrate(r, c.Value, wsID)
 }
