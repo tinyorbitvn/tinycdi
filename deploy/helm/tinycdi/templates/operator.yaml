@@ -101,6 +101,17 @@ spec:
             {{- if eq (printf "%v" (dig "topologySpread" "enabled" true .Values.runtime)) "false" }}
             - --runtime-topology-spread=false
             {{- end }}
+            {{- /* Opt-in ClusterOnly egress narrowing: every value empty
+                   keeps the historical any-namespace posture and renders
+                   NO flag at all. */}}
+            {{- $co := (dig "networkProfiles" "clusterOnly" dict (default dict .Values.runtime)) }}
+            {{- $coEgress := dict }}
+            {{- if $co.egressNamespaceSelector }}{{- $_ := set $coEgress "namespaceSelector" $co.egressNamespaceSelector }}{{- end }}
+            {{- if $co.egressPodSelector }}{{- $_ := set $coEgress "podSelector" $co.egressPodSelector }}{{- end }}
+            {{- if $co.egressPorts }}{{- $_ := set $coEgress "ports" $co.egressPorts }}{{- end }}
+            {{- if $coEgress }}
+            - {{ printf "--runtime-clusteronly-egress=%s" (toJson $coEgress) | quote }}
+            {{- end }}
             {{- if .Values.operator.devAllowNoBroker }}
             - --dev-allow-no-broker
             {{- end }}

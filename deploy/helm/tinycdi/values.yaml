@@ -122,10 +122,39 @@ kasmAdapter:
 #   memory, storage    Kubernetes quantities: "64Gi", "200G", 107374182400
 # Values below current usage are accepted: running workspaces keep running
 # and new creates are refused until usage drops.
+# namespaceQuota (per entry, OPTIONAL) renders Kubernetes-side bounds for
+# the namespace — a ResourceQuota (total requests/limits/object counts
+# across every pod, PVC and Service the workspaces create) and/or a
+# LimitRange (defaults injected into pods that leave resources unset).
+# It complements the platform-side quota above, which counts workspaces:
+# the ResourceQuota also stops an over-sized or unbounded pod spec from
+# ever scheduling, bounding the blast radius of a workspace create that
+# slips past the API. Default OFF — no objects are rendered. Sizing the
+# ResourceQuota so it cannot cover the tenant's quota.workspaces leaves
+# new workspaces Pending/refused by the apiserver, so keep it aligned
+# with the quota block. Once requests.* quotas exist, every pod MUST
+# carry requests — runtime pods do (from the template spec); the
+# LimitRange defaults below cover anything else.
 managedNamespaces: []
   # - name: tinycdi-tenant-a
   #   tenant: tenant-a
   #   quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+  #   namespaceQuota:
+  #     resourceQuota:
+  #       hard:                         # ~12 desktops at 2CPU/4Gi request each
+  #         requests.cpu: "24"
+  #         requests.memory: 48Gi
+  #         limits.cpu: "96"
+  #         limits.memory: 192Gi
+  #         requests.storage: 240Gi
+  #         persistentvolumeclaims: "24"
+  #         pods: "30"
+  #         services: "30"
+  #     limitRange:
+  #       limits:
+  #         - type: Container
+  #           defaultRequest: {cpu: "1", memory: 2Gi}
+  #           default: {cpu: "4", memory: 8Gi}
 
 # Public entry points. Every workspace session is served on its own
 # <label>.<sessionDomain> host (D9): the edge carries ONE wildcard route
@@ -654,6 +683,32 @@ runtime:
   # pre-v0.3.1 packed-by-scoring placement.
   topologySpread:
     enabled: true
+  # Per-workspace boundary NetworkPolicy narrowing (operator flag
+  # --runtime-clusteronly-egress). networkProfile: ClusterOnly today lets
+  # a workspace reach ANY pod in ANY namespace on ANY port — confinement
+  # rests entirely on destination-side ingress policies, so any
+  # third-party pod without its own NetworkPolicy (monitoring, a
+  # Postgres-as-pod, stray workloads) is reachable. Set
+  # egressNamespaceSelector to confine ClusterOnly egress to pods in
+  # matching namespaces — e.g. only the managed tenant namespaces via
+  # their workspaces.cdi.tinyorbit.vn/tenant label — optionally narrowed
+  # further by egressPodSelector and/or egressPorts. An
+  # egressPodSelector without egressNamespaceSelector matches pods in
+  # the workspace's own namespace only (NetworkPolicyPeer semantics).
+  # DNS egress is unaffected, and EMPTY values keep today's behaviour
+  # (no flag is rendered).
+  #   networkProfiles:
+  #     clusterOnly:
+  #       egressNamespaceSelector:
+  #         matchExpressions:
+  #           - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+  #       egressPorts:
+  #         - {protocol: TCP, port: 443}
+  networkProfiles:
+    clusterOnly:
+      egressNamespaceSelector: {}
+      egressPodSelector: {}
+      egressPorts: []
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must

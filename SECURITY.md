@@ -420,6 +420,13 @@ v0.2)
     - runtime egress = DNS + the template's profile;
     - `InternetOnly` always excludes RFC 1918, 100.64.0.0/10, loopback,
       link-local/metadata, multicast/reserved and the cluster CIDRs;
+    - `ClusterOnly` admits every pod in every namespace on every port by
+      default — confinement rests on destination-side ingress policies,
+      so any pod without its own NetworkPolicy is reachable. The opt-in
+      `runtime.networkProfiles.clusterOnly.*` values
+      (`--runtime-clusteronly-egress`) narrow the rule to
+      selector-matched namespaces/pods and/or ports; a ports-only
+      narrowing still never admits non-pod destinations;
     - generated policies are reconciled when they drift;
     - an empty peer list fails the render and never means "any".
 
@@ -429,7 +436,15 @@ v0.2)
     `TestInternetOnlyExceptsMergeConfigured`, `TestNetPolReconcilesSpecDrift`,
     `TestNetPolReconcileStillRefusesForeign`,
     `TestIngressPeerScopedToGatewayNamespace`,
-    `TestIngressPeerDefaultsToWorkspaceNamespace`, `TestParseExceptCIDRs`,
+    `TestIngressPeerDefaultsToWorkspaceNamespace`,
+    `TestClusterOnlyEgressDefaultUnrestricted`,
+    `TestClusterOnlyEgressRestrictionOnPolicy`,
+    `TestClusterOnlyEgressPortsOnlyStaysPodOnly`,
+    `TestParseClusterOnlyEgress`, `TestClusterOnlyEgressDefaultRendersNoFlag`,
+    `TestClusterOnlyEgressRendersNamespaceSelector`,
+    `TestDefaultRenderUnchangedGolden` (whole-render byte-golden: the opt-in
+    knobs cannot change the default manifests unnoticed),
+    `TestParseExceptCIDRs`,
     `TestNetworkPolicyEmptyPeersFailClosed`, `TestMetricsEmptyPeersFailClosed`,
     `TestMetricsNotOnPublicGatewayService`, `TestInternetOnlyRequiresClusterCIDRs`,
     `TestOperatorPodNamespaceEnv`, `TestHardeningDevGateBypasses`
