@@ -109,6 +109,7 @@ func newTestEnvFull(t *testing.T, issuer func(*oidctest.Issuer), mutate func(*Au
 	MountRevokeAllRoute(mux, a)
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountSessionProbeRoute(mux, a)
+	MountSessionTouchRoute(mux, a)
 	mux.Handle("/v1/echo-owner", a.RequireAuth(a.RequireCSRF(http.HandlerFunc(echoOwnerHandler))))
 
 	var h http.Handler = mux
@@ -456,7 +457,7 @@ func TestSessionIdleAndAbsoluteExpiry(t *testing.T) {
 	resp.Body.Close()
 	sess = findCookie(cookies, env.auth.SessionCookieName())
 	fc.Advance(30 * time.Second)
-	r = env.authedGet(t, sess, "/v1/me") // touches idle
+	r = env.authedGet(t, sess, "/v1/me") // passive read — does not touch idle
 	r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("second session rejected early: %d", r.StatusCode)

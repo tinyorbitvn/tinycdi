@@ -41,6 +41,12 @@ type Lease struct {
 	// claim carried no valid id. Gateway-side correlator only: never a
 	// metric label or log field.
 	StreamOwnerTab string `json:"-"`
+	// PortalSessionDigest is the sessions.id key form (hex of the SHA-256
+	// of the portal session id) the lease was minted under — populated on
+	// every loadLease read so input activity can be credited to exactly
+	// that session (SR-1-F3). "" for pre-migration-018 rows minted before
+	// the binding column existed.
+	PortalSessionDigest string `json:"-"`
 	// ClipboardPolicy is the workspace template's clipboard policy as
 	// recorded on the ticket at issue — populated only on redemption, so
 	// the gateway's post-redemption redirect can re-assert the client's
@@ -58,8 +64,9 @@ const (
 	portalSessionOK portalSessionCheck = "ok"
 	// portalSessionAbsent — the bound sessions row is gone.
 	portalSessionAbsent portalSessionCheck = "absent"
-	// portalSessionInvalid — the bound row exists but fails the epoch or
-	// absolute-expiry check (same semantics as RedeemTicket's re-check).
+	// portalSessionInvalid — the bound row exists but fails the epoch,
+	// absolute-expiry or idle-window check (same semantics as
+	// RedeemTicket's re-check; idle needs WithSessionIdle).
 	portalSessionInvalid portalSessionCheck = "invalid"
 )
 
@@ -67,6 +74,26 @@ const (
 // mirroring store.currentEpochSQL: a rotation (the restore procedure)
 // invalidates every bound lease on its very next check.
 const currentSessionEpochSQL = `(SELECT value FROM platform_meta WHERE key = 'session_epoch')`
+
+// portalSessionLiveSQL returns the predicate asserting that the joined
+// sessions row (alias s) backing a ticket/lease is still live: current
+// epoch (post-restore rotations fail), inside its absolute expiry, and —
+// when the broker knows the portal idle window (WithSessionIdle) — a
+// last_seen_at still inside it (FIX-IDLE / SR-1-F2): a session that has
+// idled out under RequireAuth is dead to the lease layer on the same
+// terms. argIdx is the bind index the idle interval occupies; the second
+// return carries the interval argument to append, or nil when no idle
+// window is configured.
+func (b *Broker) portalSessionLiveSQL(argIdx int) (string, []any) {
+	live := `s.epoch IS NOT DISTINCT FROM ` + currentSessionEpochSQL + `
+				  AND (s.expires_at IS NULL OR s.expires_at > now())`
+	if b.sessionIdle <= 0 {
+		return live, nil
+	}
+	return live + fmt.Sprintf(`
+				  AND s.last_seen_at > now() - $%d::interval`, argIdx),
+		[]any{fmt.Sprintf("%dms", b.sessionIdle.Milliseconds())}
+}
 
 // loadLease fetches the lease row including its lifecycle state and the
 // liveness of its bound portal session (S17 defence-in-depth): the CASE
@@ -79,25 +106,28 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		ownerTab   *string
 		ownerEpoch *int64
 		portalSess portalSessionCheck
+		digestHex  *string
 	)
+	livePred, liveArgs := b.portalSessionLiveSQL(2)
+	args := append([]any{leaseID}, liveArgs...)
 	err := b.db.Pool().QueryRow(ctx,
 		`SELECT l.id, l.workspace_id, l.tenant_id, l.principal_subject,
 			l.runtime_generation, l.runtime_uid, l.fencing_version, l.gateway_id,
 			l.state, l.expires_at, l.stream_epoch, l.stream_owner_tab, l.stream_owner_epoch,
+			encode(l.portal_session_digest, 'hex'),
 			CASE
 				WHEN l.portal_session_digest IS NULL THEN 'ok'
 				WHEN s.id IS NULL THEN 'absent'
-				WHEN s.epoch IS DISTINCT FROM `+currentSessionEpochSQL+`
-				  OR (s.expires_at IS NOT NULL AND s.expires_at <= now()) THEN 'invalid'
+				WHEN NOT (`+livePred+`) THEN 'invalid'
 				ELSE 'ok'
 			END
 		 FROM connection_lease l
 		 LEFT JOIN sessions s ON s.id = encode(l.portal_session_digest, 'hex')
-		 WHERE l.id = $1`, leaseID).
+		 WHERE l.id = $1`, args...).
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
 			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch,
-			&portalSess)
+			&digestHex, &portalSess)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, "", "", ErrLeaseInvalid
 	}
@@ -111,6 +141,9 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch >= 0 &&
 		uint64(*ownerEpoch) == l.StreamEpoch {
 		l.StreamOwnerTab = *ownerTab
+	}
+	if digestHex != nil {
+		l.PortalSessionDigest = *digestHex
 	}
 	return l, state, portalSess, nil
 }

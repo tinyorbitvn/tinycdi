@@ -25,10 +25,11 @@ func NewMeHandler(sessionDomain string) *MeHandler {
 	return &MeHandler{sessionDomain: sessionDomain}
 }
 
-// MountMeRoutes registers GET /v1/me behind sliding auth (a portal page load
-// counts as activity).
+// MountMeRoutes registers GET /v1/me behind passive auth: it is the
+// portal bootstrap read, re-issued by retry loops, so it must not slide
+// the idle timer (D18) — only mutations and desktop input do.
 func MountMeRoutes(mux *http.ServeMux, authn *Authenticator, h *MeHandler) {
-	mux.Handle("GET /v1/me", authn.RequireAuth(http.HandlerFunc(h.Get)))
+	mux.Handle("GET /v1/me", authn.RequireAuthPassive(http.HandlerFunc(h.Get)))
 }
 
 // meView matches the Me schema in openapi.yaml.

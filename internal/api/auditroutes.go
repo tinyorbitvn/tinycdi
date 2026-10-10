@@ -21,6 +21,7 @@ import (
 const (
 	auditActionSessionLogout    = "session.logout"
 	auditActionSessionRevokeAll = "session.revoke_all"
+	auditActionSessionTouch     = "session.touch"
 	auditActionWorkspaceCreate  = "workspace.create"
 	auditActionWorkspaceStart   = "workspace.start"
 	auditActionWorkspaceStop    = "workspace.stop"
@@ -42,6 +43,7 @@ const (
 // pattern can never drift from its action.
 const (
 	routeLogout           = "POST /v1/logout"
+	routeSessionTouch     = "POST /v1/session:touch"
 	routeSessionRevokeAll = "POST /v1/me/sessions:revoke-all"
 	routeWorkspaceCreate  = "POST /v1/workspaces"
 	routeWorkspaceDelete  = "DELETE /v1/workspaces/{id}"
@@ -71,6 +73,7 @@ type auditedRoute struct {
 // under /v1/admin/.
 var auditedRoutes = map[string]auditedRoute{
 	routeLogout:           {auditActionSessionLogout, ""},
+	routeSessionTouch:     {auditActionSessionTouch, ""},
 	routeSessionRevokeAll: {auditActionSessionRevokeAll, ""},
 	routeWorkspaceCreate:  {auditActionWorkspaceCreate, ""},
 	routeWorkspaceDelete:  {auditActionWorkspaceDelete, "id"},

@@ -121,3 +121,12 @@ Documented values:
 `params` here is the same flat string map convention as
 `WorkspaceEvent.params` — clients may localize the refusal instead of
 parsing `message`, and unknown keys must be ignored.
+
+## Portal session idle
+
+`POST /v1/session:touch` is the portal's explicit activity beat: every
+cookie-authenticated `GET` is passive, so the only signals that extend the
+session's sliding idle window are mutations, desktop input (measured
+broker-side), and this call — which the portal sends only on user
+interaction (pointer, key, navigation), throttled to one per minute.
+`GET /v1/session` stays anonymous and passive.

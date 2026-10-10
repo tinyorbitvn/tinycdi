@@ -86,9 +86,9 @@ func NewQuotaHandler(src QuotaSource, dir Directory, t TenantResolver) *QuotaHan
 	return &QuotaHandler{source: src, dir: dir, tenants: t}
 }
 
-// MountQuotaRoutes registers GET /v1/quota behind RequireAuth.
+// MountQuotaRoutes registers GET /v1/quota behind passive auth (D18).
 func MountQuotaRoutes(mux *http.ServeMux, authn *Authenticator, h *QuotaHandler) {
-	mux.Handle("GET /v1/quota", authn.RequireAuth(http.HandlerFunc(h.Get)))
+	mux.Handle("GET /v1/quota", authn.RequireAuthPassive(http.HandlerFunc(h.Get)))
 }
 
 // Get handles GET /v1/quota: tenant admins see every owner's usage row;

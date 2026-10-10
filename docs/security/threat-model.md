@@ -185,10 +185,15 @@ Controls:
   peer, or the right-most untrusted X-Forwarded-For entry when the peer
   sits inside `-trusted-proxies` CIDRs (`ratelimit.go:174`,
   `ParseTrustedProxies`).
-- **Passive auth** — `GET /v1/connections/.../status` authenticates via
+- **Passive auth** — since FIX-IDLE every cookie-authenticated `GET` mounts
   `RequireAuthPassive`, which never extends the idle clock
-  (`internal/api/middleware.go:83-86`, `internal/api/connection_status.go:78`) —
-  A6-S6's second authenticated path exists to be reviewed.
+  (`internal/api/middleware.go`, and the `safe`/`RequireAuthPassive` mounts
+  in `workspaces.go`, `data.go`, `me.go`, `quota.go`, `adminquota.go`,
+  `adminuserlimit.go`): the portal's interval polls can no longer hold a
+  visible-but-unattended session open. Only mutations and server-measured
+  desktop input slide the window. `GET /v1/session` is anonymous (Peek) and
+  `GET /v1/connections/.../status` was already passive — A6-S6's second
+  authenticated path exists to be reviewed.
 - **Tenant scoping** — the principal is built only from verified claims
   (`internal/api/principal.go`); tenant-admin surface is scoped and events are
   curated, not raw (`internal/api/events.go`, `statusview.go`;
@@ -562,9 +567,30 @@ Additional items found while writing this document (not from A6):
   `ci.yml` job `partitioned`): real Set-Cookie attributes, in-frame
   reconnect across a backend rollout, revoked-lease cookie rejection.
   Same-site topology only; a cross-site deployment is not exercised.
-- **Portal idle-extension depends on lease activity** — verify a stolen
-  portal cookie alone cannot extend itself, and that idle extension only
-  credits input activity measured server-side.
+- **Portal idle-extension depends on lease activity** — Implemented
+  (FIX-IDLE): portal reads are all passive server-side, so no GET a client
+  can shape extends the idle window; extension only ever credits
+  (a) mutations — including the explicit activity beat
+  `POST /v1/session:touch` — passive auth + CSRF with the slide applied
+  explicitly only after the token check, so a cookie-only request never
+  earns a slide; login-family rate limit keyed on the session digest; the
+  SPA sends it on pointer/key/navigation events throttled to 1/min, never
+  from timer polls — and (b) RFB input measured broker-side. Forging a
+  touch requires the session cookie + CSRF token — the same bar as any
+  mutation, so the beat grants nothing a caller could not already do. That input touch
+  is now scoped to the bound portal session digest — the session the
+  stream's lease was minted under — rather than every session of the
+  principal (SR-1-F3; `TouchSessionDigest`,
+  `internal/store/sessions.go`), with the principal-wide path kept only
+  as the NULL-digest fallback for pre-binding leases. Lease
+  redeem/renew/rehydrate honour the portal idle window (SR-1-F2): the
+  liveness re-checks in `loadLease` and `RedeemTicket` consult
+  `last_seen_at` under `WithSessionIdle`, so an idled-out session's lease
+  is revoked at the next renew (reason `invalid`) and a stale cookie
+  cannot rehydrate it. Renew deliberately does NOT slide the window —
+  otherwise a connected-but-idle stream would pin the session open
+  forever — so an abandoned desktop tab dies with its portal session
+  inside one renew cycle.
 - **Metrics listener** is scrape-only but has no auth — Implemented:
   served on the dedicated ClusterIP `backend-metrics` Service; the only
   rule opening the metrics port is `allow-metrics-scrape` admitting

@@ -254,10 +254,11 @@ func (h *DataHandler) WithDirectory(d Directory) *DataHandler {
 	return h
 }
 
-// MountDataRoutes registers the retained-data routes: RequireAuth on the
-// list read, RequireAuth+RequireCSRF on attach/purge writes.
+// MountDataRoutes registers the retained-data routes: RequireAuthPassive
+// on the reads (the portal polls them), RequireAuth+RequireCSRF on
+// attach/purge writes.
 func MountDataRoutes(mux *http.ServeMux, authn *Authenticator, h *DataHandler) {
-	safe := func(h http.Handler) http.Handler { return authn.RequireAuth(h) }
+	safe := func(h http.Handler) http.Handler { return authn.RequireAuthPassive(h) }
 	// unsafe mounts an audited mutation route (see MountWorkspaceRoutes).
 	unsafe := func(pattern string, next http.Handler) {
 		mux.Handle(pattern, authn.RequireAuth(

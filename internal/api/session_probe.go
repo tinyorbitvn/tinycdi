@@ -4,10 +4,15 @@
 package api
 
 import (
+	"errors"
 	"net/http"
+
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
-// session_probe.go implements GET /v1/session — the anonymous, passive
+// session_probe.go implements the session surface's two one-liners:
+// GET /v1/session — the anonymous, passive
 // "is there a live portal session?" probe (FX-R13b). The portal calls it
 // before GET /v1/me so a signed-out load never issues a request that fails
 // with 401: the browser logs every failed fetch to the console and page
@@ -47,4 +52,48 @@ func (a *Authenticator) SessionProbeHandler(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	respondJSON(w, sessionProbeView{Authenticated: authenticated})
+}
+
+// MountSessionTouchRoute registers POST /v1/session:touch — the explicit
+// activity beat (FIX-IDLE): every cookie-authenticated GET is passive, so
+// the portal sends this on real user interaction to slide the idle
+// deadline. The chain is deliberately RequireAuthPassive + RequireCSRF:
+// authentication must NOT slide, because a cookie-only POST that fails the
+// token check would otherwise extend the window it could not earn — the
+// slide happens explicitly inside the handler, after CSRF passed. The
+// audited wrapper emits the session.touch event; optional middleware wraps
+// the chain (the production mount applies the session-digest-keyed
+// login-family limiter).
+func MountSessionTouchRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+	var h http.Handler = authn.RequireAuthPassive(
+		audited(lateAuditSink{func() observability.AuditSink { return authn.auditSink }}, routeSessionTouch,
+			authn.RequireCSRF(http.HandlerFunc(authn.SessionTouchHandler))))
+	for _, w := range wrap {
+		h = w(h)
+	}
+	mux.Handle(routeSessionTouch, h)
+}
+
+// SessionTouchHandler answers 204 after sliding the session's idle
+// deadline explicitly: Get is the only write, and it runs only here —
+// after authentication and CSRF succeeded — so a denied request never
+// extends the window.
+func (a *Authenticator) SessionTouchHandler(w http.ResponseWriter, r *http.Request) {
+	sess, ok := SessionFromContext(r.Context())
+	if !ok || sess == nil {
+		writeError(w, r, CodeUnauthenticated, "authentication required")
+		return
+	}
+	if _, err := a.sessions.Get(r.Context(), sess.ID); err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			writeError(w, r, CodeUnauthenticated, "session missing or expired")
+		case store.IsTransient(err):
+			writeError(w, r, CodeUnavailable, "session store unavailable")
+		default:
+			writeError(w, r, CodeInternal, "internal error")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

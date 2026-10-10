@@ -102,6 +102,14 @@ func WithLeaseTTL(d time.Duration) Option { return func(b *Broker) { b.leaseTTL 
 // WithMaxBindingAge overrides MaxBindingAge.
 func WithMaxBindingAge(d time.Duration) Option { return func(b *Broker) { b.maxBindingAge = d } }
 
+// WithSessionIdle sets the portal session idle window the lease layer
+// honours (FIX-IDLE / SR-1-F2): a bound session whose last_seen_at is
+// older than d fails the liveness re-checks on redeem, renew and
+// rehydrate, matching the window RequireAuth enforces on the session
+// itself. <=0 disables the idle clause — the epoch and absolute-expiry
+// checks still apply.
+func WithSessionIdle(d time.Duration) Option { return func(b *Broker) { b.sessionIdle = d } }
+
 // WithGatewayAudience sets the session-gateway audience tickets are bound to.
 // The gateway's mTLS identity maps to this audience at the internal API.
 func WithGatewayAudience(aud string) Option {
@@ -198,14 +206,22 @@ type Broker struct {
 	maxBindingAge time.Duration
 	audience      string
 	creds         CredentialSource
+	// sessionIdle is the portal session's sliding inactivity window: a
+	// bound session whose last_seen_at is older than it fails the lease
+	// layer's liveness re-check, so an idled-out session can neither mint
+	// (redeem) nor keep (renew) nor rebuild (rehydrate) a stream
+	// (FIX-IDLE / SR-1-F2). <=0 disables the idle clause — the epoch and
+	// absolute-expiry checks still apply.
+	sessionIdle time.Duration
 	// metrics counts broker-initiated lease revocations on a dead portal
 	// session; nil disables them.
 	metrics *observability.Metrics
 	// log emits the one-line records for those revocations; nil disables.
 	log *slog.Logger
-	// inputHook is invoked with the lease's principal on each recorded
-	// "input" activity event (D18); nil disables it.
-	inputHook func(ctx context.Context, principal string)
+	// inputHook is invoked with the lease's principal and bound portal
+	// session digest ("" for legacy NULL rows) on each recorded "input"
+	// activity event (D18); nil disables it.
+	inputHook func(ctx context.Context, principal, sessionDigest string)
 
 	synthOnce  sync.Once
 	synthCreds *synthesizedCredentials
@@ -479,18 +495,19 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		// revocation transaction, and a live session's tickets are revoked
 		// with it — this read is the second barrier, so an outstanding
 		// ticket dies with its session however the revoke itself fared.
-		// Epoch + absolute expiry mirror SessionStore's liveness rule; a
+		// Epoch + absolute expiry + idle window mirror SessionStore's
+		// liveness rule (idle needs WithSessionIdle, FIX-IDLE/SR-1-F2); a
 		// restored dump or a rotated epoch fails closed.
 		if portalSession != nil {
 			var alive bool
+			livePred, liveArgs := b.portalSessionLiveSQL(2)
+			args := append([]any{portalSession}, liveArgs...)
 			if err := tx.QueryRow(ctx,
 				`SELECT EXISTS (
-					SELECT 1 FROM sessions
-					WHERE id = encode($1, 'hex')
-					  AND epoch = (SELECT value FROM platform_meta
-					               WHERE key = 'session_epoch')
-					  AND (expires_at IS NULL OR expires_at > now()))`,
-				portalSession).Scan(&alive); err != nil {
+					SELECT 1 FROM sessions s
+					WHERE s.id = encode($1, 'hex')
+					  AND `+livePred+`)`,
+				args...).Scan(&alive); err != nil {
 				return fmt.Errorf("broker: portal session check: %w", err)
 			}
 			if !alive {
