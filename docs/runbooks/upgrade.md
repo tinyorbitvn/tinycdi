@@ -55,8 +55,10 @@ status:
   they hold `TemplateRevisionGone` as below.
 - **Running workspace whose revision cannot be proven** — the pod KEEPS
   RUNNING untouched; the workspace holds `Ready` with
-  `Degraded`/`TemplateRevisionGone` — the phase still describes the
-  running incarnation, the Degraded condition carries the hold — and
+  `Degraded`/`TemplateRevisionGone` while the pod serves — the phase
+  describes the incarnation, the Degraded condition carries the hold
+  (a pod that is not Ready yet reports `Pending` with the observed
+  step conditions) — and
   emits one Warning event (only after the condition persisted — retries
   cannot duplicate it). Lifecycle enforcement (idle/disconnect/
   max-duration, at the stricter held caps) and reconnect tickets keep

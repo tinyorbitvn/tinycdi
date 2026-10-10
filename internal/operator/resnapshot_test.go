@@ -478,7 +478,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatal(err)
 		}
 		pod := seedRunning(t, ns, ws, live, "")
-		// The revision object was pruned since the pod was built.
+		// The revision object was pruned since the pod was built; the pod
+		// itself is the serving incarnation.
+		markPodReady(t, c, pod)
 		if err := c.Delete(context.Background(), live); err != nil {
 			t.Fatalf("delete revision: %v", err)
 		}
@@ -539,6 +541,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatal(err)
 		}
 		pod := seedRunning(t, ns, ws, live, "")
+		markPodReady(t, c, pod)
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
 		delete(pod.Annotations, linux.AnnotationTemplateHash)

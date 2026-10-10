@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 // A template hold follows the incarnation, not the hold itself: a
-// workspace whose operator-owned pod is still running holds phase Ready —
+// workspace whose operator-owned pod is still serving holds phase Ready —
 // the Degraded condition carries the hold — so the broker's running
 // projection keeps it under lifecycle enforcement (the stricter held
-// caps) and ticket issuance for reconnect keeps working. A hold with no
-// operator-owned pod is Pending. Before the fix every hold wrote Pending,
-// which dropped still-running held workspaces out of the broker's
-// running set entirely — no idle/disconnect/max-duration enforcement,
-// no reconnect.
+// caps) and ticket issuance for reconnect keeps working. An owned pod
+// that is not serving, a foreign pod, and no pod at all are Pending.
+// Before the fix every hold wrote Pending, which dropped still-running
+// held workspaces out of the broker's running set entirely — no
+// idle/disconnect/max-duration enforcement, no reconnect.
 package operator
 
 import (
@@ -36,13 +36,30 @@ func podUID(t *testing.T, c client.Client, pod *corev1.Pod, uid types.UID) {
 	}
 }
 
-// assertHeldReady asserts the with-pod hold shape: phase Ready — the live
-// incarnation — with Degraded carrying the hold reason and every status
-// field the broker's serving paths read still populated.
+// servingPod marks the incarnation what a live desktop behind a hold
+// looks like: Running phase + PodReady, plus the apiserver-assigned UID.
+func servingPod(t *testing.T, c client.Client, pod *corev1.Pod, uid types.UID) {
+	t.Helper()
+	pod.UID = uid
+	if err := c.Update(context.Background(), pod); err != nil {
+		t.Fatalf("stamp pod uid: %v", err)
+	}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "Ready"},
+	}
+	if err := c.Status().Update(context.Background(), pod); err != nil {
+		t.Fatalf("mark pod serving: %v", err)
+	}
+}
+
+// assertHeldReady asserts the with-pod hold shape: phase Ready — the
+// serving incarnation — with Degraded carrying the hold reason and every
+// status field the broker's serving paths read still populated.
 func assertHeldReady(t *testing.T, c client.Client, got *workspacesv1alpha1.Workspace, pod *corev1.Pod, reason string) {
 	t.Helper()
 	if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
-		t.Fatalf("held workspace with a live pod: phase=%q, want Ready", got.Status.Phase)
+		t.Fatalf("held workspace with a serving pod: phase=%q, want Ready", got.Status.Phase)
 	}
 	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reason {
@@ -74,7 +91,7 @@ func assertHeldReady(t *testing.T, c client.Client, got *workspacesv1alpha1.Work
 
 // The with-pod holds — identity-unprovable (TemplateRevisionGone) and
 // content-invalid (TemplateInvalid) — keep phase Ready while their pod is
-// live, and keep it across reconciles.
+// serving, and keep it across reconciles.
 func TestHoldWithPodStaysReady(t *testing.T) {
 	s := snapScheme(t)
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
@@ -85,7 +102,7 @@ func TestHoldWithPodStaysReady(t *testing.T) {
 			WithObjects(ws).WithStatusSubresource(ws).Build()
 		// Stamped pod names a revision object that has since been pruned.
 		pod := seedBuiltPod(t, c, ws, tpl)
-		podUID(t, c, pod, "pod-uid-1")
+		servingPod(t, c, pod, "pod-uid-1")
 
 		got := adoptReconcile(t, s, c, ws)
 		assertHeldReady(t, c, got, pod, ReasonTemplateRevisionGone)
@@ -103,7 +120,7 @@ func TestHoldWithPodStaysReady(t *testing.T) {
 		// The pod's revision proves fine; the live template's content
 		// fails admission while the pod keeps running.
 		pod := seedBuiltPod(t, c, ws, tpl)
-		podUID(t, c, pod, "pod-uid-2")
+		servingPod(t, c, pod, "pod-uid-2")
 
 		got := adoptReconcile(t, s, c, ws)
 		assertHeldReady(t, c, got, pod, ReasonTemplateInvalid)
@@ -114,18 +131,11 @@ func TestHoldWithPodStaysReady(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).
 			WithObjects(ws).WithStatusSubresource(ws).Build()
 		pod := seedBuiltPod(t, c, ws, tpl)
-		podUID(t, c, pod, "pod-uid-3")
-		pod.Status.Phase = corev1.PodRunning
-		pod.Status.Conditions = []corev1.PodCondition{
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "Ready"},
-		}
-		if err := c.Status().Update(context.Background(), pod); err != nil {
-			t.Fatalf("mark pod ready: %v", err)
-		}
+		servingPod(t, c, pod, "pod-uid-3")
 
 		got := adoptReconcile(t, s, c, ws)
 		assertHeldReady(t, c, got, pod, ReasonTemplateRevisionGone)
-		// The observed step truth survives the hold: a ready pod under a
+		// The observed step truth survives the hold: a serving pod under a
 		// held workspace still reports RuntimeReady/ConnectionReady — the
 		// reconnect surface ticket issuance rides on.
 		for _, typ := range []string{
@@ -134,19 +144,53 @@ func TestHoldWithPodStaysReady(t *testing.T) {
 		} {
 			cc := condition(got, typ)
 			if cc == nil || cc.Status != metav1.ConditionTrue {
-				t.Fatalf("%s = %+v, want True behind the held-but-running pod", typ, cc)
+				t.Fatalf("%s = %+v, want True behind the held-but-serving pod", typ, cc)
 			}
 		}
 	})
 }
 
-// A hold without an operator-owned pod is Pending — both the
-// fresh-template-invalid case and the foreign-pod case, where a pod
-// squatting on the workspace-pod name without provenance must not pull
-// the workspace into the serving set.
-func TestHoldWithoutPodStaysPending(t *testing.T) {
+// A hold without a serving pod is Pending — the owned pod that exists
+// but is not Ready (still booting or crash-looping: no tickets may be
+// minted against it), the foreign squatter, and the no-pod case.
+func TestHoldWithoutServingPodStaysPending(t *testing.T) {
 	s := snapScheme(t)
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+
+	t.Run("owned pod not serving", func(t *testing.T) {
+		ws := adoptWorkspace("fam32", "", types.UID("ws-hold-6"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws).WithStatusSubresource(ws).Build()
+		// The pod is live and owned but never reported Ready.
+		pod := seedBuiltPod(t, c, ws, tpl)
+		podUID(t, c, pod, "pod-uid-6")
+
+		got := adoptReconcile(t, s, c, ws)
+		if got.Status.Phase != workspacesv1alpha1.WorkspacePhasePending {
+			t.Fatalf("held workspace with a not-serving pod: phase=%q, want Pending",
+				got.Status.Phase)
+		}
+		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		if cond == nil || cond.Status != metav1.ConditionTrue ||
+			cond.Reason != ReasonTemplateRevisionGone {
+			t.Fatalf("want Degraded=True reason=%s, got %+v",
+				ReasonTemplateRevisionGone, got.Status.Conditions)
+		}
+		// The observed step truth is still written: the incarnation's
+		// identity and endpoint are recorded, the steps report it is not
+		// ready yet.
+		if got.Status.RuntimeUID != string(pod.UID) {
+			t.Fatalf("runtimeUID=%q, want the observed pod %q",
+				got.Status.RuntimeUID, pod.UID)
+		}
+		if got.Status.ServiceRef == nil {
+			t.Fatal("serviceRef empty although the pod's Service exists")
+		}
+		if rr := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rr == nil ||
+			rr.Status != metav1.ConditionFalse {
+			t.Fatalf("RuntimeReady = %+v, want False for a not-serving pod", rr)
+		}
+	})
 
 	t.Run("no pod, template unresolvable", func(t *testing.T) {
 		ws := adoptWorkspace("fam32-aaaa1111",

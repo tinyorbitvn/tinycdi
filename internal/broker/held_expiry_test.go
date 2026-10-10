@@ -5,7 +5,7 @@ package broker_test
 
 // A workspace on a template hold (the operator's Degraded/TemplateRevisionGone
 // or TemplateInvalid hold — status.templateSnapshot never recorded) keeps its
-// Ready phase while its operator-owned pod lives, so the broker's running
+// Ready phase while its operator-owned pod serves, so the broker's running
 // projection keeps it under lifecycle enforcement — with the held policy:
 // the STRICTER of the resolved template lifecycle and the chart defaults.
 // These tests pin enforcement at that stricter cap: a default-policy
@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -223,10 +224,22 @@ func TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced(t *testing.T) {
 	}
 
 	// Seed the running incarnation through the real backend — stamped,
-	// owned pod + service — then invalidate the live template's content.
+	// owned pod + service, kubelet-reported Ready — then invalidate the
+	// live template's content.
 	backend := linux.New(kc, linux.Options{})
 	if _, err := backend.Ensure(ctx, ws, tpl); err != nil {
 		t.Fatalf("seed incarnation: %v", err)
+	}
+	pod := &corev1.Pod{}
+	if err := kc.Get(ctx, client.ObjectKey{Namespace: ns, Name: linux.PodName(ws.UID)}, pod); err != nil {
+		t.Fatalf("seeded pod: %v", err)
+	}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "Ready"},
+	}
+	if err := kc.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("mark pod serving: %v", err)
 	}
 	live := &workspacesv1alpha1.WorkspaceTemplate{}
 	if err := kc.Get(ctx, client.ObjectKey{Namespace: ns, Name: "fam-held"}, live); err != nil {
