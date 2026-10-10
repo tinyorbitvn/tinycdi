@@ -588,7 +588,13 @@ v0.2)
      managed namespaces `restricted`;
    - never label the release namespace `privileged`;
    - `networkPolicy.enabled=true` with explicit `apiServerPeers`,
-     `dnsPeers` and monitoring peers.
+     `dnsPeers` and monitoring peers;
+   - `admissionPolicy.enabled=true` (Kubernetes >= 1.30): a
+     ValidatingAdmissionPolicy keeps the operator-owned
+     `workspaces.cdi.tinyorbit.vn/template-snapshot` mirror annotation
+     writable only by the operator ServiceAccount — nothing trusted
+     reads it, but the policy stops other Workspace writers from
+     leaving a forged or stale mirror for consumers.
 7. **Node profiles:**
    - install the seccomp and AppArmor profiles out-of-band
      ([node profiles](deploy/node-profiles/README.md)), or with the

@@ -543,6 +543,29 @@ alerts:
   # (2→0) from paging critical. 0 disables the floor.
   sessionDropFloor: 5
 
+# Optional admission hardening (S3x) — renders a ValidatingAdmissionPolicy
+# + binding that DENIES create/update of Workspace objects in the
+# managedNamespaces when the request adds, changes or removes the
+# workspaces.cdi.tinyorbit.vn/template-snapshot annotation, unless the
+# caller is the operator ServiceAccount — the rendered identity is
+# system:serviceaccount:<release-namespace>:operator (the chart's
+# serviceaccounts.yaml names it "operator" in Release.Namespace). The
+# annotation is the operator's read-only mirror of status.templateSnapshot
+# — nothing trusted reads it, but letting Workspace writers (the backend
+# SA, GitOps) edit it leaves a stale mirror other readers can see; this
+# policy makes the mirror operator-only at the API boundary.
+# Requires Kubernetes >= 1.30 (admissionregistration.k8s.io/v1) — already
+# the chart-wide floor via Chart.yaml kubeVersion.
+admissionPolicy:
+  enabled: false
+  # Additional usernames allowed to write the annotation — exact
+  # request.userInfo.username matches, e.g. a restore controller's
+  # system:serviceaccount:<ns>:<sa>. The operator identity above is always
+  # allowed. Needed only when tooling legitimately replays the mirror
+  # (e.g. a cluster-manifest restore — see docs/runbooks/backup-restore.md);
+  # leave empty otherwise.
+  extraAllowedUsernames: []
+
 networkPolicy:
   enabled: true
   # Egress peers for the cluster apiserver (pods labeled

@@ -1,0 +1,65 @@
+{{- /* S3x hardening: the workspaces.cdi.tinyorbit.vn/template-snapshot
+       annotation is an operator-owned mirror of status.templateSnapshot —
+       never a trusted input (S30 moved the trusted copy to the status
+       subresource). This optional ValidatingAdmissionPolicy makes the
+       mirror read-only at the API boundary: only the operator
+       ServiceAccount — system:serviceaccount:<release-ns>:operator,
+       plus any admissionPolicy.extraAllowedUsernames — may create a
+       Workspace carrying the annotation or change/remove it on update.
+       Match is restricted to workspaces in the managedNamespaces.
+       Requires Kubernetes >= 1.30 (admissionregistration.k8s.io/v1). */ -}}
+{{- if .Values.admissionPolicy.enabled }}
+{{- $allowed := prepend (default (list) .Values.admissionPolicy.extraAllowedUsernames) (printf "system:serviceaccount:%s:operator" .Release.Namespace) -}}
+{{- $allowedCEL := list -}}
+{{- range $u := $allowed }}{{ $allowedCEL = append $allowedCEL (printf "'%s'" $u) }}{{ end -}}
+{{- $nsCEL := list -}}
+{{- range .Values.managedNamespaces }}{{ $nsCEL = append $nsCEL (printf "'%s'" .name) }}{{ end -}}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-template-snapshot
+  labels:
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["workspaces"]
+  matchConditions:
+  - name: managed-namespace
+    expression: object.metadata.namespace in [{{ join ", " $nsCEL }}]
+  validations:
+  - message: >-
+      workspaces.cdi.tinyorbit.vn/template-snapshot is written by the
+      tinycdi operator only — a Workspace may not be created carrying it
+      by another identity
+    expression: >-
+      request.operation != 'CREATE'
+      || request.userInfo.username in [{{ join ", " $allowedCEL }}]
+      || !('workspaces.cdi.tinyorbit.vn/template-snapshot' in (has(object.metadata.annotations) ? object.metadata.annotations : {}))
+  - message: >-
+      workspaces.cdi.tinyorbit.vn/template-snapshot is written by the
+      tinycdi operator only — another identity may not add, change or
+      remove it
+    expression: >-
+      request.operation != 'UPDATE'
+      || request.userInfo.username in [{{ join ", " $allowedCEL }}]
+      || (has(object.metadata.annotations) && 'workspaces.cdi.tinyorbit.vn/template-snapshot' in object.metadata.annotations
+          ? [object.metadata.annotations['workspaces.cdi.tinyorbit.vn/template-snapshot']] : [])
+         == (has(oldObject.metadata.annotations) && 'workspaces.cdi.tinyorbit.vn/template-snapshot' in oldObject.metadata.annotations
+             ? [oldObject.metadata.annotations['workspaces.cdi.tinyorbit.vn/template-snapshot']] : [])
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-template-snapshot
+  labels:
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-template-snapshot
+  validationActions: [Deny]
+{{- end }}

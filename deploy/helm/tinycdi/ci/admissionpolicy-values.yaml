@@ -1,0 +1,41 @@
+# Optional admission hardening (S3x): renders the
+# ValidatingAdmissionPolicy + binding that keeps the operator-owned
+# workspaces.cdi.tinyorbit.vn/template-snapshot mirror annotation
+# read-only for every identity except the operator ServiceAccount.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+
+admissionPolicy:
+  enabled: true
+  # A DR/restore controller replaying exported Workspace manifests (the
+  # backup-restore runbook keeps the annotation) needs its identity here.
+  extraAllowedUsernames:
+    - system:serviceaccount:gitops-system:workspace-restore
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

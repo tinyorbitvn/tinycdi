@@ -403,6 +403,17 @@
         "sessionDropFloor": {"type": "integer", "minimum": 0}
       }
     },
+    "admissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "extraAllowedUsernames": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^'\\\\]*$"}
+        }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
