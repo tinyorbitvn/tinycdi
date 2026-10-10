@@ -56,6 +56,10 @@ const (
 	// SessionCookieName — host-only Secure/HttpOnly/SameSite session cookie,
 	// set only after a successful ticket redemption.
 	SessionCookieName = "__Host-tcdi_session"
+	// UpstreamHeaderTimeout is the default ResponseHeaderTimeout on the
+	// per-session upstream transport: the runtime must deliver response
+	// headers — including the websocket 101 — inside this window.
+	UpstreamHeaderTimeout = 30 * time.Second
 )
 
 // CookieMode selects the session cookie's cross-site behavior. The portal
@@ -148,6 +152,16 @@ type Config struct {
 	// headers the runtime sees — client-supplied values are stripped and
 	// rebuilt from the verified chain only.
 	TrustedProxies []netip.Prefix
+	// UpstreamResponseHeaderTimeout bounds the wait for the runtime's
+	// response headers on the per-session upstream transport (default
+	// UpstreamHeaderTimeout); injectable for tests. It covers the
+	// websocket handshake too — the 101 IS the response headers — so a
+	// hostile runtime that accepts TLS and then stalls can pin neither a
+	// request goroutine nor the session's single upgrade admission. The
+	// established stream is unaffected: once the 101 is read the
+	// transport yields the conn to the hijacked stream and applies no
+	// deadline to it.
+	UpstreamResponseHeaderTimeout time.Duration
 	// Now injects a clock for tests.
 	Now func() time.Time
 	// Metrics, Audit and Logger are optional observability sinks; all three
@@ -180,6 +194,11 @@ type Gateway struct {
 	draining        bool          // set by Drain: refuse new upgrades
 	done            chan struct{} // closed by Close
 	closeOnce       sync.Once
+
+	// connLogLast rate-limits the pre-auth dropped-Connection-token debug
+	// log to one line per minute per route — the metric counts every drop.
+	connLogMu   sync.Mutex
+	connLogLast map[string]time.Time
 }
 
 func (g *Gateway) now() time.Time { return g.cfg.Now() }
@@ -201,6 +220,9 @@ func New(cfg Config) (*Gateway, error) {
 	if cfg.InputReportInterval <= 0 {
 		cfg.InputReportInterval = InputReportInterval
 	}
+	if cfg.UpstreamResponseHeaderTimeout <= 0 {
+		cfg.UpstreamResponseHeaderTimeout = UpstreamHeaderTimeout
+	}
 	mode, err := ParseCookieMode(string(cfg.CookieMode))
 	if err != nil {
 		return nil, err
@@ -213,6 +235,7 @@ func New(cfg Config) (*Gateway, error) {
 		byLease:      map[string]*session{},
 		byWorkspace:  map[string]*session{},
 		inflight:     map[broker.SessionDigest]*rehydrateCall{},
+		connLogLast:  map[string]time.Time{},
 		done:         make(chan struct{}),
 	}
 	for _, po := range cfg.PortalOrigins {
@@ -232,7 +255,7 @@ func New(cfg Config) (*Gateway, error) {
 		g.controlHosts[h] = true
 	}
 	g.proxy = &httputil.ReverseProxy{
-		Director:       g.direct,
+		Rewrite:        g.rewrite,
 		Transport:      sessionRoundTripper{},
 		ModifyResponse: g.responsePolicy,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -498,6 +521,13 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "service_worker_forbidden"})
 		return
 	}
+	// A client's Connection token list names headers the stdlib reverse
+	// proxy deletes AFTER the outbound request is built — including the
+	// ones this gateway injects. Injection now lives in Rewrite (after the
+	// strip), and the token list is additionally canonicalised to the only
+	// values a client legitimately sends so it can name nothing else.
+	// Dropped tokens are logged and counted, never 400'd.
+	g.sanitizeConnectionTokens(r)
 	// A malformed or non-websocket upgrade offer (Upgrade header present
 	// but not a complete RFC6455 request) must never be proxied: a foreign
 	// upgrade token would reach upstream bypassing originOK+admitUpgrade,
@@ -752,7 +782,10 @@ func (g *Gateway) ensureTarget(ctx context.Context, s *session) error {
 			ServerName: t.TLSServerName,
 			MinVersion: tls.VersionTLS12,
 		},
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: g.cfg.UpstreamResponseHeaderTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
 	}
 	s.mu.Lock()
 	s.target = &t
@@ -785,10 +818,17 @@ func (s *session) resolved() (*broker.Target, *url.URL, http.RoundTripper) {
 	return s.target, s.upURL, s.transport
 }
 
-// direct rewrites the request to the resolved upstream: authority from
+// rewrite retargets the request at the resolved upstream and stamps the
+// gateway-owned headers. It runs as the ReverseProxy's Rewrite hook — AFTER
+// the stdlib hop-by-hop strip — so no client Connection token list can ever
+// remove the injected Authorization, the rebuilt forwarding chain or
+// Sec-WebSocket-Origin (the Director ran BEFORE that strip, which is how a
+// client could name and delete them). Authority comes from
 // broker.Target.UpstreamURL (never client-supplied — SSRF guard), runtime
-// credentials injected server-side, client Authorization/Cookie stripped.
-func (g *Gateway) direct(r *http.Request) {
+// credentials are injected server-side, client Authorization/Cookie
+// stripped.
+func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
+	r := pr.Out
 	s, _ := r.Context().Value(ctxKeySession).(*session)
 	if s == nil {
 		return // Transport will fail; ErrorHandler answers 502
@@ -812,11 +852,13 @@ func (g *Gateway) direct(r *http.Request) {
 		r.Header.Del("Authorization")
 	}
 	r.Header.Del("Cookie")
-	g.rewriteForwarded(r)
+	g.rewriteForwarded(pr.In, r)
 	// Upstream quirk: KasmVNC requires the legacy Sec-WebSocket-Origin
 	// header on upgrades; browsers only send Origin. We have already
 	// validated Origin (scheme+exact authority) before proxying, so relay
-	// that verified value.
+	// that verified value. On the outbound request the stdlib has already
+	// re-pinned Connection: Upgrade + Upgrade: websocket for real upgrade
+	// offers, so isUpgrade reads the negotiated state, not client claims.
 	if isUpgrade(r) {
 		r.Header.Set("Sec-WebSocket-Origin", r.Header.Get("Origin"))
 	} else {
@@ -825,39 +867,140 @@ func (g *Gateway) direct(r *http.Request) {
 }
 
 // rewriteForwarded rebuilds the client-address headers toward the runtime
-// (S18): client-supplied X-Forwarded-For, Forwarded and X-Real-IP are
-// stripped and re-derived from the trusted chain only. The runtime keys
-// its brute-force blacklist on the forwarded address, so a spoofed client
+// (S18): every client-supplied entry in clientHeaderStripList is removed
+// from the outbound request and the address headers are re-derived from
+// the INBOUND request's trusted chain only. The runtime keys its
+// brute-force blacklist on the forwarded address, so a spoofed client
 // value must never reach the pod. The derived client is the same
 // selection the launch limiter keys on — ratelimit.ClientAddr shares
 // ClientKey's chain walk — but rendered as the real client address
 // (unmapped, never folded to its /64): the limiter's per-prefix billing
 // granularity must not blur the address attribution the runtime sees.
-// When the peer itself is the client the header is left
-// unset — the ReverseProxy appends the socket address itself; when the
-// peer is a trusted proxy the derived client is prepended and the proxy
-// still appends the peer, so the runtime sees "<client>, <peer>".
-// Forwarded mirrors that chain in RFC 7239 form and X-Real-IP carries the
-// derived client for runtimes that key on it.
-func (g *Gateway) rewriteForwarded(r *http.Request) {
-	peer := ratelimit.PeerIP(r.RemoteAddr)
-	client := ratelimit.ClientAddr(r, g.cfg.TrustedProxies)
+// The peer is rendered explicitly — in the Rewrite hook the stdlib does
+// not auto-append RemoteAddr the way the Director path did — so the
+// runtime sees "<client>, <peer>" when a trusted proxy fronts the socket
+// and the bare verified peer otherwise. Forwarded mirrors that chain in
+// RFC 7239 form and X-Real-IP carries the derived client for runtimes
+// that key on it.
+func (g *Gateway) rewriteForwarded(in, out *http.Request) {
+	stripClientHeaders(out.Header)
+	peer := ratelimit.PeerIP(in.RemoteAddr)
+	client := ratelimit.ClientAddr(in, g.cfg.TrustedProxies)
 	if _, err := netip.ParseAddr(client); err != nil {
 		// A non-IP right-most entry (spoofed or "unknown") is not a
 		// usable client address: fall back to the verified peer rather
 		// than forward client bytes into a parsed field.
 		client = peer
 	}
-	r.Header.Del("X-Forwarded-For")
-	r.Header.Del("Forwarded")
-	r.Header.Del("X-Real-Ip")
+	xff := client
 	if client != peer {
-		r.Header.Set("X-Forwarded-For", client)
-		r.Header.Set("Forwarded", "for="+forwardedFor(client)+", for="+forwardedFor(peer))
-	} else {
-		r.Header.Set("Forwarded", "for="+forwardedFor(peer))
+		xff += ", " + peer
 	}
-	r.Header.Set("X-Real-Ip", client)
+	out.Header.Set("X-Forwarded-For", xff)
+	if client != peer {
+		out.Header.Set("Forwarded", "for="+forwardedFor(client)+", for="+forwardedFor(peer))
+	} else {
+		out.Header.Set("Forwarded", "for="+forwardedFor(peer))
+	}
+	out.Header.Set("X-Real-Ip", client)
+}
+
+// clientHeaderStripList is the one table of client-supplied headers the
+// session proxy never relays: the whole X-Forwarded-*/X-Original-*
+// families plus Forwarded, X-Real-Ip and X-Rewrite-Url (the forwarding
+// family — a forged value could shape absolute redirects, scheme
+// decisions and origin metadata upstream), and the vendor client-address
+// headers an intermediary claim could spoof. Entries are lowercase; a
+// trailing "-" marks a prefix rule. The stdlib's pre-Rewrite pass deletes
+// only Forwarded and three X-Forwarded-* entries — everything else would
+// reach the tenant-controlled runtime verbatim.
+var clientHeaderStripList = []string{
+	"forwarded", "x-real-ip", "x-rewrite-url",
+	"x-forwarded-", "x-original-",
+	"via", "x-client-ip", "true-client-ip", "cf-connecting-ip",
+	"x-cluster-client-ip", "x-envoy-",
+}
+
+// stripClientHeaders deletes every clientHeaderStripList entry from h.
+func stripClientHeaders(h http.Header) {
+	for k := range h {
+		fold := strings.ToLower(k)
+		for _, rule := range clientHeaderStripList {
+			if fold == rule ||
+				(strings.HasSuffix(rule, "-") && strings.HasPrefix(fold, rule)) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+}
+
+// connTokenAllowlist is the full set of Connection tokens a client may
+// keep: upgrade (websocket offers), keep-alive and close. Every other
+// token names a header the stdlib hop-by-hop strip would delete from the
+// outbound request — and no legitimate client needs that power, least of
+// all over headers the gateway injects itself.
+var connTokenAllowlist = map[string]struct{}{
+	"upgrade": {}, "keep-alive": {}, "close": {},
+}
+
+// sanitizeConnectionTokens canonicalises the client's Connection header to
+// connTokenAllowlist, dropping every other token (never a 400 — browsers
+// never send one, and the Rewrite-order fix already makes the tokens
+// unable to reach the injected headers; this is defence-in-depth so the
+// strip can name nothing else at all). Dropped tokens are debug-logged
+// and counted.
+func (g *Gateway) sanitizeConnectionTokens(r *http.Request) {
+	vals, ok := r.Header["Connection"]
+	if !ok {
+		return
+	}
+	var kept, dropped []string
+	for _, v := range vals {
+		for _, tok := range strings.Split(v, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			if _, ok := connTokenAllowlist[strings.ToLower(tok)]; ok {
+				kept = append(kept, tok)
+			} else {
+				dropped = append(dropped, tok)
+			}
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddConnectionTokensDropped(float64(len(dropped)))
+	}
+	// The drop runs before session auth: an unauthenticated client could
+	// otherwise spray the debug log — admit at most one line per minute
+	// per route. The metric still counts every dropped token.
+	if g.cfg.Logger != nil && g.connTokenLogOK("proxy") {
+		g.cfg.Logger.Debug("dropped client Connection tokens",
+			"dropped", strings.Join(dropped, ","), "path", r.URL.Path)
+	}
+	if len(kept) == 0 {
+		delete(r.Header, "Connection")
+	} else {
+		r.Header["Connection"] = []string{strings.Join(kept, ", ")}
+	}
+}
+
+// connTokenLogOK admits one dropped-Connection-token debug log per minute
+// per route: the canonicalisation runs before session auth, so unlike the
+// counter (which counts every drop) the log line needs its own bound
+// against unauthenticated spray.
+func (g *Gateway) connTokenLogOK(route string) bool {
+	g.connLogMu.Lock()
+	defer g.connLogMu.Unlock()
+	if last, ok := g.connLogLast[route]; ok && g.now().Sub(last) < time.Minute {
+		return false
+	}
+	g.connLogLast[route] = g.now()
+	return true
 }
 
 // forwardedFor renders an address as an RFC 7239 for= token; IPv6 literals

@@ -22,6 +22,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -149,6 +150,234 @@ func TestAuditCoverage_SpecMatchesTable(t *testing.T) {
 		if !ops[normPattern(pattern)] {
 			t.Errorf("auditedRoutes entry %q names no spec operation", pattern)
 		}
+	}
+}
+
+// coverageEnv builds ONE env whose mux carries every app-listener mount —
+// the same Mount*/mux.Handle calls backend.appMux performs
+// (internal/backend/wire.go) — on the in-memory fakes the per-route tests
+// use, with the capturing sink attached to the authenticator and every
+// audited handler. Keep the mount block in sync with appMux: a route
+// mounted there but not replayed here answers 404 and produces no domain
+// event, which the spec-set assertion below turns into a loud failure.
+type coverageFixtures struct {
+	env      *testEnv
+	backend  *fakeWorkspaceBackend
+	retained *fakeRetainedStore
+}
+
+func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
+	t.Helper()
+	iss, err := oidctest.NewIssuer()
+	if err != nil {
+		t.Fatalf("oidctest.NewIssuer: %v", err)
+	}
+	logBuf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, nil))
+	sessions := NewInMemorySessionStore(30 * time.Minute)
+	a, err := NewAuthenticator(context.Background(), AuthConfig{
+		Issuer:      iss.URL(),
+		ClientID:    iss.ClientID,
+		RedirectURL: "https://portal.test/auth/callback",
+		LoginSealer: testLoginSealer(t),
+	}, sessions, logger)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	a.WithAuditSink(sink).WithPrincipalRevoker(&fakePrincipalRevoker{res: RevokeAllResult{Sessions: 1}})
+
+	tenants := defaultTenants()
+	cat := defaultCatalog()
+	be := newFakeBackend()
+	fs := newFakeRetainedStore()
+	d, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
+	connH := NewConnectionHandler(&fakeIssuer{ticket: IssuedTicket{
+		WorkspaceID: "ws_0000000000000000000000000c",
+		Token:       "tkt_coveragereplay0000000000000",
+		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
+	}}, tenants, d).WithLogger(logger).WithAuditSink(sink)
+
+	mux := http.NewServeMux()
+	// env.login drives the /auth/* flow; everything below mirrors the
+	// appMux mount block — keep in sync with it.
+	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	noop := func(h http.Handler) http.Handler { return h }
+	mux.Handle("GET /v1/login", noop(http.HandlerFunc(a.LoginHandler)))
+	mux.Handle("GET /v1/auth/callback", noop(http.HandlerFunc(a.CallbackHandler)))
+	MountLogoutRoute(mux, a)
+	MountRevokeAllRoute(mux, a, noop)
+	MountSessionTouchRoute(mux, a, noop)
+	MountSessionProbeRoute(mux, a, noop)
+	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
+	MountWorkspaceRoutes(mux, a, NewWorkspaceHandler(be, cat, tenants).WithAuditSink(sink), NewTemplateHandler(cat, tenants))
+	MountConnectionRoutes(mux, a, connH)
+	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
+	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
+	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, newFakeDirectory(), tenants))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, newFakeDirectory(), tenants, nil).WithAuditSink(sink))
+	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(&fakeUserLimitSource{overrides: map[string]int64{}}, newFakeDirectory(), tenants).WithAuditSink(sink))
+
+	// Production wrap order (wire.wrapApp): RequestID → request audit →
+	// trusted-origin gate → mux. The replay requests carry no Origin or
+	// Sec-Fetch-Site, so they pass the gate as non-browser clients.
+	srv := httptest.NewServer(RequestID(AuditWithSink(logger, sink)(
+		RequireTrustedOrigin(a.SessionCookieName(), nil)(mux))))
+	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
+	t.Cleanup(func() { srv.Close(); iss.Close() })
+	return &coverageFixtures{env: env, backend: be, retained: fs}
+}
+
+// requiredMutatingOps is the coverage domain: every openapi operation a
+// domain audit event must exist for — every non-GET plus every
+// /v1/admin/ operation, the same predicate TestAuditCoverage_SpecMatchesTable
+// applies.
+func requiredMutatingOps(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for op := range specOps(t) {
+		space := strings.IndexByte(op, ' ')
+		method, path := op[:space], op[space+1:]
+		if method == http.MethodGet && !strings.HasPrefix(path, "/v1/admin/") {
+			continue
+		}
+		out[op] = true
+	}
+	return out
+}
+
+// TestAuditCoverage_MountedMuxEmitsEventPerRoute is the runtime pin for
+// audit completeness: it replays the mounted mux — every route mount the
+// app listener performs, wired the way wire.go wires them — with a
+// capturing audit sink, then drives ONE request through every mutating
+// and /v1/admin/ spec route and requires EXACTLY one domain audit event
+// carrying the route's table action. The spec↔table pin proves a route
+// NAMES an action; this proves the mounted handler EMITS it — a route
+// mounted without audited() (or audited() invoked and discarded)
+// produces no event and fails here. The driven set is asserted equal to
+// the spec's mutating set, so a route can be neither unaudited nor
+// unlisted.
+func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
+	sink := &captureSink{}
+	fx := newCoverageEnv(t, sink)
+	env := fx.env
+	sess, csrf := login(t, env, "user-a")
+
+	const wsID = "ws_0000000000000000000000000c"
+	fx.backend.recs[wsID] = provisioning.WorkspaceRecord{
+		ID: wsID, TenantID: "tenant-a", Owner: envOwner(env, "user-a"),
+		Phase: "Ready", DesiredState: "Running",
+	}
+	const wsStoppedID = "ws_0000000000000000000000000d"
+	fx.backend.recs[wsStoppedID] = provisioning.WorkspaceRecord{
+		ID: wsStoppedID, TenantID: "tenant-a", Owner: envOwner(env, "user-a"),
+		Phase: "Stopped", DesiredState: "Stopped",
+	}
+	rec := seedRetained(fx.retained, "rd_cov00000001", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	rec2 := seedRetained(fx.retained, "rd_cov00000002", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	sessA, csrfA := loginAdmin(t, env, "admin-a")
+
+	// One driver per required spec op, keyed by the normalized
+	// "METHOD /path/{}" form specOps produces. Session-destroying routes
+	// run last; the revoke-all gets a fresh login it may consume.
+	routes := []struct {
+		op     string
+		action string
+		run    func()
+	}{
+		{"POST /v1/session:touch", auditActionSessionTouch, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/session:touch", "", nil).Body.Close()
+		}},
+		{"POST /v1/workspaces", auditActionWorkspaceCreate, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+				`{"name":"coverage-ws","templateRef":"tpl_linuxdesktop"}`,
+				map[string]string{"Idempotency-Key": "key-cov-create"}).Body.Close()
+		}},
+		{"POST /v1/workspaces/{}/start", auditActionWorkspaceStart, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsStoppedID+"/start", "", nil).Body.Close()
+		}},
+		{"POST /v1/workspaces/{}/stop", auditActionWorkspaceStop, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/stop", "", nil).Body.Close()
+		}},
+		{"POST /v1/workspaces/{}/connections", auditActionConnectionCreate, func() {
+			doReq(t, env, sess, csrf, http.MethodPost,
+				"/v1/workspaces/"+wsID+"/connections", `{"takeover":true}`, nil).Body.Close()
+		}},
+		{"DELETE /v1/workspaces/{}", auditActionWorkspaceDelete, func() {
+			doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+wsID, "", nil).Body.Close()
+		}},
+		{"POST /v1/data/{}/attach", auditActionDataAttach, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+				`{"name":"restored","templateRef":"tpl_linuxdesktop"}`,
+				map[string]string{"Idempotency-Key": "key-cov-attach"}).Body.Close()
+		}},
+		{"POST /v1/data/{}/purge", auditActionDataPurge, func() {
+			got := decodeBody[retainedDataView](t,
+				doReq(t, env, sess, csrf, http.MethodGet, "/v1/data/"+rec2.ID, "", nil))
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec2.ID+"/purge",
+				`{"confirmationNonce":"`+got.PurgeConfirmationNonce+`"}`, nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/quota", auditActionAdminQuotaGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminQuotaPath, "", nil).Body.Close()
+		}},
+		{"PUT /v1/admin/tenants/{}/quota", auditActionAdminQuotaSet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, adminQuotaPath, adminQuotaBody,
+				map[string]string{"If-Match": IfMatchCreate}).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/admin/tenants/tenant-a/user-limits", "", nil).Body.Close()
+		}},
+		{"PUT /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitSet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits",
+				`{"ownerRef":"iss|sub","limit":3}`, nil).Body.Close()
+		}},
+		{"PUT /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultSet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits/default",
+				`{"limit":3}`, nil).Body.Close()
+		}},
+		{"POST /v1/logout", auditActionSessionLogout, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()
+		}},
+		{"POST /v1/me/sessions:revoke-all", auditActionSessionRevokeAll, func() {
+			s2, c2 := login(t, env, "user-b") // the revoke consumes this login
+			doReq(t, env, s2, c2, http.MethodPost, "/v1/me/sessions:revoke-all", "", nil).Body.Close()
+		}},
+	}
+
+	required := requiredMutatingOps(t)
+	driven := map[string]bool{}
+	for _, rt := range routes {
+		if !required[rt.op] {
+			t.Errorf("replay driver %s is not a mutating/admin spec operation", rt.op)
+			continue
+		}
+		driven[rt.op] = true
+		rt.run()
+		requireEvent(t, sink, rt.action)
+	}
+	for op := range required {
+		if !driven[op] {
+			t.Errorf("spec operation %s has no replay driver — add one or the route is unaudited", op)
+		}
+	}
+	// No extra domain events may fire anywhere else in the replay: every
+	// non-"http.request" event must be one of the driven table actions.
+	var extra []observability.AuditEvent
+	domainActions := map[string]bool{}
+	for pattern, rt := range auditedRoutes {
+		domainActions[rt.action] = true
+		_ = pattern
+	}
+	for _, e := range sink.get() {
+		if e.Action != "http.request" && !domainActions[e.Action] {
+			extra = append(extra, e)
+		}
+	}
+	if len(extra) != 0 {
+		t.Errorf("unexpected domain audit events: %+v", extra)
 	}
 }
 

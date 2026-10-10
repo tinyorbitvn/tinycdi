@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,10 +171,63 @@ func TestClientKey_MultipleHeadersAndNonIP(t *testing.T) {
 	if k := ClientKey(r, trusted); k != "2.2.2.2" {
 		t.Fatalf("key = %q, want right-most untrusted 2.2.2.2 across header lines", k)
 	}
-	// A non-IP entry is never trusted, so it can be the key.
+	// A non-IP entry is never trusted, so the walk selects it — but it
+	// can never be the key: the claim collapses to the socket peer.
 	r.Header.Set("X-Forwarded-For", "unknown")
-	if k := ClientKey(r, trusted); k != "unknown" {
-		t.Fatalf("key = %q, want \"unknown\"", k)
+	if k := ClientKey(r, trusted); k != "10.0.0.1" {
+		t.Fatalf("key = %q, want the socket peer 10.0.0.1 — a non-IP claim never keys", k)
+	}
+}
+
+// TestClientKey_NonIPSelectedEntryFallsBackToPeer: a right-most untrusted
+// XFF slot the client controls must never become a limiter key — garbage
+// tokens, hostnames, "unknown", zoned IPv6 literals, address:port forms
+// and oversized strings all collapse to the verified socket peer. A spray
+// of fresh claims then draws from ONE bucket (the peer's) instead of
+// minting an unbounded key per request, so the per-key bound engages on
+// both the local bucket and the shared window row that keys on the same
+// string.
+func TestClientKey_NonIPSelectedEntryFallsBackToPeer(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	mk := func(xff string) string {
+		return ClientKey(&http.Request{
+			RemoteAddr: "10.1.2.3:443", // the (trusted) edge peer
+			Header:     http.Header{"X-Forwarded-For": {xff}},
+		}, trusted)
+	}
+
+	// Every non-plain-IP spelling that can reach the selected slot keys
+	// to the peer — never to client bytes.
+	for _, xff := range []string{
+		"junk-0, 10.9.9.9",                        // arbitrary token
+		"example.com, 10.9.9.9",                   // hostname
+		"unknown",                                 // the classic placeholder
+		"fe80::1%eth0, 10.9.9.9",                  // zoned IPv6 literal (parses!)
+		"1.2.3.4:8080, 10.9.9.9",                  // address:port, not a bare IP
+		"2001:db8::1%veth99, 10.9.9.9",            // zoned global address
+		"not an ip, 10.9.9.9",                     // spaces survive trimming
+		strings.Repeat("a", 70000) + ", 10.9.9.9", // oversized claim
+	} {
+		if k := mk(xff); k != "10.1.2.3" {
+			t.Fatalf("ClientKey(xff=%.60q) = %q, want the peer 10.1.2.3", xff, k)
+		}
+	}
+	// A plain IP in the same slot still selects normally — the fallback
+	// only swallows claims that were never addresses.
+	if k := mk("8.8.8.8, 10.9.9.9"); k != "8.8.8.8" {
+		t.Fatalf("key = %q, want right-most untrusted 8.8.8.8", k)
+	}
+
+	// The spray that used to mint a key per request now shares the peer's
+	// single budget: under a 1/min limiter only the first claim passes.
+	l := New(1, 1, 100000, nil)
+	if ok, _ := l.Allow(mk("junk-0, 10.9.9.9")); !ok {
+		t.Fatal("first request refused")
+	}
+	for i := 1; i <= 50; i++ {
+		if ok, _ := l.Allow(mk(fmt.Sprintf("junk-%d, 10.9.9.9", i))); ok {
+			t.Fatalf("sprayed claim junk-%d escaped the bound — keys must collapse to the peer", i)
+		}
 	}
 }
 

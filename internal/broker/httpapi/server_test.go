@@ -26,8 +26,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 )
 
 // fakeBroker scripts the broker surface; err maps let tests inject the
@@ -189,15 +193,19 @@ type env struct {
 	logs  *bytes.Buffer
 }
 
-func newEnv(t *testing.T, fb *fakeBroker) *env {
+func newEnv(t *testing.T, fb *fakeBroker, tweaks ...func(*httpapi.Config)) *env {
 	t.Helper()
 	p := newPKI(t)
 	logs := &bytes.Buffer{}
-	h := httpapi.NewHandler(httpapi.Config{
+	cfg := httpapi.Config{
 		Broker:   fb,
 		Audience: "session.example.dev",
 		Logger:   slog.New(slog.NewJSONHandler(logs, nil)),
-	})
+	}
+	for _, tw := range tweaks {
+		tw(&cfg)
+	}
+	h := httpapi.NewHandler(cfg)
 	srv := httptest.NewUnstartedServer(h)
 	srvCert := p.issue(t, "broker-internal", nil, true)
 	srv.TLS = &tls.Config{
@@ -671,5 +679,185 @@ func TestNoLeaseIDsInLogs(t *testing.T) {
 	}
 	if !strings.Contains(logs, "/internal/v1/broker/leases/{id}") {
 		t.Fatalf("request log lost the route pattern: %s", logs)
+	}
+}
+
+// capAllower is a ratelimit.Allower test stub: it allows the first max
+// calls and refuses the rest — deterministic rejection-log limiting.
+type capAllower struct{ n, max int }
+
+func (c *capAllower) Allow(string) (bool, time.Duration) {
+	c.n++
+	return c.n <= c.max, 0
+}
+
+// The broker refuses a runtimeGeneration beyond the workspace's recorded
+// bound; the refusal surfaces as 400 INVALID_REQUEST, not a revocation.
+func TestRevokeWorkspace_GenerationUnbounded(t *testing.T) {
+	fb := &fakeBroker{revokeWsErr: broker.ErrGenerationUnbounded}
+	e := newEnv(t, fb)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err := e.client(t, &op).Post(
+		e.srv.URL+"/internal/v1/broker/workspaces/ws-1/revoke",
+		"application/json", bytes.NewReader([]byte(`{"runtimeGeneration":4611686018427387904}`)))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("revoke status=%d, want 400", resp.StatusCode)
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Code != "INVALID_REQUEST" {
+		t.Fatalf("code=%q, want INVALID_REQUEST", body.Code)
+	}
+}
+
+// TestIdentify_RejectionsLogged: requests refused by the identify
+// middleware never reach logRequests, so the boundary warn line is
+// emitted inside identify itself — peer, reason class and redacted path,
+// never any certificate material.
+func TestIdentify_RejectionsLogged(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+
+	// No client certificate -> 401, reason no_cert.
+	resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", resp.StatusCode)
+	}
+	logs := e.logs.String()
+	for _, want := range []string{
+		`"msg":"internal_auth_rejected"`,
+		`"reason":"no_cert"`,
+		`"status":401`,
+		`"path":"/internal/v1/broker/redeem"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("rejection log missing %s: %s", want, logs)
+		}
+	}
+	if strings.Contains(logs, `"request_id":""`) || !strings.Contains(logs, `"request_id":"`) ||
+		strings.Contains(logs, `"peer":""`) || !strings.Contains(logs, `"peer":"`) {
+		t.Fatalf("request_id/peer missing or empty in rejection log: %s", logs)
+	}
+
+	// Verified cert with an empty CN -> 401, reason no_cn.
+	e.logs.Reset()
+	emptyCN := e.pki.issue(t, "", nil, false)
+	resp, err = e.client(t, &emptyCN).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", resp.StatusCode)
+	}
+	if !strings.Contains(e.logs.String(), `"reason":"no_cn"`) {
+		t.Fatalf("empty-CN rejection not logged: %s", e.logs.String())
+	}
+
+	// SPIFFE SAN disagreeing with the CN -> 403, reason spiffe_mismatch.
+	e.logs.Reset()
+	mismatched := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-9"}, false)
+	resp, err = e.client(t, &mismatched).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", resp.StatusCode)
+	}
+	logs = e.logs.String()
+	if !strings.Contains(logs, `"reason":"spiffe_mismatch"`) || !strings.Contains(logs, `"status":403`) {
+		t.Fatalf("SPIFFE rejection not logged: %s", logs)
+	}
+}
+
+// TestIdentify_RejectedPathRedacted (SEC-41): the rejection log's path
+// field keeps the route shape but hashes every identifier segment — a
+// lease id in an auth-failed request is still bearer material and must
+// never reach the log.
+func TestIdentify_RejectedPathRedacted(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	resp, err := e.client(t, nil).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-secret-handle/renew",
+		"application/json", bytes.NewReader([]byte(`{"fence":{}}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	logs := e.logs.String()
+	if strings.Contains(logs, "lease-secret-handle") {
+		t.Fatalf("raw lease id leaked into rejection log: %s", logs)
+	}
+	if !strings.Contains(logs, `/internal/v1/broker/leases/sha256:`) ||
+		!strings.Contains(logs, `/renew`) {
+		t.Fatalf("rejection log lost the route shape: %s", logs)
+	}
+}
+
+// TestIdentify_RejectionsRateLimited: the warn line is bounded per reason
+// class — a sprayed bad-auth probe cannot flood the log pipeline.
+func TestIdentify_RejectionsRateLimited(t *testing.T) {
+	lim := &capAllower{max: 3}
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.AuthLogLimit = lim })
+	for i := 0; i < 6; i++ {
+		resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+			"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("request %d status=%d, want 401", i, resp.StatusCode)
+		}
+	}
+	if got := strings.Count(e.logs.String(), "internal_auth_rejected"); got != 3 {
+		t.Fatalf("rejection warn lines = %d, want 3 (limiter-capped)", got)
+	}
+}
+
+// TestIdentify_RejectionsCounted: the warn line is rate-limited but the
+// counter is the complete record — every refused attempt increments
+// tinycdi_internal_auth_failures_total by bounded reason class.
+func TestIdentify_RejectionsCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.Metrics = m })
+
+	resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	mismatched := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-9"}, false)
+	resp2, err := e.client(t, &mismatched).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp2.Body.Close()
+
+	want := `# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="no_cert"} 1
+tinycdi_internal_auth_failures_total{reason="spiffe_mismatch"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
 	}
 }
