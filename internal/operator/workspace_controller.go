@@ -462,6 +462,13 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		case gerr != nil:
 			return ctrl.Result{}, gerr
 		}
+		// Admission: a live template whose seccomp-profile annotation is
+		// out of policy can never produce a pod — refuse to admit it into
+		// a recorded snapshot at all rather than converge on a rejection
+		// the backend would raise at Ensure.
+		if verr := linux.ValidateSeccompAnnotation(tpl.Annotations); verr != nil {
+			return r.holdTemplateInvalid(ctx, ws, applied, verr.Error())
+		}
 		recorded, rerr := snapshotTemplate(tpl)
 		if rerr != nil {
 			return ctrl.Result{}, rerr
@@ -1069,6 +1076,12 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 				"error", serr)
 		}
 	}
+	// A proven-but-inadmissible template is never recorded: the running
+	// pod is left untouched, a stop/start re-snapshots from the live
+	// template (whose own admission check then applies).
+	if verr := linux.ValidateSeccompAnnotation(live.Annotations); verr != nil {
+		return gone(fmt.Sprintf("template %q carries an out-of-policy seccomp profile: %v", live.Name, verr))
+	}
 	snap, rerr := snapshotTemplate(live)
 	if rerr != nil {
 		return nil, ctrl.Result{}, false, rerr
@@ -1216,7 +1229,15 @@ func verifySnapshotRecord(snap *templateSnapshot) error {
 		return fmt.Errorf("header fields inconsistent: name=%q revision=%q spec.revision=%q",
 			snap.Name, snap.Revision, snap.Spec.Revision)
 	}
-	return validateSnapshotSpec(&snap.Spec)
+	if err := validateSnapshotSpec(&snap.Spec); err != nil {
+		return err
+	}
+	// The recorded annotations drive buildPod's confinement the same way
+	// the recorded spec drives its shape: a snapshot whose seccomp
+	// profile name is out of policy is not a usable record. It is
+	// replaced by a fresh snapshot of the live template — the admission
+	// check there then decides whether anything may be recorded at all.
+	return linux.ValidateSeccompAnnotation(snap.Annotations)
 }
 
 // validateSnapshotSpec re-checks the invariants the CRD enforces on a
