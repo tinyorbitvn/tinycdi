@@ -355,6 +355,19 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			cond.Reason != ReasonTemplateRevisionGone {
 			t.Fatalf("want Degraded/TemplateRevisionGone, got %+v", got.Status.Conditions)
 		}
+		// The pod is the running incarnation: the hold phase stays Ready
+		// with the Degraded condition carrying the hold — the broker's
+		// running projection keeps the workspace under lifecycle
+		// enforcement and ticket issuance keeps working.
+		if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+			t.Fatalf("held workspace with a live pod: phase=%q, want Ready", got.Status.Phase)
+		}
+		if got.Status.RuntimeUID != string(pod.UID) {
+			t.Fatalf("runtimeUID=%q, want the live pod %q", got.Status.RuntimeUID, pod.UID)
+		}
+		if got.Status.ServiceRef == nil || got.Status.StartedAt == nil {
+			t.Fatalf("serviceRef/startedAt lost on hold: %+v", got.Status)
+		}
 		cur := &corev1.Pod{}
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
 			t.Fatalf("pod vanished on revision-gone hold: %v", err)

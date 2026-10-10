@@ -1108,22 +1108,47 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 	return snap, ctrl.Result{}, false, nil
 }
 
-// holdDegraded persists a Pending phase with Degraded=True/reason and
+// holdDegraded persists the hold phase with Degraded=True/reason and
 // emits exactly one Warning event on the transition into the hold —
 // after the status write that proves the transition. Runtime children
 // are left untouched: a held workspace keeps whatever incarnation it
 // had.
+//
+// The phase describes the incarnation, not the hold: a workspace that
+// still HAS a live operator-owned pod holds Ready — the Degraded
+// condition carries the hold — so the broker's running projection keeps
+// it under lifecycle enforcement (the stricter held caps), tickets can
+// still be issued for reconnect, and the status fields (runtimeUID,
+// serviceRef, step conditions) stay the observed truth. A hold with no
+// operator-owned pod is Pending.
 func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, reason, eventMsg string) (ctrl.Result, error) {
-	obs := tcdiruntime.Observation{
-		RuntimeGeneration: applied.RuntimeGeneration,
-		Reason:            reason,
-	}
 	edge := func() bool {
 		cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
 		return cur == nil || cur.Status != metav1.ConditionTrue || cur.Reason != reason
 	}()
-	err := r.writeStatus(ctx, ws, applied, obs,
-		workspacesv1alpha1.WorkspacePhasePending, errors.New(reason), nil)
+	phase := workspacesv1alpha1.WorkspacePhasePending
+	obs := tcdiruntime.Observation{
+		RuntimeGeneration: applied.RuntimeGeneration,
+		Reason:            reason,
+	}
+	ident, ierr := r.Backend.PodTemplateIdentity(ctx, ws)
+	if ierr != nil {
+		return ctrl.Result{}, ierr
+	}
+	if ident.Owned {
+		// The same ownership bar the adoption proof applies: anything
+		// less and a foreign pod squatting on the workspace-pod name
+		// could pull a held workspace into the serving set.
+		live, oerr := r.Backend.Observe(ctx, ws)
+		if oerr != nil {
+			return ctrl.Result{}, oerr
+		}
+		if live.RuntimeUID != "" {
+			obs = live
+			phase = workspacesv1alpha1.WorkspacePhaseReady
+		}
+	}
+	err := r.writeStatus(ctx, ws, applied, obs, phase, errors.New(reason), nil)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1141,9 +1166,10 @@ func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1
 // untouched: the adoption path's running pod keeps running until a
 // stop/start re-snapshots the live template — the same pod-untouched
 // hold as TemplateRevisionGone, split by failure class (content-invalid
-// vs identity-unprovable). The workspace holds Pending with
-// Degraded=True reason=TemplateInvalid and requeues (a later-published
-// template still resolves).
+// vs identity-unprovable). The workspace holds Degraded=True
+// reason=TemplateInvalid — Ready while the operator-owned pod is live,
+// Pending with none — and requeues (a later-published template still
+// resolves).
 func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("no trustworthy template source; convergence held",
 		"detail", detail)
