@@ -92,6 +92,12 @@ var (
 	leaseSessionMissingReasons = map[string]struct{}{
 		"absent": {}, "invalid": {},
 	}
+	// internalAuthFailReasons are the mTLS identity-refusal classes the
+	// internal broker listener can emit: no peer cert presented, a verified
+	// cert without a CN, or a SPIFFE URI SAN disagreeing with the CN.
+	internalAuthFailReasons = map[string]struct{}{
+		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
+	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route
 	// events, the gateway events, http.request and the config apply); a
@@ -99,8 +105,8 @@ var (
 	// a new series.
 	auditEventActions = map[string]struct{}{
 		"http.request": {}, "session.logout": {}, "session.revoke": {},
-		"session.revoke_all": {},
-		"session.list":       {}, "session.host_mismatch": {},
+		"session.revoke_all": {}, "session.touch": {},
+		"session.list": {}, "session.host_mismatch": {},
 		"workspace.create": {}, "workspace.start": {}, "workspace.stop": {},
 		"workspace.delete": {}, "connection.create": {},
 		"data.attach": {}, "data.purge": {},
@@ -135,17 +141,21 @@ type Metrics struct {
 	sessionsActive prometheus.Gauge
 	rehydrations   *prometheus.CounterVec
 	streamsFenced  prometheus.Counter
-	logins         *prometheus.CounterVec
-	imageAge       *prometheus.GaugeVec
-	rateLimited    *prometheus.CounterVec
-	rateLimitStore *prometheus.CounterVec
-	rateLimitDown  *prometheus.GaugeVec
-	frameReloads   *prometheus.CounterVec
-	sessionRevokes *prometheus.CounterVec
+	// connTokensDropped counts client Connection-header tokens the session
+	// gateway dropped before proxying.
+	connTokensDropped prometheus.Counter
+	logins            *prometheus.CounterVec
+	imageAge          *prometheus.GaugeVec
+	rateLimited       *prometheus.CounterVec
+	rateLimitStore    *prometheus.CounterVec
+	rateLimitDown     *prometheus.GaugeVec
+	frameReloads      *prometheus.CounterVec
+	sessionRevokes    *prometheus.CounterVec
 	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
-	sessionRevokeAlls *prometheus.CounterVec
-	leaseSessGone     *prometheus.CounterVec
-	auditWriteErrs    *prometheus.CounterVec
+	sessionRevokeAlls    *prometheus.CounterVec
+	leaseSessGone        *prometheus.CounterVec
+	auditWriteErrs       *prometheus.CounterVec
+	internalAuthFailures *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -212,6 +222,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "gateway_streams_fenced_total",
 			Help: "Streams closed because another replica claimed the lease's stream epoch.",
 		}),
+		connTokensDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "gateway_connection_tokens_dropped_total",
+			Help: "Client Connection-header tokens the session gateway dropped before proxying — tokens outside upgrade/keep-alive/close can name and strip headers, so they are never forwarded.",
+		}),
 		logins: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "logins_total",
 			Help: "Completed /v1/auth/callback login attempts, by bounded outcome.",
@@ -252,6 +266,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "audit_write_errors_total",
 			Help: "Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.",
 		}, []string{"event"}),
+		internalAuthFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "internal_auth_failures_total",
+			Help: "mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.",
+		}, []string{"reason"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -260,9 +278,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
-		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
+		m.sessionsActive, m.rehydrations, m.streamsFenced, m.connTokensDropped, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
+		m.internalAuthFailures,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -355,6 +374,12 @@ func (m *Metrics) IncRehydration(result string) {
 // closed.
 func (m *Metrics) IncStreamsFenced() { m.streamsFenced.Inc() }
 
+// AddConnectionTokensDropped counts client Connection-header tokens the
+// session gateway dropped before proxying: a token outside the
+// upgrade/keep-alive/close allowlist names a header the stdlib hop-by-hop
+// strip would remove from the outbound request, so it is never forwarded.
+func (m *Metrics) AddConnectionTokensDropped(n float64) { m.connTokensDropped.Add(n) }
+
 // IncLogin counts one completed login-callback outcome; outcome is bounded
 // to {success, denied, error, other}.
 func (m *Metrics) IncLogin(outcome string) {
@@ -442,4 +467,12 @@ func (m *Metrics) IncAuditWriteError(event string) {
 		return
 	}
 	m.auditWriteErrs.WithLabelValues(boundValue(event, auditEventActions)).Inc()
+}
+
+// IncInternalAuthFailure counts one mTLS identity rejection on the
+// internal broker listener; reason is bounded to {no_cert, no_cn,
+// spiffe_mismatch, other}. Unlike the per-request warn line this counter
+// is not rate-limited — it is the complete record of refused attempts.
+func (m *Metrics) IncInternalAuthFailure(reason string) {
+	m.internalAuthFailures.WithLabelValues(boundValue(reason, internalAuthFailReasons)).Inc()
 }

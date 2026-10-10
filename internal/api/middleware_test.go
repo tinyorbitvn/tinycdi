@@ -381,6 +381,9 @@ func (s failingSessionStore) Peek(context.Context, string) (*Session, error) { r
 func (s failingSessionStore) TouchPrincipal(context.Context, string) (int64, error) {
 	return 0, s.err
 }
+func (s failingSessionStore) TouchSessionDigest(context.Context, string) (int64, error) {
+	return 0, s.err
+}
 func (s failingSessionStore) Delete(context.Context, string) error { return s.err }
 
 // TestRequireAuth_SessionStoreErrors: a store error is not "no session".

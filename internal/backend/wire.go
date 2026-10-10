@@ -399,7 +399,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		broker.WithGatewayAudience(id.Audience),
 		broker.WithCredentialSource(broker.NewK8sCredentialSource(kc, tenants)),
 		broker.WithMetrics(metrics),
-		broker.WithLogger(log))
+		broker.WithLogger(log),
+		// The lease layer honours the portal session idle window too
+		// (FIX-IDLE / SR-1-F2): an idled-out session can no longer redeem,
+		// renew or rehydrate a lease — the stream dies inside one renew
+		// cycle instead of outliving the session it was minted under.
+		broker.WithSessionIdle(cfg.SessionIdle))
 
 	// Expiry planner (design §8): periodically evaluate running workspaces
 	// against recorded session activity and emit generation-fenced stop
@@ -458,7 +463,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		// listener="internal" — InstrumentHTTP passes through when the
 		// metrics listener is off.
 		b.internalHandler = api.InstrumentHTTP(metrics, "internal")(httpapi.NewHandler(httpapi.Config{
-			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log,
+			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log, Metrics: metrics,
 		}))
 	} else {
 		log.Warn("internal broker api disabled (-internal-listen unset); remote gateways cannot redeem tickets")
@@ -711,6 +716,7 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	mux.Handle("GET /v1/auth/callback", callbackLimit(http.HandlerFunc(authn.CallbackHandler)))
 	api.MountLogoutRoute(mux, authn)
 	api.MountRevokeAllRoute(mux, authn, sessionLimit)
+	api.MountSessionTouchRoute(mux, authn, sessionLimit)
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
 	api.MountMeRoutes(mux, authn, me)
 	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
@@ -872,6 +878,10 @@ func (a sessionStoreAdapter) Peek(ctx context.Context, id string) (*api.Session,
 
 func (a sessionStoreAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
 	return a.s.TouchPrincipal(ctx, principal)
+}
+
+func (a sessionStoreAdapter) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
+	return a.s.TouchSessionDigest(ctx, digestHex)
 }
 
 func (a sessionStoreAdapter) Delete(ctx context.Context, id string) error {

@@ -19,6 +19,14 @@ import (
 // keyboard/mouse input does.
 var ErrActivityType = errors.New("broker: unrecognized activity event type")
 
+// ErrGenerationUnbounded is returned when a workspace revocation names a
+// runtimeGeneration beyond the workspace's recorded generation plus one
+// (the observed-but-not-yet-projected slack). A revocation row covers
+// every generation <= N permanently — the table has no delete path — so
+// an unbounded value would fence every future runtime the workspace will
+// ever have. The internal API maps it to 400 INVALID_REQUEST.
+var ErrGenerationUnbounded = errors.New("broker: runtime generation beyond recorded bound")
+
 // ActivityEventType classifies a gateway-reported session signal
 // (design §8). Only these three values are valid.
 type ActivityEventType string
@@ -158,11 +166,13 @@ func (b *Broker) ReportActivity(ctx context.Context, gw GatewayIdentity, leaseID
 	if err := b.recordActivity(ctx, l.ID, PlatformID(l.WorkspaceUID), l.RuntimeGeneration, ev, now); err != nil {
 		return err
 	}
-	// Desktop input extends the owning user's PORTAL session idle timer
-	// (D18): the hook receives the lease's principal — the "iss|sub" owner
-	// string — after the event is durably recorded.
+	// Desktop input extends the owning session's PORTAL idle timer (D18):
+	// the hook receives the lease's principal and the bound
+	// portal_session_digest — input credits exactly the session the
+	// stream was launched under (SR-1-F3); a legacy NULL digest degrades
+	// to the principal-wide touch — after the event is durably recorded.
 	if ev.Type == ActivityInput && b.inputHook != nil {
-		b.inputHook(ctx, l.PrincipalSubject)
+		b.inputHook(ctx, l.PrincipalSubject, l.PortalSessionDigest)
 	}
 	return nil
 }
@@ -302,10 +312,18 @@ func (b *Broker) RequestStop(ctx context.Context, workspaceUID PlatformID, runti
 // zeroed in the same transaction and DrainStatus never waits on them. The
 // disconnect grace anchor is set on the transition to zero, preserving the
 // §8 grace-window semantics if the workspace is not actually torn down.
+//
+// The fence itself is bounded: runtimeGeneration must not exceed the
+// workspace's recorded generation plus one (checkRevokeBound), else
+// ErrGenerationUnbounded — a revocation row is undeletable, so covering a
+// generation that was never recorded would brick the workspace.
 func (b *Broker) RevokeWorkspaceLeases(ctx context.Context, workspaceUID PlatformID, runtimeGeneration uint64) (int, error) {
 	now := b.now()
 	var n int64
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		if err := b.checkRevokeBound(ctx, tx, workspaceUID, runtimeGeneration); err != nil {
+			return err
+		}
 		tag, err := tx.Exec(ctx, `
 			UPDATE connection_lease SET state = 'revoked', closed_at = $3
 			WHERE workspace_id = $1 AND runtime_generation <= $2 AND state = 'active'`,
@@ -332,6 +350,60 @@ func (b *Broker) RevokeWorkspaceLeases(ctx context.Context, workspaceUID Platfor
 		return nil
 	})
 	return int(n), err
+}
+
+// checkRevokeBound refuses a workspace revocation whose runtimeGeneration
+// exceeds every generation the broker has recorded for the workspace plus
+// one of observed-but-not-yet-projected slack. The bound is the highest
+// generation either authoritative view reports: workspaces.runtime_generation
+// (the mint counter, bumped inside the same transaction as AppendIntent)
+// and the informer binding's observed generation — which covers a
+// generation the CR already recorded but the row projection has not
+// applied yet (DR skew, projection lag). Generation minting is monotonic,
+// so a bound read mid-bump can only err toward refusal, never toward a
+// wider fence. A binding lookup failure narrows nothing — the row bound
+// still applies.
+//
+// When neither view knows the workspace the call keeps its historical
+// no-op shape: the revocation insert below is EXISTS-guarded on the
+// workspaces row, so no fence can ever be written for it — and no leases,
+// tickets or activity rows can exist either (all reference the workspaces
+// row), so the remaining statements are already no-ops.
+func (b *Broker) checkRevokeBound(ctx context.Context, tx store.Tx, workspaceUID PlatformID, runtimeGeneration uint64) error {
+	var (
+		recorded  uint64
+		haveBound bool
+		rowGen    int64
+	)
+	switch err := tx.QueryRow(ctx,
+		`SELECT runtime_generation FROM workspaces WHERE id = $1`,
+		workspaceUID).Scan(&rowGen); {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("broker: workspace generation lookup: %w", err)
+	default:
+		// runtime_generation is >= 0 by CHECK; the cast is exact.
+		recorded, haveBound = uint64(rowGen), true
+	}
+	if b.src != nil {
+		if binding, err := b.src.CurrentBinding(ctx, workspaceUID); err == nil &&
+			binding.RuntimeGeneration > recorded {
+			recorded, haveBound = binding.RuntimeGeneration, true
+		}
+	}
+	// recorded <= max int64 on every path (row CHECK + CRD int64 fields),
+	// so recorded+1 cannot wrap.
+	if haveBound && runtimeGeneration > recorded+1 {
+		if b.log != nil {
+			b.log.Warn("workspace revocation refused: runtime generation beyond bound",
+				"workspace", string(workspaceUID),
+				"runtime_generation", runtimeGeneration,
+				"recorded_generation", recorded,
+				"request_id", requestID(ctx))
+		}
+		return ErrGenerationUnbounded
+	}
+	return nil
 }
 
 // revokedGeneration reports whether a revocation covering the given

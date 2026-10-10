@@ -222,7 +222,7 @@ func TestInputActivity_ExtendsIdle(t *testing.T) {
 	hook := env.auth.InputHook()
 
 	fc.Advance(25 * time.Minute)
-	hook(context.Background(), env.issuer.URL()+"|alice")
+	hook(context.Background(), env.issuer.URL()+"|alice", sessionKey(sess.Value))
 
 	fc.Advance(15 * time.Minute) // t = 40 min — inside idle only because of the input
 	r := env.authedGet(t, sess, "/v1/me")
@@ -247,7 +247,7 @@ func TestInputActivity_DoesNotReviveExpiredSession(t *testing.T) {
 	hook := env.auth.InputHook()
 
 	fc.Advance(31 * time.Minute) // past the 30 m idle window
-	hook(context.Background(), env.issuer.URL()+"|alice")
+	hook(context.Background(), env.issuer.URL()+"|alice", sessionKey(sess.Value))
 
 	r := env.authedGet(t, sess, "/v1/me")
 	defer r.Body.Close()
@@ -275,7 +275,7 @@ func TestInputActivity_OtherPrincipalUntouched(t *testing.T) {
 
 	hook := env.auth.InputHook()
 	fc.Advance(25 * time.Minute)
-	hook(context.Background(), env.issuer.URL()+"|alice")
+	hook(context.Background(), env.issuer.URL()+"|alice", sessionKey(sessX.Value))
 
 	fc.Advance(10 * time.Minute) // t = 35 min: X fresh (25 m), Y dead (35 m)
 	r := env.authedGet(t, sessX, "/v1/me")
@@ -287,5 +287,75 @@ func TestInputActivity_OtherPrincipalUntouched(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("session Y slid by X's input: %d", r.StatusCode)
+	}
+}
+
+// TestInputActivity_SlidesOnlyBoundSession (SR-1-F3): input under a lease
+// credits the session digest the lease was minted under — a second,
+// zero-request session of the SAME principal idles out on schedule; a
+// legacy NULL digest (no binding recorded) keeps the principal-wide
+// fallback.
+func TestInputActivity_SlidesOnlyBoundSession(t *testing.T) {
+	env, fc := inputEnv(t)
+	sessA, _ := login(t, env, "alice")
+	now := fc.Now
+	// A sibling session of the same principal — e.g. a second browser tab's
+	// login — that has seen no activity of its own.
+	err := env.store.Save(context.Background(), &Session{
+		ID:        "sibling-session",
+		Principal: Principal{Issuer: env.issuer.URL(), Subject: "alice", TenantID: "tenant-a"},
+		CreatedAt: now(), LastSeenAt: now(), ExpiresAt: now().Add(12 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("plant session: %v", err)
+	}
+	sessB := &http.Cookie{Name: env.auth.SessionCookieName(), Value: "sibling-session"}
+
+	hook := env.auth.InputHook()
+	fc.Advance(25 * time.Minute)
+	hook(context.Background(), env.issuer.URL()+"|alice", sessionKey(sessA.Value))
+
+	fc.Advance(10 * time.Minute) // t = 35 min: A fresh (25 m), B dead (35 m)
+	r := env.authedGet(t, sessA, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("bound session rejected after own input: %d", r.StatusCode)
+	}
+	r = env.authedGet(t, sessB, "/v1/me")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("sibling session slid by a digest-scoped input: %d", r.StatusCode)
+	}
+}
+
+// TestInputActivity_NullDigestFallsBackToPrincipal (SR-1-F3): a lease minted
+// before the binding column exists carries no digest — the hook degrades to
+// the principal-wide touch so pre-upgrade streams keep working during a
+// rolling deploy.
+func TestInputActivity_NullDigestFallsBackToPrincipal(t *testing.T) {
+	env, fc := inputEnv(t)
+	sessA, _ := login(t, env, "alice")
+	now := fc.Now
+	err := env.store.Save(context.Background(), &Session{
+		ID:        "sibling-session",
+		Principal: Principal{Issuer: env.issuer.URL(), Subject: "alice", TenantID: "tenant-a"},
+		CreatedAt: now(), LastSeenAt: now(), ExpiresAt: now().Add(12 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("plant session: %v", err)
+	}
+	sessB := &http.Cookie{Name: env.auth.SessionCookieName(), Value: "sibling-session"}
+
+	hook := env.auth.InputHook()
+	fc.Advance(25 * time.Minute)
+	hook(context.Background(), env.issuer.URL()+"|alice", "") // legacy lease
+
+	fc.Advance(10 * time.Minute)
+	for _, sess := range []*http.Cookie{sessA, sessB} {
+		r := env.authedGet(t, sess, "/v1/me")
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("principal-fallback input did not slide %s: %d", sess.Value, r.StatusCode)
+		}
 	}
 }
