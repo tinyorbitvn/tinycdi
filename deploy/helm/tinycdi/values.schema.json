@@ -486,16 +486,20 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "egressNamespaceSelector": {"type": ["object", "null"]},
-                "egressPodSelector": {"type": ["object", "null"]},
+                "egressNamespaceSelector": {"$ref": "#/$defs/labelSelector"},
+                "egressPodSelector": {"$ref": "#/$defs/labelSelector"},
                 "egressPorts": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
+                    "dependencies": {"endPort": ["port"]},
                     "properties": {
                       "protocol": {"type": "string", "enum": ["TCP", "UDP", "SCTP"]},
-                      "port": {"type": ["integer", "string"]},
+                      "port": {"anyOf": [
+                        {"type": "integer", "minimum": 1, "maximum": 65535},
+                        {"type": "string", "minLength": 1, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"}
+                      ]},
                       "endPort": {"type": "integer", "minimum": 1, "maximum": 65535}
                     }
                   }
@@ -574,6 +578,30 @@
     }
   },
   "$defs": {
+    "labelSelector": {
+      "description": "metav1.LabelSelector: matchLabels map and/or matchExpressions with a real operator enum — the operator also validates it with LabelSelectorAsSelector at startup.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "matchExpressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "operator"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string", "minLength": 1},
+              "operator": {"type": "string", "enum": ["In", "NotIn", "Exists", "DoesNotExist"]},
+              "values": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
     "byteQuantity": {
       "description": "Kubernetes quantity of bytes: a non-negative number, or a decimal with an optional Ki..Ei / k..E suffix.",
       "anyOf": [

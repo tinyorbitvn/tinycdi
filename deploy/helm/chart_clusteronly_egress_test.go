@@ -124,6 +124,13 @@ func TestClusterOnlyEgressSchema(t *testing.T) {
 		{"selector not an object", `runtime.networkProfiles.clusterOnly.egressNamespaceSelector="tenant"`},
 		{"ports not an array", `runtime.networkProfiles.clusterOnly.egressPorts={}`},
 		{"bad port protocol", `runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"XYZ","port":1}]`},
+		{"port zero", `runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"TCP","port":0}]`},
+		{"endPort without port", `runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"TCP","endPort":9000}]`},
+		// Selector shape is validated at render time too (the operator
+		// additionally rejects bad selectors at startup).
+		{"bad matchExpression operator", `runtime.networkProfiles.clusterOnly.egressNamespaceSelector={"matchExpressions":[{"key":"k","operator":"Sometimes","values":["v"]}]}`},
+		{"empty matchExpression key", `runtime.networkProfiles.clusterOnly.egressNamespaceSelector={"matchExpressions":[{"key":"","operator":"Exists"}]}`},
+		{"unknown selector key", `runtime.networkProfiles.clusterOnly.egressNamespaceSelector={"matchLabel":{"a":"b"}}`},
 	} {
 		out := renderErrArgs(t, "-f", minimal, "--set-json", tc.set)
 		if !strings.Contains(out, "clusterOnly") && !strings.Contains(out, "networkProfiles") {

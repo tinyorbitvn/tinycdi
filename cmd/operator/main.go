@@ -15,13 +15,17 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -124,17 +128,68 @@ func parseClusterOnlyEgress(s string) (*linuxruntime.ClusterOnlyEgress, error) {
 		return nil, errors.New("--runtime-clusteronly-egress must set at least one of " +
 			"namespaceSelector, podSelector or ports")
 	}
+	// The selectors and ports become NetworkPolicy peers verbatim —
+	// validate them the way the apiserver will, so a typo fails startup
+	// instead of converging a policy that can never apply or that is
+	// wider than asked.
+	for _, sel := range []struct {
+		field string
+		v     *metav1.LabelSelector
+	}{
+		{"namespaceSelector", spec.NamespaceSelector},
+		{"podSelector", spec.PodSelector},
+	} {
+		if _, err := metav1.LabelSelectorAsSelector(sel.v); err != nil {
+			return nil, fmt.Errorf("--runtime-clusteronly-egress %s: %w", sel.field, err)
+		}
+	}
 	for i, p := range spec.Ports {
-		if p.Protocol != nil {
-			switch *p.Protocol {
-			case corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP:
-			default:
-				return nil, fmt.Errorf("--runtime-clusteronly-egress ports[%d]: "+
-					"invalid protocol %q (want TCP, UDP or SCTP)", i, *p.Protocol)
-			}
+		if err := validNetPolPort(p); err != nil {
+			return nil, fmt.Errorf("--runtime-clusteronly-egress ports[%d]: %w", i, err)
 		}
 	}
 	return &spec, nil
+}
+
+// validNetPolPort mirrors the apiserver's NetworkPolicyPort rules:
+// protocol ∈ {TCP,UDP,SCTP}; port is a valid port number or port name;
+// endPort may only accompany a numeric port and must not be less than it.
+func validNetPolPort(p networkingv1.NetworkPolicyPort) error {
+	if p.Protocol != nil {
+		switch *p.Protocol {
+		case corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP:
+		default:
+			return fmt.Errorf("invalid protocol %q (want TCP, UDP or SCTP)", *p.Protocol)
+		}
+	}
+	if p.Port != nil {
+		switch p.Port.Type {
+		case intstr.Int:
+			if errs := validation.IsValidPortNum(int(p.Port.IntVal)); len(errs) > 0 {
+				return fmt.Errorf("invalid port %d: %s", p.Port.IntVal, errs[0])
+			}
+		case intstr.String:
+			if errs := validation.IsValidPortName(p.Port.StrVal); len(errs) > 0 {
+				return fmt.Errorf("invalid port name %q: %s", p.Port.StrVal, errs[0])
+			}
+		}
+	}
+	if p.EndPort == nil {
+		return nil
+	}
+	if p.Port == nil {
+		return errors.New("endPort requires port")
+	}
+	if p.Port.Type != intstr.Int {
+		return errors.New("endPort requires a numeric port")
+	}
+	if errs := validation.IsValidPortNum(int(*p.EndPort)); len(errs) > 0 {
+		return fmt.Errorf("invalid endPort %d: %s", *p.EndPort, errs[0])
+	}
+	if *p.EndPort < p.Port.IntVal {
+		return fmt.Errorf("endPort %d must not be less than port %d", *p.EndPort, p.Port.IntVal)
+	}
+	return nil
 }
 
 // runtimePlacement carries the operator-wide scheduling defaults for

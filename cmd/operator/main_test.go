@@ -438,6 +438,19 @@ func TestParseClusterOnlyEgress(t *testing.T) {
 		t.Fatalf("ports = %+v", got.Ports)
 	}
 
+	// Valid port-range forms.
+	for _, in := range []string{
+		`{"ports":[{"protocol":"TCP","port":8000,"endPort":9000}]}`, // range
+		`{"ports":[{"protocol":"TCP","port":443,"endPort":443}]}`,   // degenerate range
+		`{"ports":[{"port":"https"}]}`,                              // named port
+		`{"ports":[{}]}`,                                            // port unset = all
+		`{"namespaceSelector":{"matchLabels":{"a":"b"},"matchExpressions":[{"key":"k","operator":"In","values":["v"]}]}}`,
+	} {
+		if _, err := parseClusterOnlyEgress(in); err != nil {
+			t.Fatalf("valid input %s rejected: %v", in, err)
+		}
+	}
+
 	for _, tc := range []struct {
 		name string
 		in   string
@@ -450,6 +463,22 @@ func TestParseClusterOnlyEgress(t *testing.T) {
 		{"unknown port key", `{"ports":[{"protocol":"TCP","port":1,"bogus":1}]}`, "--runtime-clusteronly-egress"},
 		{"bad protocol", `{"ports":[{"protocol":"XYZ","port":1}]}`, "protocol"},
 		{"bad port type", `{"ports":[{"protocol":"TCP","port":{}}]}`, "--runtime-clusteronly-egress"},
+		// Typo'd selectors must fail startup, never widen silently.
+		{"nested unknown selector key", `{"namespaceSelector":{"bogus":1}}`, "--runtime-clusteronly-egress"},
+		{"nested unknown requirement key", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"In","values":["v"],"bogus":1}]}}`, "--runtime-clusteronly-egress"},
+		{"bad matchExpression operator", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"Sometimes","values":["v"]}]}}`, "namespaceSelector"},
+		{"empty matchExpression key", `{"namespaceSelector":{"matchExpressions":[{"key":"","operator":"Exists"}]}}`, "namespaceSelector"},
+		{"bad matchLabel key", `{"namespaceSelector":{"matchLabels":{"bad key!":"v"}}}`, "namespaceSelector"},
+		{"values under Exists", `{"podSelector":{"matchExpressions":[{"key":"k","operator":"Exists","values":["v"]}]}}`, "podSelector"},
+		{"In without values", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"In"}]}}`, "namespaceSelector"},
+		// Port-range validation (apiserver rules).
+		{"port zero", `{"ports":[{"protocol":"TCP","port":0}]}`, "ports"},
+		{"port too big", `{"ports":[{"protocol":"TCP","port":70000}]}`, "ports"},
+		{"bad port name", `{"ports":[{"protocol":"TCP","port":"BAD PORT"}]}`, "ports"},
+		{"endPort without port", `{"ports":[{"protocol":"TCP","endPort":9000}]}`, "endPort"},
+		{"endPort less than port", `{"ports":[{"protocol":"TCP","port":9000,"endPort":8000}]}`, "endPort"},
+		{"endPort on named port", `{"ports":[{"protocol":"TCP","port":"https","endPort":9000}]}`, "endPort"},
+		{"endPort out of range", `{"ports":[{"protocol":"TCP","port":80,"endPort":70000}]}`, "endPort"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseClusterOnlyEgress(tc.in)

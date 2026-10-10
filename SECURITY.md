@@ -441,7 +441,10 @@ v0.2)
     `TestClusterOnlyEgressRestrictionOnPolicy`,
     `TestClusterOnlyEgressPortsOnlyStaysPodOnly`,
     `TestParseClusterOnlyEgress`, `TestClusterOnlyEgressDefaultRendersNoFlag`,
-    `TestClusterOnlyEgressRendersNamespaceSelector`, `TestParseExceptCIDRs`,
+    `TestClusterOnlyEgressRendersNamespaceSelector`,
+    `TestDefaultRenderUnchangedGolden` (whole-render byte-golden: the opt-in
+    knobs cannot change the default manifests unnoticed),
+    `TestParseExceptCIDRs`,
     `TestNetworkPolicyEmptyPeersFailClosed`, `TestMetricsEmptyPeersFailClosed`,
     `TestMetricsNotOnPublicGatewayService`, `TestInternetOnlyRequiresClusterCIDRs`,
     `TestOperatorPodNamespaceEnv`, `TestHardeningDevGateBypasses`

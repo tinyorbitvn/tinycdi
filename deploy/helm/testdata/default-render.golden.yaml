@@ -1,0 +1,1727 @@
+---
+# Source: tinycdi/crds/workspaces.cdi.tinyorbit.vn_workspaces.yaml
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: workspaces.workspaces.cdi.tinyorbit.vn
+spec:
+  group: workspaces.cdi.tinyorbit.vn
+  names:
+    kind: Workspace
+    listKind: WorkspaceList
+    plural: workspaces
+    singular: workspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.desiredState
+      name: Desired
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.runtimeGeneration
+      name: RuntimeGen
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Workspace is the Schema for the workspaces API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Workspace
+            properties:
+              dataPolicy:
+                description: |-
+                  dataPolicy selects whether workspace data is destroyed (Ephemeral) or
+                  moved to the retained inventory (Retain) when the workspace is deleted.
+                enum:
+                - Ephemeral
+                - Retain
+                type: string
+              desiredState:
+                description: 'desiredState is the user/platform intent: Running or
+                  Stopped.'
+                enum:
+                - Running
+                - Stopped
+                type: string
+              intentRevision:
+                description: |-
+                  intentRevision serializes every lifecycle intent (create, start, stop,
+                  delete, attach, purge) of this workspace. The API increments it in the
+                  same transaction as the workspace record. The operator drops any
+                  observed intentRevision <= status.lastAppliedIntentRevision.
+                format: int64
+                minimum: 1
+                type: integer
+              ownerSubject:
+                description: ownerSubject is the immutable OIDC identity of the workspace
+                  owner.
+                properties:
+                  issuer:
+                    description: issuer is the OIDC issuer URL (the `iss` claim).
+                    minLength: 1
+                    type: string
+                  subject:
+                    description: subject is the OIDC subject (the `sub` claim).
+                    minLength: 1
+                    type: string
+                required:
+                - issuer
+                - subject
+                type: object
+              runtimeGeneration:
+                description: |-
+                  runtimeGeneration is a monotonically increasing number scoped to this
+                  workspace's UID. The API assigns a new value (in spec, inside the same
+                  outbox transaction as the intent record) every time an intent is
+                  accepted that moves the runtime to Running: create-with-Running or
+                  start-from-Stopped. Stop/Delete fence the current generation; the next
+                  start is issued a new one. It may be 0 only while the workspace has
+                  never been asked to run.
+                format: int64
+                minimum: 0
+                type: integer
+              templateRef:
+                description: |-
+                  templateRef is the WorkspaceTemplate this workspace runs from. It is
+                  fixed while the runtime is wanted Running; the platform API may
+                  re-point it to a newer revision of the same template family only
+                  while desiredState is Stopped (the CEL rule below).
+                properties:
+                  name:
+                    description: name of the WorkspaceTemplate in the same namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - dataPolicy
+            - desiredState
+            - intentRevision
+            - ownerSubject
+            - runtimeGeneration
+            - templateRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec.templateRef may change only while desiredState is Stopped
+              rule: self.templateRef == oldSelf.templateRef || oldSelf.desiredState
+                == 'Stopped'
+            - message: spec.ownerSubject is immutable
+              rule: self.ownerSubject == oldSelf.ownerSubject
+            - message: spec.dataPolicy is immutable
+              rule: self.dataPolicy == oldSelf.dataPolicy
+            - message: spec.runtimeGeneration must not decrease
+              rule: self.runtimeGeneration >= oldSelf.runtimeGeneration
+            - message: spec.intentRevision must not decrease
+              rule: self.intentRevision >= oldSelf.intentRevision
+            - message: spec.runtimeGeneration must be >= 1 when spec.desiredState
+                is Running
+              rule: self.desiredState != 'Running' || self.runtimeGeneration >= 1
+          status:
+            description: status defines the observed state of Workspace
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the Workspace resource.
+                  Condition types: Admitted, StorageReady, RuntimeReady, ConnectionReady,
+                  Degraded.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dataRefs:
+                description: |-
+                  dataRefs lists the volumes belonging to this workspace (home PVC,
+                  retained disk attachment, Windows boot disk).
+                items:
+                  description: |-
+                    DataReference records a data volume the workspace uses or retains. Persistent
+                    volumes never carry an ownerReference to the Workspace; these refs are the
+                    platform's bookkeeping for retention and purge.
+                  properties:
+                    name:
+                      description: name of the referenced object (e.g. PersistentVolumeClaim
+                        name).
+                      minLength: 1
+                      type: string
+                    role:
+                      description: role of the referenced volume.
+                      enum:
+                      - Home
+                      - Boot
+                      - Scratch
+                      - Retained
+                      type: string
+                  required:
+                  - name
+                  - role
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - role
+                x-kubernetes-list-type: map
+              lastAppliedIntentRevision:
+                description: |-
+                  lastAppliedIntentRevision is the highest spec.intentRevision the
+                  operator has applied. Lower revisions are ignored.
+                format: int64
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the latest metadata.generation the operator has
+                  reconciled.
+                format: int64
+                type: integer
+              observedRuntimeGeneration:
+                description: |-
+                  observedRuntimeGeneration is the spec.runtimeGeneration the reported
+                  runtime incarnation belongs to.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  phase summarizes the lifecycle position. Condition reasons carry the
+                  actionable detail.
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Stopping
+                - Stopped
+                - Failed
+                - Terminating
+                type: string
+              runtimeUID:
+                description: |-
+                  runtimeUID is the UID of the current runtime incarnation (Pod for
+                  LinuxContainer, VMI for WindowsVM) belonging to
+                  observedRuntimeGeneration. A generation may contain several
+                  incarnations; a crash/reschedule produces a new runtimeUID which
+                  automatically fences tickets, leases and activity bound to the old one.
+                type: string
+              serviceRef:
+                description: |-
+                  serviceRef is the internal Service fronting the runtime, set when the
+                  runtime exists. Not a connect endpoint for clients.
+                properties:
+                  name:
+                    description: name of the Service in the workspace's namespace.
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port on the Service that serves the streaming endpoint.
+                    format: int32
+                    type: integer
+                required:
+                - name
+                type: object
+              startedAt:
+                description: |-
+                  startedAt is when the current runtime incarnation became Ready. It
+                  belongs to that incarnation alone: the maxDuration cap is measured from
+                  it, it is cleared once the incarnation ends (Stopping, Stopped or
+                  Failed) and set again when the next start reaches Ready. It is not the
+                  workspace's first start.
+                format: date-time
+                type: string
+              stoppedAt:
+                description: stoppedAt is when the runtime last reached Stopped.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: tinycdi/crds/workspaces.cdi.tinyorbit.vn_workspacetemplates.yaml
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: workspacetemplates.workspaces.cdi.tinyorbit.vn
+spec:
+  group: workspaces.cdi.tinyorbit.vn
+  names:
+    kind: WorkspaceTemplate
+    listKind: WorkspaceTemplateList
+    plural: workspacetemplates
+    singular: workspacetemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.runtime
+      name: Runtime
+      type: string
+    - jsonPath: .spec.experience
+      name: Experience
+      type: string
+    - jsonPath: .spec.revision
+      name: Revision
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: WorkspaceTemplate is the Schema for the workspacetemplates API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of WorkspaceTemplate
+            properties:
+              bootDeadline:
+                description: |-
+                  bootDeadline bounds how long a workspace may take to become Ready
+                  before it is failed.
+                type: string
+              clipboardPolicy:
+                description: |-
+                  clipboardPolicy selects clipboard redirection between client and
+                  workspace.
+                enum:
+                - Disabled
+                - Send
+                - Receive
+                - Bidirectional
+                type: string
+              experience:
+                description: experience selects the client experience.
+                enum:
+                - Desktop
+                - Browser
+                type: string
+              lifecycle:
+                description: |-
+                  lifecycle carries the default idle/disconnect/max-duration and data
+                  policy for workspaces from this template.
+                properties:
+                  dataPolicy:
+                    description: |-
+                      dataPolicy is the default data policy for workspaces created from this
+                      template.
+                    enum:
+                    - Ephemeral
+                    - Retain
+                    type: string
+                  disconnectTimeout:
+                    description: |-
+                      disconnectTimeout is the grace period after the last interactive
+                      connection drops before the runtime is stopped.
+                    type: string
+                  idleTimeout:
+                    description: |-
+                      idleTimeout is how long an unused (no input) session may run before the
+                      platform stops it.
+                    type: string
+                  imageUpdate:
+                    default: OnStart
+                    description: |-
+                      imageUpdate selects how workspaces created from this template pick up
+                      newer published revisions of the same template family: OnStart moves a
+                      workspace to the newest revision on every Stopped -> Running start;
+                      Pinned keeps it on its recorded revision.
+                    enum:
+                    - OnStart
+                    - Pinned
+                    type: string
+                  maxDuration:
+                    description: maxDuration is the hard cap on a single Running generation.
+                    type: string
+                required:
+                - dataPolicy
+                - disconnectTimeout
+                - idleTimeout
+                - maxDuration
+                type: object
+              linux:
+                description: |-
+                  linux holds the LinuxContainer configuration. Required iff
+                  runtime=LinuxContainer, forbidden otherwise.
+                properties:
+                  adapter:
+                    default: ""
+                    description: |-
+                      adapter selects an injected runtime adapter for the image: "kasm"
+                      runs UNMODIFIED kasmweb/* workspace images behind the adapter scripts
+                      the operator delivers via an initContainer (docs/kasm-images.md).
+                      Requires the operator to be configured with --kasm-adapter-image;
+                      empty keeps the image's own entrypoint contract (the tcdi/* images).
+                    enum:
+                    - ""
+                    - kasm
+                    type: string
+                  browserPolicy:
+                    description: |-
+                      browserPolicy restricts the in-session browser when experience is
+                      Browser.
+                    properties:
+                      allowedDomains:
+                        description: |-
+                          allowedDomains is the allowlist of DNS domains the session browser may
+                          reach. Empty means the network profile alone decides.
+                        items:
+                          type: string
+                        type: array
+                      deniedDomains:
+                        description: deniedDomains is subtracted from the allowlist.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  command:
+                    description: |-
+                      command is the fixed container command/args chosen by the admin. End
+                      users can never supply or override a container command. Forbidden with
+                      adapter=kasm — the adapter supplies the container command.
+                    items:
+                      type: string
+                    type: array
+                  hostUsers:
+                    description: |-
+                      hostUsers sets the pod's hostUsers field: false runs the runtime in a
+                      user namespace so its root is not node root. Unset leaves the pod
+                      field nil — the operator's default applies when configured. Opt-in in
+                      v0.2; it becomes the default only after the R1 spike proves
+                      KasmVNC + the Chromium sandbox + PVC on RKE2 (design §3.7, D26).
+                    type: boolean
+                  image:
+                    description: |-
+                      image is the OCI reference for the runtime image, digest-pinned:
+                      <repo>@sha256:<64 hex>. Tags without a digest are rejected.
+                    minLength: 1
+                    pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$
+                    type: string
+                  sessionCmd:
+                    description: |-
+                      sessionCmd is the session payload command the adapter runs inside the
+                      desktop session (exported to the runtime as TCDI_SESSION_CMD). For
+                      Chromium-family kasmweb images it MUST point past the image's
+                      --no-sandbox wrapper scripts at the real binary — per docs/kasm-images.md
+                      every cataloged image needs a wrapper audit. Only valid with
+                      adapter=kasm; empty runs the image's default desktop session.
+                    pattern: ^[ -~]{1,512}$
+                    type: string
+                required:
+                - image
+                type: object
+                x-kubernetes-validations:
+                - message: sessionCmd is only valid with adapter=kasm
+                  rule: '!has(self.sessionCmd) || self.adapter == ''kasm'''
+                - message: command must be empty with adapter=kasm; the adapter supplies
+                    the container command
+                  rule: self.adapter != 'kasm' || !has(self.command) || size(self.command)
+                    == 0
+              networkProfile:
+                description: networkProfile selects the permitted egress profile for
+                  the runtime.
+                enum:
+                - InternetOnly
+                - ClusterOnly
+                - Isolated
+                type: string
+              placement:
+                description: |-
+                  placement controls where runtime pods are scheduled: node selector,
+                  tolerations, runtime class. Admin-only and immutable with the spec.
+                properties:
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: nodeSelector pins runtime pods to nodes carrying
+                      these labels.
+                    type: object
+                  runtimeClassName:
+                    description: |-
+                      runtimeClassName selects the node container runtime handler (e.g.
+                      gvisor). Passed through to pod.spec.runtimeClassName; v0.2 does not
+                      maintain a tested handler matrix (design §3.7).
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  tolerations:
+                    description: |-
+                      tolerations let runtime pods land on tainted nodes (the dedicated
+                      workspace pool). Capped at 16 — a scheduling hint, not a policy
+                      surface.
+                    items:
+                      description: |-
+                        The pod this Toleration is attached to tolerates any taint that matches
+                        the triple <key,value,effect> using the matching operator <operator>.
+                      properties:
+                        effect:
+                          description: |-
+                            Effect indicates the taint effect to match. Empty means match all taint effects.
+                            When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                          type: string
+                        key:
+                          description: |-
+                            Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                            If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                          type: string
+                        operator:
+                          description: |-
+                            Operator represents a key's relationship to the value.
+                            Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                            Exists is equivalent to wildcard for value, so that a pod can
+                            tolerate all taints of a particular category.
+                            Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                          type: string
+                        tolerationSeconds:
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration (which must be
+                            of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                            it is not set, which means tolerate the taint forever (do not evict). Zero and
+                            negative values will be treated as 0 (evict immediately) by the system.
+                          format: int64
+                          type: integer
+                        value:
+                          description: |-
+                            Value is the taint value the toleration matches to.
+                            If the operator is Exists, the value should be empty, otherwise just a regular string.
+                          type: string
+                      type: object
+                    maxItems: 16
+                    type: array
+                type: object
+              resources:
+                description: resources is the compute/storage profile for the runtime.
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: cpu request/limit for the runtime.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: memory request/limit for the runtime.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      storage is the size of the per-workspace data volume (Linux home PVC or
+                      Windows boot disk clone).
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - cpu
+                - memory
+                - storage
+                type: object
+              revision:
+                description: |-
+                  revision is an admin-assigned identifier for this immutable template
+                  revision (e.g. "2026-09-a"). Immutable with the rest of spec.
+                minLength: 1
+                type: string
+              runtime:
+                description: runtime selects the runtime kind.
+                enum:
+                - LinuxContainer
+                - WindowsVM
+                type: string
+              windows:
+                description: |-
+                  windows holds the WindowsVM configuration. Required iff
+                  runtime=WindowsVM, forbidden otherwise.
+                properties:
+                  sourceChecksum:
+                    description: |-
+                      sourceChecksum is the content checksum of the sealed source, recorded
+                      by the admin at seal time and used to detect a re-sealed or swapped
+                      source.
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  sourcePVCRef:
+                    description: sourcePVCRef is the sealed, golden-image PVC to clone
+                      per workspace.
+                    properties:
+                      name:
+                        description: name of the sealed source PVC in the template's
+                          namespace.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          namespace must be omitted. The source PVC is always resolved in the
+                          template's own namespace; setting this field is rejected.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - sourceChecksum
+                - sourcePVCRef
+                type: object
+            required:
+            - bootDeadline
+            - clipboardPolicy
+            - experience
+            - lifecycle
+            - networkProfile
+            - resources
+            - revision
+            - runtime
+            type: object
+          status:
+            description: status defines the observed state of WorkspaceTemplate
+            properties:
+              observedGeneration:
+                description: |-
+                  observedGeneration is the latest metadata.generation seen by a
+                  consumer (informational).
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: spec is immutable; publish a new revision object instead
+          rule: self.spec == oldSelf.spec
+        - message: spec.linux is required iff spec.runtime=LinuxContainer, spec.windows
+            iff WindowsVM; the other block is forbidden
+          rule: (self.spec.runtime == 'LinuxContainer' && has(self.spec.linux) &&
+            !has(self.spec.windows)) || (self.spec.runtime == 'WindowsVM' && has(self.spec.windows)
+            && !has(self.spec.linux))
+        - message: spec.windows.sourcePVCRef.namespace must be omitted; the source
+            PVC is always resolved in the template's namespace (cross-namespace references
+            are not allowed)
+          rule: '!has(self.spec.windows) || !has(self.spec.windows.sourcePVCRef) ||
+            !has(self.spec.windows.sourcePVCRef.namespace)'
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: tinycdi/templates/namespaces.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tinycdi-tenant-a
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: tenant-a
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinycdi-0.2.0
+---
+# Source: tinycdi/templates/namespaces.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tinycdi-tenant-b
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: tenant-b
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinycdi-0.2.0
+# The release (platform) namespace itself is labeled by Helm only when
+# Helm creates it; the installer applies the PSS labels (see install.md).
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tcdi-system
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tinycdi-tenant-a
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tinycdi-tenant-b
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# Cluster DNS for every pod in the release namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: tcdi-system
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# Pods that must reach the kube-apiserver (backend: CR projection; operator:
+# watches). Peers are values — point them at
+# the kubernetes.default Service IP of YOUR cluster (see install.md).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-apiserver-egress
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {cdi.tinyorbit.vn/needs-apiserver: "true"}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - {protocol: TCP, port: 443}
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# backend: app (:8443) and session (:8444, every <label>.<sessionDomain>
+# workspace host) take traffic from the edge only (see
+# networkPolicy.edgeIngress) — plus the in-cluster control surface on
+# :8444 from the release namespace; the internal mTLS listener
+# (:9443) only from the operator. Egress: OIDC issuer, PostgreSQL and the
+# runtime pods in managed namespaces (streaming port); apiserver and DNS
+# come from the shared policies above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: backend}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 8443}
+        - {protocol: TCP, port: 8444}
+    # Session control surface (D9): /healthz and the bearer-gated
+    # /v1/control/* on :8444 answer only on the in-cluster Service names
+    # (-session-control-hosts), never on a workspace host. Pods in the
+    # release namespace (operator, admin/tooling Jobs) may reach it even
+    # when edgeIngressCIDRs is narrowed to the load-balancer range.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: "tcdi-system"}
+      ports:
+        - {protocol: TCP, port: 8444}
+    # internal mTLS listener (ADR 0003): the operator's teardown
+    # revoke/drain seam only — the session gateway reaches the broker
+    # in-process.
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: operator}
+      ports:
+        - {protocol: TCP, port: 9443}
+  egress:
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - ipBlock:
+            cidr: 10.20.30.40/32
+      ports:
+        - {protocol: TCP, port: 5432}
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+      ports: [{protocol: TCP, port: 8443}]
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# frontend: static SPA server. Ingress from the edge only; no egress at all
+# beyond DNS (it proxies nothing).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 8443}
+  egress: []
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# operator: reaches the backend internal mTLS listener for the teardown
+# finalizer's revoke/drain seam (ADR 0003). apiserver + DNS egress come
+# from the shared policies above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator
+  namespace: tcdi-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: operator}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: backend}
+      ports: [{protocol: TCP, port: 9443}]
+---
+# Source: tinycdi/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: tcdi}
+  minAvailable: 1
+---
+# Source: tinycdi/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: operator
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: operator, app.kubernetes.io/instance: tcdi}
+  minAvailable: 1
+---
+# Source: tinycdi/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: tcdi}
+  minAvailable: 1
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+automountServiceAccountToken: true   # SEC-34: the frontend never calls the apiserver
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: operator
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+automountServiceAccountToken: true   # SEC-34: the frontend never calls the apiserver
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+automountServiceAccountToken: false   # SEC-34: the frontend never calls the apiserver
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tinycdi-runtime
+  namespace: tinycdi-tenant-a
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: tenant-a
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinycdi-0.2.0
+automountServiceAccountToken: false
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tinycdi-runtime
+  namespace: tinycdi-tenant-b
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: tenant-b
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinycdi-0.2.0
+automountServiceAccountToken: false
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tcdi-manager-role
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+rules:
+# Workspace CRs: spec/status read+write, finalizer management. No create —
+# the platform API owns Workspace creation; the operator only reconciles.
+# Cluster-scoped because workspaces span tenant namespaces; the operator
+# itself only ever touches children it owns (UID-labeled), and never reads
+# Secret values into logs or status.
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces/finalizers"]
+  verbs: ["update"]
+# Templates are read-only for the operator (admins publish them).
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspacetemplates"]
+  verbs: ["get", "list", "watch"]
+# Runtime children the backend converges.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Events: the operator emits the IntentBehind warning on Workspace objects
+# (edge-triggered, one per drift transition) inside managed namespaces.
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+# Source: tinycdi/templates/rbac.yaml
+# Backend role (public API): projects intents onto Workspace CRs and reads templates, only
+# inside tenant namespaces (bound via RoleBindings below). secrets get is
+# the broker credential source (per-workspace runtime secret).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tcdi-backend-role
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+rules:
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspaces"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["workspaces.cdi.tinyorbit.vn"]
+  resources: ["workspacetemplates"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+# retained-data flows: attach retargets (patch), the purge sweeper
+# deletes confirmed-Purging volumes and strips the pvc-protection
+# finalizer (merge patch — never update), the inventory sync lists
+# retained-labelled PVCs; the sweeper also lists pods to refuse
+# deleting a volume a consumer still binds
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+# Source: tinycdi/templates/rbac.yaml
+# Leader election stays inside the release namespace. Leases ONLY —
+# controller-runtime defaults the lock to coordination.k8s.io/leases
+# (resourcelock.LeasesResourceLock; cmd/operator never overrides it), so no
+# configmaps grant exists here (SEC-06: a configmaps write grant is what
+# let the operator SA patch the node-profile installer's scripts).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tcdi-leader-election
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tcdi-leader-election
+  namespace: tcdi-system
+subjects:
+  - {kind: ServiceAccount, name: operator, namespace: tcdi-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: tcdi-leader-election}
+# Operator bindings: every managed namespace ONLY (SEC-09). The release
+# namespace gets no manager-role binding — the operator does nothing there
+# (no Workspace CRs can be created there; leader election has its own Role
+# above), and a binding would let it read every platform Secret and create
+# pods next to the backend. --watch-namespaces matches this list.
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operator-manager
+  namespace: tinycdi-tenant-a
+subjects:
+  - {kind: ServiceAccount, name: operator, namespace: tcdi-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: tcdi-manager-role}
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-workspaces
+  namespace: tinycdi-tenant-a
+subjects:
+  - {kind: ServiceAccount, name: backend, namespace: tcdi-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: tcdi-backend-role}
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operator-manager
+  namespace: tinycdi-tenant-b
+subjects:
+  - {kind: ServiceAccount, name: operator, namespace: tcdi-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: tcdi-manager-role}
+---
+# Source: tinycdi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-workspaces
+  namespace: tinycdi-tenant-b
+subjects:
+  - {kind: ServiceAccount, name: backend, namespace: tcdi-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: tcdi-backend-role}
+---
+# Source: tinycdi/templates/backend.yaml
+# app (portal host /v1/), session (every <label>.<sessionDomain> host)
+# and internal (operator mTLS) ports. ClusterIP only: the portal host
+# needs an L7 path router
+# (Ingress / Gateway API) in front, and a NodePort/LoadBalancer would also
+# publish the internal port. The NetworkPolicies decide who reaches which
+# port: the edge only app/session, the operator only internal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: tcdi}
+  ports:
+    - {name: app, port: 8443, targetPort: app}
+    - {name: session, port: 8444, targetPort: session}
+    - {name: internal, port: 9443, targetPort: internal}
+    # SEC-33: metrics are NEVER exposed on this Service — with
+    # backend.metrics.enabled they live on the dedicated ClusterIP
+    # backend-metrics Service below, reachable only via the
+    # allow-metrics-scrape NetworkPolicy peers.
+---
+# Source: tinycdi/templates/frontend.yaml
+# ClusterIP only — the edge (Ingress / Gateway API) routes portalHost
+# everything-but-/v1/ here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: tcdi}
+  ports:
+    - {name: https, port: 8443, targetPort: https}
+---
+# Source: tinycdi/templates/backend.yaml
+# Backend (cmd/backend): the public API and the session gateway in ONE
+# deployment, with a separate TLS listener per role:
+#   :8443 app      — public API /v1/* for the PORTAL host (the edge routes
+#                    portalHost /v1/ here; everything else on that host
+#                    goes to the frontend)
+#   :8444 session  — session gateway for every <label>.<sessionDomain>
+#                    workspace host (launch, desktop proxy, websockify)
+#                    plus the in-cluster control surface (/healthz,
+#                    /v1/control/*) on the Service names below
+#   :9443 internal — mTLS broker listener for the operator (ADR 0003)
+#   :9090 metrics  — only with backend.metrics.enabled, on its own
+#                    ClusterIP Service (SEC-33)
+# The gateway resolves launch tickets in-process — no gateway mTLS client.
+#
+# workspaces.cdi.tinyorbit.vn/role=gateway is what the operator's
+# per-workspace NetworkPolicy matches on for runtime ingress (SEC-29).
+#
+# Restart safety (D22): two replicas with a shared -gateway-id,
+# maxUnavailable=0 (a surge pod must be Ready before an old one drains),
+# a PDB (minAvailable 1) and preferred node anti-affinity. SIGTERM starts
+# Gateway.Drain inside the 30s termination grace period and holds both
+# listeners for the whole -drain-window; clients reconnect to the other
+# replica with the same session cookie.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      # Never drop below the replica count: surge first, then drain the
+      # old pod — a session replica stays available at every step (D22).
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: backend, app.kubernetes.io/instance: tcdi}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend
+        app.kubernetes.io/instance: tcdi
+        app.kubernetes.io/part-of: tinycdi
+        cdi.tinyorbit.vn/needs-apiserver: "true"
+        workspaces.cdi.tinyorbit.vn/role: gateway
+    spec:
+      serviceAccountName: backend
+      # The API projects Workspace CRs and reads templates/secrets in the
+      # managed namespaces (rbac.yaml backend-role).
+      automountServiceAccountToken: true
+      # SIGTERM fails readiness, then the pod waits
+      # -drain-propagation-delay (backend.drainPropagationDelay, default
+      # 5 s) for the endpoint removal to propagate while streams keep
+      # flowing, closes them with a graceful 1001, and holds both
+      # listeners for the whole -drain-window (default 8 s,
+      # TCDI_DRAIN_WINDOW): reads answer, new launches/upgrades get a
+      # retryable 503, then graceful listener shutdown — all under one
+      # 24 s deadline (internal/backend). 30 s covers it with margin.
+      # Never lower this below 30.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      
+      # Spread replicas across nodes (P8: preferred, not required — a
+      # required rule would strand the second replica on single-node
+      # clusters). backend.affinity keys merge over this default.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: tcdi
+                  app.kubernetes.io/name: backend
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+        - name: backend
+          image: ghcr.io/tinyorbitvn/tinycdi-backend:0.2.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: app, containerPort: 8443}
+            - {name: session, containerPort: 8444}
+            - {name: internal, containerPort: 9443}
+          args:
+            # app listener: public API for the portal host.
+            - -listen=:8443
+            - -tls-cert=/tls/app/tls.crt
+            - -tls-key=/tls/app/tls.key
+            - -session-idle=30m
+            # readiness drop -> endpoint-removal propagation wait ->
+            # graceful 1001 stream close -> drain-window hold (FX-R34).
+            - -drain-propagation-delay=5s
+            - -drain-window=8s
+            # Sign-out also ends the IdP session (RP-initiated logout).
+            - --oidc-end-session=true
+            # AEAD keys sealing the __Host-tcdi_login cookie (D20): the
+            # FIRST file seals, every file opens — "previous" carries the
+            # pre-rotation key while it exists in the Secret (in-cluster
+            # lookup decides; under helm template/GitOps add
+            # "-login-key-file=/login-keys/previous" via backend.extraArgs
+            # during a rotation).
+            - -login-key-file=/login-keys/current
+            # session listener: session gateway on every workspace host
+            # <label>.<sessionDomain> (D9).
+            - -session-listen=:8444
+            - -session-tls-cert=/tls/session/tls.crt
+            - -session-tls-key=/tls/session/tls.key
+            # /healthz and the bearer-gated /v1/control/* answer ONLY on
+            # these Hosts — the in-cluster Service names — never on a
+            # workspace host (D9); backend.controlHosts adds extras (the
+            # allowlist compares the hostname sans port).
+            - -session-control-hosts=backend,backend.tcdi-system,backend.tcdi-system.svc,backend.tcdi-system.svc.cluster.local
+            # lax requires portal and session on the same registrable
+            # domain; partitioned (SameSite=None; Secure; Partitioned) is
+            # for cross-site deployments.
+            - -session-cookie-mode=lax
+            # internal listener: operator mTLS broker API (ADR 0003).
+            - -internal-listen=:9443
+            - -internal-tls-cert=/tls/internal/tls.crt
+            - -internal-tls-key=/tls/internal/tls.key
+            - -internal-client-ca=/etc/client-ca/ca.crt
+            # shared: the session domain names the per-workspace hosts
+            # (launch target + ticket audience); the portal origins are
+            # the API CSRF Origin allowlist, the launch Origin allowlist
+            # (ADR 0004) and the session listener's frame-ancestors.
+            - -session-domain=session.lab.example.net
+            - -portal-origin=https://portal.lab.example.net
+            - -gateway-audience=session.lab.example.net
+            # ONE identity for the whole Deployment (D19/D22): the lease
+            # directory is shared, so a per-pod id would split ownership
+            # across replicas. Literal value — never the pod name.
+            - -gateway-id=tinycdi-backend
+            # Rate-limit per-replica ceiling (RL-1, ADR 0006): the shared
+            # Postgres window enforces -login-rate/-launch-rate as the
+            # exact aggregate; each pod additionally keeps its budget
+            # divided by this count as the local ceiling — the cap while
+            # Postgres is healthy and the fail-open limit during a store
+            # outage. Clamped to >= 1 — backend.replicas may be 0 (scaled
+            # down), and a later out-of-band scale-up must not crash-loop
+            # on a 0 divisor. Rendered before extraArgs so an override
+            # there (e.g. an HPA's maxReplicas) wins.
+            - -rate-limit-replicas=2
+          env:
+            - name: TCDI_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tinycdi-backend-db
+                  key: url
+            # pgx honours the libpq env vars for DSN keys the URL omits —
+            # an explicit sslmode= in the DSN still wins.
+            - {name: PGSSLMODE, value: "verify-full"}
+            - {name: TCDI_OIDC_ISSUER, value: "https://idp.lab.example.net/realms/tinycdi"}
+            - {name: TCDI_OIDC_CLIENT_ID, value: "tinycdi"}
+            - name: TCDI_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: tinycdi-oidc-client
+                  key: client-secret
+            - {name: TCDI_OIDC_REDIRECT_URL, value: "https://portal.lab.example.net/v1/auth/callback"}
+            - {name: TCDI_TENANT_NAMESPACES, value: "tenant-a=tinycdi-tenant-a,tenant-b=tinycdi-tenant-b"}
+            # Bounded tenant label values for session metrics/leases.
+            - {name: TCDI_TENANT_ALLOWLIST, value: "tenant-a,tenant-b"}
+          # /readyz answers 200 only once Run is serving AND the Workspace
+          # informer cache has synced, and 503 as soon as shutdown starts.
+          readinessProbe:
+            httpGet: {path: /readyz, port: app, scheme: HTTPS}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup (migrations queued behind another replica, cache sync)
+          # may take minutes; liveness only begins once /healthz answers.
+          startupProbe:
+            httpGet: {path: /healthz, port: app, scheme: HTTPS}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: app, scheme: HTTPS}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            limits:
+              cpu: "1"
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - {name: tls-app, mountPath: /tls/app, readOnly: true}
+            - {name: tls-session, mountPath: /tls/session, readOnly: true}
+            - {name: tls-internal, mountPath: /tls/internal, readOnly: true}
+            - {name: client-ca, mountPath: /etc/client-ca, readOnly: true}
+            - {name: login-keys, mountPath: /login-keys, readOnly: true}
+      volumes:
+        # One certificate per listener — the app, session and internal
+        # listeners never share TLS material.
+        - name: tls-app
+          secret: {secretName: tinycdi-backend-app-tls}
+        - name: tls-session
+          secret: {secretName: tinycdi-backend-session-tls}
+        - name: tls-internal
+          secret: {secretName: tinycdi-backend-internal-tls}
+        - name: client-ca
+          # SEC-08: project ONLY the CA key — the Secret may also carry
+          # tls.key (the cert-manager CA Secret does).
+          secret:
+            secretName: tinycdi-internal-ca
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: login-keys
+          # Login-state seal keys: "current" is required, "previous" is
+          # mounted when the Secret carries it (key rotation).
+          secret: {secretName: tinycdi-backend-login-keys}
+---
+# Source: tinycdi/templates/frontend.yaml
+# Frontend (build/frontend): serves the built portal SPA over TLS with the
+# portal security headers. Static files only — it does not proxy /v1; the
+# edge routes portalHost /v1/ to the backend app listener. No apiserver
+# access — its ServiceAccount has automountServiceAccountToken=false.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      # Never drop below the replica count: surge first, then drain the
+      # old pod — the portal stays available at every step (E4/D22).
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: frontend, app.kubernetes.io/instance: tcdi}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/instance: tcdi
+        app.kubernetes.io/part-of: tinycdi
+    spec:
+      serviceAccountName: frontend
+      automountServiceAccountToken: false
+      # SIGTERM fails /healthz, then the frontend keeps serving for
+      # -drain-delay (frontend.drainDelay, default 8s) while the pod's
+      # endpoint removal propagates to kube-proxy / the edge — a rollover
+      # never routes to a dead pod (FX-R35). 30 s covers the delay plus a
+      # graceful listener shutdown with margin (render-time bound:
+      # drainDelay <= 20s).
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+        - name: frontend
+          image: ghcr.io/tinyorbitvn/tinycdi-frontend:0.2.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -listen=:8443
+            # pre-stop drain (FX-R35): /healthz fails on SIGTERM and the
+            # server keeps serving this long while the endpoint removal
+            # propagates, then shuts down gracefully.
+            - -drain-delay=8s
+            # The SPA shows sessions in an iframe on each workspace's own
+            # <label>.<sessionDomain> host and launches them with a form
+            # POST there — the CSP frame-src and form-action get the
+            # https://*.<sessionDomain> wildcard or every session is
+            # CSP-blocked (D14).
+            - -session-domain=session.lab.example.net
+            - -tls-cert=/tls/tls.crt
+            - -tls-key=/tls/tls.key
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            # One miss flips Ready — on drain /healthz fails at once and
+            # the pod must leave the endpoints fast (FX-R35).
+            failureThreshold: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 20m
+              memory: 32Mi
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: tinycdi-frontend-tls}
+---
+# Source: tinycdi/templates/operator.yaml
+# Operator (cmd/operator). Its ClusterRole is bound ONLY via RoleBindings
+# in the managed namespaces (rbac.yaml — never the release namespace,
+# SEC-09), so --watch-namespaces pins the informer cache to exactly that
+# allowlist. POD_NAMESPACE (downward API) is the release namespace — the
+# leader-election Lease lives there via its own Role, and the runtime
+# backend uses it as the default --gateway-namespace (SEC-29).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: tcdi-system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/part-of: tinycdi
+    app.kubernetes.io/instance: tcdi
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: operator, app.kubernetes.io/instance: tcdi}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: operator
+        app.kubernetes.io/instance: tcdi
+        app.kubernetes.io/part-of: tinycdi
+        cdi.tinyorbit.vn/needs-apiserver: "true"
+    spec:
+      serviceAccountName: operator
+      automountServiceAccountToken: true
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+        - name: operator
+          image: ghcr.io/tinyorbitvn/tinycdi-operator:0.2.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --health-probe-bind-address=:8081
+            # Metrics stay OFF (SEC-33): controller-runtime's secure mode
+            # also enables the authn/authz filter, which needs
+            # cluster-scoped TokenReview/SAR RBAC this chart never grants;
+            # plain-HTTP metrics are not offered either.
+            - --metrics-bind-address=0
+            - --webhook-port=-1
+            - --leader-elect=true
+            - --leader-election-namespace=tcdi-system
+            - --watch-namespaces=tinycdi-tenant-a,tinycdi-tenant-b
+            # Internal broker (backend mTLS listener): the operator client
+            # cert CN is the only identity the workspace revoke/drain routes
+            # accept (ADR 0003; default CN=operator, backend.operatorCN
+            # overrides).
+            - --broker-internal-url=https://backend.tcdi-system.svc:9443
+            - --broker-ca-file=/etc/broker-ca/ca.crt
+            - --broker-client-cert-file=/mtls/tls.crt
+            - --broker-client-key-file=/mtls/tls.key
+            - --runtime-host-users=false
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          ports:
+            - {name: probes, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: probes}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            limits:
+              cpu: "1"
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - {name: broker-ca, mountPath: /etc/broker-ca, readOnly: true}
+            - {name: mtls, mountPath: /mtls, readOnly: true}
+      volumes:
+        - name: broker-ca
+          secret:
+            secretName: tinycdi-internal-ca
+            # SEC-08: project ONLY the CA key — the Secret may also carry
+            # tls.key (the cert-manager CA Secret does).
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: mtls
+          secret: {secretName: tinycdi-operator-mtls}
+---
+# Source: tinycdi/templates/dashboards.yaml
+# Optional Grafana dashboards (E8): one ConfigMap per JSON file under
+# files/dashboards/, labeled for the Grafana dashboard sidecar
+# (kube-prometheus-stack default: grafana_dashboard=1). Requires
+# backend.metrics.enabled — every panel reads the tinycdi_* series the
+# backend metrics listener serves; without it the dashboards are empty.
+---
+# Source: tinycdi/templates/namespaces.yaml
+# Managed (tenant) namespaces. resource-policy=keep: `helm uninstall`
+# leaves them — and every user PVC/Workspace inside — untouched.
+---
+# Source: tinycdi/templates/networkpolicy.yaml
+# Default-deny baseline: nothing talks unless a policy below allows it.
+# Managed namespaces get ONLY the baseline — the operator converges a
+# per-workspace boundary policy for each runtime pod.
+---
+# Source: tinycdi/templates/pdb.yaml
+# Optional PodDisruptionBudgets, one per component. backend and frontend
+# use <component>.pdb, operator keeps <component>.podDisruptionBudget.
+# The PDB renders when the block's `enabled` is true, or — when no
+# `enabled` key is present — when a sizing key (minAvailable /
+# maxUnavailable) is set; all three ship ON by default with
+# minAvailable:1 (D22 backend, E4 operator+frontend).
+---
+# Source: tinycdi/templates/prometheusrule.yaml
+# Optional PrometheusRule (E8): the platform alert set over the tinycdi_*
+# series. Requires backend.metrics.enabled — nothing serves the series
+# otherwise — and the Prometheus Operator CRDs; alerts.labels selects the
+# operator's ruleSelector the way serviceMonitor.labels does.
+---
+# Source: tinycdi/templates/rbac.yaml
+# RBAC — namespace-scoped by construction.
+#
+# The operator ClusterRole (config/rbac/role.yaml verbatim rules) is bound
+# ONLY via RoleBindings in each MANAGED namespace (SEC-09) — never the
+# release namespace (leader election uses its own leases-only Role there)
+# and matching --watch-namespaces on the operator. No ClusterRoleBinding
+# exists anywhere in this chart.
+---
+# Source: tinycdi/templates/serviceaccounts.yaml
+# Platform ServiceAccounts (release namespace) plus one tinycdi-runtime SA
+# per managed namespace with automountServiceAccountToken=false — runtime
+# pods never get a token (the operator also sets it on the pod spec).
+---
+# Source: tinycdi/templates/workspacetemplates.yaml
+# Seeded WorkspaceTemplates — the runtime catalog. spec passes through
+# (the CRD validates it: digest-pinned image, enum fields, ...) except
+# two chart fills: spec.linux.image resolves from `image:`/images keys,
+# and spec.linux.adapter is rendered explicitly ("" is the value the API
+# server would store anyway — GitOps diffing then shows no drift). Once
+# created, CEL makes spec immutable. So every distinct rendered
+# content becomes a NEW revision object instead of an in-place mutation:
+# metadata.name is "<name>-<hash8>" where hash8 = sha256 of the rendered
+# spec + effective annotations. A values change renders a new name; helm
+# creates the new revision and deletes the superseded one — upgrades and
+# rollbacks never touch a live template's spec. The catalog-name label
+# ties the revisions of one logical template together: the API resolves
+# tpl_<name> (and lists) to the newest published revision.
+#
+# Per-entry structured fields map to the annotations the runtime backend
+# honors (internal/runtime/linux/backend.go). The v0.1 nodeSelector entry
+# field is gone (E14): the render fails below — pod placement lives in the
+# typed spec.placement block, with unset fields falling back to the
+# operator defaults rendered from runtime.placement.
+#   image:           key into .Values.images (e.g. "linuxDesktop",
+#                    "browser") or a literal reference; used when
+#                    spec.linux.image is empty. Runtime images must be
+#                    digest-pinned — the CRD rejects tag-only references.
+#   imageBuiltAt:    -> workspaces.cdi.tinyorbit.vn/image-built-at for literal
+#                    image references (entries using an images key take
+#                    images.<key>.builtAt instead; images.<key>.engines.*
+#                    likewise render as image-chromium/image-firefox)
+#   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
+#   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
+#   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
+#                    (falls back to the top-level storageClass value)
+#   annotations:     -> extra annotations, verbatim
