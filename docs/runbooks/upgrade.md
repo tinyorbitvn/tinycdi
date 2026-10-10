@@ -51,6 +51,16 @@ reconcile and is harmless in between (the broker's expiry projection
 reads status first and falls back to the annotation only for rows that
 pre-date the field).
 
+**One honest caveat:** a workspace that is ALREADY running a pod built
+from a forged snapshot at upgrade time is adopted as-is — the pod proof
+is exactly what the upgrade relies on, and a forged record that matches
+the live pod is indistinguishable from an honest one. If you suspect a
+workspace's recorded snapshot was tampered with before the upgrade (e.g.
+a discovered annotation forgery), **stop the affected workspaces before rolling the
+operator** — a stopped workspace has no proving pod, so the new operator
+re-snapshots it from the live template instead of adopting the record,
+and its next start runs only what the template actually says.
+
 Post-upgrade check:
 
 ```

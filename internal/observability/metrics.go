@@ -92,6 +92,12 @@ var (
 	leaseSessionMissingReasons = map[string]struct{}{
 		"absent": {}, "invalid": {},
 	}
+	// internalAuthFailReasons are the mTLS identity-refusal classes the
+	// internal broker listener can emit: no peer cert presented, a verified
+	// cert without a CN, or a SPIFFE URI SAN disagreeing with the CN.
+	internalAuthFailReasons = map[string]struct{}{
+		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
+	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route
 	// events, the gateway events, http.request and the config apply); a
@@ -143,9 +149,10 @@ type Metrics struct {
 	frameReloads   *prometheus.CounterVec
 	sessionRevokes *prometheus.CounterVec
 	// sessionRevokeAlls counts sign-out-everywhere calls (ADR 0007).
-	sessionRevokeAlls *prometheus.CounterVec
-	leaseSessGone     *prometheus.CounterVec
-	auditWriteErrs    *prometheus.CounterVec
+	sessionRevokeAlls    *prometheus.CounterVec
+	leaseSessGone        *prometheus.CounterVec
+	auditWriteErrs       *prometheus.CounterVec
+	internalAuthFailures *prometheus.CounterVec
 
 	tenants map[string]struct{}
 }
@@ -252,6 +259,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "audit_write_errors_total",
 			Help: "Audit sink write failures, by bounded audit action — nonzero means audit records are being lost; the failed request still succeeded.",
 		}, []string{"event"}),
+		internalAuthFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "internal_auth_failures_total",
+			Help: "mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.",
+		}, []string{"reason"}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -263,6 +274,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
+		m.internalAuthFailures,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -442,4 +454,12 @@ func (m *Metrics) IncAuditWriteError(event string) {
 		return
 	}
 	m.auditWriteErrs.WithLabelValues(boundValue(event, auditEventActions)).Inc()
+}
+
+// IncInternalAuthFailure counts one mTLS identity rejection on the
+// internal broker listener; reason is bounded to {no_cert, no_cn,
+// spiffe_mismatch, other}. Unlike the per-request warn line this counter
+// is not rate-limited — it is the complete record of refused attempts.
+func (m *Metrics) IncInternalAuthFailure(reason string) {
+	m.internalAuthFailures.WithLabelValues(boundValue(reason, internalAuthFailReasons)).Inc()
 }

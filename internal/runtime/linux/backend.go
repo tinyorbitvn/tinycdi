@@ -1136,11 +1136,12 @@ func templateHash(tpl *workspacesv1alpha1.WorkspaceTemplate) (string, error) {
 
 // PodMatchesTemplate implements runtime.Backend: the adoption proof for
 // snapshots recorded before status.templateSnapshot existed. The
-// incarnation pod must exist, belong to this workspace (label AND
-// controller ownerRef), and provably derive from tpl — a matching
-// template-hash stamp, or (pods built before the stamp) a spec equal to a
-// fresh build after discounting apiserver defaults. false means the
-// record may not be trusted.
+// incarnation pod must exist, be operator-owned (controller ownerRef to
+// this Workspace UID plus the managed label set for the live
+// generation), and provably derive from tpl — a matching template-hash
+// stamp, or (pods built before the stamp) a spec equal to a fresh build
+// after discounting apiserver defaults. false means the record may not
+// be trusted.
 func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
 	uid := ws.UID
 	pod := &corev1.Pod{}
@@ -1151,7 +1152,19 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 	case err != nil:
 		return false, err
 	}
-	if pod.Labels[LabelWorkspaceUID] != string(uid) || !metav1.IsControlledBy(pod, ws) {
+	// The pod must be operator-OWNED — a controller owner-reference to
+	// this Workspace UID plus the full managed label set for the live
+	// generation. Anything less and a foreign object squatting on the
+	// workspace-pod name could "prove" a forged record.
+	if !metav1.IsControlledBy(pod, ws) {
+		return false, nil
+	}
+	for k, v := range labels(ws) {
+		if pod.Labels[k] != v {
+			return false, nil
+		}
+	}
+	if pod.Labels[LabelRuntimeGeneration] != fmt.Sprintf("%d", ws.Spec.RuntimeGeneration) {
 		return false, nil
 	}
 	if stamp := pod.Annotations[AnnotationTemplateHash]; stamp != "" {

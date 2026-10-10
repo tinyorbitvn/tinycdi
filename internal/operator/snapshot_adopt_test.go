@@ -305,37 +305,80 @@ func TestAdoptSnapshot_RequiresPod(t *testing.T) {
 	})
 }
 
-// PodMatchesTemplate ownership: a foreign pod squatter — right name,
-// wrong workspace — never grounds an adoption.
+// PodMatchesTemplate ownership: a pod that was not created/owned by the
+// operator for THIS workspace — right name, foreign or missing
+// provenance — must never prove a record, even when its spec matches the
+// forged annotation exactly. Every such pod rejects adoption: the
+// workspace holds Degraded rather than trusting the annotation.
 func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 	s := snapScheme(t)
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	ws := adoptWorkspace("fam32", snapshotAnnotation(t, tpl, "fam32", 1), types.UID("ws-pre-7"))
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
-	b := linux.New(c, linux.Options{})
-	if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
-		t.Fatalf("seed pod: %v", err)
+	// The annotation claims the honest record; the attack is in the POD,
+	// which the workspace writer cannot create but a bug/compromise
+	// scenario must still reject.
+	ann := snapshotAnnotation(t, tpl, "fam32", 1)
+
+	cases := []struct {
+		name  string
+		munge func(pod *corev1.Pod)
+	}{
+		{name: "foreign label, no ownerRef", munge: func(pod *corev1.Pod) {
+			pod.Labels[linux.LabelWorkspaceUID] = "someone-else"
+			pod.OwnerReferences = nil
+		}},
+		{name: "matching labels, no ownerRef", munge: func(pod *corev1.Pod) {
+			pod.OwnerReferences = nil
+		}},
+		{name: "matching labels, non-controller ownerRef", munge: func(pod *corev1.Pod) {
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "workspaces.cdi.tinyorbit.vn/v1alpha1",
+				Kind:       "Workspace",
+				Name:       "ws-legacy",
+				UID:        "ws-pre-x",
+			}}
+		}},
+		{name: "matching labels, controller ownerRef to another uid", munge: func(pod *corev1.Pod) {
+			tr := true
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "workspaces.cdi.tinyorbit.vn/v1alpha1",
+				Kind:       "Workspace",
+				Name:       "other",
+				UID:        "not-this-workspace",
+				Controller: &tr,
+			}}
+		}},
+		{name: "operator labels squatted generation", munge: func(pod *corev1.Pod) {
+			pod.Labels[linux.LabelRuntimeGeneration] = "9"
+		}},
 	}
-	// Re-label the pod foreign: the squatter path.
-	pod := &corev1.Pod{}
-	if err := c.Get(context.Background(), client.ObjectKey{
-		Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
-		t.Fatal(err)
-	}
-	pod.Labels[linux.LabelWorkspaceUID] = "someone-else"
-	pod.OwnerReferences = nil
-	if err := c.Update(context.Background(), pod); err != nil {
-		t.Fatal(err)
-	}
-	r := &WorkspaceReconciler{Client: c, Scheme: s, Backend: linux.New(c, linux.Options{})}
-	reconcile(t, r, client.ObjectKeyFromObject(ws))
-	got := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
-	if got.Status.TemplateSnapshot != nil {
-		t.Fatal("annotation adopted behind a foreign pod")
-	}
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
-	if cond == nil || cond.Status != metav1.ConditionTrue ||
-		cond.Reason != ReasonTemplateInvalid {
-		t.Fatalf("want Degraded TemplateInvalid, got %+v", got.Status.Conditions)
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := adoptWorkspace("fam32", ann, types.UID(fmt.Sprintf("ws-pre-%d", 70+i)))
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
+			b := linux.New(c, linux.Options{})
+			if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
+				t.Fatalf("seed pod: %v", err)
+			}
+			pod := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKey{
+				Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
+				t.Fatal(err)
+			}
+			tc.munge(pod)
+			if err := c.Update(context.Background(), pod); err != nil {
+				t.Fatal(err)
+			}
+			r := &WorkspaceReconciler{Client: c, Scheme: s, Backend: linux.New(c, linux.Options{})}
+			reconcile(t, r, client.ObjectKeyFromObject(ws))
+			got := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
+			if got.Status.TemplateSnapshot != nil {
+				t.Fatal("annotation adopted behind a foreign pod")
+			}
+			cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+			if cond == nil || cond.Status != metav1.ConditionTrue ||
+				cond.Reason != ReasonTemplateInvalid {
+				t.Fatalf("want Degraded TemplateInvalid, got %+v", got.Status.Conditions)
+			}
+		})
 	}
 }

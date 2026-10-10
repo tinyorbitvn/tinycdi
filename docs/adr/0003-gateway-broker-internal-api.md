@@ -110,7 +110,7 @@ Status: contract extension fixed in design review.
 | Route | Caller | Body | Success | Errors |
 |---|---|---|---|---|
 | `POST /internal/v1/broker/leases/{id}/activity` | gateway | `{"fence":{...},"type":"input"\|"connected"\|"disconnect"}` | 204 | 400 unknown type, 403 foreign gateway, 409 fenced/stale, 410 dead lease |
-| `POST /internal/v1/broker/workspaces/{uid}/revoke` | operator | `{"runtimeGeneration":N}` | 200 `{"revokedLeases":n}` | 403 non-operator |
+| `POST /internal/v1/broker/workspaces/{uid}/revoke` | operator | `{"runtimeGeneration":N}` | 200 `{"revokedLeases":n}` | 403 non-operator, 400 generation beyond recorded bound |
 | `GET /internal/v1/broker/workspaces/{uid}/drain` | operator | — | 200 `{"openStreams":n,"drained":b}` | 403 non-operator |
 
 ### Identity split
@@ -140,7 +140,11 @@ refuses it — a gateway cert cannot call the operator routes and vice versa.
   a generation `<= runtimeGeneration` (the operator's observed generation;
   a lease for a NEWER generation survives — stale teardown never fences a
   restarted runtime) and records a `workspace_revocation` row that blocks
-  `IssueTicket`/`RedeemTicket` for covered generations.
+  `IssueTicket`/`RedeemTicket` for covered generations. The fence is
+  bounded server-side: a `runtimeGeneration` beyond the workspace's
+  recorded generation plus one is refused 400 `INVALID_REQUEST` — a
+  revocation row is undeletable, so covering a generation that was never
+  recorded would fence every future runtime permanently.
 - **Drain.** `drain` returns the summed `open_streams` the gateways have
   reported. Stream state derives from the connected/disconnect activity
   events themselves — no separate periodic stream-count report was added;
