@@ -186,7 +186,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant, quota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -727,6 +727,50 @@ values overwrite a hand-edited row for that tenant at the next backend
 start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
 flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
 usage, refusal codes, changing limits).
+
+### Namespace object quotas
+
+Each `managedNamespaces[]` entry may additionally carry a `namespaceQuota`
+block — **off by default**. It renders Kubernetes-side bounds into that
+namespace: a `ResourceQuota tinycdi-workspace-quota` (summed
+requests/limits and object counts across everything the workspaces
+create — pods, PVCs, Services) and/or a `LimitRange
+tinycdi-runtime-defaults` (resource defaults injected into pods that
+leave them unset). Where `quota` counts workspaces at the API layer,
+the ResourceQuota stops an over-sized or unbounded pod spec at
+apiserver admission — it bounds the blast radius of a workspace create
+that slips past the API:
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+    namespaceQuota:
+      resourceQuota:
+        hard:                        # ~12 desktops at 2 CPU / 4Gi request each
+          requests.cpu: "24"
+          requests.memory: 48Gi
+          limits.cpu: "96"
+          limits.memory: 192Gi
+          requests.storage: 240Gi
+          persistentvolumeclaims: "24"
+          pods: "30"
+          services: "30"
+      limitRange:
+        limits:
+          - type: Container
+            defaultRequest: {cpu: "1", memory: 2Gi}
+            default: {cpu: "4", memory: 8Gi}
+```
+
+Keep `resourceQuota.hard` aligned with the tenant's `quota` block — a
+ResourceQuota that cannot cover the declared running workspaces leaves
+new ones refused at admission. Once `requests.*` quotas exist, every pod
+must carry requests: runtime pods do (they come from the template spec);
+the LimitRange covers anything else in the namespace. Either sub-object
+may be rendered alone; an empty `namespaceQuota` block is a schema
+error.
 
 ## Validation & tests
 

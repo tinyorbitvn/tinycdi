@@ -63,6 +63,36 @@
               "memory": {"$ref": "#/$defs/byteQuantity"},
               "storage": {"$ref": "#/$defs/byteQuantity"}
             }
+          },
+          "namespaceQuota": {
+            "type": "object",
+            "additionalProperties": false,
+            "anyOf": [
+              {"required": ["resourceQuota"]},
+              {"required": ["limitRange"]}
+            ],
+            "properties": {
+              "resourceQuota": {
+                "type": "object",
+                "required": ["hard"],
+                "additionalProperties": false,
+                "properties": {
+                  "hard": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {"type": ["string", "number"]}
+                  }
+                }
+              },
+              "limitRange": {
+                "type": "object",
+                "required": ["limits"],
+                "additionalProperties": false,
+                "properties": {
+                  "limits": {"type": "array", "minItems": 1}
+                }
+              }
+            }
           }
         }
       }
