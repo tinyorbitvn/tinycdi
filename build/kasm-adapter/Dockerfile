@@ -8,7 +8,7 @@
 # Pinned bases per docs/compatibility.md (digest-pinned, same pins as the
 # other images). Build context is the repo root.
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
-ARG BUILD_IMAGE=docker.io/library/golang:1.26@sha256:6c2a5538f964f1c82f97ad14988bf05de100d922d159d0e398b54c7b0ca0c6c9
+ARG BUILD_IMAGE=docker.io/library/golang:1.26@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89
 
 FROM ${BUILD_IMAGE} AS builder
 ARG TARGETOS

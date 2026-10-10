@@ -6,7 +6,7 @@
 # deploy/compatibility.lock.yaml where a lock exists.
 #
 # Toolchain pins:
-#   Go 1.26.8              — go.mod `toolchain go1.26.8`
+#   Go 1.26.9              — go.mod `toolchain go1.26.9`
 #   Node 22.23.3           — docs/compatibility.md (npm bundled with node)
 #   setup-envtest v0.25.1  — sigs.k8s.io/controller-runtime from go.mod
 #   envtest k8s 1.37.0     — k8s.io/api v0.37.1 in go.mod
@@ -49,7 +49,7 @@ defaults:
     shell: bash
 
 env:
-  GO_VERSION: "1.26.8"
+  GO_VERSION: "1.26.9"
   NODE_VERSION: "22.23.3"
   ENVTEST_VERSION: "v0.25.1"
   ENVTEST_K8S_VERSION: "1.37.0"
