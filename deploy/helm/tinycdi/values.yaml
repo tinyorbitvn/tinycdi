@@ -631,6 +631,32 @@ runtime:
   # pre-v0.3.1 packed-by-scoring placement.
   topologySpread:
     enabled: true
+  # Per-workspace boundary NetworkPolicy narrowing (operator flag
+  # --runtime-clusteronly-egress). networkProfile: ClusterOnly today lets
+  # a workspace reach ANY pod in ANY namespace on ANY port — confinement
+  # rests entirely on destination-side ingress policies, so any
+  # third-party pod without its own NetworkPolicy (monitoring, a
+  # Postgres-as-pod, stray workloads) is reachable. Set
+  # egressNamespaceSelector to confine ClusterOnly egress to pods in
+  # matching namespaces — e.g. only the managed tenant namespaces via
+  # their workspaces.cdi.tinyorbit.vn/tenant label — optionally narrowed
+  # further by egressPodSelector and/or egressPorts. An
+  # egressPodSelector without egressNamespaceSelector matches pods in
+  # the workspace's own namespace only (NetworkPolicyPeer semantics).
+  # DNS egress is unaffected, and EMPTY values keep today's behaviour
+  # (no flag is rendered).
+  #   networkProfiles:
+  #     clusterOnly:
+  #       egressNamespaceSelector:
+  #         matchExpressions:
+  #           - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+  #       egressPorts:
+  #         - {protocol: TCP, port: 443}
+  networkProfiles:
+    clusterOnly:
+      egressNamespaceSelector: {}
+      egressPodSelector: {}
+      egressPorts: []
 
 # Node security profiles for browser workspaces — OPTIONAL, default OFF.
 # Browser templates reference Localhost seccomp/AppArmor profiles that must

@@ -100,6 +100,43 @@ func parseKasmAdapterImage(v string) (string, error) {
 	return v, nil
 }
 
+// parseClusterOnlyEgress validates --runtime-clusteronly-egress: a JSON
+// object {namespaceSelector, podSelector, ports} narrowing the
+// NetworkProfileClusterOnly egress rule. An empty flag keeps the
+// historical any-pod-any-namespace default. Decoding is strict: an
+// unknown key (a typo like "namespceSelector") must fail startup —
+// silently dropping it would produce a wider rule than asked — and an
+// object with no field set is rejected, since it can only come from a
+// broken render.
+func parseClusterOnlyEgress(s string) (*linuxruntime.ClusterOnlyEgress, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var spec linuxruntime.ClusterOnlyEgress
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
+		return nil, fmt.Errorf("--runtime-clusteronly-egress is not a JSON object "+
+			"{namespaceSelector,podSelector,ports}: %w", err)
+	}
+	if spec.NamespaceSelector == nil && spec.PodSelector == nil && len(spec.Ports) == 0 {
+		return nil, errors.New("--runtime-clusteronly-egress must set at least one of " +
+			"namespaceSelector, podSelector or ports")
+	}
+	for i, p := range spec.Ports {
+		if p.Protocol != nil {
+			switch *p.Protocol {
+			case corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP:
+			default:
+				return nil, fmt.Errorf("--runtime-clusteronly-egress ports[%d]: "+
+					"invalid protocol %q (want TCP, UDP or SCTP)", i, *p.Protocol)
+			}
+		}
+	}
+	return &spec, nil
+}
+
 // runtimePlacement carries the operator-wide scheduling defaults for
 // runtime pods, parsed from the --runtime-* flags. The linux backend
 // applies them per field when a template leaves the matching
@@ -289,6 +326,7 @@ func main() {
 	var internetExceptCIDRs string
 	var disableBuiltinExcepts bool
 	var gatewayNamespace string
+	var clusterOnlyEgress string
 	var kasmAdapterImage string
 	var watchNamespaces string
 	var leaderElectionNamespace string
@@ -332,6 +370,11 @@ func main() {
 			"(tinycdi-kasm-adapter) — the initContainer image injected into pods of "+
 			"templates with spec.linux.adapter=kasm (env TCDI_KASM_ADAPTER_IMAGE). "+
 			"Empty rejects kasm templates.")
+	flag.StringVar(&clusterOnlyEgress, "runtime-clusteronly-egress", "",
+		"JSON object narrowing NetworkProfileClusterOnly workspace egress: "+
+			`{"namespaceSelector":{...},"podSelector":{...},"ports":[{"protocol":"TCP","port":443}]}. `+
+			"Empty keeps the default: egress to any pod in any namespace on any port. "+
+			"The chart renders it from runtime.networkProfiles.clusterOnly.*.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", os.Getenv("POD_NAMESPACE"),
 		"Namespace the session gateway pods run in; per-workspace NetworkPolicies admit "+
 			"ingress only from pods labeled workspaces.cdi.tinyorbit.vn/role=gateway there "+
@@ -474,6 +517,11 @@ func main() {
 		setupLog.Error(err, "invalid runtime placement flags")
 		os.Exit(1)
 	}
+	clusterOnly, err := parseClusterOnlyEgress(clusterOnlyEgress)
+	if err != nil {
+		setupLog.Error(err, "invalid runtime egress configuration")
+		os.Exit(1)
+	}
 	if gatewayNamespace == "" {
 		setupLog.Info("WARNING: --gateway-namespace unset (POD_NAMESPACE empty); " +
 			"runtime ingress is scoped to each workspace's own namespace — " +
@@ -511,6 +559,7 @@ func main() {
 			DefaultHostUsers:    placement.hostUsers,
 			AppArmorNotRequired: !appArmorRequireDefault,
 			TopologySpread:      topologySpread,
+			ClusterOnlyEgress:   clusterOnly,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.

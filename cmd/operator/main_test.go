@@ -405,3 +405,60 @@ func TestRuntimeAppArmorRequireDefaultFlag(t *testing.T) {
 		t.Fatal("a non-boolean value must be rejected")
 	}
 }
+
+// --runtime-clusteronly-egress: empty stays nil (the backend keeps the
+// any-namespace default); a set value must be a strict JSON object —
+// unknown keys, malformed JSON, an all-empty object and a bad port
+// protocol all fail so a typo can never silently widen the rule.
+func TestParseClusterOnlyEgress(t *testing.T) {
+	if got, err := parseClusterOnlyEgress(""); err != nil || got != nil {
+		t.Fatalf("empty flag = %+v, %v; want nil, nil", got, err)
+	}
+
+	got, err := parseClusterOnlyEgress(`{"namespaceSelector":{"matchLabels":{"workspaces.cdi.tinyorbit.vn/tenant":"a"}}}`)
+	if err != nil {
+		t.Fatalf("valid namespaceSelector rejected: %v", err)
+	}
+	if got.NamespaceSelector == nil ||
+		got.NamespaceSelector.MatchLabels["workspaces.cdi.tinyorbit.vn/tenant"] != "a" {
+		t.Fatalf("namespaceSelector = %+v", got.NamespaceSelector)
+	}
+	if got.PodSelector != nil || len(got.Ports) != 0 {
+		t.Fatalf("unset fields must stay zero, got %+v", got)
+	}
+
+	got, err = parseClusterOnlyEgress(`{"namespaceSelector":{},"podSelector":{"matchLabels":{"k8s-app":"kube-dns"}},"ports":[{"protocol":"UDP","port":53}]}`)
+	if err != nil {
+		t.Fatalf("valid full object rejected: %v", err)
+	}
+	if got.PodSelector == nil || got.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Fatalf("podSelector = %+v", got.PodSelector)
+	}
+	if len(got.Ports) != 1 || got.Ports[0].Port.IntValue() != 53 {
+		t.Fatalf("ports = %+v", got.Ports)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"not json", `not-json`, "--runtime-clusteronly-egress"},
+		{"json array", `[{"namespaceSelector":{}}]`, "--runtime-clusteronly-egress"},
+		{"empty object", `{}`, "--runtime-clusteronly-egress"},
+		{"unknown key", `{"namespceSelector":{"matchLabels":{"a":"b"}}}`, "--runtime-clusteronly-egress"},
+		{"unknown port key", `{"ports":[{"protocol":"TCP","port":1,"bogus":1}]}`, "--runtime-clusteronly-egress"},
+		{"bad protocol", `{"ports":[{"protocol":"XYZ","port":1}]}`, "protocol"},
+		{"bad port type", `{"ports":[{"protocol":"TCP","port":{}}]}`, "--runtime-clusteronly-egress"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseClusterOnlyEgress(tc.in)
+			if err == nil {
+				t.Fatalf("input %s must be rejected, got %+v", tc.in, got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error must contain %q, got %v", tc.want, err)
+			}
+		})
+	}
+}

@@ -447,6 +447,32 @@
           "properties": {
             "enabled": {"type": "boolean"}
           }
+        },
+        "networkProfiles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clusterOnly": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "egressNamespaceSelector": {"type": ["object", "null"]},
+                "egressPodSelector": {"type": ["object", "null"]},
+                "egressPorts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "protocol": {"type": "string", "enum": ["TCP", "UDP", "SCTP"]},
+                      "port": {"type": ["integer", "string"]},
+                      "endPort": {"type": "integer", "minimum": 1, "maximum": 65535}
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

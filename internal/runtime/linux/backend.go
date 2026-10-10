@@ -314,6 +314,37 @@ type Options struct {
 	// still schedule; the soak finding it answers is the default
 	// scheduler packing workspace pods onto a subset of pool nodes.
 	TopologySpread bool
+
+	// ClusterOnlyEgress (operator --runtime-clusteronly-egress; chart
+	// runtime.networkProfiles.clusterOnly.*) narrows the in-cluster
+	// egress rule of NetworkProfileClusterOnly workspaces. Nil keeps
+	// the historical posture — egress to any pod in any namespace on
+	// any port, where confinement rests entirely on destination-side
+	// ingress policies. Set, it admits only pod destinations matching
+	// its selectors, on its ports — it can never widen the rule past
+	// pod peers (external IPs stay denied). DNS egress is unaffected.
+	ClusterOnlyEgress *ClusterOnlyEgress
+}
+
+// ClusterOnlyEgress is the operator-wide narrowing of the
+// NetworkProfileClusterOnly egress rule. Its fields mirror the peer+port
+// parts of one NetworkPolicyEgressRule; a nil selector keeps that axis
+// open within the pod-only destination set. The JSON tags let the
+// --runtime-clusteronly-egress flag value decode straight into the
+// struct.
+type ClusterOnlyEgress struct {
+	// NamespaceSelector picks the destination namespaces; nil means
+	// every namespace (pods only — never external IPs).
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+
+	// PodSelector narrows the peer further to matching pods — across
+	// the selected namespaces, or in the workspace's own namespace when
+	// NamespaceSelector is nil (NetworkPolicyPeer semantics).
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
+
+	// Ports restricts the allowed destination ports/protocols; empty
+	// means every port.
+	Ports []networkingv1.NetworkPolicyPort `json:"ports,omitempty"`
 }
 
 // builtinEgressExcepts are always subtracted from the 0.0.0.0/0 allow of
@@ -1204,13 +1235,7 @@ func buildNetPol(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Works
 			}},
 		})
 	case workspacesv1alpha1.NetworkProfileClusterOnly:
-		// In-cluster destinations only: any pod in any namespace.
-		profile = append(profile, networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{PodSelector: &metav1.LabelSelector{}},
-				{NamespaceSelector: &metav1.LabelSelector{}},
-			},
-		})
+		profile = append(profile, clusterOnlyEgressRule(opts))
 	}
 	// NetworkProfileIsolated: DNS only, no extra rules.
 
@@ -1257,6 +1282,38 @@ func buildNetPol(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Works
 			}},
 			Egress: append([]networkingv1.NetworkPolicyEgressRule{dns}, profile...),
 		},
+	}
+}
+
+// clusterOnlyEgressRule builds the in-cluster egress rule for
+// NetworkProfileClusterOnly. The zero option keeps the historical
+// posture — any pod in any namespace on any port, where confinement
+// rests entirely on destination-side ingress policies. A configured
+// Options.ClusterOnlyEgress narrows the destination set to matching
+// pods in matching namespaces and/or the listed ports; it can never
+// widen past pod peers (external IPs stay denied either way).
+func clusterOnlyEgressRule(opts Options) networkingv1.NetworkPolicyEgressRule {
+	co := opts.ClusterOnlyEgress
+	if co == nil {
+		return networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{
+				{PodSelector: &metav1.LabelSelector{}},
+				{NamespaceSelector: &metav1.LabelSelector{}},
+			},
+		}
+	}
+	peer := networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: co.NamespaceSelector,
+		PodSelector:       co.PodSelector,
+	}
+	if peer.NamespaceSelector == nil && peer.PodSelector == nil {
+		// A wholly empty peer would also match EXTERNAL IPs — a ports-
+		// only narrowing must keep the pod-only destination set.
+		peer.NamespaceSelector = &metav1.LabelSelector{}
+	}
+	return networkingv1.NetworkPolicyEgressRule{
+		To:    []networkingv1.NetworkPolicyPeer{peer},
+		Ports: co.Ports,
 	}
 }
 

@@ -372,9 +372,12 @@ Controls:
 
 - **Per-workspace NetworkPolicy** `ws-<uid>-boundary`: default-deny, ingress
   only from the gateway, DNS egress, template/profile-scoped egress
-  (`internal/runtime/linux/backend.go:1144-1194` `buildNetPol`; test
+  (`internal/runtime/linux/backend.go` `buildNetPol`; test
   `backend_netpol_test.go`); chart-level `default-deny` baselines for the
   release and managed namespaces (`templates/networkpolicy.yaml`).
+  `ClusterOnly` egress defaults to any pod in any namespace; the opt-in
+  `runtime.networkProfiles.clusterOnly.*` values narrow it to
+  selector-matched destinations/ports (S30).
 - **Pod hardening** — `RunAsNonRoot`, `AllowPrivilegeEscalation=false`,
   `Drop: ALL` capabilities, seccomp `RuntimeDefault` (or a `localhost/`
   profile via the template annotation, validated),
@@ -556,6 +559,7 @@ items that landed since.
 | S27 | create-connection echoed JSON decoder detail | Fixed: `ConnectionHandler.Create` decodes via the shared `decodeJSON` helper — which also rejects trailing data after the first document, a check the previous inline decode lacked — answers 400 `INVALID_REQUEST` with the generic "invalid request body", and logs the decode detail server-side with the request id (SEC-I7). `decodeJSON` now returns the error so callers can log it without echoing it. Tests: `TestCreateConnection_InvalidBodyGenericMessage`, `TestCreateConnection_TrailingJSONRejected` |
 | S28 | Workspace revoke accepted an unbounded `runtimeGeneration` | Fixed: `POST /internal/v1/broker/workspaces/{uid}/revoke` wrote its `runtimeGeneration` straight into `workspace_revocation` — a far-future value (e.g. 2^62) fenced every generation the workspace would ever mint, permanently (the table has no delete path). `RevokeWorkspaceLeases` now refuses any value beyond the recorded generation plus one (max of `workspaces.runtime_generation` — the mint counter — and the informer binding's observed generation) with `ErrGenerationUnbounded` → 400 `INVALID_REQUEST`, a warn log carrying request id, workspace, requested and recorded generation; calls within the bound stay idempotent and an unknown workspace keeps its no-op shape. Tests: `TestRevokeWorkspaceLeases_GenerationBounded`, `TestRevokeWorkspace_GenerationUnbounded` |
 | S29 | Auth-failed requests on the internal mTLS listener were never logged | Fixed: `identify` is the outer middleware on :9443, so no-cert/empty-CN/SPIFFE-mismatch rejections bypassed `logRequests` and left no record at the trust boundary. `identify` now counts every refusal on `tinycdi_internal_auth_failures_total{reason}` (bounded classes `no_cert`/`no_cn`/`spiffe_mismatch`) and emits a warn line rate-limited per reason class (1/s sustained, burst 10) carrying request id, method, peer and the SEC-41-redacted path — raw paths embed lease ids (bearer material); certificate/SAN material is never logged. Tests: `TestIdentify_RejectionsLogged`, `TestIdentify_RejectedPathRedacted`, `TestIdentify_RejectionsRateLimited`, `TestIdentify_RejectionsCounted` |
+| S30 | `ClusterOnly` egress spans every pod in every namespace on every port | Mitigated (opt-in, v1.0): the default is unchanged — a `ClusterOnly` workspace may reach any pod that does not restrict its own ingress, and confinement rests on destination-side policies (SR-2-F8 residual accepted as documented posture). Setting `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` renders `--runtime-clusteronly-egress`, which rewrites every `ws-<uid>-boundary` ClusterOnly rule to a single narrowed peer (selector-matched namespaces/pods, optional `egressPorts`) — the recommended selector `workspaces.cdi.tinyorbit.vn/tenant Exists` confines egress to the managed namespaces. The narrowing can never widen past pod destinations: a ports-only value keeps an all-namespaces *pod* peer rather than an empty peer, so external IPs stay denied; DNS egress is untouched; spec-drift reconcile rolls the change out to existing workspaces. Tests: `TestClusterOnlyEgressDefaultUnrestricted`, `TestClusterOnlyEgressRestrictionOnPolicy`, `TestClusterOnlyEgressPortsOnlyStaysPodOnly`, `TestParseClusterOnlyEgress`, `deploy/helm/chart_clusteronly_egress_test.go` |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's
 ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is
