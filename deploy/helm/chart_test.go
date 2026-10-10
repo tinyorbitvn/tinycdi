@@ -50,6 +50,7 @@ type doc = map[string]any
 // lintValues are the ci files expected to lint+render cleanly.
 var lintValues = []string{
 	"minimal-values.yaml",
+	"admissionpolicy-values.yaml",
 	"example-values.yaml",
 	"ingress-certmanager-values.yaml",
 	"gateway-api-values.yaml",

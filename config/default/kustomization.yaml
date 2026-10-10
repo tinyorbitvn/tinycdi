@@ -32,6 +32,15 @@ resources:
 # Allow webhook traffic from all sources.
 #- ../network-policy
 
+# [ADMISSION POLICY] Optional hardening (S36): a ValidatingAdmissionPolicy
+# that keeps the operator-owned workspaces.cdi.tinyorbit.vn/template-snapshot
+# annotation writable only by the operator ServiceAccount. NOT part of this
+# overlay — do not add ../admissionpolicy as a resource here: this
+# kustomization's namePrefix/namespace transforms would rename the policy
+# without updating the binding's policyName. Edit the sample (operator SA
+# identity, managed namespaces) and apply it standalone:
+#     kubectl apply -k config/admissionpolicy
+
 # Uncomment the patches line if you enable Metrics
 patches:
 # [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.

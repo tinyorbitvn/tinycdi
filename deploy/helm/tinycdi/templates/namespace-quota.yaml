@@ -1,0 +1,41 @@
+{{- /* Kubernetes-side bounds for managed (tenant) namespaces — OPT-IN
+       via managedNamespaces[].namespaceQuota (default: nothing
+       rendered). The ResourceQuota caps the summed requests/limits and
+       object counts of everything the workspaces create (pods, PVCs,
+       Services), so an over-sized pod spec fails apiserver admission
+       instead of scheduling; the LimitRange injects resource defaults
+       into pods that leave them unset (once requests.* quotas exist,
+       requests are mandatory). Both objects are namespaced and stay
+       inside the managed-namespace boundary — they are rendered ONLY
+       for entries that declare the block. */ -}}
+{{- range .Values.managedNamespaces }}
+{{- $nsq := .namespaceQuota | default dict }}
+{{- if and $nsq.resourceQuota $nsq.resourceQuota.hard }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tinycdi-workspace-quota
+  namespace: {{ .name }}
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: {{ .tenant }}
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml $nsq.resourceQuota.hard | nindent 4 }}
+{{- end }}
+{{- if and $nsq.limitRange $nsq.limitRange.limits }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tinycdi-runtime-defaults
+  namespace: {{ .name }}
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: {{ .tenant }}
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+spec:
+  limits:
+    {{- toYaml $nsq.limitRange.limits | nindent 4 }}
+{{- end }}
+{{- end }}

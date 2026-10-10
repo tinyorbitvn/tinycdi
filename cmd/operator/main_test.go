@@ -405,3 +405,89 @@ func TestRuntimeAppArmorRequireDefaultFlag(t *testing.T) {
 		t.Fatal("a non-boolean value must be rejected")
 	}
 }
+
+// --runtime-clusteronly-egress: empty stays nil (the backend keeps the
+// any-namespace default); a set value must be a strict JSON object —
+// unknown keys, malformed JSON, an all-empty object and a bad port
+// protocol all fail so a typo can never silently widen the rule.
+func TestParseClusterOnlyEgress(t *testing.T) {
+	if got, err := parseClusterOnlyEgress(""); err != nil || got != nil {
+		t.Fatalf("empty flag = %+v, %v; want nil, nil", got, err)
+	}
+
+	got, err := parseClusterOnlyEgress(`{"namespaceSelector":{"matchLabels":{"workspaces.cdi.tinyorbit.vn/tenant":"a"}}}`)
+	if err != nil {
+		t.Fatalf("valid namespaceSelector rejected: %v", err)
+	}
+	if got.NamespaceSelector == nil ||
+		got.NamespaceSelector.MatchLabels["workspaces.cdi.tinyorbit.vn/tenant"] != "a" {
+		t.Fatalf("namespaceSelector = %+v", got.NamespaceSelector)
+	}
+	if got.PodSelector != nil || len(got.Ports) != 0 {
+		t.Fatalf("unset fields must stay zero, got %+v", got)
+	}
+
+	got, err = parseClusterOnlyEgress(`{"namespaceSelector":{},"podSelector":{"matchLabels":{"k8s-app":"kube-dns"}},"ports":[{"protocol":"UDP","port":53}]}`)
+	if err != nil {
+		t.Fatalf("valid full object rejected: %v", err)
+	}
+	if got.PodSelector == nil || got.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
+		t.Fatalf("podSelector = %+v", got.PodSelector)
+	}
+	if len(got.Ports) != 1 || got.Ports[0].Port.IntValue() != 53 {
+		t.Fatalf("ports = %+v", got.Ports)
+	}
+
+	// Valid port-range forms.
+	for _, in := range []string{
+		`{"ports":[{"protocol":"TCP","port":8000,"endPort":9000}]}`, // range
+		`{"ports":[{"protocol":"TCP","port":443,"endPort":443}]}`,   // degenerate range
+		`{"ports":[{"port":"https"}]}`,                              // named port
+		`{"ports":[{}]}`,                                            // port unset = all
+		`{"namespaceSelector":{"matchLabels":{"a":"b"},"matchExpressions":[{"key":"k","operator":"In","values":["v"]}]}}`,
+	} {
+		if _, err := parseClusterOnlyEgress(in); err != nil {
+			t.Fatalf("valid input %s rejected: %v", in, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"not json", `not-json`, "--runtime-clusteronly-egress"},
+		{"json array", `[{"namespaceSelector":{}}]`, "--runtime-clusteronly-egress"},
+		{"empty object", `{}`, "--runtime-clusteronly-egress"},
+		{"unknown key", `{"namespceSelector":{"matchLabels":{"a":"b"}}}`, "--runtime-clusteronly-egress"},
+		{"unknown port key", `{"ports":[{"protocol":"TCP","port":1,"bogus":1}]}`, "--runtime-clusteronly-egress"},
+		{"bad protocol", `{"ports":[{"protocol":"XYZ","port":1}]}`, "protocol"},
+		{"bad port type", `{"ports":[{"protocol":"TCP","port":{}}]}`, "--runtime-clusteronly-egress"},
+		// Typo'd selectors must fail startup, never widen silently.
+		{"nested unknown selector key", `{"namespaceSelector":{"bogus":1}}`, "--runtime-clusteronly-egress"},
+		{"nested unknown requirement key", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"In","values":["v"],"bogus":1}]}}`, "--runtime-clusteronly-egress"},
+		{"bad matchExpression operator", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"Sometimes","values":["v"]}]}}`, "namespaceSelector"},
+		{"empty matchExpression key", `{"namespaceSelector":{"matchExpressions":[{"key":"","operator":"Exists"}]}}`, "namespaceSelector"},
+		{"bad matchLabel key", `{"namespaceSelector":{"matchLabels":{"bad key!":"v"}}}`, "namespaceSelector"},
+		{"values under Exists", `{"podSelector":{"matchExpressions":[{"key":"k","operator":"Exists","values":["v"]}]}}`, "podSelector"},
+		{"In without values", `{"namespaceSelector":{"matchExpressions":[{"key":"k","operator":"In"}]}}`, "namespaceSelector"},
+		// Port-range validation (apiserver rules).
+		{"port zero", `{"ports":[{"protocol":"TCP","port":0}]}`, "ports"},
+		{"port too big", `{"ports":[{"protocol":"TCP","port":70000}]}`, "ports"},
+		{"bad port name", `{"ports":[{"protocol":"TCP","port":"BAD PORT"}]}`, "ports"},
+		{"endPort without port", `{"ports":[{"protocol":"TCP","endPort":9000}]}`, "endPort"},
+		{"endPort less than port", `{"ports":[{"protocol":"TCP","port":9000,"endPort":8000}]}`, "endPort"},
+		{"endPort on named port", `{"ports":[{"protocol":"TCP","port":"https","endPort":9000}]}`, "endPort"},
+		{"endPort out of range", `{"ports":[{"protocol":"TCP","port":80,"endPort":70000}]}`, "endPort"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseClusterOnlyEgress(tc.in)
+			if err == nil {
+				t.Fatalf("input %s must be rejected, got %+v", tc.in, got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error must contain %q, got %v", tc.want, err)
+			}
+		})
+	}
+}

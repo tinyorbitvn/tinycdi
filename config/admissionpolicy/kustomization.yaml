@@ -1,0 +1,10 @@
+# Optional hardening sample — deliberately NOT referenced by
+# config/default. Edit policy.yaml (operator ServiceAccount identity,
+# managedNamespaces list) and apply with:
+#
+#     kubectl apply -k config/admissionpolicy
+#
+# No namespace/namePrefix here: ValidatingAdmissionPolicy and its binding
+# are cluster-scoped and must keep the names in policy.yaml.
+resources:
+- policy.yaml

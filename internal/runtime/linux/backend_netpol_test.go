@@ -18,6 +18,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -275,5 +276,137 @@ func TestPodAutomountServiceAccountTokenFalse(t *testing.T) {
 	}
 	if pod.Spec.EnableServiceLinks == nil || *pod.Spec.EnableServiceLinks {
 		t.Fatalf("enableServiceLinks must be explicitly false")
+	}
+}
+
+// The ClusterOnly default is the historical posture: egress to any pod
+// in any namespace on any port — two peers, one selecting every pod in
+// the workspace's own namespace and one every namespace. The rule
+// carries no ports and the DNS rule still leads the egress list.
+func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
+	ws := testWorkspace()
+	tpl := testTemplate(nil)
+	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+	np, _ := netPolFor(t, Options{}, ws, tpl)
+
+	if len(np.Spec.Egress) != 2 {
+		t.Fatalf("ClusterOnly egress rules = %d, want 2 (dns + profile)", len(np.Spec.Egress))
+	}
+	dns := np.Spec.Egress[0]
+	foundDNS := false
+	for _, p := range dns.Ports {
+		if p.Port != nil && p.Port.IntValue() == 53 {
+			foundDNS = true
+		}
+	}
+	if !foundDNS {
+		t.Fatalf("first egress rule must be cluster DNS (port 53): %+v", dns)
+	}
+	rule := np.Spec.Egress[1]
+	if len(rule.Ports) != 0 {
+		t.Fatalf("default ClusterOnly rule must not restrict ports: %+v", rule.Ports)
+	}
+	var anyPod, anyNS bool
+	for _, peer := range rule.To {
+		if peer.PodSelector != nil && len(peer.PodSelector.MatchLabels) == 0 &&
+			len(peer.PodSelector.MatchExpressions) == 0 && peer.NamespaceSelector == nil {
+			anyPod = true
+		}
+		if peer.NamespaceSelector != nil && len(peer.NamespaceSelector.MatchLabels) == 0 &&
+			len(peer.NamespaceSelector.MatchExpressions) == 0 && peer.PodSelector == nil {
+			anyNS = true
+		}
+	}
+	if !anyPod || !anyNS {
+		t.Fatalf("default ClusterOnly peers = %+v, want {podSelector:{}} + {namespaceSelector:{}}", rule.To)
+	}
+}
+
+// A configured ClusterOnlyEgress lands on the built policy as a single
+// narrowed peer: the requested namespace+pod selectors AND the ports —
+// and nothing else (no leftover any-namespace peer). The restriction
+// reaches EXISTING policies too: the spec-drift reconcile rewrites a
+// stored unrestricted rule.
+func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
+	ws := testWorkspace()
+	tpl := testTemplate(nil)
+	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+
+	opts := Options{ClusterOnlyEgress: &ClusterOnlyEgress{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "workspaces.cdi.tinyorbit.vn/tenant",
+				Operator: metav1.LabelSelectorOpExists,
+			}},
+		},
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"app.kubernetes.io/name": "postgres"},
+		},
+		Ports: []networkingv1.NetworkPolicyPort{{
+			Protocol: ptr(corev1.ProtocolTCP),
+			Port:     ptr(intstr.FromInt32(5432)),
+		}},
+	}}
+	np, c := netPolFor(t, opts, ws, tpl)
+
+	if len(np.Spec.Egress) != 2 {
+		t.Fatalf("restricted ClusterOnly egress rules = %d, want 2 (dns + profile)", len(np.Spec.Egress))
+	}
+	rule := np.Spec.Egress[1]
+	if len(rule.To) != 1 {
+		t.Fatalf("restricted ClusterOnly peers = %+v, want exactly one peer", rule.To)
+	}
+	peer := rule.To[0]
+	if peer.NamespaceSelector == nil ||
+		len(peer.NamespaceSelector.MatchExpressions) != 1 ||
+		peer.NamespaceSelector.MatchExpressions[0].Key != "workspaces.cdi.tinyorbit.vn/tenant" {
+		t.Fatalf("restricted namespaceSelector = %+v", peer.NamespaceSelector)
+	}
+	if peer.PodSelector == nil ||
+		peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "postgres" {
+		t.Fatalf("restricted podSelector = %+v", peer.PodSelector)
+	}
+	if len(rule.Ports) != 1 || rule.Ports[0].Port == nil || rule.Ports[0].Port.IntValue() != 5432 {
+		t.Fatalf("restricted ports = %+v, want TCP 5432", rule.Ports)
+	}
+
+	// Drift reconcile: removing the option on a second Ensure rewrites
+	// the stored policy back to the unrestricted shape (and vice versa —
+	// the mechanism is generic, exercised here in the hardening direction
+	// by the second half of this test).
+	if _, err := New(c, Options{}).Ensure(context.Background(), ws, tpl); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+	back := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(),
+		client.ObjectKey{Name: NetPolName(ws.UID), Namespace: ws.Namespace}, back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Spec.Egress[1].To) != 2 {
+		t.Fatalf("stored policy was not reconciled back to the unrestricted peer set: %+v",
+			back.Spec.Egress[1].To)
+	}
+}
+
+// A ports-only narrowing keeps the pod-only destination set: the peer
+// must be an all-namespaces namespaceSelector (every pod, never external
+// IPs), NOT a wholly empty peer — `to: [{}]` would also admit non-pod
+// destinations.
+func TestClusterOnlyEgressPortsOnlyStaysPodOnly(t *testing.T) {
+	ws := testWorkspace()
+	tpl := testTemplate(nil)
+	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+
+	np, _ := netPolFor(t, Options{ClusterOnlyEgress: &ClusterOnlyEgress{
+		Ports: []networkingv1.NetworkPolicyPort{{
+			Port: ptr(intstr.FromInt32(443)),
+		}},
+	}}, ws, tpl)
+	rule := np.Spec.Egress[1]
+	if len(rule.To) != 1 || rule.To[0].NamespaceSelector == nil || rule.To[0].PodSelector != nil {
+		t.Fatalf("ports-only peer = %+v, want a single all-namespaces pod peer", rule.To)
+	}
+	if len(rule.Ports) != 1 || rule.Ports[0].Port.IntValue() != 443 {
+		t.Fatalf("ports-only rule ports = %+v, want [443]", rule.Ports)
 	}
 }

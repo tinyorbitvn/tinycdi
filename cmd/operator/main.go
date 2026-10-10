@@ -15,13 +15,17 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -98,6 +102,94 @@ func parseKasmAdapterImage(v string) (string, error) {
 			"(<repo>@sha256:<64 hex>)", v)
 	}
 	return v, nil
+}
+
+// parseClusterOnlyEgress validates --runtime-clusteronly-egress: a JSON
+// object {namespaceSelector, podSelector, ports} narrowing the
+// NetworkProfileClusterOnly egress rule. An empty flag keeps the
+// historical any-pod-any-namespace default. Decoding is strict: an
+// unknown key (a typo like "namespceSelector") must fail startup —
+// silently dropping it would produce a wider rule than asked — and an
+// object with no field set is rejected, since it can only come from a
+// broken render.
+func parseClusterOnlyEgress(s string) (*linuxruntime.ClusterOnlyEgress, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var spec linuxruntime.ClusterOnlyEgress
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
+		return nil, fmt.Errorf("--runtime-clusteronly-egress is not a JSON object "+
+			"{namespaceSelector,podSelector,ports}: %w", err)
+	}
+	if spec.NamespaceSelector == nil && spec.PodSelector == nil && len(spec.Ports) == 0 {
+		return nil, errors.New("--runtime-clusteronly-egress must set at least one of " +
+			"namespaceSelector, podSelector or ports")
+	}
+	// The selectors and ports become NetworkPolicy peers verbatim —
+	// validate them the way the apiserver will, so a typo fails startup
+	// instead of converging a policy that can never apply or that is
+	// wider than asked.
+	for _, sel := range []struct {
+		field string
+		v     *metav1.LabelSelector
+	}{
+		{"namespaceSelector", spec.NamespaceSelector},
+		{"podSelector", spec.PodSelector},
+	} {
+		if _, err := metav1.LabelSelectorAsSelector(sel.v); err != nil {
+			return nil, fmt.Errorf("--runtime-clusteronly-egress %s: %w", sel.field, err)
+		}
+	}
+	for i, p := range spec.Ports {
+		if err := validNetPolPort(p); err != nil {
+			return nil, fmt.Errorf("--runtime-clusteronly-egress ports[%d]: %w", i, err)
+		}
+	}
+	return &spec, nil
+}
+
+// validNetPolPort mirrors the apiserver's NetworkPolicyPort rules:
+// protocol ∈ {TCP,UDP,SCTP}; port is a valid port number or port name;
+// endPort may only accompany a numeric port and must not be less than it.
+func validNetPolPort(p networkingv1.NetworkPolicyPort) error {
+	if p.Protocol != nil {
+		switch *p.Protocol {
+		case corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP:
+		default:
+			return fmt.Errorf("invalid protocol %q (want TCP, UDP or SCTP)", *p.Protocol)
+		}
+	}
+	if p.Port != nil {
+		switch p.Port.Type {
+		case intstr.Int:
+			if errs := validation.IsValidPortNum(int(p.Port.IntVal)); len(errs) > 0 {
+				return fmt.Errorf("invalid port %d: %s", p.Port.IntVal, errs[0])
+			}
+		case intstr.String:
+			if errs := validation.IsValidPortName(p.Port.StrVal); len(errs) > 0 {
+				return fmt.Errorf("invalid port name %q: %s", p.Port.StrVal, errs[0])
+			}
+		}
+	}
+	if p.EndPort == nil {
+		return nil
+	}
+	if p.Port == nil {
+		return errors.New("endPort requires port")
+	}
+	if p.Port.Type != intstr.Int {
+		return errors.New("endPort requires a numeric port")
+	}
+	if errs := validation.IsValidPortNum(int(*p.EndPort)); len(errs) > 0 {
+		return fmt.Errorf("invalid endPort %d: %s", *p.EndPort, errs[0])
+	}
+	if *p.EndPort < p.Port.IntVal {
+		return fmt.Errorf("endPort %d must not be less than port %d", *p.EndPort, p.Port.IntVal)
+	}
+	return nil
 }
 
 // runtimePlacement carries the operator-wide scheduling defaults for
@@ -289,6 +381,7 @@ func main() {
 	var internetExceptCIDRs string
 	var disableBuiltinExcepts bool
 	var gatewayNamespace string
+	var clusterOnlyEgress string
 	var kasmAdapterImage string
 	var watchNamespaces string
 	var leaderElectionNamespace string
@@ -332,6 +425,11 @@ func main() {
 			"(tinycdi-kasm-adapter) — the initContainer image injected into pods of "+
 			"templates with spec.linux.adapter=kasm (env TCDI_KASM_ADAPTER_IMAGE). "+
 			"Empty rejects kasm templates.")
+	flag.StringVar(&clusterOnlyEgress, "runtime-clusteronly-egress", "",
+		"JSON object narrowing NetworkProfileClusterOnly workspace egress: "+
+			`{"namespaceSelector":{...},"podSelector":{...},"ports":[{"protocol":"TCP","port":443}]}. `+
+			"Empty keeps the default: egress to any pod in any namespace on any port. "+
+			"The chart renders it from runtime.networkProfiles.clusterOnly.*.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", os.Getenv("POD_NAMESPACE"),
 		"Namespace the session gateway pods run in; per-workspace NetworkPolicies admit "+
 			"ingress only from pods labeled workspaces.cdi.tinyorbit.vn/role=gateway there "+
@@ -474,6 +572,11 @@ func main() {
 		setupLog.Error(err, "invalid runtime placement flags")
 		os.Exit(1)
 	}
+	clusterOnly, err := parseClusterOnlyEgress(clusterOnlyEgress)
+	if err != nil {
+		setupLog.Error(err, "invalid runtime egress configuration")
+		os.Exit(1)
+	}
 	if gatewayNamespace == "" {
 		setupLog.Info("WARNING: --gateway-namespace unset (POD_NAMESPACE empty); " +
 			"runtime ingress is scoped to each workspace's own namespace — " +
@@ -511,6 +614,7 @@ func main() {
 			DefaultHostUsers:    placement.hostUsers,
 			AppArmorNotRequired: !appArmorRequireDefault,
 			TopologySpread:      topologySpread,
+			ClusterOnlyEgress:   clusterOnly,
 		}),
 		// Retention is explicit: dataPolicy Retain stamps persistent PVCs
 		// into the controller-owned inventory, Ephemeral destroys them.
