@@ -42,7 +42,9 @@ A workspace consumes resources at two layers:
    this scale (see §The 20-session load gate).
 3. **Network** — KasmVNC WebSocket streaming; dominated by screen-change
    rate and client bandwidth, not by the platform. The load gate measures
-   gateway throughput directly.
+   gateway throughput directly. One upstream bound to know: KasmVNC caps
+   roughly 100 concurrent connections per desktop — 502s beyond that
+   ceiling come from the runtime, not the gateway.
 
 Cold-start cost is dominated by **image pull**, not CPU: `tcdi/linux-desktop`
 ≈ 1.25 GB (302 MB compressed; the old openbox image was ≈ 0.83 GB) and

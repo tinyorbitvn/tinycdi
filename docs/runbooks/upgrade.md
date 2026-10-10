@@ -908,6 +908,14 @@ their values.
   not remove fields already written to etcd, and `kubectl replace -f crds/`
   with a pruned schema can delete stored data. CRD rollback = restore from
   the CR export, reviewed by hand.
+- **An older operator's status writes prune `status.templateSnapshot` —
+  expected.** A binary predating the field serializes `workspaces/status`
+  with its own (older) schema, so each status write drops the field it
+  does not know. The `template-snapshot` annotation mirror stays
+  populated — it is what the old operator reads — so convergence is
+  unaffected; rolling forward again re-establishes the record (re-adopt
+  from the pod's stamped identity, or re-snapshot the live template) on
+  the next reconcile. That is the designed downgrade path, not drift.
 - After any rollback, re-run the post-checks and a synthetic lifecycle
   round-trip.
 
