@@ -162,3 +162,39 @@ func TestProxy_ClientForwardedFamilyStripped(t *testing.T) {
 		}
 	}
 }
+
+// TestProxy_VendorClientAddressHeadersStripped: vendor client-address
+// headers — Via, X-Client-Ip, True-Client-Ip, CF-Connecting-Ip,
+// X-Cluster-Client-Ip and the X-Envoy-* family — are stripped by the same
+// table as the forwarding family; the runtime must see the verified chain
+// only, never an intermediary's claim.
+func TestProxy_VendorClientAddressHeadersStripped(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-vendor", testWSUID)
+	up := newHeaderRecorder(t)
+	srv := newGateway(t, fb, nil)
+	cookie := launchOK(t, srv, testHost, "tk-vendor")
+	fb.pointLeaseAt(t, "tk-vendor", up.srv)
+
+	forged := map[string]string{
+		"Via":                      "1.1 evil.example.com",
+		"X-Client-Ip":              "198.51.100.77",
+		"True-Client-Ip":           "198.51.100.77",
+		"Cf-Connecting-Ip":         "198.51.100.77",
+		"X-Cluster-Client-Ip":      "198.51.100.77",
+		"X-Envoy-External-Address": "198.51.100.77",
+		"X-Envoy-Original-Path":    "/api/admin",
+		"X-Envoy-Attempt-Count":    "3",
+	}
+	resp := proxied(t, srv, testHost, "/", cookie, forged)
+	drain(resp)
+	h := up.last()
+	if h == nil {
+		t.Fatal("upstream not reached")
+	}
+	for name := range forged {
+		if got := h.Get(name); got != "" {
+			t.Fatalf("client-supplied %s reached the runtime: %q", name, got)
+		}
+	}
+}

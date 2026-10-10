@@ -194,6 +194,11 @@ type Gateway struct {
 	draining        bool          // set by Drain: refuse new upgrades
 	done            chan struct{} // closed by Close
 	closeOnce       sync.Once
+
+	// connLogLast rate-limits the pre-auth dropped-Connection-token debug
+	// log to one line per minute per route — the metric counts every drop.
+	connLogMu   sync.Mutex
+	connLogLast map[string]time.Time
 }
 
 func (g *Gateway) now() time.Time { return g.cfg.Now() }
@@ -230,6 +235,7 @@ func New(cfg Config) (*Gateway, error) {
 		byLease:      map[string]*session{},
 		byWorkspace:  map[string]*session{},
 		inflight:     map[broker.SessionDigest]*rehydrateCall{},
+		connLogLast:  map[string]time.Time{},
 		done:         make(chan struct{}),
 	}
 	for _, po := range cfg.PortalOrigins {
@@ -861,7 +867,7 @@ func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
 }
 
 // rewriteForwarded rebuilds the client-address headers toward the runtime
-// (S18): every client-supplied member of the forwarding family is stripped
+// (S18): every client-supplied entry in clientHeaderStripList is removed
 // from the outbound request and the address headers are re-derived from
 // the INBOUND request's trusted chain only. The runtime keys its
 // brute-force blacklist on the forwarded address, so a spoofed client
@@ -877,7 +883,7 @@ func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
 // RFC 7239 form and X-Real-IP carries the derived client for runtimes
 // that key on it.
 func (g *Gateway) rewriteForwarded(in, out *http.Request) {
-	stripForwardedFamily(out.Header)
+	stripClientHeaders(out.Header)
 	peer := ratelimit.PeerIP(in.RemoteAddr)
 	client := ratelimit.ClientAddr(in, g.cfg.TrustedProxies)
 	if _, err := netip.ParseAddr(client); err != nil {
@@ -899,21 +905,32 @@ func (g *Gateway) rewriteForwarded(in, out *http.Request) {
 	out.Header.Set("X-Real-Ip", client)
 }
 
-// stripForwardedFamily removes every client-supplied forwarding-family
-// header: the whole X-Forwarded-* and X-Original-* families plus Forwarded,
-// X-Real-Ip and X-Rewrite-Url. The stdlib's pre-Rewrite pass deletes only
-// Forwarded and three X-Forwarded-* entries — the rest (X-Forwarded-Host's
-// siblings -Port/-Ssl/-Server and beyond, X-Original-Url, X-Rewrite-Url)
-// would reach the tenant-controlled runtime verbatim and let a session
-// holder shape absolute redirects, scheme decisions and origin metadata
-// upstream.
-func stripForwardedFamily(h http.Header) {
+// clientHeaderStripList is the one table of client-supplied headers the
+// session proxy never relays: the whole X-Forwarded-*/X-Original-*
+// families plus Forwarded, X-Real-Ip and X-Rewrite-Url (the forwarding
+// family — a forged value could shape absolute redirects, scheme
+// decisions and origin metadata upstream), and the vendor client-address
+// headers an intermediary claim could spoof. Entries are lowercase; a
+// trailing "-" marks a prefix rule. The stdlib's pre-Rewrite pass deletes
+// only Forwarded and three X-Forwarded-* entries — everything else would
+// reach the tenant-controlled runtime verbatim.
+var clientHeaderStripList = []string{
+	"forwarded", "x-real-ip", "x-rewrite-url",
+	"x-forwarded-", "x-original-",
+	"via", "x-client-ip", "true-client-ip", "cf-connecting-ip",
+	"x-cluster-client-ip", "x-envoy-",
+}
+
+// stripClientHeaders deletes every clientHeaderStripList entry from h.
+func stripClientHeaders(h http.Header) {
 	for k := range h {
 		fold := strings.ToLower(k)
-		if strings.HasPrefix(fold, "x-forwarded-") ||
-			strings.HasPrefix(fold, "x-original-") ||
-			fold == "forwarded" || fold == "x-real-ip" || fold == "x-rewrite-url" {
-			delete(h, k)
+		for _, rule := range clientHeaderStripList {
+			if fold == rule ||
+				(strings.HasSuffix(rule, "-") && strings.HasPrefix(fold, rule)) {
+				delete(h, k)
+				break
+			}
 		}
 	}
 }
@@ -955,18 +972,35 @@ func (g *Gateway) sanitizeConnectionTokens(r *http.Request) {
 	if len(dropped) == 0 {
 		return
 	}
-	if g.cfg.Logger != nil {
-		g.cfg.Logger.Debug("dropped client Connection tokens",
-			"dropped", strings.Join(dropped, ","), "path", r.URL.Path)
-	}
 	if g.cfg.Metrics != nil {
 		g.cfg.Metrics.AddConnectionTokensDropped(float64(len(dropped)))
+	}
+	// The drop runs before session auth: an unauthenticated client could
+	// otherwise spray the debug log — admit at most one line per minute
+	// per route. The metric still counts every dropped token.
+	if g.cfg.Logger != nil && g.connTokenLogOK("proxy") {
+		g.cfg.Logger.Debug("dropped client Connection tokens",
+			"dropped", strings.Join(dropped, ","), "path", r.URL.Path)
 	}
 	if len(kept) == 0 {
 		delete(r.Header, "Connection")
 	} else {
 		r.Header["Connection"] = []string{strings.Join(kept, ", ")}
 	}
+}
+
+// connTokenLogOK admits one dropped-Connection-token debug log per minute
+// per route: the canonicalisation runs before session auth, so unlike the
+// counter (which counts every drop) the log line needs its own bound
+// against unauthenticated spray.
+func (g *Gateway) connTokenLogOK(route string) bool {
+	g.connLogMu.Lock()
+	defer g.connLogMu.Unlock()
+	if last, ok := g.connLogLast[route]; ok && g.now().Sub(last) < time.Minute {
+		return false
+	}
+	g.connLogLast[route] = g.now()
+	return true
 }
 
 // forwardedFor renders an address as an RFC 7239 for= token; IPv6 literals

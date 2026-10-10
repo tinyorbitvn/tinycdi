@@ -8,9 +8,13 @@ package gateway_test
 // for the dropped-Connection-token counter.
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,5 +134,63 @@ func TestProxy_ConnectionTokensDroppedMetric(t *testing.T) {
 	drain(resp)
 	if got := counter(); got != 2 {
 		t.Fatalf("dropped-token counter = %v after a clean request, want 2", got)
+	}
+}
+
+// syncLogBuf is a mutex-guarded slog sink: background gateway goroutines
+// (renew/kill loops) write to the same logger while the test counts lines.
+type syncLogBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestProxy_ConnectionTokenLogRateLimited: the dropped-token debug log is
+// capped at one line per minute per route — the drop happens before
+// session auth, so an unauthenticated client must not be able to spray
+// the log (the counter is unaffected by the cap).
+func TestProxy_ConnectionTokenLogRateLimited(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	var buf syncLogBuf
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-ctl", testWSUID)
+	srv := newGateway(t, fb, func(c *gateway.Config) {
+		c.Now = clock.Now
+		c.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	cookie := launchOK(t, srv, testHost, "tk-ctl")
+
+	send := func() {
+		resp := proxied(t, srv, testHost, "/", cookie, map[string]string{
+			"Connection": "authorization",
+		})
+		drain(resp)
+	}
+	lines := func() int {
+		return strings.Count(buf.String(), "dropped client Connection tokens")
+	}
+
+	send()
+	send() // second drop inside the window: logged at most once
+	if got := lines(); got != 1 {
+		t.Fatalf("log lines within one minute = %d, want 1", got)
+	}
+	// The jump also passes the renew deadline and may kill the session —
+	// the pre-auth drop is still logged before auth, so the count stands.
+	clock.Advance(61 * time.Second)
+	send()
+	if got := lines(); got != 2 {
+		t.Fatalf("log lines after the window = %d, want 2", got)
 	}
 }
