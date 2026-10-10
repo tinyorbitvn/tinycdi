@@ -17,11 +17,13 @@ package operator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -142,4 +144,100 @@ func TestTemplateValidLocalhostSeccompAnnotation(t *testing.T) {
 		sc.LocalhostProfile == nil || *sc.LocalhostProfile != "profiles/chromium-userns.json" {
 		t.Fatalf("container seccompProfile = %+v, want Localhost profiles/chromium-userns.json", sc)
 	}
+}
+
+// The adoption hold splits by failure class: a candidate template whose
+// CONTENT is inadmissible (out-of-policy seccomp annotation) holds
+// Degraded/TemplateInvalid, while a pod whose recorded revision cannot
+// be proven holds Degraded/TemplateRevisionGone — and in BOTH cases the
+// running pod is left untouched and exactly one Warning event fires,
+// after the status persist.
+func TestAdoptHold_ReasonPerFailureClass(t *testing.T) {
+	s := snapScheme(t)
+
+	reconcile := func(c client.Client, ws *workspacesv1alpha1.Workspace,
+		rec *record.FakeRecorder) *workspacesv1alpha1.Workspace {
+		t.Helper()
+		r := &WorkspaceReconciler{Client: c, Scheme: s,
+			Backend: linux.New(c, linux.Options{}), Recorder: rec}
+		for i := 0; i < 3; i++ {
+			if _, err := r.Reconcile(context.Background(),
+				ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+		}
+		got := &workspacesv1alpha1.Workspace{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	assertHeld := func(got *workspacesv1alpha1.Workspace, reason string) {
+		t.Helper()
+		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reason {
+			t.Fatalf("want Degraded=True reason=%s, got %+v", reason, got.Status.Conditions)
+		}
+	}
+	assertPodUntouched := func(c client.Client, ws *workspacesv1alpha1.Workspace) {
+		t.Helper()
+		pod := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKey{
+			Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
+			t.Fatalf("held workspace's running pod was touched: %v", err)
+		}
+		if !pod.DeletionTimestamp.IsZero() {
+			t.Fatal("held workspace's running pod is being deleted")
+		}
+	}
+	assertOneEvent := func(rec *record.FakeRecorder, reason string) {
+		t.Helper()
+		select {
+		case ev := <-rec.Events:
+			if !strings.Contains(ev, reason) {
+				t.Fatalf("event %q, want reason %s", ev, reason)
+			}
+		default:
+			t.Fatalf("no %s Warning emitted", reason)
+		}
+		select {
+		case ev := <-rec.Events:
+			t.Fatalf("second event emitted on a repeated hold: %q", ev)
+		default:
+		}
+	}
+
+	t.Run("content-invalid holds TemplateInvalid, pod untouched", func(t *testing.T) {
+		tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-inv"))
+		ws := adoptWorkspace("fam32", "", types.UID("ws-adopt-invalid"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
+		seedBuiltPod(t, c, ws, tpl) // stamped fam32-aaaa1111 @ 2026-10-a
+		// The live object becomes inadmissible after the pod was built.
+		tpl.Annotations[linux.AnnotationSeccompProfile] = "localhost/../escape"
+		if err := c.Update(context.Background(), tpl); err != nil {
+			t.Fatal(err)
+		}
+		rec := record.NewFakeRecorder(16)
+		got := reconcile(c, ws, rec)
+		assertHeld(got, ReasonTemplateInvalid)
+		assertPodUntouched(c, ws)
+		if got.Status.TemplateSnapshot != nil {
+			t.Fatalf("inadmissible template adopted: %+v", got.Status.TemplateSnapshot)
+		}
+		assertOneEvent(rec, ReasonTemplateInvalid)
+	})
+
+	t.Run("identity-unprovable holds TemplateRevisionGone, pod untouched", func(t *testing.T) {
+		tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-gone"))
+		ws := adoptWorkspace("fam32", "", types.UID("ws-adopt-gone"))
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(ws).WithStatusSubresource(ws).Build()
+		seedBuiltPod(t, c, ws, tpl) // stamped; the object is absent
+		rec := record.NewFakeRecorder(16)
+		got := reconcile(c, ws, rec)
+		assertHeld(got, ReasonTemplateRevisionGone)
+		assertPodUntouched(c, ws)
+		assertOneEvent(rec, ReasonTemplateRevisionGone)
+	})
 }
