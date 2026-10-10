@@ -56,6 +56,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/session:touch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Activity beat
+         * @description The explicit "the user is here" signal (FIX-IDLE). Reaching this
+         *     endpoint slides the session's idle deadline — the sliding session
+         *     read inside authentication IS the touch — and the handler answers
+         *     `204` with no body. It exists because every `GET` on this API is
+         *     passive: the portal calls it only on real user interaction
+         *     (pointer, key, navigation), never from a timer-driven poll, and
+         *     throttles to at most one call per minute.
+         *
+         *     Requires the session cookie and the `X-CSRF-Token` header (`401`
+         *     without a session, `403` without a valid token) — forging a touch
+         *     is therefore exactly as hard as forging any mutation. The call is
+         *     rate-limited like the rest of the login/session family, keyed on
+         *     the session digest when the cookie is valid.
+         *
+         *     A session that already idled out cannot be revived by a touch:
+         *     authentication fails `401` before the write, same as any route.
+         */
+        post: operations["touchSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/logout": {
         parameters: {
             query?: never;
@@ -1601,6 +1636,29 @@ export interface operations {
                     "application/json": components["schemas"]["SessionProbe"];
                 };
             };
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    touchSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Idle deadline extended. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

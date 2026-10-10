@@ -123,12 +123,12 @@ func (h *AdminUserLimitsHandler) WithAuditSink(s observability.AuditSink) *Admin
 }
 
 // MountAdminUserLimitRoutes registers the routes audited (see
-// MountAdminQuotaRoutes): RequireAuth+audit on the read,
+// MountAdminQuotaRoutes): RequireAuthPassive+audit on the read,
 // RequireAuth+audit+RequireCSRF on the writes — denied (non-admin,
 // cross-tenant) attempts emit the route's table action with outcome
 // denied; a write that decodes resolves to the set or clear variant.
 func MountAdminUserLimitRoutes(mux *http.ServeMux, authn *Authenticator, h *AdminUserLimitsHandler) {
-	mux.Handle(routeAdminUserLimitsGet, authn.RequireAuth(
+	mux.Handle(routeAdminUserLimitsGet, authn.RequireAuthPassive(
 		audited(h.audit, routeAdminUserLimitsGet, http.HandlerFunc(h.Get))))
 	mux.Handle(routeAdminUserLimitsPut, authn.RequireAuth(
 		audited(h.audit, routeAdminUserLimitsPut,

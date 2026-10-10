@@ -162,6 +162,44 @@ func TestProxy_IPv6ForwardsExactAddrKeyFolds(t *testing.T) {
 	}
 }
 
+// TestClientAddr_NonIPSelectedEntryFallsBackToPeer: the forwarded-header
+// render shares the limiter key's chain walk, so a non-IP claim can never
+// reach a parsed address field toward the runtime — a client whose own
+// bytes land in the selected slot gets the verified socket peer, exactly
+// like ClientKey, while a plain IP claim keeps its exact (unfolded) form.
+func TestClientAddr_NonIPSelectedEntryFallsBackToPeer(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	mk := func(xff string) string {
+		return ratelimit.ClientAddr(&http.Request{
+			RemoteAddr: "10.1.2.3:443", // the (trusted) edge peer
+			Header:     http.Header{"X-Forwarded-For": {xff}},
+		}, trusted)
+	}
+	for _, xff := range []string{
+		"junk, 10.9.9.9",         // arbitrary token
+		"unknown",                // the classic placeholder
+		"example.com, 10.9.9.9",  // hostname
+		"fe80::1%eth0, 10.9.9.9", // zoned IPv6 literal (parses!)
+		"1.2.3.4:8080, 10.9.9.9", // address:port, not a bare IP
+		"not an ip, 10.9.9.9",    // spaces survive trimming
+	} {
+		a := mk(xff)
+		if a != "10.1.2.3" {
+			t.Fatalf("ClientAddr(xff=%.40q) = %q, want the peer 10.1.2.3", xff, a)
+		}
+		if _, err := netip.ParseAddr(a); err != nil {
+			t.Fatalf("ClientAddr(xff=%.40q) carried a non-IP value", xff)
+		}
+	}
+	// The real address render is untouched: exact, unmapped, not folded.
+	if a := mk("::ffff:8.8.8.8, 10.9.9.9"); a != "8.8.8.8" {
+		t.Fatalf("ClientAddr = %q, want unmapped 8.8.8.8", a)
+	}
+	if a := mk("2001:db8::5, 10.9.9.9"); a != "2001:db8::5" {
+		t.Fatalf("ClientAddr = %q, want the exact address, not the /64 base", a)
+	}
+}
+
 // TestProxy_NoXFFAtAll: a request with no forwarding headers still lets the
 // runtime identify the client — the socket peer.
 func TestProxy_NoXFFAtAll(t *testing.T) {

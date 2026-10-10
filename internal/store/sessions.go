@@ -283,6 +283,45 @@ func (s *SessionStore) TouchPrincipal(ctx context.Context, principal string) (in
 	return tag.RowsAffected(), nil
 }
 
+// TouchSessionDigestSQL and TouchSessionDigestIdleSQL are the statements
+// behind TouchSessionDigest (without / with an idle window): they address
+// exactly one session row — $1 is the sessions.id key form (hex of the
+// SHA-256 digest a lease recorded as portal_session_digest); the idle
+// variant takes the window as $2.
+const (
+	TouchSessionDigestSQL = `
+		UPDATE sessions SET last_seen_at = now()
+		WHERE id = $1
+		  AND epoch = ` + currentEpochSQL + `
+		  AND (expires_at IS NULL OR expires_at > now())`
+	TouchSessionDigestIdleSQL = TouchSessionDigestSQL + `
+		  AND last_seen_at > now() - $2::interval`
+)
+
+// TouchSessionDigest slides last_seen_at for exactly the session row the
+// digest names — the session the desktop stream's input arrived under
+// (SR-1-F3): input under one session's lease no longer refreshes the
+// principal's other sessions. The guards are identical to TouchPrincipal —
+// live epoch, inside absolute expiry, inside the idle window — so input
+// still can never revive an expired session. Returns the row count
+// actually updated (0 for an unknown or dead row).
+func (s *SessionStore) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
+	var (
+		tag pgconn.CommandTag
+		err error
+	)
+	if s.idle > 0 {
+		tag, err = s.db.Pool().Exec(ctx, TouchSessionDigestIdleSQL,
+			digestHex, fmt.Sprintf("%dms", s.idle.Milliseconds()))
+	} else {
+		tag, err = s.db.Pool().Exec(ctx, TouchSessionDigestSQL, digestHex)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("session touch: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // Delete removes the session; deleting a missing ID is a no-op.
 func (s *SessionStore) Delete(ctx context.Context, id string) error {
 	_, err := s.db.Pool().Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sessionKey(id))

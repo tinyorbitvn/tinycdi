@@ -636,6 +636,10 @@ func (a *pgSessionAdapter) TouchPrincipal(ctx context.Context, principal string)
 	return a.s.TouchPrincipal(ctx, principal)
 }
 
+func (a *pgSessionAdapter) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
+	return a.s.TouchSessionDigest(ctx, digestHex)
+}
+
 func (a *pgSessionAdapter) Delete(ctx context.Context, id string) error {
 	return a.s.Delete(ctx, id)
 }
