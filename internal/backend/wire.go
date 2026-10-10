@@ -550,8 +550,14 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		RenewInterval:  cfg.RenewInterval,
 		RevokeDeadline: cfg.RevokeDeadline,
 		LaunchLimiter:  launch,
-		TrustedProxies: trusted,
-		Metrics:        metrics,
+		// The unknown-cookie lookup bound is LOCAL in every mode — it
+		// exists to keep a cookie spray off Postgres, so a shared window
+		// would defeat its purpose; 0 disables via the always-allow
+		// bucket ratelimit.New(0, ...) returns.
+		SessionLookupLimiter: ratelimit.New(cfg.SessionLookupRate, gateway.SessionLookupBurst, rateLimitMaxKeys, nil),
+		UnattachedSessionTTL: cfg.UnattachedSessionTTL,
+		TrustedProxies:       trusted,
+		Metrics:              metrics,
 		Audit: observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), b.log,
 			metrics.IncAuditWriteError),
 		Logger: b.log,

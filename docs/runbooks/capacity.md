@@ -188,6 +188,17 @@ What that means for sizing:
   that is live on the serving replica are per-session; a *first* launch
   (no cookie yet, or a cookie only a sibling replica knows) is per-IP —
   20 users' simultaneous first connects need `-launch-rate` ≥ 20/min.
+- **Session reconnects pay the session-lookup bound until cached.**
+  `-session-lookup-rate` (300/min, burst 120 **per replica**) is a
+  pre-lookup gate on the session listener: any request carrying a cookie
+  the replica has never seen — including a *valid* one, e.g. every
+  session after a backend rollout — spends one token before the
+  directory read. A reconnecting client costs ~2 tokens (the frame
+  document load plus the `/websockify` upgrade), so NAT sizing is ~2 ×
+  concurrent reconnecting clients per replica: burst 120 covers ~60
+  concurrent reconnects from one address, and the 300/min refill drains
+  the refusal tail (refused clients see `429 RATE_LIMITED` +
+  `Retry-After` and retry).
 - **Budgets are the exact aggregate across replicas.** The limiter is a
   Postgres fixed-minute window shared by every backend replica (ADR 0006):
   one key draws at most rate+burst in a window — `-login-rate` 60/min +

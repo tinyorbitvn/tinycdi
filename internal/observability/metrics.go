@@ -60,9 +60,11 @@ var (
 	}
 	// rateLimitRoutes are the bounded route templates whose per-client
 	// limiter may refuse a request (E7) — the login family on the app
-	// listener and launch on the session listener.
+	// listener, launch on the session listener, and the unknown-cookie
+	// session-directory lookup on the same listener.
 	rateLimitRoutes = map[string]struct{}{
 		"/v1/login": {}, "/v1/auth/callback": {}, "/v1/session": {}, "/v1/launch": {},
+		"session_lookup": {},
 	}
 	// rateLimitWindowRoutes are the bounded limiter families whose
 	// Postgres window check may fail (ADR 0006): the shared login bucket,
@@ -114,6 +116,7 @@ var (
 		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
 		"admin.user_limit.default.set": {}, "admin.user_limit.default.clear": {},
 		"launch.redeem": {}, "launch.host_mismatch": {},
+		"session.lookup": {},
 	}
 )
 
@@ -401,7 +404,7 @@ func (m *Metrics) DeleteRuntimeImageAge(family string) {
 
 // IncRateLimited counts one rate-limiter refusal; route is bounded to the
 // limited route templates {/v1/login, /v1/auth/callback, /v1/session,
-// /v1/launch, other}.
+// /v1/launch, session_lookup, other}.
 func (m *Metrics) IncRateLimited(route string) {
 	m.rateLimited.WithLabelValues(boundValue(route, rateLimitRoutes)).Inc()
 }
