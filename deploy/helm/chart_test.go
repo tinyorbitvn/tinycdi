@@ -2330,6 +2330,121 @@ func TestKustomizeRBACNoClusterRoleBinding(t *testing.T) {
 	}
 }
 
+// workspaceStatusVerbs returns every verb a Role/ClusterRole doc grants on
+// workspaces/status, flattened across its rules.
+func workspaceStatusVerbs(d doc) []string {
+	var out []string
+	for _, r := range toSlice(d["rules"]) {
+		rm, _ := r.(map[string]any)
+		matches := false
+		for _, res := range toSlice(rm["resources"]) {
+			if res == "workspaces/status" {
+				matches = true
+			}
+		}
+		if !matches {
+			continue
+		}
+		for _, v := range toSlice(rm["verbs"]) {
+			if vs, ok := v.(string); ok {
+				out = append(out, vs)
+			}
+		}
+	}
+	return out
+}
+
+// workspaceStatusWriteVerbs filters a verb list to writes: anything that
+// is not a read (get/list/watch) can mutate status.templateSnapshot — the
+// field whose operator-only writability the snapshot trust boundary
+// depends on (SEC-10).
+func workspaceStatusWriteVerbs(d doc) []string {
+	var out []string
+	for _, v := range workspaceStatusVerbs(d) {
+		if v != "get" && v != "list" && v != "watch" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// TestWorkspaceStatusWritableOnlyByOperator: status.templateSnapshot is
+// the pod-building source of truth BECAUSE workspaces/status is writable
+// by the operator service account alone — any other role in the chart
+// (backend, frontend, persona roles) may hold at most get. A role
+// granting update/patch on workspaces/status to anyone else reopens the
+// forged-snapshot escalation.
+func TestWorkspaceStatusWritableOnlyByOperator(t *testing.T) {
+	for _, vf := range lintValues {
+		docs := render(t, vf)
+		managerGrants := false
+		for _, d := range append(selectDocs(docs, "ClusterRole"), selectDocs(docs, "Role")...) {
+			write := workspaceStatusWriteVerbs(d)
+			if len(write) == 0 {
+				continue
+			}
+			name, _ := meta(d)
+			if !strings.HasSuffix(name, "-manager-role") {
+				t.Errorf("%s: %s %q grants workspaces/status %v — only the operator manager-role may write it",
+					vf, d["kind"], name, write)
+				continue
+			}
+			managerGrants = true
+		}
+		if !managerGrants {
+			t.Errorf("%s: no manager-role workspaces/status write grant — the operator cannot record status.templateSnapshot", vf)
+		}
+	}
+}
+
+// TestKustomizeWorkspaceStatusWritableOnlyByManager: the same invariant
+// on the dev kustomize path (config/rbac, consumed by make deploy and
+// build-installer): only manager-role may write workspaces/status. The
+// scaffold admin/editor/viewer personas are get-only — they exist for
+// human cluster admins, never for a service account the platform runs.
+func TestKustomizeWorkspaceStatusWritableOnlyByManager(t *testing.T) {
+	rbacDir := filepath.Join(repoRoot(t), "config", "rbac")
+	entries, err := os.ReadDir(rbacDir)
+	if err != nil {
+		t.Skipf("config/rbac not present: %v", err)
+	}
+	managerGrants := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(rbacDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(b))
+		for {
+			var d doc
+			if err := dec.Decode(&d); err != nil {
+				break
+			}
+			kind, _ := d["kind"].(string)
+			if kind != "ClusterRole" && kind != "Role" {
+				continue
+			}
+			write := workspaceStatusWriteVerbs(d)
+			if len(write) == 0 {
+				continue
+			}
+			name, _ := meta(d)
+			if name != "manager-role" {
+				t.Errorf("config/rbac/%s: %s %q grants workspaces/status %v — only manager-role may write it",
+					e.Name(), kind, name, write)
+				continue
+			}
+			managerGrants = true
+		}
+	}
+	if !managerGrants {
+		t.Error("config/rbac: manager-role lost its workspaces/status write grant — the operator cannot record status.templateSnapshot")
+	}
+}
+
 // TestNodeProfilesInstallerDockerProof is the permanent form of the
 // offline proof: it runs install.sh/verify.sh end-to-end inside the pinned
 // alpine image against a simulated host root (fake /proc, fake

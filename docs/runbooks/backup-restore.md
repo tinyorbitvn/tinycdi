@@ -64,7 +64,9 @@ surfaced.
      so a stale
      `appliedAt` can no longer fail a converging workspace. The strip is
      still correct for the intent fencing.) Keep `template-snapshot` —
-     it is the immutable image pin the workspace was admitted under.
+     the annotation mirrors `status.templateSnapshot`, the immutable
+     image pin the workspace was admitted under (a CR export carries
+     both; keep them consistent).
    - A bare `spec.desiredState` patch is **ignored** by the operator:
      it only adopts intents with `spec.intentRevision` greater than the
      recorded `applied-intent.revision`. To re-drive a restored

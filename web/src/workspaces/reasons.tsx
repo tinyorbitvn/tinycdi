@@ -43,6 +43,8 @@ const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   TemplateNotFound: "workspaces.reason.templateNotFound",
   TemplateRejected: "workspaces.reason.templateRejected",
   TemplateSnapshotInvalid: "workspaces.reason.templateSnapshotInvalid",
+  TemplateInvalid: "workspaces.reason.templateInvalid",
+  TemplateRevisionGone: "workspaces.reason.templateRevisionGone",
   IntentApplied: "workspaces.reason.intentApplied",
   Provisioning: "workspaces.reason.provisioning",
   WaitingForDisk: "workspaces.reason.waitingForDisk",

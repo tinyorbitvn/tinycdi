@@ -78,4 +78,43 @@ type Backend interface {
 	// (Service, secrets, scratch). Persistent data is handled by the
 	// retention flow, not here.
 	DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Workspace) error
+
+	// PodMatchesTemplate reports whether the workspace's current runtime
+	// incarnation exists, is owned by ws (controller ownerRef), and
+	// provably was built from tpl — either it carries a matching
+	// template-hash stamp, or (incarnations built before the stamp
+	// existed) its spec equals a fresh build from tpl field-for-field.
+	// It is the upgrade-adoption proof for template snapshots recorded
+	// before status.templateSnapshot existed; a false answer means the
+	// record may NOT be trusted and convergence must re-snapshot.
+	PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error)
+
+	// PodTemplateIdentity returns the template-revision identity the
+	// runtime incarnation pod was stamped with — operator-written pod
+	// metadata, never user input. Owned is false when no pod exists or
+	// the pod is not operator-owned for ws; the caller then treats the
+	// workspace as having no proving incarnation.
+	PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (PodTemplateIdentity, error)
+
+	// StampPodTemplateIdentity backfills the template-identity stamps
+	// onto the workspace's operator-owned incarnation pod after its
+	// provenance was proven by another means (the pre-stamp upgrade
+	// path) — later reconciles and upgrades read the identity directly.
+	// No-op when no owned pod exists.
+	StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error
+}
+
+// PodTemplateIdentity is the stamped template-revision identity of a
+// workspace's runtime incarnation pod.
+type PodTemplateIdentity struct {
+	// Owned is true only when the pod exists and is operator-owned for
+	// the workspace (controller ownerRef to the Workspace UID plus the
+	// backend's managed label set for the live generation).
+	Owned bool
+	// Name is the WorkspaceTemplate object name the pod was built from.
+	// Empty means the pod predates the stamp — its revision cannot be
+	// proven.
+	Name string
+	// Revision is spec.revision of the template the pod was built from.
+	Revision string
 }

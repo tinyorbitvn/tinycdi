@@ -3,13 +3,14 @@
 
 // SEC-10 regression coverage: the
 // operator must not trust the workspaces.cdi.tinyorbit.vn/template-snapshot
-// annotation blindly. The annotation is ordinary Workspace metadata —
-// a principal with Workspace write can pre-seed or replace it — so before
-// it drives convergence the snapshot must prove integrity (specHash over
-// the recorded spec), re-satisfy the CRD invariants the apiserver
-// enforces on real templates (digest-pinned image, runtime-block
-// exclusivity), and, when the recorded template object still exists,
-// equal it. A forged annotation must produce NO runtime children.
+// annotation at all. The annotation is ordinary Workspace metadata — a
+// principal with Workspace write can pre-seed or replace it — so
+// convergence builds pods only from status.templateSnapshot, the record
+// the operator wrote itself through the workspaces/status subresource
+// (granted to the operator service account alone). The annotation can
+// reach status only through the one-time upgrade-adoption proof (a live
+// operator-owned pod verifiably built from it). A forged annotation must
+// produce NO runtime children from its own spec.
 package operator
 
 import (
@@ -18,6 +19,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -124,9 +127,9 @@ func assertSnapshotRejected(t *testing.T, c client.Client, ws *workspacesv1alpha
 	}
 	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue ||
-		cond.Reason != ReasonTemplateSnapshotInvalid {
+		cond.Reason != ReasonTemplateInvalid {
 		t.Fatalf("want Degraded=True reason=%s, got %+v",
-			ReasonTemplateSnapshotInvalid, got.Status.Conditions)
+			ReasonTemplateInvalid, got.Status.Conditions)
 	}
 }
 
@@ -174,7 +177,9 @@ func TestForgedSnapshotCELInvariantRejected(t *testing.T) {
 
 // The recorded template object still exists with the same UID but the
 // recorded spec does not match it — a forged annotation naming a REAL
-// template must be caught too.
+// template is overridden by an honest re-snapshot of the live object:
+// the forged spec never converges, the pod is built from the template's
+// own spec.
 func TestForgedSnapshotLiveTemplateMismatchRejected(t *testing.T) {
 	live := &workspacesv1alpha1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -205,7 +210,31 @@ func TestForgedSnapshotLiveTemplateMismatchRejected(t *testing.T) {
 	ws := forgedWorkspace(ann)
 	ws.Spec.TemplateRef.Name = "tpl-live"
 	c, got := reconcileForged(t, ws, live)
-	assertSnapshotRejected(t, c, ws, got)
+
+	// No pod may exist yet, and never one built from the forged spec: the
+	// annotation is unadoptable without an operator-owned pod, so the
+	// operator re-snapshots the LIVE template and converges on it.
+	pod := &corev1.Pod{}
+	err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod)
+	if err != nil {
+		t.Fatalf("honest re-snapshot produced no pod: %v", err)
+	}
+	if img := pod.Spec.Containers[0].Image; img != live.Spec.Linux.Image {
+		t.Fatalf("pod image %q — the forged spec converged", img)
+	}
+	if got.Status.TemplateSnapshot == nil {
+		t.Fatal("re-snapshot did not record status.templateSnapshot")
+	}
+	want, err := snapshotTemplate(live)
+	if err != nil {
+		t.Fatalf("snapshotTemplate(live): %v", err)
+	}
+	if got.Status.TemplateSnapshot.SpecHash != want.SpecHash ||
+		got.Status.TemplateSnapshot.Name != "tpl-live" {
+		t.Fatalf("status snapshot = %+v, want honest record of tpl-live",
+			got.Status.TemplateSnapshot)
+	}
 }
 
 // The annotation recorded by the operator itself still verifies — and a
@@ -323,6 +352,249 @@ func TestValidateSnapshotSpecKasmAdapter(t *testing.T) {
 	ok.Linux.SessionCmd = "/usr/bin/chromium-orig --start-maximized"
 	if err := validateSnapshotSpec(&ok); err != nil {
 		t.Fatalf("valid kasm spec rejected: %v", err)
+	}
+}
+
+// A fully VALID forged snapshot — correct specHash over a spec that
+// satisfies every CRD/CEL invariant (digest-pinned image, kasm rules),
+// self-consistent sourceRef/runtimeGeneration — naming a template that was
+// never published. This is the structurally-valid forge the old
+// provenance check could not catch (template NotFound returned early
+// success): attacker-chosen image, command, control-plane placement,
+// runtimeClass and unbounded resources. Under the status-authoritative
+// model it is simply untrusted: no status record exists, the annotation
+// is never adopted without a proving pod, and the unresolvable reference
+// holds the workspace Degraded with NO pod.
+func TestForgedSnapshotStructurallyValidRejected(t *testing.T) {
+	spec := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
+	// Attacker-chosen placement: land the pod on control-plane nodes.
+	spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		Tolerations: []corev1.Toleration{{
+			Key:      "node-role.kubernetes.io/control-plane",
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		}},
+	}
+	rc := "kata-containers"
+	spec.Placement.RuntimeClassName = &rc
+	spec.NetworkProfile = workspacesv1alpha1.NetworkProfileInternetOnly
+	raw, _ := json.Marshal(spec)
+	sum := sha256.Sum256(raw)
+	ann := forgedSnapshot("never-published", "ffffffff-0000-0000-0000-000000000001",
+		spec.Revision, "sha256:"+hex.EncodeToString(sum[:]), spec,
+		map[string]string{linux.AnnotationSeccompProfile: "localhost/attacker-loaded"})
+
+	ws := forgedWorkspace(ann)
+	// The forger keeps the snapshot self-consistent with the spec it
+	// plants on the CR: SourceRef must equal spec.templateRef.name and the
+	// recorded generation must cover spec.runtimeGeneration.
+	var parsed templateSnapshot
+	if err := json.Unmarshal([]byte(ann), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	parsed.SourceRef = ws.Spec.TemplateRef.Name
+	parsed.RuntimeGeneration = ws.Spec.RuntimeGeneration
+	rawAnn, _ := json.Marshal(&parsed)
+	ws.Annotations[AnnotationTemplateSnapshot] = string(rawAnn)
+
+	c, got := reconcileForged(t, ws)
+	assertSnapshotRejected(t, c, ws, got)
+	if got.Status.TemplateSnapshot != nil {
+		t.Fatalf("forged annotation was adopted into status: %+v",
+			got.Status.TemplateSnapshot)
+	}
+}
+
+// The held workspace emits exactly one Warning event on the transition
+// into TemplateInvalid — the hold requeues and reconciles again, but the
+// transition fires once, not per pass.
+func TestTemplateInvalidEventEmittedOnce(t *testing.T) {
+	spec := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
+	raw, _ := json.Marshal(spec)
+	sum := sha256.Sum256(raw)
+	ann := forgedSnapshot("never-published", "x", "x",
+		"sha256:"+hex.EncodeToString(sum[:]), spec, nil)
+	ws := forgedWorkspace(ann)
+
+	s := snapScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
+	rec := record.NewFakeRecorder(16)
+	r := &WorkspaceReconciler{Client: c, Scheme: s,
+		Backend: linux.New(c, linux.Options{}), Recorder: rec}
+	key := client.ObjectKeyFromObject(ws)
+	for i := 0; i < 4; i++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, ReasonTemplateInvalid) {
+			t.Fatalf("event %q, want reason %s", ev, ReasonTemplateInvalid)
+		}
+	default:
+		t.Fatal("no TemplateInvalid event emitted")
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Fatalf("second event emitted on a repeated hold: %q", ev)
+	default:
+	}
+}
+
+// The revision-gone hold emits its Warning once — after the Degraded
+// status persisted — and stays silent across repeated holds.
+func TestTemplateRevisionGoneEventEmittedOnce(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32", "", types.UID("ws-pre-ev"))
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
+	seedBuiltPod(t, c, ws, tpl) // stamped fam32-aaaa1111; the object is absent
+
+	rec := record.NewFakeRecorder(16)
+	r := &WorkspaceReconciler{Client: c, Scheme: s,
+		Backend: linux.New(c, linux.Options{}), Recorder: rec}
+	key := client.ObjectKeyFromObject(ws)
+	for i := 0; i < 4; i++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, ReasonTemplateRevisionGone) {
+			t.Fatalf("event %q, want reason %s", ev, ReasonTemplateRevisionGone)
+		}
+	default:
+		t.Fatal("no TemplateRevisionGone event emitted")
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Fatalf("second event emitted on a repeated hold: %q", ev)
+	default:
+	}
+}
+
+// The status copy is the source of truth: a workspace whose
+// status.templateSnapshot the operator recorded still converges on it
+// even when the annotation is replaced by a forgery — the mirror is
+// repaired, never read.
+func TestStatusSnapshotAuthoritativeOverForgedAnnotation(t *testing.T) {
+	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tpl-honest", Namespace: "tinycdi-tenant-a",
+			UID: types.UID("eeeeeeee-0000-0000-0000-000000000002"),
+		},
+		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
+			Experience: workspacesv1alpha1.ExperienceDesktop,
+			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
+			},
+			Resources: workspacesv1alpha1.ResourceProfile{
+				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
+				Storage: resource.MustParse("5Gi"),
+			},
+			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
+			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+		},
+	}
+	honest, err := snapshotTemplate(tpl)
+	if err != nil {
+		t.Fatalf("snapshotTemplate: %v", err)
+	}
+	honest.RuntimeGeneration = 1
+	honest.SourceRef = "tpl-honest"
+
+	// Forged annotation with control-plane placement claims the same
+	// source — it must lose to the status record and be overwritten.
+	spec := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
+	spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+	}
+	fraw, _ := json.Marshal(spec)
+	fsum := sha256.Sum256(fraw)
+	forged := &templateSnapshot{
+		Name: "tpl-honest", UID: "ffffffff-0000-0000-0000-000000000009",
+		Revision: "2026-09-a", SpecHash: "sha256:" + hex.EncodeToString(fsum[:]),
+		Spec: spec, RuntimeGeneration: 1, SourceRef: "tpl-honest",
+	}
+	forgedRaw, _ := json.Marshal(forged)
+
+	ws := forgedWorkspace(string(forgedRaw))
+	ws.Spec.TemplateRef.Name = "tpl-honest"
+	ws.Status.TemplateSnapshot = honest
+	c, got := reconcileForged(t, ws)
+
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
+		t.Fatalf("status snapshot blocked convergence: %v", err)
+	}
+	if img := pod.Spec.Containers[0].Image; img != tpl.Spec.Linux.Image {
+		t.Fatalf("pod image %q, want status-recorded %q — the forged annotation drove convergence",
+			img, tpl.Spec.Linux.Image)
+	}
+	wantAnn, _ := json.Marshal(honest)
+	if got.Annotations[AnnotationTemplateSnapshot] != string(wantAnn) {
+		t.Fatal("forged annotation was not repaired to the status mirror")
+	}
+}
+
+// First admit writes the snapshot to status (the trusted copy) and
+// mirrors it to the annotation for readers — the operator builds the
+// record from the live template, never from caller-supplied bytes.
+func TestStatusSnapshotRecordedAtFirstAdmit(t *testing.T) {
+	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tpl-admit", Namespace: "tinycdi-tenant-a",
+			UID:         types.UID("eeeeeeee-0000-0000-0000-000000000003"),
+			Annotations: map[string]string{linux.AnnotationSeccompProfile: "localhost/browser-sandbox"},
+		},
+		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
+			Experience: workspacesv1alpha1.ExperienceDesktop,
+			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
+			},
+			Resources: workspacesv1alpha1.ResourceProfile{
+				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
+				Storage: resource.MustParse("5Gi"),
+			},
+			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
+			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+		},
+	}
+	ws := forgedWorkspace("")
+	delete(ws.Annotations, AnnotationTemplateSnapshot)
+	ws.Spec.TemplateRef.Name = "tpl-admit"
+	c, got := reconcileForged(t, ws, tpl)
+
+	snap := got.Status.TemplateSnapshot
+	if snap == nil {
+		t.Fatal("status.templateSnapshot not recorded at first admit")
+	}
+	want, err := snapshotTemplate(tpl)
+	if err != nil {
+		t.Fatalf("snapshotTemplate: %v", err)
+	}
+	if snap.Name != want.Name || snap.UID != want.UID || snap.SpecHash != want.SpecHash ||
+		snap.SourceRef != "tpl-admit" || snap.RuntimeGeneration != 1 ||
+		snap.Annotations[linux.AnnotationSeccompProfile] != "localhost/browser-sandbox" {
+		t.Fatalf("recorded snapshot = %+v, want honest record of tpl-admit", snap)
+	}
+	rawAnn, _ := json.Marshal(snap)
+	if got.Annotations[AnnotationTemplateSnapshot] != string(rawAnn) {
+		t.Fatal("annotation does not mirror the status record")
+	}
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
+		t.Fatalf("no pod from recorded snapshot: %v", err)
+	}
+	if pod.Annotations[linux.AnnotationTemplateHash] == "" {
+		t.Fatal("pod missing the template-hash stamp")
 	}
 }
 
