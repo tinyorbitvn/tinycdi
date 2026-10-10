@@ -78,4 +78,14 @@ type Backend interface {
 	// (Service, secrets, scratch). Persistent data is handled by the
 	// retention flow, not here.
 	DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Workspace) error
+
+	// PodMatchesTemplate reports whether the workspace's current runtime
+	// incarnation exists, is owned by ws (controller ownerRef), and
+	// provably was built from tpl — either it carries a matching
+	// template-hash stamp, or (incarnations built before the stamp
+	// existed) its spec equals a fresh build from tpl field-for-field.
+	// It is the upgrade-adoption proof for template snapshots recorded
+	// before status.templateSnapshot existed; a false answer means the
+	// record may NOT be trusted and convergence must re-snapshot.
+	PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error)
 }

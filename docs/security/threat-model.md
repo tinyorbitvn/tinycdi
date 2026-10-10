@@ -438,8 +438,14 @@ Controls: scoped RBAC in `deploy/helm/tinycdi/templates/rbac.yaml` +
 `spec.linux.command` with `adapter=kasm` (the adapter entrypoint wins —
 `buildPod` kasm block); `hostUsers` is a typed template field with an
 operator-wide default knob, nil leaves the pod field unset
-(`internal/runtime/linux/backend.go:295-298,1097-1103`). Image-digest
-verification of the running template snapshot:
+(`internal/runtime/linux/backend.go:295-298,1097-1103`). The template
+snapshot that drives pod building is operator-authoritative: it is
+recorded to `status.templateSnapshot` — writable only through the
+`workspaces/status` subresource, granted to the operator service account
+alone — from the live template at first admit, and only mirrored to the
+`workspaces.cdi.tinyorbit.vn/template-snapshot` annotation for readers,
+so Workspace writers can no longer steer convergence by editing
+annotation bytes (S28). Image-digest verification of the recorded spec:
 `internal/operator/snapshot_verify_test.go`. Intent delivery is fenced:
 the operator converges a Workspace only to the newest recorded intent
 (`spec.intentRevision` vs the `applied-intent` annotation — a spec at or
@@ -548,6 +554,7 @@ items that landed since.
 | S25 | Dead/misleading auth config knobs | Fixed: `AuthConfig` carried `IdleTimeout` — defaulted at startup but never consumed (the session idle window is owned by the session store: `-session-idle`/`TCDI_SESSION_IDLE` → `store.NewSessionStore`) — and `AllowedTenants` — enforced in `tenantAllowed` but with no flag/env/chart path able to populate it, so the gate could never engage; `-required-groups` (`oidc.requiredGroups`) remains the supported login gate. Both knobs were deleted rather than wired: wiring `IdleTimeout` would have created a second source of truth for the store's window, and `AllowedTenants` had no reachable configuration. Guard: `TestAuthConfig_NoDeadSessionKnobs` fails if either field returns |
 | S26 | Post-logout redirect accepted plaintext `http` | Fixed: `AuthConfig.PostLogoutRedirect` and the discovered `end_session_endpoint` now require an absolute https URL — `http` is accepted only for loopback hosts (`localhost`, 127.0.0.0/8, `::1`; strict `netip` parse — mapped/octal spellings do not count), matching the dev plain-http-on-loopback IdP convention (`oidctest`); the chart schema already required `^https://` (`values.schema.json`). Tests: `TestNewAuthenticator_RejectsBadPostLogoutRedirect`, `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`, `TestLogout_UntrustedDiscoveredEndpointIs204` |
 | S27 | create-connection echoed JSON decoder detail | Fixed: `ConnectionHandler.Create` decodes via the shared `decodeJSON` helper — which also rejects trailing data after the first document, a check the previous inline decode lacked — answers 400 `INVALID_REQUEST` with the generic "invalid request body", and logs the decode detail server-side with the request id (SEC-I7). `decodeJSON` now returns the error so callers can log it without echoing it. Tests: `TestCreateConnection_InvalidBodyGenericMessage`, `TestCreateConnection_TrailingJSONRejected` |
+| S28 | Forged `template-snapshot` annotation drove operator-built pods | Fixed: the snapshot that drives pod building moved to `status.templateSnapshot` — writable only through the `workspaces/status` subresource, which RBAC grants to the operator service account alone (pinned for chart + kustomize by `TestWorkspaceStatusWritableOnlyByOperator`/`TestKustomizeWorkspaceStatusWritableOnlyByManager`). The operator records the snapshot itself from the live template named by `spec.templateRef` and mirrors it to the annotation for readers; a workspace with no status record and no resolvable live template holds `Degraded`/`TemplateInvalid` plus one edge event instead of trusting annotation bytes, and the live-object provenance check is gone by design (the status record *is* the provenance — catalog rotation after admit still runs from it). Upgrade adopts a pre-status annotation once, only while an operator-owned pod proves it (`workspaces.cdi.tinyorbit.vn/template-hash` stamp, or an exact spec-rebuild match for pre-stamp pods); everything else re-snapshots the live template (`TestSnapshot_UpgradeAdoption`, `snapshot_adopt_test.go`). Residual: the annotation stays readable/writable by Workspace writers (the backend SA) — it is a mirror for consumers and is never trusted; a ValidatingAdmissionPolicy tightening who may write it is a separate hardening item |
 
 *Review note — S17:* the ticket-lock serialization claim (a redeem's
 ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is

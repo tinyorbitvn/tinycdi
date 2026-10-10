@@ -4,6 +4,66 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
+## Upgrading from v0.5 to v1.0 — `status.templateSnapshot`
+
+v1.0 changes where the immutable per-workspace template snapshot lives.
+The `workspaces` CRD gains the optional `status.templateSnapshot` field —
+the ONLY copy trusted for pod building — and the operator starts writing
+it (the `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation becomes
+a read mirror kept for consumers). Apply the CRDs first as usual:
+`kubectl diff -f deploy/helm/tinycdi/crds/` then `kubectl apply -f
+deploy/helm/tinycdi/crds/` — Helm never upgrades `crds/`, and the new
+schema is additive (a new optional status field; existing objects stay
+valid, and a v0.5 binary ignores the field it does not know).
+
+**No data migration and no runtime disruption are needed.** During the
+rollout the operator's leader-election Lease hands reconcile to exactly
+one pod at a time: the outgoing v0.5 replicas keep serving until the new
+leader is up — there is no window in which both versions reconcile the
+same workspace (with the chart default `operator.leaderElect: true`; a
+single-replica `replicas: 1` install simply rolls the one pod and is
+uncovered only for its own restart gap, same as every upgrade).
+
+On its first reconcile of each workspace the new operator establishes
+the snapshot like this:
+
+- **Running workspace with an honest record** — the live pod carries the
+  workspace's owner reference and provably was built from the recorded
+  annotation (a `workspaces.cdi.tinyorbit.vn/template-hash` stamp match
+  on new builds; for pods built before the stamp existed, the stored pod
+  spec must equal a fresh build from the recorded spec field-for-field).
+  The record is adopted into `status.templateSnapshot` once, untouched —
+  the pod is not restarted or replaced.
+- **Running workspace whose record does not match its pod, and every
+  workspace without a live pod** (stopped ones included) — the operator
+  re-snapshots the live template named by `spec.templateRef`, exactly as
+  a fresh admit would. A stopped workspace whose template was deleted in
+  the meantime holds `Degraded`/`TemplateInvalid` — with one Warning
+  event — until an admin republishes a resolvable template; it never
+  falls back to the annotation.
+- **Corrupt or absent record** — same rule: re-snapshot the live
+  template or hold.
+
+After adoption or re-snapshot the annotation mirror is rewritten from
+status — a Workspace writer can still edit the annotation, but nothing
+in convergence reads it any more, so drift there is repaired on the next
+reconcile and is harmless in between (the broker's expiry projection
+reads status first and falls back to the annotation only for rows that
+pre-date the field).
+
+Post-upgrade check:
+
+```
+kubectl -n <tenant-ns> get workspaces \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.templateSnapshot.name}{"\n"}{end}'
+```
+
+Every running workspace should name the revision it was admitted under.
+Rollback: the annotation mirror stays fully populated, so a v0.5
+operator (which reads only the annotation) keeps converging the same
+recorded revision — do not "un-apply" the v1.0 CRD, the extra status
+field is inert under v0.5.
+
 ## Upgrading from v0.2 to v0.3
 
 v0.3 ("Operate") keeps the v0.2 topology — the same `backend`,
@@ -696,9 +756,10 @@ cataloged browser image meets the gate the allowlist stays empty — see
 ## Running workspaces and images — read this before bumping template images
 
 - A Workspace records an **immutable template snapshot** at first admit
-  (`workspaces.cdi.tinyorbit.vn/template-snapshot` annotation, spec JSON +
-  sha256 — `internal/operator/workspace_controller.go`). The template
-  object is never re-read for that workspace.
+  (`status.templateSnapshot` — spec JSON + sha256, mirrored to the
+  `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation for readers;
+  `internal/operator/workspace_controller.go`). The template object is
+  never re-read for that workspace.
 - Therefore **upgrading the platform or replacing a WorkspaceTemplate does
   not change the image of any already-created workspace.** There is no
   rolling update of desktops in use — by design (plan global constraints).

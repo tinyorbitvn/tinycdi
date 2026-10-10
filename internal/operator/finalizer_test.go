@@ -88,6 +88,11 @@ func (f *fakeBackend) DeleteRuntime(context.Context, *workspacesv1alpha1.Workspa
 	return f.delErr
 }
 
+// PodMatchesTemplate reports nothing adoptable: the fake keeps no pods.
+func (f *fakeBackend) PodMatchesTemplate(context.Context, *workspacesv1alpha1.Workspace, *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
+	return false, nil
+}
+
 // stepRecorder implements every finalizer seam, recording call order and
 // injecting failures: failLeft[step]>0 makes that step return an error and
 // decrements the counter (simulating a crash inside the step).

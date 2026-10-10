@@ -153,7 +153,7 @@ func (i *RetentionInventory) MarkRetained(ctx context.Context, ws *workspacesv1a
 // ran), then the live WorkspaceTemplate CR. "" when neither resolves — the
 // caller falls back to the PVC's existing annotation, then LinuxContainer.
 func (i *RetentionInventory) runtimeFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) string {
-	if snap, err := templateSnapshotFor(ws); err == nil && snap != nil && snap.Spec.Runtime != "" {
+	if snap := recordedSnapshot(ws); snap != nil && snap.Spec.Runtime != "" {
 		return string(snap.Spec.Runtime)
 	}
 	tpl := &workspacesv1alpha1.WorkspaceTemplate{}

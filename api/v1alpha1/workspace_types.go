@@ -107,6 +107,56 @@ type WorkspaceSpec struct {
 	IntentRevision int64 `json:"intentRevision"`
 }
 
+// TemplateSnapshot is the operator-recorded copy of the WorkspaceTemplate
+// revision a workspace was admitted under. It lives in status — writable
+// only through the workspaces/status subresource, which RBAC grants to the
+// operator service account alone — so it is the one snapshot surface a
+// Workspace spec writer cannot forge. It is mirrored to the
+// workspaces.cdi.tinyorbit.vn/template-snapshot annotation for readers;
+// convergence trusts this copy only.
+type TemplateSnapshot struct {
+	// name of the WorkspaceTemplate object the snapshot was taken from.
+	// +required
+	Name string `json:"name"`
+
+	// uid of that object at record time.
+	// +required
+	UID string `json:"uid"`
+
+	// revision is the recorded spec.revision.
+	// +required
+	Revision string `json:"revision"`
+
+	// specHash is sha256 of the canonical spec JSON — provenance for the
+	// recorded revision.
+	// +required
+	SpecHash string `json:"specHash"`
+
+	// spec is the recorded template spec.
+	// +required
+	Spec WorkspaceTemplateSpec `json:"spec"`
+
+	// annotations carries the admin-controlled template annotations the
+	// backend honors (seccomp-profile, apparmor-profile, storage-class) —
+	// the snapshot captures them since the template object is never
+	// re-read.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// runtimeGeneration is the applied spec.runtimeGeneration the snapshot
+	// was recorded under.
+	// +optional
+	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`
+
+	// sourceRef is the spec.templateRef.name the snapshot was taken from
+	// (the catalog base name the create path writes, or the revision object
+	// name a carried re-point writes). Empty on snapshots recorded before
+	// the re-snapshot machinery existed — the recorded object name is the
+	// fallback source for those.
+	// +optional
+	SourceRef string `json:"sourceRef,omitempty"`
+}
+
 // WorkspaceStatus is operator-populated. Phase is only a summary; conditions
 // and reasons are the operational truth.
 type WorkspaceStatus struct {
@@ -150,6 +200,13 @@ type WorkspaceStatus struct {
 	// runtime exists. Not a connect endpoint for clients.
 	// +optional
 	ServiceRef *ServiceReference `json:"serviceRef,omitempty"`
+
+	// templateSnapshot is the operator-recorded template copy the runtime
+	// converges on, written at first admit and re-recorded on a re-pointing
+	// start. It is the ONLY snapshot trusted for pod building — the
+	// template-snapshot annotation is a read-only mirror for consumers.
+	// +optional
+	TemplateSnapshot *TemplateSnapshot `json:"templateSnapshot,omitempty"`
 
 	// dataRefs lists the volumes belonging to this workspace (home PVC,
 	// retained disk attachment, Windows boot disk).

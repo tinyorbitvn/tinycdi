@@ -250,8 +250,10 @@ substitute for review).
 - `internal/runtime/linux/backend_kasm_test.go`,
   `backend_kasm_quota_test.go` — kasm adapter injection, wrapper/policy
   mounts, read-only rootfs, quota interaction.
-- `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go` —
-  template snapshot image-digest verification (SEC-10).
+- `internal/operator/snapshot_verify_test.go`, `resnapshot_test.go`,
+  `snapshot_adopt_test.go` — template snapshot image-digest verification,
+  status-record authority over the annotation, and the upgrade-adoption
+  pod proof (SEC-10).
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
   `delete_vanished_test.go`, `workspace_controller_test.go` — retained-disk
   ownership and lifecycle edges; `intent_drift_test.go`

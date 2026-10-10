@@ -137,10 +137,18 @@ func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1
 }
 
 // lifecycleFor returns the recorded snapshot lifecycle, else the resolved
-// template's, else nil. A corrupt snapshot annotation resolves the live
-// template rather than failing closed — an unplannable workspace must
-// never silently drop its caps.
+// template's, else nil. The operator-recorded status.templateSnapshot is
+// read first — it is the authoritative copy (workspaces/status is writable
+// by the operator service account alone); the annotation is a fallback for
+// rows recorded before the status field existed, and a corrupt annotation
+// resolves the live template rather than failing closed — an unplannable
+// workspace must never silently drop its caps.
 func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.LifecycleDefaults {
+	if snap := ws.Status.TemplateSnapshot; snap != nil &&
+		snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+		lc := snap.Spec.Lifecycle
+		return &lc
+	}
 	if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
 		var snap snapshotPolicy
 		// An all-zero lifecycle — e.g. a snapshot written without the key —

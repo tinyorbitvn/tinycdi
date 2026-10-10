@@ -9,11 +9,14 @@
 //     the first time a newer spec.intentRevision is observed; a spec whose
 //     intentRevision <= the recorded revision is ignored, so a replayed stale
 //     intent can never flip desiredState back;
-//   - the WorkspaceTemplate is resolved once at first admit into the
-//     template-snapshot annotation (spec JSON + sha256 hash); it is re-taken
-//     only when spec.runtimeGeneration advances and spec.templateRef moved
-//     off the snapshot's source (an OnStart family re-point written by the
-//     API's start path). Within one generation the template object is never
+//   - the WorkspaceTemplate is resolved once at first admit into
+//     status.templateSnapshot (spec JSON + sha256 hash) — writable only
+//     through the workspaces/status subresource, which RBAC grants to the
+//     operator service account alone — and mirrored to the
+//     template-snapshot annotation for readers; it is re-taken only when
+//     spec.runtimeGeneration advances and spec.templateRef moved off the
+//     snapshot's source (an OnStart family re-point written by the API's
+//     start path). Within one generation the template object is never
 //     re-read — it may be deleted or re-published without touching a
 //     running generation;
 //   - all runtime convergence goes through the backend; status reports
@@ -68,8 +71,11 @@ const (
 	// ignored, so a replayed stale intent can never flip desiredState back.
 	AnnotationAppliedIntent = "workspaces.cdi.tinyorbit.vn/applied-intent"
 
-	// AnnotationTemplateSnapshot records the immutable template snapshot taken
-	// at first admit (JSON templateSnapshot).
+	// AnnotationTemplateSnapshot mirrors the operator-recorded
+	// status.templateSnapshot (JSON TemplateSnapshot) for consumers that
+	// predate the status field. It is plain object metadata — a Workspace
+	// writer can rewrite it — so convergence NEVER reads it; the status
+	// copy is the only source of truth.
 	AnnotationTemplateSnapshot = "workspaces.cdi.tinyorbit.vn/template-snapshot"
 
 	// AnnotationIncarnationStart records the first observation of the
@@ -90,20 +96,21 @@ const (
 	// runtime configuration (e.g. an out-of-policy apparmor-profile
 	// annotation value); no runtime children are created.
 	ReasonTemplateRejected = "TemplateRejected"
-	// ReasonTemplateSnapshotInvalid — the recorded template-snapshot
-	// annotation failed verification (tampered hash, a spec the CRD would
-	// never admit, or content that disagrees with the live template
-	// object); convergence is held until a human restores a valid record
-	// (SEC-10).
-	ReasonTemplateSnapshotInvalid = "TemplateSnapshotInvalid"
-	ReasonProvisioning            = "Provisioning"
-	ReasonReady                   = "Ready"
-	ReasonStopped                 = "Stopped"
-	ReasonTerminating             = "Terminating"
-	ReasonNameConflict            = "NameConflict"
-	ReasonBootDeadlineExceeded    = "BootDeadlineExceeded"
-	ReasonBackendError            = "BackendError"
-	ReasonNominal                 = "Nominal"
+	// ReasonTemplateInvalid — no trustworthy template source exists for
+	// the workspace: status.templateSnapshot is absent or failed
+	// verification AND no valid live template resolves under
+	// spec.templateRef (the writer-controlled annotation is never
+	// trusted). Convergence is held — no runtime children — and one
+	// edge-triggered Warning event is emitted (SEC-10).
+	ReasonTemplateInvalid      = "TemplateInvalid"
+	ReasonProvisioning         = "Provisioning"
+	ReasonReady                = "Ready"
+	ReasonStopped              = "Stopped"
+	ReasonTerminating          = "Terminating"
+	ReasonNameConflict         = "NameConflict"
+	ReasonBootDeadlineExceeded = "BootDeadlineExceeded"
+	ReasonBackendError         = "BackendError"
+	ReasonNominal              = "Nominal"
 
 	// ReasonRetainedClaimMissing — the Workspace says it consumes retained
 	// data (retained-data-ref) but names no retained claim; the backend
@@ -149,30 +156,10 @@ type AppliedIntent struct {
 	AppliedAt         metav1.Time                     `json:"appliedAt"`
 }
 
-// templateSnapshot is the template copy recorded at admit, re-recorded when
-// a start's family re-point moves spec.templateRef onto a newer revision.
-type templateSnapshot struct {
-	Name     string `json:"name"`
-	UID      string `json:"uid"`
-	Revision string `json:"revision"`
-	// SpecHash is sha256 of the canonical spec JSON — provenance for the
-	// recorded revision.
-	SpecHash string                                   `json:"specHash"`
-	Spec     workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
-	// Annotations carries the admin-controlled template annotations the
-	// backend honors (seccomp-profile, apparmor-profile, storage-class) —
-	// the snapshot must capture them since the template object is never
-	// re-read.
-	Annotations map[string]string `json:"annotations,omitempty"`
-	// RuntimeGeneration is the applied spec.runtimeGeneration the snapshot
-	// was recorded under; SourceRef is the spec.templateRef.name it was
-	// taken from (the catalog base name the create path writes, or the
-	// revision object name a carried re-point writes). Both are empty on
-	// snapshots recorded before the re-snapshot machinery existed — the
-	// recorded object name is the fallback source for those.
-	RuntimeGeneration int64  `json:"runtimeGeneration,omitempty"`
-	SourceRef         string `json:"sourceRef,omitempty"`
-}
+// templateSnapshot aliases the status record type: the snapshot the
+// operator writes to status.templateSnapshot (and mirrors to the
+// annotation) is the api type, shared with every reader.
+type templateSnapshot = workspacesv1alpha1.TemplateSnapshot
 
 // WorkspaceReconciler reconciles Workspace objects against a runtime backend.
 type WorkspaceReconciler struct {
@@ -385,7 +372,7 @@ func (r *WorkspaceReconciler) reconcileStopped(ctx context.Context, ws *workspac
 	if obs.RuntimeUID != "" {
 		phase = workspacesv1alpha1.WorkspacePhaseStopping
 	}
-	return ctrl.Result{}, r.writeStatus(ctx, ws, applied, obs, phase, nil)
+	return ctrl.Result{}, r.writeStatus(ctx, ws, applied, obs, phase, nil, nil)
 }
 
 // reconcileRunning converges toward a running incarnation under the applied
@@ -402,77 +389,89 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	}
 
 	// --- template snapshot --------------------------------------------------
-	// Recorded at first admit, and re-recorded when the applied generation
-	// advanced AND spec.templateRef moved off the snapshot's source — the
-	// API's start path re-points the reference only while the CR is Stopped
-	// (CEL) and only when the compatibility guard allowed the move (E1/E2),
-	// so a moved reference under a new generation is the re-snapshot signal.
-	// Within one generation the recorded snapshot is authoritative: a pod
-	// crash/recreate converges on it, never on a re-read of the template.
-	snap, err := templateSnapshotFor(ws)
-	if err != nil {
-		return ctrl.Result{}, err
+	// status.templateSnapshot is the ONLY source trusted for pod building:
+	// it is writable solely through the workspaces/status subresource,
+	// which RBAC grants to the operator service account alone, so a
+	// Workspace spec writer cannot forge it. The annotation of the same
+	// record is kept as a mirror for readers and is never trusted.
+	snap := ws.Status.TemplateSnapshot
+	if snap == nil {
+		// Upgrade path: a workspace admitted before this field existed may
+		// adopt its recorded annotation ONCE — only while a live
+		// operator-owned pod proves the record is what the runtime was
+		// actually built from. Everything else is recorded fresh from the
+		// live template below.
+		adopted, aerr := r.adoptSnapshot(ctx, ws)
+		if aerr != nil {
+			return ctrl.Result{}, aerr
+		}
+		if adopted != nil {
+			if err := r.recordSnapshot(ctx, ws, adopted); err != nil {
+				return ctrl.Result{}, err
+			}
+			snap = adopted
+		}
 	}
+	// Re-record when the status record is unusable (failed integrity or
+	// invariant checks — it is replaced by a fresh snapshot of the live
+	// template rather than trusted), or when the applied generation
+	// advanced AND spec.templateRef moved off the snapshot's source — the
+	// API's start path re-points the reference only while the CR is
+	// Stopped (CEL) and only when the compatibility guard allowed the move
+	// (E1/E2), so a moved reference under a new generation is the
+	// re-snapshot signal. Within one generation the recorded snapshot is
+	// authoritative: a pod crash/recreate converges on it, never on a
+	// re-read of the template.
 	resnapshot := snap == nil
 	if !resnapshot {
-		stale, serr := r.snapshotStale(ctx, ws, applied, snap)
-		if serr != nil {
-			return ctrl.Result{}, serr
+		if verr := verifySnapshotRecord(snap); verr != nil {
+			logf.FromContext(ctx).Info("recorded template snapshot failed verification; re-snapshotting",
+				"reason", verr.Error())
+			resnapshot = true
+		} else {
+			stale, serr := r.snapshotStale(ctx, ws, applied, snap)
+			if serr != nil {
+				return ctrl.Result{}, serr
+			}
+			resnapshot = stale
 		}
-		resnapshot = stale
 	}
 	if resnapshot {
+		prev := snap
 		tpl, gerr := r.resolveTemplate(ctx, ws)
 		switch {
 		case apierrors.IsNotFound(gerr):
-			obs := tcdiruntime.Observation{RuntimeGeneration: applied.RuntimeGeneration, Reason: ReasonTemplateNotFound}
-			return ctrl.Result{RequeueAfter: requeueRetry}, r.writeStatus(ctx, ws, applied, obs,
-				workspacesv1alpha1.WorkspacePhasePending, errors.New(ReasonTemplateNotFound))
+			// No usable operator-recorded snapshot and no valid live
+			// template to take one from — fail closed rather than trust
+			// the writer-controlled annotation.
+			return r.holdTemplateInvalid(ctx, ws, applied,
+				fmt.Sprintf("template %q does not resolve", ws.Spec.TemplateRef.Name))
 		case gerr != nil:
 			return ctrl.Result{}, gerr
 		}
-		prev := snap
-		snap, err = snapshotTemplate(tpl)
-		if err != nil {
-			return ctrl.Result{}, err
+		recorded, rerr := snapshotTemplate(tpl)
+		if rerr != nil {
+			return ctrl.Result{}, rerr
 		}
+		snap = recorded
 		snap.RuntimeGeneration = applied.RuntimeGeneration
 		snap.SourceRef = ws.Spec.TemplateRef.Name
-		raw, _ := json.Marshal(snap)
-		setAnnotation(ws, AnnotationTemplateSnapshot, string(raw))
-		if err := r.Update(ctx, ws); err != nil {
-			return ctrl.Result{}, err
+		if rerr := r.recordSnapshot(ctx, ws, snap); rerr != nil {
+			return ctrl.Result{}, rerr
 		}
 		if prev != nil {
 			logf.FromContext(ctx).Info("template snapshot re-recorded on new generation",
 				"from", prev.Name, "to", snap.Name,
 				"runtimeGeneration", applied.RuntimeGeneration)
 		}
-	} else if verr := r.verifySnapshot(ctx, ws, snap); verr != nil {
-		// The annotation is plain object metadata — a principal able to
-		// write Workspace objects can pre-seed or rewrite it, so a
-		// snapshot that fails verification must never reach the backend
-		// (SEC-10). Fail closed: no runtime children, the workspace marks
-		// Degraded until a human restores a valid record. The freshly
-		// recorded snapshot (the branch above) is trusted by construction.
-		logf.FromContext(ctx).Info("template snapshot failed verification; held",
-			"reason", verr.Error())
-		obs := tcdiruntime.Observation{
-			RuntimeGeneration: applied.RuntimeGeneration,
-			Reason:            ReasonTemplateSnapshotInvalid,
+	} else {
+		// Repair the annotation mirror if a Workspace writer diverged it;
+		// readers see the status truth, never the drift.
+		if merr := r.mirrorSnapshotAnnotation(ctx, ws, snap); merr != nil {
+			return ctrl.Result{}, merr
 		}
-		return ctrl.Result{RequeueAfter: requeueRetry}, r.writeStatus(ctx, ws, applied, obs,
-			workspacesv1alpha1.WorkspacePhasePending,
-			errors.New(ReasonTemplateSnapshotInvalid))
 	}
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        snap.Name,
-			Namespace:   ws.Namespace,
-			Annotations: snap.Annotations,
-		},
-		Spec: snap.Spec,
-	}
+	tpl := templateFromSnapshot(ws, snap)
 
 	// --- converge runtime ----------------------------------------------------
 	obs, berr := r.Backend.Ensure(ctx, ws, tpl)
@@ -537,7 +536,7 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		phase != workspacesv1alpha1.WorkspacePhaseFailed {
 		res.RequeueAfter = requeueNotReady
 	}
-	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr)
+	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr, snap)
 }
 
 // incarnationEnded reports whether phase says the runtime incarnation that
@@ -632,7 +631,7 @@ func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *workspace
 		}
 		statusErr = errors.New(ReasonFailedCleanup)
 	}
-	return res, r.writeStatus(ctx, ws, applied, obs, workspacesv1alpha1.WorkspacePhaseFailed, statusErr)
+	return res, r.writeStatus(ctx, ws, applied, obs, workspacesv1alpha1.WorkspacePhaseFailed, statusErr, nil)
 }
 
 // expireRunning applies an out-of-band stop to the live generation: the
@@ -654,7 +653,10 @@ func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv
 
 // writeStatus projects the observation into status fields + conditions and
 // persists it. statusErr, when non-nil, marks Degraded with its reason.
-func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error) error {
+// snap, when non-nil, is the pass's recorded template snapshot — re-staged
+// here because the drift path's main-resource update returns the stored
+// (unstaged) status.
+func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error, snap *templateSnapshot) error {
 	gen := ws.Generation
 	// Intent-fence drift: reconcile the params annotation BEFORE any status
 	// field is staged — persisting it needs a main-resource update whose
@@ -664,6 +666,9 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		return derr
 	}
 	st := &ws.Status
+	if snap != nil {
+		st.TemplateSnapshot = snap
+	}
 	// A workspace that already latched Failed on this intent keeps its step
 	// conditions as they were: they record which step stalled, and the
 	// incarnation cleanup would otherwise overwrite them with "Provisioning"
@@ -903,16 +908,128 @@ func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *workspace
 	return provisioning.ResolveTemplateByName(ctx, r.Client, ws.Namespace, ws.Spec.TemplateRef.Name)
 }
 
-func templateSnapshotFor(ws *workspacesv1alpha1.Workspace) (*templateSnapshot, error) {
+// recordedSnapshot returns the operator-recorded template snapshot —
+// status.templateSnapshot, falling back to the annotation mirror for rows
+// recorded before the status field existed. The annotation side is for
+// hints only (deadline requeues, retained-disk runtime labels): any caller
+// needing provenance must go through status or the adoption pod proof —
+// convergence never does this.
+func recordedSnapshot(ws *workspacesv1alpha1.Workspace) *templateSnapshot {
+	if s := ws.Status.TemplateSnapshot; s != nil {
+		return s
+	}
+	raw := ws.Annotations[AnnotationTemplateSnapshot]
+	if raw == "" {
+		return nil
+	}
+	s := &templateSnapshot{}
+	if err := json.Unmarshal([]byte(raw), s); err != nil {
+		return nil
+	}
+	return s
+}
+
+// templateFromSnapshot reconstructs the WorkspaceTemplate the runtime
+// backend converges on from a recorded snapshot — the object is never
+// re-read, the record is the whole contract.
+func templateFromSnapshot(ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) *workspacesv1alpha1.WorkspaceTemplate {
+	return &workspacesv1alpha1.WorkspaceTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        snap.Name,
+			Namespace:   ws.Namespace,
+			Annotations: snap.Annotations,
+		},
+		Spec: snap.Spec,
+	}
+}
+
+// recordSnapshot records snap for this pass: the annotation mirror is
+// written first (a main-resource update, which returns the stored status),
+// then the authoritative copy is staged on ws.Status for the pass's
+// writeStatus to persist — the status subresource sees exactly one write
+// per reconcile, and a crash can leave at most a stale mirror, never a
+// stale truth.
+func (r *WorkspaceReconciler) recordSnapshot(ctx context.Context, ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) error {
+	if err := r.mirrorSnapshotAnnotation(ctx, ws, snap); err != nil {
+		return err
+	}
+	ws.Status.TemplateSnapshot = snap
+	return nil
+}
+
+// mirrorSnapshotAnnotation keeps the template-snapshot annotation equal to
+// the status record for consumers that predate the status field (the
+// broker's expiry projection reads status first and falls back to the
+// annotation only for pre-upgrade rows). A Workspace writer can rewrite
+// the annotation at any time — harmless: nothing in convergence reads it.
+func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) error {
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	if ws.Annotations[AnnotationTemplateSnapshot] == string(raw) {
+		return nil
+	}
+	setAnnotation(ws, AnnotationTemplateSnapshot, string(raw))
+	return r.Update(ctx, ws)
+}
+
+// adoptSnapshot is the one-time upgrade path for workspaces admitted before
+// status.templateSnapshot existed. The recorded annotation may be adopted
+// into status only while a live pod proves the record: the pod must be
+// owned by this workspace AND verifiably built from it — either it carries
+// a matching template-hash stamp, or (pods built before the stamp existed)
+// its spec equals a fresh build from the recorded spec byte-for-byte.
+// Anything else — no record, an invalid record, a missing or unproven pod —
+// adopts nothing and falls through to a fresh snapshot of the live
+// template.
+func (r *WorkspaceReconciler) adoptSnapshot(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*templateSnapshot, error) {
 	raw := ws.Annotations[AnnotationTemplateSnapshot]
 	if raw == "" {
 		return nil, nil
 	}
-	s := &templateSnapshot{}
-	if err := json.Unmarshal([]byte(raw), s); err != nil {
-		return nil, fmt.Errorf("corrupt %s annotation: %w", AnnotationTemplateSnapshot, err)
+	snap := &templateSnapshot{}
+	if err := json.Unmarshal([]byte(raw), snap); err != nil {
+		// Unadoptable record: treat it as absent — the live-template
+		// re-snapshot decides what (if anything) may converge.
+		return nil, nil
 	}
-	return s, nil
+	if err := verifySnapshotRecord(snap); err != nil {
+		return nil, nil
+	}
+	ok, err := r.Backend.PodMatchesTemplate(ctx, ws, templateFromSnapshot(ws, snap))
+	if err != nil || !ok {
+		return nil, err
+	}
+	logf.FromContext(ctx).Info("template snapshot adopted into status",
+		"name", snap.Name, "uid", snap.UID,
+		"runtimeGeneration", snap.RuntimeGeneration)
+	return snap, nil
+}
+
+// holdTemplateInvalid is the fail-closed exit of snapshot resolution: no
+// operator-recorded snapshot is usable and nothing valid replaced it —
+// the writer-controlled annotation is never trusted (SEC-10). No runtime
+// children are built; the workspace holds Pending with Degraded=True
+// reason=TemplateInvalid, requeues (a later-published template still
+// resolves), and emits exactly one Warning event on the transition into
+// the hold.
+func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("no trustworthy template source; convergence held",
+		"detail", detail)
+	if r.Recorder != nil {
+		cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+		if cur == nil || cur.Status != metav1.ConditionTrue || cur.Reason != ReasonTemplateInvalid {
+			r.Recorder.Event(ws, corev1.EventTypeWarning, ReasonTemplateInvalid,
+				"the workspace's template could not be established; runtime convergence is held")
+		}
+	}
+	obs := tcdiruntime.Observation{
+		RuntimeGeneration: applied.RuntimeGeneration,
+		Reason:            ReasonTemplateInvalid,
+	}
+	return ctrl.Result{RequeueAfter: requeueRetry}, r.writeStatus(ctx, ws, applied, obs,
+		workspacesv1alpha1.WorkspacePhasePending, errors.New(ReasonTemplateInvalid), nil)
 }
 
 // snapshotStale reports whether the recorded snapshot must be re-taken for
@@ -970,26 +1087,23 @@ var snapshotDigestPattern = regexp.MustCompile(workspacesv1alpha1.DigestPattern)
 // LinuxRuntimeSpec.SessionCmd (printable ASCII, 1..512 chars).
 var snapshotSessionCmdPattern = regexp.MustCompile(workspacesv1alpha1.SessionCmdPattern)
 
-// verifySnapshot re-establishes trust in a recorded template snapshot
-// before it may drive convergence. The annotation is ordinary metadata —
-// a principal able to write Workspace objects can pre-seed or rewrite it,
-// bypassing every CRD/CEL guard real templates enforce — so the recorded
-// content must re-earn trust on every pass:
+// verifySnapshotRecord re-checks the integrity and invariants of a recorded
+// template snapshot before it may drive convergence:
 //
 //   - integrity: SpecHash must equal the sha256 snapshotTemplate writes
 //     over the recorded spec JSON;
 //   - consistency: the header fields must agree with the embedded spec;
 //   - invariants: the spec must satisfy the CRD/CEL contract a real
 //     template can never violate — a digest-pinned linux image and the
-//     runtime-block exclusivity rules;
-//   - provenance: while the recorded template object still exists under
-//     the recorded UID, it must still belong to the catalog the
-//     workspace's templateRef names AND its spec/annotations must equal
-//     the recorded ones. A deleted or re-published revision (NotFound, or
-//     a different UID) does NOT invalidate the snapshot — design §4 gives
-//     the recorded revision lifetime validity; integrity + invariants are
-//     the residual gate.
-func (r *WorkspaceReconciler) verifySnapshot(ctx context.Context, ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) error {
+//     runtime-block exclusivity rules.
+//
+// Provenance is NOT re-checked here and needs no live object: the status
+// copy is writable only by the operator service account, and an
+// annotation-side record reaches the same function only through the
+// upgrade-adoption pod proof — each establishes provenance at record time.
+// A deleted or re-published revision therefore never invalidates a
+// recorded snapshot (design §4).
+func verifySnapshotRecord(snap *templateSnapshot) error {
 	specJSON, err := json.Marshal(snap.Spec)
 	if err != nil {
 		return fmt.Errorf("spec does not marshal: %w", err)
@@ -1002,37 +1116,7 @@ func (r *WorkspaceReconciler) verifySnapshot(ctx context.Context, ws *workspaces
 		return fmt.Errorf("header fields inconsistent: name=%q revision=%q spec.revision=%q",
 			snap.Name, snap.Revision, snap.Spec.Revision)
 	}
-	if err := validateSnapshotSpec(&snap.Spec); err != nil {
-		return err
-	}
-
-	live := &workspacesv1alpha1.WorkspaceTemplate{}
-	gerr := r.Get(ctx, types.NamespacedName{Name: snap.Name, Namespace: ws.Namespace}, live)
-	switch {
-	case apierrors.IsNotFound(gerr):
-		// The recorded revision is gone — the snapshot keeps its lifetime
-		// validity on the strength of the checks above.
-		return nil
-	case gerr != nil:
-		return gerr
-	case string(live.UID) != snap.UID:
-		// Same name, new object: a re-published revision does not
-		// invalidate a snapshot recorded under the old one.
-		return nil
-	}
-	if live.Name != ws.Spec.TemplateRef.Name &&
-		live.Labels[provisioning.LabelCatalogName] != ws.Spec.TemplateRef.Name {
-		return fmt.Errorf("recorded template %q belongs to a different catalog than templateRef %q",
-			snap.Name, ws.Spec.TemplateRef.Name)
-	}
-	want, err := snapshotTemplate(live)
-	if err != nil {
-		return err
-	}
-	if want.SpecHash != snap.SpecHash || !maps.Equal(want.Annotations, snap.Annotations) {
-		return errors.New("recorded spec/annotations differ from the live template object")
-	}
-	return nil
+	return validateSnapshotSpec(&snap.Spec)
 }
 
 // validateSnapshotSpec re-checks the invariants the CRD enforces on a

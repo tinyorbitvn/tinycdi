@@ -271,6 +271,146 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 	}
 }
 
+// TestSnapshot_UpgradeAdoption: the v0.5->v1.0 upgrade path end to end on
+// a real apiserver. A workspace admitted before status.templateSnapshot
+// existed carries only the annotation; the operator adopts it into status
+// ONCE — and only while a live operator-owned pod proves it (an unstamped
+// pre-stamp pod must equal a fresh build field-for-field, apiserver
+// defaults discounted). A forged record is never adopted: the live
+// template is re-snapshotted instead.
+func TestSnapshot_UpgradeAdoption(t *testing.T) {
+	env, c := startEnv(t)
+	defer func() {
+		if err := env.Stop(); err != nil {
+			t.Logf("envtest stop: %v", err)
+		}
+	}()
+
+	// seedPreUpgrade lets a linux backend build the workspace's pod from
+	// tpl as a v0.5.0 operator would have, strips the template-hash stamp
+	// (pre-stamp build), and leaves only the recorded annotation on the
+	// workspace — the upgrade-time shape.
+	seedPreUpgrade := func(t *testing.T, ns string, ws *workspacesv1alpha1.Workspace,
+		tpl *workspacesv1alpha1.WorkspaceTemplate, ann string) *corev1.Pod {
+		t.Helper()
+		b := linux.New(c, linux.Options{})
+		if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
+			t.Fatalf("seed pod: %v", err)
+		}
+		pod := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKey{
+			Namespace: ns, Name: linux.PodName(ws.UID)}, pod); err != nil {
+			t.Fatalf("seeded pod: %v", err)
+		}
+		delete(pod.Annotations, linux.AnnotationTemplateHash)
+		if err := c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("strip stamp: %v", err)
+		}
+		cur := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
+		if cur.Annotations == nil {
+			cur.Annotations = map[string]string{}
+		}
+		cur.Annotations[AnnotationTemplateSnapshot] = ann
+		if err := c.Update(context.Background(), cur); err != nil {
+			t.Fatalf("seed annotation: %v", err)
+		}
+		return pod
+	}
+
+	t.Run("honest record adopted, pod undisturbed", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adopt", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		pod := seedPreUpgrade(t, ns, ws, live,
+			snapshotAnnotation(t, live, "fam32", 1))
+
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		snap := got.Status.TemplateSnapshot
+		if snap == nil {
+			t.Fatal("pod-proven annotation was not adopted into status")
+		}
+		want, err := snapshotTemplate(live)
+		if err != nil {
+			t.Fatalf("snapshotTemplate: %v", err)
+		}
+		if snap.SpecHash != want.SpecHash || snap.UID != want.UID ||
+			snap.RuntimeGeneration != 1 || snap.SourceRef != "fam32" {
+			t.Fatalf("adopted snapshot = %+v, want record of fam32-aaaa1111", snap)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished after adoption: %v", err)
+		}
+		if cur.UID != pod.UID {
+			t.Fatal("adoption recreated the pod")
+		}
+	})
+
+	t.Run("forged record never adopted", func(t *testing.T) {
+		ns := newNamespace(t, c)
+		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
+		ws := newWorkspace(t, c, ns, "ws-adoptf", "fam32", nil)
+		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
+		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		if err := c.Get(context.Background(),
+			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
+			t.Fatal(err)
+		}
+		// Forge: valid hash over an attacker spec (control-plane
+		// placement + attacker image) claiming the honest revision.
+		forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
+		forged.Revision = "2026-10-a"
+		forged.Placement = &workspacesv1alpha1.PlacementSpec{
+			NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		}
+		fraw, _ := json.Marshal(forged)
+		fsum := sha256.Sum256(fraw)
+		var snap templateSnapshot
+		if err := json.Unmarshal([]byte(forgedSnapshot("fam32-aaaa1111",
+			string(live.UID), "2026-10-a", "sha256:"+hex.EncodeToString(fsum[:]),
+			forged, nil)), &snap); err != nil {
+			t.Fatal(err)
+		}
+		snap.SourceRef = "fam32"
+		snap.RuntimeGeneration = 1
+		annRaw, _ := json.Marshal(&snap)
+		pod := seedPreUpgrade(t, ns, ws, live, string(annRaw))
+
+		r := newReconciler(c)
+		reconcile(t, r, key)
+		got := getWorkspace(t, c, key)
+		recorded := got.Status.TemplateSnapshot
+		if recorded == nil {
+			t.Fatal("live-template re-snapshot did not record status")
+		}
+		want, err := snapshotTemplate(live)
+		if err != nil {
+			t.Fatalf("snapshotTemplate: %v", err)
+		}
+		if recorded.SpecHash != want.SpecHash {
+			t.Fatalf("forged spec adopted into status: %q", recorded.SpecHash)
+		}
+		cur := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+			t.Fatalf("pod vanished: %v", err)
+		}
+		if img := cur.Spec.Containers[0].Image; img != resnapImageA {
+			t.Fatalf("pod rebuilt from forged spec: %q", img)
+		}
+		if len(cur.Spec.NodeSelector) != 0 && cur.Spec.NodeSelector["node-role.kubernetes.io/control-plane"] != "" {
+			t.Fatal("pod carries forged control-plane placement")
+		}
+	})
+}
+
 // TestForgedSnapshotStillRejected (SEC-10, V3.2 regression): a forged
 // template-snapshot annotation still never reaches the backend — a bad
 // hash or an invariant-breaking spec is held, and a forged record under a
@@ -366,8 +506,13 @@ func legacySnapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTem
 }
 
 // legacyWorkspace seeds a Running workspace carrying a pre-V3.2 snapshot
-// (no sourceRef) of the recorded revision object.
+// (no sourceRef) of the recorded revision object — in status, as the
+// upgrade-adoption path records it, and in the mirrored annotation.
 func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspace {
+	var snap templateSnapshot
+	if err := json.Unmarshal([]byte(ann), &snap); err != nil {
+		panic(err)
+	}
 	return &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-legacy", Namespace: "tinycdi-tenant-a", UID: uid,
@@ -382,6 +527,7 @@ func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspa
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
 		},
+		Status: workspacesv1alpha1.WorkspaceStatus{TemplateSnapshot: &snap},
 	}
 }
 
