@@ -20,6 +20,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,25 @@ const (
 	// per-session upstream transport: the runtime must deliver response
 	// headers — including the websocket 101 — inside this window.
 	UpstreamHeaderTimeout = 30 * time.Second
+	// UnattachedSessionTTL is how long a session that never admitted a
+	// request may hold its lease: a client that abandons the launch
+	// between ticket redemption and the 303 delivery leaves a session no
+	// browser holds renewing the lease — and pinning the workspace —
+	// indefinitely. The renew loop reaps it at this TTL. 90 s gives a
+	// slow client ample room to land the first post-303 request.
+	UnattachedSessionTTL = 90 * time.Second
+	// SessionLookupRate / SessionLookupBurst are the default per-client
+	// bounds (requests/minute, burst) on session-directory lookups for
+	// cookies this replica has never seen — each miss costs the store
+	// 1-2 indexed reads. Per replica: the limiter's whole point is
+	// keeping a cookie spray off Postgres, so there is no shared window.
+	// The burst covers a rollout reconnect storm: every VALID cookie a
+	// replica has not cached draws one token, so a mid-size site behind
+	// one client address must fit inside it.
+	SessionLookupRate  = 300
+	SessionLookupBurst = 120
+	// sessionLookupMaxKeys bounds the limiter's key space (LRU).
+	sessionLookupMaxKeys = 100_000
 )
 
 // CookieMode selects the session cookie's cross-site behavior. The portal
@@ -162,6 +182,22 @@ type Config struct {
 	// transport yields the conn to the hijacked stream and applies no
 	// deadline to it.
 	UpstreamResponseHeaderTimeout time.Duration
+	// SessionLookupLimiter bounds session-directory lookups for cookies
+	// this replica has never seen — the only proxy-path request that
+	// spends Postgres reads before auth. It is keyed by the plain client
+	// key (ratelimit.ClientKey over TrustedProxies: socket peer or
+	// right-most untrusted XFF entry, IPv6 folded to /64), applies ONLY
+	// to the unknown-cookie path — requests without a cookie, cookies a
+	// live local session already owns and rehydrated sessions are never
+	// limited — and answers 429 + Retry-After. Nil installs the
+	// SessionLookupRate/SessionLookupBurst bound on the configured clock;
+	// an Allower that always allows disables the limit.
+	SessionLookupLimiter ratelimit.Allower
+	// UnattachedSessionTTL bounds sessions that never admitted a request
+	// (default UnattachedSessionTTL); injectable for tests. On expiry the
+	// renew loop revokes the lease — releasing the workspace pin a live
+	// lease holds — and tears the session down.
+	UnattachedSessionTTL time.Duration
 	// Now injects a clock for tests.
 	Now func() time.Time
 	// Metrics, Audit and Logger are optional observability sinks; all three
@@ -222,6 +258,16 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.UpstreamResponseHeaderTimeout <= 0 {
 		cfg.UpstreamResponseHeaderTimeout = UpstreamHeaderTimeout
+	}
+	if cfg.UnattachedSessionTTL <= 0 {
+		cfg.UnattachedSessionTTL = UnattachedSessionTTL
+	}
+	if cfg.SessionLookupLimiter == nil {
+		// The store-protection bound defaults ON: a nil injection means
+		// the caller never thought about it, which must fail safe, not
+		// unbounded. cfg.Now feeds the bucket clock so tests can drive
+		// refills through the gateway clock.
+		cfg.SessionLookupLimiter = ratelimit.New(SessionLookupRate, SessionLookupBurst, sessionLookupMaxKeys, cfg.Now)
 	}
 	mode, err := ParseCookieMode(string(cfg.CookieMode))
 	if err != nil {
@@ -315,6 +361,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Security-Policy", sessionCSP(cspHost, g.embedders))
 	h.Set("Permissions-Policy", g.permissions)
 	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("Origin-Agent-Cluster", "?1")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
@@ -538,8 +585,21 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	}
 	s, lookupErr := g.lookupSession(r, wsID)
 	if lookupErr != nil {
-		// The session directory could not answer: not "no session". 503
-		// so the browser retries; nothing is cached.
+		// The unknown-cookie limiter refused before any store read: 429
+		// with the bucket's own wait hint, counted like the launch
+		// bucket's refusals. Any other failure is the directory not
+		// answering: not "no session" — 503 so the browser retries;
+		// nothing is cached.
+		var lim *lookupLimitedError
+		if errors.As(lookupErr, &lim) {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncRateLimited("session_lookup")
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(lim.retryAfter)))
+			g.audit(r, "session.lookup", wsID, observability.OutcomeDenied, "rate_limited")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
 		return
 	}
@@ -556,6 +616,10 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	// A request that resolves a live session on its own host proves the
+	// 303 landed — mark the session attached so the ghost TTL can never
+	// reap it underneath a real client.
+	s.noteAttached()
 	// NAVTEL-1: a frame-document load on a session whose lease already had
 	// a stream is a re-navigation (the portal watch's FX-R32 fallback, or
 	// a user reload/new-tab load) — the per-tab id minted per outer page
@@ -1128,7 +1192,8 @@ func (g *Gateway) responsePolicy(resp *http.Response) error {
 		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
 		"X-Content-Type-Options", "Strict-Transport-Security",
 		"X-Frame-Options", "Permissions-Policy", "Feature-Policy",
-		"Cross-Origin-Resource-Policy", "Origin-Agent-Cluster",
+		"Cross-Origin-Resource-Policy", "Cross-Origin-Opener-Policy",
+		"Origin-Agent-Cluster",
 	} {
 		resp.Header.Del(h)
 	}

@@ -89,6 +89,11 @@ type fakeBroker struct {
 	lookupErr   error
 	lookupPanic bool
 	revokeErr   error // injected RevokeLease failure
+	// revokeGate, when set, makes every RevokeLease call announce itself
+	// on revokeEntered and then block until the gate closes — a
+	// deterministic rendezvous for the attach-vs-reap race test.
+	revokeGate    chan struct{}
+	revokeEntered chan struct{}
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -246,10 +251,19 @@ func (f *fakeBroker) ResolveTarget(_ context.Context, _ broker.GatewayIdentity, 
 
 func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.revokeN++
 	f.renewErr[leaseID] = broker.ErrRevoked
 	f.revokes[leaseID]++
+	gate, entered := f.revokeGate, f.revokeEntered
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.revokeErr
 }
 
@@ -409,6 +423,18 @@ func (f *fakeBroker) setBindErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bindErr = err
+}
+
+// gateRevokes makes every subsequent RevokeLease call announce itself on
+// the returned entered channel and then block until the returned gate
+// closes — the rendezvous that lets a test place an attach request
+// inside the reap's revoke call deterministically.
+func (f *fakeBroker) gateRevokes() (entered, gate chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeEntered = make(chan struct{}, 4)
+	f.revokeGate = make(chan struct{})
+	return f.revokeEntered, f.revokeGate
 }
 
 func (f *fakeBroker) ReportActivity(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ev broker.ActivityEvent) error {

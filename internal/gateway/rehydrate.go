@@ -57,6 +57,14 @@ type rehydrateCall struct {
 // lookup died (a panic) before recording a result.
 var errRehydrateAborted = errors.New("gateway: session lookup aborted")
 
+// lookupLimitedError carries the unknown-cookie limiter's refusal up to
+// serveProxy: retryAfter is the limiter's own wait hint, rendered on
+// Retry-After exactly like the launch bucket's. It is distinct from a
+// directory error — a refusal answers 429, never 503.
+type lookupLimitedError struct{ retryAfter time.Duration }
+
+func (e *lookupLimitedError) Error() string { return "gateway: session lookup rate limited" }
+
 // rehydrateTimeout bounds the shared directory lookup.
 const rehydrateTimeout = 10 * time.Second
 
