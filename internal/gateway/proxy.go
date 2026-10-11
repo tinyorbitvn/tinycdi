@@ -193,6 +193,16 @@ type Config struct {
 	// SessionLookupRate/SessionLookupBurst bound on the configured clock;
 	// an Allower that always allows disables the limit.
 	SessionLookupLimiter ratelimit.Allower
+	// UpstreamStreamCap bounds the upstream connections one workspace may
+	// hold open through THIS replica at once — websocket streams and
+	// plain proxied requests alike (V11): each admitted request spends
+	// real upstream fds, and the KasmVNC runtime crashes once its fd
+	// count crosses FD_SETSIZE. Over cap a request is refused 429 +
+	// Retry-After before it can consume an upstream slot; N replicas
+	// admit at most N x cap. <= 0 installs DefaultUpstreamStreamCap —
+	// the bound cannot be disabled through Config (a runtime that does
+	// not need it tolerates any large value).
+	UpstreamStreamCap int
 	// UnattachedSessionTTL bounds sessions that never admitted a request
 	// (default UnattachedSessionTTL); injectable for tests. On expiry the
 	// renew loop revokes the lease — releasing the workspace pin a live
@@ -227,9 +237,16 @@ type Gateway struct {
 	// channel — test instrumentation that makes the dedup rendezvous
 	// observable (read through export_test.go).
 	inflightWaiters int
-	draining        bool          // set by Drain: refuse new upgrades
-	done            chan struct{} // closed by Close
-	closeOnce       sync.Once
+	// upstreamSlots counts in-flight upstream-bound requests per
+	// workspace UID — the runtime pod they all land on — bounded per
+	// workspace by cfg.UpstreamStreamCap (V11). upstreamInFlight is the
+	// replica-wide sum the unlabelled gauge reports.
+	streamMu         sync.Mutex
+	upstreamSlots    map[string]int
+	upstreamInFlight int
+	draining         bool          // set by Drain: refuse new upgrades
+	done             chan struct{} // closed by Close
+	closeOnce        sync.Once
 
 	// connLogLast rate-limits the pre-auth dropped-Connection-token debug
 	// log to one line per minute per route — the metric counts every drop.
@@ -262,6 +279,12 @@ func New(cfg Config) (*Gateway, error) {
 	if cfg.UnattachedSessionTTL <= 0 {
 		cfg.UnattachedSessionTTL = UnattachedSessionTTL
 	}
+	if cfg.UpstreamStreamCap <= 0 {
+		// Like the store-protection lookup bound, an omitted cap fails
+		// safe to the default — a zero Config must not silently unbound
+		// the runtime fd count it exists to defend.
+		cfg.UpstreamStreamCap = DefaultUpstreamStreamCap
+	}
 	if cfg.SessionLookupLimiter == nil {
 		// The store-protection bound defaults ON: a nil injection means
 		// the caller never thought about it, which must fail safe, not
@@ -275,14 +298,15 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	cfg.CookieMode = mode
 	g := &Gateway{
-		cfg:          cfg,
-		controlHosts: map[string]bool{},
-		sessions:     map[string]*session{},
-		byLease:      map[string]*session{},
-		byWorkspace:  map[string]*session{},
-		inflight:     map[broker.SessionDigest]*rehydrateCall{},
-		connLogLast:  map[string]time.Time{},
-		done:         make(chan struct{}),
+		cfg:           cfg,
+		controlHosts:  map[string]bool{},
+		sessions:      map[string]*session{},
+		byLease:       map[string]*session{},
+		byWorkspace:   map[string]*session{},
+		inflight:      map[broker.SessionDigest]*rehydrateCall{},
+		upstreamSlots: map[string]int{},
+		connLogLast:   map[string]time.Time{},
+		done:          make(chan struct{}),
 	}
 	for _, po := range cfg.PortalOrigins {
 		u, ok := parseOrigin(strings.TrimSpace(po))
@@ -618,8 +642,21 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	}
 	// A request that resolves a live session on its own host proves the
 	// 303 landed — mark the session attached so the ghost TTL can never
-	// reap it underneath a real client.
+	// reap it underneath a real client. This runs BEFORE the upstream
+	// bound: a request refused at the cap still carried a valid cookie
+	// here, so a saturated workspace must not ghost-reap a live client
+	// at the unattached TTL while it retries.
 	s.noteAttached()
+	// Per-workspace upstream bound (V11): an admitted request — upgrade
+	// or plain fetch — holds an upstream connection the KasmVNC runtime
+	// spends real fds on, and the workspace's live count is capped per
+	// replica. Checked BEFORE any upgrade admission so a refusal claims
+	// no stream epoch and fences no live conn.
+	if !g.acquireUpstreamStream(wsID) {
+		g.writeStreamCapRefused(w, r, wsID)
+		return
+	}
+	defer g.releaseUpstreamStream(wsID)
 	// NAVTEL-1: a frame-document load on a session whose lease already had
 	// a stream is a re-navigation (the portal watch's FX-R32 fallback, or
 	// a user reload/new-tab load) — the per-tab id minted per outer page

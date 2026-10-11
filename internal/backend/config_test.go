@@ -199,6 +199,39 @@ func TestParseFlags_RateLimitReplicas(t *testing.T) {
 	}
 }
 
+// TestParseFlags_SessionStreamCap (V11): the per-workspace upstream bound
+// defaults to 32, honors TCDI_SESSION_STREAM_CAP with the flag winning,
+// and rejects < 1 — there is no unlimited mode (set a large value).
+func TestParseFlags_SessionStreamCap(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.SessionStreamCap != 32 {
+		t.Fatalf("default SessionStreamCap = %d, want 32", cfg.SessionStreamCap)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_SESSION_STREAM_CAP": "64"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.SessionStreamCap != 64 {
+		t.Fatalf("env SessionStreamCap = %d, want 64", cfg.SessionStreamCap)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-session-stream-cap", "8"),
+		envMap(map[string]string{"TCDI_SESSION_STREAM_CAP": "64"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.SessionStreamCap != 8 {
+		t.Fatalf("flag SessionStreamCap = %d, want 8 (flag wins over env)", cfg.SessionStreamCap)
+	}
+	for _, bad := range []string{"0", "-1"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-session-stream-cap", bad), noEnv); err == nil {
+			t.Fatalf("-session-stream-cap %s must fail — the bound cannot be disabled", bad)
+		}
+	}
+}
+
 func TestParseFlags_SplitModeRejectsMixed(t *testing.T) {
 	// -broker-url together with the default (non-empty) -listen must fail,
 	// and the error must name both flags so the operator can fix the config.
