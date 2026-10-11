@@ -103,7 +103,7 @@ doit() {
   if $APPLY; then
     gh api "$@" >/dev/null && note "APPLIED: $desc" || { note "FAILED: $desc"; exit 1; }
   fi
-  changed=1
+  changed=$((changed + 1))
 }
 
 # doit_body <desc> <method> <endpoint> <body-file>
@@ -116,7 +116,44 @@ doit_body() {
     gh api -X "$method" "$ep" --input "$body" >/dev/null \
       && note "APPLIED: $desc" || { note "FAILED: $desc"; exit 1; }
   fi
-  changed=1
+  changed=$((changed + 1))
+}
+
+# env_matches <live-env-json> <wanted-body-file> — "true" only when every
+# field the env PUT manages is already what we would write: reviewer ids,
+# prevent_self_review (a field of the required_reviewers protection rule),
+# wait_timer (its protection rule is absent when the timer is 0) and
+# deployment_branch_policy (the custom branch/tag policy mode). GET adds
+# ids/links/timestamps, so only the managed fields are compared — drift in
+# any of them plans a re-PUT that repairs all of them at once.
+env_matches() {
+  jq -n --argjson cur "$1" --argjson want "$(cat "$2")" '
+    ([$cur.protection_rules[]? | select(.type == "required_reviewers")
+        | .reviewers[]? | .reviewer.id] | sort)
+      == ([$want.reviewers[]?.id] | sort)
+    and (([$cur.protection_rules[]? | select(.type == "required_reviewers")
+        | .prevent_self_review] | .[0]) // false)
+      == ($want.prevent_self_review // false)
+    and (([$cur.protection_rules[]? | select(.type == "wait_timer")
+        | .wait_timer] | .[0]) // 0)
+      == ($want.wait_timer // 0)
+    and ($cur.deployment_branch_policy // null)
+      == ($want.deployment_branch_policy // null)'
+}
+
+# pol_drift <policies-json> <wanted-name> <wanted-type> — the managed
+# deployment branch/tag policy set is exactly one entry; prints one
+# tab-separated drift line per difference:
+#   "missing"                          wanted entry absent -> POST it
+#   "extra <id> <name> <type>"         unexpected entry -> DELETE it by id
+pol_drift() {
+  jq -r --arg n "$2" --arg t "$3" '
+    (.branch_policies // []) as $p
+    | (if [$p[] | select(.name == $n and .type == $t)] == []
+       then ["missing"] else [] end)
+      + [$p[] | select(.name != $n or .type != $t)
+             | "extra\t\(.id)\t\(.name)\t\(.type)"]
+    | .[]' <<< "$1"
 }
 
 # --- 1. release environment ------------------------------------------------
@@ -132,6 +169,7 @@ done
 note "reviewers: ${_revs[*]}"
 
 jq -n --argjson r "$reviewers_json" '{
+  wait_timer: 0,
   reviewers: $r,
   prevent_self_review: false,
   deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}
@@ -143,14 +181,10 @@ jq -n --argjson r "$reviewers_json" '{
 rc=0; cur="$(get "repos/$REPO/environments/release")" || rc=$?
 [ "$rc" -eq 2 ] && exit 1
 if [ "$rc" -eq 0 ]; then
-  same="$(jq -n --argjson cur "$cur" --argjson want "$reviewers_json" '
-    ([$cur.protection_rules[]? | select(.type == "required_reviewers")
-      | .reviewers[]? | .reviewer.id] | sort)
-    == ([$want[]?.id] | sort)')"
-  if [ "$same" = "true" ]; then
-    note "ok: reviewers already match"
+  if [ "$(env_matches "$cur" "$TMP/env.json")" = "true" ]; then
+    note "ok: environment release settings already match"
   else
-    doit_body "update reviewers on environment release" PUT \
+    doit_body "sync environment release settings" PUT \
       "repos/$REPO/environments/release" "$TMP/env.json"
   fi
 else
@@ -159,13 +193,27 @@ else
 fi
 
 # SUPF-3: GET deployment-branch-policies returns an OBJECT with a
-# branch_policies array ({total_count, branch_policies:[{name,type}]}),
-# not a bare array — probe the tag entries by name.
+# branch_policies array ({total_count, branch_policies:[{id,name,type}]}),
+# not a bare array. The managed set is exactly {'v*' tag} — drift in either
+# direction (entry missing or an unexpected extra) plans a repair.
 rc=0
-tag_policies="$(get "repos/$REPO/environments/release/deployment-branch-policies" \
-  | jq -r '.branch_policies[]? | select(.type == "tag") | .name')" || rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$tag_policies" | grep -qxF 'v*'; then
-  note "ok: 'v*' tag deployment policy present"
+tag_policies="$(get "repos/$REPO/environments/release/deployment-branch-policies")" || rc=$?
+if [ "$rc" -eq 0 ]; then
+  drift="$(pol_drift "$tag_policies" 'v*' 'tag')"
+  if [ -z "$drift" ]; then
+    note "ok: 'v*' tag deployment policy present"
+  else
+    while IFS=$'\t' read -r kind pid pname ptype; do
+      if [ "$kind" = missing ]; then
+        doit "add 'v*' tag deployment policy to environment release" -- \
+          -X POST "repos/$REPO/environments/release/deployment-branch-policies" \
+          -f name='v*' -f type=tag
+      else
+        doit "remove unexpected '$pname' $ptype deployment policy on environment release" -- \
+          -X DELETE "repos/$REPO/environments/release/deployment-branch-policies/$pid"
+      fi
+    done <<< "$drift"
+  fi
 elif [ "$rc" -gt 1 ]; then
   exit 1
 else
@@ -200,14 +248,10 @@ jq -n --argjson r "$train_reviewers_json" '{
 rc=0; cur="$(get "repos/$REPO/environments/runtime-train")" || rc=$?
 [ "$rc" -eq 2 ] && exit 1
 if [ "$rc" -eq 0 ]; then
-  same="$(jq -n --argjson cur "$cur" --argjson want "$train_reviewers_json" '
-    ([$cur.protection_rules[]? | select(.type == "required_reviewers")
-      | .reviewers[]? | .reviewer.id] | sort)
-    == ([$want[]?.id] | sort)')"
-  if [ "$same" = "true" ]; then
-    note "ok: runtime-train reviewers already match"
+  if [ "$(env_matches "$cur" "$TMP/env-train.json")" = "true" ]; then
+    note "ok: environment runtime-train settings already match"
   else
-    doit_body "update reviewers on environment runtime-train" PUT \
+    doit_body "sync environment runtime-train settings" PUT \
       "repos/$REPO/environments/runtime-train" "$TMP/env-train.json"
   fi
 else
@@ -216,12 +260,26 @@ else
 fi
 
 # SUPF-3 ordering, same as `release`: the environment must exist before
-# its deployment branch policy is attached.
+# its deployment branch policy is attached, and the managed set is exactly
+# {'main' branch} — drift in either direction plans a repair.
 rc=0
-train_branch_policies="$(get "repos/$REPO/environments/runtime-train/deployment-branch-policies" \
-  | jq -r '.branch_policies[]? | select(.type == "branch") | .name')" || rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$train_branch_policies" | grep -qxF 'main'; then
-  note "ok: 'main' branch deployment policy present"
+train_branch_policies="$(get "repos/$REPO/environments/runtime-train/deployment-branch-policies")" || rc=$?
+if [ "$rc" -eq 0 ]; then
+  drift="$(pol_drift "$train_branch_policies" 'main' 'branch')"
+  if [ -z "$drift" ]; then
+    note "ok: 'main' branch deployment policy present"
+  else
+    while IFS=$'\t' read -r kind pid pname ptype; do
+      if [ "$kind" = missing ]; then
+        doit "add 'main' branch deployment policy to environment runtime-train" -- \
+          -X POST "repos/$REPO/environments/runtime-train/deployment-branch-policies" \
+          -f name='main' -f type=branch
+      else
+        doit "remove unexpected '$pname' $ptype deployment policy on environment runtime-train" -- \
+          -X DELETE "repos/$REPO/environments/runtime-train/deployment-branch-policies/$pid"
+      fi
+    done <<< "$drift"
+  fi
 elif [ "$rc" -gt 1 ]; then
   exit 1
 else
