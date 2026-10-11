@@ -258,8 +258,10 @@ done
 echo "curl $url" >> "$STUB_LOG"
 case "$url" in
   *ghcr.io/token*)
+    # namespaced READ-ONLY scope only — a push/other-scope change
+    # must fail here so the helper can never silently widen rights
     case "$url" in
-      *"scope=repository:tinyorbitvn/"*) echo '{"token":"ns-scoped"}' ;;
+      *"scope=repository:tinyorbitvn/"*":pull") echo '{"token":"ns-scoped"}' ;;
       *) echo 'curl: (22) 400 invalid scope' >&2; exit 22 ;;
     esac ;;
   */manifests/*|*/referrers/*)
