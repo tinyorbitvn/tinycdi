@@ -502,8 +502,10 @@ fail-when-nothing-happens rule to any new kill/revoke drill.
 check → pin-bump PR → build/trivy-scan/cosign-sign/publish `runtime-*`
 releases; `runtime-images.json` carries a `cosign sign-blob` Sigstore
 bundle, and GitHub build-provenance legs run under the
-`TRAIN_ATTESTATIONS_ENABLED` variable (off by default). Intentionally no
-human gate on publish (A6-S12).
+`TRAIN_ATTESTATIONS_ENABLED` variable (off by default). The publish job
+runs under the `runtime-train` environment — a required reviewer makes
+every publish wait on a recorded approval (SR-5-F2 mitigation; an
+unapproved run expires and the freshness check flags the images stale).
 
 `.github/workflows/runtime-freshness.yml` — daily: fails while a pinned
 Chromium/Firefox-ESR build is stale (opens a pin-bump PR); fails when the

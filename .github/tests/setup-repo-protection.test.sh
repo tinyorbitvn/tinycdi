@@ -8,6 +8,11 @@
 #   * required_approving_review_count: 0 (single maintainer), and the
 #     network-dependent "chromium apt-pin freshness" is NOT required
 #   * private vulnerability reporting + secret scanning/push protection
+#   * runtime-train environment (SR-5-F2): reviewers + wait_timer 0 +
+#     prevent_self_review false + a `main` branch deployment policy,
+#     created after the environment exists (SUPF-3 ordering)
+#   * sha_pinning_required=true on repos/…/actions/permissions (SR-5-F5),
+#     PUT preserving the live enabled/allowed_actions values
 #   * GET probes fail closed on non-404 API errors (SUPF-9)
 set -uo pipefail
 
@@ -42,6 +47,13 @@ reply() { # reply <body>
 notfound() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
 err500()   { echo "gh: boom (HTTP 500)" >&2; exit 1; }
 mode="${GH_STUB_MODE:-clean}"
+# err500<where> modes replay a fully converged repo with one failing GET.
+fail_ep=""
+case "$mode" in
+  err500train) mode=converged; fail_ep="repos/test/repo/environments/runtime-train" ;;
+  err500perms) mode=converged; fail_ep="repos/test/repo/actions/permissions" ;;
+esac
+[ -n "$fail_ep" ] && [ "$endpoint" = "$fail_ep" ] && err500
 case "$endpoint" in
   repos/test/repo)
     [ "$mode" = "converged" ] && reply '{"visibility":"public","security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
@@ -54,6 +66,12 @@ case "$endpoint" in
     notfound ;;
   repos/test/repo/environments/release/deployment-branch-policies)
     case "$mode" in partial|converged) reply '{"total_count":1,"branch_policies":[{"name":"v*","type":"tag"}]}' ;; esac
+    notfound ;;
+  repos/test/repo/environments/runtime-train)
+    case "$mode" in partial|converged) reply '{"protection_rules":[{"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"vanlongme","id":1234}}]}]}' ;; esac
+    notfound ;;
+  repos/test/repo/environments/runtime-train/deployment-branch-policies)
+    [ "$mode" = "converged" ] && reply '{"total_count":1,"branch_policies":[{"name":"main","type":"branch"}]}'
     notfound ;;
   repos/test/repo/rulesets)
     case "$mode" in partial|converged) reply '[{"id":7,"name":"release-tags"}]' ;; esac
@@ -78,6 +96,10 @@ case "$endpoint" in
     [ "$mode" = "partial" ] && reply '{"name":"CODE_SCANNING_ENABLED","value":"false"}'
     [ "$mode" = "converged" ] && reply '{"name":"CODE_SCANNING_ENABLED","value":"true"}'
     notfound ;;
+  repos/test/repo/actions/permissions)
+    [ "$mode" = "converged" ] && reply '{"enabled":true,"allowed_actions":"local_only","sha_pinning_required":true}'
+    # non-default allowed_actions proves the PUT preserves live values
+    reply '{"enabled":true,"allowed_actions":"local_only","sha_pinning_required":false}' ;;
   *) echo "gh stub: unmocked endpoint '$endpoint'" >&2; exit 2 ;;
 esac
 EOF
@@ -121,6 +143,24 @@ chk "$WORK/clean.out" '"secret_scanning_push_protection"' "push protection not i
 chk "$WORK/clean.out" 'WOULD: gh api -X POST repos/test/repo/actions/variables' "variables not planned"
 chk "$WORK/clean.out" 'dry-run complete' "dry-run did not finish cleanly"
 
+# SR-5-F2: the runtime-train environment is planned with reviewers +
+# wait_timer 0 + prevent_self_review false + a `main` branch policy,
+# environment PUT strictly before the policy POST (SUPF-3 ordering).
+chk  "$WORK/clean.out" 'WOULD: gh api -X PUT repos/test/repo/environments/runtime-train' "runtime-train env PUT not planned"
+chk  "$WORK/clean.out" '"wait_timer": *0'          "runtime-train env body lacks wait_timer 0"
+chk  "$WORK/clean.out" '"prevent_self_review": *false' "runtime-train env body lacks prevent_self_review false"
+chk  "$WORK/clean.out" 'WOULD: gh api -X POST repos/test/repo/environments/runtime-train/deployment-branch-policies -f name=main -f type=branch' "runtime-train 'main' branch policy POST not planned"
+trenv_ln="$(grep -n 'WOULD: gh api -X PUT repos/test/repo/environments/runtime-train' "$WORK/clean.out" | head -1 | cut -d: -f1)"
+trpol_ln="$(grep -n 'WOULD: gh api -X POST repos/test/repo/environments/runtime-train/deployment-branch-policies' "$WORK/clean.out" | head -1 | cut -d: -f1)"
+[ -n "$trenv_ln" ] && [ -n "$trpol_ln" ] && [ "$trenv_ln" -lt "$trpol_ln" ] \
+  || { echo "FAIL: runtime-train environment not created before its branch policy"; fails=1; }
+
+# SR-5-F5: sha_pinning_required PUT preserves live enabled/allowed_actions.
+chk  "$WORK/clean.out" 'WOULD: gh api -X PUT repos/test/repo/actions/permissions' "sha-pinning PUT not planned"
+chk  "$WORK/clean.out" '"sha_pinning_required": *true' "PUT body lacks sha_pinning_required:true"
+chk  "$WORK/clean.out" '"enabled": *true'             "PUT body drops live enabled value"
+chk  "$WORK/clean.out" '"allowed_actions": *"local_only"' "PUT body does not preserve allowed_actions"
+
 # ---- scenario: converged state -------------------------------------------
 GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=partial \
   bash "$SCRIPT" > "$WORK/partial.out" 2>&1 || { echo "FAIL: partial dry-run exited nonzero"; cat "$WORK/partial.out"; fails=1; }
@@ -131,6 +171,8 @@ chk "$WORK/partial.out" 'ok: ATTESTATIONS_ENABLED already true' "idempotent: var
 chk "$WORK/partial.out" 'WOULD: gh api -X PATCH repos/test/repo/actions/variables/CODE_SCANNING_ENABLED' "idempotent: stale variable not PATCHed"
 
 chk "$WORK/partial.out" 'WOULD: gh api -X PUT repos/test/repo/branches/main/protection' "idempotent: protection drift not detected"
+chk "$WORK/partial.out" 'ok: runtime-train reviewers already match' "idempotent: runtime-train reviewers re-detected wrongly"
+chk "$WORK/partial.out" 'WOULD: gh api -X POST repos/test/repo/environments/runtime-train/deployment-branch-policies' "idempotent: missing 'main' branch policy not POSTed"
 
 # ---- scenario: fully converged — the plan must be empty -------------------
 GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=converged \
@@ -139,6 +181,9 @@ absent "$WORK/converged.out" 'WOULD:' "converged state still plans changes"
 chk    "$WORK/converged.out" 'ok: ruleset release-tags matches' "converged: ruleset not recognised"
 chk    "$WORK/converged.out" 'ok: main branch protection matches' "converged: protection not recognised"
 chk    "$WORK/converged.out" 'ok: private vulnerability reporting already enabled' "converged: PVR not recognised"
+chk    "$WORK/converged.out" 'ok: runtime-train reviewers already match' "converged: runtime-train env not recognised"
+chk    "$WORK/converged.out" "ok: 'main' branch deployment policy present" "converged: runtime-train branch policy not recognised"
+chk    "$WORK/converged.out" 'ok: sha_pinning_required already true' "converged: sha pinning not recognised"
 
 # ---- scenario: GET fails with a non-404 — must fail CLOSED ---------------
 if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500 \
@@ -146,6 +191,18 @@ if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500 \
   echo "FAIL: HTTP 500 on environment GET did not abort"; fails=1
 else
   chk "$WORK/err.out" 'refusing to continue' "non-404 GET did not fail closed"
+fi
+if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500train \
+    bash "$SCRIPT" > "$WORK/err-train.out" 2>&1; then
+  echo "FAIL: HTTP 500 on runtime-train environment GET did not abort"; fails=1
+else
+  chk "$WORK/err-train.out" 'refusing to continue' "runtime-train GET did not fail closed"
+fi
+if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500perms \
+    bash "$SCRIPT" > "$WORK/err-perms.out" 2>&1; then
+  echo "FAIL: HTTP 500 on actions/permissions GET did not abort"; fails=1
+else
+  chk "$WORK/err-perms.out" 'refusing to continue' "actions/permissions GET did not fail closed"
 fi
 
 if [ "$fails" -eq 0 ]; then echo "setup-repo-protection: all guards pass"; fi

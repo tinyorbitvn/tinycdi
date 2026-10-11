@@ -9,7 +9,7 @@ the trailing comment) and every downloaded tool sha256-verified.
 | `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
 | `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles |
 | `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version no longer exists there ("pinned version gone": the browser image can no longer be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` (and, for firefox-esr, `build/linux-desktop/Dockerfile` — the desktop image carries the same Firefox pin) + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days (D28) |
-| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → cosign sign + SBOM attest (+ `attest-build-provenance` under `TRAIN_ATTESTATIONS_ENABLED`, off by default) → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` sign-blob'd and attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
+| `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train (D27): digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → `environment: runtime-train` publish job (required reviewer — every publish waits on a recorded approval) → cosign sign + SBOM attest (+ `attest-build-provenance` under `TRAIN_ATTESTATIONS_ENABLED`, off by default) → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` sign-blob'd and attached to GitHub Release `runtime-YYYY.MM.DD`. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
 ## Supply-chain pipeline shape
 
@@ -74,6 +74,13 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
 - **`release` environment** — required reviewers (`RELEASE_REVIEWERS`, a
   comma list of GitHub logins resolved to ids at run time; default:
   `vanlongme`) + a deployment **tag** policy matching `v*`.
+- **`runtime-train` environment** — required reviewers
+  (`TRAIN_REVIEWERS`, default: the `RELEASE_REVIEWERS` set) +
+  `wait_timer` 0 + a deployment **branch** policy restricted to `main`.
+  The train's publish job waits on this approval — approve only once the
+  publish job itself is waiting (pending deployment), never at run
+  start. After this change, run the script with `--apply` so the
+  environment exists with reviewers before the next train run.
 - **`release-tags` ruleset** on `refs/tags/v*` — creation/update/deletion
   restricted to repo admins only (no GitHub Actions app bypass).
   Consequence: `release.yml` `workflow_dispatch` is **dry-run only** —
@@ -87,11 +94,18 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   Strict (up-to-date) mode, enforce admins, dismiss stale
   reviews, conversation resolution required, no force-push/delete.
   `required_approving_review_count` is 0 while the repo has a single
-  maintainer — raise it when a second maintainer joins.
+  maintainer — when a second maintainer joins, set it to 1 +
+  `require_last_push_approval`, and `prevent_self_review` true on the
+  `release`/`runtime-train` environments (docs/security/review-v1.0.md
+  §7).
 - **Security features** — private vulnerability reporting, secret
   scanning and push protection.
 - **Actions variables** `ATTESTATIONS_ENABLED=true` and
   `CODE_SCANNING_ENABLED=true` (see "Variables").
+- **Actions permissions** — `sha_pinning_required=true` on the
+  repository: the platform refuses any `uses:` not pinned to a
+  full-length commit SHA. The PUT preserves the live
+  `enabled`/`allowed_actions` values.
 
 `prepare` additionally verifies that any real publish (tag pushes only —
 dispatches are refused unless `dry_run=true`, since the tag ruleset
@@ -170,6 +184,10 @@ the same run opens the pin-bump PR via `bump-browser-pin.sh`.
 `linux-desktop`, `browser`) on their own cadence — every main push touching
 `build/linux-base/**`, `build/linux-desktop/**` or `build/browser/**`, weekly, and on
 `workflow_dispatch` — independent of control-plane `v*.*.*` releases.
+The `publish` job runs under **`environment: runtime-train`** (required
+reviewer — see "Release protection"), so every train publish waits on a
+recorded approval; an unapproved scheduled run expires, and
+`runtime-freshness.yml` then flags the images as stale.
 Promoted digests get the `rt-YYYYMMDD.N` tag where `N` is the next free
 number over the day's already-published `rt-*` tags — derived by
 `.github/scripts/next-rt-tag.sh` at promote time, so failed builds and

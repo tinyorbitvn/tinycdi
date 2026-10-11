@@ -130,3 +130,20 @@ nothing prunes it. That residual is acceptable by construction:
 
 Pruning untagged, unsigned manifests is a possible hygiene cleanup; it is
 not a security boundary.
+
+## What a signature does not prove
+
+A cosign signature or a GitHub build-provenance attestation proves the
+artifact was built by **this repository's workflow** from the recorded
+commit/tag — nothing more. In particular it does **not** prove that a
+second person reviewed the change: the project currently has a single
+maintainer, and the same account can author, merge and approve a publish
+(SR-5-F2, accepted residual — [`review-v1.0.md` §7](review-v1.0.md)).
+
+The durable record is the **environment approval**, not the signature:
+the `release` and `runtime-train` environments each require a reviewer
+before their publish job runs, so every `v*` release and every `rt-*`
+train publish carries a recorded approval in the run's deployment
+history. Approve a train or release publish only once the publish job
+itself is waiting — the *pending deployment* review on the run — never
+at run start, before the build and scan jobs have finished.
