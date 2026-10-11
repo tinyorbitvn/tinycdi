@@ -111,10 +111,27 @@ guarantee.
 ## Digest-addressable does not mean released
 
 Build jobs push `type=registry,push-by-digest=true` **before** the scan
-gate runs, so a gate-failed (or never-promoted) build leaves an unsigned
-manifest that stays pullable by digest —
-`ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` resolves on GHCR and
-nothing prunes it. That residual is acceptable by construction:
+gate runs. When the gate — or any upstream build leg — fails, the same
+workflow run's `cleanup` job deletes exactly the versions that run
+pushed (SR-5-F3): each pushed index, its per-platform and build
+attestation-manifest children and its referrers, resolved from the
+run's own `image-ref` artifacts by
+`.github/scripts/cleanup-failed-digests.sh`. The deletion is strictly
+run-scoped — never a sweep of unlabelled GHCR versions — and double
+bounded: a version goes only if it was created inside the run's window
+(`created_at >= run_started_at`, so a dedup'd identical rebuild's
+pre-existing version is untouched) and is reachable solely from that
+run's tree. If any candidate carries a non-digest tag or is reachable
+from a tagged manifest, nothing is deleted for that image — so a
+gate-failed `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does
+not stay pullable-by-digest and a published release can never be
+cleaned up by a failed run. The window and reachability checks are
+check-then-act — a version could in principle gain a tag or a referrer
+between resolution and deletion, a small TOCTOU residual accepted for
+v1.1.
+
+Even in the window between push and cleanup the residual carries no
+release trust:
 
 - it is **never tagged** — tags (`rt-*`, `:<ver>`, `:latest`, `:main`,
   `:sha-*`) are promoted only by the publish job, after the trivy gate
@@ -125,11 +142,7 @@ nothing prunes it. That residual is acceptable by construction:
   release `images.txt`) references it;
 - consumers pin digests only out of signed manifests and verify the
   signature first — pulling a never-promoted digest is
-  indistinguishable from pulling any other unsigned image, so the
-  digest-addressable leftover carries no release trust.
-
-Pruning untagged, unsigned manifests is a possible hygiene cleanup; it is
-not a security boundary.
+  indistinguishable from pulling any other unsigned image.
 
 ## What a signature does not prove
 

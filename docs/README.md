@@ -31,6 +31,8 @@
 - [runbooks/backup-restore.md](runbooks/backup-restore.md) — backup and restore
 - [runbooks/disaster-recovery.md](runbooks/disaster-recovery.md) — DR procedure
 - [runbooks/capacity.md](runbooks/capacity.md) — sizing and capacity planning
+- [runbooks/mtls-cert-revocation.md](runbooks/mtls-cert-revocation.md) —
+  revoke one internal mTLS certificate (ADR 0009 serial blocklist)
 - [runbooks/stuck-finalizer.md](runbooks/stuck-finalizer.md) — workspace
   teardown finalizer recovery
 

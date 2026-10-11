@@ -592,6 +592,18 @@ paths:
         exists and `takeover` is not set, the call fails with
         `409 CONNECTION_IN_USE`. With `takeover: true` the previous session is
         revoked and fenced **before** the new ticket becomes usable.
+
+        On the session origin itself, every proxied request — the
+        `/websockify` stream and plain asset fetches alike — draws on a
+        per-workspace, per-replica bound of concurrent upstream
+        connections (`-session-stream-cap`, default 32; the KasmVNC
+        runtime cannot survive a reconnect storm above its fd-derived
+        crash boundary). A request over the bound answers
+        `429` + `Retry-After: 1` with the session-listener error body
+        `{"error": "too_many_streams"}` — retryable, and the KasmVNC
+        client's in-frame reconnect absorbs it. Session-origin errors use
+        that lowercase `error`-field shape, distinct from this API's
+        `code`/`retryable` envelope.
       tags: [workspaces]
       security:
         - sessionCookie: []
