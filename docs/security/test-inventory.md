@@ -173,13 +173,14 @@ substitute for review).
   client-supplied forwarding family plus vendor client-address headers
   is deleted before the verified rebuild
   (`TestProxy_ClientForwardedFamilyStripped`,
-  `TestProxy_VendorClientAddressHeadersStripped`), dropped tokens count
-  on `tinycdi_gateway_connection_tokens_dropped_total`
-  (`TestProxy_ConnectionTokensDroppedMetric`) with a bound on the
-  debug-log rate (`TestProxy_ConnectionTokenLogRateLimited`).
+  `TestProxy_VendorClientAddressHeadersStripped`).
 - `internal/gateway/upstreamtimeout_test.go` — the session upstream
   transport bounds a hostile/stalled runtime
-  (`TestProxy_UpstreamResponseHeaderTimeout`, #142).
+  (`TestProxy_UpstreamResponseHeaderTimeout`, #142); also pins the
+  connection-token accounting — dropped tokens count on
+  `tinycdi_gateway_connection_tokens_dropped_total`
+  (`TestProxy_ConnectionTokensDroppedMetric`) with a bound on the
+  debug-log rate (`TestProxy_ConnectionTokenLogRateLimited`).
 - `internal/gateway/forwarded_test.go` — client XFF never reaches the
   runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / A6-S18);
   `TestProxy_IPv6ForwardsExactAddrKeyFolds` pins that the forwarded

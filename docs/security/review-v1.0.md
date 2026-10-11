@@ -332,7 +332,7 @@ pin them.
   intents bounded to curated kinds; `IntentHistory` tenant-predicated.
   `statusview_test.go`, `events_test.go`.
 - Principal directory — display-only, tenant-scoped, bounded, never
-  authorizes. `directory_test.go`, `principal_directory_test.go`.
+  authorizes. `tests/integration/principal_directory_test.go`.
 - Admin surface — path tenant must equal the verified principal's
   tenant plus tenant-admin group; If-Match optimistic concurrency;
   denied admin attempts audited. `adminquota_test.go`,
