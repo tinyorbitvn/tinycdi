@@ -555,6 +555,10 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		// would defeat its purpose; 0 disables via the always-allow
 		// bucket ratelimit.New(0, ...) returns.
 		SessionLookupLimiter: ratelimit.New(cfg.SessionLookupRate, gateway.SessionLookupBurst, rateLimitMaxKeys, nil),
+		// Per-workspace upstream stream bound (V11): validated >= 1 in
+		// ParseFlags; the gateway keeps the fail-safe default if it is
+		// ever wired unvalidated.
+		UpstreamStreamCap:    cfg.SessionStreamCap,
 		UnattachedSessionTTL: cfg.UnattachedSessionTTL,
 		TrustedProxies:       trusted,
 		Metrics:              metrics,
