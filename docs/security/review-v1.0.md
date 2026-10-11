@@ -96,10 +96,10 @@ the v0.5.1 tag are marked accordingly.
 | SR-4-F4 | P3 | Audit coverage pin is spec↔table only; an unwrapped mutating route escapes detection | Fixed | #145 | `TestAuditCoverage_MountedMuxEmitsEventPerRoute` |
 | SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Open | — | n/a — listed (§6) |
 | SR-5-F1 | P2 | `runtime-images.json` is the only unsigned artifact in the release chain | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (sign-blob step + asset assertions) |
-| SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #@PRNUM@ (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
+| SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #157 (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
 | SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Open | — | n/a — listed (§6) |
 | SR-5-F4 | P3 | Scan jobs write unvalidated artifact refs into `GITHUB_ENV` | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (ref validated before the env write) |
-| SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Fixed | #@PRNUM@ | `.github/tests/setup-repo-protection.test.sh` (`sha_pinning_required` PUT preserving live values) |
+| SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Fixed | #157 | `.github/tests/setup-repo-protection.test.sh` (`sha_pinning_required` PUT preserving live values) |
 | SR-5-F6 | P3 | Train images carry no SLSA build-provenance attestation | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (var-gated `attest-build-provenance` legs) |
 | SR-5-F7 | P3 | No dedicated SBOM for the packaged chart or the release binaries | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh`, `publish-inputs.test.sh` (`sbom-chart`/`sbom-binaries` assets) |
 
@@ -109,7 +109,7 @@ the v0.5.1 tag are marked accordingly.
 |---|---|---|
 | P0 | 0 | — |
 | P1 | 1 | fixed — SR-3-F1 in #146 (verified by the forged-annotation drill, G4) |
-| P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 accepted — SR-5-F2, owner `maintainers`, target = a second maintainer joining, mitigated by the `runtime-train` publish approval environment in #@PRNUM@ (§7) |
+| P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 accepted — SR-5-F2, owner `maintainers`, target = a second maintainer joining, mitigated by the `runtime-train` publish approval environment in #157 (§7) |
 | P3 | 22 | 17 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 2 listed open (SR-4-F5, SR-5-F3) |
 | duplicate | 1 | SR-2-F6 (== SR-4-F1) — fixed in #133 |
 
@@ -506,7 +506,7 @@ decided on 2026-10-11, decided by the maintainer.
   tenant-executed image with no second actor. For a single-maintainer
   project that residual is accepted, owner `maintainers`, with this
   mitigation in force: the runtime train's `publish` job runs under the
-  `runtime-train` environment with a required reviewer (#@PRNUM@), so
+  `runtime-train` environment with a required reviewer (#157), so
   every train publish carries a durable approval record — approve only
   once the publish job itself is waiting (pending deployment), never
   at run start. **Trigger — when a second maintainer joins:** `main`
