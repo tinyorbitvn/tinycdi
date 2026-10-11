@@ -26,6 +26,14 @@
 #      HTTPS layer via write-only kasmpasswd; RFB port is never published).
 set -euo pipefail
 
+# Same fd bound as build/linux-base/entrypoint.sh: the image's Xvnc
+# multiplexes clients with select(), so no fd it holds may reach
+# FD_SETSIZE (1024) — FD_SET would write past the stack fd_set. Capping
+# the soft RLIMIT_NOFILE below it turns a connection burst into EMFILE
+# refusals instead of a SIGSEGV. Children inherit the soft limit; the
+# hard limit is left alone so a debug shell can still raise it.
+ulimit -Sn 1000
+
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 PASS_FILE="$SECRET_DIR/password"
 USER_FILE="$SECRET_DIR/username"

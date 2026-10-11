@@ -15,6 +15,25 @@
 #      the orchestrator restarts us when the display dies.
 set -euo pipefail
 
+# File-descriptor bound for the whole process tree: Xvnc multiplexes
+# every client connection with select() — FD_SET on the socket fd is
+# undefined once an fd reaches FD_SETSIZE (1024): the bit write lands
+# past the stack-allocated fd_set and the server dies SIGSEGV. Each
+# websocket client costs ~3 fds inside the single Xvnc process on top of
+# a ~23-fd baseline, so an unbounded fd table turns a connection burst
+# into stack corruption (~334 concurrent streams on a clean pod). A soft
+# RLIMIT_NOFILE below FD_SETSIZE makes accept() fail EMFILE instead, so
+# excess connections are refused while every fd Xvnc can hold stays
+# select()-safe. Soft limit only — inherited by every child (Xvnc, the
+# websockify threads, the session), and 1000 still allows ~325
+# concurrent streams, far above the gateway's per-workspace stream cap;
+# the supervisor loop and helpers each need only a handful of fds. The
+# hard limit is left alone so a debug shell can still raise it.
+# Residual: under sustained saturation a racing handshake thread can
+# still exit(1) via KasmVNC's fatal() on the EMFILE'd tls.key open —
+# a clean exit, not memory corruption (upstream robustness bug).
+ulimit -Sn 1000
+
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 PASS_FILE="$SECRET_DIR/password"
 USER_FILE="$SECRET_DIR/username"
