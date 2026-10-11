@@ -9,7 +9,7 @@ import {
   IconChevronDown,
   IconWorld,
   IconDeviceLaptop,
-  IconLogOut,
+  IconLogout,
   IconMoon,
   IconShieldCheck,
   IconSun,
@@ -185,7 +185,7 @@ function UserMenu({ me }: { me: Me }) {
           </Button>
         )}
         items={[
-          { id: "sign-out", label: t("app.user.signOut"), icon: <IconLogOut />, onSelect: onSignOut },
+          { id: "sign-out", label: t("app.user.signOut"), icon: <IconLogout />, onSelect: onSignOut },
           {
             id: "sign-out-all",
             label: t("app.user.signOutAll"),
