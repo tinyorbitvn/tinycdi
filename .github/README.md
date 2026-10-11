@@ -76,6 +76,34 @@ A non-publishing run (`release.yml` dry_run, `images.yml` on a non-main ref)
 exports the image as a `type=docker` tar artifact instead; the scan job scans
 the tar, so rehearsal coverage is identical.
 
+### Rehearsing the cleanup
+
+`images.yml` carries a maintainer-facing `fail_scan_for_rehearsal`
+workflow_dispatch input (boolean, default `false`). When true **and** the
+run is on `refs/heads/main`, the scan jobs run the real trivy gate and
+upload every report first, then a trailing step exits non-zero so the
+scan job fails exactly like a real gate failure — the `promote` job is
+skipped (nothing is signed or tagged) and the `cleanup` job fires against
+this run's own `image-ref` artifacts. The input is inert on every other
+path: push events, the default value, and non-main refs (where nothing
+is pushed anyway).
+
+Rehearsal procedure (single dispatch):
+
+1. Snapshot every `tinycdi-*` package's version ids:
+   `gh api --paginate orgs/tinyorbitvn/packages/container/<pkg>/versions?per_page=100`
+   for each of `tinycdi-linux-base`, `tinycdi-linux-desktop`,
+   `tinycdi-backend`, `tinycdi-frontend`, `tinycdi-operator`,
+   `tinycdi-browser`, `tinycdi-kasm-adapter`.
+2. Dispatch `images.yml` on `main` with `fail_scan_for_rehearsal=true`.
+3. When the run finishes, re-snapshot: exactly this run's created
+   versions are gone and every pre-existing id (published tags, their
+   children, `sha256-<hex>.sig`/`.att` artifacts) is intact; spot-check
+   a published tag still verifies with `cosign verify`.
+
+The cleanup job's whole-tree refusals mean a digest shared with any
+published index is never deleted — the diff above is the proof.
+
 ## Release protection (SEC-15 / SUPR-5)
 
 The `publish` job runs under **`environment: release`**. The environment,
