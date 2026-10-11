@@ -33,8 +33,14 @@ cat > "$WORK/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 # gh stub — state selected via GH_STUB_MODE: clean | partial | converged | err500
 # Single-field drift on the converged state via GH_STUB_DRIFT:
-#   rel-psr | rel-wait | rel-dbp | rel-pol   (release environment)
-#   train-psr | train-wait | train-dbp | train-pol   (runtime-train)
+#   rel-psr | rel-wait | rel-dbp             (release environment)
+#   train-psr | train-wait | train-dbp       (runtime-train)
+#   rel-pol | train-pol                      extra deployment policy
+#   rel-pol-miss | train-pol-miss            GET 200, wanted policy absent
+#   rel-pol-pages | train-pol-pages          partial page (total_count > entries)
+#   rel-pol-many | train-pol-many            extras over the DELETE bound
+#   rel-pol-empty | train-pol-empty          empty policies body
+#   rel-pol-bad | train-pol-bad              non-JSON policies body
 [ "$1" = "api" ] || { echo "gh stub: unsupported '$*'" >&2; exit 2; }
 shift
 endpoint="" ; jqexpr=""
@@ -47,6 +53,10 @@ while [ $# -gt 0 ]; do
     *) [ -z "$endpoint" ] && endpoint="$1"; shift ;;
   esac
 done
+# endpoints may carry a query string (the policies GETs must pass
+# ?per_page=100) — epath is the route, equery the raw query.
+epath="$endpoint"; equery=""
+case "$endpoint" in *\?*) epath="${endpoint%%\?*}"; equery="${endpoint#*\?}" ;; esac
 reply() { # reply <body>
   if [ -n "$jqexpr" ]; then printf '%s' "$1" | jq -r "$jqexpr"; else printf '%s\n' "$1"; fi
   exit 0
@@ -61,8 +71,8 @@ case "$mode" in
   err500train) mode=converged; fail_ep="repos/test/repo/environments/runtime-train" ;;
   err500perms) mode=converged; fail_ep="repos/test/repo/actions/permissions" ;;
 esac
-[ -n "$fail_ep" ] && [ "$endpoint" = "$fail_ep" ] && err500
-case "$endpoint" in
+[ -n "$fail_ep" ] && [ "$epath" = "$fail_ep" ] && err500
+case "$epath" in
   repos/test/repo)
     [ "$mode" = "converged" ] && reply '{"visibility":"public","security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
     reply '{"visibility":"public","security_and_analysis":{}}' ;;
@@ -80,8 +90,16 @@ case "$endpoint" in
     esac
     notfound ;;
   repos/test/repo/environments/release/deployment-branch-policies)
+    [ "$equery" = "per_page=100" ] || { echo "gh stub: policies GET lacks ?per_page=100" >&2; exit 2; }
     case "$mode" in partial|converged)
-      [ "$drift" = "rel-pol" ] && reply '{"total_count":2,"branch_policies":[{"id":11,"name":"v*","type":"tag"},{"id":12,"name":"dev*","type":"tag"}]}'
+      case "$drift" in
+        rel-pol)       reply '{"total_count":2,"branch_policies":[{"id":11,"name":"v*","type":"tag"},{"id":12,"name":"dev*","type":"tag"}]}' ;;
+        rel-pol-miss)  reply '{"total_count":0,"branch_policies":[]}' ;;
+        rel-pol-pages) reply '{"total_count":200,"branch_policies":[{"id":11,"name":"v*","type":"tag"},{"id":12,"name":"dev*","type":"tag"}]}' ;;
+        rel-pol-many)  reply '{"total_count":5,"branch_policies":[{"id":11,"name":"v*","type":"tag"},{"id":12,"name":"a*","type":"tag"},{"id":13,"name":"b*","type":"tag"},{"id":14,"name":"c*","type":"tag"},{"id":15,"name":"d*","type":"tag"}]}' ;;
+        rel-pol-empty) reply '' ;;
+        rel-pol-bad)   reply 'not-json' ;;
+      esac
       reply '{"total_count":1,"branch_policies":[{"id":11,"name":"v*","type":"tag"}]}' ;;
     esac
     notfound ;;
@@ -96,8 +114,16 @@ case "$endpoint" in
     esac
     notfound ;;
   repos/test/repo/environments/runtime-train/deployment-branch-policies)
+    [ "$equery" = "per_page=100" ] || { echo "gh stub: policies GET lacks ?per_page=100" >&2; exit 2; }
     if [ "$mode" = "converged" ]; then
-      [ "$drift" = "train-pol" ] && reply '{"total_count":2,"branch_policies":[{"id":21,"name":"main","type":"branch"},{"id":22,"name":"dev","type":"branch"}]}'
+      case "$drift" in
+        train-pol)       reply '{"total_count":2,"branch_policies":[{"id":21,"name":"main","type":"branch"},{"id":22,"name":"dev","type":"branch"}]}' ;;
+        train-pol-miss)  reply '{"total_count":0,"branch_policies":[]}' ;;
+        train-pol-pages) reply '{"total_count":200,"branch_policies":[{"id":21,"name":"main","type":"branch"}]}' ;;
+        train-pol-many)  reply '{"total_count":5,"branch_policies":[{"id":21,"name":"main","type":"branch"},{"id":22,"name":"a","type":"branch"},{"id":23,"name":"b","type":"branch"},{"id":24,"name":"c","type":"branch"},{"id":25,"name":"d","type":"branch"}]}' ;;
+        train-pol-empty) reply '' ;;
+        train-pol-bad)   reply 'not-json' ;;
+      esac
       reply '{"total_count":1,"branch_policies":[{"id":21,"name":"main","type":"branch"}]}'
     fi
     notfound ;;
@@ -264,6 +290,32 @@ drift_case train-dbp  'WOULD: gh api -X PUT repos/test/repo/environments/runtime
   "deployment_branch_policy drift did not plan an env PUT"
 drift_case train-pol  'WOULD: gh api -X DELETE repos/test/repo/environments/runtime-train/deployment-branch-policies/22' \
   "extra branch policy did not plan a DELETE"
+# rc==0 'missing' arm: GET 200 with the wanted entry absent -> POST it.
+drift_case rel-pol-miss   'WOULD: gh api -X POST repos/test/repo/environments/release/deployment-branch-policies -f name=v\* -f type=tag' \
+  "missing tag policy did not plan a POST"
+drift_case train-pol-miss 'WOULD: gh api -X POST repos/test/repo/environments/runtime-train/deployment-branch-policies -f name=main -f type=branch' \
+  "missing branch policy did not plan a POST"
+
+# ---- scenario: malformed-success and unsafe drift must fail CLOSED -------
+# An empty/garbage policies body or a partial page (total_count above the
+# ?per_page=100 result) must abort, never report "ok". More than the
+# DELETE bound of unexpected policies must abort for manual review.
+fail_case() {  # fail_case <GH_STUB_DRIFT> <expected error pattern> <desc>
+  local d="$1" out="$WORK/drift-$1.out"
+  if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=converged GH_STUB_DRIFT="$d" \
+      bash "$SCRIPT" > "$out" 2>&1; then
+    echo "FAIL: drift $d did not abort"; fails=1; return
+  fi
+  chk "$out" "$2" "drift $d: $3"
+}
+fail_case rel-pol-empty   'malformed body'   "empty policies body did not fail closed"
+fail_case rel-pol-bad     'malformed body'   "non-JSON policies body did not fail closed"
+fail_case rel-pol-pages   'partial page'     "paginated policies body did not fail closed"
+fail_case rel-pol-many    'refusing to plan a mass deletion' "DELETE bound not enforced"
+fail_case train-pol-empty 'malformed body'   "empty policies body did not fail closed"
+fail_case train-pol-bad   'malformed body'   "non-JSON policies body did not fail closed"
+fail_case train-pol-pages 'partial page'     "paginated policies body did not fail closed"
+fail_case train-pol-many  'refusing to plan a mass deletion' "DELETE bound not enforced"
 
 # ---- scenario: GET fails with a non-404 — must fail CLOSED ---------------
 if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500 \

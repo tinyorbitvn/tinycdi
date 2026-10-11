@@ -57,7 +57,12 @@
 #                        RELEASE_REVIEWERS set).
 #
 # Idempotent: live state is GET first; creates/updates happen only where
-# the live object is missing or differs. Safe to re-run after config drifts.
+# the live object is missing or differs. The environment compare covers
+# every managed field (reviewers, wait_timer, prevent_self_review and the
+# deployment_branch_policy mode); the deployment branch/tag policy set is
+# managed exactly — a missing entry is POSTed and an unexpected entry is
+# planned for DELETE by id, capped at 3 per environment (more aborts the
+# run for manual review). Safe to re-run after config drifts.
 # Dry-run prints every planned call as `WOULD: gh api -X <METHOD> <path>`
 # followed by the JSON body, so the policy is reviewable before applying.
 set -euo pipefail
@@ -79,6 +84,10 @@ fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 changed=0
+# Safety bound on the delete-extras repair: more than this many unexpected
+# deployment policies in one environment aborts the run for manual review
+# instead of planning a mass deletion.
+MAX_POLICY_DELETES=3
 note() { echo "  - $*"; }
 
 # get <endpoint> — prints the body; rc 0 ok, rc 1 on HTTP 404, rc 2 on any
@@ -146,7 +155,21 @@ env_matches() {
 # tab-separated drift line per difference:
 #   "missing"                          wanted entry absent -> POST it
 #   "extra <id> <name> <type>"         unexpected entry -> DELETE it by id
+# Fails closed on a malformed-success: an empty/non-JSON body or a partial
+# page (total_count above the entries the ?per_page=100 GET returned) is an
+# error, never an "all clear".
 pol_drift() {
+  jq -e 'type == "object" and (.branch_policies | type) == "array"
+         and (.total_count | type) == "number"' <<< "$1" >/dev/null || {
+    echo "error: deployment-branch-policies GET returned a malformed body — refusing to continue" >&2
+    return 2
+  }
+  if [ "$(jq -r '.total_count > (.branch_policies | length)' <<< "$1")" = "true" ]; then
+    echo "error: deployment-branch-policies GET returned a partial page — total_count" >&2
+    echo "       exceeds the entries fetched (?per_page=100). Inspect the environment" >&2
+    echo "       manually, then re-run." >&2
+    return 2
+  fi
   jq -r --arg n "$2" --arg t "$3" '
     (.branch_policies // []) as $p
     | (if [$p[] | select(.name == $n and .type == $t)] == []
@@ -197,12 +220,19 @@ fi
 # not a bare array. The managed set is exactly {'v*' tag} — drift in either
 # direction (entry missing or an unexpected extra) plans a repair.
 rc=0
-tag_policies="$(get "repos/$REPO/environments/release/deployment-branch-policies")" || rc=$?
+tag_policies="$(get "repos/$REPO/environments/release/deployment-branch-policies?per_page=100")" || rc=$?
 if [ "$rc" -eq 0 ]; then
   drift="$(pol_drift "$tag_policies" 'v*' 'tag')"
   if [ -z "$drift" ]; then
     note "ok: 'v*' tag deployment policy present"
   else
+    if [ "$(printf '%s\n' "$drift" | grep -c '^extra' || true)" -gt "$MAX_POLICY_DELETES" ]; then
+      echo "error: environment release has more than $MAX_POLICY_DELETES unexpected" >&2
+      echo "       deployment policies — refusing to plan a mass deletion. Inspect and" >&2
+      echo "       remove them manually (gh api repos/$REPO/environments/release/" >&2
+      echo "       deployment-branch-policies), then re-run." >&2
+      exit 1
+    fi
     while IFS=$'\t' read -r kind pid pname ptype; do
       if [ "$kind" = missing ]; then
         doit "add 'v*' tag deployment policy to environment release" -- \
@@ -263,12 +293,19 @@ fi
 # its deployment branch policy is attached, and the managed set is exactly
 # {'main' branch} — drift in either direction plans a repair.
 rc=0
-train_branch_policies="$(get "repos/$REPO/environments/runtime-train/deployment-branch-policies")" || rc=$?
+train_branch_policies="$(get "repos/$REPO/environments/runtime-train/deployment-branch-policies?per_page=100")" || rc=$?
 if [ "$rc" -eq 0 ]; then
   drift="$(pol_drift "$train_branch_policies" 'main' 'branch')"
   if [ -z "$drift" ]; then
     note "ok: 'main' branch deployment policy present"
   else
+    if [ "$(printf '%s\n' "$drift" | grep -c '^extra' || true)" -gt "$MAX_POLICY_DELETES" ]; then
+      echo "error: environment runtime-train has more than $MAX_POLICY_DELETES unexpected" >&2
+      echo "       deployment policies — refusing to plan a mass deletion. Inspect and" >&2
+      echo "       remove them manually (gh api repos/$REPO/environments/runtime-train/" >&2
+      echo "       deployment-branch-policies), then re-run." >&2
+      exit 1
+    fi
     while IFS=$'\t' read -r kind pid pname ptype; do
       if [ "$kind" = missing ]; then
         doit "add 'main' branch deployment policy to environment runtime-train" -- \
