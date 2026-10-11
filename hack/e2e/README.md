@@ -76,7 +76,9 @@ Anonymous (`--anon-only` stops here):
   `/v1/templates` answer 401 without a session.
 - `metrics-not-public` — `/v1/metrics` does not exist on the portal (404).
 - `session-host-no-cookie` — a well-formed `ws-<suffix>.<session-domain>`
-  host is the cookie-gated desktop proxy: no workspace cookie → 401.
+  host is the cookie-gated desktop proxy: no workspace cookie → 401. The
+  session host must be named `ws-<suffix>.<session-domain>` — any other
+  name is refused `421` by design.
 - `session-host-foreign-421` — a non-workspace label under the session
   domain is misdirected traffic: 421 `bad_host`
   (`internal/gateway/proxy.go`). The probe uses the fixed name
