@@ -199,6 +199,7 @@ objects. It **keeps**:
 | `backend.loginKeys.existingSecret` | `current` (+ `previous` while rotating), 32 bytes each | backend `-login-key-file` — seals the `__Host-tcdi_login` cookie; **required** unless `loginKeys.generate` |
 | `backend.tls.{app,session,internal}.existingSecret` | `tls.crt`/`tls.key` | backend app listener :8443 / session listener :8444 / internal mTLS listener :9443 |
 | `backend.clientCA.existingSecret` | `ca.crt` | backend verifies internal-listener client certs |
+| `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0009 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
 | `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
 | `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
 | `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
@@ -280,6 +281,7 @@ the value to set instead:
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
+| `backend.tls.internal.revokedSerials.{existingSecret,key}` | `""` / `revoked-serials.txt` | per-certificate revocation on the internal mTLS listener (ADR 0009, SR-3-F5): mounts a Secret holding the serial blocklist (`<serial-hex> <issuer-dn>` per line) at `/etc/internal-revoked/` — a listed leaf's handshake is aborted and its live conns severed; propagation is kubelet Secret sync + one 30 s poll (~90 s worst). Empty = off (default render unchanged) |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
 | `operator.clusterCIDRs` | `[]` | this cluster's pod/service/node CIDRs — appended to `--internet-except-cidrs`; **required** (render fails) when any seeded template uses `networkProfile: InternetOnly` |

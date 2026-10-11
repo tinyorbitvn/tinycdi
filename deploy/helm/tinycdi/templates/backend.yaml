@@ -22,6 +22,7 @@
 # listeners for the whole -drain-window; clients reconnect to the other
 # replica with the same session cookie.
 {{- $loginSecret := .Values.backend.loginKeys.existingSecret | default (printf "%s-backend-login-keys" .Release.Name) -}}
+{{- $revokedSerials := ((.Values.backend.tls.internal | default dict).revokedSerials) | default dict -}}
 {{- $loginPrevious := false -}}
 {{- with lookup "v1" "Secret" $.Release.Namespace $loginSecret -}}
 {{- if hasKey (default dict .data) "previous" -}}
@@ -198,6 +199,11 @@ spec:
             - -internal-tls-cert=/tls/internal/tls.crt
             - -internal-tls-key=/tls/internal/tls.key
             - -internal-client-ca=/etc/client-ca/ca.crt
+            {{- if $revokedSerials.existingSecret }}
+            # ADR 0009: per-certificate revocation — the Secret's
+            # blocklist key is projected to a fixed filename.
+            - -internal-revoked-list=/etc/internal-revoked/revoked-serials.txt
+            {{- end }}
             {{- if .Values.backend.operatorCN }}
             - -operator-cn={{ .Values.backend.operatorCN }}
             {{- end }}
@@ -275,6 +281,9 @@ spec:
             - {name: tls-session, mountPath: /tls/session, readOnly: true}
             - {name: tls-internal, mountPath: /tls/internal, readOnly: true}
             - {name: client-ca, mountPath: /etc/client-ca, readOnly: true}
+            {{- if $revokedSerials.existingSecret }}
+            - {name: internal-revoked, mountPath: /etc/internal-revoked, readOnly: true}
+            {{- end }}
             - {name: login-keys, mountPath: /login-keys, readOnly: true}
             {{- if .Values.backend.extraCA.existingSecret }}
             - {name: extra-ca, mountPath: /etc/extra-ca, readOnly: true}
@@ -306,6 +315,14 @@ spec:
           secret:
             secretName: {{ .Values.backend.clientCA.existingSecret }}
             items: [{key: {{ .Values.backend.clientCA.key | default "ca.crt" }}, path: ca.crt}]
+        {{- if $revokedSerials.existingSecret }}
+        - name: internal-revoked
+          # ADR 0009: project ONLY the blocklist key to a fixed filename —
+          # same projection pattern as client-ca above.
+          secret:
+            secretName: {{ $revokedSerials.existingSecret }}
+            items: [{key: {{ $revokedSerials.key | default "revoked-serials.txt" }}, path: revoked-serials.txt}]
+        {{- end }}
         - name: login-keys
           # Login-state seal keys: "current" is required, "previous" is
           # mounted when the Secret carries it (key rotation).

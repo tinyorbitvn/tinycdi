@@ -279,8 +279,24 @@ substitute for review).
   `ca_reload_test.go` — client cert/CA hot reload (FX-R33, A6-S15).
 - `internal/tlsreload/reloader_test.go`, `capool_test.go` — file-watch reload
   incl. Kubernetes atomic Secret-volume swaps.
+- `internal/tlsreload/blocklist_test.go` — ADR 0009 revocation list
+  (SR-3-F5): format/bounds parse (one bad line rejects the file),
+  fail-closed boot, keep-last-good reload with the error observer, the
+  conn registry's track/sever/drop, and the swap-vs-registration
+  serialization under `-race`.
 - `internal/backend/mtls_reload_test.go` — internal listener cert + client-CA
   hot reload.
+- `internal/backend/mtls_revocation_test.go` — ADR 0009 end-to-end on the
+  production internal-listener stack: blocked (issuer, serial) aborts the
+  handshake, sibling + cross-issuer certs pass, an appended entry lands on
+  poll, resumed handshakes are refused too, a live conn on a newly blocked
+  serial is severed, `ConnState` close/hijack drops the registration,
+  feature-off installs no `VerifyConnection` (byte-identical), absent-cert
+  still reaches the 401 path, WARN line + the three metrics, and the
+  flag/env/validation surface.
+- `deploy/helm/chart_revocation_test.go` — `revokedSerials` render legs:
+  off = no arg/mount/volume (golden unchanged), on = arg + read-only mount
+  + single-key Secret projection to the fixed filename.
 - `internal/backend/listeners_test.go` — listener timeout budgets (SEC-23).
 - `internal/backend/config_test.go` — DSN `sslmode` refusal without
   `-dev-insecure-db`, trusted-proxies parsing.
@@ -566,6 +582,7 @@ context):
 | FX-R26 | XFF hygiene + multi-replica cookie liveness — `forwarded_test.go`, `session_cookie_liveness_test.go` |
 | FX-R30 | authenticated rate-limit keying — `ratelimit_key.go` + launch/login tests |
 | FX-R33 | mTLS client cert/CA hot reload — `opclient/ca_reload_test.go`, `mtls_reload_test.go` |
+| SR-3-F5 | per-certificate revocation on internal mTLS (ADR 0009) — `tlsreload/blocklist_test.go`, `mtls_revocation_test.go`, `chart_revocation_test.go` |
 | RL-1 | per-replica rate-limit division — `internal/ratelimit`, `wire.go` |
 
 ## 11. Gaps a reviewer will notice

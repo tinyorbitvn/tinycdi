@@ -284,7 +284,17 @@ backend:
   tls:
     app:      {existingSecret: tinycdi-backend-app-tls}      # keys tls.crt / tls.key
     session:  {existingSecret: tinycdi-backend-session-tls}  # MUST cover *.<sessionDomain> (wildcard cert)
-    internal: {existingSecret: tinycdi-backend-internal-tls}
+    internal:
+      existingSecret: tinycdi-backend-internal-tls
+      # Per-certificate revocation on the internal mTLS listener (ADR
+      # 0009, SR-3-F5): a Secret carrying the serial blocklist file —
+      # "<serial-hex> <issuer-dn>" per line, blank lines and '#' comments
+      # ignored. Mounted read-only at /etc/internal-revoked/ and polled;
+      # a listed leaf's handshake is aborted and its live conns severed.
+      # empty = feature off (render byte-identical to before).
+      revokedSerials:
+        existingSecret: ""                    # Secret holding the blocklist file
+        key: revoked-serials.txt              # key within the Secret
   # CA bundle the internal mTLS listener verifies client certs against
   # (the operator's broker client cert).
   clientCA:

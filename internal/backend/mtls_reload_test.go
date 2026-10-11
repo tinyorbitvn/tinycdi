@@ -10,6 +10,7 @@ package backend
 import (
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
@@ -27,12 +29,24 @@ import (
 // 200 only to a verified client cert — absent or rejected certs get 401,
 // mirroring the listener's error model. Returns the bound address.
 func serveInternalTLS(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool *tlsreload.CAPool) string {
+	return serveInternalTLSList(t, srvCert, caPEM, pool, nil, nil, nil)
+}
+
+// serveInternalTLSList is serveInternalTLS plus the ADR 0009 leg: when bl
+// is non-nil the listener installs the revocation VerifyConnection
+// (installRevocation) and the ConnState drop hook, exactly as bind() does
+// when -internal-revoked-list is set.
+func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool *tlsreload.CAPool,
+	bl *tlsreload.Blocklist, log *slog.Logger, metrics *observability.Metrics) string {
 	t.Helper()
 	tlsCfg, err := httpapi.ServerTLSConfig(srvCert, caPEM)
 	if err != nil {
 		t.Fatalf("ServerTLSConfig: %v", err)
 	}
 	hotReloadClientCAs(tlsCfg, pool)
+	if bl != nil {
+		installRevocation(tlsCfg, bl, log, metrics)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -44,6 +58,9 @@ func serveInternalTLS(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool 
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
+	if bl != nil {
+		srv.ConnState = connStateDrop(bl)
+	}
 	go func() { _ = serveTLS(srv, ln, tlsCfg) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()

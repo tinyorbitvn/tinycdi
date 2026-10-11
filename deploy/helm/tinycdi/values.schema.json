@@ -168,7 +168,16 @@
           "properties": {
             "app": {"$ref": "#/$defs/secretRefRequired"},
             "session": {"$ref": "#/$defs/secretRefRequired"},
-            "internal": {"$ref": "#/$defs/secretRefRequired"}
+            "internal": {
+              "type": "object",
+              "required": ["existingSecret"],
+              "additionalProperties": false,
+              "properties": {
+                "existingSecret": {"type": "string", "minLength": 1},
+                "key": {"type": "string", "minLength": 1},
+                "revokedSerials": {"$ref": "#/$defs/secretRef"}
+              }
+            }
           }
         },
         "clientCA": {"$ref": "#/$defs/secretRefRequired"},

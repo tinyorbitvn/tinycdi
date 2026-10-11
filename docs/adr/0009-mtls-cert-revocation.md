@@ -1,7 +1,8 @@
 # ADR 0009 — Per-certificate revocation on the internal mTLS API (SR-3-F5)
 
-Status: **proposed** (design only — implementation target v1.1 if merged
-before the v1.1.0-rc.1 cut, else v1.2)
+Status: **accepted — implemented** (v1.1: `-internal-revoked-list`,
+`tlsreload.Blocklist`, the `VerifyConnection` hook, the live-conn
+registry, metrics, chart values and the operator runbook)
 
 Date: 2026-10-11
 

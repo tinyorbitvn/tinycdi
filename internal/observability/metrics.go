@@ -102,6 +102,12 @@ var (
 	internalAuthFailReasons = map[string]struct{}{
 		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
 	}
+	// internalMTLSListeners bounds the {listener} label of the internal
+	// mTLS revocation counter (ADR 0009): "internal" today, future mTLS
+	// servers slot in without minting new label values.
+	internalMTLSListeners = map[string]struct{}{
+		"internal": {},
+	}
 	// retentionTables are the session-layer tables the terminal-row
 	// retention sweep prunes (SR-4-F5).
 	retentionTables = map[string]struct{}{
@@ -171,6 +177,9 @@ type Metrics struct {
 	internalAuthFailures *prometheus.CounterVec
 	retentionPruned      *prometheus.CounterVec
 	retentionLastOK      prometheus.Gauge
+	revokedSerials       *prometheus.CounterVec
+	revocationEntries    prometheus.Gauge
+	revocationReloadErrs prometheus.Counter
 
 	tenants map[string]struct{}
 }
@@ -297,6 +306,18 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "retention_last_success_timestamp_seconds",
 			Help: "Unix timestamp of the last completed terminal-row retention sweep.",
 		}),
+		revokedSerials: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "internal_mtls_revoked_serial_total",
+			Help: "Internal mTLS handshakes aborted because the peer certificate's (issuer, serial) is on the revocation list (ADR 0009), by listener.",
+		}, []string{"listener"}),
+		revocationEntries: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "internal_mtls_revocation_entries",
+			Help: "Entries in the currently loaded internal-mTLS revocation list (ADR 0009) — zero when the feature is off.",
+		}),
+		revocationReloadErrs: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "internal_mtls_revocation_reload_errors_total",
+			Help: "Internal-mTLS revocation list reload failures — the last-good list kept serving (ADR 0009).",
+		}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -309,6 +330,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
 		m.internalAuthFailures, m.retentionPruned, m.retentionLastOK,
+		m.revokedSerials, m.revocationEntries, m.revocationReloadErrs,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
@@ -527,3 +549,20 @@ func (m *Metrics) AddRetentionRowsPruned(table string, n float64) {
 func (m *Metrics) SetRetentionLastSuccess(at time.Time) {
 	m.retentionLastOK.Set(float64(at.Unix()))
 }
+
+// IncInternalRevokedSerial counts one internal-mTLS handshake aborted
+// because the verified peer leaf's (issuer, serial) is on the ADR 0009
+// revocation list; listener is bounded to {internal, other}.
+func (m *Metrics) IncInternalRevokedSerial(listener string) {
+	m.revokedSerials.WithLabelValues(boundValue(listener, internalMTLSListeners)).Inc()
+}
+
+// SetRevocationEntries records the entry count of the currently loaded
+// ADR 0009 revocation list (called on boot load and on every swap).
+func (m *Metrics) SetRevocationEntries(entries int) {
+	m.revocationEntries.Set(float64(entries))
+}
+
+// IncRevocationReloadError counts one failed revocation-list reload that
+// kept the last-good list (ADR 0009).
+func (m *Metrics) IncRevocationReloadError() { m.revocationReloadErrs.Inc() }

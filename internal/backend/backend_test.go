@@ -462,7 +462,11 @@ type testCA struct {
 	pem  []byte
 }
 
-func newTestCA(t *testing.T) *testCA {
+func newTestCA(t *testing.T) *testCA { return newTestCANamed(t, "test-ca") }
+
+// newTestCANamed builds a test CA with the given Subject CN. Revocation
+// (issuer, serial) pairing tests need distinct issuer DNs.
+func newTestCANamed(t *testing.T, cn string) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -470,7 +474,7 @@ func newTestCA(t *testing.T) *testCA {
 	}
 	tpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "test-ca"},
+		Subject:               pkix.Name{CommonName: cn},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,
@@ -491,13 +495,19 @@ func newTestCA(t *testing.T) *testCA {
 
 // sign issues a client certificate under the CA.
 func (ca *testCA) sign(t *testing.T, cn string) tls.Certificate {
+	return ca.signSerial(t, cn, 2)
+}
+
+// signSerial issues a client certificate under the CA with the given
+// serial number — revocation tests need known serials.
+func (ca *testCA) signSerial(t *testing.T, cn string, serial int64) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+		SerialNumber: big.NewInt(serial),
 		Subject:      pkix.Name{CommonName: cn},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),

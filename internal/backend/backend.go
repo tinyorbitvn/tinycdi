@@ -16,6 +16,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/gateway"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
 )
 
 // Shutdown runs against ONE shared deadline, kept under the pod's
@@ -85,6 +86,10 @@ type Backend struct {
 	sessionHandler  http.Handler
 	internalHandler http.Handler
 	internalTLSCfg  *tls.Config
+	// internalBlocklist is the ADR 0009 revocation list on the internal
+	// mTLS listener (nil when -internal-revoked-list is unset): it backs
+	// the handshake VerifyConnection and the ConnState drop hook.
+	internalBlocklist *tlsreload.Blocklist
 
 	// metrics is the platform metric set (E8), built only when the metrics
 	// listener is enabled — with no listener there is nothing to scrape.

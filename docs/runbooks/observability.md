@@ -74,6 +74,10 @@ cardinality cannot leak in.
 | `tinycdi_internal_auth_failures_total` | counter | `reason` | mTLS identity rejections on the internal broker listener (`reason` is `no_cert`, `no_cn` or `spiffe_mismatch`) — the complete record of refused attempts; the matching warn line is rate-limited per reason. A rising series means bad or absent client certs are hitting :9443 — check internal cert issuance/rotation or a probing client |
 | `tinycdi_retention_rows_pruned_total` | counter | `table` | terminal `connection_lease`/`launch_ticket` rows deleted by the leader's hourly retention sweep (`table` is `connection_lease` or `launch_ticket`). Flat zero is normal on quiet installs — pair with the last-success gauge before alarming |
 | `tinycdi_retention_last_success_timestamp_seconds` | gauge | — | unix timestamp of the last completed terminal-row retention sweep. Absent until the first pass finishes on this leader; stale > ~2 h means the sweep is not running and the session tables resume growing without bound |
+| `tinycdi_internal_mtls_revoked_serial_total` | counter | `listener` | internal-mTLS handshakes aborted because the verified peer leaf's (issuer, serial) is on the ADR 0009 revocation list — the complete record of refusals; the `internal_mtls_revoked_cert` WARN line (rate-limited) carries peer/serial/issuer. Nonzero means a revoked cert is still being presented — see `runbooks/mtls-cert-revocation.md` |
+| `tinycdi_internal_mtls_revocation_entries` | gauge | — | entries in the currently loaded internal-mTLS revocation list (0 when the feature is off) |
+| `tinycdi_internal_mtls_revocation_reload_errors_total` | counter | — | revocation-list reload failures — the last-good list kept serving; a rising series means the mounted file is unreadable/invalid and new revocations are NOT landing |
+
 
 ## Dashboards
 
