@@ -55,6 +55,9 @@
   review preparation: assets, actors, trust boundaries, current controls
 - [security/test-inventory.md](security/test-inventory.md) — security-relevant
   tests and CI scanners with paths
+- [security/review-v1.0.md](security/review-v1.0.md) — the v1.0 internal
+  security review report: scope, method, findings, held controls,
+  residuals
 
 ## ADRs
 

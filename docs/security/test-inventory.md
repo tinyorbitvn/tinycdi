@@ -39,25 +39,55 @@ substitute for review).
   the client-IP bucket; per-IP ceiling on the callback).
 - `internal/api/connection_status_test.go` — passive auth path: polling must
   not extend idle (A6-S6).
+- `internal/api/idlepoll_test.go` — the idle-window contract after #133:
+  every cookie-authenticated GET is passive, so timer-driven portal polls
+  can never hold a session open (`TestPolledReads_DoNotSlideIdleWindow`,
+  `TestMeRead_DoesNotSlideIdleWindow`); mutations still slide
+  (`TestMutation_StillSlidesIdleWindow`); the explicit activity beat
+  `POST /v1/session:touch` slides only after the CSRF check
+  (`TestSessionTouch_SlidesIdleWindow`).
+- `internal/api/inputhook_throttle_test.go` — broker-reported desktop
+  input is throttled before it touches the session store
+  (`TestInputHookThrottle_Bounded`); `me_test.go` `TestInputActivity_*`
+  pins that input credit slides only the bound session's digest
+  (`TestInputActivity_SlidesOnlyBoundSession`), cannot revive an
+  already-idle-dead session, leaves other principals untouched, and
+  falls back to principal-wide touch for pre-binding NULL-digest leases
+  (#133).
 - `internal/api/session_probe_test.go` — the unauthenticated session probe.
 - `internal/api/logout_test.go` — sign-out destroys the session and expires
   cookies; `endSessionURL` built only from discovery+config (no open
   redirect); `TestLogout_RevokesSessionBoundMaterial` /
   `TestLogout_RevokeFailureStillSignsOut` — sign-out revokes session-bound
   leases/tickets at the store, audits `session.revoke`, and a store failure
-  never blocks the sign-out (S17).
+  never blocks the sign-out (S17). Fail-closed sign-out (#131):
+  `TestLogout_StoreDeleteFailureReturns503` — a session-store `Delete`
+  error answers retryable 503 + `Retry-After` with nothing torn down (no
+  cookie expiry, no lease/ticket revoke). Post-logout redirect is
+  https-only off-loopback (#134):
+  `TestNewAuthenticator_RejectsBadPostLogoutRedirect`,
+  `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`.
 - `internal/api/revokeall_test.go` — sign-out-everywhere (ADR 0007, S19):
   `POST /v1/me/sessions:revoke-all` hands the caller's (tenant, issuer,
   subject) to the principal revoker — the caller's own session included —
   audits `session.revoke_all` with per-kind counts, expires the cookie,
   returns the same `endSessionUrl` as logout, and answers 500 leaving every
-  session intact when the store transaction fails (503 when unwired).
+  session intact when the store transaction fails (503 when unwired);
+  `TestRevokeAll_StoreFailureThenRetrySignsOut` pins that a retry after a
+  store failure completes the sign-out (#131).
 - `internal/api/tenant_scope_test.go`, `events_test.go`, `statusview_test.go`,
   `me_test.go`, `owner_test.go`, `principal.go` — tenant scoping, curated
   events, principal directory fallbacks; `TestProjectConditions_IntentBehind`
   covers the intent-drift condition projection (#125).
 - `internal/api/workspaces_handlers_test.go` — SEC-01 (retainedDataRef owner
   bypass) and SEC-I7 (malformed pageToken) regression coverage.
+- `internal/api/connections_test.go` — connection creation decodes via the
+  shared `decodeJSON` helper (#134): `TestCreateConnection_InvalidBodyGenericMessage`
+  (the decoder detail is never echoed) and
+  `TestCreateConnection_TrailingJSONRejected`.
+- `internal/api/auth_test.go` — also pins the dead-knob guard (#134):
+  `TestAuthConfig_NoDeadSessionKnobs` fails if `AuthConfig` regrows a dead
+  session knob.
 - `internal/api/adminquota_test.go`, `quota_test.go`,
   `internal/backend/tenantquota_test.go` — quota enforcement paths.
 - `internal/api/adminuserlimit_test.go`,
@@ -136,8 +166,26 @@ substitute for review).
 - `internal/gateway/authorization.go` fencing covered by
   `wsclose_test.go` (orderly WS close), `owner_tab_test.go` (owner-tab
   takeover), `activity_test.go`/`activity_internal_test.go`.
+- `internal/gateway/connheaders_test.go` — header-injection ordering
+  (#142): client `Connection:` token lists can never strip the
+  broker-injected headers (`TestProxy_ConnectionTokensCannotStripInjectedHeaders`,
+  `TestProxy_UpgradeConnectionTokensCannotStripInjected`), the whole
+  client-supplied forwarding family plus vendor client-address headers
+  is deleted before the verified rebuild
+  (`TestProxy_ClientForwardedFamilyStripped`,
+  `TestProxy_VendorClientAddressHeadersStripped`).
+- `internal/gateway/upstreamtimeout_test.go` — the session upstream
+  transport bounds a hostile/stalled runtime
+  (`TestProxy_UpstreamResponseHeaderTimeout`, #142); also pins the
+  connection-token accounting — dropped tokens count on
+  `tinycdi_gateway_connection_tokens_dropped_total`
+  (`TestProxy_ConnectionTokensDroppedMetric`) with a bound on the
+  debug-log rate (`TestProxy_ConnectionTokenLogRateLimited`).
 - `internal/gateway/forwarded_test.go` — client XFF never reaches the
   runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / A6-S18);
+  `TestProxy_IPv6ForwardsExactAddrKeyFolds` pins that the forwarded
+  rebuild carries the client's exact IPv6 address while the limiter key
+  folds to /64 (#132);
   `TestClientAddr_NonIPSelectedEntryFallsBackToPeer` pins that a non-IP
   selected claim collapses to the socket peer on the forwarded path too.
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
@@ -209,13 +257,23 @@ substitute for review).
   absolutely expired, with drain accounting and the
   `tinycdi_lease_session_missing_total{reason}` counter; NULL-digest leases
   stay exempt (rolling-upgrade safe); foreign-gateway and multi-replica
-  shapes.
+  shapes. The portal idle window is honoured too (#133):
+  `TestLeaseSession_IdleDeadSessionRevokesOnRenew`,
+  `TestLeaseSession_RedeemRejectsIdleDeadSession`, and
+  `TestLeaseSession_IdleCheckDisabledWithoutOption` pins the option-off
+  behaviour.
 - `internal/broker/credentials_envtest_test.go` — per-workspace Secret
   credential reads.
 - `internal/broker/operator_stopped_test.go` +
   `operator_stopped_envtest_test.go` — behaviour while the operator is down.
 - `internal/broker/httpapi/server_test.go` — internal API routes require a
-  peer certificate and the right client role (SEC-41).
+  peer certificate and the right client role (SEC-41); #143 adds the
+  `identify` refusal observability (`TestIdentify_RejectionsLogged`,
+  `TestIdentify_RejectedPathRedacted`, `TestIdentify_RejectionsRateLimited`,
+  `TestIdentify_RejectionsCounted`) and the generation bound on workspace
+  revoke (`TestRevokeWorkspace_GenerationUnbounded`);
+  `internal/broker/activity_e2e_test.go` pins the bound end to end
+  (`TestRevokeWorkspaceLeases_GenerationBounded`).
 - `internal/broker/httpapi/opclient/client_test.go`,
   `verify_internal_test.go` — `VerifyConnection` chain+hostname checks;
   `ca_reload_test.go` — client cert/CA hot reload (FX-R33, A6-S15).
@@ -238,9 +296,13 @@ substitute for review).
   plus the `-i-know-backends-are-running` override, the no-Kubernetes
   SQL fallback.
 - `internal/ratelimit/ratelimit_test.go` — token buckets, LRU eviction,
-  `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation;
+  `PerReplica` division (RL-1), `ClientKey`/`PeerIP` derivation; key
+  canonicalisation (#132): `TestClientKey_IPv6FoldedTo64`,
+  `TestClientKey_MappedFormsUnified`;
   `TestClientKey_NonIPSelectedEntryFallsBackToPeer` pins that a non-IP
-  selected XFF claim never becomes a limiter key.
+  selected XFF claim never becomes a limiter key (#145);
+  `TestShared_IPv6WindowAndLocalShareKey` pins the same folded key in
+  the local bucket and the shared Postgres window.
 - `internal/ratelimit/shared_test.go` — the Postgres-window limiter (ADR
   0006 + RL-CEILING): fixed-window bound, undivided healthy ceiling
   consulted first, uneven-split bound (15/5, 20/0 across two instances),
@@ -284,9 +346,46 @@ substitute for review).
   identity from pod metadata, content always from the LIVE revision
   object, the annotation never a source (`TemplateRevisionGone` holds
   for unprovable identities: pruned/republished/rotated/webhook-altered
-  or forged builds, foreign pods); `internal/broker/
+  or forged builds, foreign pods); the forged-annotation fix (#146) is
+  pinned by `TestStatusSnapshotAuthoritativeOverForgedAnnotation`,
+  `TestForgedSnapshotStructurallyValidRejected`,
+  `TestStatusSnapshotRecordedAtFirstAdmit`, the `TestAdoptSnapshot_*`
+  series and `TestSnapshot_UpgradeAdoption`; `internal/broker/
   operator_stopped_envtest_test.go` pins that held workspaces get the
   stricter of template/defaults, never annotation caps (SEC-10).
+- `internal/operator/hold_phase_test.go` + `internal/broker/
+  held_expiry_test.go` — the held-phase contract (#152): a held
+  workspace whose operator-owned pod serves stays `Ready` +
+  `Degraded(reason)` and keeps lifecycle enforcement
+  (`TestHoldWithPodStaysReady`, `TestHoldWithoutServingPodStaysPending`,
+  `TestHeldWorkspace_EnforcedAtStricterCaps`,
+  `TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced`).
+- `internal/operator/snapshot_seccomp_test.go` +
+  `internal/runtime/linux/seccomp_profile_test.go` — `seccomp-profile`
+  localhost-name validation at template admission, snapshot recording
+  and pod build (#150, S38).
+- `internal/provisioning/template_family_test.go` — the start-time
+  template guard's security-field coverage (#150, S37):
+  `TestUpdate_SkippedOnSecurityFieldDrift` end to end through
+  `K8sTemplateCatalog`, `TestUpdate_SkippedReasonMatrix`;
+  `internal/api/events_test.go` `TestEvents_TemplateSkipReasons` curates
+  the seven reason tokens.
+- `deploy/helm/chart_test.go` — also pins that `workspaces/status` is
+  writable only by the operator service account (#146):
+  `TestWorkspaceStatusWritableOnlyByOperator`,
+  `TestKustomizeWorkspaceStatusWritableOnlyByManager`.
+- `deploy/helm/chart_clusteronly_egress_test.go`,
+  `chart_namespacequota_test.go`, `chart_defaultrender_test.go` — the
+  opt-in hardening renders (#148, S34/S35): ClusterOnly egress selector/
+  ports rendering + schema, per-managed-namespace ResourceQuota/
+  LimitRange objects, and the whole-render byte golden
+  (`TestDefaultRenderUnchangedGolden`) proving the default render is
+  unchanged; `cmd/operator/main_test.go` `TestParseClusterOnlyEgress`
+  covers fail-loud flag validation, and
+  `internal/runtime/linux/backend_netpol_test.go` pins the rewritten
+  policy (`TestClusterOnlyEgressDefaultUnrestricted`,
+  `TestClusterOnlyEgressRestrictionOnPolicy`,
+  `TestClusterOnlyEgressPortsOnlyStaysPodOnly`).
 - `internal/operator/snapshot_annotation_vap_envtest_test.go` — envtest
   enforcement proof for the optional ValidatingAdmissionPolicy sample
   (`config/admissionpolicy/`, S36): a real apiserver denies non-operator
@@ -337,7 +436,9 @@ Security-relevant subset:
   `pre_stop_drain_test.go`, `pre_stop_drain_window_test.go` — fail-closed
   posture under infra loss.
 - `connection_stable_test.go`, `session_touch_test.go` — lease/stream
-  stability.
+  stability; `session_touch_test.go` also pins the digest-scoped input
+  touch on real Postgres (`TestTouchSessionDigest_ScopesToBoundSession`,
+  #133).
 - `retained_attach_mount_test.go`, `retention_test.go`,
   `delete_finalization_test.go` — data-plane ownership/teardown.
 - `quota_admin_test.go`, `quota_restart_test.go` — quota persistence.
