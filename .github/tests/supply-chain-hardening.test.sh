@@ -23,6 +23,9 @@
 #   * digest-addressability is documented: gate-failed digest-pushes
 #     stay pullable-by-digest but are never tagged/signed — the docs
 #     must say so.
+#   * train publish approval (SR-5-F2): the publish job runs under
+#     `environment: runtime-train` so every publish leaves a durable
+#     approval record.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -121,12 +124,24 @@ chk "docs: README pins the train signer identity" "$README" \
 chk "docs: images.md points at the signed manifest" "$ROOT/docs/images.md" \
   'verify-blob|sigstore\.json'
 
+PUB="$(sed -n '/^  publish:/,$p' "$TRAIN")"
+
+# ---------------------------------------------------------------
+# SR-5-F2: the publish job runs under `environment: runtime-train`
+# (required reviewer — setup-repo-protection.sh creates the
+# environment); exactly one environment declaration, on publish only.
+# ---------------------------------------------------------------
+chk "runtime-images: publish job runs under environment runtime-train" \
+  <(echo "$PUB") 'environment: runtime-train'
+n="$(grep -c '^    environment: runtime-train' "$TRAIN")"
+[ "$n" -eq 1 ] \
+  || { echo "FAIL: runtime-images: 'environment: runtime-train' appears $n times (want exactly the publish job)"; fails=1; }
+
 # ---------------------------------------------------------------
 # Train build-provenance parity with release.yml — var-gated OFF by
 # default (TRAIN_ATTESTATIONS_ENABLED), attestations:write only on
 # the publish job.
 # ---------------------------------------------------------------
-PUB="$(sed -n '/^  publish:/,$p' "$TRAIN")"
 chk "runtime-images: publish job holds attestations: write" <(echo "$PUB") \
   'attestations: write'
 n="$(grep -c 'attestations: write' "$TRAIN")"

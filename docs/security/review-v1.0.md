@@ -96,10 +96,10 @@ the v0.5.1 tag are marked accordingly.
 | SR-4-F4 | P3 | Audit coverage pin is spec↔table only; an unwrapped mutating route escapes detection | Fixed | #145 | `TestAuditCoverage_MountedMuxEmitsEventPerRoute` |
 | SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Open | — | n/a — listed (§6) |
 | SR-5-F1 | P2 | `runtime-images.json` is the only unsigned artifact in the release chain | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (sign-blob step + asset assertions) |
-| SR-5-F2 | P2 | Single-actor merge→signed-publish path | Open | — | governance decision pending the user — §7 |
+| SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #157 (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
 | SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Open | — | n/a — listed (§6) |
 | SR-5-F4 | P3 | Scan jobs write unvalidated artifact refs into `GITHUB_ENV` | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (ref validated before the env write) |
-| SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Open | — | governance decision pending the user — §7 |
+| SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Fixed | #157 | `.github/tests/setup-repo-protection.test.sh` (`sha_pinning_required` PUT preserving live values) |
 | SR-5-F6 | P3 | Train images carry no SLSA build-provenance attestation | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (var-gated `attest-build-provenance` legs) |
 | SR-5-F7 | P3 | No dedicated SBOM for the packaged chart or the release binaries | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh`, `publish-inputs.test.sh` (`sbom-chart`/`sbom-binaries` assets) |
 
@@ -109,14 +109,15 @@ the v0.5.1 tag are marked accordingly.
 |---|---|---|
 | P0 | 0 | — |
 | P1 | 1 | fixed — SR-3-F1 in #146 (verified by the forged-annotation drill, G4) |
-| P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 open — SR-5-F2, a repository-governance decision pending the user (§7), owner and target to be set by that decision |
-| P3 | 22 | 16 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 3 listed open (SR-4-F5, SR-5-F3, SR-5-F5 — the last is the §7 governance item) |
+| P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 accepted — SR-5-F2, owner `maintainers`, target = a second maintainer joining, mitigated by the `runtime-train` publish approval environment in #157 (§7) |
+| P3 | 22 | 17 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 2 listed open (SR-4-F5, SR-5-F3) |
 | duplicate | 1 | SR-2-F6 (== SR-4-F1) — fixed in #133 |
 
-**Result:** no open P0/P1. Every P2 is fixed except SR-5-F2, which the
-rubric would otherwise require to be fixed or accepted — it is held
-open deliberately as a governance decision only the user can take
-(§7), and is called out here rather than silently waved through.
+**Result:** no open P0/P1. Every P2 is fixed or accepted: SR-5-F2's
+single-actor merge→publish residual is accepted for a
+single-maintainer project (§7), and from this release every train
+publish waits on a recorded `runtime-train` approval — the trigger
+that resolves the residual is a second maintainer joining.
 
 ## 5. Held controls
 
@@ -492,33 +493,43 @@ criterion; open items are listed.
   including `Isolated` — a unidirectional exfil channel by design;
   noted for the `Isolated` wording in operator-facing docs.
 
-## 7. Governance items — open, pending the user
+## 7. Governance items — decisions of record
 
-These are repository-organization decisions, not code changes; they are
-not decided by this PR.
+These are repository-organization decisions, not code changes. Each was
+decided on 2026-10-11, decided by the maintainer.
 
-- **SR-5-F2 — single-actor merge→publish path.** `main` currently
-  requires zero approving reviews and the `release` environment's only
-  reviewer is the same account that pushes the tag, with self-review
-  allowed — so one account can take a commit from merge to a signed,
-  attested, tenant-executed image with no second actor. Proposed:
-  `required_approving_review_count ≥ 1` + code-owner review when a
-  second maintainer exists, and putting the train `publish` job under
-  an `environment:` with required reviewers. **Open — the user's
-  decision.**
-- **Release-environment self-review setting.** The `release`
-  environment's `prevent_self_review` is off; enabling it only helps
-  once a second reviewer exists — same decision as above. **Open.**
-- **SR-5-F5 — repository-level SHA-pinning enforcement**
-  (`sha_pinning_required`). Today every action is SHA-pinned and
-  zizmor/actionlint run in a required job, but the platform guarantee
-  is off; enabling it codifies the pin. **Open — the user's decision**
-  (would then be pinned by `setup-repo-protection.sh` +
-  `repo-protection.test.sh`).
-- **External human review before GA — OPEN, the user's decision.**
-  The v0.1→v0.5 delta had no external review (standing item S13); this
-  internal review narrows that gap but does not replace an independent
-  audit — recommended before a public v1.0 GA.
+- **SR-5-F2 — single-actor merge→publish path — ACCEPTED residual**
+  (decided 2026-10-11 by the maintainer). `main` requires zero
+  approving reviews and the `release` environment's only reviewer is
+  the same account that pushes the tag, with self-review allowed — so
+  one account can take a commit from merge to a signed, attested,
+  tenant-executed image with no second actor. For a single-maintainer
+  project that residual is accepted, owner `maintainers`, with this
+  mitigation in force: the runtime train's `publish` job runs under the
+  `runtime-train` environment with a required reviewer (#157), so
+  every train publish carries a durable approval record — approve only
+  once the publish job itself is waiting (pending deployment), never
+  at run start. **Trigger — when a second maintainer joins:** `main`
+  gets `required_approving_review_count` 1 + `require_last_push_approval`,
+  and `prevent_self_review` goes `true` on the `release` and
+  `runtime-train` environments.
+- **Release-environment self-review setting — decided** (2026-10-11,
+  by the maintainer). `release`'s `prevent_self_review` stays `false`
+  until a second reviewer exists — enabling it earlier would let the
+  sole maintainer approve their own publish *less* safely, not more.
+  Same trigger as SR-5-F2.
+- **SR-5-F5 — repository-level SHA-pinning enforcement — FIXED**
+  (decided 2026-10-11 by the maintainer). `sha_pinning_required=true`
+  is codified in `.github/scripts/setup-repo-protection.sh` (applied by
+  an admin after merge; pinned by `setup-repo-protection.test.sh`).
+  Every action was already SHA-pinned with zizmor/actionlint in a
+  required job — the platform now enforces it too.
+- **External human review before GA — OPEN, deferred to the 1.x line**
+  (decided 2026-10-11 by the maintainer; owner `maintainers`). The
+  v0.1→v0.5 delta had no external review (standing item S13); this
+  internal review narrows that gap but is not an independent audit.
+  v1.0.0 ships with that statement; an independent audit is planned on
+  the 1.x line.
 
 ## 8. Sign-off
 
@@ -527,7 +538,7 @@ against the frozen v0.5.0 tree — **not an independent audit**. It
 carries the biases of any self-review: the same assumptions that shaped
 the design shaped the review, and the supply-chain items in §7 exist
 precisely because one project's checks can only go so far. External
-human review before general availability remains open and is the
-user's decision.
+human review before general availability remains open — deferred to
+the 1.x line by the maintainer's decision of 2026-10-11 (§7).
 
 — TinyCDI maintainers, 2026-10-11

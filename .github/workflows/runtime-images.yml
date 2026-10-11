@@ -34,7 +34,11 @@
 #                     a pinned, sha256-verified tarball and runs with an
 #                     empty --config + the effective --ignorefile
 #                     generated at scan time (SUPR-3/SUPR-8).
-#   3. publish job  — first-party actions + pinned cosign-installer:
+#   3. publish job  — `environment: runtime-train` (required reviewer —
+#                     see .github/README.md): every publish waits on a
+#                     recorded approval, so the weekly scheduled run is
+#                     approved-or-expired, never unattended. First-party
+#                     actions + pinned cosign-installer:
 #                     validates refs (validate-image-refs.sh), cosign
 #                     keyless signs + attests the digests BEFORE
 #                     `imagetools create` promotes the rt tag (SUPR-13),
@@ -655,9 +659,16 @@ jobs:
     # before any tag exists so a signing failure leaves nothing
     # addressable). Runs only for the main branch — a dispatch elsewhere
     # is a build+scan rehearsal.
+    # The job runs under the `runtime-train` environment (required
+    # reviewer — SR-5-F2 mitigation): build and scan stay ungated, but
+    # publish waits for a recorded approval, so every train publish has
+    # a durable approval record. Consequence: the weekly scheduled run
+    # needs an approval too — an unapproved run expires and
+    # runtime-freshness.yml then flags the images as stale.
     name: sign + promote rt tag + release manifest
     needs: [meta, scan]
     if: github.ref == 'refs/heads/main'
+    environment: runtime-train  # required reviewer — .github/README.md
     runs-on: ubuntu-24.04
     permissions:
       contents: write  # gh release create + the runtime-* tag

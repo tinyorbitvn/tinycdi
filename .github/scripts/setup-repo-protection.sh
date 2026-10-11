@@ -8,24 +8,37 @@
 #      release, and GitHub would otherwise auto-create it unprotected).
 #      The environment is created BEFORE its tag policy is attached
 #      (SUPF-3).
-#   2. Tag ruleset for `v*` — creation/update/deletion restricted to repo
+#   2. `runtime-train` environment — required reviewers (TRAIN_REVIEWERS,
+#      default: the RELEASE_REVIEWERS set) + a deployment branch policy
+#      restricted to `main`. The train's publish job runs under
+#      environment: runtime-train (SR-5-F2 mitigation — every train
+#      publish waits on a recorded approval). Same SUPF-3 ordering: the
+#      environment is created BEFORE its branch policy is attached.
+#   3. Tag ruleset for `v*` — creation/update/deletion restricted to repo
 #      admins ONLY (SUPF-2: no GitHub Actions app bypass). Consequence:
 #      release.yml workflow_dispatch is dry-run only — a real release is
 #      made by an admin pushing the tag.
-#   3. Branch protection on `main` — required status checks = every ci.yml
+#   4. Branch protection on `main` — required status checks = every ci.yml
 #      job EXCEPT the network-dependent ones (SUPF-4): the chromium
 #      apt-pin freshness job (polls Debian security feeds) and the
 #      kasm-contract job (pulls a ~2 GB Docker Hub image; the weekly
 #      schedule + PR path gate still cover it — and a tag-only or
 #      uncataloged kasm ref is already blocked by the required
 #      workflow-policy job via check-kasm-catalog.sh). Enforce admins,
-#      dismiss stale reviews. Single maintainer:
-#      required_approving_review_count is 0 — raise it (and drop the
-#      admin-only bus factor) once a second maintainer exists.
-#   4. Private vulnerability reporting + secret scanning with push
+#      dismiss stale reviews. Single maintainer today, so
+#      required_approving_review_count is 0 — when a second maintainer
+#      joins (the trigger recorded in review-v1.0.md §7): set
+#      required_approving_review_count 1 + require_last_push_approval on
+#      main, and prevent_self_review true on the `release` and
+#      `runtime-train` environments.
+#   5. Private vulnerability reporting + secret scanning with push
 #      protection (PUB-10).
-#   5. Actions variables ATTESTATIONS_ENABLED and CODE_SCANNING_ENABLED
+#   6. Actions variables ATTESTATIONS_ENABLED and CODE_SCANNING_ENABLED
 #      set to `true` (both features need a public repo / GHAS).
+#   7. Repository Actions permissions — sha_pinning_required=true
+#      (SR-5-F5): the platform then refuses any `uses:` not pinned to a
+#      full-length commit SHA. Applied as a PUT that preserves the live
+#      `enabled` / `allowed_actions` values.
 #
 # Usage:
 #   .github/scripts/setup-repo-protection.sh            # dry-run (default)
@@ -40,6 +53,8 @@
 #                        `gh api users/<login>` at run time). Repeatable
 #                        in a rerun: the environment is PUT with exactly
 #                        this set.
+#   TRAIN_REVIEWERS    — same for `runtime-train` (default: the
+#                        RELEASE_REVIEWERS set).
 #
 # Idempotent: live state is GET first; creates/updates happen only where
 # the live object is missing or differs. Safe to re-run after config drifts.
@@ -159,7 +174,63 @@ else
     -f name='v*' -f type=tag
 fi
 
-# --- 2. tag ruleset for v* --------------------------------------------------
+# --- 2. runtime-train environment --------------------------------------------
+# SR-5-F2 mitigation: the train's publish job runs under this
+# environment, so every rt-* publish waits on a recorded approval.
+# Only `main` may deploy to it.
+echo "== environment: runtime-train"
+IFS=',' read -ra _trevs <<< "${TRAIN_REVIEWERS:-${RELEASE_REVIEWERS:-vanlongme}}"
+train_reviewers_json="[]"
+for login in "${_trevs[@]}"; do
+  login="$(echo "$login" | tr -d '[:space:]')"; [ -n "$login" ] || continue
+  uid="$(gh api "users/$login" --jq .id)" || { echo "error: no such user '$login'"; exit 1; }
+  train_reviewers_json="$(jq --argjson id "$uid" '. + [{type:"User",id:$id}]' <<< "$train_reviewers_json")"
+done
+[ "$train_reviewers_json" != "[]" ] \
+  || { echo "error: TRAIN_REVIEWERS resolved empty"; exit 1; }
+note "runtime-train reviewers: ${_trevs[*]}"
+
+jq -n --argjson r "$train_reviewers_json" '{
+  wait_timer: 0,
+  reviewers: $r,
+  prevent_self_review: false,
+  deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}
+}' > "$TMP/env-train.json"
+
+rc=0; cur="$(get "repos/$REPO/environments/runtime-train")" || rc=$?
+[ "$rc" -eq 2 ] && exit 1
+if [ "$rc" -eq 0 ]; then
+  same="$(jq -n --argjson cur "$cur" --argjson want "$train_reviewers_json" '
+    ([$cur.protection_rules[]? | select(.type == "required_reviewers")
+      | .reviewers[]? | .reviewer.id] | sort)
+    == ([$want[]?.id] | sort)')"
+  if [ "$same" = "true" ]; then
+    note "ok: runtime-train reviewers already match"
+  else
+    doit_body "update reviewers on environment runtime-train" PUT \
+      "repos/$REPO/environments/runtime-train" "$TMP/env-train.json"
+  fi
+else
+  doit_body "create environment runtime-train (reviewers + custom branch policies)" PUT \
+    "repos/$REPO/environments/runtime-train" "$TMP/env-train.json"
+fi
+
+# SUPF-3 ordering, same as `release`: the environment must exist before
+# its deployment branch policy is attached.
+rc=0
+train_branch_policies="$(get "repos/$REPO/environments/runtime-train/deployment-branch-policies" \
+  | jq -r '.branch_policies[]? | select(.type == "branch") | .name')" || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$train_branch_policies" | grep -qxF 'main'; then
+  note "ok: 'main' branch deployment policy present"
+elif [ "$rc" -gt 1 ]; then
+  exit 1
+else
+  doit "add 'main' branch deployment policy to environment runtime-train" -- \
+    -X POST "repos/$REPO/environments/runtime-train/deployment-branch-policies" \
+    -f name='main' -f type=branch
+fi
+
+# --- 3. tag ruleset for v* --------------------------------------------------
 # SUPF-2: NO bypass for the GitHub Actions app — tags are pushed by
 # admins only; release.yml dispatches are dry-run.
 echo "== ruleset: release-tags (v* creation/update/deletion restricted)"
@@ -199,7 +270,7 @@ else
     "repos/$REPO/rulesets" "$TMP/ruleset.json"
 fi
 
-# --- 3. branch protection on main -------------------------------------------
+# --- 4. branch protection on main -------------------------------------------
 # SUPF-4: required_approving_review_count 0 while the repo has a single
 # maintainer; the chromium freshness job stays OUT of the required
 # contexts — it polls the Debian security feed (network-dependent).
@@ -266,7 +337,7 @@ else
     "repos/$REPO/branches/main/protection" "$TMP/protection.json"
 fi
 
-# --- 4. security features (PUB-10) -------------------------------------------
+# --- 5. security features (PUB-10) -------------------------------------------
 echo "== security features"
 rc=0; pvr="$(get "repos/$REPO/private-vulnerability-reporting")" || rc=$?
 [ "$rc" -eq 2 ] && exit 1
@@ -302,7 +373,7 @@ EOF
     "repos/$REPO" "$TMP/secfeatures.json"
 fi
 
-# --- 5. Actions variables ---------------------------------------------------
+# --- 6. Actions variables ---------------------------------------------------
 echo "== Actions variables"
 for kv in "ATTESTATIONS_ENABLED=true" "CODE_SCANNING_ENABLED=true"; do
   name="${kv%%=*}"; want="${kv#*=}"
@@ -320,6 +391,30 @@ for kv in "ATTESTATIONS_ENABLED=true" "CODE_SCANNING_ENABLED=true"; do
       -X POST "repos/$REPO/actions/variables" -f name="$name" -f value="$want"
   fi
 done
+
+# --- 7. Actions permissions: SHA pinning (SR-5-F5) ---------------------------
+# sha_pinning_required makes the platform enforce what the workflows
+# already do by convention — every `uses:` pinned to a full commit SHA.
+# The PUT must carry the live `enabled` / `allowed_actions` values, so a
+# GET that returns nothing usable fails closed rather than guessing
+# settings onto the endpoint.
+echo "== actions permissions (sha_pinning_required)"
+rc=0; ap="$(get "repos/$REPO/actions/permissions")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "error: cannot read actions/permissions — refusing to continue" >&2
+  exit 1
+fi
+if [ "$(jq -r '.sha_pinning_required // false' <<< "$ap")" = "true" ]; then
+  note "ok: sha_pinning_required already true"
+else
+  jq -n --argjson cur "$ap" '{
+    enabled: ($cur.enabled // false),
+    allowed_actions: ($cur.allowed_actions // "all"),
+    sha_pinning_required: true
+  }' > "$TMP/actions-perms.json"
+  doit_body "enforce sha_pinning_required (preserving enabled/allowed_actions)" PUT \
+    "repos/$REPO/actions/permissions" "$TMP/actions-perms.json"
+fi
 
 echo
 if $APPLY; then

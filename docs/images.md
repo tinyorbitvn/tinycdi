@@ -82,6 +82,9 @@ too (`images.<key>.engines.chromium`/`.firefox`), so the template's
 stale-image view shows both — values are GitOps-owned and never written
 back by the train; a new desktop image reaches a deployment by bumping
 `images.linuxDesktop` (and the base digest, if it keeps one) in its values.
+Every train publish waits on a `runtime-train` environment approval —
+an unapproved run expires, after which the freshness job flags the
+images as stale (see `.github/README.md` "Release protection").
 `runtime-freshness.yml` keeps the chromium and firefox-esr pins current
 (daily check + auto PR; the desktop's Firefox pin is checked against the
 browser's and bumped with it) and fails when the newest `runtime-*` release is
