@@ -529,6 +529,28 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		assertFdLimitBelowSelectSize(t, c)
 	})
 
+	t.Run("FdLimitHonoursLowHardLimit", func(t *testing.T) {
+		// A pod may cap RLIMIT_NOFILE below the entrypoint's target
+		// (exotic but legal): soft can never exceed hard, so the clamp
+		// must take min(1000, hard) — and must never kill the boot,
+		// because a pod that never starts is worse than a lower bound.
+		// With ambient 512:512 the entrypoint still becomes healthy and
+		// lands exactly on the ambient hard limit.
+		secret, _ := selfSignedSecret(t)
+		c := runContainer(t, runID, "fdlim-low", baseImage, secret, "",
+			"--ulimit", "nofile=512:512")
+		waitHealthy(t, c)
+
+		for _, target := range []string{"1", "$(pgrep -x Xvnc | head -1)"} {
+			out := strings.TrimSpace(mustExec(t, c,
+				"awk '/^Max open files/{print $4}' /proc/"+target+"/limits"))
+			if out != "512" {
+				t.Fatalf("/proc/%s soft RLIMIT_NOFILE = %s in %s, want 512 "+
+					"(min of target 1000 and ambient hard)", target, out, c)
+			}
+		}
+	})
+
 	t.Run("FontsCoverVietnameseAndCJK", func(t *testing.T) {
 		// Fonts live in linux-base, so both profiles inherit them. A page
 		// with Vietnamese or CJK text must not render tofu: fontconfig

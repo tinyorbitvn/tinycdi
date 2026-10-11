@@ -32,7 +32,22 @@ set -euo pipefail
 # Residual: under sustained saturation a racing handshake thread can
 # still exit(1) via KasmVNC's fatal() on the EMFILE'd tls.key open —
 # a clean exit, not memory corruption (upstream robustness bug).
-ulimit -Sn 1000
+#
+# The target is min(1000, hard): a pod may cap RLIMIT_NOFILE below the
+# target (exotic, but legal) — soft can never exceed hard, so take the
+# ambient bound in that case. The clamp must never kill the boot: on any
+# failure warn and continue — a loud line beats a pod that never starts.
+NOFILE_HARD="$(ulimit -Hn)"
+NOFILE_TARGET=1000
+case "$NOFILE_HARD" in
+  ''|*[!0-9]*) ;;  # 'unlimited' or unparsable: keep the 1000 target
+  *) [ "$NOFILE_HARD" -lt "$NOFILE_TARGET" ] && NOFILE_TARGET="$NOFILE_HARD" ;;
+esac
+if ulimit -Sn "$NOFILE_TARGET" 2>/dev/null; then
+  echo "tcdi-entrypoint: RLIMIT_NOFILE soft=$(ulimit -Sn) (hard=$NOFILE_HARD) — client fds stay below FD_SETSIZE"
+else
+  echo "tcdi-entrypoint: WARNING: could not set RLIMIT_NOFILE=$NOFILE_TARGET (soft=$(ulimit -Sn), hard=$NOFILE_HARD)" >&2
+fi
 
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 PASS_FILE="$SECRET_DIR/password"
