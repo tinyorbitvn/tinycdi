@@ -388,7 +388,11 @@ func TestKasmAdapterChromium(t *testing.T) {
 
 	t.Run("ReadinessEndpointAndAuth", func(t *testing.T) {
 		secret, password := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "desktop", kasmImage, adapterVol(), secret, "")
+		// --ulimit mirrors the pod ambient (~1M RLIMIT_NOFILE from the
+		// host) so the fd bound below asserts the adapter entrypoint's own
+		// cap, not a low ambient the runtime happened to inherit.
+		c := runKasmContainer(t, runID, "desktop", kasmImage, adapterVol(), secret, "",
+			"--ulimit", "nofile=1048576:1048576")
 		waitHealthyTimeout(t, c, kasmRunTimeout)
 
 		code, err := httpsGet(t, c, "", "")
@@ -462,6 +466,10 @@ func TestKasmAdapterChromium(t *testing.T) {
 		}
 		// Managed policy landed (KASM-8).
 		mustExec(t, c, "grep -q CommandLineFlagSecurityWarningsEnabled /etc/chromium/policies/managed/zz-tcdi.json")
+		// Same fd bound as the native images: the adapter entrypoint caps
+		// the soft RLIMIT_NOFILE below FD_SETSIZE so a reconnect burst
+		// degrades to EMFILE refusals instead of a select() stack overwrite.
+		assertFdLimitBelowSelectSize(t, c)
 		assertNoSecret(t, c, password)
 	})
 

@@ -388,6 +388,35 @@ func mustExec(t *testing.T, name, shell string) string {
 	return out
 }
 
+// assertFdLimitBelowSelectSize proves the serving path cannot hold an fd
+// that reaches FD_SETSIZE (1024): Xvnc multiplexes every client
+// connection with select(), where FD_SET on fd >= FD_SETSIZE writes past
+// the stack-allocated fd_set and SIGSEGVs the server — at ~3 fds per
+// websocket client on a ~23-fd baseline a reconnect burst crashes the
+// runtime near ~334 concurrent streams. The entrypoints cap the soft
+// RLIMIT_NOFILE below FD_SETSIZE so the burst becomes EMFILE refusals
+// instead of memory corruption. Checked on PID 1 (the entrypoint every
+// process descends from — children inherit the soft limit) and on the
+// live Xvnc, whose websockify acceptor is a thread in the same process.
+func assertFdLimitBelowSelectSize(t *testing.T, name string) {
+	t.Helper()
+	for _, target := range []string{"1", "$(pgrep -x Xvnc | head -1)"} {
+		out := mustExec(t, name,
+			"awk '/^Max open files/{print $4, $5}' /proc/"+target+"/limits")
+		var soft, hard int
+		if n, err := fmt.Sscanf(strings.TrimSpace(out), "%d %d", &soft, &hard); err != nil || n != 2 {
+			t.Fatalf("could not parse /proc/%s/limits in %s: %q (%v)", target, name, out, err)
+		}
+		if soft < 64 || soft >= 1024 {
+			t.Fatalf("/proc/%s soft RLIMIT_NOFILE = %d in %s, want 64..1023 "+
+				"(every fd must stay below FD_SETSIZE)", target, soft, name)
+		}
+		if hard < soft {
+			t.Fatalf("/proc/%s hard RLIMIT_NOFILE = %d < soft %d in %s", target, hard, soft, name)
+		}
+	}
+}
+
 // assertNoSecret scans container logs and inspect env for the password.
 func assertNoSecret(t *testing.T, name, password string) {
 	t.Helper()
@@ -483,6 +512,43 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 			t.Fatalf("base image ships profile software: %q", out)
 		}
 		assertNoSecret(t, c, password)
+	})
+
+	t.Run("FdLimitBelowSelectSize", func(t *testing.T) {
+		// The pod ambient is the hostile case: a kubelet/containerd
+		// container inherits the host RLIMIT_NOFILE (~1M), so an
+		// entrypoint that does not clamp it leaves Xvnc's fd table far
+		// above FD_SETSIZE. Raise the ambient here so only the
+		// entrypoint's own cap can satisfy the assert — a soft limit that
+		// happens to be low already (e.g. a Docker default of 1024) would
+		// make the same assertion vacuous.
+		secret, _ := selfSignedSecret(t)
+		c := runContainer(t, runID, "fdlim", baseImage, secret, "",
+			"--ulimit", "nofile=1048576:1048576")
+		waitHealthy(t, c)
+		assertFdLimitBelowSelectSize(t, c)
+	})
+
+	t.Run("FdLimitHonoursLowHardLimit", func(t *testing.T) {
+		// A pod may cap RLIMIT_NOFILE below the entrypoint's target
+		// (exotic but legal): soft can never exceed hard, so the clamp
+		// must take min(1000, hard) — and must never kill the boot,
+		// because a pod that never starts is worse than a lower bound.
+		// With ambient 512:512 the entrypoint still becomes healthy and
+		// lands exactly on the ambient hard limit.
+		secret, _ := selfSignedSecret(t)
+		c := runContainer(t, runID, "fdlim-low", baseImage, secret, "",
+			"--ulimit", "nofile=512:512")
+		waitHealthy(t, c)
+
+		for _, target := range []string{"1", "$(pgrep -x Xvnc | head -1)"} {
+			out := strings.TrimSpace(mustExec(t, c,
+				"awk '/^Max open files/{print $4}' /proc/"+target+"/limits"))
+			if out != "512" {
+				t.Fatalf("/proc/%s soft RLIMIT_NOFILE = %s in %s, want 512 "+
+					"(min of target 1000 and ambient hard)", target, out, c)
+			}
+		}
 	})
 
 	t.Run("FontsCoverVietnameseAndCJK", func(t *testing.T) {

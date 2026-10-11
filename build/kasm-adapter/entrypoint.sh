@@ -26,6 +26,26 @@
 #      HTTPS layer via write-only kasmpasswd; RFB port is never published).
 set -euo pipefail
 
+# Same fd bound as build/linux-base/entrypoint.sh: the image's Xvnc
+# multiplexes clients with select(), so no fd it holds may reach
+# FD_SETSIZE (1024) — FD_SET would write past the stack fd_set. Capping
+# the soft RLIMIT_NOFILE below it turns a connection burst into EMFILE
+# refusals instead of a SIGSEGV. Target = min(1000, hard) (soft can
+# never exceed hard); the clamp warns but never kills the boot.
+# Children inherit the soft limit; the hard limit is left alone so a
+# debug shell can still raise it.
+NOFILE_HARD="$(ulimit -Hn)"
+NOFILE_TARGET=1000
+case "$NOFILE_HARD" in
+  ''|*[!0-9]*) ;;
+  *) [ "$NOFILE_HARD" -lt "$NOFILE_TARGET" ] && NOFILE_TARGET="$NOFILE_HARD" ;;
+esac
+if ulimit -Sn "$NOFILE_TARGET" 2>/dev/null; then
+  echo "tcdi-kasm-adapter: RLIMIT_NOFILE soft=$(ulimit -Sn) (hard=$NOFILE_HARD) — client fds stay below FD_SETSIZE"
+else
+  echo "tcdi-kasm-adapter: WARNING: could not set RLIMIT_NOFILE=$NOFILE_TARGET (soft=$(ulimit -Sn), hard=$NOFILE_HARD)" >&2
+fi
+
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 PASS_FILE="$SECRET_DIR/password"
 USER_FILE="$SECRET_DIR/username"
