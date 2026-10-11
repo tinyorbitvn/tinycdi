@@ -118,19 +118,21 @@ case "$url" in
   https://portal.example.test/v1/metrics) code=404 ;;
   https://portal.example.test/v1/quota)
     code=200
-    rbody='{"tenant":"tenant-a","configured":true,"limits":{"runningWorkspaces":2,"cpuMillicores":4000,"memoryMib":8192,"storageGib":20},"usage":{"workspaces":0,"runningWorkspaces":0,"cpuMillicores":0,"memoryMib":0,"storageGib":0},"users":[]'
-    [ -z "${STUB_USERLIMIT:-}" ] || rbody+=',"userLimits":{"runningWorkspaces":5,"cpuMillicores":0,"memoryMib":0,"storageGib":0}'
+    rbody='{"tenant":"tenant-a","configured":true,"limits":{"runningWorkspaces":'"${STUB_TENANTLIMIT:-2}"',"cpuMillicores":4000,"memoryMib":8192,"storageGib":20},"usage":{"workspaces":0,"runningWorkspaces":0,"cpuMillicores":0,"memoryMib":0,"storageGib":0},"users":[]'
+    [ -z "${STUB_USERLIMIT:-}" ] || rbody+=',"userLimits":{"runningWorkspaces":'"${STUB_USERLIMIT}"',"cpuMillicores":0,"memoryMib":0,"storageGib":0}'
     rbody+='}' ;;
   https://portal.example.test/v1/workspaces)
     n=$(( $(wc -l <"$SD/created" 2>/dev/null || echo 0) + 1 ))
-    if [ "$n" -le 2 ]; then
+    if [ -n "${STUB_NOREFUSE:-}" ] || [ "$n" -le 2 ]; then
       code=201
       id="ws_stub000$n"
       echo "$id" >>"$SD/created"
       rbody="{\"id\":\"$id\",\"phase\":\"Ready\",\"desiredState\":\"Running\"}"
     else
       code=409
-      rbody='{"code":"QUOTA_EXHAUSTED","message":"x","retryable":false,"requestId":"req_stub"}'
+      rbody='{"code":"QUOTA_EXHAUSTED","message":"x","retryable":false,"requestId":"req_stub"'
+      [ -z "${STUB_REASON:-}" ] || rbody+=",\"details\":{\"reason\":\"$STUB_REASON\"}"
+      rbody+='}'
     fi ;;
   https://portal.example.test/v1/workspaces/*/stop)
     echo Stopped >"$SD/phase"; code=200; rbody='{"phase":"Stopped"}' ;;
@@ -226,17 +228,53 @@ grep -q 'idp.example.test:8443/realms/x/login-actions' "$D/stub/argv.log" \
 ok "authenticated flow + no credential in argv + port-preserving action join"
 
 # ---- 8. per-principal limit configured but tenant quota bound first -> SKIP ------
+# userLimits.runningWorkspaces=5 > the 409 refusal the tenant quota produces on
+# the 3rd create: a plain (no-details) over-limit is a documented alternate.
+full_env() {
+  env PATH="$D/shim:$PATH" STUB_DIR="$D/stub" \
+    TCDI_E2E_PORTAL_URL=https://portal.example.test \
+    TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+    TCDI_E2E_IDP_ISSUER=https://idp.example.test:8443/realms/x \
+    TCDI_E2E_USER=e2e-user TCDI_E2E_PASSWORD='s3cr3t-p4ss' "$@"
+}
 rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"; echo Ready >"$D/stub/phase"
-out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" STUB_USERLIMIT=1 \
-  TCDI_E2E_PORTAL_URL=https://portal.example.test \
-  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
-  TCDI_E2E_IDP_ISSUER=https://idp.example.test:8443/realms/x \
-  TCDI_E2E_USER=e2e-user TCDI_E2E_PASSWORD='s3cr3t-p4ss' \
-  "$SMOKE" 2>&1)" && rc=0 || rc=$?
+out="$(full_env STUB_USERLIMIT=5 "$SMOKE" 2>&1)" && rc=0 || rc=$?
 [ "$rc" = 0 ] || bad "user-limit variant should still exit 0 (rc=$rc): $out"
 case "$out" in *"SKIP quota-running-limit"*) ;; *) bad "expected SKIP quota-running-limit, got: $out" ;; esac
 grep -q '^FAIL quota-running-limit' <<<"$out" && bad "false-FAIL on non-user-limit refusal: $out"
-ok "quota reason mismatch SKIP-s, does not false-fail"
+ok "quota plain-tenant refusal + userLimits -> SKIP, not FAIL"
+
+# ---- 9. release_pending is the other documented alternate -> SKIP; unknown -> FAIL --
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(full_env STUB_USERLIMIT=5 STUB_REASON=release_pending "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" = 0 ] || bad "release_pending variant should still exit 0 (rc=$rc): $out"
+case "$out" in *"SKIP quota-running-limit"*) ;; *) bad "expected SKIP on release_pending, got: $out" ;; esac
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(full_env STUB_USERLIMIT=5 STUB_REASON=bogus_reason "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" != 0 ] || bad "an undocumented details.reason should fail"
+case "$out" in *"FAIL quota-running-limit: refusal details.reason 'bogus_reason' is undocumented"*) ;; \
+  *) bad "expected undocumented-reason FAIL, got: $out" ;; esac
+ok "documented alternates SKIP; unknown reason FAILs"
+
+# ---- 10. no-refusal: provable never-bound limit -> FAIL; equal-to-limit -> SKIP ----
+# Tenant limit 10 keeps it out of the way; only the per-principal limit binds.
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(full_env STUB_NOREFUSE=1 STUB_TENANTLIMIT=10 STUB_USERLIMIT=2 "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" != 0 ] || bad "held above the configured limit must fail"
+case "$out" in *"FAIL quota-running-limit: held 4 Running with no refusal — above the configured running limit (per-principal 2)"*) ;; \
+  *) bad "expected never-bound FAIL, got: $out" ;; esac
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(full_env STUB_NOREFUSE=1 STUB_TENANTLIMIT=10 STUB_USERLIMIT=4 "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" = 0 ] || bad "held==limit is a legitimate SKIP (rc=$rc): $out"
+case "$out" in *"SKIP quota-running-limit: no refusal holding 4 Running; the binding create is limit+1"*) ;; \
+  *) bad "expected no-refusal SKIP with the limit+1 rationale, got: $out" ;; esac
+# Tenant-side provable violation is caught too.
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(full_env STUB_NOREFUSE=1 "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" != 0 ] || bad "held above the tenant limit must fail"
+case "$out" in *"FAIL quota-running-limit: held 4 Running with no refusal — above the configured running limit (tenant 2)"*) ;; \
+  *) bad "expected tenant never-bound FAIL, got: $out" ;; esac
+ok "never-bound limit FAILs; budget-bound SKIP states why"
 
 [ "$fails" = 0 ] || exit 1
 echo "e2e-smoke.test.sh: all cases passed"

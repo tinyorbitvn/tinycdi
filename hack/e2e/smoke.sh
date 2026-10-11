@@ -375,6 +375,10 @@ c="$(api "$JAR" GET /v1/quota)"
 cp "$RESP" "$W/quota.json"
 quota_note="" reason="" qid=""
 user_limit="$(jq -r '.userLimits.runningWorkspaces // empty' "$W/quota.json")"
+tenant_limit=""
+if [ "$(jq -r '.configured // false' "$W/quota.json")" = "true" ]; then
+  tenant_limit="$(jq -r '.limits.runningWorkspaces // 0' "$W/quota.json")"
+fi
 q_i=2
 quota_result="skip"
 while [ "$q_i" -le "$MAX_WORKSPACES" ]; do
@@ -392,12 +396,43 @@ while [ "$q_i" -le "$MAX_WORKSPACES" ]; do
   fi
   break
 done
+held=$((q_i - 1))
 if [ "$quota_result" = "skip" ]; then
-  skip "quota-running-limit: no refusal after $((q_i - 1)) Running (limit above TCDI_E2E_MAX_WORKSPACES=$MAX_WORKSPACES probe budget)"
-elif [ -n "$user_limit" ] && [ "$reason" != "UserLimitReached" ]; then
-  skip "quota-running-limit: 409 QUOTA_EXHAUSTED held, but reason '$reason' means a different quota bound first — the configured per-principal limit is unproven"
-else
+  # No refusal within the probe budget. A running create reserves its
+  # slot at admission (provisioning/quota.go: used+req > limit), so a
+  # configured limit below the held count provably had to refuse —
+  # holding it with no refusal means the limit never bound: FAIL.
+  bound=""
+  if [ -n "$user_limit" ] && [ "$held" -gt "$user_limit" ]; then
+    bound="per-principal $user_limit"
+  fi
+  if [ -n "$tenant_limit" ] && [ "$held" -gt "$tenant_limit" ]; then
+    bound="${bound:+$bound; }tenant $tenant_limit"
+  fi
+  if [ -n "$bound" ]; then
+    fail "quota-running-limit: held $held Running with no refusal — above the configured running limit ($bound), the limit never bound"
+  elif [ -z "$user_limit" ] && [ -z "$tenant_limit" ]; then
+    skip "quota-running-limit: deployment configures no running limit — no refusal can be expected"
+  else
+    skip "quota-running-limit: no refusal holding $held Running; the binding create is limit+1 (user=${user_limit:-none} tenant=${tenant_limit:-none}) — above TCDI_E2E_MAX_WORKSPACES=$MAX_WORKSPACES probe budget"
+  fi
+elif [ "$reason" = "UserLimitReached" ]; then
   pass "quota-running-limit ($quota_note)"
+elif [ "$reason" = "release_pending" ] || [ "$reason" = "-" ]; then
+  # The only other documented QUOTA_EXHAUSTED shapes: a transient
+  # release_pending hold, or a plain tenant-level over-limit (no
+  # details). Correct refusals, but the per-principal limit is unproven.
+  if [ -n "$user_limit" ]; then
+    case "$reason" in
+      release_pending) alt="a transient release_pending hold bound first" ;;
+      *) alt="a plain tenant-quota over-limit (no details.reason) bound first" ;;
+    esac
+    skip "quota-running-limit: 409 QUOTA_EXHAUSTED held, but $alt — the configured per-principal limit is unproven"
+  else
+    pass "quota-running-limit ($quota_note)"
+  fi
+else
+  fail "quota-running-limit: refusal details.reason '$reason' is undocumented (want UserLimitReached | release_pending | absent)"
 fi
 
 # ---- 5. delete everything the smoke created -------------------------------------
