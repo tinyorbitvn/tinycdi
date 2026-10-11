@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { buttonClass, EmptyState, IconLogOut } from "../design";
+import { buttonClass, EmptyState, IconLogout } from "../design";
 import { t } from "../i18n";
 import { SIGN_IN_AGAIN_URL } from "./signOut";
 
@@ -14,7 +14,7 @@ export function SignedOut() {
   return (
     <main className="tc-signedout">
       <EmptyState
-        icon={<IconLogOut size={32} />}
+        icon={<IconLogout size={32} />}
         headingLevel={2}
         title={t("auth.signedOut.title")}
         description={t("auth.signedOut.body")}

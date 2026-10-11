@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import type { AlertTone } from "./Alert";
 import { cx } from "./cx";
-import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { IconCircleAlert, IconTriangleAlert, IconCircleCheck, IconInfo, IconX } from "./icons";
 import { t as msg } from "../i18n";
 
 export interface ToastOptions {
@@ -38,9 +38,9 @@ const ToastContext = createContext<ToastApi | null>(null);
 
 const ICONS = {
   info: IconInfo,
-  success: IconCheckCircle,
-  warning: IconAlertTriangle,
-  danger: IconAlertCircle,
+  success: IconCircleCheck,
+  warning: IconTriangleAlert,
+  danger: IconCircleAlert,
 } as const;
 
 function ToastItem({ entry, onDismiss }: { entry: ToastEntry; onDismiss: (id: number) => void }) {

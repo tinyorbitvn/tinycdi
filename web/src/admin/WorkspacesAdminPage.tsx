@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Alert, Button, Cluster, ConfirmDialog, Dialog, Input, Select, StatusPill, Table } from "../design";
 import type { Column } from "../design/Table";
-import { IconRefresh, IconStop, IconTrash } from "../design/icons";
+import { IconRefresh, IconPlayerStop, IconTrash } from "../design/icons";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { Link } from "../lib/router";
@@ -167,7 +167,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
         <Cluster gap={2} justify="end" wrap={false}>
           <Button
             size="sm"
-            icon={<IconStop />}
+            icon={<IconPlayerStop />}
             disabled={!canStop(ws)}
             aria-label={t("admin.workspaces.action.stopLabel", { name: ws.name })}
             onClick={() => open("stop", ws)}

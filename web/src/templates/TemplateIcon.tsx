@@ -1,4 +1,4 @@
-import { IconGlobe, IconLaptop, IconMonitor, cx } from "../design";
+import { IconWorld, IconDeviceLaptop, IconDeviceDesktop, cx } from "../design";
 import type { ExperienceKind, RuntimeKind } from "./types";
 
 /**
@@ -17,7 +17,7 @@ export function TemplateIcon({
   size?: "sm" | "md" | "lg";
   className?: string;
 }) {
-  const Icon = experience === "Browser" ? IconGlobe : runtime === "WindowsVM" ? IconLaptop : IconMonitor;
+  const Icon = experience === "Browser" ? IconWorld : runtime === "WindowsVM" ? IconDeviceLaptop : IconDeviceDesktop;
   const kind = experience === "Browser" ? "browser" : runtime === "WindowsVM" ? "windows" : "linux";
   const px = size === "sm" ? 16 : size === "lg" ? 24 : 20;
   return (
