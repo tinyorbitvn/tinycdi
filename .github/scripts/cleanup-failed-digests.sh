@@ -123,13 +123,27 @@ tree_digests() { # $1 pkg $2 root digest $3 bearer — every descendant
 }
 
 referrers() { # $1 pkg $2 digest $3 bearer — referrer digests; rc 1 on
-  # fetch error. A failed fetch must NOT read as "no referrers": the
-  # caller cannot prove the run's tree is complete, so it fails closed
-  # (refuses the whole image) instead.
-  curl -fsSL -H "Authorization: Bearer $3" \
+  # fetch error. GHCR answers 404 MANIFEST_UNKNOWN for a subject with
+  # no referrers (its cosign sig/att live as sha256-* tags — already
+  # covered by the tag-derived candidates), and the subject's
+  # existence is proven by the manifest fetch that ran moments before
+  # — so 404 means "empty", not "unknown". Any OTHER failure — 401,
+  # 403, any other 4xx, 5xx, or a network error — means the tree
+  # cannot be proven complete: the caller fails closed (whole-image
+  # refusal) instead.
+  local out code body
+  out="$(curl -sS -H "Authorization: Bearer $3" \
     -H 'Accept: application/vnd.oci.image.index.v1+json' \
-    "https://ghcr.io/v2/$(repo_path "$1")/referrers/$2" \
-    | jq -r '.manifests[]?.digest'
+    -w $'\n%{http_code}' \
+    "https://ghcr.io/v2/$(repo_path "$1")/referrers/$2")" || return 1
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  case "$code" in
+    404) return 0 ;;
+    200) ;;
+    *) return 1 ;;
+  esac
+  jq -r '.manifests[]?.digest' <<< "$body"
 }
 
 versions_tsv() { # $1 pkg — "id|digest|comma-tags|created_at" per version.
