@@ -111,10 +111,19 @@ guarantee.
 ## Digest-addressable does not mean released
 
 Build jobs push `type=registry,push-by-digest=true` **before** the scan
-gate runs, so a gate-failed (or never-promoted) build leaves an unsigned
-manifest that stays pullable by digest —
-`ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` resolves on GHCR and
-nothing prunes it. That residual is acceptable by construction:
+gate runs. When the gate — or any upstream build leg — fails, the same
+workflow run's `cleanup` job deletes exactly the versions that run
+pushed (SR-5-F3): each pushed index, its per-platform and build
+attestation-manifest children and its referrers, resolved from the
+run's own `image-ref` artifacts by
+`.github/scripts/cleanup-failed-digests.sh`. The deletion is strictly
+run-scoped — never a sweep of unlabelled GHCR versions — and fails
+closed on any version carrying a non-digest tag, so a gate-failed
+`ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does not stay
+pullable-by-digest.
+
+Even in the window between push and cleanup the residual carries no
+release trust:
 
 - it is **never tagged** — tags (`rt-*`, `:<ver>`, `:latest`, `:main`,
   `:sha-*`) are promoted only by the publish job, after the trivy gate
@@ -125,11 +134,7 @@ nothing prunes it. That residual is acceptable by construction:
   release `images.txt`) references it;
 - consumers pin digests only out of signed manifests and verify the
   signature first — pulling a never-promoted digest is
-  indistinguishable from pulling any other unsigned image, so the
-  digest-addressable leftover carries no release trust.
-
-Pruning untagged, unsigned manifests is a possible hygiene cleanup; it is
-not a security boundary.
+  indistinguishable from pulling any other unsigned image.
 
 ## What a signature does not prove
 

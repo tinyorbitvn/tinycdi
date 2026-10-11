@@ -39,6 +39,11 @@
 #                     `imagetools create` (SUPR-13) + GitHub Release +
 #                     sign-blob bundles. Nothing addressable is public
 #                     before the gate and the approval.
+#   4. cleanup job  — on failure only (real publishes): deletes exactly
+#                     the digests this run pushed (index + children +
+#                     referrers) so a gate-failed run leaves nothing
+#                     pullable-by-digest (SR-5-F3). Run-scoped, never an
+#                     untagged sweep.
 #
 # Released image set: build/release-images.txt (tracked) — the matrix and
 # the publish allowlist derive from it.
@@ -1464,3 +1469,50 @@ jobs:
             echo "Nothing was pushed or tagged. Would-be release assets are"
             echo "the \`release-*\` / \`sbom-*\` / \`trivy-*\` artifacts of this run."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    # SR-5-F3: a failed publish run must not leave its digest-pushes
+    # pullable-by-digest. Deletes exactly the versions this run pushed —
+    # each index, its per-platform/attestation-manifest children and its
+    # referrers — resolved from this run's own image-ref artifacts by
+    # cleanup-failed-digests.sh. Never a blanket untagged sweep: GHCR
+    # keeps published images' multi-arch children and cosign sha256-*
+    # artifacts as unlabelled versions, and sweeping them breaks
+    # releases. A version carrying any non-digest tag is refused.
+    # Dry runs push nothing and are skipped.
+    name: delete this run's digests (failed run)
+    needs: [prepare, base, images, scan]
+    if: failure() && needs.prepare.outputs.dry_run != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write  # delete this run's pushed digests only
+      actions: read    # gh run download of this run's artifacts (SUPF-1)
+    env:
+      RELEASE_IMAGES: ${{ needs.prepare.outputs.release_images }}
+    steps:
+      # Only the cleanup script is needed; no credentials persisted.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: download this run's image refs (exact artifact names)
+        # SUPF-1: same-run artifacts by exact name only. A leg that
+        # failed before pushing has no artifact — warn and continue
+        # with the refs that exist.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p refs
+          mapfile -t imgs < <(jq -r '.[]' <<< "$RELEASE_IMAGES")
+          for img in "${imgs[@]}"; do
+            gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D refs \
+              || echo "::warning::no image-ref-$img artifact — leg may have failed before pushing"
+          done
+
+      - name: delete this run's pushed digests (fail-closed on tags)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/cleanup-failed-digests.sh refs

@@ -97,7 +97,7 @@ the v0.5.1 tag are marked accordingly.
 | SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Open | — | n/a — listed (§6) |
 | SR-5-F1 | P2 | `runtime-images.json` is the only unsigned artifact in the release chain | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (sign-blob step + asset assertions) |
 | SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #157 (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
-| SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Open | — | n/a — listed (§6) |
+| SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Fixed | v1.1 cleanup job | `.github/tests/failed-digest-cleanup.test.sh` (run-scoped deletion, tagged-version refusal, no sweep); residual note in §6 |
 | SR-5-F4 | P3 | Scan jobs write unvalidated artifact refs into `GITHUB_ENV` | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (ref validated before the env write) |
 | SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Fixed | #157 | `.github/tests/setup-repo-protection.test.sh` (`sha_pinning_required` PUT preserving live values) |
 | SR-5-F6 | P3 | Train images carry no SLSA build-provenance attestation | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (var-gated `attest-build-provenance` legs) |
@@ -110,7 +110,7 @@ the v0.5.1 tag are marked accordingly.
 | P0 | 0 | — |
 | P1 | 1 | fixed — SR-3-F1 in #146 (verified by the forged-annotation drill, G4) |
 | P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 accepted — SR-5-F2, owner `maintainers`, target = a second maintainer joining, mitigated by the `runtime-train` publish approval environment in #157 (§7) |
-| P3 | 22 | 17 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 2 listed open (SR-4-F5, SR-5-F3) |
+| P3 | 22 | 18 fixed (SR-5-F3 closed in v1.1 — §6); 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 1 listed open (SR-4-F5) |
 | duplicate | 1 | SR-2-F6 (== SR-4-F1) — fixed in #133 |
 
 **Result:** no open P0/P1. Every P2 is fixed or accepted: SR-5-F2's
@@ -478,13 +478,17 @@ criterion; open items are listed.
   tables; on a long-lived deployment the build can stall writes while
   replicas roll. A retention sweep or a documented out-of-transaction
   `CREATE INDEX CONCURRENTLY` runbook step is the sketched fix.
-- **SR-5-F3 — gate-failed digests remain pullable-by-digest — OPEN**
-  (listed, P3). Build jobs push by digest before the scan gate; an
-  unsigned, never-promoted digest stays addressable. Consumers pinning
-  an arbitrary digest (including via a forged manifest) could deploy
-  unscanned content — mitigated in practice by #135's signed manifest
-  and per-digest cosign verification documented as the consumption
-  contract.
+- **SR-5-F3 — gate-failed digests remain pullable-by-digest — FIXED**
+  (v1.1). Build jobs push by digest before the scan gate; an
+  unsigned, never-promoted digest stayed addressable. Each publishing
+  workflow now runs a `cleanup` job on failure that deletes exactly the
+  versions that run pushed — the index, its children and its
+  referrers, resolved from the run's own `image-ref` artifacts —
+  refusing any version carrying a non-digest tag
+  (`.github/tests/failed-digest-cleanup.test.sh` pins the run-scoped
+  deletion, the tagged-version refusal and the no-sweep invariant).
+  Consumers pinning a digest still verify the cosign signature first,
+  which fails for anything a cleanup never ran for.
 - **Audit durability.** The audit stream is stdout JSONL behind
   `GuardedSink` — emission and shape are guaranteed; delivery,
   retention and tamper evidence are the operator's log pipeline
