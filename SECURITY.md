@@ -409,10 +409,14 @@ v0.2)
     seLinuxOptions, root groups, hostPath volumes: all need
     `dev.enabled`), `TestHardeningVerifierLeastPrivilege`,
     `TestHardeningVerifierRealSysfsProof`,
-    `TestExtraEnvDevSurfaceNamesDenied`, `TestExtraEnvManagedDuplicateDenied`
-    (`extraEnv` carrying the dev-surface env names or duplicating a
-    chart-managed env var — `TCDI_DEV_*`, `PG*`, `POD_NAMESPACE` — fails
-    the render unless `dev.enabled`).
+    `TestExtraEnvDevSurfaceNamesDenied`, `TestExtraEnvManagedDuplicateDenied`,
+    `TestExtraEnvMalformedEntryFails` (`extraEnv` carrying a dev-surface
+    env name, the env equivalent of a security-relevant chart value —
+    `TCDI_DEV_*`, `PG*`, `TCDI_CONTROL_TOKEN`, `TCDI_TRUSTED_PROXIES`,
+    `TCDI_UPSTREAM_CA`, `TCDI_OIDC_POST_LOGOUT_REDIRECT`,
+    `TCDI_TENANT_QUOTAS` — duplicating a chart-managed env var such as
+    `POD_NAMESPACE`, or carrying no name: all fail the render unless
+    `dev.enabled`).
     *Not yet enforced:*
     - seccomp and read-only-root assertions on every platform pod;
     - `readOnlyRootFilesystem` and `hostUsers: false` on runtime pods;

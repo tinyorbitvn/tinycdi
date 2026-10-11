@@ -239,7 +239,28 @@ objects. It **keeps**:
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise when an entry's name is a dev-surface env name (`TCDI_DEV_INSECURE_DB`, `TCDI_DEV_ALLOW_NO_BROKER`, `TCDI_METRICS_LISTEN`, `TCDI_KASM_ADAPTER_IMAGE`, `PGSSLMODE`, `TCDI_OPERATOR_CN`, `TCDI_WATCH_NAMESPACES`, `TCDI_REQUIRED_GROUPS`) or duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+
+`<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
+on this deny-list — dev-surface env names plus the env equivalents of
+security-relevant flags the chart exposes as first-class values (an env
+var would bypass the chart's wiring/validation). Each render error names
+the value to set instead:
+
+| Denied `extraEnv` name | Set instead |
+|---|---|
+| `TCDI_DEV_INSECURE_DB` / `PGSSLMODE` | `database.tls.mode` (verify-ca/verify-full) |
+| `TCDI_DEV_ALLOW_NO_BROKER` | `operator.devAllowNoBroker` (dev-only) |
+| `TCDI_METRICS_LISTEN` | `backend.metrics.enabled` |
+| `TCDI_KASM_ADAPTER_IMAGE` | `kasmAdapter.enabled` + `kasmAdapter.image.digest` |
+| `TCDI_OPERATOR_CN` | `backend.operatorCN` |
+| `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
+| `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
+| `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
+| `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
+| `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
+| `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
+| `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
 
 ### Component-specific highlights
 
