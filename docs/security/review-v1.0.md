@@ -97,7 +97,7 @@ the v0.5.1 tag are marked accordingly.
 | SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Open | — | n/a — listed (§6) |
 | SR-5-F1 | P2 | `runtime-images.json` is the only unsigned artifact in the release chain | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (sign-blob step + asset assertions) |
 | SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #157 (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
-| SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Fixed | v1.1 cleanup job | `.github/tests/failed-digest-cleanup.test.sh` (run-scoped deletion, tagged-version refusal, no sweep); residual note in §6 |
+| SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Fixed | #164 (v1.1) | `.github/tests/failed-digest-cleanup.test.sh` (run-scoped deletion, tagged-version refusal, no sweep); residual note in §6 |
 | SR-5-F4 | P3 | Scan jobs write unvalidated artifact refs into `GITHUB_ENV` | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (ref validated before the env write) |
 | SR-5-F5 | P3 | Repository Actions policy does not enforce SHA pinning | Fixed | #157 | `.github/tests/setup-repo-protection.test.sh` (`sha_pinning_required` PUT preserving live values) |
 | SR-5-F6 | P3 | Train images carry no SLSA build-provenance attestation | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (var-gated `attest-build-provenance` legs) |
