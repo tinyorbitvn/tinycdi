@@ -3,7 +3,9 @@
 #
 # Triggered on every push to main (tags sha-<short> + main) and manually via
 # workflow_dispatch (optional `platforms` input to opt into arm64 — the
-# default is linux/amd64 only).
+# default is linux/amd64 only — and a main-only `fail_scan_for_rehearsal`
+# input that lets a maintainer prove the failed-digest cleanup, see
+# .github/README.md "Rehearsing the cleanup").
 #
 # Pipeline shape (SEC-04/SEC-05):
 #   1. build jobs   — docker/build-push-action pushes BY DIGEST ONLY
@@ -87,6 +89,16 @@ name: images
           "linux/amd64,linux/arm64" to opt into arm64.
         required: false
         default: "linux/amd64"
+      fail_scan_for_rehearsal:
+        description: >-
+          Rehearsal for the failed-digest cleanup (SR-5-F3): the scan
+          runs for real and uploads its reports, then the gate is forced
+          red so the `cleanup` job deletes exactly this run's pushed
+          digests. Effective only on refs/heads/main — see
+          .github/README.md "Rehearsing the cleanup".
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -656,6 +668,25 @@ jobs:
         with:
           sarif_file: trivy-sarif
           category: tinycdi-${{ matrix.image }}
+
+      - name: rehearsal — force the gate red (main, dispatch only)
+        # Rehearsal for the failed-digest cleanup (SR-5-F3): a maintainer
+        # dispatching with fail_scan_for_rehearsal proves the cleanup
+        # end-to-end. The trivy gate above has already run for real and
+        # every report artifact is uploaded — this step then exits 1 so
+        # the scan job fails exactly like a real gate failure, the
+        # promote job is skipped and the `cleanup` leg fires. Inert on
+        # every other path: non-dispatch events, the default input
+        # value, and any ref other than refs/heads/main.
+        if: >-
+          always()
+          && github.event_name == 'workflow_dispatch'
+          && inputs.fail_scan_for_rehearsal
+          && github.ref == 'refs/heads/main'
+        run: |
+          echo "::warning::rehearsal: real scan complete — forcing the" \
+            "gate red so the cleanup leg runs (fail_scan_for_rehearsal=true on main)"
+          exit 1
 
   promote:
     # Signs + attests the gate-passed digests, then promotes them to the
