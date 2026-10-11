@@ -31,3 +31,12 @@ func (g *Gateway) SessionMapCounts() (sessions, byLease, byWorkspace, inflight i
 	defer g.mu.Unlock()
 	return len(g.sessions), len(g.byLease), len(g.byWorkspace), len(g.inflight)
 }
+
+// UpstreamStreamCount reports the replica-wide in-flight upstream count
+// the stream cap tracks (and the per-workspace count for wsID) — tests
+// assert slot release and per-workspace isolation directly.
+func (g *Gateway) UpstreamStreamCount(wsID string) (total, forWorkspace int) {
+	g.streamMu.Lock()
+	defer g.streamMu.Unlock()
+	return g.upstreamInFlight, g.upstreamSlots[wsID]
+}

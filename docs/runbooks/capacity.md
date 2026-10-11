@@ -43,11 +43,27 @@ A workspace consumes resources at two layers:
 3. **Network** — KasmVNC WebSocket streaming; dominated by screen-change
    rate and client bandwidth, not by the platform. The load gate measures
    gateway throughput directly. One upstream bound to know: each
-   desktop's KasmVNC runtime has its own concurrent-connection ceiling —
-   in a measured burst of 100 simultaneous reconnects to one desktop,
-   65 succeeded and 35 were answered `502` by the runtime (upstream
-   connection resets), not by the gateway or the limiter. Treat that as
-   a single observation, not a precise cap.
+   desktop's KasmVNC runtime has a concurrent-connection crash boundary,
+   not a configured cap: nothing limits the connections Xvnc accepts, and
+   once the process's fd count crosses FD_SETSIZE (1024 — ~330 concurrent
+   conns on a clean 1-CPU pod, earlier under contention, at ~3 fds per
+   conn plus ~23 baseline) its select(2)/FD_SET use corrupts the stack and
+   the pod restarts, resetting every in-flight stream at once. The
+   gateway therefore bounds live upstream connections **per workspace per
+   replica** at `-session-stream-cap` (default **32** — an order of
+   magnitude under the crash boundary; real use is one stream plus
+   parallel asset fetches): websocket streams and plain proxied requests
+   count alike, N replicas admit N × cap, and an over-cap request answers
+   a retryable `429` + `Retry-After: 1` + `{"error": "too_many_streams"}`
+   (the KasmVNC client's in-frame reconnect absorbs it). A request refused
+   at the cap still marks its session attached — a saturated workspace
+   never ghost-reaps a live, retrying client at the unattached TTL.
+   Requests refused later at the upgrade-only checks (drain, bad origin,
+   stream already in use) still held a slot for the handler's duration — a
+   negligible, conservative over-count. And a released slot frees the
+   count at once even though the upstream transport's keep-alive can leave
+   up to two idle connections per workspace open for ~90 s — a few
+   transient upstream fds, two orders below the crash boundary.
 
 Cold-start cost is dominated by **image pull**, not CPU: `tcdi/linux-desktop`
 ≈ 1.25 GB (302 MB compressed; the old openbox image was ≈ 0.83 GB) and

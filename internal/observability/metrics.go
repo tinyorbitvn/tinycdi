@@ -58,13 +58,15 @@ var (
 	loginOutcomes = map[string]struct{}{
 		"success": {}, "denied": {}, "error": {},
 	}
-	// rateLimitRoutes are the bounded route templates whose per-client
-	// limiter may refuse a request (E7) — the login family on the app
-	// listener, launch on the session listener, and the unknown-cookie
-	// session-directory lookup on the same listener.
+	// rateLimitRoutes are the bounded route templates/families a limiter
+	// refusal may name (E7) — the login family on the app listener, launch
+	// and the unknown-cookie session-directory lookup on the session
+	// listener, and upstream_streams: the per-workspace concurrent
+	// upstream bound on that listener (V11), a concurrency cap rather
+	// than a per-client rate bucket.
 	rateLimitRoutes = map[string]struct{}{
 		"/v1/login": {}, "/v1/auth/callback": {}, "/v1/session": {}, "/v1/launch": {},
-		"session_lookup": {},
+		"session_lookup": {}, "upstream_streams": {},
 	}
 	// rateLimitWindowRoutes are the bounded limiter families whose
 	// Postgres window check may fail (ADR 0006): the shared login bucket,
@@ -127,7 +129,7 @@ var (
 		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
 		"admin.user_limit.default.set": {}, "admin.user_limit.default.clear": {},
 		"launch.redeem": {}, "launch.host_mismatch": {},
-		"session.lookup": {},
+		"session.lookup": {}, "session.stream": {},
 	}
 )
 
@@ -155,6 +157,9 @@ type Metrics struct {
 	sessionsActive prometheus.Gauge
 	rehydrations   *prometheus.CounterVec
 	streamsFenced  prometheus.Counter
+	// upstreamStreams is the replica-wide count of upstream-bound
+	// requests in flight on the session gateway (V11 stream bound).
+	upstreamStreams prometheus.Gauge
 	// connTokensDropped counts client Connection-header tokens the session
 	// gateway dropped before proxying.
 	connTokensDropped prometheus.Counter
@@ -241,6 +246,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "gateway_streams_fenced_total",
 			Help: "Streams closed because another replica claimed the lease's stream epoch.",
 		}),
+		upstreamStreams: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "gateway_upstream_streams",
+			Help: "Upstream-bound requests in flight on this replica's session gateway — websocket streams and plain proxied requests summed over workspaces; each workspace is separately bounded by -session-stream-cap.",
+		}),
 		connTokensDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "gateway_connection_tokens_dropped_total",
 			Help: "Client Connection-header tokens the session gateway dropped before proxying — tokens outside upgrade/keep-alive/close can name and strip headers, so they are never forwarded.",
@@ -255,7 +264,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}, []string{"family"}),
 		rateLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "rate_limited_total",
-			Help: "Requests refused by the per-client rate limiters, by bounded route template.",
+			Help: "Requests refused by a bounded limiter — the per-client rate limits and the per-workspace upstream stream cap — by bounded route template/family.",
 		}, []string{"route"}),
 		rateLimitStore: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "rate_limit_store_errors_total",
@@ -317,7 +326,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
-		m.sessionsActive, m.rehydrations, m.streamsFenced, m.connTokensDropped, m.logins, m.imageAge,
+		m.sessionsActive, m.rehydrations, m.streamsFenced, m.upstreamStreams, m.connTokensDropped, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
 		m.internalAuthFailures, m.retentionPruned, m.retentionLastOK,
@@ -417,6 +426,12 @@ func (m *Metrics) IncRehydration(result string) {
 // closed.
 func (m *Metrics) IncStreamsFenced() { m.streamsFenced.Inc() }
 
+// SetUpstreamStreams reports the replica-wide count of upstream-bound
+// requests the session gateway currently holds (the V11 per-workspace
+// stream bound's in-flight total — unlabelled, so no workspace id can
+// ever become a label value).
+func (m *Metrics) SetUpstreamStreams(v float64) { m.upstreamStreams.Set(v) }
+
 // AddConnectionTokensDropped counts client Connection-header tokens the
 // session gateway dropped before proxying: a token outside the
 // upgrade/keep-alive/close allowlist names a header the stdlib hop-by-hop
@@ -442,9 +457,11 @@ func (m *Metrics) DeleteRuntimeImageAge(family string) {
 	m.imageAge.DeleteLabelValues(family)
 }
 
-// IncRateLimited counts one rate-limiter refusal; route is bounded to the
-// limited route templates {/v1/login, /v1/auth/callback, /v1/session,
-// /v1/launch, session_lookup, other}.
+// IncRateLimited counts one limiter refusal; route is bounded to the
+// limited route templates/families {/v1/login, /v1/auth/callback,
+// /v1/session, /v1/launch, session_lookup, upstream_streams, other} —
+// upstream_streams is the per-workspace stream-cap refusal (V11), not a
+// per-client bucket.
 func (m *Metrics) IncRateLimited(route string) {
 	m.rateLimited.WithLabelValues(boundValue(route, rateLimitRoutes)).Inc()
 }

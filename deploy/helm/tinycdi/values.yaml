@@ -260,6 +260,17 @@ backend:
   # registrable domain) or "partitioned" (SameSite=None;Secure;Partitioned
   # — for cross-site deployments).
   sessionCookieMode: lax
+  # Per-workspace bound on live upstream connections through ONE backend
+  # replica (-session-stream-cap): websocket streams and plain proxied
+  # requests alike — each holds an upstream conn the KasmVNC runtime
+  # spends ~3 fds on, and Xvnc crashes once its fd count crosses
+  # FD_SETSIZE (~330 conns on a clean pod). 32 stays an order of
+  # magnitude under that while real use is one stream plus asset
+  # fetches; over the cap the session origin answers a retryable
+  # 429 too_many_streams. Per-replica: N replicas admit N x cap.
+  # Minimum 1 — the bound cannot be disabled (a runtime without the
+  # fd bound tolerates any large value).
+  sessionStreamCap: 32
   # AEAD keys sealing the __Host-tcdi_login cookie (D20 — a login started
   # on one replica completes on another). REQUIRED — set existingSecret to
   # a Secret with keys "current" (and optional "previous" during
