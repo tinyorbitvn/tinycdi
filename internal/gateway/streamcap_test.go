@@ -503,6 +503,73 @@ func TestStreamCap_PerWorkspace(t *testing.T) {
 	streamCount(t, gw, testWSUID, 0)
 }
 
+// TestStreamCap_RefusalStillAttaches: a request refused at the cap still
+// carried a valid cookie to the session's own host — it marks the session
+// attached, so a saturated workspace cannot ghost-reap a live, retrying
+// client at the unattached TTL. The never-attached refusal is real: a
+// cookie rehydrated on replica A lands while the superseded local session
+// still holds the workspace's slots (rehydrate deliberately does not kill
+// it) — and reaping that ghost would revoke the live lease replica B
+// serves.
+func TestStreamCap_RefusalStillAttaches(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.scriptTicket("tk-a", testWSUID)
+	fb.scriptTicket("tk-b", testWSUID)
+	up := newGatedUpstream(t, "/app/hold", 1)
+	fb.pointLeaseAt(t, "tk-a", up.srv)
+	clock := &fakeClock{now: time.Now()}
+	gwA, srvA := newGatewayHandle(t, fb, func(c *gateway.Config) {
+		c.Identity = broker.GatewayIdentity{ID: "gw-A", Audience: testDomain}
+		c.Sessions = fb
+		c.UpstreamStreamCap = 1
+		c.Now = clock.Now
+		// Pin the fail-closed window above the clock jump so only the
+		// ghost TTL — never the renew deadline — can kill a session.
+		c.RevokeDeadline = time.Hour
+	})
+	_, srvB := newGatewayHandle(t, fb, func(c *gateway.Config) {
+		c.Identity = broker.GatewayIdentity{ID: "gw-B", Audience: testDomain}
+		c.Sessions = fb
+	})
+	cookieA := launchOK(t, srvA, testHost, "tk-a")
+	cookieB := launchOK(t, srvB, testHost, "tk-b") // binds digest -> lease B
+	leaseB := fb.leaseOf(t, "tk-b")
+
+	// A's parked fetch holds the workspace's only slot on replica A.
+	held := holdRequest(t, srvA, up, testHost, "/app/hold", cookieA)
+
+	// B's cookie rehydrates a session on A — still holding A's superseded
+	// session and its slot — so B's first request is refused at the cap.
+	// The refusal already proved a live client and must attach: on the
+	// pre-fix ordering B stayed unattached and the ghost TTL reaped it,
+	// revoking the live lease B serves.
+	resp := proxied(t, srvA, testHost, "/", cookieB, nil)
+	drain(resp)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("rehydrated session's request at a full cap = %d, want 429", resp.StatusCode)
+	}
+
+	// Past the unattached TTL with real renew ticks: an attached session's
+	// lease is never revoked and the session keeps resolving — refused at
+	// the cap again, never a 401 (reaped + lease revoked).
+	clock.Advance(2 * time.Minute)
+	time.Sleep(4 * testRenewInterval)
+	if n := fb.leaseRevokeCount(leaseB.ID); n != 0 {
+		t.Fatalf("cap-refused session's lease revoked %d times — the refusal must still attach", n)
+	}
+	resp = proxied(t, srvA, testHost, "/", cookieB, nil)
+	drain(resp)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("post-TTL probe = %d, want 429 — the session must still resolve past the TTL", resp.StatusCode)
+	}
+
+	close(up.release)
+	if code := <-held; code != http.StatusOK {
+		t.Fatalf("held fetch = %d, want 200 once the gate opened", code)
+	}
+	streamCount(t, gwA, testWSUID, 0)
+}
+
 // TestStreamCap_Metrics: the in-flight gauge tracks admissions and the
 // refusal counter increments under a bounded route label — never a
 // workspace one.

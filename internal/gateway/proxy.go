@@ -640,6 +640,13 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	// A request that resolves a live session on its own host proves the
+	// 303 landed — mark the session attached so the ghost TTL can never
+	// reap it underneath a real client. This runs BEFORE the upstream
+	// bound: a request refused at the cap still carried a valid cookie
+	// here, so a saturated workspace must not ghost-reap a live client
+	// at the unattached TTL while it retries.
+	s.noteAttached()
 	// Per-workspace upstream bound (V11): an admitted request — upgrade
 	// or plain fetch — holds an upstream connection the KasmVNC runtime
 	// spends real fds on, and the workspace's live count is capped per
@@ -650,10 +657,6 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		return
 	}
 	defer g.releaseUpstreamStream(wsID)
-	// A request that resolves a live session on its own host proves the
-	// 303 landed — mark the session attached so the ghost TTL can never
-	// reap it underneath a real client.
-	s.noteAttached()
 	// NAVTEL-1: a frame-document load on a session whose lease already had
 	// a stream is a re-navigation (the portal watch's FX-R32 fallback, or
 	// a user reload/new-tab load) — the per-tab id minted per outer page

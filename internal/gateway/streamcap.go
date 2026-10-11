@@ -62,10 +62,20 @@ func (g *Gateway) acquireUpstreamStream(wsID string) bool {
 // releaseUpstreamStream frees the slot acquireUpstreamStream took. It is
 // deferred by the one admission point in serveProxy, so every exit path —
 // normal close, hijack teardown, upstream error, client disconnect, ctx
-// cancel — releases the slot exactly once.
+// cancel — releases the slot exactly once. A call with no slot held for
+// the workspace is unpaired: it must NOT drive the counts negative (an
+// under-count would admit past the cap), so it is refused with one loud
+// log line — unreachable today, fail-loud if a second release site ever
+// appears.
 func (g *Gateway) releaseUpstreamStream(wsID string) {
 	g.streamMu.Lock()
 	defer g.streamMu.Unlock()
+	if g.upstreamSlots[wsID] == 0 {
+		if g.cfg.Logger != nil {
+			g.cfg.Logger.Error("upstream stream released with no slot held — counts left unchanged", "ws", wsID)
+		}
+		return
+	}
 	if n := g.upstreamSlots[wsID]; n > 1 {
 		g.upstreamSlots[wsID] = n - 1
 	} else {

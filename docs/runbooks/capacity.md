@@ -55,7 +55,15 @@ A workspace consumes resources at two layers:
    parallel asset fetches): websocket streams and plain proxied requests
    count alike, N replicas admit N × cap, and an over-cap request answers
    a retryable `429` + `Retry-After: 1` + `{"error": "too_many_streams"}`
-   (the KasmVNC client's in-frame reconnect absorbs it).
+   (the KasmVNC client's in-frame reconnect absorbs it). A request refused
+   at the cap still marks its session attached — a saturated workspace
+   never ghost-reaps a live, retrying client at the unattached TTL.
+   Requests refused later at the upgrade-only checks (drain, bad origin,
+   stream already in use) still held a slot for the handler's duration — a
+   negligible, conservative over-count. And a released slot frees the
+   count at once even though the upstream transport's keep-alive can leave
+   up to two idle connections per workspace open for ~90 s — a few
+   transient upstream fds, two orders below the crash boundary.
 
 Cold-start cost is dominated by **image pull**, not CPU: `tcdi/linux-desktop`
 ≈ 1.25 GB (302 MB compressed; the old openbox image was ≈ 0.83 GB) and
