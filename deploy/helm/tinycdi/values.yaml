@@ -696,7 +696,9 @@ runtime:
   # egressPodSelector without egressNamespaceSelector matches pods in
   # the workspace's own namespace only (NetworkPolicyPeer semantics).
   # DNS egress is unaffected, and EMPTY values keep today's behaviour
-  # (no flag is rendered).
+  # (no flag is rendered). DEPRECATED DEFAULT: unrestricted ClusterOnly
+  # egress flips to restricted in v1.2 — the install NOTES warn while a
+  # seeded ClusterOnly template runs with these unset.
   #   networkProfiles:
   #     clusterOnly:
   #       egressNamespaceSelector:
@@ -800,6 +802,10 @@ templates: []
   #       tolerations: [{key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}]
   #     resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
   #     bootDeadline: 5m
+  #     # Isolated denies all egress except cluster DNS — DNS resolution
+  #     # stays allowed by design (a deliberate unidirectional channel).
+  #     # ClusterOnly egress narrows via runtime.networkProfiles above;
+  #     # its unrestricted default flips in v1.2.
   #     networkProfile: Isolated
   #     clipboardPolicy: Disabled
   #     lifecycle: {idleTimeout: 30m, disconnectTimeout: 5m, maxDuration: 8h, dataPolicy: Ephemeral}
