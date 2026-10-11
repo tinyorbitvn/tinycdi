@@ -133,7 +133,8 @@ chk "helper: referrers fetch fails closed" "$HELPER" \
 chk "helper: referrers 404 means no referrers" "$HELPER" \
   '404) return 0'
 chk "helper: referrers status captured via -w" "$HELPER" '%{http_code}'
-chk "helper: referrers body validated as index" "$HELPER" 'manifests | type'
+chk "helper: referrers body validated as index" "$HELPER" \
+  'manifests \| type'
 chk_absent "helper: no un-namespaced /v2/ path" \
   <(grep -vE '^[[:space:]]*#' "$HELPER") 'v2/\$1/'
 chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
