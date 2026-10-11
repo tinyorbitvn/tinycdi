@@ -45,7 +45,7 @@ func terminalRetentionSweepLoop(db *store.DB, days int, m *observability.Metrics
 			switch {
 			case err != nil && errors.Is(err, context.Canceled):
 			case err != nil:
-				log.Error("terminal row retention sweep", "err", err)
+				log.Error("terminal row retention sweep failed", "err", err)
 			default:
 				log.Info("terminal row retention sweep",
 					"leases_pruned", res.Leases, "tickets_pruned", res.Tickets)

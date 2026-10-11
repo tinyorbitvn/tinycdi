@@ -41,11 +41,13 @@ const terminalSweepBatchPause = 100 * time.Millisecond
 // abandoned 'active' rows at one per workspace, so they cannot grow the
 // table on their own.
 //
-// The candidate list is taken in ascending primary-key order — the same
-// global order the session-layer mutators take their row locks — so the
-// delete serializes on a contested row instead of crossing waits into a
-// deadlock. A row deleted between the list and the lock is skipped
-// (READ COMMITTED re-evaluates the predicate on the locked version), so
+// Each call is a single autocommit statement: its row locks exist only
+// for the statement's duration and are bounded by limit, so a contested
+// row can hold a redeem or revoke for at most one short delete — and if
+// a cycle ever formed, Postgres' deadlock detector breaks it (an
+// aborted sweep simply resumes on the next pass; the deletes are
+// idempotent). A row deleted or re-shaped between the candidate scan
+// and the lock is skipped or re-evaluated under READ COMMITTED, so
 // concurrent sweepers split work harmlessly.
 func (d *DB) PruneTerminalLeases(ctx context.Context, retention time.Duration, limit int64) (int64, error) {
 	tag, err := d.pool.Exec(ctx, `
@@ -77,7 +79,8 @@ func (d *DB) PruneTerminalLeases(ctx context.Context, retention time.Duration, l
 // means anything the retention window reaches was unredeemable long
 // before it could be removed.
 //
-// Locking and concurrency notes are identical to PruneTerminalLeases.
+// Bounded per-statement locking and concurrency semantics are identical
+// to PruneTerminalLeases.
 func (d *DB) PruneTerminalTickets(ctx context.Context, retention time.Duration, limit int64) (int64, error) {
 	tag, err := d.pool.Exec(ctx, `
 		DELETE FROM launch_ticket

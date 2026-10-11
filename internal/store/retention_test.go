@@ -282,8 +282,9 @@ func TestSweepTerminalConnectionRows_ConcurrentSweepers(t *testing.T) {
 		}()
 	}
 	// The revoker: outstanding tickets die while the sweeps walk the
-	// table. The sweeps' deletes and this UPDATE take disjoint-row locks
-	// in the same key order — no cycle is possible.
+	// table. Each side holds only per-statement row locks — a contested
+	// row just waits out one short statement, and Postgres' deadlock
+	// detector would break any residual cycle.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
