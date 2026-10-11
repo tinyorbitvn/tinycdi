@@ -353,9 +353,42 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
 | `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps pre-v0.3.1 packed-by-scoring placement |
-| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies. Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
+| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies (**deprecated default — flips to restricted in v1.2**, see [ClusterOnly egress](#clusteronly-egress)). Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
 | `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
 | `runtime.networkProfiles.clusterOnly.egressPorts` | `[]` | optional port/protocol list on the same rule (`[{protocol: TCP, port: 443}]`); empty keeps every port open to the selected destinations |
+
+#### ClusterOnly egress
+
+`networkProfile: ClusterOnly` workspaces may reach **any pod in any
+namespace on any port** by default — confinement rests entirely on
+destination-side ingress policies, so any pod without its own
+NetworkPolicy is reachable. The opt-in
+`runtime.networkProfiles.clusterOnly.*` values render
+`--runtime-clusteronly-egress`, which rewrites every workspace's
+ClusterOnly egress rule to a single narrowed peer — selector-matched
+namespaces/pods, optionally port-limited — and can never admit non-pod
+destinations. **Deprecated default:** the default flips to restricted
+egress in **v1.2**; install NOTES warn while a seeded `ClusterOnly`
+template runs with the narrowing unset. Opt in now — e.g. confine
+ClusterOnly egress to the managed tenant namespaces:
+
+```yaml
+runtime:
+  networkProfiles:
+    clusterOnly:
+      egressNamespaceSelector:
+        matchExpressions:
+          - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+      egressPodSelector: {}          # optional second axis (pods in the selected namespaces)
+      egressPorts:                   # optional port/protocol list (empty = every port)
+        - {protocol: TCP, port: 443}
+```
+
+To **keep today's unrestricted posture** after the v1.2 flip, pin the
+explicit unrestricted value the v1.2 notes will document — see
+`docs/releases/v1.1.0.md` "Upgrading". DNS resolution is unaffected
+either way: every profile keeps cluster DNS egress by design — for
+`Isolated` that is the only egress, a deliberate unidirectional channel.
 
 #### Nodes without AppArmor
 
