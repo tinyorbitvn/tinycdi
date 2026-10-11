@@ -5,33 +5,38 @@ or operator can expose one user's workspace, credentials or network
 position to another. This file sets out how to report a vulnerability and
 the hardening rules that contributors and operators must follow.
 
-> **TinyCDI v0.2 has not had an independent security review; one is
-> planned before v1.0.** Until then, the mandatory rules and the blocking
-> CI scanners in this file are the bar.
+> **TinyCDI completed an internal pre-1.0 security review** — report:
+> [docs/security/review-v1.0.md](docs/security/review-v1.0.md). That was
+> an internal review, **not an independent audit**; an external review
+> remains an open item. The mandatory rules and the blocking CI scanners
+> in this file are the bar.
 >
-> **v0.2 architecture note:** v0.2 merges the v0.1 `api`, `portal` and
+> **Architecture note:** v0.2 merged the v0.1 `api`, `portal` and
 > `gateway` Deployments into one `backend` binary plus a static `frontend`
 > server
 > ([ADR 0005](docs/adr/0005-backend-frontend-operator.md)). The broker
-> moves in-process into `backend`; the internal mTLS listener keeps only
+> moved in-process into `backend`; the internal mTLS listener keeps only
 > operator routes; and each workspace is served on its own host
 > `<label>.<sessionDomain>` behind one wildcard edge rule instead of a
 > single shared session origin. Where a rule below still names `api`,
 > `gateway` or `portal`, it binds the same code in its new home. Items
-> marked *(v0.2 design)* describe the ADR 0005 target where the code is
-> still in flight; everything else is enforced today.
+> marked *(v0.2 design)* describe the ADR 0005 target.
 
 ## Supported versions
 
 | Version | Supported |
 |---|---|
 | `main` (unreleased) | Yes. Fixes land here first. |
-| Latest `0.x` minor release (images + `oci://ghcr.io/tinyorbitvn/charts/tinycdi`) | Yes. Security fixes ship as a new patch release. |
-| Older `0.x` minors | No. Upgrade to the latest minor. |
+| Latest `1.x` minor release (images + `oci://ghcr.io/tinyorbitvn/charts/tinycdi`) | Yes — security and bug fixes ship as a new patch release. |
+| `0.5.x` | Security fixes only (Critical/High) for 90 days after the v1.0.0 final release. No feature backports. |
+| `0.4` and older | No — unsupported as of 1.0.0. Upgrade to `0.5.1`, then to `1.0.0`. |
 
-While the project is pre-1.0, only the most recent minor release line gets
-security fixes. Deploy images by digest (`images.*.digest`), not by tag:
-a fix ships as a new release with new digests.
+Only the most recent `1.x` minor release line is fully supported. The
+supported upgrade path is `v0.5.1` → `1.0.0` (see
+[docs/runbooks/upgrade.md](docs/runbooks/upgrade.md) and
+[docs/versioning.md](docs/versioning.md)). Deploy images by digest
+(`images.*.digest`), not by tag: a fix ships as a new release with new
+digests.
 
 ## Reporting a vulnerability
 

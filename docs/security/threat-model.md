@@ -1,10 +1,10 @@
 # Threat model — v1.0 security review preparation
 
-Status: **working document for the independent security review planned before
-v1.0** (the review is deferred by product-owner decision; the architecture
-ADRs already note they were merged without independent review — see
-`docs/adr/0005-backend-frontend-operator.md`). This document inventories what
-exists **today on `main`**, with code and test references, so the reviewer can
+Status: **working document.** The pre-1.0 review it was prepared for ran as
+an internal review — report: [`review-v1.0.md`](review-v1.0.md) — which is
+not an independent audit; an external review remains an open item (S13).
+This document inventories what exists **today on `main`**, with code and
+test references, so the reviewer can
 spend time on judgement rather than discovery. The normative policy for
 contributors and operators stays in [`../../SECURITY.md`](../../SECURITY.md);
 this file describes, it does not prescribe.
