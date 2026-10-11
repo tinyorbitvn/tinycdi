@@ -125,6 +125,8 @@ chk "helper: created_at read from versions" "$HELPER" 'created_at'
 chk "helper: tagged-manifest reachability set" "$HELPER" 'referenced\['
 chk "helper: index -> children resolution" "$HELPER" '/manifests/'
 chk "helper: referrers resolution" "$HELPER" '/referrers/'
+chk "helper: namespaced GHCR pull scope" "$HELPER" \
+  'scope=repository:\$ORG/\$1:pull'
 chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
 chk "helper: nested-index depth bound" "$HELPER" 'MAX_DEPTH'
 chk "helper: unenumerable tagged manifest fails closed" "$HELPER" \
@@ -238,17 +240,30 @@ EOF
 
 cat > "$SHIM/curl" <<'EOF'
 #!/usr/bin/env bash
-for a in "$@"; do url="$a"; done
+# The token endpoint REJECTS an un-namespaced repository scope — a bug
+# this stub exists to catch (the real ghcr returns 400; a token from an
+# un-namespaced scope 403s every namespaced GET). Manifest/referrer
+# fetches must present the token issued for the namespaced scope.
+for a in "$@"; do
+  url="$a"
+  case "$a" in
+    "Authorization: Bearer "*) auth="${a#Authorization: Bearer }" ;;
+  esac
+done
 echo "curl $url" >> "$STUB_LOG"
 case "$url" in
-  *ghcr.io/token*) echo '{"token":"stub"}' ;;
-  */manifests/*)
-    d="${url##*/manifests/}"
-    [ -f "$STUB_MANIFEST_DIR/$d.json" ] && cat "$STUB_MANIFEST_DIR/$d.json" \
-      || { echo "curl: (22) 404" >&2; exit 22; } ;;
-  */referrers/*)
-    d="${url##*/referrers/}"
-    [ -f "$STUB_REFERRER_DIR/$d.json" ] && cat "$STUB_REFERRER_DIR/$d.json" \
+  *ghcr.io/token*)
+    case "$url" in
+      *"scope=repository:tinyorbitvn/"*) echo '{"token":"ns-scoped"}' ;;
+      *) echo 'curl: (22) 400 invalid scope' >&2; exit 22 ;;
+    esac ;;
+  */manifests/*|*/referrers/*)
+    [ "${auth:-}" = "ns-scoped" ] \
+      || { echo "curl: (22) 403 not the namespaced token" >&2; exit 22; }
+    d="${url##*/manifests/}"; d="${d##*/referrers/}"
+    dir="$STUB_MANIFEST_DIR"
+    case "$url" in */referrers/*) dir="$STUB_REFERRER_DIR" ;; esac
+    [ -f "$dir/$d.json" ] && cat "$dir/$d.json" \
       || { echo "curl: (22) 404" >&2; exit 22; } ;;
   *) echo "curl: unstubbed $url" >&2; exit 1 ;;
 esac

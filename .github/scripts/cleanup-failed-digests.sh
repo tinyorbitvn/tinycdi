@@ -75,9 +75,12 @@ TAG_OK_RE='^sha256-[0-9a-f]{64}(\.[0-9a-z-]+)?$'
 
 status=0
 
-ghcr_token() { # $1 package — pull-scope bearer token for the registry API
+ghcr_token() { # $1 package — pull-scope bearer token for the registry
+  # API. The scope MUST carry the org namespace — repository:<pkg>:pull
+  # is rejected by the token endpoint (400) and its token cannot pull
+  # the namespaced repository (403 on every manifest/referrer GET).
   curl -fsSL -u "${GITHUB_ACTOR:-x}:$GH_TOKEN" \
-    "https://ghcr.io/token?scope=repository:$1:pull" | jq -r '.token // empty'
+    "https://ghcr.io/token?scope=repository:$ORG/$1:pull" | jq -r '.token // empty'
 }
 
 manifest_json() { # $1 pkg $2 digest $3 bearer — raw manifest document
