@@ -1,7 +1,9 @@
 # ADR 0005 — backend/frontend/operator, per-workspace session hosts
 
-Status: accepted (v0.2 architecture). Not independently security-reviewed;
-a review is planned before v1.0.
+Status: accepted (v0.2 architecture). Accepted ahead of independent
+review; the pre-1.0 internal security review covering it is in
+[docs/security/review-v1.0.md](../security/review-v1.0.md) — internal,
+not an independent audit.
 
 Date: 2026-10-02
 

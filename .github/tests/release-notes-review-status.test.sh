@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# release-notes-review-status.test.sh — every release's notes must say the
-# project has not been independently security-reviewed (FX-R11), and a
-# pre-release must additionally say it is a test build.
+# release-notes-review-status.test.sh — every release's notes must carry
+# the security-review status line (FX-R11): internally reviewed for v1.0,
+# not an independent audit. A pre-release must additionally say it is a
+# test build.
 #
 # The notes are built by the "container image manifest + release notes" step
 # of release.yml. This test extracts that step's `run:` script and executes it
@@ -12,7 +13,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REL="$ROOT/.github/workflows/release.yml"
 STEP='container image manifest + release notes'
-REVIEW_LINE='Not independently security-reviewed; a review is planned before v1.0.'
+REVIEW_LINE='Internally security-reviewed for v1.0 (docs/security/review-v1.0.md); not an independent audit.'
 PRE_LINE='Pre-release test build.'
 fails=0
 
