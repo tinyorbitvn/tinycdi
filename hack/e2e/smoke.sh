@@ -88,9 +88,17 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 case "$PORTAL" in https://*) ;; *) printf 'FAIL config: TCDI_E2E_PORTAL_URL must be an https URL\n'; exit 1 ;; esac
+for v in HTTP_TIMEOUT READY_TIMEOUT DELETE_TIMEOUT MAX_WORKSPACES; do
+  case "${!v}" in
+    '' | *[!0-9]* | 0)
+      printf 'FAIL config: TCDI_E2E_%s must be a positive integer (seconds/count), got "%s"\n' "$v" "${!v}"
+      exit 1
+      ;;
+  esac
+done
 
 need() { for t in "$@"; do command -v "$t" >/dev/null 2>&1 || { printf 'FAIL config: required tool not on PATH: %s\n' "$t"; exit 1; }; done; }
-need curl jq sed awk mktemp
+need curl jq sed awk mktemp dirname
 
 # ---- plumbing ------------------------------------------------------------------
 W="$(mktemp -d)"; chmod 700 "$W"
@@ -144,10 +152,14 @@ api() {
 }
 hdr() {
   if [ -s "$HDRS" ]; then
-    awk -v h="$1" 'BEGIN{IGNORECASE=1} index(tolower($0), tolower(h)":")==1 {sub(/\r$/,""); print substr($0, length(h)+3); exit}' "$HDRS"
+    awk -v h="$1" 'BEGIN{IGNORECASE=1} index(tolower($0), tolower(h)":")==1 {sub(/\r$/,""); sub(/^[^:]*:[ \t]*/,""); print; exit}' "$HDRS"
   fi
 }
 host_of() { sed -E 's|^[a-z]+://([^/:?]+).*|\1|' <<<"$1"; }
+# origin_of keeps scheme://host[:port] — a non-443 IdP port must survive.
+origin_of() { sed -E 's|^([a-z]+://[^/?]+).*|\1|' <<<"$1"; }
+# path_of returns the URL path ("" when absent) without query/fragment.
+path_of() { sed -E 's|^[a-z]+://[^/]*||; s|[?#].*$||' <<<"$1"; }
 err_code() { jq -r '.code // "-"' "$RESP" 2>/dev/null || echo "-"; }
 
 expect_code() { # expect_code <check> <url> <want> [curl args...]
@@ -229,11 +241,19 @@ oidc_login() { # oidc_login <jar>: leaves an authenticated session cookie in jar
   if [ "$code" = "200" ]; then
     action="$(sed -n 's/.*<form[^>]*action="\([^"]*\)".*/\1/p' "$W/idp.html" | head -1 | sed 's/&amp;/\&/g')"
     if [ -z "$action" ]; then LOGIN_ERR="IdP login page carried no form action"; return 1; fi
-    case "$action" in /*) action="https://$(host_of "$loc")$action" ;; esac
+    case "$action" in
+      *://*) ;;                                    # absolute — use as-is
+      /*) action="$(origin_of "$loc")$action" ;;   # root-relative — keep scheme+host+port
+      *) action="$(origin_of "$loc")$(dirname "$(path_of "$loc")")/$action" ;;
+    esac
+    # The credentials must never appear in argv: field values come from
+    # 0600 files inside the private work dir (removed by the exit trap).
+    printf '%s' "$E2E_USER" >"$W/idp-user"; printf '%s' "$E2E_PASSWORD" >"$W/idp-pass"
+    chmod 600 "$W/idp-user" "$W/idp-pass"
     cb="$(curl -sS "${TLS_ARGS[@]}" -b "$jar" -c "$jar" -o /dev/null \
       -w '%{redirect_url}' -X POST "$action" \
-      --data-urlencode "username=$E2E_USER" \
-      --data-urlencode "password=$E2E_PASSWORD" 2>/dev/null || true)"
+      --data-urlencode "username@$W/idp-user" \
+      --data-urlencode "password@$W/idp-pass" 2>/dev/null || true)"
     if [ -z "$cb" ]; then LOGIN_ERR="IdP credential POST gave no redirect (bad credentials?)"; return 1; fi
   elif [ "$code" != "302" ] && [ "$code" != "303" ]; then
     LOGIN_ERR="IdP login page -> $code (want 200 form or 302)"; return 1
@@ -375,7 +395,7 @@ done
 if [ "$quota_result" = "skip" ]; then
   skip "quota-running-limit: no refusal after $((q_i - 1)) Running (limit above TCDI_E2E_MAX_WORKSPACES=$MAX_WORKSPACES probe budget)"
 elif [ -n "$user_limit" ] && [ "$reason" != "UserLimitReached" ]; then
-  fail "quota-running-limit: per-principal limit is configured but refusal reason is '$reason' (want UserLimitReached)"
+  skip "quota-running-limit: 409 QUOTA_EXHAUSTED held, but reason '$reason' means a different quota bound first — the configured per-principal limit is unproven"
 else
   pass "quota-running-limit ($quota_note)"
 fi

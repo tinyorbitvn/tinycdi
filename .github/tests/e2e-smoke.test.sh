@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # e2e-smoke.test.sh — regression coverage for hack/e2e/smoke.sh: the script
-# must lint clean, validate its environment, emit PASS/FAIL lines, exit
-# non-zero on the first failed check, and pass the anonymous suite against
-# a stubbed HTTP surface (a PATH curl shim — no cluster).
+# must lint clean, validate its environment (missing and non-numeric),
+# emit PASS/FAIL/SKIP lines, exit non-zero on the first failed check, keep
+# credentials out of argv, join a relative IdP form action preserving the
+# issuer's port, parse headers without a space after the colon, and pass
+# the anonymous + authenticated suites against a stubbed HTTP surface
+# (a PATH curl shim — no cluster).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,40 +39,116 @@ case "$out" in
 esac
 ok "env validation"
 
-# ---- 3. unreachable portal fails fast ------------------------------------------
+# ---- 3. numeric validation -----------------------------------------------------
+out="$(TCDI_E2E_PORTAL_URL=https://portal.example.test \
+  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+  TCDI_E2E_READY_TIMEOUT=soon "$SMOKE" --anon-only 2>&1)" && rc=0 || rc=$?
+[ "$rc" != 0 ] || bad "non-numeric timeout should exit non-zero"
+case "$out" in
+  "FAIL config: TCDI_E2E_READY_TIMEOUT must be a positive integer"*) ;;
+  *) bad "numeric validation line wrong: $out" ;;
+esac
+out="$(TCDI_E2E_PORTAL_URL=https://portal.example.test \
+  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+  TCDI_E2E_MAX_WORKSPACES=0 "$SMOKE" --anon-only 2>&1)" && rc=0 || rc=$?
+[ "$rc" != 0 ] || bad "zero MAX_WORKSPACES should exit non-zero"
+case "$out" in "FAIL config: TCDI_E2E_MAX_WORKSPACES"*) ;; *) bad "zero-count validation wrong: $out" ;; esac
+ok "numeric validation"
+
+# ---- 4. unreachable portal fails fast ------------------------------------------
 out="$(TCDI_E2E_PORTAL_URL=https://127.0.0.1:1 TCDI_E2E_SESSION_HOST=ws-00000000.example.test \
   TCDI_E2E_HTTP_TIMEOUT=3 "$SMOKE" --anon-only 2>&1)" && rc=0 || rc=$?
 [ "$rc" != 0 ] || bad "unreachable portal should exit non-zero"
 case "$out" in FAIL\ portal-root*) ;; *) bad "expected FAIL portal-root, got: $out" ;; esac
 ok "first-check failure exits non-zero"
 
-# ---- 4. anonymous suite against a stubbed surface -------------------------------
-mkdir -p "$D/shim"
+# ---- the stub -------------------------------------------------------------------
+# One shim answers the whole surface: portal (anonymous + cookie-bearing),
+# session hosts, and an IdP on a non-443 port whose login form action is
+# root-relative — the join must keep the port. Auth state, workspace phases
+# and the argv log live in $STUB_DIR so sequential curl processes share it.
+mkdir -p "$D/shim" "$D/stub"
 cat > "$D/shim/curl" <<'SHIM'
 #!/usr/bin/env bash
-# Stub curl for hack/e2e/smoke.sh --anon-only: answers the canned
-# portal/session-host surface by request URL.
-body=""; hdrs=""; wfmt=""; url=""
+SD="${STUB_DIR:?}"
+printf '%s\n' "$*" >>"$SD/argv.log" 2>/dev/null || true
+body=""; hdrs=""; wfmt=""; url=""; method=GET; jar=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) body="$2"; shift 2 ;;
     -D) hdrs="$2"; shift 2 ;;
     -w) wfmt="$2"; shift 2 ;;
-    -X | -H | -d | -b | -c | --cacert | --resolve | --max-time | --data-urlencode) shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -b) jar=1; shift 2 ;;
+    -c) shift 2 ;;
+    -H | -d | --cacert | --resolve | --max-time | --data-urlencode) shift 2 ;;
     -sS) shift ;;
     http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+state() { [ -f "$SD/state" ] && cat "$SD/state" || echo out; }
+auth() { [ "$jar" = 1 ] && [ "$(state)" = in ]; }
 code=404; rbody='{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}'
-sec=0
+redir=""; sec=0
 case "$url" in
   https://portal.example.test/) code=200; sec=1 ;;
   https://portal.example.test/healthz | https://portal.example.test/readyz) code=200; rbody='ok' ;;
-  https://portal.example.test/v1/session) code=200; rbody='{"authenticated":false}' ;;
-  https://portal.example.test/v1/me | https://portal.example.test/v1/templates)
-    code=401; rbody='{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}' ;;
+  https://portal.example.test/v1/login)
+    code=302
+    redir="https://idp.example.test:8443/realms/x/protocol/openid-connect/auth?client_id=tinycdi&state=s1" ;;
+  https://idp.example.test:8443/realms/x/protocol/openid-connect/auth*)
+    code=200
+    rbody='<html><body><form id="kc-form-login" method="post" action="/realms/x/login-actions/authenticate?session_code=a&amp;execution=b&amp;client_id=tinycdi&amp;tab_id=t"><input name="username"><input name="password"></form></body></html>' ;;
+  https://idp.example.test:8443/realms/x/login-actions/*)
+    code=302; redir="https://portal.example.test/v1/auth/callback?code=c1&state=s1" ;;
+  https://portal.example.test/v1/auth/callback*)
+    code=302; redir="/"; echo in >"$SD/state" ;;
+  https://portal.example.test/v1/session)
+    code=200
+    if auth; then rbody='{"authenticated":true}'; else rbody='{"authenticated":false}'; fi ;;
+  https://portal.example.test/v1/me)
+    if auth; then
+      code=200
+      rbody='{"subject":"u1","displayName":"Stub","tenant":"tenant-a","roles":["user"],"csrfToken":"csrf-stub","sessionDomain":"session.example.test"}'
+    else code=401; rbody='{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}'; fi ;;
+  https://portal.example.test/v1/templates)
+    if auth; then code=200; rbody='{"items":[{"id":"tpl_stub001","name":"browser"}]}'
+    else code=401; rbody='{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}'; fi ;;
   https://portal.example.test/v1/metrics) code=404 ;;
+  https://portal.example.test/v1/quota)
+    code=200
+    rbody='{"tenant":"tenant-a","configured":true,"limits":{"runningWorkspaces":2,"cpuMillicores":4000,"memoryMib":8192,"storageGib":20},"usage":{"workspaces":0,"runningWorkspaces":0,"cpuMillicores":0,"memoryMib":0,"storageGib":0},"users":[]'
+    [ -z "${STUB_USERLIMIT:-}" ] || rbody+=',"userLimits":{"runningWorkspaces":5,"cpuMillicores":0,"memoryMib":0,"storageGib":0}'
+    rbody+='}' ;;
+  https://portal.example.test/v1/workspaces)
+    n=$(( $(wc -l <"$SD/created" 2>/dev/null || echo 0) + 1 ))
+    if [ "$n" -le 2 ]; then
+      code=201
+      id="ws_stub000$n"
+      echo "$id" >>"$SD/created"
+      rbody="{\"id\":\"$id\",\"phase\":\"Ready\",\"desiredState\":\"Running\"}"
+    else
+      code=409
+      rbody='{"code":"QUOTA_EXHAUSTED","message":"x","retryable":false,"requestId":"req_stub"}'
+    fi ;;
+  https://portal.example.test/v1/workspaces/*/stop)
+    echo Stopped >"$SD/phase"; code=200; rbody='{"phase":"Stopped"}' ;;
+  https://portal.example.test/v1/workspaces/*/start)
+    echo Ready >"$SD/phase"; code=200; rbody='{"phase":"Ready"}' ;;
+  https://portal.example.test/v1/workspaces/ws_*)
+    id="${url##*/v1/workspaces/}"
+    if [ "$method" = DELETE ]; then
+      echo "$id" >>"$SD/deleted"
+      code=202; rbody='{"phase":"Terminating"}'
+    elif grep -qx "$id" "$SD/deleted" 2>/dev/null; then
+      code=404; rbody='{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}'
+    else
+      code=200; phase="$(cat "$SD/phase" 2>/dev/null || echo Ready)"
+      rbody="{\"id\":\"$id\",\"phase\":\"$phase\",\"desiredState\":\"Running\"}"
+    fi ;;
+  https://portal.example.test/v1/logout) code=204; echo out >"$SD/state"; rbody='' ;;
+  https://portal.example.test/v1/me/sessions:revoke-all) code=204; echo out >"$SD/state"; rbody='' ;;
   https://ws-00000000.session.example.test/) code=401; rbody='{"error":"unauthorized"}' ;;
   https://ws-00000000.session.example.test/metrics) code=404; rbody='{"error":"not_found"}' ;;
   https://e2e-foreign.session.example.test/) code="${STUB_FOREIGN_CODE:-421}"; rbody='{"error":"bad_host"}' ;;
@@ -78,26 +157,30 @@ esac
 if [ -n "$hdrs" ]; then
   {
     printf 'HTTP/2 %s\r\n' "$code"
+    [ -z "$redir" ] || printf 'location: %s\r\n' "$redir"
     if [ "$sec" = 1 ]; then
-      printf 'content-security-policy: default-src '"'"'self'"'"'; frame-ancestors '"'"'none'"'"'\r\n'
-      printf 'x-frame-options: DENY\r\n'
-      printf 'cross-origin-opener-policy: same-origin\r\n'
-      printf 'referrer-policy: strict-origin\r\n'
-      printf 'x-content-type-options: nosniff\r\n'
-      printf 'strict-transport-security: max-age=63072000; includeSubDomains\r\n'
+      # Deliberately no space after the colon: hdr() must still parse.
+      printf 'content-security-policy:default-src '"'"'self'"'"'; frame-ancestors '"'"'none'"'"'\r\n'
+      printf 'x-frame-options:DENY\r\n'
+      printf 'cross-origin-opener-policy:same-origin\r\n'
+      printf 'referrer-policy:strict-origin\r\n'
+      printf 'x-content-type-options:nosniff\r\n'
+      printf 'strict-transport-security:max-age=63072000; includeSubDomains\r\n'
     fi
   } >"$hdrs"
 fi
 case "$wfmt" in
-  *'%{http_code} %{redirect_url}'*) printf '%s ' "$code" ;;
+  *'%{http_code} %{redirect_url}'*) printf '%s %s' "$code" "$redir" ;;
   *'%{http_code}'*) printf '%s' "$code" ;;
-  *'%{redirect_url}'*) printf '' ;;
+  *'%{redirect_url}'*) printf '%s' "$redir" ;;
 esac
 exit 0
 SHIM
 chmod +x "$D/shim/curl"
+: > "$D/stub/argv.log"; echo Ready > "$D/stub/phase"
 
-out="$(PATH="$D/shim:$PATH" \
+# ---- 5. anonymous suite against the stub ----------------------------------------
+out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" \
   TCDI_E2E_PORTAL_URL=https://portal.example.test \
   TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
   "$SMOKE" --anon-only 2>&1)" && rc=0 || rc=$?
@@ -108,10 +191,10 @@ for want in portal-root security-headers healthz readyz session-probe \
   grep -q "^PASS $want" <<<"$out" || bad "missing 'PASS $want' in: $out"
 done
 grep -q '^FAIL ' <<<"$out" && bad "unexpected FAIL line in: $out"
-ok "anonymous suite (stubbed)"
+ok "anonymous suite (stubbed, no-space headers)"
 
-# ---- 5. a wrong answer fails the check -----------------------------------------
-out="$(PATH="$D/shim:$PATH" \
+# ---- 6. a wrong answer fails the check -----------------------------------------
+out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" \
   TCDI_E2E_PORTAL_URL=https://portal.example.test \
   TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
   STUB_FOREIGN_CODE=200 \
@@ -119,6 +202,41 @@ out="$(PATH="$D/shim:$PATH" \
 [ "$rc" != 0 ] || bad "foreign session host should fail the suite"
 case "$out" in *FAIL\ session-host-foreign-421*) ;; *) bad "expected FAIL session-host-foreign-421, got: $out" ;; esac
 ok "unexpected session-host code fails"
+
+# ---- 7. full authenticated flow: login (relative action, port), lifecycle, -------
+# ---- quota refusal, logout — plus the password never appears in argv. -----------
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"
+out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" \
+  TCDI_E2E_PORTAL_URL=https://portal.example.test \
+  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+  TCDI_E2E_IDP_ISSUER=https://idp.example.test:8443/realms/x \
+  TCDI_E2E_USER=e2e-user TCDI_E2E_PASSWORD='s3cr3t-p4ss' \
+  TCDI_E2E_TEMPLATE=browser \
+  "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" = 0 ] || bad "full flow should pass under the stub (rc=$rc): $out"
+for want in login me-authenticated templates workspace-create workspace-ready \
+  workspace-stop workspace-start quota-running-limit workspace-delete logout; do
+  grep -q "^PASS $want" <<<"$out" || bad "missing 'PASS $want' in: $out"
+done
+grep -q '^FAIL ' <<<"$out" && bad "unexpected FAIL line in: $out"
+grep -qF 's3cr3t-p4ss' "$D/stub/argv.log" \
+  && bad "password leaked into curl argv: $(grep -nF 's3cr3t-p4ss' "$D/stub/argv.log")"
+grep -q 'idp.example.test:8443/realms/x/login-actions' "$D/stub/argv.log" \
+  || bad "relative form action not joined to the issuer's :8443 origin"
+ok "authenticated flow + no credential in argv + port-preserving action join"
+
+# ---- 8. per-principal limit configured but tenant quota bound first -> SKIP ------
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted"; echo Ready >"$D/stub/phase"
+out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" STUB_USERLIMIT=1 \
+  TCDI_E2E_PORTAL_URL=https://portal.example.test \
+  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+  TCDI_E2E_IDP_ISSUER=https://idp.example.test:8443/realms/x \
+  TCDI_E2E_USER=e2e-user TCDI_E2E_PASSWORD='s3cr3t-p4ss' \
+  "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" = 0 ] || bad "user-limit variant should still exit 0 (rc=$rc): $out"
+case "$out" in *"SKIP quota-running-limit"*) ;; *) bad "expected SKIP quota-running-limit, got: $out" ;; esac
+grep -q '^FAIL quota-running-limit' <<<"$out" && bad "false-FAIL on non-user-limit refusal: $out"
+ok "quota reason mismatch SKIP-s, does not false-fail"
 
 [ "$fails" = 0 ] || exit 1
 echo "e2e-smoke.test.sh: all cases passed"

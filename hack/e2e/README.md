@@ -79,7 +79,10 @@ Anonymous (`--anon-only` stops here):
   host is the cookie-gated desktop proxy: no workspace cookie → 401.
 - `session-host-foreign-421` — a non-workspace label under the session
   domain is misdirected traffic: 421 `bad_host`
-  (`internal/gateway/proxy.go`).
+  (`internal/gateway/proxy.go`). The probe uses the fixed name
+  `e2e-foreign.<session-domain>` — on deployments without wildcard DNS it
+  needs its own `TCDI_E2E_RESOLVE` entry just like the portal and session
+  hosts (a DNS miss fails loudly as `-> 000`).
 - `session-metrics-not-public` — `/metrics` does not exist on the session
   listener either (404).
 
