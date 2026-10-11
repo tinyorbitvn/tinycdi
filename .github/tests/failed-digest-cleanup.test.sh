@@ -125,6 +125,13 @@ chk "helper: created_at read from versions" "$HELPER" 'created_at'
 chk "helper: tagged-manifest reachability set" "$HELPER" 'referenced\['
 chk "helper: index -> children resolution" "$HELPER" '/manifests/'
 chk "helper: referrers resolution" "$HELPER" '/referrers/'
+chk "helper: namespaced GHCR pull scope" "$HELPER" \
+  'scope=repository:\$\(repo_path'
+chk "helper: single repository-path helper" "$HELPER" 'repo_path()'
+chk "helper: referrers fetch fails closed" "$HELPER" \
+  'referrers fetch failed — refusing to delete'
+chk_absent "helper: no un-namespaced /v2/ path" \
+  <(grep -vE '^[[:space:]]*#' "$HELPER") 'v2/\$1/'
 chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
 chk "helper: nested-index depth bound" "$HELPER" 'MAX_DEPTH'
 chk "helper: unenumerable tagged manifest fails closed" "$HELPER" \
@@ -238,18 +245,46 @@ EOF
 
 cat > "$SHIM/curl" <<'EOF'
 #!/usr/bin/env bash
-for a in "$@"; do url="$a"; done
+# The token endpoint REJECTS an un-namespaced repository scope — a bug
+# this stub exists to catch (the real ghcr returns 400; a token from an
+# un-namespaced scope 403s every namespaced GET). Manifest/referrer
+# fetches must present the token issued for the namespaced scope.
+for a in "$@"; do
+  url="$a"
+  case "$a" in
+    "Authorization: Bearer "*) auth="${a#Authorization: Bearer }" ;;
+  esac
+done
 echo "curl $url" >> "$STUB_LOG"
 case "$url" in
-  *ghcr.io/token*) echo '{"token":"stub"}' ;;
-  */manifests/*)
-    d="${url##*/manifests/}"
-    [ -f "$STUB_MANIFEST_DIR/$d.json" ] && cat "$STUB_MANIFEST_DIR/$d.json" \
-      || { echo "curl: (22) 404" >&2; exit 22; } ;;
-  */referrers/*)
-    d="${url##*/referrers/}"
-    [ -f "$STUB_REFERRER_DIR/$d.json" ] && cat "$STUB_REFERRER_DIR/$d.json" \
-      || { echo "curl: (22) 404" >&2; exit 22; } ;;
+  *ghcr.io/token*)
+    # namespaced READ-ONLY scope only — a push/other-scope change
+    # must fail here so the helper can never silently widen rights
+    case "$url" in
+      *"scope=repository:tinyorbitvn/"*":pull") echo '{"token":"ns-scoped"}' ;;
+      *) echo 'curl: (22) 400 invalid scope' >&2; exit 22 ;;
+    esac ;;
+  */manifests/*|*/referrers/*)
+    [ "${auth:-}" = "ns-scoped" ] \
+      || { echo "curl: (22) 403 not the namespaced token" >&2; exit 22; }
+    # GHCR answers a bare repository path with 400 NAME_INVALID —
+    # model it so un-namespaced /v2/ code fails instead of passing on
+    # fixtures the real registry would never serve. Fixtures are keyed
+    # by the FULL repository path (<org>/<pkg>/<digest>).
+    p="${url#*ghcr.io/v2/}"
+    kind=manifests; base="${p%%/manifests/*}"
+    case "$p" in */referrers/*) kind=referrers; base="${p%%/referrers/*}" ;; esac
+    d="${p##*/}"
+    case "$base" in
+      */*) ;;
+      *) echo 'curl: (22) 400 NAME_INVALID' >&2; exit 22 ;;
+    esac
+    dir="$STUB_MANIFEST_DIR"; [ "$kind" = referrers ] && dir="$STUB_REFERRER_DIR"
+    [ -f "$dir/$base/$d.error" ] && { echo 'curl: (22) 500' >&2; exit 22; }
+    [ -f "$dir/$base/$d.json" ] && { cat "$dir/$base/$d.json"; exit 0; }
+    # a subject with no referrers answers 200 + an empty index
+    [ "$kind" = referrers ] && { echo '{"manifests":[]}'; exit 0; }
+    echo 'curl: (22) 404' >&2; exit 22 ;;
   *) echo "curl: unstubbed $url" >&2; exit 1 ;;
 esac
 EOF
@@ -259,6 +294,12 @@ export STUB_LOG="$WORK/stub.log" STUB_PKG_DIR="$WORK/pkgs" \
        STUB_MANIFEST_DIR="$WORK/manifests" STUB_REFERRER_DIR="$WORK/referrers"
 export PATH="$SHIM:$PATH" GH_TOKEN=test GITHUB_ACTOR=test \
        RUN_STARTED_AT="2026-10-11T12:00:00Z"
+
+# fixture keys are the FULL repository path — the stub 400s bare
+# paths like the real registry does
+MDIR="$STUB_MANIFEST_DIR/tinyorbitvn/tinycdi-backend"
+RDIR="$STUB_REFERRER_DIR/tinyorbitvn/tinycdi-backend"
+mkdir -p "$MDIR" "$RDIR"
 
 FRESH="2026-10-11T12:30:00Z"   # inside the run window
 OLD="2026-10-10T00:00:00Z"     # before the run — a pre-existing version
@@ -318,8 +359,8 @@ N1="$(dg a1)"; N2="$(dg a2)"; N3="$(dg a3)"; N4="$(dg a4)"; N5="$(dg a5)"
 IDXH="${IDX#sha256:}"; TDXH="${TDX#sha256:}"
 
 # --- happy path: fresh tree, everything unreferenced --------------------
-idx_json "$C1" "$C2" "$ATT" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json "$REFR"            > "$STUB_REFERRER_DIR/$IDX.json"
+idx_json "$C1" "$C2" "$ATT" > "$MDIR/$IDX.json"
+idx_json "$REFR"            > "$RDIR/$IDX.json"
 pkg_json \
   "$(ver_json 11 "$IDX" "" "$FRESH")" \
   "$(ver_json 12 "$C1" "" "$FRESH")" \
@@ -336,9 +377,9 @@ expect_deletes tinycdi-backend "11 12 13 14 15 16 "
 # --- whole-tree refusal: shared child with a tagged index ---------------
 # our fresh index lists [C1, SHARED]; a tagged index TIDX lists SHARED —
 # deleting SHARED would break the published image. Mandatory advisor case.
-idx_json "$C1" "$SHARED" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json "$SHARED"       > "$STUB_MANIFEST_DIR/$TIDX.json"
-rm -f "$STUB_REFERRER_DIR/$IDX.json"
+idx_json "$C1" "$SHARED" > "$MDIR/$IDX.json"
+idx_json "$SHARED"       > "$MDIR/$TIDX.json"
+rm -f "$RDIR/$IDX.json"
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
@@ -376,8 +417,8 @@ grep -q 'refusing to delete' <<< "$LAST_OUT" \
 # our fresh index lists child SDG; SDG carries tag sha256-<TDX>.sig and
 # TDX is tagged -> SDG is published content (TDX's signature).
 mkref backend "ghcr.io/tinyorbitvn/tinycdi-backend@$IDX"
-idx_json "$C1" "$SDG" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json > "$STUB_MANIFEST_DIR/$TDX.json"   # TDX: leaf manifest, no children
+idx_json "$C1" "$SDG" > "$MDIR/$IDX.json"
+idx_json > "$MDIR/$TDX.json"   # TDX: leaf manifest, no children
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
@@ -390,8 +431,8 @@ grep -q 'refusing to delete' <<< "$LAST_OUT" \
   || { echo "FAIL: sig-tag refusal not logged"; fails=1; }
 
 # --- nested index inside our tree: grandchild resolved + deleted --------
-idx_json "$C1" "i:$NIDX" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json "$GRAND"        > "$STUB_MANIFEST_DIR/$NIDX.json"
+idx_json "$C1" "i:$NIDX" > "$MDIR/$IDX.json"
+idx_json "$GRAND"        > "$MDIR/$NIDX.json"
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
@@ -405,9 +446,9 @@ expect_deletes tinycdi-backend "21 22 23 24 "
 # --- nested index protecting a grandchild of a tagged manifest ----------
 # TIDX (tagged main) -> NIDX -> SHARED; our fresh index lists SHARED:
 # reachability must follow the nested index and refuse the whole image.
-idx_json "$C1" "$SHARED" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json "i:$NIDX"       > "$STUB_MANIFEST_DIR/$TIDX.json"
-idx_json "$SHARED"       > "$STUB_MANIFEST_DIR/$NIDX.json"
+idx_json "$C1" "$SHARED" > "$MDIR/$IDX.json"
+idx_json "i:$NIDX"       > "$MDIR/$TIDX.json"
+idx_json "$SHARED"       > "$MDIR/$NIDX.json"
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
@@ -421,11 +462,11 @@ grep -q 'reachable from a tagged manifest' <<< "$LAST_OUT" \
   || { echo "FAIL: nested reachability reason not logged"; fails=1; }
 
 # --- an index nested deeper than the bound refuses the whole image ------
-idx_json "i:$N1" > "$STUB_MANIFEST_DIR/$IDX.json"
-idx_json "i:$N2" > "$STUB_MANIFEST_DIR/$N1.json"
-idx_json "i:$N3" > "$STUB_MANIFEST_DIR/$N2.json"
-idx_json "i:$N4" > "$STUB_MANIFEST_DIR/$N3.json"
-idx_json "i:$N5" > "$STUB_MANIFEST_DIR/$N4.json"   # index child at depth 5
+idx_json "i:$N1" > "$MDIR/$IDX.json"
+idx_json "i:$N2" > "$MDIR/$N1.json"
+idx_json "i:$N3" > "$MDIR/$N2.json"
+idx_json "i:$N4" > "$MDIR/$N3.json"
+idx_json "i:$N5" > "$MDIR/$N4.json"   # index child at depth 5
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   > "$STUB_PKG_DIR/tinycdi-backend.json"
@@ -435,8 +476,8 @@ grep -q 'nested deeper than' <<< "$LAST_OUT" \
   || { echo "FAIL: depth-bound refusal not logged"; fails=1; }
 
 # --- cannot enumerate a tagged manifest: refuse, delete nothing ---------
-rm -f "$STUB_MANIFEST_DIR/$TIDX.json"   # tagged manifest is unreadable
-idx_json "$C1" > "$STUB_MANIFEST_DIR/$IDX.json"
+rm -f "$MDIR/$TIDX.json"   # tagged manifest is unreadable
+idx_json "$C1" > "$MDIR/$IDX.json"
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
@@ -446,6 +487,22 @@ run_case "unenumerable tagged manifest: refuse, delete nothing" 0
 expect_deletes tinycdi-backend ""
 grep -q 'cannot enumerate tagged manifest' <<< "$LAST_OUT" \
   || { echo "FAIL: unenumerable-manifest refusal not logged"; fails=1; }
+
+# --- referrers fetch error: fail-closed refusal, nothing deleted --------
+# a failed referrers GET must NOT read as "no referrers" — the tree is
+# possibly incomplete, so the whole image is refused (rc 0, logged)
+idx_json "$C1" > "$MDIR/$IDX.json"
+touch "$RDIR/$IDX.error"
+pkg_json \
+  "$(ver_json 21 "$IDX" "" "$FRESH")" \
+  "$(ver_json 22 "$C1" "" "$FRESH")" \
+  > "$STUB_PKG_DIR/tinycdi-backend.json"
+mkref backend "ghcr.io/tinyorbitvn/tinycdi-backend@$IDX"
+run_case "referrers fetch error: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: referrers-error refusal not logged"; fails=1; }
+rm -f "$RDIR/$IDX.error"
 
 # --- versions-list API error: nothing deleted, job fails ----------------
 rm -f "$STUB_PKG_DIR/tinycdi-backend.json"   # stub gh exits nonzero
@@ -459,7 +516,7 @@ pkg_json \
   "$(ver_json 21 "$IDX" "sha-deadbe" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
   > "$STUB_PKG_DIR/tinycdi-backend.json"
-idx_json "$C1" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "$C1" > "$MDIR/$IDX.json"
 run_case "tagged candidate refuses the whole image" 0
 expect_deletes tinycdi-backend ""
 grep -q 'non-digest tag' <<< "$LAST_OUT" \
@@ -472,7 +529,7 @@ pkg_json \
   "$(ver_json 25 "$SDG" "" "$OLD")" \
   "$(ver_json 27 "$(dg 44)" "" "$OLD")" \
   > "$STUB_PKG_DIR/tinycdi-backend.json"
-idx_json "$C1" "$SDG" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "$C1" "$SDG" > "$MDIR/$IDX.json"
 run_case "pre-existing member excluded, fresh members deleted" 0
 expect_deletes tinycdi-backend "21 22 "
 grep -q 'skipping pre-existing version 25' <<< "$LAST_OUT" \
@@ -483,7 +540,7 @@ pkg_json \
   "$(ver_json 21 "$IDX" "" "$OLD")" \
   "$(ver_json 22 "$C1" "" "$OLD")" \
   > "$STUB_PKG_DIR/tinycdi-backend.json"
-idx_json "$C1" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "$C1" > "$MDIR/$IDX.json"
 run_case "identical rebuild (pre-existing index) deletes nothing" 0
 expect_deletes tinycdi-backend ""
 
