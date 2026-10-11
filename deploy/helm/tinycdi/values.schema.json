@@ -197,6 +197,13 @@
             "port": {"type": "integer", "minimum": 1, "maximum": 65535}
           }
         },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "terminalRowDays": {"type": "integer", "minimum": 0}
+          }
+        },
         "service": {
           "type": "object",
           "additionalProperties": false,

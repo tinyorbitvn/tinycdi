@@ -55,6 +55,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncLeaseSessionMissing("absent")
 	m.IncAuditWriteError("workspace.create")
 	m.IncInternalAuthFailure("no_cert")
+	m.AddRetentionRowsPruned("connection_lease", 7)
+	m.SetRetentionLastSuccess(time.Unix(1760000000, 0))
 	m.IncInternalRevokedSerial("internal")
 	m.SetRevocationEntries(2)
 	m.IncRevocationReloadError()
@@ -84,6 +86,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_lease_session_missing_total",
 		"tinycdi_audit_write_errors_total",
 		"tinycdi_internal_auth_failures_total",
+		"tinycdi_retention_rows_pruned_total",
+		"tinycdi_retention_last_success_timestamp_seconds",
 		"tinycdi_internal_mtls_revoked_serial_total",
 		"tinycdi_internal_mtls_revocation_entries",
 		"tinycdi_internal_mtls_revocation_reload_errors_total",

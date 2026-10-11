@@ -339,6 +339,16 @@ backend:
   trustedProxies: []
   # Ticket audience; defaults to sessionDomain.
   audience: ""
+  # Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
+  # are append-mostly — the leader replica's hourly sweep deletes rows
+  # that have been terminal (lease revoked/expired/superseded, ticket
+  # consumed/revoked/expired) for longer than terminalRowDays, keeping
+  # both tables bounded. A pruned row is unreachable history only — no
+  # reader depends on terminal rows (live leases and outstanding tickets
+  # are never touched). 0 disables the sweep and the tables grow without
+  # bound. Rendered as -terminal-retention-days=<n>.
+  retention:
+    terminalRowDays: 30
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
   # Service, never on the public Service (SEC-33).
   # networkPolicy.prometheusPeers must be set when enabled.
