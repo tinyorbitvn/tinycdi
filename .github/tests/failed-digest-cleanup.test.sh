@@ -133,6 +133,7 @@ chk "helper: referrers fetch fails closed" "$HELPER" \
 chk "helper: referrers 404 means no referrers" "$HELPER" \
   '404) return 0'
 chk "helper: referrers status captured via -w" "$HELPER" '%{http_code}'
+chk "helper: referrers body validated as index" "$HELPER" 'manifests | type'
 chk_absent "helper: no un-namespaced /v2/ path" \
   <(grep -vE '^[[:space:]]*#' "$HELPER") 'v2/\$1/'
 chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
@@ -290,7 +291,10 @@ case "$url" in
       # the -w tail line when the caller asks for it, or via exit 22
       # when the caller passes -f. .code forces a status, .neterr a
       # transport failure.
-      has_f=0; for a in "$@"; do case "$a" in -*f*) has_f=1 ;; esac; done
+      has_f=0; has_w=0
+      for a in "$@"; do
+        case "$a" in -*f*) has_f=1 ;; -w|-w*) has_w=1 ;; esac
+      done
       [ -f "$dir/$base/$d.neterr" ] \
         && { echo 'curl: (6) could not resolve host' >&2; exit 6; }
       code=404
@@ -302,7 +306,9 @@ case "$url" in
       if [ "$has_f" = 1 ] && [ "$code" != 200 ]; then
         echo "curl: (22) $code" >&2; exit 22
       fi
-      printf '%s\n%s\n' "$body" "$code"; exit 0
+      printf '%s\n' "$body"
+      [ "$has_w" = 1 ] && printf '%s\n' "$code"
+      exit 0
     fi
     [ -f "$dir/$base/$d.json" ] && { cat "$dir/$base/$d.json"; exit 0; }
     echo 'curl: (22) 404' >&2; exit 22 ;;
@@ -540,6 +546,21 @@ expect_deletes tinycdi-backend ""
 grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
   || { echo "FAIL: referrers network-error refusal not logged"; fails=1; }
 rm -f "$RDIR/$IDX.neterr"
+
+# --- a 200 body that is not a manifest index must fail closed -----------
+# unparseable JSON, or parseable-but-not-an-index (e.g. an error doc):
+# neither proves "no referrers"
+echo 'this-is-not-json' > "$RDIR/$IDX.json"
+run_case "referrers malformed body: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: malformed-body refusal not logged"; fails=1; }
+echo '{"errors":[{"code":"BLOB_UNKNOWN","message":"x"}]}' > "$RDIR/$IDX.json"
+run_case "referrers non-index body: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: non-index-body refusal not logged"; fails=1; }
+rm -f "$RDIR/$IDX.json"
 
 # --- referrers 404 = no referrers: the tree deletes normally ------------
 # GHCR answers 404 MANIFEST_UNKNOWN for a referrer-less subject (the

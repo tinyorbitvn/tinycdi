@@ -143,7 +143,11 @@ referrers() { # $1 pkg $2 digest $3 bearer — referrer digests; rc 1 on
     200) ;;
     *) return 1 ;;
   esac
-  jq -r '.manifests[]?.digest' <<< "$body"
+  # A 200 body that is not a manifest index — malformed JSON or a
+  # parseable error/empty document — must not read as "no referrers":
+  # it means the tree cannot be proven complete, so fail closed.
+  jq -r 'if (.manifests | type) == "array" then .manifests[]?.digest
+         else error("referrers body is not a manifest index") end' <<< "$body"
 }
 
 versions_tsv() { # $1 pkg — "id|digest|comma-tags|created_at" per version.
