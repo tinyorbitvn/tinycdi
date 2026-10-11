@@ -75,18 +75,24 @@ TAG_OK_RE='^sha256-[0-9a-f]{64}(\.[0-9a-z-]+)?$'
 
 status=0
 
+repo_path() { echo "$ORG/$1"; } # $1 package — namespaced repository
+# path. GHCR keys both the token scope and every /v2/ route on
+# <org>/<pkg>: a bare package name is rejected (400 NAME_INVALID on
+# /v2/, 400/403 on the token endpoint). Every call goes through this
+# one helper so the two surfaces cannot drift apart again.
+
 ghcr_token() { # $1 package — pull-scope bearer token for the registry
   # API. The scope MUST carry the org namespace — repository:<pkg>:pull
   # is rejected by the token endpoint (400) and its token cannot pull
   # the namespaced repository (403 on every manifest/referrer GET).
   curl -fsSL -u "${GITHUB_ACTOR:-x}:$GH_TOKEN" \
-    "https://ghcr.io/token?scope=repository:$ORG/$1:pull" | jq -r '.token // empty'
+    "https://ghcr.io/token?scope=repository:$(repo_path "$1"):pull" | jq -r '.token // empty'
 }
 
 manifest_json() { # $1 pkg $2 digest $3 bearer — raw manifest document
   curl -fsSL -H "Authorization: Bearer $3" \
     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-    "https://ghcr.io/v2/$1/manifests/$2"
+    "https://ghcr.io/v2/$(repo_path "$1")/manifests/$2"
 }
 
 MAX_DEPTH=4
@@ -116,11 +122,14 @@ tree_digests() { # $1 pkg $2 root digest $3 bearer — every descendant
   done
 }
 
-referrers() { # $1 pkg $2 digest $3 bearer — referrer digests; empty when none
+referrers() { # $1 pkg $2 digest $3 bearer — referrer digests; rc 1 on
+  # fetch error. A failed fetch must NOT read as "no referrers": the
+  # caller cannot prove the run's tree is complete, so it fails closed
+  # (refuses the whole image) instead.
   curl -fsSL -H "Authorization: Bearer $3" \
     -H 'Accept: application/vnd.oci.image.index.v1+json' \
-    "https://ghcr.io/v2/$1/referrers/$2" 2>/dev/null \
-    | jq -r '.manifests[]?.digest' || true
+    "https://ghcr.io/v2/$(repo_path "$1")/referrers/$2" \
+    | jq -r '.manifests[]?.digest'
 }
 
 versions_tsv() { # $1 pkg — "id|digest|comma-tags|created_at" per version.
@@ -162,7 +171,10 @@ clean_package() { # $1 pkg $2 pushed index digest
        return 1 ;;
   esac
   while IFS= read -r d; do [ -n "$d" ] && cand["$d"]=1; done <<< "$children"
-  refs="$(referrers "$pkg" "$idx" "$tok")"
+  if ! refs="$(referrers "$pkg" "$idx" "$tok")"; then
+    echo "::warning::$pkg@$idx: referrers fetch failed — refusing to delete (tree possibly incomplete)"
+    return 0
+  fi
   while IFS= read -r d; do [ -n "$d" ] && cand["$d"]=1; done <<< "$refs"
 
   if ! rows="$(versions_tsv "$pkg")"; then
