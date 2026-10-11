@@ -130,6 +130,11 @@ chk "helper: namespaced GHCR pull scope" "$HELPER" \
 chk "helper: single repository-path helper" "$HELPER" 'repo_path()'
 chk "helper: referrers fetch fails closed" "$HELPER" \
   'referrers fetch failed — refusing to delete'
+chk "helper: referrers 404 means no referrers" "$HELPER" \
+  '404) return 0'
+chk "helper: referrers status captured via -w" "$HELPER" '%{http_code}'
+chk "helper: referrers body validated as index" "$HELPER" \
+  'manifests \| type'
 chk_absent "helper: no un-namespaced /v2/ path" \
   <(grep -vE '^[[:space:]]*#' "$HELPER") 'v2/\$1/'
 chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
@@ -281,9 +286,32 @@ case "$url" in
     esac
     dir="$STUB_MANIFEST_DIR"; [ "$kind" = referrers ] && dir="$STUB_REFERRER_DIR"
     [ -f "$dir/$base/$d.error" ] && { echo 'curl: (22) 500' >&2; exit 22; }
+    if [ "$kind" = referrers ]; then
+      # model GHCR referrers semantics: a referrer-less subject answers
+      # 404 MANIFEST_UNKNOWN (not 200 + empty index); status travels in
+      # the -w tail line when the caller asks for it, or via exit 22
+      # when the caller passes -f. .code forces a status, .neterr a
+      # transport failure.
+      has_f=0; has_w=0
+      for a in "$@"; do
+        case "$a" in -*f*) has_f=1 ;; -w|-w*) has_w=1 ;; esac
+      done
+      [ -f "$dir/$base/$d.neterr" ] \
+        && { echo 'curl: (6) could not resolve host' >&2; exit 6; }
+      code=404
+      body='{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}'
+      [ -f "$dir/$base/$d.code" ] \
+        && { code="$(cat "$dir/$base/$d.code")"; body='{}'; }
+      [ -f "$dir/$base/$d.json" ] \
+        && { code=200; body="$(cat "$dir/$base/$d.json")"; }
+      if [ "$has_f" = 1 ] && [ "$code" != 200 ]; then
+        echo "curl: (22) $code" >&2; exit 22
+      fi
+      printf '%s\n' "$body"
+      [ "$has_w" = 1 ] && printf '%s\n' "$code"
+      exit 0
+    fi
     [ -f "$dir/$base/$d.json" ] && { cat "$dir/$base/$d.json"; exit 0; }
-    # a subject with no referrers answers 200 + an empty index
-    [ "$kind" = referrers ] && { echo '{"manifests":[]}'; exit 0; }
     echo 'curl: (22) 404' >&2; exit 22 ;;
   *) echo "curl: unstubbed $url" >&2; exit 1 ;;
 esac
@@ -492,17 +520,58 @@ grep -q 'cannot enumerate tagged manifest' <<< "$LAST_OUT" \
 # a failed referrers GET must NOT read as "no referrers" — the tree is
 # possibly incomplete, so the whole image is refused (rc 0, logged)
 idx_json "$C1" > "$MDIR/$IDX.json"
-touch "$RDIR/$IDX.error"
+echo "500" > "$RDIR/$IDX.code"
 pkg_json \
   "$(ver_json 21 "$IDX" "" "$FRESH")" \
   "$(ver_json 22 "$C1" "" "$FRESH")" \
   > "$STUB_PKG_DIR/tinycdi-backend.json"
 mkref backend "ghcr.io/tinyorbitvn/tinycdi-backend@$IDX"
-run_case "referrers fetch error: fail-closed refusal" 0
+run_case "referrers 5xx: fail-closed refusal" 0
 expect_deletes tinycdi-backend ""
 grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
   || { echo "FAIL: referrers-error refusal not logged"; fails=1; }
-rm -f "$RDIR/$IDX.error"
+rm -f "$RDIR/$IDX.code"
+
+# --- every other referrers error class must also fail closed ------------
+for st in 401 403 400 503; do
+  echo "$st" > "$RDIR/$IDX.code"
+  run_case "referrers HTTP $st: fail-closed refusal" 0
+  expect_deletes tinycdi-backend ""
+  grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+    || { echo "FAIL: referrers $st refusal not logged"; fails=1; }
+  rm -f "$RDIR/$IDX.code"
+done
+touch "$RDIR/$IDX.neterr"
+run_case "referrers network error: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: referrers network-error refusal not logged"; fails=1; }
+rm -f "$RDIR/$IDX.neterr"
+
+# --- a 200 body that is not a manifest index must fail closed -----------
+# unparseable JSON, or parseable-but-not-an-index (e.g. an error doc):
+# neither proves "no referrers"
+echo 'this-is-not-json' > "$RDIR/$IDX.json"
+run_case "referrers malformed body: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: malformed-body refusal not logged"; fails=1; }
+echo '{"errors":[{"code":"BLOB_UNKNOWN","message":"x"}]}' > "$RDIR/$IDX.json"
+run_case "referrers non-index body: fail-closed refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'referrers fetch failed — refusing to delete' <<< "$LAST_OUT" \
+  || { echo "FAIL: non-index-body refusal not logged"; fails=1; }
+rm -f "$RDIR/$IDX.json"
+
+# --- referrers 404 = no referrers: the tree deletes normally ------------
+# GHCR answers 404 MANIFEST_UNKNOWN for a referrer-less subject (the
+# default stub answer with no fixture present); the subject's
+# existence is already proven by the manifest fetch, so 404 is
+# "empty", not "unknown" — the same case under the OLD code passes
+# only because '|| true' also hid the error, which is why the error
+# classes above carry the weight.
+run_case "referrers 404 = empty list: tree deletes" 0
+expect_deletes tinycdi-backend "21 22 "
 
 # --- versions-list API error: nothing deleted, job fails ----------------
 rm -f "$STUB_PKG_DIR/tinycdi-backend.json"   # stub gh exits nonzero
