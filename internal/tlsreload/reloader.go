@@ -32,9 +32,14 @@ type Reloader struct {
 type options struct {
 	interval time.Duration
 	log      *slog.Logger
+	// onError and onSwap observe Blocklist reloads only (ADR 0009): the
+	// kept-last-good reload-error counter and the loaded-entries gauge.
+	// Reloader and CAPool never call them.
+	onError func()
+	onSwap  func(entries int)
 }
 
-// Option configures a Reloader or a CAPool.
+// Option configures a Reloader, a CAPool or a Blocklist.
 type Option func(*options)
 
 // WithInterval sets how often the files are checked (default 30s).
