@@ -340,6 +340,16 @@ backend:
   trustedProxies: []
   # Ticket audience; defaults to sessionDomain.
   audience: ""
+  # Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
+  # are append-mostly — the leader replica's hourly sweep deletes rows
+  # that have been terminal (lease revoked/expired/superseded, ticket
+  # consumed/revoked/expired) for longer than terminalRowDays, keeping
+  # both tables bounded. A pruned row is unreachable history only — no
+  # reader depends on terminal rows (live leases and outstanding tickets
+  # are never touched). 0 disables the sweep and the tables grow without
+  # bound. Rendered as -terminal-retention-days=<n>.
+  retention:
+    terminalRowDays: 30
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
   # Service, never on the public Service (SEC-33).
   # networkPolicy.prometheusPeers must be set when enabled.
@@ -712,7 +722,9 @@ runtime:
   # egressPodSelector without egressNamespaceSelector matches pods in
   # the workspace's own namespace only (NetworkPolicyPeer semantics).
   # DNS egress is unaffected, and EMPTY values keep today's behaviour
-  # (no flag is rendered).
+  # (no flag is rendered). DEPRECATED DEFAULT: unrestricted ClusterOnly
+  # egress flips to restricted in v1.2 — the install NOTES warn while a
+  # seeded ClusterOnly template runs with these unset.
   #   networkProfiles:
   #     clusterOnly:
   #       egressNamespaceSelector:
@@ -816,6 +828,10 @@ templates: []
   #       tolerations: [{key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}]
   #     resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
   #     bootDeadline: 5m
+  #     # Isolated denies all egress except cluster DNS — DNS resolution
+  #     # stays allowed by design (a deliberate unidirectional channel).
+  #     # ClusterOnly egress narrows via runtime.networkProfiles above;
+  #     # its unrestricted default flips in v1.2.
   #     networkProfile: Isolated
   #     clipboardPolicy: Disabled
   #     lifecycle: {idleTimeout: 30m, disconnectTimeout: 5m, maxDuration: 8h, dataPolicy: Ephemeral}

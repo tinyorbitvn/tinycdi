@@ -419,6 +419,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// just keeps every replica from paying the scan.
 	b.singletons = append(b.singletons, rateLimitWindowSweepLoop(db, log))
 
+	// Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
+	// are append-mostly, so without a sweep every deployment's history
+	// grows both tables without bound — and every index build or
+	// revocation scan pays for it. The leader prunes rows terminal for
+	// longer than -terminal-retention-days in bounded batches; 0 disables.
+	if cfg.TerminalRetentionDays > 0 {
+		b.singletons = append(b.singletons,
+			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
+	}
+
 	// The loops registered above are read-modify-write without a claim, so
 	// only the replica holding the Postgres leader lock runs them.
 	b.electSingletons(db, leaderRetryInterval)

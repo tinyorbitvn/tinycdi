@@ -19,10 +19,14 @@ Rules for new migrations:
   cannot run in a transaction. A plain `CREATE INDEX` on a non-trivial
   table takes a `SHARE` lock that blocks all writes for the build — the
   whole table stalls while replicas roll (migrations 020 and 023 do this
-  to `connection_lease`/`launch_ticket`, which are never pruned; see
-  `docs/runbooks/upgrade.md`). For a table that can be large in
-  production, ship the index as a documented out-of-band
-  `CREATE INDEX CONCURRENTLY` runbook step instead — or accept the lock
+  to `connection_lease`/`launch_ticket`; see `docs/runbooks/upgrade.md`).
+  For a table that can be large in production, ship the index as a
+  documented `CREATE INDEX CONCURRENTLY IF NOT EXISTS` runbook step in
+  `docs/runbooks/upgrade.md`, run by the operator *before* the upgrade
+  and named to match the `IF NOT EXISTS` name the migration would have
+  used — the migration's own `IF NOT EXISTS` statement is then a cheap
+  no-op when the runbook ran and the slow path when it did not. This
+  stands until the runner gains a no-transaction mode. Accept the lock
   only when the table is bounded small, and say why in the file header.
 - **No data migrations that outlive the transaction budget.** Row rewrites
   belong in code paths or a documented operator step, not in a startup

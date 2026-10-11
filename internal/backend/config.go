@@ -116,9 +116,14 @@ type Config struct {
 	ExpiryInterval       time.Duration
 	RetainedSyncInterval time.Duration
 	RecoveryInterval     time.Duration
-	ImageStaleAfter      time.Duration
-	ImageBlockAfter      time.Duration // 0 disables the stale-image admission block (E3)
-	LoginRate            int           // per-client requests/min on the login-family routes; 0 disables
+	// TerminalRetentionDays is how long a connection_lease/launch_ticket
+	// row is kept after reaching a terminal state; the leader's hourly
+	// sweep deletes older rows. 0 disables the sweep — the tables then
+	// grow without bound (SR-4-F5).
+	TerminalRetentionDays int
+	ImageStaleAfter       time.Duration
+	ImageBlockAfter       time.Duration // 0 disables the stale-image admission block (E3)
+	LoginRate             int           // per-client requests/min on the login-family routes; 0 disables
 
 	// Session listener (the former cmd/gateway surface).
 	SessionListen       string // empty disables the session listener
@@ -266,6 +271,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"expiry planner sweep interval (idle/disconnect/max-duration checks)")
 	fs.DurationVar(&c.RetainedSyncInterval, "retained-sync-interval", envDur(getenv, "TCDI_RETAINED_SYNC_INTERVAL", 30*time.Second),
 		"retained-inventory PVC->record sync interval; <=0 disables (env TCDI_RETAINED_SYNC_INTERVAL)")
+	fs.IntVar(&c.TerminalRetentionDays, "terminal-retention-days", envInt(getenv, "TCDI_TERMINAL_RETENTION_DAYS", 30),
+		"days a terminal connection_lease/launch_ticket row is kept before the leader's hourly sweep deletes it; 0 disables (env TCDI_TERMINAL_RETENTION_DAYS)")
 	fs.DurationVar(&c.RecoveryInterval, "recovery-interval", envDur(getenv, "TCDI_RECOVERY_INTERVAL", 30*time.Second),
 		"quota/intent recovery pass interval; one pass runs at every leader acquisition, then every interval; "+
 			"<=0 runs the single startup pass only. Quota settlement is event-driven (Workspace informer) with "+
@@ -390,6 +397,9 @@ func (c *Config) validate() error {
 	}
 	if c.SessionStreamCap < 1 {
 		return errors.New("-session-stream-cap must be >= 1 — the per-workspace upstream bound cannot be disabled (set a large value instead)")
+	}
+	if c.TerminalRetentionDays < 0 {
+		return errors.New("-terminal-retention-days must be >= 0 (0 disables the retention sweep)")
 	}
 	if c.RateLimitReplicas < 1 {
 		return errors.New("-rate-limit-replicas must be >= 1")

@@ -55,6 +55,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.IncLeaseSessionMissing("absent")
 	m.IncAuditWriteError("workspace.create")
 	m.IncInternalAuthFailure("no_cert")
+	m.AddRetentionRowsPruned("connection_lease", 7)
+	m.SetRetentionLastSuccess(time.Unix(1760000000, 0))
 
 	want := []string{
 		"tinycdi_http_requests_total",
@@ -81,6 +83,8 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_lease_session_missing_total",
 		"tinycdi_audit_write_errors_total",
 		"tinycdi_internal_auth_failures_total",
+		"tinycdi_retention_rows_pruned_total",
+		"tinycdi_retention_last_success_timestamp_seconds",
 	}
 	fams := gatherFamilies(t, reg)
 	for _, name := range want {

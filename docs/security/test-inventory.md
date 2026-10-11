@@ -386,6 +386,10 @@ substitute for review).
   policy (`TestClusterOnlyEgressDefaultUnrestricted`,
   `TestClusterOnlyEgressRestrictionOnPolicy`,
   `TestClusterOnlyEgressPortsOnlyStaysPodOnly`).
+  `TestClusterOnlyEgressDeprecationNotice` (v1.1, SR-2-F8) pins the
+  install-NOTES warning: shown while a seeded `ClusterOnly` template
+  runs with the narrowing unset, silent once any `egress*` value is set
+  or no `ClusterOnly` template is seeded.
 - `internal/operator/snapshot_annotation_vap_envtest_test.go` — envtest
   enforcement proof for the optional ValidatingAdmissionPolicy sample
   (`config/admissionpolicy/`, S36): a real apiserver denies non-operator
