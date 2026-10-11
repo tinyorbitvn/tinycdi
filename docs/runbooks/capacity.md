@@ -56,6 +56,19 @@ they share are pulled once per node). Keep runtime
 images resident on the worker nodes that may schedule workspace pods, or
 accept the pull time inside `bootDeadline`.
 
+**Postgres table growth is bounded.** The session-layer tables
+`connection_lease` and `launch_ticket` are append-mostly; since v1.1 the
+leader replica runs an hourly retention sweep
+(`-terminal-retention-days` / `backend.retention.terminalRowDays`,
+default 30, `0` disables) that deletes rows terminal for longer than the
+window — 500 per statement with a pause between batches, so the sweep
+never holds the tables across a redeem or sign-out. Table size is then
+roughly `terminal transitions in the window + ≤1 abandoned 'active'
+lease per workspace`; only the last-success gauge going stale means the
+sweep is not running. Until v1.1 both tables grew without bound — the
+upgrade note for migrations 020/023's index builds
+(`docs/runbooks/upgrade.md`) is why that mattered.
+
 ## Tenant quota — the hard gate
 
 Quota is enforced in Postgres, not by cluster capacity:
@@ -287,6 +300,7 @@ exposes no metrics endpoint (the chart pins `--metrics-bind-address=0`).
 | Stuck teardown | `tinycdi_finalizers_stuck` | > 0 — see `docs/runbooks/stuck-finalizer.md` |
 | Quota drift | `tinycdi_quota_drift{tenant}` | ≠ 0 — reservation/actual disagreement; run recovery reconcile |
 | PVC leaks | `tinycdi_pvc_leaks` | > 0 — orphaned volumes cost disk quota/$$ |
+| Retention sweep | `tinycdi_retention_rows_pruned_total{table}` + `tinycdi_retention_last_success_timestamp_seconds` | last-success stale > ~2 h — the leader's terminal-row sweep is not running; the session tables resume growing without bound |
 | Boot failures | `tinycdi_boot_deadline_exceeded_total` | rising — image pull or scheduling trouble |
 | API health | `tinycdi_http_requests_total` / `tinycdi_http_request_duration_seconds` (by `listener`) | 5xx-class growth, p95 on `/v1/workspaces` |
 

@@ -138,3 +138,48 @@ func TestClusterOnlyEgressSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestClusterOnlyEgressDeprecationNotice: while a seeded template uses
+// networkProfile: ClusterOnly and the #148 narrowing values are unset,
+// install NOTES must warn that the default flips to restricted egress in
+// v1.2 and name the values to set now. Setting any narrowing value — or
+// seeding no ClusterOnly template — silences it.
+func TestClusterOnlyEgressDeprecationNotice(t *testing.T) {
+	example := filepath.Join("tinycdi", "ci", "example-values.yaml")
+	seedClusterOnly := "--set=templates[0].spec.networkProfile=ClusterOnly"
+
+	notes := renderNotes(t, "-f", example, seedClusterOnly)
+	for _, want := range []string{
+		"WARNING", "v1.2",
+		"runtime.networkProfiles.clusterOnly.egressNamespaceSelector",
+		"runtime.networkProfiles.clusterOnly.egressPodSelector",
+		"runtime.networkProfiles.clusterOnly.egressPorts",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("ClusterOnly seeded with unset narrowing: NOTES must contain %q, got:\n%s", want, notes)
+		}
+	}
+
+	// Any narrowing value set = the restricted posture is already opted in.
+	for _, narrowing := range []string{
+		`runtime.networkProfiles.clusterOnly.egressNamespaceSelector={"matchExpressions":[{"key":"workspaces.cdi.tinyorbit.vn/tenant","operator":"Exists"}]}`,
+		`runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"TCP","port":443}]`,
+	} {
+		if notes := renderNotes(t, "-f", example, seedClusterOnly, "--set-json", narrowing); strings.Contains(notes, "ClusterOnly egress") {
+			t.Errorf("narrowing %s: NOTES must not warn, got:\n%s", narrowing, notes)
+		}
+	}
+
+	// example-values seeds Isolated templates only — no ClusterOnly in
+	// use means no warning. Non-ClusterOnly seeded profiles stay silent.
+	if notes := renderNotes(t, "-f", example); strings.Contains(notes, "ClusterOnly egress") {
+		t.Errorf("no ClusterOnly template seeded: NOTES must not warn, got:\n%s", notes)
+	}
+	// InternetOnly needs operator.clusterCIDRs (SEC-02) for the render to
+	// succeed at all.
+	if notes := renderNotes(t, "-f", example,
+		"--set", "templates[0].spec.networkProfile=InternetOnly",
+		"--set", "operator.clusterCIDRs[0]=10.0.0.0/8"); strings.Contains(notes, "ClusterOnly egress") {
+		t.Errorf("InternetOnly template seeded: NOTES must not warn, got:\n%s", notes)
+	}
+}

@@ -1733,6 +1733,10 @@ spec:
             # on a 0 divisor. Rendered before extraArgs so an override
             # there (e.g. an HPA's maxReplicas) wins.
             - -rate-limit-replicas=2
+            # Terminal-row retention (SR-4-F5): the leader's hourly sweep
+            # deletes connection_lease/launch_ticket rows terminal for
+            # longer than this — 0 disables and the tables grow unbounded.
+            - -terminal-retention-days=30
           env:
             - name: TCDI_DATABASE_URL
               valueFrom:

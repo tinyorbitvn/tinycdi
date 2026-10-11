@@ -37,6 +37,27 @@ plus containers, no cluster required. See
 `tests/integration/linux_runtime_test.go` for the exact container contract
 (mounted TLS material + credentials, seccomp profile, dropped caps).
 
+## Database migrations
+
+Authoring rules live in `internal/store/migrations/README.md` — expand-only,
+idempotent, no data rewrites that outlive the per-migration transaction.
+One rule deserves repeating here because it is easy to get wrong:
+
+**Every migration file runs inside its own transaction.** The runner
+(`internal/store/migrate.go`, `applyMigration`) applies each
+`NNN_name.sql` in a single transaction, so `CREATE INDEX CONCURRENTLY`
+can never appear in a migration file — and a plain `CREATE INDEX` on a
+large append-mostly table takes a `SHARE` lock that blocks all writes
+for the build's duration (the 020/023 builds on `connection_lease` /
+`launch_ticket` are the documented example, SR-4-F5). Until the runner
+gains a no-transaction mode, an index on a table that can be large in
+production ships instead as a **documented
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS` runbook step** in
+`docs/runbooks/upgrade.md`, run by the operator *before* the upgrade and
+named to match the `IF NOT EXISTS` name the migration would have used —
+the migration can then keep its own `IF NOT EXISTS` statement as a cheap
+no-op when the runbook ran, and as the slow path when it did not.
+
 ## Local image builds
 
 Every image builds from a clean checkout with repo-root context:

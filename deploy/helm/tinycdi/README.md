@@ -239,7 +239,28 @@ objects. It **keeps**:
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled` |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+
+`<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
+on this deny-list — dev-surface env names plus the env equivalents of
+security-relevant flags the chart exposes as first-class values (an env
+var would bypass the chart's wiring/validation). Each render error names
+the value to set instead:
+
+| Denied `extraEnv` name | Set instead |
+|---|---|
+| `TCDI_DEV_INSECURE_DB` / `PGSSLMODE` | `database.tls.mode` (verify-ca/verify-full) |
+| `TCDI_DEV_ALLOW_NO_BROKER` | `operator.devAllowNoBroker` (dev-only) |
+| `TCDI_METRICS_LISTEN` | `backend.metrics.enabled` |
+| `TCDI_KASM_ADAPTER_IMAGE` | `kasmAdapter.enabled` + `kasmAdapter.image.digest` |
+| `TCDI_OPERATOR_CN` | `backend.operatorCN` |
+| `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
+| `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
+| `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
+| `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
+| `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
+| `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
+| `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
 
 ### Component-specific highlights
 
@@ -256,6 +277,7 @@ objects. It **keeps**:
 | `backend.hostAliases` | `[]` | pod `spec.hostAliases` on the backend Deployment — e.g. resolve an in-cluster OIDC issuer host to a Service ClusterIP when cluster DNS cannot; empty renders nothing |
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
+| `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
@@ -331,9 +353,42 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
 | `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps pre-v0.3.1 packed-by-scoring placement |
-| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies. Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
+| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies (**deprecated default — flips to restricted in v1.2**, see [ClusterOnly egress](#clusteronly-egress)). Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
 | `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
 | `runtime.networkProfiles.clusterOnly.egressPorts` | `[]` | optional port/protocol list on the same rule (`[{protocol: TCP, port: 443}]`); empty keeps every port open to the selected destinations |
+
+#### ClusterOnly egress
+
+`networkProfile: ClusterOnly` workspaces may reach **any pod in any
+namespace on any port** by default — confinement rests entirely on
+destination-side ingress policies, so any pod without its own
+NetworkPolicy is reachable. The opt-in
+`runtime.networkProfiles.clusterOnly.*` values render
+`--runtime-clusteronly-egress`, which rewrites every workspace's
+ClusterOnly egress rule to a single narrowed peer — selector-matched
+namespaces/pods, optionally port-limited — and can never admit non-pod
+destinations. **Deprecated default:** the default flips to restricted
+egress in **v1.2**; install NOTES warn while a seeded `ClusterOnly`
+template runs with the narrowing unset. Opt in now — e.g. confine
+ClusterOnly egress to the managed tenant namespaces:
+
+```yaml
+runtime:
+  networkProfiles:
+    clusterOnly:
+      egressNamespaceSelector:
+        matchExpressions:
+          - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+      egressPodSelector: {}          # optional second axis (pods in the selected namespaces)
+      egressPorts:                   # optional port/protocol list (empty = every port)
+        - {protocol: TCP, port: 443}
+```
+
+To **keep today's unrestricted posture** after the v1.2 flip, pin the
+explicit unrestricted value the v1.2 notes will document — see
+`docs/releases/v1.1.0.md` "Upgrading". DNS resolution is unaffected
+either way: every profile keeps cluster DNS egress by design — for
+`Isolated` that is the only egress, a deliberate unidirectional channel.
 
 #### Nodes without AppArmor
 

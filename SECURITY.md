@@ -408,12 +408,18 @@ v0.2)
     `TestHardeningDevGateBypasses` (extraArgs, capability lists, Unconfined,
     seLinuxOptions, root groups, hostPath volumes: all need
     `dev.enabled`), `TestHardeningVerifierLeastPrivilege`,
-    `TestHardeningVerifierRealSysfsProof`.
+    `TestHardeningVerifierRealSysfsProof`,
+    `TestExtraEnvDevSurfaceNamesDenied`, `TestExtraEnvManagedDuplicateDenied`,
+    `TestExtraEnvMalformedEntryFails` (`extraEnv` carrying a dev-surface
+    env name, the env equivalent of a security-relevant chart value —
+    `TCDI_DEV_*`, `PG*`, `TCDI_CONTROL_TOKEN`, `TCDI_TRUSTED_PROXIES`,
+    `TCDI_UPSTREAM_CA`, `TCDI_OIDC_POST_LOGOUT_REDIRECT`,
+    `TCDI_TENANT_QUOTAS` — duplicating a chart-managed env var such as
+    `POD_NAMESPACE`, or carrying no name: all fail the render unless
+    `dev.enabled`).
     *Not yet enforced:*
     - seccomp and read-only-root assertions on every platform pod;
     - `readOnlyRootFilesystem` and `hostUsers: false` on runtime pods;
-    - `extraEnv` equivalents of gated flags (`TCDI_DEV_*`, `PG*`,
-      `POD_NAMESPACE`);
     - `localhost/<name>` profile names, which are checked only by
       pattern (allowlist `tinycdi-browser`);
     - the installer verifier still shares `hostPID`.
@@ -431,7 +437,12 @@ v0.2)
       `runtime.networkProfiles.clusterOnly.*` values
       (`--runtime-clusteronly-egress`) narrow the rule to
       selector-matched namespaces/pods and/or ports; a ports-only
-      narrowing still never admits non-pod destinations;
+      narrowing still never admits non-pod destinations. The default is
+      deprecated and flips to restricted egress in v1.2 — install NOTES
+      warn while a seeded `ClusterOnly` template runs unrestricted;
+    - `Isolated` denies all egress **except cluster DNS** — DNS
+      resolution stays allowed by design (a deliberate unidirectional
+      channel);
     - generated policies are reconciled when they drift;
     - an empty peer list fails the render and never means "any".
 
@@ -599,9 +610,12 @@ v0.2)
      is required when you seed `InternetOnly` templates, and it matters
      for any range outside RFC 1918;
    - keep `extraArgs`/`extraEnv` empty on every component: the chart
-     rejects known weakening flags unless `dev.enabled`, but cannot catch
-     every override;
-   - prefer the `Isolated` profile where the use case allows it;
+     rejects known weakening flags and env names unless `dev.enabled`,
+     but cannot catch every override;
+   - prefer the `Isolated` profile where the use case allows it —
+     `Isolated` still permits cluster DNS egress by design (a deliberate
+     unidirectional channel); workloads needing even DNS blocked are out
+     of profile scope;
    - an FQDN allowlist needs an egress proxy.
 6. **Namespaces:**
    - release namespace PSS `enforce=baseline` (`warn=restricted`);
