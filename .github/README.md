@@ -51,14 +51,24 @@ split publish rights from scanner execution (SEC-04/SEC-05):
    apply the same strict form to artifact-supplied refs **before**
    writing them to `$GITHUB_ENV` (SUPF-10).
 4. **cleanup** job (failure only; `packages: write` + `actions: read`) runs
-   when the gate — or any upstream leg — fails on a publishing run
-   (SR-5-F3). It downloads this run's `image-ref-*` artifacts by exact
-   name and `.github/scripts/cleanup-failed-digests.sh` deletes exactly
-   the versions they pushed: each index digest, its manifest children
+   when any pre-publish leg fails on a publishing run (SR-5-F3): build,
+   scan, and on release.yml also `chart`/`binaries`. It downloads this
+   run's `image-ref-*` artifacts by exact name and
+   `.github/scripts/cleanup-failed-digests.sh` deletes exactly the
+   versions they pushed: each index digest, its manifest children
    (per-platform + buildkit attestation entries) and its OCI referrers,
-   including cosign `sha256-<digest>.*` tag-derived versions. Deletion
-   is strictly run-scoped — never a sweep of unlabelled versions —
-   and fails closed on any version carrying a non-digest tag.
+   including cosign `sha256-<digest>.*` tag-derived versions. A version
+   goes only when BOTH bounds hold — it was created within this run's
+   window (`created_at >= run_started_at`, so a dedup'd identical
+   rebuild's pre-existing version is never touched) and it is reachable
+   only from this run's tree. If ANY candidate carries a non-digest tag
+   or is reachable from a tagged manifest (index children + cosign
+   `sha256-<hex>.*` artifacts of tagged versions are resolved and
+   counted), NOTHING is deleted for that image — the refusal is logged
+   and does not fail the job. Coverage limits: the `promote`/`publish`
+   leg is deliberately outside `needs` (its output may already be
+   signed/tagged — an operator decision, not auto-deletion), and a
+   cancelled run can run nothing.
 
 A non-publishing run (`release.yml` dry_run, `images.yml` on a non-main ref)
 exports the image as a `type=docker` tar artifact instead; the scan job scans

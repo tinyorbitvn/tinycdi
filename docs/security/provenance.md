@@ -117,10 +117,15 @@ pushed (SR-5-F3): each pushed index, its per-platform and build
 attestation-manifest children and its referrers, resolved from the
 run's own `image-ref` artifacts by
 `.github/scripts/cleanup-failed-digests.sh`. The deletion is strictly
-run-scoped — never a sweep of unlabelled GHCR versions — and fails
-closed on any version carrying a non-digest tag, so a gate-failed
-`ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does not stay
-pullable-by-digest.
+run-scoped — never a sweep of unlabelled GHCR versions — and double
+bounded: a version goes only if it was created inside the run's window
+(`created_at >= run_started_at`, so a dedup'd identical rebuild's
+pre-existing version is untouched) and is reachable solely from that
+run's tree. If any candidate carries a non-digest tag or is reachable
+from a tagged manifest, nothing is deleted for that image — so a
+gate-failed `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does
+not stay pullable-by-digest and a published release can never be
+cleaned up by a failed run.
 
 Even in the window between push and cleanup the residual carries no
 release trust:

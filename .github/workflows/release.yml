@@ -1475,13 +1475,19 @@ jobs:
     # pullable-by-digest. Deletes exactly the versions this run pushed —
     # each index, its per-platform/attestation-manifest children and its
     # referrers — resolved from this run's own image-ref artifacts by
-    # cleanup-failed-digests.sh. Never a blanket untagged sweep: GHCR
-    # keeps published images' multi-arch children and cosign sha256-*
-    # artifacts as unlabelled versions, and sweeping them breaks
-    # releases. A version carrying any non-digest tag is refused.
+    # cleanup-failed-digests.sh, bounded to versions created inside this
+    # run's window and refusing (whole-tree) any version reachable from a
+    # tagged manifest. Never a blanket untagged sweep: GHCR keeps
+    # published images' multi-arch children and cosign sha256-* artifacts
+    # as unlabelled versions, and sweeping them breaks releases.
     # Dry runs push nothing and are skipped.
+    # Covers every pre-publish leg (prepare, base, images, scan, chart,
+    # binaries). Legs this job does NOT cover: `publish` (its output may
+    # already be signed/tagged — an operator decision, not
+    # auto-deletion) and cancelled runs (a cancelled job graph runs
+    # nothing).
     name: delete this run's digests (failed run)
-    needs: [prepare, base, images, scan]
+    needs: [prepare, base, images, scan, chart, binaries]
     if: failure() && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -1506,13 +1512,22 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p refs
-          mapfile -t imgs < <(jq -r '.[]' <<< "$RELEASE_IMAGES")
+          mapfile -t imgs < <(jq -r '.[]' <<< "${RELEASE_IMAGES:-[]}")
           for img in "${imgs[@]}"; do
             gh run download "$GITHUB_RUN_ID" -n "image-ref-$img" -D refs \
               || echo "::warning::no image-ref-$img artifact — leg may have failed before pushing"
           done
 
-      - name: delete this run's pushed digests (fail-closed on tags)
+      - name: delete this run's pushed digests (run-scoped, fail-closed)
+        # RUN_STARTED_AT bounds deletions to versions created within
+        # THIS run — a pre-existing (dedup'd identical-rebuild) version
+        # is never touched; the helper additionally refuses any version
+        # reachable from a tagged manifest (whole-tree refusal).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/cleanup-failed-digests.sh refs
+        run: |
+          RUN_STARTED_AT="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq .run_started_at)"
+          export RUN_STARTED_AT
+          .github/scripts/cleanup-failed-digests.sh refs
