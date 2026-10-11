@@ -82,6 +82,9 @@
 - [adr/0008-kasmvnc-bruteforce.md](adr/0008-kasmvnc-bruteforce.md) —
   KasmVNC endpoint brute-force posture: reachability and credential
   channel analysis closing threat-model S18 (accepted — no build)
+- [adr/0009-mtls-cert-revocation.md](adr/0009-mtls-cert-revocation.md) —
+  per-certificate revocation on the internal mTLS API: serial blocklist +
+  shorter lifetimes (SR-3-F5; proposed)
 
 ## Elsewhere in the repo
 
