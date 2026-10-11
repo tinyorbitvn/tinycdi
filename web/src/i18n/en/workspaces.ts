@@ -99,6 +99,8 @@ export default {
   "workspaces.detail.action.stopping": "Stopping…",
   "workspaces.detail.connectStatus": "connect status",
   "workspaces.detail.connectUnavailable": "Connect unavailable: {reason}",
+  "workspaces.detail.adminContext":
+    "This workspace belongs to {owner}. You are acting on it as a tenant administrator; Connect is only available to the owner.",
   "workspaces.detail.blocker.stopped": "desired state is Stopped",
   "workspaces.detail.blocker.connectionReady":
     "ConnectionReady={status} ({reason})",

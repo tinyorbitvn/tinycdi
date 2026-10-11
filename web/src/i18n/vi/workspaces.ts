@@ -102,6 +102,8 @@ export default {
   "workspaces.detail.action.stopping": "Đang dừng…",
   "workspaces.detail.connectStatus": "trạng thái kết nối",
   "workspaces.detail.connectUnavailable": "Không kết nối được: {reason}",
+  "workspaces.detail.adminContext":
+    "Workspace này thuộc về {owner}. Bạn đang thao tác với vai trò quản trị viên tenant; chỉ chủ sở hữu mới có thể Kết nối.",
   "workspaces.detail.blocker.stopped": "trạng thái mong muốn là Đã dừng",
   "workspaces.detail.blocker.connectionReady":
     "ConnectionReady={status} ({reason})",

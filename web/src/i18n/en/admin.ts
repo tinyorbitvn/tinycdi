@@ -9,6 +9,7 @@ export default {
   "admin.nav.workspaces": "Workspaces",
   "admin.nav.quota": "Quota",
   "admin.nav.templates": "Templates",
+  "admin.nav.data": "Data",
   "admin.eyebrow": "Admin",
   "admin.eyebrow.tenant": "Admin · {tenant}",
   "admin.gate.checking": "Checking permissions",
@@ -22,6 +23,7 @@ export default {
   "admin.route.workspaces": "Tenant workspaces",
   "admin.route.quota": "Quota",
   "admin.route.templates": "Template catalog",
+  "admin.route.data": "Retained data",
 
   "admin.action.refresh": "Refresh",
 
@@ -37,6 +39,9 @@ export default {
   "admin.overview.failed.one": "{n} failed workspace",
   "admin.overview.failed.other": "{n} failed workspaces",
   "admin.overview.failedAgo": "failed {age}",
+  "admin.overview.data.title": "Retained data",
+  "admin.overview.data.disks": "retained disks",
+  "admin.overview.data.all": "View retained data",
 
   // Quota page.
   "admin.quota.title": "Quota",
@@ -152,29 +157,65 @@ export default {
   "admin.workspaces.column.phase": "Phase",
   "admin.workspaces.column.age": "Age",
   "admin.workspaces.column.actions": "Actions",
+  "admin.workspaces.action.start": "Start",
   "admin.workspaces.action.stop": "Stop",
+  "admin.workspaces.action.restart": "Restart",
   "admin.workspaces.action.delete": "Delete",
+  "admin.workspaces.action.connect": "Connect",
+  "admin.workspaces.action.startLabel": "Start {name}",
   "admin.workspaces.action.stopLabel": "Stop {name}",
+  "admin.workspaces.action.restartLabel": "Restart {name}",
   "admin.workspaces.action.deleteLabel": "Delete {name}",
+  "admin.workspaces.action.connectLabel": "Connect to {name}",
+  "admin.workspaces.action.menuLabel": "Actions for {name}",
+  "admin.workspaces.notice.start": "Start requested for {name} ({owner}).",
   "admin.workspaces.notice.stop": "Stop requested for {name} ({owner}).",
+  "admin.workspaces.notice.restart": "Restart requested for {name} ({owner}).",
   "admin.workspaces.notice.delete": "Delete requested for {name} ({owner}).",
+  "admin.workspaces.actingAs": "You are acting on {owner}'s workspace.",
+  "admin.workspaces.start.title": "Start {name}?",
+  "admin.workspaces.start.fallbackTitle": "Start workspace",
+  "admin.workspaces.start.confirm": "Start workspace",
+  "admin.workspaces.start.body":
+    "Starting it consumes {owner}'s running-workspace limit and the tenant quota.",
+  "admin.workspaces.restart.title": "Restart {name}?",
+  "admin.workspaces.restart.fallbackTitle": "Restart workspace",
+  "admin.workspaces.restart.confirm": "Restart workspace",
+  "admin.workspaces.restart.body":
+    "Restart is two operations: the workspace stops, then starts once it reaches Stopped. Any open session ends immediately.",
+  "admin.workspaces.restart.quota":
+    "Starting it again consumes {owner}'s running-workspace limit and the tenant quota.",
+  "admin.workspaces.restart.progress.stopping": "Stopping {name}…",
+  "admin.workspaces.restart.progress.waiting": "Waiting for {name} to reach Stopped…",
+  "admin.workspaces.restart.progress.starting": "Starting {name}…",
+  "admin.workspaces.restart.timeout":
+    "The workspace did not stop in time. Check its phase and try again — the start step was not sent.",
+  "admin.workspaces.restart.aborted": "The workspace is being deleted and cannot be restarted.",
   "admin.workspaces.stop.title": "Stop {name}?",
   "admin.workspaces.stop.fallbackTitle": "Stop workspace",
   "admin.workspaces.stop.confirm": "Stop workspace",
   "admin.workspaces.stop.body":
-    "The workspace belongs to {owner}. Stopping it ends any open session immediately; unsaved work in the desktop is lost.",
+    "Stopping it ends any open session immediately; unsaved work in the desktop is lost.",
   "admin.workspaces.stop.retain": "Its disk is kept and the owner can start it again.",
   "admin.workspaces.stop.ephemeral": "Its data is ephemeral and is discarded on stop.",
   "admin.workspaces.delete.title": "Delete {name}?",
   "admin.workspaces.delete.fallbackTitle": "Delete workspace",
   "admin.workspaces.delete.confirm": "Delete workspace",
   "admin.workspaces.delete.body":
-    "This removes the workspace owned by {owner} and revokes access.",
+    "This removes the workspace and revokes access.",
   "admin.workspaces.delete.retain":
     "Its disk moves to the retained data inventory; purge it there to destroy it.",
   "admin.workspaces.delete.ephemeral": "Its data is ephemeral and will be destroyed.",
   "admin.workspaces.delete.typeConfirm": "Type {name} to confirm",
   "admin.workspaces.dialog.cancel": "Cancel",
+
+  // Retained data page (tenant-scope inventory + purge).
+  "admin.data.title": "Retained data",
+  "admin.data.description":
+    "Disks kept after workspaces were deleted, across the whole tenant. Purge destroys a disk permanently.",
+  "admin.data.caption": "Retained data across the tenant",
+  "admin.data.column.age": "Age",
+  "admin.data.action.purgeLabel": "Purge {id}",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Error",
