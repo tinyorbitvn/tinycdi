@@ -6,6 +6,7 @@ import { OverviewPage } from "./OverviewPage";
 import { QuotaPage } from "./QuotaPage";
 import { TemplatesPage } from "./TemplatesPage";
 import { WorkspacesAdminPage } from "./WorkspacesAdminPage";
+import { DataAdminPage } from "./DataAdminPage";
 import "./admin.css";
 
 function Redirect({ to }: { to: string }) {
@@ -42,6 +43,12 @@ export const routes: AppRoute[] = [
     title: t("admin.route.templates"),
     requires: "tenant-admin",
     render: () => <TemplatesPage />,
+  },
+  {
+    path: "/admin/data",
+    title: t("admin.route.data"),
+    requires: "tenant-admin",
+    render: () => <DataAdminPage />,
   },
   {
     path: "/admin/*",

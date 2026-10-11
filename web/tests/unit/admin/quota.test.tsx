@@ -5,9 +5,11 @@ import { makeAdmin, seedTenant, control } from "./helpers";
 import { QuotaPage } from "../../../src/admin/QuotaPage";
 import { OverviewPage } from "../../../src/admin/OverviewPage";
 import { adminArea } from "../../mock-api/admin.ts";
+import { dataArea } from "../../mock-api/data.ts";
 
 function setup() {
-  const api = createMockApi({ areas: [adminArea] });
+  // dataArea backs the overview's retained-data card (GET /v1/data).
+  const api = createMockApi({ areas: [adminArea, dataArea] });
   loginCookies();
   makeAdmin(api);
   return api;

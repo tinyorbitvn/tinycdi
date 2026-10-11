@@ -32,6 +32,7 @@ import {
 } from "../templates/format";
 import { getRetainedData, type ScopedRetainedData } from "../data/api";
 import { useBranding } from "../app/shell";
+import { useMeLoaded } from "../app/me";
 import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
@@ -142,6 +143,7 @@ export function WorkspaceDetailPage({
 }) {
   const api = useApi();
   const templates = useTemplates();
+  const me = useMeLoaded();
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
 
@@ -263,9 +265,15 @@ export function WorkspaceDetailPage({
   const blocker = blockingReason(ws);
   const canStart = ws.phase === "Stopped" || ws.phase === "Failed";
   const canStop = ws.desiredState === "Running" && !TERMINAL.has(ws.phase);
-  // Connect needs a running workspace; on a stopped one the Start action is
-  // the way forward, so the Connect control is not offered (T5.4).
-  const canOfferConnect = ws.desiredState === "Running" && ws.phase !== "Terminating";
+  // Connect is owner-only (advisor Q1): a tenant admin viewing another
+  // user's workspace gets Start/Stop/Delete plus an acting-as banner, but
+  // never a session on it — no takeover in v1.2. The owner check needs the
+  // /v1/me subject; while it is absent (loading, or the old-backend stub)
+  // Connect stays hidden rather than offered to a non-owner.
+  const viewerSubject = me.data?.subject ?? "";
+  const isOwner = viewerSubject !== "" && ws.owner?.subject === viewerSubject;
+  const canOfferConnect = isOwner && ws.desiredState === "Running" && ws.phase !== "Terminating";
+  const showAdminContext = viewerSubject !== "" && ws.owner !== undefined && !isOwner;
 
   const fields = [
     {
@@ -379,6 +387,13 @@ export function WorkspaceDetailPage({
       }
     >
       <ErrorBanner error={error} onRetry={() => void detail.refresh()} onDismiss={() => { setActionError(null); detail.clearError(); }} />
+      {showAdminContext ? (
+        <Alert tone="info">
+          {t("workspaces.detail.adminContext", {
+            owner: ws.owner?.displayName || ws.owner?.subject || "",
+          })}
+        </Alert>
+      ) : null}
       {blocker ? (
         <Alert tone="info" title={t("workspaces.detail.connectStatus")}>
           {t("workspaces.detail.connectUnavailable", { reason: t(blocker.key, blocker.params) })}
