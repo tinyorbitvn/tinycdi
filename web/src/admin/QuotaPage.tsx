@@ -350,9 +350,13 @@ export function QuotaContent({
     );
   }
 
+  const ariaSort = (k: UsageSortKey) =>
+    sort.key === k ? (sort.dir === 1 ? ("ascending" as const) : ("descending" as const)) : ("none" as const);
+
   const columns: Column<UserUsage>[] = [
     {
       key: "user",
+      sort: ariaSort("user"),
       header: (
         <SortHeader label={t("admin.quota.column.user")} columnKey="user" sort={sort} onSort={onSort} />
       ),
@@ -367,6 +371,7 @@ export function QuotaContent({
     ...QUOTA_KEYS.map(
       (k): Column<UserUsage> => ({
         key: k,
+        sort: ariaSort(k),
         header: <SortHeader label={quotaLabel(k)} columnKey={k} sort={sort} onSort={onSort} />,
         align: "end",
         hideOnMobile: k === "memoryMib" || k === "cpuMillicores",

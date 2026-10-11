@@ -4,18 +4,24 @@ import {
   Button,
   ConfirmDialog,
   cx,
+  Drawer,
   EmptyState,
   IconCheck,
   IconChevronDown,
   IconWorld,
   IconDeviceLaptop,
   IconLogout,
+  IconMenu,
   IconMoon,
   IconShieldCheck,
   IconSun,
   IconUser,
   IconButton,
   Menu,
+  NavIconCloud,
+  NavIconServices,
+  NavIconSettings,
+  NavIconVps,
   Spinner,
   useToast,
 } from "../design";
@@ -212,6 +218,43 @@ function UserMenu({ me }: { me: Me }) {
   );
 }
 
+// --- section nav ------------------------------------------------------------
+
+// The one nav list renders twice: inside the desktop sidebar and inside the
+// small-screen Drawer (UX-2) — same links, same duotone glyphs.
+function SideNav({ me }: { me: Me | null }) {
+  return (
+    <ul className="tc-sidebar__list">
+      <li>
+        <NavLink to="/workspaces" activePrefixes={["/"]}>
+          <NavIconVps />
+          {t("nav.workspaces")}
+        </NavLink>
+      </li>
+      <li>
+        <NavLink to="/templates">
+          <NavIconServices />
+          {t("nav.templates")}
+        </NavLink>
+      </li>
+      <li>
+        <NavLink to="/data">
+          <NavIconCloud />
+          {t("nav.data")}
+        </NavLink>
+      </li>
+      {isTenantAdmin(me) ? (
+        <li>
+          <NavLink to="/admin">
+            <NavIconSettings />
+            {t("nav.admin")}
+          </NavLink>
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
 // --- shell -----------------------------------------------------------------
 
 type RouteResult = ResolvedRoute | "error" | null;
@@ -265,6 +308,11 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
     if (denied) navigate("/workspaces", { replace: true });
   }, [denied]);
 
+  // Section navigation on small screens lives in a Drawer the hamburger
+  // opens; it closes itself once a destination is picked.
+  const [navOpen, setNavOpen] = useState(false);
+  useEffect(() => setNavOpen(false), [pathname]);
+
   const bleed = route?.layout === "bleed";
   const logoSrc = branding
     ? resolvedTheme === "dark" && branding.logoDark
@@ -296,7 +344,20 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
 
   return (
     <div className={cx("tc-shell", bleed && "tc-shell--bleed")}>
+      <a className="tc-skip-link" href="#tc-main">
+        {t("app.skipLink")}
+      </a>
       <header className="tc-topbar">
+        {bleed ? null : (
+          <IconButton
+            className="tc-topbar__nav-toggle"
+            label={t("nav.menu")}
+            icon={<IconMenu />}
+            aria-haspopup="dialog"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen(true)}
+          />
+        )}
         <Link to="/" className="tc-topbar__brand">
           {logoSrc ? <img className="tc-topbar__mark" src={logoSrc} alt={""} /> : null}
           <span className="tc-topbar__name">{productName}</span>
@@ -310,29 +371,27 @@ export function AppShell({ areas = ROUTE_AREAS }: { areas?: RouteArea[] }) {
       </header>
       <div className="tc-shell__body">
         {bleed ? null : (
-          <nav className="tc-sidebar" aria-label={t("nav.sections")}>
-            <ul className="tc-sidebar__list">
-              <li>
-                <NavLink to="/workspaces" activePrefixes={["/"]}>
-                  {t("nav.workspaces")}
-                </NavLink>
-              </li>
-              <li>
-                <NavLink to="/templates">{t("nav.templates")}</NavLink>
-              </li>
-              <li>
-                <NavLink to="/data">{t("nav.data")}</NavLink>
-              </li>
-              {isTenantAdmin(me) ? (
-                <li>
-                  <NavLink to="/admin">{t("nav.admin")}</NavLink>
-                </li>
-              ) : null}
-            </ul>
+          <nav className="tc-nav tc-sidebar" aria-label={t("nav.sections")}>
+            <SideNav me={me} />
           </nav>
         )}
-        <main className={cx("tc-content", bleed && "tc-content--bleed")}>{content}</main>
+        <main id="tc-main" tabIndex={-1} className={cx("tc-content", bleed && "tc-content--bleed")}>
+          {content}
+        </main>
       </div>
+      {bleed ? null : (
+        <Drawer
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          side="left"
+          size="sm"
+          title={t("nav.sections")}
+        >
+          <nav className="tc-nav" aria-label={t("nav.sections")}>
+            <SideNav me={me} />
+          </nav>
+        </Drawer>
+      )}
     </div>
   );
 }

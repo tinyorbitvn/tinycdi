@@ -4,6 +4,7 @@ import type common from "../en/common";
 // enforced by the catalog parity test and lint:strings (V3.14).
 export default {
   "common.cancel": "Huỷ",
+  "common.clear": "Xoá",
   "common.close": "Đóng",
   "common.dismiss": "Bỏ qua",
   "common.toast.dismiss": "Tắt thông báo",

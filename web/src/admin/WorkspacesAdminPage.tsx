@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Alert, Button, Cluster, ConfirmDialog, Dialog, Input, Select, StatusPill, Table } from "../design";
 import type { Column } from "../design/Table";
-import { IconRefresh, IconPlayerStop, IconTrash } from "../design/icons";
+import { IconRefresh, IconPlayerStop, IconSearch, IconTrash } from "../design/icons";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { Link } from "../lib/router";
@@ -208,6 +208,8 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           placeholder={t("admin.workspaces.filter.placeholder")}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          icon={<IconSearch />}
+          onClear={() => setFilter("")}
         />
         <Select
           label={t("admin.workspaces.phase.label")}

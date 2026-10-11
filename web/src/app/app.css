@@ -7,6 +7,31 @@
   min-height: 100vh;
 }
 
+/* Skip link: first in tab order, hidden until focused (WCAG 2.4.1). */
+.tc-skip-link {
+  position: absolute;
+  top: var(--tc-space-2);
+  left: var(--tc-space-2);
+  z-index: calc(var(--tc-z-overlay) + 1);
+  padding: var(--tc-space-2) var(--tc-space-3);
+  border-radius: var(--tc-radius-md);
+  background: var(--tc-color-surface-raised);
+  color: var(--tc-color-accent-text);
+  font-size: var(--tc-text-sm);
+  font-weight: var(--tc-weight-semibold);
+  text-decoration: none;
+  box-shadow: var(--tc-shadow-md);
+  transform: translateY(calc(-100% - var(--tc-space-2)));
+  transition: transform var(--tc-duration-fast) var(--tc-ease);
+}
+
+.tc-skip-link:focus,
+.tc-skip-link:focus-visible {
+  transform: none;
+  outline: 2px solid var(--tc-color-focus);
+  outline-offset: 3px;
+}
+
 /* ---------- top bar ---------- */
 .tc-topbar {
   position: sticky;
@@ -48,6 +73,14 @@
   font-size: var(--tc-text-sm);
   color: var(--tc-color-text-subtle);
   white-space: nowrap;
+}
+
+/* Hamburger: hidden on desktop, shown when the sidebar collapses.
+ * Nested under .tc-topbar so it wins over .tc-button's inline-flex
+ * (design.css loads after this sheet). */
+.tc-topbar .tc-topbar__nav-toggle {
+  display: none;
+  flex: none;
 }
 
 .tc-topbar__actions {
@@ -113,9 +146,11 @@
   list-style: none;
 }
 
-.tc-sidebar a {
+/* .tc-nav is shared by the desktop sidebar and the small-screen drawer. */
+.tc-nav a {
   display: flex;
   align-items: center;
+  gap: var(--tc-space-3);
   min-height: var(--tc-control-height-sm);
   padding: var(--tc-space-2) var(--tc-space-3);
   border-radius: var(--tc-radius-md);
@@ -128,12 +163,12 @@
     color var(--tc-duration-fast) var(--tc-ease);
 }
 
-.tc-sidebar a:hover {
+.tc-nav a:hover {
   background: var(--tc-color-surface-sunken);
   color: var(--tc-color-text);
 }
 
-.tc-sidebar a.is-active {
+.tc-nav a.is-active {
   background: var(--tc-color-accent-subtle);
   color: var(--tc-color-accent-text);
   font-weight: var(--tc-weight-semibold);
@@ -156,9 +191,24 @@
   padding-top: var(--tc-space-16);
 }
 
-/* Small screens: collapse the sidebar; sections remain reachable via routes. */
+/* Small screens: collapse the sidebar behind the hamburger + nav drawer,
+ * and drop the brand byline so the top bar still fits. */
 @media (max-width: 48rem) {
   .tc-sidebar {
+    display: none;
+  }
+
+  .tc-topbar .tc-topbar__nav-toggle {
+    display: inline-flex;
+  }
+
+  .tc-topbar__byline {
+    display: none;
+  }
+
+  /* Keep the account menu but drop the name text — the hamburger leaves
+   * no room for it at this width. */
+  .tc-topbar__user {
     display: none;
   }
 }

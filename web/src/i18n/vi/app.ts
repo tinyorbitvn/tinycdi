@@ -10,6 +10,7 @@ export default {
   "app.loadError.body": "Tải lại trang để thử lại.",
 
   "app.shell.byline": "bởi TinyOrbit",
+  "app.skipLink": "Đến nội dung",
   "app.theme.label": "Giao diện",
   "app.theme.light": "Sáng",
   "app.theme.dark": "Tối",
@@ -42,6 +43,7 @@ export default {
   "auth.gate.retrying": "Không kết nối được tới API workspace ({error}). Đang thử lại…",
 
   "nav.sections": "Mục",
+  "nav.menu": "Menu",
   "nav.workspaces": "Workspace",
   "nav.admin": "Quản trị",
   "nav.newWorkspace": "Workspace mới",

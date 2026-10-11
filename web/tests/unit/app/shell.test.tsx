@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, test } from "vitest";
 import { ToastProvider } from "../../../src/design";
 import { ApiProvider } from "../../../src/api/context";
@@ -70,6 +70,36 @@ describe("AppShell", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Dark" }));
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+  });
+
+  test("skip link is first and targets main content", async () => {
+    renderShell();
+    expect(await screen.findByText("TinyCDI")).toBeInTheDocument();
+    const skip = screen.getByRole("link", { name: "Skip to content" });
+    expect(skip).toHaveAttribute("href", "#tc-main");
+    const main = document.getElementById("tc-main");
+    expect(main?.tagName).toBe("MAIN");
+    expect(main).toHaveAttribute("tabindex", "-1");
+    // The skip link precedes the top bar in focus order.
+    const firstLink = document.body.querySelector(".tc-shell > *:first-child");
+    expect(firstLink).toBe(skip);
+  });
+
+  test("menu button opens the nav drawer; Escape closes and restores focus", async () => {
+    renderShell();
+    await screen.findByText("TinyCDI");
+    const toggle = screen.getByRole("button", { name: "Menu" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // jsdom does not focus buttons on click like a real browser does;
+    // focus it first so the trap's restore target is meaningful.
+    toggle.focus();
+    fireEvent.click(toggle);
+    const dialog = await screen.findByRole("dialog", { name: "Sections" });
+    expect(within(dialog).getByRole("navigation", { name: "Sections" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: "Workspaces" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(toggle).toHaveFocus();
   });
 
   test("nav hides Admin without the tenant-admin role", async () => {

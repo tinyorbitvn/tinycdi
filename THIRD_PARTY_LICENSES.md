@@ -62,6 +62,7 @@ at build time.
 | Asset | Source (pinned) | License |
 |---|---|---|
 | Orbit stylesheets `css/*.css` | TinyOrbit Orbit System 2.9 (exported 2026-10-02) | TinyOrbit design-system asset; ships with this project |
+| Orbit "Dashboard icons" duotone nav artwork, inlined in `src/design/nav-icons.tsx` | TinyOrbit Orbit System 2.9 dashboard icon set (2026-10 export) | TinyOrbit design-system artwork, used with permission of the brand owner; not MIT-licensed — see `TRADEMARKS.md` |
 | Manrope Variable WOFF2 subsets | `@fontsource-variable/manrope` 5.3.0 | OFL-1.1 (`LICENSES/manrope-LICENSE.txt`) |
 | JetBrains Mono 400 WOFF2 subsets | `@fontsource/jetbrains-mono` 5.3.0 | OFL-1.1 (`LICENSES/jetbrains-LICENSE.txt`) |
 | Tabler Icons outline SVGs | `@tabler/icons` 3.48.0 | MIT (`LICENSES/LICENSE-Tabler.txt`) |

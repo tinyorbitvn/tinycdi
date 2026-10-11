@@ -52,6 +52,6 @@ describe("admin: 403 handled", () => {
     // The page chrome and an actionable error render — never a blank page.
     await screen.findByRole("heading", { name: "Quota" });
     await screen.findByText(/tenant-admin role/);
-    expect(screen.getByRole("navigation", { name: "Admin sections" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Admin sections" })).toBeInTheDocument();
   });
 });
