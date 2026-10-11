@@ -158,7 +158,13 @@ type Config struct {
 	// Postgres reads. LOCAL per replica (its purpose is keeping the
 	// cookie spray off the store, so there is no shared window); 0
 	// disables.
-	SessionLookupRate    int
+	SessionLookupRate int
+	// SessionStreamCap is the per-workspace bound on live upstream
+	// connections — websocket streams and plain proxied requests alike —
+	// served by THIS replica (V11, the runtime-fd crash defense; N
+	// replicas admit N x cap). >= 1 — there is no unlimited mode; a
+	// runtime without the fd bound tolerates a large value.
+	SessionStreamCap     int
 	UnattachedSessionTTL time.Duration // ghost-session reap TTL; <=0 uses the gateway default
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
@@ -167,6 +173,10 @@ type Config struct {
 	InternalTLSKey   string
 	InternalClientCA string
 	OperatorCN       string
+	// InternalRevokedList is the ADR 0009 per-certificate revocation
+	// list for the internal mTLS listener; empty disables the feature —
+	// the handshake path is then byte-identical to an unlisted build.
+	InternalRevokedList string
 
 	// Metrics listener (scrape-only, plain HTTP).
 	MetricsListen string // empty disables
@@ -298,6 +308,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"per-client launches/minute on /v1/launch (burst 40), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 	fs.IntVar(&c.SessionLookupRate, "session-lookup-rate", envInt(getenv, "TCDI_SESSION_LOOKUP_RATE", gateway.SessionLookupRate),
 		"per-client requests/minute carrying a session cookie this replica has never seen (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
+	fs.IntVar(&c.SessionStreamCap, "session-stream-cap", envInt(getenv, "TCDI_SESSION_STREAM_CAP", gateway.DefaultUpstreamStreamCap),
+		"per-workspace bound on live upstream connections through THIS replica — websocket streams and plain proxied requests alike; over the cap the session origin answers 429 too_many_streams + Retry-After: 1. >= 1 — no unlimited mode; pick a large value when the runtime carries no fd bound (env TCDI_SESSION_STREAM_CAP)")
 	fs.DurationVar(&c.UnattachedSessionTTL, "unattached-session-ttl", envDur(getenv, "TCDI_UNATTACHED_SESSION_TTL", gateway.UnattachedSessionTTL),
 		"how long a redeemed session that never served a request may hold its lease before the gateway revokes it — bounds the workspace pin a launch abandoned between redeem and the 303 leaves behind (env TCDI_UNATTACHED_SESSION_TTL)")
 
@@ -309,6 +321,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.InternalClientCA, "internal-client-ca", envOr(getenv, "TCDI_INTERNAL_CLIENT_CA", ""), "CA bundle verifying internal client certs")
 	fs.StringVar(&c.OperatorCN, "operator-cn", envOr(getenv, "TCDI_OPERATOR_CN", httpapi.DefaultOperatorCN),
 		"client-certificate CN of the operator identity on the internal workspace routes")
+	fs.StringVar(&c.InternalRevokedList, "internal-revoked-list", envOr(getenv, "TCDI_INTERNAL_REVOKED_LIST", ""),
+		"per-certificate revocation list for the internal mTLS listener (ADR 0009: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
 
 	// Metrics listener.
 	fs.StringVar(&c.MetricsListen, "metrics-listen", envOr(getenv, "TCDI_METRICS_LISTEN", ""), "metrics listen address (empty disables)")
@@ -386,6 +400,9 @@ func (c *Config) validate() error {
 	}
 	if c.LoginRate < 0 || c.LaunchRate < 0 || c.SessionLookupRate < 0 {
 		return errors.New("-login-rate, -launch-rate and -session-lookup-rate must be >= 0 (0 disables the limit)")
+	}
+	if c.SessionStreamCap < 1 {
+		return errors.New("-session-stream-cap must be >= 1 — the per-workspace upstream bound cannot be disabled (set a large value instead)")
 	}
 	if c.TerminalRetentionDays < 0 {
 		return errors.New("-terminal-retention-days must be >= 0 (0 disables the retention sweep)")
@@ -485,6 +502,11 @@ func (c *Config) validate() error {
 		if c.InternalTLSCert == "" || c.InternalTLSKey == "" || c.InternalClientCA == "" {
 			return errors.New("-internal-listen requires -internal-tls-cert, -internal-tls-key and -internal-client-ca")
 		}
+	}
+	if c.InternalRevokedList != "" && c.InternalListen == "" {
+		// A configured revocation control that silently does nothing is a
+		// fail-open misconfiguration — refuse it.
+		return errors.New("-internal-revoked-list requires -internal-listen")
 	}
 
 	// The session domain is required by the session-listener check above;

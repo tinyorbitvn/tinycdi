@@ -49,8 +49,8 @@ type session struct {
 	fence broker.Fence // pinned at redemption, refreshed from renews
 
 	// createdAt is the mint time — the anchor of the unattached TTL. A
-	// session is "attached" once a request carrying its cookie is
-	// admitted on its own host (the 303 landed in a browser); until then
+	// session is "attached" once a request carrying its cookie resolves
+	// it on its own host (the 303 landed in a browser); until then
 	// it is a ghost the renew loop reaps at UnattachedSessionTTL.
 	// attached lives under s.mu so the reap decision serializes against
 	// it — an attach that won the lock can never be revoked.
@@ -172,12 +172,15 @@ func (s *session) workspaceUID() string {
 	return s.lease.WorkspaceUID
 }
 
-// noteAttached records that a request carrying this session's cookie was
-// admitted on its own host — the launch's 303 reached a browser. Until the
-// first such request the session is "unattached": a client that abandoned
-// the launch between ticket redemption and delivery left it a ghost no
-// browser holds. The write runs under s.mu so it serializes against the
-// reap decision — an attach that wins the lock aborts the reap.
+// noteAttached records that a request carrying this session's cookie
+// resolved it on its own host — the launch's 303 reached a browser. It
+// marks even a request the per-workspace upstream bound then refuses: a
+// live client retrying a saturated workspace is still a live client.
+// Until the first such request the session is "unattached": a client that
+// abandoned the launch between ticket redemption and delivery left it a
+// ghost no browser holds. The write runs under s.mu so it serializes
+// against the reap decision — an attach that wins the lock aborts the
+// reap.
 func (s *session) noteAttached() {
 	s.mu.Lock()
 	s.attached = true

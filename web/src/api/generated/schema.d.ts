@@ -67,13 +67,14 @@ export interface paths {
         put?: never;
         /**
          * Activity beat
-         * @description The explicit "the user is here" signal (FIX-IDLE). Reaching this
-         *     endpoint slides the session's idle deadline — the sliding session
-         *     read inside authentication IS the touch — and the handler answers
-         *     `204` with no body. It exists because every `GET` on this API is
-         *     passive: the portal calls it only on real user interaction
-         *     (pointer, key, navigation), never from a timer-driven poll, and
-         *     throttles to at most one call per minute.
+         * @description The explicit "the user is here" signal (FIX-IDLE). The session is
+         *     authenticated passively, the CSRF token checked, and only then does
+         *     the handler slide the idle deadline explicitly — a cookie-only
+         *     request that fails the token check can never extend the window.
+         *     The handler answers `204` with no body. It exists because every
+         *     `GET` on this API is passive: the portal calls it only on real
+         *     user interaction (pointer, key, navigation), never from a
+         *     timer-driven poll, and throttles to at most one call per minute.
          *
          *     Requires the session cookie and the `X-CSRF-Token` header (`401`
          *     without a session, `403` without a valid token) — forging a touch
@@ -355,6 +356,18 @@ export interface paths {
          *     exists and `takeover` is not set, the call fails with
          *     `409 CONNECTION_IN_USE`. With `takeover: true` the previous session is
          *     revoked and fenced **before** the new ticket becomes usable.
+         *
+         *     On the session origin itself, every proxied request — the
+         *     `/websockify` stream and plain asset fetches alike — draws on a
+         *     per-workspace, per-replica bound of concurrent upstream
+         *     connections (`-session-stream-cap`, default 32; the KasmVNC
+         *     runtime cannot survive a reconnect storm above its fd-derived
+         *     crash boundary). A request over the bound answers
+         *     `429` + `Retry-After: 1` with the session-listener error body
+         *     `{"error": "too_many_streams"}` — retryable, and the KasmVNC
+         *     client's in-frame reconnect absorbs it. Session-origin errors use
+         *     that lowercase `error`-field shape, distinct from this API's
+         *     `code`/`retryable` envelope.
          */
         post: operations["createConnection"];
         delete?: never;

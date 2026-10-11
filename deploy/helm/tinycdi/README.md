@@ -199,6 +199,7 @@ objects. It **keeps**:
 | `backend.loginKeys.existingSecret` | `current` (+ `previous` while rotating), 32 bytes each | backend `-login-key-file` — seals the `__Host-tcdi_login` cookie; **required** unless `loginKeys.generate` |
 | `backend.tls.{app,session,internal}.existingSecret` | `tls.crt`/`tls.key` | backend app listener :8443 / session listener :8444 / internal mTLS listener :9443 |
 | `backend.clientCA.existingSecret` | `ca.crt` | backend verifies internal-listener client certs |
+| `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0009 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
 | `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
 | `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
 | `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
@@ -270,6 +271,7 @@ the value to set instead:
 | `backend.drainPropagationDelay` | `5s` | wait between the readiness drop and the graceful 1001 stream close on pod drain, so the endpoint removal reaches kube-proxy/the ingress before clients are told to reconnect — render-time budget check: `drainPropagationDelay` + `drainWindow` must be <= 20s (leaves >= 4 s of the 24 s shutdown deadline inside the 30 s grace period) |
 | `backend.drainWindow` | `8s` | post-close drain window: the listeners keep serving reads and refuse new launches/upgrades for this long after streams are shed |
 | `backend.sessionCookieMode` | `lax` | session cookie mode — `lax` (portal + session domain on one registrable domain) or `partitioned` (cross-site) |
+| `backend.sessionStreamCap` | `32` | per-workspace bound on live upstream connections through ONE replica (websocket streams + plain proxied requests alike; N replicas admit N x cap) — the KasmVNC runtime crashes once its fd count crosses FD_SETSIZE (~330 conns); over the cap the session origin answers `429 too_many_streams` + `Retry-After: 1`. Minimum 1 — the bound cannot be disabled |
 | `backend.gatewayID` | `tinycdi-backend` | ONE gateway identity shared by all replicas — the lease directory is per-identity, so it must be a literal, never a pod name |
 | `backend.loginKeys.{existingSecret,generate}` | `""`/`false` | **required** — see Credentials; `generate` mints `<release>-backend-login-keys` once via `lookup` (kept across upgrades; not for GitOps) |
 | `backend.extraPortalOrigins` | `[]` | extra CSRF + launch-Origin allowlist entries and session `frame-ancestors` |
@@ -279,6 +281,7 @@ the value to set instead:
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
+| `backend.tls.internal.revokedSerials.{existingSecret,key}` | `""` / `revoked-serials.txt` | per-certificate revocation on the internal mTLS listener (ADR 0009, SR-3-F5): mounts a Secret holding the serial blocklist (`<serial-hex> <issuer-dn>` per line) at `/etc/internal-revoked/` — a listed leaf's handshake is aborted and its live conns severed; propagation is kubelet Secret sync + one 30 s poll (~90 s worst). Empty = off (default render unchanged) |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
 | `operator.clusterCIDRs` | `[]` | this cluster's pod/service/node CIDRs — appended to `--internet-except-cidrs`; **required** (render fails) when any seeded template uses `networkProfile: InternetOnly` |

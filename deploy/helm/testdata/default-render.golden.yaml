@@ -1707,6 +1707,10 @@ spec:
             # domain; partitioned (SameSite=None; Secure; Partitioned) is
             # for cross-site deployments.
             - -session-cookie-mode=lax
+            # Per-workspace bound on live upstream connections through
+            # this replica (V11): the runtime's fd-driven crash bound is
+            # ~330 conns; the cap converts a storm into a retryable 429.
+            - -session-stream-cap=32
             # internal listener: operator mTLS broker API (ADR 0003).
             - -internal-listen=:9443
             - -internal-tls-cert=/tls/internal/tls.crt

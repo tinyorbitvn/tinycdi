@@ -15,6 +15,40 @@
 #      the orchestrator restarts us when the display dies.
 set -euo pipefail
 
+# File-descriptor bound for the whole process tree: Xvnc multiplexes
+# every client connection with select() — FD_SET on the socket fd is
+# undefined once an fd reaches FD_SETSIZE (1024): the bit write lands
+# past the stack-allocated fd_set and the server dies SIGSEGV. Each
+# websocket client costs ~3 fds inside the single Xvnc process on top of
+# a ~23-fd baseline, so an unbounded fd table turns a connection burst
+# into stack corruption (~334 concurrent streams on a clean pod). A soft
+# RLIMIT_NOFILE below FD_SETSIZE makes accept() fail EMFILE instead, so
+# excess connections are refused while every fd Xvnc can hold stays
+# select()-safe. Soft limit only — inherited by every child (Xvnc, the
+# websockify threads, the session), and 1000 still allows ~325
+# concurrent streams, far above the gateway's per-workspace stream cap;
+# the supervisor loop and helpers each need only a handful of fds. The
+# hard limit is left alone so a debug shell can still raise it.
+# Residual: under sustained saturation a racing handshake thread can
+# still exit(1) via KasmVNC's fatal() on the EMFILE'd tls.key open —
+# a clean exit, not memory corruption (upstream robustness bug).
+#
+# The target is min(1000, hard): a pod may cap RLIMIT_NOFILE below the
+# target (exotic, but legal) — soft can never exceed hard, so take the
+# ambient bound in that case. The clamp must never kill the boot: on any
+# failure warn and continue — a loud line beats a pod that never starts.
+NOFILE_HARD="$(ulimit -Hn)"
+NOFILE_TARGET=1000
+case "$NOFILE_HARD" in
+  ''|*[!0-9]*) ;;  # 'unlimited' or unparsable: keep the 1000 target
+  *) [ "$NOFILE_HARD" -lt "$NOFILE_TARGET" ] && NOFILE_TARGET="$NOFILE_HARD" ;;
+esac
+if ulimit -Sn "$NOFILE_TARGET" 2>/dev/null; then
+  echo "tcdi-entrypoint: RLIMIT_NOFILE soft=$(ulimit -Sn) (hard=$NOFILE_HARD) — client fds stay below FD_SETSIZE"
+else
+  echo "tcdi-entrypoint: WARNING: could not set RLIMIT_NOFILE=$NOFILE_TARGET (soft=$(ulimit -Sn), hard=$NOFILE_HARD)" >&2
+fi
+
 SECRET_DIR="${TCDI_SECRET_DIR:-/run/secrets/tcdi}"
 PASS_FILE="$SECRET_DIR/password"
 USER_FILE="$SECRET_DIR/username"
