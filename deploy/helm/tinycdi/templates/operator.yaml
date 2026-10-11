@@ -119,9 +119,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef: {fieldPath: metadata.namespace}
+            {{- include "tinycdi.env.operator" . | nindent 12 }}
             {{- with .Values.operator.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

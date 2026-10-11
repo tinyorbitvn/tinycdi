@@ -407,6 +407,17 @@ Install-time invariants. Rendering FAILS when violated:
         client flags). */ -}}
 {{- include "tinycdi.denyExtraArgs" (dict "component" "operator" "args" .Values.operator.extraArgs "denied" (list "dev-allow-no-broker" "disable-builtin-egress-excepts" "metrics-bind-address" "metrics-secure" "metrics-cert-path" "metrics-cert-name" "metrics-cert-key")) -}}
 {{- include "tinycdi.denyExtraArgs" (dict "component" "backend" "args" .Values.backend.extraArgs "denied" (list "dev-insecure-db" "required-groups" "metrics-listen" "broker-url" "broker-ca" "mtls-cert" "mtls-key")) -}}
+{{- /* SR-3-F2: the same surfaces are reachable through <component>.extraEnv
+        — the environment equivalents of the denied flags, plus ANY name
+        the chart itself manages for that component (extraEnv renders
+        after the managed block, so a duplicate name silently wins). The
+        managed set is derived from the rendered tinycdi.env.<component>
+        blocks by tinycdi.managedEnvNames — never a second copy. */ -}}
+{{- $deniedEnv := list "TCDI_DEV_INSECURE_DB" "TCDI_DEV_ALLOW_NO_BROKER" "TCDI_METRICS_LISTEN" "TCDI_KASM_ADAPTER_IMAGE" "PGSSLMODE" "TCDI_OPERATOR_CN" "TCDI_WATCH_NAMESPACES" "TCDI_REQUIRED_GROUPS" -}}
+{{- range $c := list "backend" "operator" "frontend" -}}
+{{- $cv := default dict (index $.Values $c) -}}
+{{- include "tinycdi.denyExtraEnv" (dict "component" $c "env" (index $cv "extraEnv") "denied" $deniedEnv "root" $) -}}
+{{- end -}}
 {{- /* A hostPath extraVolume would mount the host filesystem into the
         session edge (CHTR-3). */ -}}
 {{- range $v := (.Values.backend.extraVolumes | default (list)) -}}
@@ -533,5 +544,91 @@ hardened defaults unless dev.enabled. Called with {component, sc, kind}.
 {{- end -}}
 {{- if $bad -}}
 {{- fail (printf "%s.%s weakens the hardened securityContext (%s) — requires dev.enabled=true" .component .kind (join ", " $bad)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Managed container env per component — the entries rendered under `env:`
+ahead of <component>.extraEnv. tinycdi.managedEnvNames reads the names
+back off THIS rendered block, so the SR-3-F2 extraEnv guard derives the
+chart-owned names from the templates themselves (no second copy to
+drift). Each helper renders the env ENTRIES (a YAML list), never the
+`env:` key.
+*/}}
+{{- define "tinycdi.env.backend" -}}
+- name: TCDI_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.urlKey }}
+{{- if .Values.database.tls.mode }}
+# pgx honours the libpq env vars for DSN keys the URL omits —
+# an explicit sslmode= in the DSN still wins.
+- {name: PGSSLMODE, value: {{ .Values.database.tls.mode | quote }}}
+{{- end }}
+{{- if .Values.database.tls.caSecret.name }}
+- {name: PGSSLROOTCERT, value: {{ printf "/etc/db-ca/%s" (.Values.database.tls.caSecret.key | default "ca.crt") | quote }}}
+{{- end }}
+- {name: TCDI_OIDC_ISSUER, value: {{ .Values.oidc.issuer | quote }}}
+- {name: TCDI_OIDC_CLIENT_ID, value: {{ .Values.oidc.clientID | quote }}}
+- name: TCDI_OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.oidc.existingSecret }}
+      key: {{ .Values.oidc.clientSecretKey }}
+{{- $redirect := .Values.oidc.redirectURL | default (printf "https://%s/v1/auth/callback" .Values.portalHost) }}
+- {name: TCDI_OIDC_REDIRECT_URL, value: {{ $redirect | quote }}}
+- {name: TCDI_TENANT_NAMESPACES, value: {{ include "tinycdi.tenantNamespaces" . | quote }}}
+# Bounded tenant label values for session metrics/leases.
+- {name: TCDI_TENANT_ALLOWLIST, value: {{ include "tinycdi.tenantAllowlist" . | quote }}}
+{{- if .Values.backend.extraCA.existingSecret }}
+- {name: SSL_CERT_FILE, value: "/etc/extra-ca/{{ .Values.backend.extraCA.key | default "ca.crt" }}"}
+{{- end }}
+{{- end }}
+
+{{- define "tinycdi.env.operator" -}}
+- name: POD_NAMESPACE
+  valueFrom:
+    fieldRef: {fieldPath: metadata.namespace}
+{{- end }}
+
+{{/* The frontend manages no env entries today — the empty helper keeps
+     tinycdi.managedEnvNames generic across components. */}}
+{{- define "tinycdi.env.frontend" -}}
+{{- end }}
+
+{{/*
+Env names the chart itself manages for a component — DERIVED by rendering
+tinycdi.env.<component> and reading the `name` keys back (never a
+hand-maintained second list). Called with {component, root}; renders a
+JSON array.
+*/}}
+{{- define "tinycdi.managedEnvNames" -}}
+{{- $names := list -}}
+{{- range $e := (include (printf "tinycdi.env.%s" .component) .root | fromYamlArray) -}}
+{{- $names = append $names (get $e "name") -}}
+{{- end -}}
+{{- toJson $names -}}
+{{- end }}
+
+{{/*
+SR-3-F2/CHTR-3 helper: refuses <component>.extraEnv entries whose name is
+a dev-surface env name (the environment equivalent of a flag the chart
+pins closed) or duplicates a name the chart itself manages for that
+component — extraEnv renders AFTER the managed block, so a duplicate
+name would silently win. Called with {component, env, denied, root}.
+*/}}
+{{- define "tinycdi.denyExtraEnv" -}}
+{{- $managed := include "tinycdi.managedEnvNames" (dict "component" .component "root" .root) | fromJsonArray -}}
+{{- range $e := (.env | default (list)) -}}
+{{- if kindIs "map" $e -}}
+{{- $name := printf "%v" (get $e "name") -}}
+{{- if has $name $.denied -}}
+{{- fail (printf "%s.extraEnv entry %q reopens a surface the chart pins closed — it requires dev.enabled=true" $.component $name) -}}
+{{- end -}}
+{{- if has $name $managed -}}
+{{- fail (printf "%s.extraEnv entry %q duplicates an env var the chart itself manages for %[1]s — the later entry would silently win; it requires dev.enabled=true" $.component $name) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
