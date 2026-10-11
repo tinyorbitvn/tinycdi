@@ -133,6 +133,38 @@ func TestParseFlags_ImageBlockAfter(t *testing.T) {
 	}
 }
 
+// TestParseFlags_TerminalRetentionDays (SR-4-F5): the terminal-row
+// retention window defaults to 30 days, honors
+// TCDI_TERMINAL_RETENTION_DAYS with the flag winning, 0 disables the
+// sweep, and a negative window is rejected.
+func TestParseFlags_TerminalRetentionDays(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.TerminalRetentionDays != 30 {
+		t.Fatalf("TerminalRetentionDays = %d, want 30", cfg.TerminalRetentionDays)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_TERMINAL_RETENTION_DAYS": "7"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.TerminalRetentionDays != 7 {
+		t.Fatalf("env TerminalRetentionDays = %d, want 7", cfg.TerminalRetentionDays)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-terminal-retention-days", "0"),
+		envMap(map[string]string{"TCDI_TERMINAL_RETENTION_DAYS": "7"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.TerminalRetentionDays != 0 {
+		t.Fatalf("flag TerminalRetentionDays = %d, want 0 (disabled)", cfg.TerminalRetentionDays)
+	}
+	if _, err := ParseFlags(withArg(mergedArgs(), "-terminal-retention-days", "-1"), noEnv); err == nil {
+		t.Fatal("negative -terminal-retention-days accepted")
+	}
+}
+
 // TestParseFlags_RateLimitReplicas (RL-1): the replica divisor defaults
 // to 1 (one replica's full budget), honors TCDI_RATE_LIMIT_REPLICAS with
 // the flag winning, and rejects < 1 — a 0 divisor would silently turn

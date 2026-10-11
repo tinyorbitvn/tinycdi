@@ -278,9 +278,10 @@ func TestMigration011_Idempotent(t *testing.T) {
 	}
 }
 
-// TestLeaseBySession_MissUsesIndex: lease rows are never pruned, so the
-// dead-row check on the miss path must be an index probe, not a scan of
-// every lease ever issued — otherwise random cookies become full scans.
+// TestLeaseBySession_MissUsesIndex: the dead-row check on the miss path
+// must be an index probe, not a scan of the lease history — otherwise
+// random cookies become full scans. The retention sweep bounds how much
+// history exists, but the probe must not depend on it having run.
 func TestLeaseBySession_MissUsesIndex(t *testing.T) {
 	db, _, _, _ := setup(t)
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")

@@ -881,10 +881,14 @@ cannot run inside the per-migration transaction, so this is a known
 write-lock window, not a bug (see `internal/store/migrations/README.md`
 for the rule new index migrations follow). On a small install each build
 finishes in well under a second and the stall is invisible; both tables
-are append-mostly and **never pruned**, so on a long-lived deployment the
-window grows with table size — ticket redemption, lease mint/renew and
-sign-out revocation all queue behind it. On large installs run the
-upgrade in a quiet window: low sign-in/launch traffic, off-peak hours.
+are append-mostly and were **never pruned until v1.1**, so on a
+long-lived deployment the window grows with table size — ticket
+redemption, lease mint/renew and sign-out revocation all queue behind
+it. On large installs run the upgrade in a quiet window: low
+sign-in/launch traffic, off-peak hours. (v1.1 bounds the tables for the
+future: the leader's hourly retention sweep deletes terminal rows past
+`backend.retention.terminalRowDays`, default 30 — see
+`docs/runbooks/capacity.md`.)
 
 v0.3 → v0.4 also adds `021_rate_limit_window` — the `rate_limit_window`
 table behind the Postgres-backed login/launch rate limits (ADR 0006).

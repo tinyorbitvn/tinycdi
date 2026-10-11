@@ -277,6 +277,7 @@ the value to set instead:
 | `backend.hostAliases` | `[]` | pod `spec.hostAliases` on the backend Deployment — e.g. resolve an in-cluster OIDC issuer host to a Service ClusterIP when cluster DNS cannot; empty renders nothing |
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
+| `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
