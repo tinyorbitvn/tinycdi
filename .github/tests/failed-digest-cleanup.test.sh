@@ -28,7 +28,6 @@ IMG="$ROOT/.github/workflows/images.yml"
 REL="$ROOT/.github/workflows/release.yml"
 TRAIN="$ROOT/.github/workflows/runtime-images.yml"
 HELPER="$ROOT/.github/scripts/cleanup-failed-digests.sh"
-README="$ROOT/.github/README.md"
 fails=0
 
 chk() { # chk <desc> <file> <regex>
@@ -124,6 +123,12 @@ chk "helper: created_at read from versions" "$HELPER" 'created_at'
 chk "helper: tagged-manifest reachability set" "$HELPER" 'referenced\['
 chk "helper: index -> children resolution" "$HELPER" '/manifests/'
 chk "helper: referrers resolution" "$HELPER" '/referrers/'
+chk "helper: bounded recursive manifest walk" "$HELPER" 'tree_digests'
+chk "helper: nested-index depth bound" "$HELPER" 'MAX_DEPTH'
+chk "helper: unenumerable tagged manifest fails closed" "$HELPER" \
+  'cannot enumerate tagged manifest'
+chk "helper: versions-list failure is an error path" "$HELPER" \
+  'cannot list package versions'
 chk "helper: run-digest tag derivation" "$HELPER" 'sha256-\$\{hex\}'
 
 # one DELETE call site only, positioned after the targeting checks
@@ -142,6 +147,12 @@ chk_absent "helper: no untagged/age/count sweep (code)" \
 # the frozen v1.0 review record is not edited by this change
 chk_absent "review-v1.0.md untouched (frozen record)" \
   <(git diff origin/main -- docs/security/review-v1.0.md 2>/dev/null) 'SR-5-F3'
+
+# cancel is out of coverage — no doc may claim aborted runs are cleaned
+chk_absent "release notes: no 'aborted run' claim" \
+  "$ROOT/docs/releases/v1.1.0.md" 'abort'
+chk_absent "provenance: no 'aborted run' claim" \
+  "$ROOT/docs/security/provenance.md" 'abort'
 
 # ---------------------------------------------------------------
 # unit tests — stubbed gh + curl fixtures.
@@ -228,17 +239,25 @@ ver_json() { # ver_json <id> <digest> <comma-tags> <created_at>
     "$1" "$2" "$4" "$tags"
 }
 pkg_json() { local IFS=,; printf '[%s]\n' "$*"; }
-idx_json() { # idx_json <digest...> -> OCI index listing children
+idx_json() { # idx_json <child>... — "sha256:..." leaf manifest or
+  # "i:sha256:..." a nested index child (recursed into by tree_digests)
   local m="" d
-  for d in "$@"; do m+="${m:+,}{\"digest\":\"$d\"}"; done
+  for d in "$@"; do
+    case "$d" in
+      i:*) m+="${m:+,}{\"digest\":\"${d#i:}\",\"mediaType\":\"application/vnd.oci.image.index.v1+json\"}" ;;
+      *)   m+="${m:+,}{\"digest\":\"$d\",\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\"}" ;;
+    esac
+  done
   printf '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[%s]}' "$m"
 }
 
 dg() { printf 'sha256:%s' "$(printf "$1%.0s" $(seq 32))"; } # dg <2hex> -> digest
 
 IDX="$(dg aa)";   C1="$(dg bb)";   C2="$(dg cc)";   ATT="$(dg dd)"
-REFR="$(dg ee)";  SIGM="$(dg f1)";  PUB="$(dg 99)";   TIDX="$(dg 88)"
+REFR="$(dg ee)";  SIGM="$(dg f1)";  TIDX="$(dg 88)"
 SHARED="$(dg 77)"; SDG="$(dg 66)";  TDX="$(dg 55)"
+NIDX="$(dg 22)";  GRAND="$(dg 11)"
+N1="$(dg a1)"; N2="$(dg a2)"; N3="$(dg a3)"; N4="$(dg a4)"; N5="$(dg a5)"
 IDXH="${IDX#sha256:}"; TDXH="${TDX#sha256:}"
 
 # --- happy path: fresh tree, everything unreferenced --------------------
@@ -312,6 +331,71 @@ run_case "cosign sig-tag reverse reference: whole-tree refusal" 0
 expect_deletes tinycdi-backend ""
 grep -q 'refusing to delete' <<< "$LAST_OUT" \
   || { echo "FAIL: sig-tag refusal not logged"; fails=1; }
+
+# --- nested index inside our tree: grandchild resolved + deleted --------
+idx_json "$C1" "i:$NIDX" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "$GRAND"        > "$STUB_MANIFEST_DIR/$NIDX.json"
+pkg_json \
+  "$(ver_json 21 "$IDX" "" "$FRESH")" \
+  "$(ver_json 22 "$C1" "" "$FRESH")" \
+  "$(ver_json 23 "$NIDX" "" "$FRESH")" \
+  "$(ver_json 24 "$GRAND" "" "$FRESH")" \
+  > "$STUB_PKG_DIR/tinycdi-backend.json"
+mkref backend "ghcr.io/tinyorbitvn/tinycdi-backend@$IDX"
+run_case "nested index inside our tree: grandchild resolved + deleted" 0
+expect_deletes tinycdi-backend "21 22 23 24 "
+
+# --- nested index protecting a grandchild of a tagged manifest ----------
+# TIDX (tagged main) -> NIDX -> SHARED; our fresh index lists SHARED:
+# reachability must follow the nested index and refuse the whole image.
+idx_json "$C1" "$SHARED" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "i:$NIDX"       > "$STUB_MANIFEST_DIR/$TIDX.json"
+idx_json "$SHARED"       > "$STUB_MANIFEST_DIR/$NIDX.json"
+pkg_json \
+  "$(ver_json 21 "$IDX" "" "$FRESH")" \
+  "$(ver_json 22 "$C1" "" "$FRESH")" \
+  "$(ver_json 23 "$SHARED" "" "$FRESH")" \
+  "$(ver_json 25 "$TIDX" "main" "$OLD")" \
+  "$(ver_json 26 "$NIDX" "" "$OLD")" \
+  > "$STUB_PKG_DIR/tinycdi-backend.json"
+run_case "grandchild behind a tagged nested index: whole-tree refusal" 0
+expect_deletes tinycdi-backend ""
+grep -q 'reachable from a tagged manifest' <<< "$LAST_OUT" \
+  || { echo "FAIL: nested reachability reason not logged"; fails=1; }
+
+# --- an index nested deeper than the bound refuses the whole image ------
+idx_json "i:$N1" > "$STUB_MANIFEST_DIR/$IDX.json"
+idx_json "i:$N2" > "$STUB_MANIFEST_DIR/$N1.json"
+idx_json "i:$N3" > "$STUB_MANIFEST_DIR/$N2.json"
+idx_json "i:$N4" > "$STUB_MANIFEST_DIR/$N3.json"
+idx_json "i:$N5" > "$STUB_MANIFEST_DIR/$N4.json"   # index child at depth 5
+pkg_json \
+  "$(ver_json 21 "$IDX" "" "$FRESH")" \
+  > "$STUB_PKG_DIR/tinycdi-backend.json"
+run_case "index nested deeper than 4: refuse whole image" 0
+expect_deletes tinycdi-backend ""
+grep -q 'nested deeper than' <<< "$LAST_OUT" \
+  || { echo "FAIL: depth-bound refusal not logged"; fails=1; }
+
+# --- cannot enumerate a tagged manifest: refuse, delete nothing ---------
+rm -f "$STUB_MANIFEST_DIR/$TIDX.json"   # tagged manifest is unreadable
+idx_json "$C1" > "$STUB_MANIFEST_DIR/$IDX.json"
+pkg_json \
+  "$(ver_json 21 "$IDX" "" "$FRESH")" \
+  "$(ver_json 22 "$C1" "" "$FRESH")" \
+  "$(ver_json 25 "$TIDX" "main" "$OLD")" \
+  > "$STUB_PKG_DIR/tinycdi-backend.json"
+run_case "unenumerable tagged manifest: refuse, delete nothing" 0
+expect_deletes tinycdi-backend ""
+grep -q 'cannot enumerate tagged manifest' <<< "$LAST_OUT" \
+  || { echo "FAIL: unenumerable-manifest refusal not logged"; fails=1; }
+
+# --- versions-list API error: nothing deleted, job fails ----------------
+rm -f "$STUB_PKG_DIR/tinycdi-backend.json"   # stub gh exits nonzero
+run_case "versions listing API error: delete nothing" 1
+expect_deletes tinycdi-backend ""
+grep -q 'cannot list package versions' <<< "$LAST_OUT" \
+  || { echo "FAIL: versions-list error not logged"; fails=1; }
 
 # --- candidate carrying a real tag -> whole-tree refusal ----------------
 pkg_json \

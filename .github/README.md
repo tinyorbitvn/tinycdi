@@ -65,7 +65,9 @@ split publish rights from scanner execution (SEC-04/SEC-05):
    or is reachable from a tagged manifest (index children + cosign
    `sha256-<hex>.*` artifacts of tagged versions are resolved and
    counted), NOTHING is deleted for that image — the refusal is logged
-   and does not fail the job. Coverage limits: the `promote`/`publish`
+   and does not fail the job. A whole-tree refusal is a `::warning::`
+   inside an already-failed run: it leaves the pre-fix residual and
+   breaks nothing further. Coverage limits: the `promote`/`publish`
    leg is deliberately outside `needs` (its output may already be
    signed/tagged — an operator decision, not auto-deletion), and a
    cancelled run can run nothing.

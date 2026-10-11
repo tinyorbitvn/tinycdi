@@ -3,7 +3,7 @@
 # failed publishing run pushed (SR-5-F3).
 #
 # Build jobs push `type=registry,push-by-digest=true` BEFORE the trivy
-# gate; a gate-failed (or aborted) publish run used to leave those
+# gate; a gate-failed publish run used to leave those
 # unsigned manifests pullable-by-digest forever. The publishing
 # workflows' `cleanup` job feeds this script the run's own
 # image-ref artifacts and it deletes precisely the versions that run
@@ -80,10 +80,37 @@ ghcr_token() { # $1 package — pull-scope bearer token for the registry API
     "https://ghcr.io/token?scope=repository:$1:pull" | jq -r '.token // empty'
 }
 
-manifest_children() { # $1 pkg $2 digest $3 bearer — child digests of an index
+manifest_json() { # $1 pkg $2 digest $3 bearer — raw manifest document
   curl -fsSL -H "Authorization: Bearer $3" \
     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-    "https://ghcr.io/v2/$1/manifests/$2" | jq -r '.manifests[]?.digest'
+    "https://ghcr.io/v2/$1/manifests/$2"
+}
+
+MAX_DEPTH=4
+tree_digests() { # $1 pkg $2 root digest $3 bearer — every descendant
+  # digest, transitively: children of the root and of any nested index,
+  # up to MAX_DEPTH levels. rc 0 ok, 1 manifest fetch error, 2 an index
+  # is nested deeper than the bound (caller fails closed).
+  local pkg="$1" tok="$3"
+  local -A seen=()
+  local -a stack=("$2:0")
+  local item dg dep body d mt
+  while [ "${#stack[@]}" -gt 0 ]; do
+    item="${stack[-1]}"; unset 'stack[-1]'
+    dg="${item%:*}"; dep="${item##*:}"   # sha256:<hex>:<depth>
+    [ -n "${seen[$dg]:-}" ] && continue
+    seen[$dg]=1
+    body="$(manifest_json "$pkg" "$dg" "$tok")" || return 1
+    while IFS='|' read -r d mt; do
+      [ -z "$d" ] && continue
+      echo "$d"
+      case "$mt" in
+        *index*|*manifest.list*)
+          [ $((dep + 1)) -gt "$MAX_DEPTH" ] && return 2
+          stack+=("$d:$((dep + 1))") ;;
+      esac
+    done <<< "$(jq -r '.manifests[]? | [.digest, (.mediaType // "")] | join("|")' <<< "$body")"
+  done
 }
 
 referrers() { # $1 pkg $2 digest $3 bearer — referrer digests; empty when none
@@ -105,7 +132,7 @@ versions_tsv() { # $1 pkg — "id|digest|comma-tags|created_at" per version.
 clean_package() { # $1 pkg $2 pushed index digest
   local pkg="$1" idx="$2" hex="${2#sha256:}"
   local -A cand=([$2]=1) seen=() referenced=() taghex=()
-  local tok children refs rows d vid vname vtags vc t kids tagged derived
+  local tok children refs rows d vid vname vtags vc t kids tagged derived tree_rc
   local -a tags=() c_ids=() c_names=() c_created=() del_now=() del_idx=()
   local refuse="" rc=0 i
 
@@ -114,13 +141,23 @@ clean_package() { # $1 pkg $2 pushed index digest
     || { echo "::error::$pkg: ghcr token fetch failed — skipping"; return 1; }
 
   # This run's tree: index -> children (per-platform + buildkit
-  # attestation manifests) -> referrers. Without the index manifest we
-  # cannot name the children — skip the package rather than delete
-  # only the index and orphan its legs.
-  if ! children="$(manifest_children "$pkg" "$idx" "$tok")"; then
-    echo "::error::$pkg@$idx: manifest fetch failed — skipping package"
-    return 1
+  # attestation manifests, transitively — nested indexes up to
+  # MAX_DEPTH) -> referrers. Without the index manifest we cannot name
+  # the children — skip the package rather than delete only the index
+  # and orphan its legs. An index nested deeper than the bound is a
+  # fail-closed refusal, not an error.
+  if children="$(tree_digests "$pkg" "$idx" "$tok")"; then
+    tree_rc=0
+  else
+    tree_rc=$?
   fi
+  case "$tree_rc" in
+    0) ;;
+    2) echo "::warning::$pkg@$idx: index nested deeper than $MAX_DEPTH — refusing to delete"
+       return 0 ;;
+    *) echo "::error::$pkg@$idx: manifest fetch failed — skipping package"
+       return 1 ;;
+  esac
   while IFS= read -r d; do [ -n "$d" ] && cand["$d"]=1; done <<< "$children"
   refs="$(referrers "$pkg" "$idx" "$tok")"
   while IFS= read -r d; do [ -n "$d" ] && cand["$d"]=1; done <<< "$refs"
@@ -155,11 +192,12 @@ clean_package() { # $1 pkg $2 pushed index digest
     [ -n "$tagged" ] || continue
     taghex[${vname#sha256:}]=1
     referenced[$vname]=1
-    # The tagged index's children are published legs — never deletable.
-    if kids="$(manifest_children "$pkg" "$vname" "$tok")"; then
+    # The tagged manifest's whole tree is published legs — never
+    # deletable. An unreadable or over-deep nested index proves no
+    # non-overlap — fail closed for the whole image.
+    if kids="$(tree_digests "$pkg" "$vname" "$tok")"; then
       while IFS= read -r d; do [ -n "$d" ] && referenced[$d]=1; done <<< "$kids"
     else
-      # cannot prove non-overlap — fail closed for the whole image
       refuse+="cannot enumerate tagged manifest $vname (proving non-overlap impossible); "
     fi
   done <<< "$rows"

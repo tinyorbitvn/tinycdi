@@ -125,7 +125,10 @@ run's tree. If any candidate carries a non-digest tag or is reachable
 from a tagged manifest, nothing is deleted for that image — so a
 gate-failed `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does
 not stay pullable-by-digest and a published release can never be
-cleaned up by a failed run.
+cleaned up by a failed run. The window and reachability checks are
+check-then-act — a version could in principle gain a tag or a referrer
+between resolution and deletion, a small TOCTOU residual accepted for
+v1.1.
 
 Even in the window between push and cleanup the residual carries no
 release trust:
