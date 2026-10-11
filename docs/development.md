@@ -13,7 +13,8 @@ cmd/       Go entrypoints: backend, operator (the frontend server lives in build
 config/    kubebuilder config: CRDs, RBAC, manager, samples
 deploy/    deploy/helm/tinycdi — the Helm chart (install/upgrade)
 docs/      architecture, ADRs, runbooks, security policy, compatibility pins
-hack/      codegen helpers (boilerplate header)
+hack/      codegen + ops helpers (boilerplate header, kind quickstart,
+           preflight, env-driven e2e smoke)
 internal/  control-plane packages (backend, api, broker, gateway, operator, runtime, ...)
 tests/     integration tests (Go, envtest + Docker — no cluster required)
 web/       frontend SPA (React/TypeScript, Vite, vitest + Playwright mock suite)
@@ -76,6 +77,15 @@ The desktop (XFCE4) and browser (kiosk) images are profiles layered on the
 shared base image — `BASE_IMAGE` selects which linux-base build to extend (a
 local tag or a registry digest). See `docs/images.md` for the runtime-image contract and
 pinned inputs.
+
+## Release-candidate e2e smoke
+
+`hack/e2e/smoke.sh` is the env-driven API-level smoke a release candidate
+runs against a live deployment — anonymous surface checks, a scripted
+OIDC login, the workspace lifecycle (create → Ready → stop → start →
+Ready → delete), the quota refusal and sign-out. It needs only `curl` +
+`jq` and the `TCDI_E2E_*` environment — see `hack/e2e/README.md`. The
+kind quickstart (`hack/quickstart/up.sh`) is the reference deployment.
 
 ## Regenerating the README screenshots
 
