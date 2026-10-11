@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { cx } from "./cx";
 import type { Tone } from "./Badge";
-import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { IconCircleAlert, IconTriangleAlert, IconCircleCheck, IconInfo, IconX } from "./icons";
 import { t } from "../i18n";
 
 export type AlertTone = Exclude<Tone, "neutral" | "accent">;
@@ -19,9 +19,9 @@ export interface AlertProps {
 
 const ICONS = {
   info: IconInfo,
-  success: IconCheckCircle,
-  warning: IconAlertTriangle,
-  danger: IconAlertCircle,
+  success: IconCircleCheck,
+  warning: IconTriangleAlert,
+  danger: IconCircleAlert,
 } as const;
 
 /**

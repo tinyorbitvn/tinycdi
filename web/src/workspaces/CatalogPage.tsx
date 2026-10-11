@@ -1,5 +1,5 @@
 import { Alert, Badge, Button, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Spinner } from "../design";
-import { IconGrid, IconPlus } from "../design/icons";
+import { IconLayoutGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
 import { isPortalApiError } from "../api/errors";
 import { Link } from "../lib/router";
@@ -107,7 +107,7 @@ export function CatalogPage() {
       {list.loading && !list.data ? (
         <Spinner label={t("templates.catalog.loading")} />
       ) : (list.data ?? []).length === 0 ? (
-        <EmptyState icon={<IconGrid size={24} />} title={t("templates.catalog.empty")} />
+        <EmptyState icon={<IconLayoutGrid size={24} />} title={t("templates.catalog.empty")} />
       ) : (
         <Grid min="md">
           {(list.data ?? []).map((tpl) => (

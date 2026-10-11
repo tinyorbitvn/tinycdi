@@ -7,11 +7,11 @@ import {
   EmptyState,
   IconCheck,
   IconChevronDown,
-  IconGlobe,
-  IconLaptop,
+  IconWorld,
+  IconDeviceLaptop,
   IconLogOut,
   IconMoon,
-  IconShield,
+  IconShieldCheck,
   IconSun,
   IconUser,
   IconButton,
@@ -70,7 +70,7 @@ export function useBranding(): Branding | null {
 const THEME_OPTIONS: { pref: ThemePreference; label: MessageKey; icon: ReactNode }[] = [
   { pref: "light", label: "app.theme.light", icon: <IconSun /> },
   { pref: "dark", label: "app.theme.dark", icon: <IconMoon /> },
-  { pref: "system", label: "app.theme.system", icon: <IconLaptop /> },
+  { pref: "system", label: "app.theme.system", icon: <IconDeviceLaptop /> },
 ];
 
 function ThemeMenu() {
@@ -115,7 +115,7 @@ function LanguageMenu() {
           {...props}
           size="sm"
           label={t("app.language.label")}
-          icon={<IconGlobe />}
+          icon={<IconWorld />}
         />
       )}
       items={LOCALES.map((l) => ({
@@ -189,7 +189,7 @@ function UserMenu({ me }: { me: Me }) {
           {
             id: "sign-out-all",
             label: t("app.user.signOutAll"),
-            icon: <IconShield />,
+            icon: <IconShieldCheck />,
             onSelect: () => setConfirmAll(true),
           },
         ]}

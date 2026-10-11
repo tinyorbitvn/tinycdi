@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buttonClass, EmptyState, Page, Spinner, StatusPill, Table } from "../design";
 import type { Column } from "../design/Table";
-import { IconGrid, IconPlus } from "../design/icons";
+import { IconLayoutGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { Link } from "../lib/router";
@@ -104,7 +104,7 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
       actions={
         <>
           <Link to="/templates" className={buttonClass("secondary")}>
-            <IconGrid size={16} /> {t("nav.templates")}
+            <IconLayoutGrid size={16} /> {t("nav.templates")}
           </Link>
           <Link to="/workspaces/new" className={buttonClass("primary")}>
             <IconPlus size={16} /> {t("nav.newWorkspace")}
@@ -120,7 +120,7 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
         <Spinner label={t("workspaces.list.loading")} />
       ) : items.length === 0 ? (
         <EmptyState
-          icon={<IconGrid size={24} />}
+          icon={<IconLayoutGrid size={24} />}
           title={t("workspaces.list.empty")}
           description={t("workspaces.list.emptyBody")}
           action={

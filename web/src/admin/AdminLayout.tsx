@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { EmptyState, Page, Spinner } from "../design";
-import { IconShield } from "../design/icons";
+import { IconShieldCheck } from "../design/icons";
 import { Link, navigate, usePathname } from "../lib/router";
 import { cx } from "../design/cx";
 import { t, type MessageKey } from "../i18n";
@@ -67,7 +67,7 @@ export function AdminLayout({
   } else if (!isTenantAdmin(me.data)) {
     body = (
       <EmptyState
-        icon={<IconShield size={32} />}
+        icon={<IconShieldCheck size={32} />}
         title={t("admin.gate.title")}
         description={t("admin.gate.body")}
         action={<Link to="/">{t("admin.gate.back")}</Link>}
