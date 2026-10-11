@@ -146,15 +146,32 @@ lb="$(grep -n 'X DELETE' "$HELPER" | head -1 | cut -d: -f1)"
 chk_absent "helper: no untagged/age/count sweep (code)" \
   <(grep -vE '^[[:space:]]*#' "$HELPER") 'untagged|keep-n'
 
-# the frozen v1.0 review record is not edited by this change
-chk_absent "review-v1.0.md untouched (frozen record)" \
-  <(git diff origin/main -- docs/security/review-v1.0.md 2>/dev/null) 'SR-5-F3'
+# the frozen v1.0 review record must not carry this fix's closure —
+# content-pin (no git needed) plus a diff check when origin/main is
+# resolvable, so the guard is fail-closed in shallow clones too.
+chk_absent "review-v1.0.md frozen (no SR-5-F3 closure)" \
+  "$ROOT/docs/security/review-v1.0.md" \
+  'SR-5-F3.{0,80}Fixed|cleanup-failed-digests|failed-digest-cleanup|#164'
+if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+  chk_absent "review-v1.0.md untouched vs origin/main" \
+    <(git diff origin/main -- docs/security/review-v1.0.md 2>/dev/null) 'SR-5-F3'
+fi
 
-# cancel is out of coverage — no doc may claim aborted runs are cleaned
-chk_absent "release notes: no 'aborted run' claim" \
-  "$ROOT/docs/releases/v1.1.0.md" 'abort'
-chk_absent "provenance: no 'aborted run' claim" \
-  "$ROOT/docs/security/provenance.md" 'abort'
+# cancel is out of coverage — the docs must not claim aborted/cancelled
+# RUNS are cleaned. The pattern is deliberately narrow: it needs an
+# abort/cancel word immediately followed by run/workflow/job (or the
+# legacy 'or aborted' phrasing) — unrelated uses like "the handshake is
+# aborted" must pass.
+ABORT_RE='(abort|cancel)[a-z]* (run|workflow|job)|or aborted'
+for doc in "$ROOT/docs/releases/v1.1.0.md" "$ROOT/docs/security/provenance.md"; do
+  grep -qiE "$ABORT_RE" "$doc" \
+    && { echo "FAIL: $doc claims aborted/cancelled runs are cleaned"; fails=1; }
+done
+# fixtures: the old wording is still caught; an unrelated use passes.
+grep -qiE "$ABORT_RE" <<< 'a gate-failed (or aborted) publish run used to leave' \
+  || { echo "FAIL: abort pattern misses the old '(or aborted)' wording"; fails=1; }
+grep -qiE "$ABORT_RE" <<< 'the TLS handshake is aborted after one retry' \
+  && { echo "FAIL: abort pattern matches an unrelated sentence"; fails=1; }
 
 # ---------------------------------------------------------------
 # rehearsal input (images.yml only): a main-only, dispatch-only,
