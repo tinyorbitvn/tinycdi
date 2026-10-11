@@ -355,6 +355,19 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			cond.Reason != ReasonTemplateRevisionGone {
 			t.Fatalf("want Degraded/TemplateRevisionGone, got %+v", got.Status.Conditions)
 		}
+		// The pod is the running incarnation: the hold phase stays Ready
+		// with the Degraded condition carrying the hold — the broker's
+		// running projection keeps the workspace under lifecycle
+		// enforcement and ticket issuance keeps working.
+		if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+			t.Fatalf("held workspace with a live pod: phase=%q, want Ready", got.Status.Phase)
+		}
+		if got.Status.RuntimeUID != string(pod.UID) {
+			t.Fatalf("runtimeUID=%q, want the live pod %q", got.Status.RuntimeUID, pod.UID)
+		}
+		if got.Status.ServiceRef == nil || got.Status.StartedAt == nil {
+			t.Fatalf("serviceRef/startedAt lost on hold: %+v", got.Status)
+		}
 		cur := &corev1.Pod{}
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
 			t.Fatalf("pod vanished on revision-gone hold: %v", err)
@@ -465,7 +478,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatal(err)
 		}
 		pod := seedRunning(t, ns, ws, live, "")
-		// The revision object was pruned since the pod was built.
+		// The revision object was pruned since the pod was built; the pod
+		// itself is the serving incarnation.
+		markPodReady(t, c, pod)
 		if err := c.Delete(context.Background(), live); err != nil {
 			t.Fatalf("delete revision: %v", err)
 		}
@@ -526,6 +541,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatal(err)
 		}
 		pod := seedRunning(t, ns, ws, live, "")
+		markPodReady(t, c, pod)
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
 		delete(pod.Annotations, linux.AnnotationTemplateHash)

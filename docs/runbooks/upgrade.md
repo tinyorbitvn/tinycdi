@@ -54,10 +54,16 @@ status:
   pods whose revision was rotated out or pruned do NOT match —
   they hold `TemplateRevisionGone` as below.
 - **Running workspace whose revision cannot be proven** — the pod KEEPS
-  RUNNING untouched; the workspace holds `Pending` with
-  `Degraded`/`TemplateRevisionGone` and emits one Warning event (only
-  after the condition persisted — retries cannot duplicate it). Expect
-  this only on sessions started BEFORE the last template rollout —
+  RUNNING untouched; the workspace holds `Ready` with
+  `Degraded`/`TemplateRevisionGone` while the pod serves — the phase
+  describes the incarnation, the Degraded condition carries the hold
+  (a pod that is not Ready yet reports `Pending` with the observed
+  step conditions) — and
+  emits one Warning event (only after the condition persisted — retries
+  cannot duplicate it). Lifecycle enforcement (idle/disconnect/
+  max-duration, at the stricter held caps) and reconnect tickets keep
+  working on the held session. Expect this only on sessions started
+  BEFORE the last template rollout —
   i.e. pods built from a revision that has since been rotated or
   pruned — and on webhook-altered or forged-spec pods. To clear, stop
   and start the workspace: the next start re-snapshots the template
@@ -65,7 +71,8 @@ status:
 - **Running workspace whose resolved template is inadmissible** — the
   pod's revision proves fine, but the live template's content fails
   admission (an out-of-policy `seccomp-profile` annotation): the pod
-  KEEPS RUNNING untouched exactly like the RevisionGone hold — the two
+  KEEPS RUNNING untouched exactly like the RevisionGone hold — `Ready`
+  with `Degraded` — the two
   holds differ only in the Degraded reason, `TemplateInvalid` for
   content-invalid versus `TemplateRevisionGone` for
   identity-unprovable — and the same single Warning event fires after
@@ -75,7 +82,8 @@ status:
 - **Workspace without a running pod** (stopped or pending) — nothing is
   adopted. The next start resolves `spec.templateRef` and snapshots the
   live template exactly like a fresh admit; if the template was deleted
-  in the meantime the workspace holds `Degraded`/`TemplateInvalid` —
+  in the meantime the workspace holds `Pending` with
+  `Degraded`/`TemplateInvalid` —
   with one Warning event — until an admin republishes it, same as today.
 
 After the record lands, the annotation mirror is rewritten from status
