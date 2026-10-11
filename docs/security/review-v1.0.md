@@ -94,7 +94,7 @@ the v0.5.1 tag are marked accordingly.
 | SR-4-F2 | P3 | Desktop input extends the principal's other sessions (duplicate of SR-1-F3, claimed P3 vs SR-1-F3's P2) | Fixed | #133 — fixed on v0.5.0-era main before v0.5.1 | `TestInputActivity_SlidesOnlyBoundSession`, `TestTouchSessionDigest_ScopesToBoundSession` |
 | SR-4-F3 | P3 | Non-IP `X-Forwarded-For` entries become verbatim rate-limit keys | Fixed | #145 | `TestClientKey_NonIPSelectedEntryFallsBackToPeer`, `TestClientAddr_NonIPSelectedEntryFallsBackToPeer`; e2e junk-XFF leg (G7) |
 | SR-4-F4 | P3 | Audit coverage pin is spec↔table only; an unwrapped mutating route escapes detection | Fixed | #145 | `TestAuditCoverage_MountedMuxEmitsEventPerRoute` |
-| SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Open | — | n/a — listed (§6) |
+| SR-4-F5 | P3 | Migrations 020/023 build indexes with non-concurrent `CREATE INDEX` inside the migration transaction | Fixed | v1.1 — terminal-row retention sweep | `TestSweepTerminalConnectionRows_*`, `TestPruneTerminal_BatchBoundary`, `TestRetention*` (chart) |
 | SR-5-F1 | P2 | `runtime-images.json` is the only unsigned artifact in the release chain | Fixed | #135 | `.github/tests/supply-chain-hardening.test.sh` (sign-blob step + asset assertions) |
 | SR-5-F2 | P2 | Single-actor merge→signed-publish path | Accepted | #157 (approval-gate mitigation) | `.github/tests/supply-chain-hardening.test.sh` (publish job under `environment: runtime-train`), `.github/tests/setup-repo-protection.test.sh`; residual + trigger in §7 |
 | SR-5-F3 | P3 | Gate-failed build digests stay pullable-by-digest | Open | — | n/a — listed (§6) |
@@ -110,7 +110,7 @@ the v0.5.1 tag are marked accordingly.
 | P0 | 0 | — |
 | P1 | 1 | fixed — SR-3-F1 in #146 (verified by the forged-annotation drill, G4) |
 | P2 | 9 | 8 fixed (#131, #132, #133, #135, #142); 1 accepted — SR-5-F2, owner `maintainers`, target = a second maintainer joining, mitigated by the `runtime-train` publish approval environment in #157 (§7) |
-| P3 | 22 | 17 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 2 listed open (SR-4-F5, SR-5-F3) |
+| P3 | 22 | 17 fixed; 3 accepted with owner `maintainers` and target v1.1 (SR-2-F8, SR-3-F2, SR-3-F5 — §6); 1 fixed post-review in v1.1 (SR-4-F5 — retention sweep); 1 listed open (SR-5-F3) |
 | duplicate | 1 | SR-2-F6 (== SR-4-F1) — fixed in #133 |
 
 **Result:** no open P0/P1. Every P2 is fixed or accepted: SR-5-F2's
@@ -473,11 +473,18 @@ criterion; open items are listed.
   edge, not reproduced). Flagged for v1.0: watch for reports of
   mid-rollout stream loss.
 - **SR-4-F5 — non-concurrent `CREATE INDEX` inside the migration
-  transaction — OPEN** (listed, P3). Migrations 020/023 take a SHARE
-  lock on append-mostly, never-pruned `connection_lease`/`launch_ticket`
+  transaction — FIXED** (v1.1). Migrations 020/023 take a SHARE
+  lock on append-mostly `connection_lease`/`launch_ticket`
   tables; on a long-lived deployment the build can stall writes while
-  replicas roll. A retention sweep or a documented out-of-transaction
-  `CREATE INDEX CONCURRENTLY` runbook step is the sketched fix.
+  replicas roll. Closed by the retention sweep: the leader replica now
+  deletes terminal rows older than `-terminal-retention-days` (default
+  30, `0` disables) in bounded hourly batches
+  (`internal/store/retention.go`, `internal/backend/retention.go`), so
+  table size — and the cost of any future index build — no longer grows
+  with deployment age. The authoring rule for the next large-table index
+  (documented `CREATE INDEX CONCURRENTLY IF NOT EXISTS` runbook step
+  before the upgrade) is codified in `internal/store/migrations/README.md`
+  and `docs/development.md`.
 - **SR-5-F3 — gate-failed digests remain pullable-by-digest — OPEN**
   (listed, P3). Build jobs push by digest before the scan gate; an
   unsigned, never-promoted digest stays addressable. Consumers pinning

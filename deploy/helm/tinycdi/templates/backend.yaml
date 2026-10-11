@@ -230,6 +230,10 @@ spec:
             # on a 0 divisor. Rendered before extraArgs so an override
             # there (e.g. an HPA's maxReplicas) wins.
             - -rate-limit-replicas={{ max 1 (.Values.backend.replicas | int) }}
+            # Terminal-row retention (SR-4-F5): the leader's hourly sweep
+            # deletes connection_lease/launch_ticket rows terminal for
+            # longer than this — 0 disables and the tables grow unbounded.
+            - -terminal-retention-days={{ .Values.backend.retention.terminalRowDays }}
             {{- with .Values.backend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
