@@ -458,6 +458,29 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
 		hotReloadClientCAs(tlsCfg, caPool)
+		// ADR 0009 (SR-3-F5): optional per-certificate revocation. The
+		// blocklist polls+swaps exactly like the CA pool; a bad file at
+		// boot fails startup (a configured revocation control never starts
+		// silently disabled) and a bad reload keeps the last-good list.
+		// Unset flag = no VerifyConnection is installed — the handshake
+		// path stays byte-identical.
+		if cfg.InternalRevokedList != "" {
+			var onErr func()
+			var onSwap func(int)
+			if metrics != nil {
+				onErr = metrics.IncRevocationReloadError
+				onSwap = metrics.SetRevocationEntries
+			}
+			bl, err := tlsreload.NewBlocklist(cfg.InternalRevokedList,
+				tlsreload.WithLogger(log),
+				tlsreload.WithReloadObserver(onErr, onSwap))
+			if err != nil {
+				return fmt.Errorf("internal revoked list: %w", err)
+			}
+			b.reloaders = append(b.reloaders, bl)
+			b.internalBlocklist = bl
+			installRevocation(tlsCfg, bl, log, metrics)
+		}
 		b.internalTLSCfg = tlsCfg
 		// E8: the internal mTLS surface is instrumented too, under
 		// listener="internal" — InstrumentHTTP passes through when the
@@ -790,7 +813,13 @@ func (b *Backend) bind(cfg Config) error {
 	if err := add("session", cfg.SessionListen, sessionServer(cfg.SessionListen, b.sessionHandler), sessionTLS); err != nil {
 		return err
 	}
-	if err := add("internal", cfg.InternalListen, internalServer(cfg.InternalListen, b.internalHandler), b.internalTLSCfg); err != nil {
+	internalSrv := internalServer(cfg.InternalListen, b.internalHandler)
+	if bl := b.internalBlocklist; bl != nil {
+		// ADR 0009: the live-conn registry tracks only conns the server
+		// still holds — drop each on close/hijack so it cannot leak.
+		internalSrv.ConnState = connStateDrop(bl)
+	}
+	if err := add("internal", cfg.InternalListen, internalSrv, b.internalTLSCfg); err != nil {
 		return err
 	}
 	if cfg.MetricsListen != "" {

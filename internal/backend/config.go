@@ -162,6 +162,10 @@ type Config struct {
 	InternalTLSKey   string
 	InternalClientCA string
 	OperatorCN       string
+	// InternalRevokedList is the ADR 0009 per-certificate revocation
+	// list for the internal mTLS listener; empty disables the feature —
+	// the handshake path is then byte-identical to an unlisted build.
+	InternalRevokedList string
 
 	// Metrics listener (scrape-only, plain HTTP).
 	MetricsListen string // empty disables
@@ -302,6 +306,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.InternalClientCA, "internal-client-ca", envOr(getenv, "TCDI_INTERNAL_CLIENT_CA", ""), "CA bundle verifying internal client certs")
 	fs.StringVar(&c.OperatorCN, "operator-cn", envOr(getenv, "TCDI_OPERATOR_CN", httpapi.DefaultOperatorCN),
 		"client-certificate CN of the operator identity on the internal workspace routes")
+	fs.StringVar(&c.InternalRevokedList, "internal-revoked-list", envOr(getenv, "TCDI_INTERNAL_REVOKED_LIST", ""),
+		"per-certificate revocation list for the internal mTLS listener (ADR 0009: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
 
 	// Metrics listener.
 	fs.StringVar(&c.MetricsListen, "metrics-listen", envOr(getenv, "TCDI_METRICS_LISTEN", ""), "metrics listen address (empty disables)")
@@ -475,6 +481,11 @@ func (c *Config) validate() error {
 		if c.InternalTLSCert == "" || c.InternalTLSKey == "" || c.InternalClientCA == "" {
 			return errors.New("-internal-listen requires -internal-tls-cert, -internal-tls-key and -internal-client-ca")
 		}
+	}
+	if c.InternalRevokedList != "" && c.InternalListen == "" {
+		// A configured revocation control that silently does nothing is a
+		// fail-open misconfiguration — refuse it.
+		return errors.New("-internal-revoked-list requires -internal-listen")
 	}
 
 	// The session domain is required by the session-listener check above;
