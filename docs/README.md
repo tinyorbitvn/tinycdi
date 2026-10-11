@@ -40,6 +40,7 @@
 - [releases/v0.3.2.md](releases/v0.3.2.md) — v0.3.2 release notes
 - [releases/v0.4.0.md](releases/v0.4.0.md) — v0.4 release notes
 - [releases/v0.5.0.md](releases/v0.5.0.md) — v0.5 release notes
+- [releases/v0.5.1.md](releases/v0.5.1.md) — v0.5.1 release notes
   (in progress; assembled ahead of the tag)
 
 ## Security
