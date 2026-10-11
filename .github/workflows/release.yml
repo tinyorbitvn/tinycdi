@@ -1347,7 +1347,7 @@ jobs:
           # FX-R11: every release states its security-review status, and a
           # pre-release says it is a test build (tests: release-notes-review-status).
           {
-            echo "Not independently security-reviewed; a review is planned before v1.0."
+            echo "Internally security-reviewed for v1.0 (docs/security/review-v1.0.md); not an independent audit."
             echo
             if [ "$PRERELEASE" = "true" ]; then
               echo "Pre-release test build."

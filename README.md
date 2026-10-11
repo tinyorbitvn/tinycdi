@@ -83,6 +83,7 @@ adapter (`spec.linux.adapter: kasm`) — see [`docs/kasm-images.md`](docs/kasm-i
 - [Architecture](docs/architecture.md) — design doc + ADRs
 - [Runtime image contract](docs/images.md) · [Compatibility pins](docs/compatibility.md)
 - [Runbooks](docs/runbooks/install.md) — install, upgrade, retained data, DR, capacity
+- [Versioning](docs/versioning.md) — the 1.0 contract: stable surfaces and support policy
 - [Development](docs/development.md) — repo layout, build, test, screenshots
 
 ## Security
@@ -90,6 +91,11 @@ adapter (`spec.linux.adapter: kasm`) — see [`docs/kasm-images.md`](docs/kasm-i
 TinyCDI runs other people's desktops — vulnerability reports go through
 GitHub private reporting, and hardening rules are mandatory for
 contributors and operators. See [`SECURITY.md`](SECURITY.md).
+
+**Status:** the 1.0 release line. An internal pre-1.0 security review is
+complete ([report](docs/security/review-v1.0.md)); it is **not an
+independent audit**. The versioning and stability contract is in
+[`docs/versioning.md`](docs/versioning.md).
 
 ## License
 
