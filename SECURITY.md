@@ -437,7 +437,12 @@ v0.2)
       `runtime.networkProfiles.clusterOnly.*` values
       (`--runtime-clusteronly-egress`) narrow the rule to
       selector-matched namespaces/pods and/or ports; a ports-only
-      narrowing still never admits non-pod destinations;
+      narrowing still never admits non-pod destinations. The default is
+      deprecated and flips to restricted egress in v1.2 — install NOTES
+      warn while a seeded `ClusterOnly` template runs unrestricted;
+    - `Isolated` denies all egress **except cluster DNS** — DNS
+      resolution stays allowed by design (a deliberate unidirectional
+      channel);
     - generated policies are reconciled when they drift;
     - an empty peer list fails the render and never means "any".
 
@@ -607,7 +612,10 @@ v0.2)
    - keep `extraArgs`/`extraEnv` empty on every component: the chart
      rejects known weakening flags and env names unless `dev.enabled`,
      but cannot catch every override;
-   - prefer the `Isolated` profile where the use case allows it;
+   - prefer the `Isolated` profile where the use case allows it —
+     `Isolated` still permits cluster DNS egress by design (a deliberate
+     unidirectional channel); workloads needing even DNS blocked are out
+     of profile scope;
    - an FQDN allowlist needs an egress proxy.
 6. **Namespaces:**
    - release namespace PSS `enforce=baseline` (`warn=restricted`);
