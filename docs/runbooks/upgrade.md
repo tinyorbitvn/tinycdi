@@ -4,9 +4,24 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
-## Upgrading from v0.5 to v1.0 — `status.templateSnapshot`
+## Upgrading from v0.5.1 to v1.0.0
 
-v1.0 changes where the immutable per-workspace template snapshot lives.
+v1.0.0 carries **no CRD change and no database migration** over v0.5.1 —
+the upgrade is the chart plus the pinned images, nothing else. There is
+no `crds/` step: the `workspaces` and `workspacetemplates` schemas are
+unchanged from v0.5.1 (and Helm never upgrades `crds/` anyway). Follow
+the general "Procedure" below, skipping the CRD step: pin the new image
+digests (`images.{backend,frontend,operator}.digest`, plus the
+runtime-train digests per [images.md](../images.md)), render and diff,
+then `helm upgrade`. Sessions keep running under the same rules.
+
+Rollback is the same as for any chart-only step: `helm rollback`, or
+re-pin the previous digests and `helm upgrade` — nothing schema-side
+moves, so the outgoing release reads the same objects it wrote.
+
+## Upgrading from v0.5.0 to v0.5.1 — `status.templateSnapshot`
+
+v0.5.1 changes where the immutable per-workspace template snapshot lives.
 The `workspaces` CRD gains the optional `status.templateSnapshot` field —
 the ONLY copy trusted for pod building — and the operator starts writing
 it (the `workspaces.cdi.tinyorbit.vn/template-snapshot` annotation becomes
@@ -14,11 +29,11 @@ a read mirror kept for consumers). Apply the CRDs first as usual:
 `kubectl diff -f deploy/helm/tinycdi/crds/` then `kubectl apply -f
 deploy/helm/tinycdi/crds/` — Helm never upgrades `crds/`, and the new
 schema is additive (a new optional status field; existing objects stay
-valid, and a v0.5 binary ignores the field it does not know).
+valid, and a v0.5.0 binary ignores the field it does not know).
 
 **No data migration and no runtime disruption are needed.** During the
 rollout the operator's leader-election Lease hands reconcile to exactly
-one pod at a time: the outgoing v0.5 replicas keep serving until the new
+one pod at a time: the outgoing v0.5.0 replicas keep serving until the new
 leader is up — there is no window in which both versions reconcile the
 same workspace (with the chart default `operator.leaderElect: true`; a
 single-replica `replicas: 1` install simply rolls the one pod and is
@@ -37,7 +52,7 @@ status:
   matching revision string identify ONE live `WorkspaceTemplate` object;
   the operator re-reads THAT object's content and writes it into
   `status.templateSnapshot`. The pod is not restarted or replaced.
-- **Running workspace with a pre-stamp pod (every v0.5 pod)** — the pod
+- **Running workspace with a pre-stamp pod (every v0.5.0 pod)** — the pod
   names nothing, so the operator computes ONE candidate: the live
   revision `spec.templateRef` resolves to today (a catalog base name
   resolves to its newest revision). It rebuilds the pod from that object
@@ -116,9 +131,9 @@ populate the record. While held, the broker's expiry planner ignores the
 annotation's lifecycle caps entirely — held sessions get the stricter
 of the resolved template's lifecycle and the chart defaults. Rollback:
 the annotation mirror
-stays fully populated, so a v0.5 operator (which reads only the
+stays fully populated, so a v0.5.0 operator (which reads only the
 annotation) keeps converging the same recorded revision — do not
-"un-apply" the v1.0 CRD, the extra status field is inert under v0.5.
+"un-apply" the v0.5.1 CRD, the extra status field is inert under v0.5.0.
 
 ## Upgrading from v0.2 to v0.3
 
