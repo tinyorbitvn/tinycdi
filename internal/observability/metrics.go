@@ -100,6 +100,11 @@ var (
 	internalAuthFailReasons = map[string]struct{}{
 		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
 	}
+	// retentionTables are the session-layer tables the terminal-row
+	// retention sweep prunes (SR-4-F5).
+	retentionTables = map[string]struct{}{
+		"connection_lease": {}, "launch_ticket": {},
+	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route
 	// events, the gateway events, http.request and the config apply); a
@@ -159,6 +164,8 @@ type Metrics struct {
 	leaseSessGone        *prometheus.CounterVec
 	auditWriteErrs       *prometheus.CounterVec
 	internalAuthFailures *prometheus.CounterVec
+	retentionPruned      *prometheus.CounterVec
+	retentionLastOK      prometheus.Gauge
 
 	tenants map[string]struct{}
 }
@@ -273,6 +280,14 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "internal_auth_failures_total",
 			Help: "mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.",
 		}, []string{"reason"}),
+		retentionPruned: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "retention_rows_pruned_total",
+			Help: "Terminal connection_lease/launch_ticket rows deleted by the retention sweep, by table.",
+		}, []string{"table"}),
+		retentionLastOK: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricNamespace, Name: "retention_last_success_timestamp_seconds",
+			Help: "Unix timestamp of the last completed terminal-row retention sweep.",
+		}),
 		tenants: map[string]struct{}{},
 	}
 	for _, t := range tenantAllowlist {
@@ -284,12 +299,15 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		m.sessionsActive, m.rehydrations, m.streamsFenced, m.connTokensDropped, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
-		m.internalAuthFailures,
+		m.internalAuthFailures, m.retentionPruned, m.retentionLastOK,
 	)
 	// A state gauge reads "no data" until first touched — seed every
 	// bounded family at 0 (closed) so dashboards see the healthy state.
 	for r := range rateLimitWindowRoutes {
 		m.rateLimitDown.WithLabelValues(r).Set(0)
+	}
+	for tbl := range retentionTables {
+		m.retentionPruned.WithLabelValues(tbl).Add(0)
 	}
 	return m
 }
@@ -478,4 +496,17 @@ func (m *Metrics) IncAuditWriteError(event string) {
 // is not rate-limited — it is the complete record of refused attempts.
 func (m *Metrics) IncInternalAuthFailure(reason string) {
 	m.internalAuthFailures.WithLabelValues(boundValue(reason, internalAuthFailReasons)).Inc()
+}
+
+// AddRetentionRowsPruned counts terminal rows the retention sweep deleted
+// (SR-4-F5); table is bounded to {connection_lease, launch_ticket, other}.
+func (m *Metrics) AddRetentionRowsPruned(table string, n float64) {
+	m.retentionPruned.WithLabelValues(boundValue(table, retentionTables)).Add(n)
+}
+
+// SetRetentionLastSuccess stamps when the last terminal-row retention
+// sweep completed; an absent series means no pass has finished since the
+// replica started.
+func (m *Metrics) SetRetentionLastSuccess(at time.Time) {
+	m.retentionLastOK.Set(float64(at.Unix()))
 }

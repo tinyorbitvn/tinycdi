@@ -239,7 +239,28 @@ objects. It **keeps**:
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled` |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+
+`<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
+on this deny-list — dev-surface env names plus the env equivalents of
+security-relevant flags the chart exposes as first-class values (an env
+var would bypass the chart's wiring/validation). Each render error names
+the value to set instead:
+
+| Denied `extraEnv` name | Set instead |
+|---|---|
+| `TCDI_DEV_INSECURE_DB` / `PGSSLMODE` | `database.tls.mode` (verify-ca/verify-full) |
+| `TCDI_DEV_ALLOW_NO_BROKER` | `operator.devAllowNoBroker` (dev-only) |
+| `TCDI_METRICS_LISTEN` | `backend.metrics.enabled` |
+| `TCDI_KASM_ADAPTER_IMAGE` | `kasmAdapter.enabled` + `kasmAdapter.image.digest` |
+| `TCDI_OPERATOR_CN` | `backend.operatorCN` |
+| `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
+| `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
+| `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
+| `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
+| `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
+| `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
+| `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
 
 ### Component-specific highlights
 
@@ -256,6 +277,7 @@ objects. It **keeps**:
 | `backend.hostAliases` | `[]` | pod `spec.hostAliases` on the backend Deployment — e.g. resolve an in-cluster OIDC issuer host to a Service ClusterIP when cluster DNS cannot; empty renders nothing |
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
+| `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |

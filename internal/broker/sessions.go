@@ -59,7 +59,11 @@ func (b *Broker) BindSession(ctx context.Context, gw GatewayIdentity, leaseID st
 // ErrDenied. The live lookup goes through the partial unique index
 // (session_digest + state = 'active'); the dead-row check runs only on the
 // miss path, through the plain session_digest index, so a replayed cookie
-// still fails closed as revoked without scanning the unpruned lease table.
+// still fails closed as revoked without scanning the lease table. The
+// retention sweep deletes terminal rows past -terminal-retention-days, so
+// a cookie replayed after its lease was pruned fails closed as unknown
+// (ErrLeaseInvalid) instead of revoked — both are terminal denies
+// everywhere the gateway maps them, so the distinction is cosmetic.
 func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error) {
 	now := b.now()
 	var leaseID string
