@@ -3,7 +3,7 @@ import { cx } from "./cx";
 import type { IconProps } from "./icons";
 
 // Orbit 2.9 "Dashboard icons" — duotone artwork (24 grid, 1.75 stroke,
-// currentColor + a 0.16 fill layer), custom TinyOrbit design-system art
+// currentColor + a low-opacity underlay layer), custom TinyOrbit design-system art
 // used with permission of the brand owner (see TRADEMARKS.md / the orbit
 // README). Sidebar nav only — everywhere else uses the Tabler outline set
 // in ./icons.tsx. Same aria contract as makeIcon: decorative by default
@@ -63,18 +63,13 @@ export const NavIconServices = makeNavIcon(
   </>,
 );
 
-// "cloud" — retained disks persisted outside a workspace; the Retained
+// "attachment" — retained disks attach back to a workspace; the Retained
 // data section.
-export const NavIconCloud = makeNavIcon(
-  "Cloud",
+export const NavIconAttachment = makeNavIcon(
+  "Attachment",
   <>
-    <path
-      d="M7 19h11a5 5 0 0 0 1-10A7 7 0 0 0 5 9a5 5 0 0 0 2 10Z"
-      fill="currentColor"
-      fillOpacity={0.16}
-      stroke="none"
-    />
-    <path d="M7 19h11a5 5 0 0 0 1-10A7 7 0 0 0 5 9a5 5 0 0 0 2 10Z" />
+    <path d="m7 13 7-7a5 5 0 0 1 7 7l-9 9" stroke="currentColor" strokeWidth={5} opacity={0.15} />
+    <path d="m8 13 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l9-9a2 2 0 0 1 3 3l-9 9a1 1 0 0 0 2 2l8-8" />
   </>,
 );
 
