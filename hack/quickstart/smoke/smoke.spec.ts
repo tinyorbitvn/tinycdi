@@ -176,23 +176,59 @@ function cloneBrowserTemplate(name: string, display: string, policy: string) {
   kubectl("apply", "-f", f);
 }
 
-// Creates a workspace on the template whose option label matches `label`.
+// Creates a workspace on the template whose option label matches
+// `label`, retrying the API's retryable release_pending quota refusal —
+// a just-deleted workspace's compute holds the running slot until the
+// backend's 30 s recovery pass proves the runtime gone (the same
+// refusal the retained-attach smoke retries through).
 async function createWorkspaceOnTemplate(
   page: Page,
   name: string,
   label: RegExp,
 ): Promise<string> {
-  await page.getByRole("link", { name: "New workspace" }).click();
-  await page.waitForURL("**/workspaces/new");
-  await page.locator('input[name="name"]').fill(name);
-  const option = page.locator('select[name="template"] option', { hasText: label }).first();
-  await expect(option).toBeAttached();
-  await page
-    .locator('select[name="template"]')
-    .selectOption((await option.getAttribute("value")) ?? "");
-  await page.getByRole("button", { name: "Create workspace" }).click();
-  await page.waitForURL(/\/workspaces\/ws_/);
-  return workspaceIdFromUrl(page);
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    await page.goto("/workspaces/new");
+    await page.locator('input[name="name"]').fill(name);
+    const option = page.locator('select[name="template"] option', { hasText: label }).first();
+    await expect(option).toBeAttached();
+    await page
+      .locator('select[name="template"]')
+      .selectOption((await option.getAttribute("value")) ?? "");
+    const [resp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().endsWith("/v1/workspaces") && r.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Create workspace" }).click(),
+    ]);
+    const body = (await resp.json().catch(() => ({}))) as Record<string, any>;
+    if (resp.status() === 201) {
+      await page.waitForURL(/\/workspaces\/ws_/);
+      return workspaceIdFromUrl(page);
+    }
+    expect(
+      body?.details?.reason === "release_pending" && Date.now() < deadline,
+      `workspace create refused (${resp.status()}): ${JSON.stringify(body)}`,
+    ).toBeTruthy();
+    await page.waitForTimeout(5_000);
+  }
+}
+
+// Deletes the workspace through the portal UI (same flow the
+// retained-attach smoke drives). The running-quota slot is freed by the
+// backend's recovery pass; the next create retries through
+// release_pending.
+async function deleteWorkspace(page: Page, workspaceId: string) {
+  await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  const [delResp] = await Promise.all([
+    page.waitForResponse(
+      (r) =>
+        r.url().endsWith(`/v1/workspaces/${workspaceId}`) && r.request().method() === "DELETE",
+    ),
+    page.getByRole("button", { name: "Confirm delete" }).click(),
+  ]);
+  expect(delResp.status(), "delete is accepted").toBe(202);
 }
 
 // Connects to the workspace and returns the KasmVNC session frame once the
@@ -499,34 +535,62 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
 
   await login(page);
 
-  // --- Operator half, verified on ANY runtime image ---------------------
+  // runningWorkspaces=2 and the earlier smokes leave a workspace up —
+  // one free slot, so the two policy checks run sequentially: Disabled
+  // first, delete, then Bidirectional. The pod-env assertions are the
+  // operator half and run on ANY runtime image; the browser round-trip
+  // additionally needs the runtime image's entrypoint render (the
+  // published quickstart train predates it — it activates on the
+  // post-change pins or an explicit TCDI_QS_BROWSER_DIGEST override).
+
+  // --- Disabled --------------------------------------------------------
+  const offId = await createWorkspaceOnTemplate(page, `clipoff-${stamp}`, /browser/i);
+  // The pod object lands during provisioning — poll until it exists.
+  await expect
+    .poll(() => podEnv(offId)["TCDI_CLIPBOARD_POLICY"], { timeout: 120_000 })
+    .toBe("Disabled");
+  await expect.poll(() => podPhase(offId), { timeout: 10 * 60_000 }).toBe("Running");
+
+  const capable = runtimeRendersClipboard(offId);
+  if (capable) {
+    const offFrame = await connectSessionFrame(page, offId);
+    const offClip = podClipboard(offId);
+
+    // A cut inside the pod must never reach the client (SendCutText off).
+    const s2cOff = `s2c-off-${stamp}`;
+    offClip.set(s2cOff);
+    await page.waitForTimeout(15_000);
+    expect(
+      await offFrame.locator("#noVNC_clipboard_text").inputValue(),
+      "Disabled: remote cut must not reach the client",
+    ).not.toBe(s2cOff);
+
+    // A client-side paste must never reach the workspace (AcceptCutText
+    // off): the remote selection keeps the value set above.
+    const c2sOff = `c2s-off-${stamp}`;
+    await sendClipboard(offFrame, c2sOff);
+    await page.waitForTimeout(10_000);
+    expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
+  }
+
+  await deleteWorkspace(page, offId);
+
+  // --- Bidirectional: both directions through the real client ----------
   const bidiId = await createWorkspaceOnTemplate(
     // The option label is the catalog name ("<name> (Linux container)"),
     // not the display-name annotation — match the object name.
     page, `clipbi-${stamp}`, new RegExp(tplName, "i"),
   );
-  const offId = await createBrowserWorkspace(page, `clipoff-${stamp}`);
-  // The pod object lands during provisioning — poll until it exists.
   await expect
     .poll(() => podEnv(bidiId)["TCDI_CLIPBOARD_POLICY"], { timeout: 120_000 })
     .toBe("Bidirectional");
-  await expect
-    .poll(() => podEnv(offId)["TCDI_CLIPBOARD_POLICY"], { timeout: 120_000 })
-    .toBe("Disabled");
 
-  // The browser round-trip needs the runtime image's entrypoint render —
-  // a published train predating this change has nothing to render with.
-  // It activates automatically once the quickstart pulls an image built
-  // from a tree containing this change (post-release pins or an explicit
-  // TCDI_QS_BROWSER_DIGEST override).
-  await expect.poll(() => podPhase(bidiId), { timeout: 10 * 60_000 }).toBe("Running");
   test.skip(
-    !runtimeRendersClipboard(bidiId),
+    !capable,
     "runtime image predates the entrypoint clipboard render — pod env asserted; " +
       "browser round-trip gated on the post-change runtime train",
   );
 
-  // --- Bidirectional: both directions through the real client -----------
   const bidiFrame = await connectSessionFrame(page, bidiId);
   const bidiClip = podClipboard(bidiId);
 
@@ -543,24 +607,4 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
   const c2s = `c2s-${stamp}`;
   await sendClipboard(bidiFrame, c2s);
   await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
-
-  // --- Disabled: the same actions move nothing --------------------------
-  const offFrame = await connectSessionFrame(page, offId);
-  const offClip = podClipboard(offId);
-
-  // A cut inside the pod must never reach the client (SendCutText off).
-  const s2cOff = `s2c-off-${stamp}`;
-  offClip.set(s2cOff);
-  await page.waitForTimeout(15_000);
-  expect(
-    await offFrame.locator("#noVNC_clipboard_text").inputValue(),
-    "Disabled: remote cut must not reach the client",
-  ).not.toBe(s2cOff);
-
-  // A client-side paste must never reach the workspace (AcceptCutText
-  // off): the remote selection keeps the value set above.
-  const c2sOff = `c2s-off-${stamp}`;
-  await sendClipboard(offFrame, c2sOff);
-  await page.waitForTimeout(10_000);
-  expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
 });
