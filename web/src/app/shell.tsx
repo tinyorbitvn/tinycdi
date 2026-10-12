@@ -18,7 +18,7 @@ import {
   IconUser,
   IconButton,
   Menu,
-  NavIconCloud,
+  NavIconAttachment,
   NavIconServices,
   NavIconSettings,
   NavIconVps,
@@ -239,7 +239,7 @@ function SideNav({ me }: { me: Me | null }) {
       </li>
       <li>
         <NavLink to="/data">
-          <NavIconCloud />
+          <NavIconAttachment />
           {t("nav.data")}
         </NavLink>
       </li>

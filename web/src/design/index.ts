@@ -5,7 +5,7 @@ export { cx } from "./cx";
 export { useDomId } from "./useId";
 export { useFocusTrap, focusableIn } from "./focus";
 export * from "./icons";
-export { NavIconVps, NavIconServices, NavIconCloud, NavIconSettings } from "./nav-icons";
+export { NavIconVps, NavIconServices, NavIconAttachment, NavIconSettings } from "./nav-icons";
 export { Button, IconButton, buttonClass } from "./Button";
 export type { ButtonProps, IconButtonProps, ButtonVariant, ButtonSize } from "./Button";
 export { Card } from "./Card";
