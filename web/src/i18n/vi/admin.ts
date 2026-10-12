@@ -9,6 +9,7 @@ export default {
   "admin.nav.quota": "Hạn mức",
   "admin.nav.templates": "Template",
   "admin.nav.data": "Dữ liệu",
+  "admin.nav.users": "Người dùng",
   "admin.eyebrow": "Quản trị",
   "admin.eyebrow.tenant": "Quản trị · {tenant}",
   "admin.gate.checking": "Đang kiểm tra quyền",
@@ -23,6 +24,8 @@ export default {
   "admin.route.quota": "Hạn mức",
   "admin.route.templates": "Danh mục template",
   "admin.route.data": "Dữ liệu giữ lại",
+  "admin.route.users": "Người dùng tenant",
+  "admin.route.user": "Chi tiết người dùng",
 
   "admin.action.refresh": "Làm mới",
 
@@ -214,6 +217,37 @@ export default {
   "admin.data.caption": "Dữ liệu giữ lại trong tenant",
   "admin.data.column.age": "Tuổi",
   "admin.data.action.purgeLabel": "Xoá vĩnh viễn {id}",
+
+  // Users page: principals known to the tenant (quota usage or a per-user
+  // limit row) plus per-user drill-down.
+  "admin.users.title": "Người dùng",
+  "admin.users.description": "Mọi principal có mức dùng hoặc giới hạn trong tenant này.",
+  "admin.users.note":
+    "Danh sách này hiển thị những người dùng đã sử dụng tenant — mức dùng hạn mức hoặc giới hạn theo người dùng — không phải toàn bộ thư mục tenant.",
+  "admin.users.loading": "Đang tải người dùng",
+  "admin.users.caption": "Người dùng tenant",
+  "admin.users.filter.label": "Lọc",
+  "admin.users.filter.placeholder": "Tên hoặc subject",
+  "admin.users.empty.all": "Chưa ghi nhận người dùng nào.",
+  "admin.users.empty.filtered": "Không có người dùng nào khớp bộ lọc.",
+  "admin.users.shown": "Hiển thị {shown} / {total} người dùng",
+  "admin.users.column.disks": "Đĩa",
+  "admin.userDetail.titleFallback": "Chi tiết người dùng",
+  "admin.userDetail.notFound.title": "Không tìm thấy người dùng",
+  "admin.userDetail.notFound.body":
+    "Principal này không có mức dùng hoặc giới hạn trong tenant — hoặc danh sách đã thay đổi từ khi tải.",
+  "admin.userDetail.notFound.back": "Về danh sách người dùng",
+  "admin.userDetail.limits.title": "Giới hạn workspace đang chạy",
+  "admin.userDetail.field.subject": "Subject",
+  "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.usage": "Mức dùng",
+  "admin.userDetail.workspaces.title": "Workspace",
+  "admin.userDetail.workspaces.caption": "Workspace của người dùng",
+  "admin.userDetail.workspaces.empty": "Người dùng này không có workspace nào.",
+  "admin.userDetail.disks.title": "Đĩa giữ lại",
+  "admin.userDetail.disks.caption": "Đĩa giữ lại của người dùng",
+  "admin.userDetail.disks.empty": "Người dùng này không có đĩa giữ lại nào.",
+  "admin.userDetail.disks.all": "Mở dữ liệu giữ lại",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Lỗi",

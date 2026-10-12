@@ -10,6 +10,7 @@ export default {
   "admin.nav.quota": "Quota",
   "admin.nav.templates": "Templates",
   "admin.nav.data": "Data",
+  "admin.nav.users": "Users",
   "admin.eyebrow": "Admin",
   "admin.eyebrow.tenant": "Admin · {tenant}",
   "admin.gate.checking": "Checking permissions",
@@ -24,6 +25,8 @@ export default {
   "admin.route.quota": "Quota",
   "admin.route.templates": "Template catalog",
   "admin.route.data": "Retained data",
+  "admin.route.users": "Tenant users",
+  "admin.route.user": "User detail",
 
   "admin.action.refresh": "Refresh",
 
@@ -215,6 +218,37 @@ export default {
   "admin.data.caption": "Retained data across the tenant",
   "admin.data.column.age": "Age",
   "admin.data.action.purgeLabel": "Purge {id}",
+
+  // Users page: principals known to the tenant (quota usage or a per-user
+  // limit row) plus per-user drill-down.
+  "admin.users.title": "Users",
+  "admin.users.description": "Every principal with usage or a limit in this tenant.",
+  "admin.users.note":
+    "This list shows users who have used the tenant — quota usage or a per-user limit — not a full tenant directory.",
+  "admin.users.loading": "Loading users",
+  "admin.users.caption": "Tenant users",
+  "admin.users.filter.label": "Filter",
+  "admin.users.filter.placeholder": "Name or subject",
+  "admin.users.empty.all": "No users recorded yet.",
+  "admin.users.empty.filtered": "No users match the filter.",
+  "admin.users.shown": "{shown} of {total} users shown",
+  "admin.users.column.disks": "Disks",
+  "admin.userDetail.titleFallback": "User detail",
+  "admin.userDetail.notFound.title": "User not found",
+  "admin.userDetail.notFound.body":
+    "This principal has no usage or limit in the tenant — or the list changed since it was loaded.",
+  "admin.userDetail.notFound.back": "Back to users",
+  "admin.userDetail.limits.title": "Running-workspace limit",
+  "admin.userDetail.field.subject": "Subject",
+  "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.usage": "Usage",
+  "admin.userDetail.workspaces.title": "Workspaces",
+  "admin.userDetail.workspaces.caption": "The user's workspaces",
+  "admin.userDetail.workspaces.empty": "This user has no workspaces.",
+  "admin.userDetail.disks.title": "Retained disks",
+  "admin.userDetail.disks.caption": "The user's retained disks",
+  "admin.userDetail.disks.empty": "This user has no retained disks.",
+  "admin.userDetail.disks.all": "Open retained data",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Error",

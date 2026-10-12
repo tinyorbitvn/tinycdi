@@ -94,7 +94,8 @@ export function QuotaMeters({
   );
 }
 
-function UsageCell({ k, value, limit }: { k: QuotaKey; value: number; limit: number | undefined }) {
+// Shared by the admin Users table, which renders the same used/limit vector.
+export function UsageCell({ k, value, limit }: { k: QuotaKey; value: number; limit: number | undefined }) {
   if (limit === undefined || isUnlimited(k, limit)) return <>{formatQuota(k, value)}</>;
   const level = usageLevel(value, limit);
   return (

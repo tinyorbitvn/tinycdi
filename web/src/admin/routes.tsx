@@ -7,6 +7,7 @@ import { QuotaPage } from "./QuotaPage";
 import { TemplatesPage } from "./TemplatesPage";
 import { WorkspacesAdminPage } from "./WorkspacesAdminPage";
 import { DataAdminPage } from "./DataAdminPage";
+import { UserDetailPage, UsersAdminPage } from "./UsersAdminPage";
 import "./admin.css";
 
 function Redirect({ to }: { to: string }) {
@@ -49,6 +50,18 @@ export const routes: AppRoute[] = [
     title: t("admin.route.data"),
     requires: "tenant-admin",
     render: () => <DataAdminPage />,
+  },
+  {
+    path: "/admin/users",
+    title: t("admin.route.users"),
+    requires: "tenant-admin",
+    render: () => <UsersAdminPage />,
+  },
+  {
+    path: "/admin/users/:subject",
+    title: t("admin.route.user"),
+    requires: "tenant-admin",
+    render: (p) => <UserDetailPage subject={p.subject!} />,
   },
   {
     path: "/admin/*",
