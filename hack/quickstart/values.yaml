@@ -10,9 +10,12 @@ managedNamespaces:
     # Declarative tenant quota (chart README "Tenant quotas"): the backend
     # leader upserts this row at startup, and a tenant without one is refused
     # every create (409 QUOTA_NOT_CONFIGURED). Sized for a laptop kind node:
-    # two of the 1 CPU / 2 GiB / 5 GiB templates below, with headroom.
+    # three of the 1 CPU / 2 GiB / 5 GiB templates below — the smoke leaves
+    # two workspaces running by the time its sequential policy checks run,
+    # so the cap needs one slot of headroom (cpu/memory/storage already
+    # allow the third).
     quota:
-      runningWorkspaces: 2
+      runningWorkspaces: 3
       cpu: "4"
       memory: 8Gi
       storage: 20Gi

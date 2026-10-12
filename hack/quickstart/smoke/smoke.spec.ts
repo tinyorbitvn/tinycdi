@@ -535,7 +535,7 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
 
   await login(page);
 
-  // runningWorkspaces=2 and the earlier smokes leave a workspace up —
+  // runningWorkspaces=3 and the earlier smokes leave two workspaces up —
   // one free slot, so the two policy checks run sequentially: Disabled
   // first, delete, then Bidirectional. The pod-env assertions are the
   // operator half and run on ANY runtime image; the browser round-trip
