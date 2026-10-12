@@ -240,7 +240,7 @@ objects. It **keeps**:
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--tenant-admin-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
 
 `<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
 on this deny-list — dev-surface env names plus the env equivalents of
@@ -257,6 +257,7 @@ the value to set instead:
 | `TCDI_OPERATOR_CN` | `backend.operatorCN` |
 | `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
 | `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
+| `TCDI_TENANT_ADMIN_GROUPS` | `oidc.tenantAdminGroups` |
 | `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
 | `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
 | `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
@@ -289,6 +290,7 @@ the value to set instead:
 | `database.tls.mode` | `verify-full` | `PGSSLMODE` on the backend — only `verify-ca`/`verify-full` render without `dev.enabled` (the backend refuses weaker sslmodes at startup, CHTR-8); dev + insecure mode renders `--dev-insecure-db`; DSN `sslmode=` still wins |
 | `database.allowedPeers` | deny-all placeholder | backend→DB NetworkPolicy peers — **required**: an empty list OR the shipped `0.0.0.0/32` placeholder fails the render |
 | `oidc.requiredGroups` | `[]` | login gate — backend flag `--required-groups=<csv>`; ID-token `groups` must carry one listed group (exact match); empty = every IdP account may log in |
+| `oidc.tenantAdminGroups` | `["tenant-admin"]` | tenant-admin role — backend flag `--tenant-admin-groups=<csv>`; ID-token `groups` must carry one listed group (exact match, same semantics as `requiredGroups`). Members get tenant-wide read, workspace stop/start and retained-disk attach/purge, and admin of the tenant's quota and per-user limits — review the IdP group membership; must name at least one group |
 | `oidc.endSession` | `true` | sign-out also ends the identity provider session (RP-initiated logout) when its discovery document has `end_session_endpoint` — backend flag `--oidc-end-session`; `false` keeps sign-out local. See the install runbook, "Sign-out and the identity provider" |
 | `oidc.postLogoutRedirect` | `""` | `post_logout_redirect_uri` sent at sign-out (`https` only; must be registered at the provider — Keycloak: the client's *Valid post logout redirect URIs*) — backend flag `--oidc-post-logout-redirect`; empty omits it and the provider shows its own logged-out page |
 | `oidc.egressCIDRs` | `[0.0.0.0/0]` | backend→IdP egress CIDRs — **required** non-empty, narrow to your IdP |

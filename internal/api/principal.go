@@ -27,6 +27,12 @@ type Principal struct {
 	// authorization meaning and must never be used for ownership.
 	DisplayName string
 	Email       string
+	// tenantAdmin is the resolved tenant-admin role for this request:
+	// RequireAuth derives it from Groups against the configured
+	// AuthConfig.TenantAdminGroups when the principal is attached to the
+	// request context. It is derived, never persisted — a Principal
+	// attached any other way reports false (fail closed).
+	tenantAdmin bool
 }
 
 // Owner returns the canonical, immutable owner reference for resources
@@ -44,6 +50,15 @@ func (p Principal) InGroup(group string) bool {
 	}
 	return false
 }
+
+// IsTenantAdmin reports whether the principal holds the tenant-admin
+// role — the single authorization primitive behind every admin gate
+// (tenant-wide list/get, scope=tenant, /v1/admin/* and the audit "role"
+// marker). Membership is resolved by the authenticator against the
+// deployment's configured admin groups (AuthConfig.TenantAdminGroups,
+// flag -tenant-admin-groups), NOT a hard-coded name; the /v1/me role
+// string stays "tenant-admin" either way.
+func (p Principal) IsTenantAdmin() bool { return p.tenantAdmin }
 
 type ctxKey int
 

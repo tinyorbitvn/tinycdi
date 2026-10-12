@@ -1335,7 +1335,7 @@ export interface components {
             email?: string;
             /** @description Tenant the principal belongs to. */
             tenant: string;
-            /** @description `user` for every authenticated principal; `tenant-admin` when the principal carries the tenant-admin group. */
+            /** @description `user` for every authenticated principal; `tenant-admin` when the principal carries one of the deployment's configured tenant-admin groups (`--tenant-admin-groups`, default `tenant-admin`). */
             roles: ("user" | "tenant-admin")[];
             /**
              * @description Session-bound CSRF token — echo it in the `X-CSRF-Token` header on

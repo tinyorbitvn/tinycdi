@@ -108,7 +108,7 @@ func (h *QuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInternal, "internal error")
 		return
 	}
-	admin := p.InGroup(TenantAdminGroup)
+	admin := p.IsTenantAdmin()
 	refs := make([]string, 0, len(rep.Owners))
 	for _, o := range rep.Owners {
 		if admin || o.OwnerRef == p.Owner() {

@@ -185,7 +185,7 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			if p, ok := PrincipalFromContext(r.Context()); ok {
 				actor = observability.ActorRef(p.Issuer, p.Subject)
 				tenant = p.TenantID
-				if p.InGroup(TenantAdminGroup) {
+				if p.IsTenantAdmin() {
 					// Mark the elevated role explicitly: on shared endpoints the
 					// record must distinguish an admin acting tenant-wide from
 					// an owner acting on their own resource.

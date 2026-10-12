@@ -60,8 +60,11 @@ func (m StaticTenantResolver) Namespace(tenantID string) (string, bool) {
 	return ns, ok
 }
 
-// TenantAdminGroup is the verified group claim that widens list/get to the
-// whole tenant instead of the caller's own workspaces.
+// TenantAdminGroup is the default tenant-admin group name (the deployment
+// may widen the set via AuthConfig.TenantAdminGroups /
+// -tenant-admin-groups) and, independently, the /v1/me role name emitted
+// for a tenant admin — the role name is part of the API contract and does
+// not follow the configured groups.
 const TenantAdminGroup = "tenant-admin"
 
 // TemplateEntry is a catalog entry resolvable to a templateRef.
@@ -354,7 +357,7 @@ type createWorkspaceRequest struct {
 
 // ownerScope returns the caller's owner ref, or "" for tenant admins.
 func ownerScope(p Principal) string {
-	if p.InGroup(TenantAdminGroup) {
+	if p.IsTenantAdmin() {
 		return ""
 	}
 	return p.Owner()
@@ -373,7 +376,7 @@ func listScope(w http.ResponseWriter, r *http.Request, p Principal) (string, boo
 	case "mine":
 		return p.Owner(), true
 	case "tenant":
-		if !p.InGroup(TenantAdminGroup) {
+		if !p.IsTenantAdmin() {
 			writeError(w, r, CodeForbidden, "scope=tenant requires the tenant-admin role")
 			return "", false
 		}

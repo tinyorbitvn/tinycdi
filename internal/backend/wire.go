@@ -635,7 +635,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		ClientSecret:   cfg.OIDCClientSecret,
 		RedirectURL:    cfg.OIDCRedirectURL,
 		RequiredGroups: cfg.RequiredGroups,
-		LoginSealer:    sealer,
+		// The tenant-admin role follows the configured groups — every
+		// admin gate resolves through Principal.IsTenantAdmin.
+		TenantAdminGroups: cfg.TenantAdminGroups,
+		LoginSealer:       sealer,
 
 		EndSession:         cfg.OIDCEndSession,
 		PostLogoutRedirect: cfg.OIDCPostLogoutURL,

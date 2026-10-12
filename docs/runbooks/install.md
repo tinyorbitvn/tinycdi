@@ -311,6 +311,31 @@ $K -n tinycdi-system logs -l app.kubernetes.io/name=backend --tail=-1 | grep "te
 Day-2 quota operations (reading usage, `QUOTA_EXHAUSTED` vs
 `release_pending`, changing limits): `tenant-quotas.md`.
 
+## Granting tenant administration
+
+A user is a **tenant admin** — tenant-wide workspace/retained-data
+visibility, stop/start and retained-disk attach/purge, plus the
+`/v1/admin/*` quota and per-user limit endpoints — when their verified
+ID-token `groups` claim carries one of the names in
+`oidc.tenantAdminGroups` (default `["tenant-admin"]`):
+
+```yaml
+oidc:
+  tenantAdminGroups: ["platform-admins"]   # group names, exact match
+```
+
+The match is **exact**, the same semantics as the `oidc.requiredGroups`
+login gate: a Keycloak full-path claim value (`/platform-admins`) does not
+match `platform-admins` — emit `groups` without full paths. The list must
+name at least one group (the backend refuses to start on an empty set —
+there is no "nobody is admin" mode) and every member of a listed group
+gets the full admin surface, so keep it small and review the IdP group
+membership. Changes apply with `helm upgrade` (a backend rollout); a user
+gains or loses the role on their next request — there is no session
+lifetime lag, unlike the login gate. The `/v1/me` role string stays
+`tenant-admin` whatever groups are configured, and the portal's Admin
+section follows it.
+
 ## Rate limits and trusted proxies
 
 `GET /v1/login`, `GET /v1/auth/callback` and `GET /v1/session` are limited

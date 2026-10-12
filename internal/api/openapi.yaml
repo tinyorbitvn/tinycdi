@@ -2276,7 +2276,7 @@ components:
           items:
             type: string
             enum: [user, tenant-admin]
-          description: "`user` for every authenticated principal; `tenant-admin` when the principal carries the tenant-admin group."
+          description: "`user` for every authenticated principal; `tenant-admin` when the principal carries one of the deployment's configured tenant-admin groups (`--tenant-admin-groups`, default `tenant-admin`)."
         csrfToken:
           type: string
           description: |

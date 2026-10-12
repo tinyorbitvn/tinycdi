@@ -93,6 +93,13 @@ type AuthConfig struct {
 	// The match is exact — the Keycloak full-path form "/platform-admins"
 	// does not satisfy "platform-admins". Empty disables the gate.
 	RequiredGroups []string
+	// TenantAdminGroups is the set of Groups-claim values that grant the
+	// tenant-admin role: RequireAuth resolves membership per request into
+	// Principal.IsTenantAdmin. The match is exact, like RequiredGroups —
+	// "/tenant-admins" does not satisfy "tenant-admins". Nil defaults to
+	// {TenantAdminGroup}; an explicitly empty list is a startup error —
+	// there is no "nobody is admin" mode.
+	TenantAdminGroups []string
 
 	// PostLoginRedirect is where the callback sends the browser after a
 	// session is established. Default "/".
@@ -139,6 +146,9 @@ func (c *AuthConfig) withDefaults() {
 	}
 	if c.GroupsClaim == "" {
 		c.GroupsClaim = "groups"
+	}
+	if c.TenantAdminGroups == nil {
+		c.TenantAdminGroups = []string{TenantAdminGroup}
 	}
 	if c.PostLoginRedirect == "" {
 		c.PostLoginRedirect = "/"
@@ -364,6 +374,14 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 	for _, g := range cfg.RequiredGroups {
 		if strings.TrimSpace(g) == "" {
 			return nil, errors.New("api: AuthConfig RequiredGroups entries must be non-empty")
+		}
+	}
+	if len(cfg.TenantAdminGroups) == 0 {
+		return nil, errors.New("api: AuthConfig TenantAdminGroups must name at least one group")
+	}
+	for _, g := range cfg.TenantAdminGroups {
+		if strings.TrimSpace(g) == "" {
+			return nil, errors.New("api: AuthConfig TenantAdminGroups entries must be non-empty")
 		}
 	}
 	if sessions == nil {
@@ -978,6 +996,18 @@ func (a *Authenticator) groupsAllowed(p Principal) bool {
 		return true
 	}
 	for _, g := range a.cfg.RequiredGroups {
+		if p.InGroup(g) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTenantAdmin resolves the configured TenantAdminGroups against the
+// principal's verified group claim — the single membership check behind
+// Principal.IsTenantAdmin; handlers never name a group literal.
+func (a *Authenticator) isTenantAdmin(p Principal) bool {
+	for _, g := range a.cfg.TenantAdminGroups {
 		if p.InGroup(g) {
 			return true
 		}
