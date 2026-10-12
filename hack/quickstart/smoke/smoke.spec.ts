@@ -214,21 +214,21 @@ async function createWorkspaceOnTemplate(
   }
 }
 
-// Deletes the workspace through the portal UI (same flow the
-// retained-attach smoke drives). The running-quota slot is freed by the
-// backend's recovery pass; the next create retries through
-// release_pending.
-async function deleteWorkspace(page: Page, workspaceId: string) {
-  await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
-  await page.getByRole("button", { name: "Delete", exact: true }).click();
-  const [delResp] = await Promise.all([
-    page.waitForResponse(
-      (r) =>
-        r.url().endsWith(`/v1/workspaces/${workspaceId}`) && r.request().method() === "DELETE",
-    ),
-    page.getByRole("button", { name: "Confirm delete" }).click(),
-  ]);
-  expect(delResp.status(), "delete is accepted").toBe(202);
+async function workspacePhase(page: Page, id: string): Promise<string> {
+  return page.evaluate(async (wid) => {
+    const r = await fetch(`/v1/workspaces/${encodeURIComponent(wid)}`);
+    return r.ok ? ((await r.json()) as { phase?: string }).phase ?? "?" : `http-${r.status}`;
+  }, id);
+}
+
+async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 60_000) {
+  await expect
+    .poll(() => workspacePhase(page, id), {
+      timeout: timeoutMs,
+      intervals: [3_000],
+      message: `${id} -> ${phase}`,
+    })
+    .toBe(phase);
 }
 
 // Connects to the workspace and returns the KasmVNC session frame once the
@@ -515,8 +515,37 @@ function runtimeRendersClipboard(workspaceId: string): boolean {
   }
 }
 
-function podPhase(workspaceId: string): string {
-  return kubectl("get", "pod", runtimePod(workspaceId), "-o", "jsonpath={.status.phase}");
+// The platform workspace id (ws_<hex>) of a Running pod carrying the
+// rendered policy — found through the pod's workspace-name label and the
+// CR's workspace-uid label. null when no running pod matches.
+function runningWorkspaceWithPolicy(policy: string): string | null {
+  const pods = JSON.parse(kubectl("get", "pods", "-o", "json")) as {
+    items: Array<Record<string, any>>;
+  };
+  for (const p of pods.items ?? []) {
+    if (p.status?.phase !== "Running") continue;
+    const env = (p.spec?.containers?.[0]?.env ?? []) as Array<{ name: string; value?: string }>;
+    if (!env.some((e) => e.name === "TCDI_CLIPBOARD_POLICY" && e.value === policy)) continue;
+    const crName = p.metadata?.labels?.["workspaces.cdi.tinyorbit.vn/workspace-name"];
+    if (!crName) continue;
+    const cr = JSON.parse(kubectl("get", "workspace", crName, "-o", "json")) as Record<
+      string,
+      any
+    >;
+    const uid = cr.metadata?.labels?.["workspaces.cdi.tinyorbit.vn/workspace-uid"];
+    if (typeof uid === "string" && uid) return uid;
+  }
+  return null;
+}
+
+// The rendered policy env of a workspace's pod, tolerating a pod that is
+// not materialized yet (kubectl fails while provisioning is in flight).
+function podPolicy(workspaceId: string): string | null {
+  try {
+    return podEnv(workspaceId)["TCDI_CLIPBOARD_POLICY"] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // The template clipboardPolicy is enforced by the session
@@ -535,26 +564,27 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
 
   await login(page);
 
-  // runningWorkspaces=3 and the earlier smokes leave two workspaces up —
-  // one free slot, so the two policy checks run sequentially: Disabled
-  // first, delete, then Bidirectional. The pod-env assertions are the
-  // operator half and run on ANY runtime image; the browser round-trip
-  // additionally needs the runtime image's entrypoint render (the
-  // published quickstart train predates it — it activates on the
+  // runningWorkspaces=2 and the earlier smokes leave two workspaces
+  // running — no free slot. Every seeded template is Disabled, so a
+  // leftover covers the Disabled check; stopping it afterwards frees
+  // the slot the Bidirectional workspace needs. The pod-env assertions
+  // are the operator half and run on ANY runtime image; the browser
+  // round-trip additionally needs the runtime image's entrypoint render
+  // (the published quickstart train predates it — it activates on the
   // post-change pins or an explicit TCDI_QS_BROWSER_DIGEST override).
 
-  // --- Disabled --------------------------------------------------------
-  const offId = await createWorkspaceOnTemplate(page, `clipoff-${stamp}`, /browser/i);
-  // The pod object lands during provisioning — poll until it exists.
-  await expect
-    .poll(() => podEnv(offId)["TCDI_CLIPBOARD_POLICY"], { timeout: 120_000 })
-    .toBe("Disabled");
-  await expect.poll(() => podPhase(offId), { timeout: 10 * 60_000 }).toBe("Running");
+  // --- Disabled (a leftover seeded-template workspace) -----------------
+  const offId = runningWorkspaceWithPolicy("Disabled");
+  expect(
+    offId,
+    "a running workspace carries TCDI_CLIPBOARD_POLICY=Disabled " +
+      "(the earlier smokes leave one on the seeded browser template)",
+  ).toBeTruthy();
 
-  const capable = runtimeRendersClipboard(offId);
+  const capable = runtimeRendersClipboard(offId!);
   if (capable) {
-    const offFrame = await connectSessionFrame(page, offId);
-    const offClip = podClipboard(offId);
+    const offFrame = await connectSessionFrame(page, offId!);
+    const offClip = podClipboard(offId!);
 
     // A cut inside the pod must never reach the client (SendCutText off).
     const s2cOff = `s2c-off-${stamp}`;
@@ -573,7 +603,10 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
   }
 
-  await deleteWorkspace(page, offId);
+  // Free the running slot for the Bidirectional workspace.
+  await page.goto(`/workspaces/${encodeURIComponent(offId!)}`);
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await waitPhase(page, offId!, "Stopped");
 
   // --- Bidirectional: both directions through the real client ----------
   const bidiId = await createWorkspaceOnTemplate(
@@ -581,8 +614,9 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     // not the display-name annotation — match the object name.
     page, `clipbi-${stamp}`, new RegExp(tplName, "i"),
   );
+  // The pod object lands during provisioning — poll until it exists.
   await expect
-    .poll(() => podEnv(bidiId)["TCDI_CLIPBOARD_POLICY"], { timeout: 120_000 })
+    .poll(() => podPolicy(bidiId), { timeout: 120_000 })
     .toBe("Bidirectional");
 
   test.skip(
