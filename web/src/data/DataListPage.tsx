@@ -6,9 +6,12 @@ import {
   type Column,
   EmptyState,
   Page,
+  Pagination,
   Select,
   Table,
   type Tone,
+  usePagination,
+  useTableSort,
   VisuallyHidden,
 } from "../design";
 import { Link, navigate } from "../lib/router";
@@ -102,14 +105,26 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "id",
         header: t("data.list.col.id"),
         rowHeader: true,
+        sortable: true,
+        compare: (a, b) => a.id.localeCompare(b.id),
         render: (r) => <Link to={`/data/${r.id}`}>{r.id}</Link>,
       },
-      { key: "source", header: t("data.list.col.source"), render: (r) => r.sourceWorkspaceName },
+      {
+        key: "source",
+        header: t("data.list.col.source"),
+        sortable: true,
+        compare: (a, b) => a.sourceWorkspaceName.localeCompare(b.sourceWorkspaceName),
+        tiebreak: (a, b) => a.id.localeCompare(b.id),
+        render: (r) => r.sourceWorkspaceName,
+      },
     ];
     if (effectiveScope === "tenant") {
       cols.push({
         key: "owner",
         header: t("data.list.col.owner"),
+        sortable: true,
+        compare: (a, b) => ownerLabel(a.owner).localeCompare(ownerLabel(b.owner)),
+        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => ownerLabel(r.owner),
       });
     }
@@ -118,23 +133,34 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "runtime",
         header: t("data.list.col.runtime"),
         hideOnMobile: true,
+        sortable: true,
+        compare: (a, b) => runtimeLabel(a.runtime).localeCompare(runtimeLabel(b.runtime)),
+        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => runtimeLabel(r.runtime),
       },
       {
         key: "size",
         header: t("data.list.col.size"),
         align: "end",
+        sortable: true,
+        compare: (a, b) => a.sizeGib - b.sizeGib,
+        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => t("data.list.sizeGib", { n: r.sizeGib }),
       },
       {
         key: "state",
         header: t("data.list.col.state"),
+        sortable: true,
+        compare: (a, b) => a.state.localeCompare(b.state),
+        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => <DataStateBadge state={r.state} />,
       },
       {
         key: "retainedAt",
         header: t("data.list.col.retainedAt"),
         hideOnMobile: true,
+        sortable: true,
+        compare: (a, b) => a.retainedAt.localeCompare(b.retainedAt),
         render: (r) => formatDateTime(r.retainedAt),
       },
       {
@@ -178,6 +204,13 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
 
   const items = list.data?.items;
 
+  // Newest disk first by default; switching scope resets the page.
+  const sort = useTableSort(columns, items ?? [], {
+    key: "retainedAt",
+    direction: "descending",
+  });
+  const paged = usePagination(sort.sortedRows, { resetKey: effectiveScope });
+
   return (
     <Page
       title={t("data.list.title")}
@@ -216,8 +249,10 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
       <Table
         caption={t("data.list.caption")}
         columns={columns}
-        rows={items ?? []}
+        rows={paged.pageRows}
         rowKey={(r) => r.id}
+        sort={sort.sort}
+        onSortChange={sort.onSortChange}
         loading={list.loading && !list.data}
         empty={
           <EmptyState
@@ -226,6 +261,7 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
           />
         }
       />
+      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("data.list.caption") })} />
       {attaching ? (
         <AttachDialog
           record={attaching}

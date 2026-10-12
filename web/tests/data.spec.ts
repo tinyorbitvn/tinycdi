@@ -4,7 +4,7 @@ import { test, expect, type Page, type APIRequestContext } from "@playwright/tes
 // :4310 via the Vite /v1 proxy. Fixture values mirror
 // internal/api/openapi.yaml examples.
 
-const MOCK = "http://127.0.0.1:4310";
+const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 const RETAINED_ID = "rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A";
 
 async function login(page: Page) {

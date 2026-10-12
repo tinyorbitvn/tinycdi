@@ -69,6 +69,14 @@ export const IconChevronLeft = makeIcon("ChevronLeft", <path d="M15 6l-6 6l6 6" 
 
 export const IconChevronRight = makeIcon("ChevronRight", <path d="M9 6l6 6l-6 6" />);
 
+export const IconSelector = makeIcon(
+  "Selector",
+  <>
+    <path d="M8 9l4 -4l4 4" />
+    <path d="M16 15l-4 4l-4 -4" />
+  </>,
+);
+
 export const IconArrowLeft = makeIcon(
   "ArrowLeft",
   <>

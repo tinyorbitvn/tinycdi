@@ -6,10 +6,13 @@ import {
   DescriptionList,
   EmptyState,
   Input,
+  Pagination,
   Section,
   Spinner,
   StatusPill,
   Table,
+  usePagination,
+  useTableSort,
 } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh, IconSearch, IconUsers } from "../design/icons";
@@ -174,11 +177,19 @@ export function UsersAdminPage() {
     [allRows, filter],
   );
 
+  const byName = (a: AdminUserRow, b: AdminUserRow) =>
+    a.displayName.localeCompare(b.displayName) || a.subject.localeCompare(b.subject);
+  // Nullable numeric cells sort "unset" last at either direction — the
+  // missing-limit/unknown bucket reads as larger than any real limit.
+  const UNSET = Number.MAX_SAFE_INTEGER;
   const columns: Column<AdminUserRow>[] = [
     {
       key: "user",
       header: t("admin.quota.column.user"),
       rowHeader: true,
+      sortable: true,
+      compare: (a, b) => a.displayName.localeCompare(b.displayName),
+      tiebreak: (a, b) => a.subject.localeCompare(b.subject),
       render: (r) => (
         <span className="tc-admin-cell-stack">
           <Link to={userDetailPath(r.subject)}>{r.displayName}</Link>
@@ -190,6 +201,10 @@ export function UsersAdminPage() {
       key: "running",
       header: t("admin.userLimits.column.running"),
       align: "end",
+      sortable: true,
+      sortStart: "descending",
+      compare: (a, b) => a.running - b.running,
+      tiebreak: byName,
       render: (r) => r.running,
     },
     ...USAGE_VECTOR_KEYS.map(
@@ -198,6 +213,10 @@ export function UsersAdminPage() {
         header: quotaLabel(k),
         align: "end",
         hideOnMobile: k !== "storageGib",
+        sortable: true,
+        sortStart: "descending",
+        compare: (a, b) => a.usage[k] - b.usage[k],
+        tiebreak: byName,
         render: (r) => (
           <UsageCell k={k} value={r.usage[k]} limit={u.data?.quota.limits?.[k]} />
         ),
@@ -208,12 +227,18 @@ export function UsersAdminPage() {
       header: t("admin.userLimits.column.limit"),
       align: "end",
       hideOnMobile: true,
+      sortable: true,
+      compare: (a, b) => (a.override ?? UNSET) - (b.override ?? UNSET),
+      tiebreak: byName,
       render: (r) => <OverrideCell row={r} />,
     },
     {
       key: "effective",
       header: t("admin.userLimits.column.effective"),
       align: "end",
+      sortable: true,
+      compare: (a, b) => (a.effective ?? UNSET) - (b.effective ?? UNSET),
+      tiebreak: byName,
       render: (r) => <EffectiveCell row={r} />,
     },
     {
@@ -221,9 +246,18 @@ export function UsersAdminPage() {
       header: t("admin.users.column.disks"),
       align: "end",
       hideOnMobile: true,
+      sortable: true,
+      sortStart: "descending",
+      compare: (a, b) => a.retainedDisks - b.retainedDisks,
+      tiebreak: byName,
       render: (r) => r.retainedDisks,
     },
   ];
+
+  // The directory order (display name + subject) is the default sort; the
+  // search filter resets the page.
+  const sort = useTableSort(columns, rows, { key: "user", direction: "ascending" });
+  const paged = usePagination(sort.sortedRows, { resetKey: filter });
 
   return (
     <AdminLayout
@@ -250,15 +284,15 @@ export function UsersAdminPage() {
       <Table
         caption={t("admin.users.caption")}
         columns={columns}
-        rows={rows}
+        rows={paged.pageRows}
         rowKey={(r) => r.subject}
+        sort={sort.sort}
+        onSortChange={sort.onSortChange}
         loading={u.loading && !u.data}
         density="compact"
         empty={filter ? t("admin.users.empty.filtered") : t("admin.users.empty.all")}
       />
-      <p className="tc-admin-muted" aria-live="polite">
-        {u.data ? t("admin.users.shown", { shown: rows.length, total: allRows.length }) : ""}
-      </p>
+      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.users.caption") })} />
     </AdminLayout>
   );
 }

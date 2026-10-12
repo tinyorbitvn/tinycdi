@@ -20,8 +20,17 @@ export { Spinner, Skeleton } from "./Spinner";
 export type { SpinnerProps, SkeletonProps } from "./Spinner";
 export { Field, Input, Select, Textarea, Checkbox } from "./Field";
 export type { FieldProps, FieldControlProps, InputProps, SelectProps, TextareaProps, CheckboxProps } from "./Field";
-export { Table } from "./Table";
-export type { TableProps, Column } from "./Table";
+export { Table, useTableSort, sortRows } from "./Table";
+export type {
+  TableProps,
+  Column,
+  TableSort,
+  TableSortState,
+  SortDirection,
+  UseTableSortResult,
+} from "./Table";
+export { Pagination, usePagination } from "./Pagination";
+export type { PaginationProps, UsePaginationOptions, UsePaginationResult } from "./Pagination";
 export { Tabs } from "./Tabs";
 export type { TabsProps, TabItem } from "./Tabs";
 export { Dialog, Drawer, ConfirmDialog } from "./Dialog";
