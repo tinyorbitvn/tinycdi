@@ -2301,7 +2301,11 @@ export interface operations {
             header: {
                 /**
                  * @description Change token from the GET response's `version`, or `*` to create
-                 *     a row for a tenant that has none.
+                 *     a row for a tenant that has none. The value is the opaque
+                 *     RFC3339Nano change-token from the last read, sent verbatim
+                 *     without quotes — it is not an RFC 7232 entity-tag; a quoted or
+                 *     otherwise unparseable token is treated as stale and answers
+                 *     `412 PRECONDITION_FAILED`.
                  */
                 "If-Match": string;
             };
@@ -2484,7 +2488,11 @@ export interface operations {
             header: {
                 /**
                  * @description Change token from the GET response's `version`, or `*` to
-                 *     create a row for a tenant that has none.
+                 *     create a row for a tenant that has none. The value is the
+                 *     opaque RFC3339Nano change-token from the last read, sent
+                 *     verbatim without quotes — it is not an RFC 7232 entity-tag;
+                 *     a quoted or otherwise unparseable token is treated as stale
+                 *     and answers `412 PRECONDITION_FAILED`.
                  */
                 "If-Match": string;
             };
