@@ -1,5 +1,14 @@
 import { useCallback, useMemo, useState } from "react";
-import { Alert, Button, EmptyState, Table, VisuallyHidden } from "../design";
+import {
+  Alert,
+  Button,
+  EmptyState,
+  Pagination,
+  Table,
+  usePagination,
+  useTableSort,
+  VisuallyHidden,
+} from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh, IconTrash } from "../design/icons";
 import { Link } from "../lib/router";
@@ -39,28 +48,42 @@ export function DataAdminPage({ now, pollIntervalMs }: { now?: number; pollInter
       key: "id",
       header: t("data.list.col.id"),
       rowHeader: true,
+      sortable: true,
+      compare: (a, b) => a.id.localeCompare(b.id),
       render: (r) => <Link to={`/data/${r.id}`}>{r.id}</Link>,
     },
     {
       key: "owner",
       header: t("data.list.col.owner"),
+      sortable: true,
+      compare: (a, b) => ownerLabel(a.owner).localeCompare(ownerLabel(b.owner)),
+      tiebreak: (a, b) => a.id.localeCompare(b.id),
       render: (r) => ownerLabel(r.owner),
     },
     {
       key: "state",
       header: t("data.list.col.state"),
+      sortable: true,
+      compare: (a, b) => a.state.localeCompare(b.state),
+      tiebreak: (a, b) => a.id.localeCompare(b.id),
       render: (r) => <DataStateBadge state={r.state} />,
     },
     {
       key: "size",
       header: t("data.list.col.size"),
       align: "end",
+      sortable: true,
+      compare: (a, b) => a.sizeGib - b.sizeGib,
+      tiebreak: (a, b) => a.id.localeCompare(b.id),
       render: (r) => t("data.list.sizeGib", { n: r.sizeGib }),
     },
     {
       key: "source",
       header: t("data.list.col.source"),
       hideOnMobile: true,
+      sortable: true,
+      compare: (a, b) => a.sourceWorkspaceName.localeCompare(b.sourceWorkspaceName),
+      tiebreak: (a, b) => a.id.localeCompare(b.id),
       render: (r) => r.sourceWorkspaceName,
     },
     {
@@ -79,6 +102,8 @@ export function DataAdminPage({ now, pollIntervalMs }: { now?: number; pollInter
       header: t("admin.data.column.age"),
       align: "end",
       hideOnMobile: true,
+      sortable: true,
+      compare: (a, b) => a.retainedAt.localeCompare(b.retainedAt),
       render: (r) => (
         <time dateTime={r.retainedAt} title={formatDateTime(r.retainedAt)}>
           {formatAge(r.retainedAt, ts)}
@@ -103,6 +128,11 @@ export function DataAdminPage({ now, pollIntervalMs }: { now?: number; pollInter
         ) : null,
     },
   ];
+
+  // The API's newest-first order is the default sort (age descending); the
+  // page clamps itself when a purged row drops out of the list.
+  const sort = useTableSort(columns, rows, { key: "age", direction: "descending" });
+  const paged = usePagination(sort.sortedRows);
 
   function onPurged() {
     setPurging(null);
@@ -134,8 +164,10 @@ export function DataAdminPage({ now, pollIntervalMs }: { now?: number; pollInter
       <Table
         caption={t("admin.data.caption")}
         columns={columns}
-        rows={rows}
+        rows={paged.pageRows}
         rowKey={(r) => r.id}
+        sort={sort.sort}
+        onSortChange={sort.onSortChange}
         loading={list.loading && !list.data}
         empty={
           <EmptyState
@@ -144,6 +176,7 @@ export function DataAdminPage({ now, pollIntervalMs }: { now?: number; pollInter
           />
         }
       />
+      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.data.caption") })} />
       {purging ? (
         <PurgeDialog record={purging} onClose={() => setPurging(null)} onPurged={onPurged} />
       ) : null}

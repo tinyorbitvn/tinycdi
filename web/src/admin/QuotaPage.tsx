@@ -1,8 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Badge, Button, Card, Dialog, Grid, Input, Meter, Section, Spinner, Table } from "../design";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  Grid,
+  Input,
+  Meter,
+  Section,
+  Spinner,
+  Table,
+  useTableSort,
+} from "../design";
 import type { Column } from "../design/Table";
-import { IconChevronDown, IconChevronUp, IconRefresh } from "../design/icons";
-import { cx } from "../design/cx";
+import { IconRefresh } from "../design/icons";
 import { t } from "../i18n";
 import type { ApiClient } from "../api/client";
 import { useApi } from "../api/context";
@@ -100,60 +112,14 @@ export function UsageCell({ k, value, limit }: { k: QuotaKey; value: number; lim
   );
 }
 
-export type UsageSortKey = "user" | QuotaKey;
-
-export interface UsageSort {
-  key: UsageSortKey;
-  dir: 1 | -1;
-}
-
-// Default order: heaviest users first — running workspaces, then storage.
-export const DEFAULT_USAGE_SORT: UsageSort = { key: "runningWorkspaces", dir: -1 };
-
-export function sortedUsers(users: readonly UserUsage[], sort: UsageSort): UserUsage[] {
-  const dir = sort.dir;
-  return [...users].sort((a, b) => {
-    const primary =
-      sort.key === "user"
-        ? a.displayName.localeCompare(b.displayName)
-        : a.usage[sort.key] - b.usage[sort.key];
-    return (
-      primary * dir ||
-      b.usage.runningWorkspaces - a.usage.runningWorkspaces ||
-      a.displayName.localeCompare(b.displayName) ||
-      a.subject.localeCompare(b.subject)
-    );
-  });
-}
-
-function SortHeader({
-  label,
-  columnKey,
-  sort,
-  onSort,
-}: {
-  label: string;
-  columnKey: UsageSortKey;
-  sort: UsageSort;
-  onSort: (key: UsageSortKey) => void;
-}) {
-  const active = sort.key === columnKey;
+// Sort tail for the usage table: after the chosen column, the heaviest
+// runner surfaces first, then name/subject keep the order deterministic.
+// The tiebreak is not direction-flipped, matching the pre-shared SortHeader.
+function usageTiebreak(a: UserUsage, b: UserUsage): number {
   return (
-    <button
-      type="button"
-      className={cx("tc-admin-sort", active && "tc-admin-sort--active")}
-      aria-pressed={active}
-      onClick={() => onSort(columnKey)}
-    >
-      {label}
-      {active ? (
-        sort.dir === 1 ? (
-          <IconChevronUp size={14} aria-hidden="true" />
-        ) : (
-          <IconChevronDown size={14} aria-hidden="true" />
-        )
-      ) : null}
-    </button>
+    b.usage.runningWorkspaces - a.usage.runningWorkspaces ||
+    a.displayName.localeCompare(b.displayName) ||
+    a.subject.localeCompare(b.subject)
   );
 }
 
@@ -341,26 +307,16 @@ export function QuotaContent({
   quota: AdminQuotaView;
   onChanged: () => void;
 }) {
-  const [sort, setSort] = useState<UsageSort>(DEFAULT_USAGE_SORT);
   const [editing, setEditing] = useState(false);
   const writable = quota.source !== "config";
-
-  function onSort(key: UsageSortKey) {
-    setSort((s) =>
-      s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "user" ? 1 : -1 },
-    );
-  }
-
-  const ariaSort = (k: UsageSortKey) =>
-    sort.key === k ? (sort.dir === 1 ? ("ascending" as const) : ("descending" as const)) : ("none" as const);
 
   const columns: Column<UserUsage>[] = [
     {
       key: "user",
-      sort: ariaSort("user"),
-      header: (
-        <SortHeader label={t("admin.quota.column.user")} columnKey="user" sort={sort} onSort={onSort} />
-      ),
+      sortable: true,
+      compare: (a, b) => a.displayName.localeCompare(b.displayName),
+      tiebreak: usageTiebreak,
+      header: t("admin.quota.column.user"),
       rowHeader: true,
       render: (u) => (
         <span className="tc-admin-cell-stack">
@@ -372,14 +328,23 @@ export function QuotaContent({
     ...QUOTA_KEYS.map(
       (k): Column<UserUsage> => ({
         key: k,
-        sort: ariaSort(k),
-        header: <SortHeader label={quotaLabel(k)} columnKey={k} sort={sort} onSort={onSort} />,
+        sortable: true,
+        sortStart: "descending",
+        compare: (a, b) => a.usage[k] - b.usage[k],
+        tiebreak: usageTiebreak,
+        header: quotaLabel(k),
         align: "end",
         hideOnMobile: k === "memoryMib" || k === "cpuMillicores",
         render: (u) => <UsageCell k={k} value={u.usage[k]} limit={quota.limits?.[k]} />,
       }),
     ),
   ];
+
+  // Default order: heaviest users first — running workspaces, then storage.
+  const usageSort = useTableSort(columns, quota.users, {
+    key: "runningWorkspaces",
+    direction: "descending",
+  });
 
   return (
     <>
@@ -408,8 +373,10 @@ export function QuotaContent({
         <Table
           caption={t("admin.quota.users.caption")}
           columns={columns}
-          rows={sortedUsers(quota.users, sort)}
+          rows={usageSort.sortedRows}
           rowKey={(u) => u.subject}
+          sort={usageSort.sort}
+          onSortChange={usageSort.onSortChange}
           density="compact"
           empty={t("admin.quota.users.empty")}
         />

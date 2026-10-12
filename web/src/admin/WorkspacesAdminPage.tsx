@@ -8,9 +8,12 @@ import {
   IconButton,
   Input,
   Menu,
+  Pagination,
   Select,
   StatusPill,
   Table,
+  usePagination,
+  useTableSort,
 } from "../design";
 import type { Column } from "../design/Table";
 import type { MenuItem } from "../design";
@@ -238,6 +241,8 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       key: "name",
       header: t("admin.workspaces.column.workspace"),
       rowHeader: true,
+      sortable: true,
+      compare: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => (
         <span className="tc-admin-cell-stack">
           <Link to={`/workspaces/${ws.id}`}>{ws.name}</Link>
@@ -248,17 +253,26 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     {
       key: "owner",
       header: t("admin.workspaces.column.owner"),
+      sortable: true,
+      compare: (a, b) => ownerLabel(a.owner).localeCompare(ownerLabel(b.owner)),
+      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => ownerLabel(ws.owner),
     },
     {
       key: "template",
       header: t("admin.workspaces.column.template"),
       hideOnMobile: true,
+      sortable: true,
+      compare: (a, b) => a.template.name.localeCompare(b.template.name),
+      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => `${ws.template.name} ${t("admin.templates.revision", { n: ws.template.revision })}`,
     },
     {
       key: "phase",
       header: t("admin.workspaces.column.phase"),
+      sortable: true,
+      compare: (a, b) => PHASES.indexOf(a.phase) - PHASES.indexOf(b.phase),
+      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => (
         <span className="tc-admin-cell-stack">
           <StatusPill phase={ws.phase} label={t(phaseLabelKey(ws.phase))} />
@@ -273,6 +287,8 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       header: t("admin.workspaces.column.age"),
       align: "end",
       hideOnMobile: true,
+      sortable: true,
+      compare: (a, b) => a.createdAt.localeCompare(b.createdAt),
       render: (ws) => (
         <time dateTime={ws.createdAt} title={formatDateTime(ws.createdAt)}>
           {formatAge(ws.createdAt, ts)}
@@ -331,6 +347,11 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     },
   ];
 
+  // Sort runs over the filtered rows, pagination slices the sorted result;
+  // a filter/phase change brings the view back to page 1.
+  const sort = useTableSort(columns, rows);
+  const paged = usePagination(sort.sortedRows, { resetKey: `${filter}|${phase}` });
+
   const deleteConfirmed = pending?.kind === "delete" && typed === pending.ws.name;
   const actingOn = pending ? ownerLabel(pending.ws.owner) : "";
   const restartProgressKey =
@@ -384,18 +405,16 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       <Table
         caption={t("admin.workspaces.caption")}
         columns={columns}
-        rows={rows}
+        rows={paged.pageRows}
         rowKey={(ws) => ws.id}
+        sort={sort.sort}
+        onSortChange={sort.onSortChange}
         loading={list.loading && !list.data}
         empty={
           filter || phase ? t("admin.workspaces.empty.filtered") : t("admin.workspaces.empty.all")
         }
       />
-      <p className="tc-admin-muted" aria-live="polite">
-        {list.data
-          ? t("admin.workspaces.shown", { shown: rows.length, total: list.data.items.length })
-          : ""}
-      </p>
+      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.workspaces.caption") })} />
 
       <ConfirmDialog
         open={pending?.kind === "start"}

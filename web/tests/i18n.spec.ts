@@ -4,7 +4,7 @@ import { test, expect, type Page } from "@playwright/test";
 // survives a reload via tcdi.lang; with no stored choice the portal follows
 // navigator.language. Runs against the contract mock (tests/mock-api).
 
-const MOCK = "http://127.0.0.1:4310";
+const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 
 async function login(page: Page, heading: string) {
   await page.goto("/v1/login?returnTo=/");
