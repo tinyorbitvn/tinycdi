@@ -149,7 +149,6 @@ export default {
     "Đang hiển thị {n} workspace đầu tiên; thu hẹp bộ lọc trạng thái để xem phần còn lại.",
   "admin.workspaces.empty.filtered": "Không có workspace nào khớp bộ lọc.",
   "admin.workspaces.empty.all": "Chưa có workspace nào trong tenant này.",
-  "admin.workspaces.shown": "Hiển thị {shown} trên {total} workspace",
   "admin.workspaces.column.workspace": "Workspace",
   "admin.workspaces.column.owner": "Chủ sở hữu",
   "admin.workspaces.column.template": "Template",

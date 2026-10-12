@@ -1,4 +1,4 @@
-import { Badge, Button, Table } from "../design";
+import { Badge, Button, Pagination, Table, usePagination, useTableSort } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import type { ApiClient } from "../api/client";
@@ -82,6 +82,8 @@ const columns: Column<CatalogRow>[] = [
     key: "name",
     header: t("admin.templates.column.template"),
     rowHeader: true,
+    sortable: true,
+    compare: (a, b) => a.template.name.localeCompare(b.template.name),
     render: ({ template: tpl }) => (
       <span className="tc-admin-cell-stack">
         <span>
@@ -94,6 +96,9 @@ const columns: Column<CatalogRow>[] = [
   {
     key: "kind",
     header: t("admin.templates.column.kind"),
+    sortable: true,
+    compare: (a, b) => experienceLabel(a.template.experience).localeCompare(experienceLabel(b.template.experience)),
+    tiebreak: (a, b) => a.template.name.localeCompare(b.template.name),
     render: ({ template: tpl }) => (
       <span className="tc-admin-cell-stack">
         <span>{experienceLabel(tpl.experience)}</span>
@@ -165,6 +170,9 @@ const columns: Column<CatalogRow>[] = [
     key: "usage",
     header: t("admin.templates.column.usage"),
     align: "end",
+    sortable: true,
+    compare: (a, b) => a.inUse - b.inUse,
+    tiebreak: (a, b) => a.template.name.localeCompare(b.template.name),
     render: (r) => (
       <span aria-label={t("admin.templates.usageLabel", { inUse: r.inUse, running: r.running })}>
         {r.inUse} <span className="tc-admin-muted">{t("admin.templates.usage.running", { n: r.running })}</span>
@@ -175,12 +183,20 @@ const columns: Column<CatalogRow>[] = [
     key: "published",
     header: t("admin.templates.column.published"),
     hideOnMobile: true,
+    sortable: true,
+    compare: (a, b) => a.template.publishedAt.localeCompare(b.template.publishedAt),
     render: ({ template: tpl }) => <time dateTime={tpl.publishedAt}>{formatDateTime(tpl.publishedAt)}</time>,
   },
 ];
 
 export function TemplatesPage() {
   const catalog = useLoader(loadCatalog, "catalog");
+  // catalogRows' in-use-descending order is the default sort.
+  const sort = useTableSort(columns, catalog.data ?? [], {
+    key: "usage",
+    direction: "descending",
+  });
+  const paged = usePagination(sort.sortedRows);
   return (
     <AdminLayout
       title={t("admin.templates.title")}
@@ -195,11 +211,14 @@ export function TemplatesPage() {
       <Table
         caption={t("admin.templates.caption")}
         columns={columns}
-        rows={catalog.data ?? []}
+        rows={paged.pageRows}
         rowKey={(r) => r.template.id}
+        sort={sort.sort}
+        onSortChange={sort.onSortChange}
         loading={catalog.loading && !catalog.data}
         empty={t("admin.templates.empty")}
       />
+      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.templates.caption") })} />
     </AdminLayout>
   );
 }

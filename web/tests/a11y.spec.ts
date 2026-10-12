@@ -6,7 +6,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 // every interactive element on /workspaces is Tab-reachable with a visible
 // focus ring. Runs against the contract mock (tests/mock-api) on :4310.
 
-const MOCK = "http://127.0.0.1:4310";
+const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 const SEED_WS = "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E";
 
 const READY_CONDITIONS = [

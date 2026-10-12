@@ -6,7 +6,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 // signed-out page, which never starts a login by itself. Runs against the
 // contract mock (tests/mock-api) on :4310.
 
-const MOCK = "http://127.0.0.1:4310";
+const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 const IDP_LOGOUT = "https://idp.test.invalid/logout?client_id=tinycdi-portal";
 
 async function login(page: Page) {

@@ -58,29 +58,3 @@
 .tc-admin-list li + li {
   margin-top: var(--tc-space-1);
 }
-
-/* Sortable column headers (quota usage table). */
-.tc-admin-sort {
-  appearance: none;
-  background: none;
-  border: 0;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--tc-space-1);
-}
-
-.tc-admin-sort--active {
-  font-weight: var(--tc-weight-semibold);
-}
-
-.tc-admin-sort:focus-visible {
-  outline: var(--tc-focus-ring);
-  outline-offset: 2px;
-  border-radius: var(--tc-radius-sm);
-}

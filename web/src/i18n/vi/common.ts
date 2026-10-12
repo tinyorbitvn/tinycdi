@@ -11,6 +11,13 @@ export default {
   "common.toast.errors": "Thông báo lỗi",
   "common.toast.notifications": "Thông báo",
 
+  "common.pagination.label": "Phân trang {name}",
+  "common.pagination.previous": "Trước",
+  "common.pagination.next": "Sau",
+  "common.pagination.page": "Trang {n}",
+  "common.pagination.status": "Hiển thị {from}–{to} trên {total}",
+  "common.pagination.rowsPerPage": "Số hàng mỗi trang",
+
   "errors.banner.fallback": "LỖI",
   "errors.banner.requestId": "(mã yêu cầu {id})",
   "errors.banner.retry": "Thử lại",

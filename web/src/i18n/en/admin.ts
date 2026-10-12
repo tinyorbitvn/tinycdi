@@ -150,7 +150,6 @@ export default {
     "Showing the first {n} workspaces; narrow the phase filter to see the rest.",
   "admin.workspaces.empty.filtered": "No workspaces match the filters.",
   "admin.workspaces.empty.all": "No workspaces in this tenant yet.",
-  "admin.workspaces.shown": "{shown} of {total} workspaces shown",
   "admin.workspaces.column.workspace": "Workspace",
   "admin.workspaces.column.owner": "Owner",
   "admin.workspaces.column.template": "Template",
