@@ -742,8 +742,9 @@ runtime:
   # the workspace's own namespace only (NetworkPolicyPeer semantics).
   # DNS egress is unaffected, and EMPTY values keep today's behaviour
   # (no flag is rendered). DEPRECATED DEFAULT: unrestricted ClusterOnly
-  # egress flips to restricted in v1.2 — the install NOTES warn while a
-  # seeded ClusterOnly template runs with these unset.
+  # egress flips to restricted in a future minor release (planned v1.3)
+  # — the install NOTES warn while a seeded ClusterOnly template runs
+  # with these unset.
   #   networkProfiles:
   #     clusterOnly:
   #       egressNamespaceSelector:
@@ -850,7 +851,8 @@ templates: []
   #     # Isolated denies all egress except cluster DNS — DNS resolution
   #     # stays allowed by design (a deliberate unidirectional channel).
   #     # ClusterOnly egress narrows via runtime.networkProfiles above;
-  #     # its unrestricted default flips in v1.2.
+  #     # its unrestricted default flips in a future minor release
+  #     # (planned v1.3).
   #     networkProfile: Isolated
   #     # Clipboard redirection between the user's device and the
   #     # workspace, named from the user's point of view (normative
