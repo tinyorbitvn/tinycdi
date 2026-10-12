@@ -142,15 +142,16 @@ func TestClusterOnlyEgressSchema(t *testing.T) {
 // TestClusterOnlyEgressDeprecationNotice: while a seeded template uses
 // networkProfile: ClusterOnly and the #148 narrowing values are unset,
 // install NOTES must warn that the default flips to restricted egress in
-// v1.2 and name the values to set now. Setting any narrowing value — or
-// seeding no ClusterOnly template — silences it.
+// a future minor release (planned v1.3) and name the values to set now.
+// Setting any narrowing value — or seeding no ClusterOnly template —
+// silences it.
 func TestClusterOnlyEgressDeprecationNotice(t *testing.T) {
 	example := filepath.Join("tinycdi", "ci", "example-values.yaml")
 	seedClusterOnly := "--set=templates[0].spec.networkProfile=ClusterOnly"
 
 	notes := renderNotes(t, "-f", example, seedClusterOnly)
 	for _, want := range []string{
-		"WARNING", "v1.2",
+		"WARNING", "planned v1.3",
 		"runtime.networkProfiles.clusterOnly.egressNamespaceSelector",
 		"runtime.networkProfiles.clusterOnly.egressPodSelector",
 		"runtime.networkProfiles.clusterOnly.egressPorts",
