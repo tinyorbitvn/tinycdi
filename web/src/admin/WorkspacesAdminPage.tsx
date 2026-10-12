@@ -1,15 +1,47 @@
-import { useMemo, useState } from "react";
-import { Alert, Button, Cluster, ConfirmDialog, Dialog, Input, Select, StatusPill, Table } from "../design";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  Alert,
+  Button,
+  Cluster,
+  ConfirmDialog,
+  Dialog,
+  IconButton,
+  Input,
+  Menu,
+  Select,
+  StatusPill,
+  Table,
+} from "../design";
 import type { Column } from "../design/Table";
-import { IconRefresh, IconPlayerStop, IconSearch, IconTrash } from "../design/icons";
+import type { MenuItem } from "../design";
+import {
+  IconDeviceDesktop,
+  IconDots,
+  IconPlayerPlay,
+  IconPlayerStop,
+  IconPower,
+  IconRefresh,
+  IconSearch,
+  IconTrash,
+} from "../design/icons";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
-import { Link } from "../lib/router";
+import { Link, navigate } from "../lib/router";
 import { t } from "../i18n";
-import { phaseLabelKey } from "../workspaces/helpers";
-import { listScopedWorkspaces, type ScopedWorkspace, type WorkspacePhase } from "./api";
+import { isConnectable, phaseLabelKey, sessionPath } from "../workspaces/helpers";
+import {
+  listScopedWorkspaces,
+  restartWorkspace,
+  startWorkspace,
+  stopWorkspace,
+  RestartAbortedError,
+  RestartTimeoutError,
+  type RestartStep,
+  type ScopedWorkspace,
+  type WorkspacePhase,
+} from "./api";
 import { formatAge, formatDateTime, ownerLabel } from "./format";
-import { useLoader } from "../app/me";
+import { useLoader, useMeLoaded } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 
@@ -23,15 +55,32 @@ const PHASES: WorkspacePhase[] = [
   "Terminating",
 ];
 
-// Stop is offered while the runtime is (or is becoming) active; delete for
-// anything not already being deleted. The API re-checks and answers
-// INVALID_STATE on a race.
+// Start is offered for the two terminal phases the API accepts; restart is
+// stop -> wait Stopped -> start and only makes sense while the runtime is
+// (or is becoming) active. Stop/delete follow the same phase gates the
+// API re-checks (it answers INVALID_STATE on a race).
+export function canStart(ws: ScopedWorkspace): boolean {
+  return ws.phase === "Stopped" || ws.phase === "Failed";
+}
+
 export function canStop(ws: ScopedWorkspace): boolean {
   return ws.desiredState === "Running" && ws.phase !== "Stopping" && ws.phase !== "Terminating";
 }
 
+// A Failed workspace is already not running — Start is the retry verb, so
+// Restart is reserved for rows that actually have a runtime to bounce.
+export function canRestart(ws: ScopedWorkspace): boolean {
+  return canStop(ws) && ws.phase !== "Failed";
+}
+
 export function canDelete(ws: ScopedWorkspace): boolean {
   return ws.phase !== "Terminating";
+}
+
+// Connect is owner-only (advisor Q1): a tenant admin never gets a session
+// on another user's workspace — no takeover in v1.2.
+export function canConnect(ws: ScopedWorkspace, viewerSubject: string | undefined): boolean {
+  return !!viewerSubject && ws.owner?.subject === viewerSubject && isConnectable(ws);
 }
 
 export function matchesFilter(ws: ScopedWorkspace, text: string): boolean {
@@ -42,19 +91,40 @@ export function matchesFilter(ws: ScopedWorkspace, text: string): boolean {
   );
 }
 
-type Pending = { kind: "stop" | "delete"; ws: ScopedWorkspace };
+type Pending = { kind: "start" | "stop" | "restart" | "delete"; ws: ScopedWorkspace };
+
+// Static keys so the unused-key catalog check can grep each one.
+const NOTICE_KEYS = {
+  start: "admin.workspaces.notice.start",
+  stop: "admin.workspaces.notice.stop",
+  restart: "admin.workspaces.notice.restart",
+  delete: "admin.workspaces.notice.delete",
+} as const;
+
+interface RowAction {
+  id: string;
+  label: string;
+  ariaLabel: string;
+  icon: ReactNode;
+  danger?: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}
 
 export function WorkspacesAdminPage({ now }: { now?: number }) {
   const api = useApi();
+  const me = useMeLoaded();
   const [phase, setPhase] = useState<WorkspacePhase | "">("");
   const [filter, setFilter] = useState("");
   const list = useLoader((a) => listScopedWorkspaces(a, "tenant", phase || undefined), `ws:${phase}`);
   const [pending, setPending] = useState<Pending | null>(null);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
+  const [restartStep, setRestartStep] = useState<RestartStep | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const viewerSubject = me.data?.subject;
   const rows = useMemo(
     () => (list.data?.items ?? []).filter((ws) => matchesFilter(ws, filter)),
     [list.data, filter],
@@ -63,6 +133,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
   function open(kind: Pending["kind"], ws: ScopedWorkspace) {
     setPending({ kind, ws });
     setTyped("");
+    setRestartStep(null);
     setActionError(null);
   }
 
@@ -78,15 +149,12 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     setBusy(true);
     setActionError(null);
     try {
-      if (kind === "stop") {
-        unwrap(
-          await api.POST("/v1/workspaces/{workspaceId}/stop", {
-            params: {
-              path: { workspaceId: ws.id },
-              header: { "Idempotency-Key": newIdempotencyKey() },
-            },
-          }),
-        );
+      if (kind === "start") {
+        await startWorkspace(api, ws.id);
+      } else if (kind === "stop") {
+        await stopWorkspace(api, ws.id);
+      } else if (kind === "restart") {
+        await restartWorkspace(api, ws.id, { onStep: setRestartStep });
       } else {
         unwrap(
           await api.DELETE("/v1/workspaces/{workspaceId}", {
@@ -98,7 +166,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
         );
       }
       setNotice(
-        t(kind === "stop" ? "admin.workspaces.notice.stop" : "admin.workspaces.notice.delete", {
+        t(NOTICE_KEYS[kind], {
           name: ws.name,
           owner: ownerLabel(ws.owner),
         }),
@@ -110,6 +178,58 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Everything a row can do; rendered inline at <= 2 actions and folded
+  // into the IconDots menu above that, so busy rows stay one control wide.
+  function rowActions(ws: ScopedWorkspace): RowAction[] {
+    const actions: RowAction[] = [];
+    if (canConnect(ws, viewerSubject)) {
+      actions.push({
+        id: "connect",
+        label: t("admin.workspaces.action.connect"),
+        ariaLabel: t("admin.workspaces.action.connectLabel", { name: ws.name }),
+        icon: <IconDeviceDesktop />,
+        onSelect: () => navigate(sessionPath(ws.id)),
+      });
+    }
+    if (canStart(ws)) {
+      actions.push({
+        id: "start",
+        label: t("admin.workspaces.action.start"),
+        ariaLabel: t("admin.workspaces.action.startLabel", { name: ws.name }),
+        icon: <IconPlayerPlay />,
+        onSelect: () => open("start", ws),
+      });
+    }
+    if (canStop(ws)) {
+      actions.push({
+        id: "stop",
+        label: t("admin.workspaces.action.stop"),
+        ariaLabel: t("admin.workspaces.action.stopLabel", { name: ws.name }),
+        icon: <IconPlayerStop />,
+        onSelect: () => open("stop", ws),
+      });
+    }
+    if (canRestart(ws)) {
+      actions.push({
+        id: "restart",
+        label: t("admin.workspaces.action.restart"),
+        ariaLabel: t("admin.workspaces.action.restartLabel", { name: ws.name }),
+        icon: <IconPower />,
+        onSelect: () => open("restart", ws),
+      });
+    }
+    actions.push({
+      id: "delete",
+      label: t("admin.workspaces.action.delete"),
+      ariaLabel: t("admin.workspaces.action.deleteLabel", { name: ws.name }),
+      icon: <IconTrash />,
+      danger: true,
+      disabled: !canDelete(ws),
+      onSelect: () => open("delete", ws),
+    });
+    return actions;
   }
 
   const ts = now ?? Date.now();
@@ -163,33 +283,62 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       key: "actions",
       header: <span className="tc-sr-only">{t("admin.workspaces.column.actions")}</span>,
       align: "end",
-      render: (ws) => (
-        <Cluster gap={2} justify="end" wrap={false}>
-          <Button
-            size="sm"
-            icon={<IconPlayerStop />}
-            disabled={!canStop(ws)}
-            aria-label={t("admin.workspaces.action.stopLabel", { name: ws.name })}
-            onClick={() => open("stop", ws)}
-          >
-            {t("admin.workspaces.action.stop")}
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            icon={<IconTrash />}
-            disabled={!canDelete(ws)}
-            aria-label={t("admin.workspaces.action.deleteLabel", { name: ws.name })}
-            onClick={() => open("delete", ws)}
-          >
-            {t("admin.workspaces.action.delete")}
-          </Button>
-        </Cluster>
-      ),
+      render: (ws) => {
+        const actions = rowActions(ws);
+        if (actions.length > 2) {
+          const items: MenuItem[] = actions.map((a) => ({
+            id: a.id,
+            label: a.label,
+            icon: a.icon,
+            ...(a.danger ? { danger: true } : {}),
+            ...(a.disabled ? { disabled: true } : {}),
+            ...(a.danger ? { separatorBefore: true } : {}),
+            onSelect: a.onSelect,
+          }));
+          return (
+            <Menu
+              align="end"
+              trigger={(p) => (
+                <IconButton
+                  {...p}
+                  size="sm"
+                  label={t("admin.workspaces.action.menuLabel", { name: ws.name })}
+                  icon={<IconDots />}
+                />
+              )}
+              items={items}
+            />
+          );
+        }
+        return (
+          <Cluster gap={2} justify="end" wrap={false}>
+            {actions.map((a) => (
+              <Button
+                key={a.id}
+                size="sm"
+                variant={a.danger ? "danger" : "secondary"}
+                icon={a.icon}
+                disabled={a.disabled}
+                aria-label={a.ariaLabel}
+                onClick={a.onSelect}
+              >
+                {a.label}
+              </Button>
+            ))}
+          </Cluster>
+        );
+      },
     },
   ];
 
   const deleteConfirmed = pending?.kind === "delete" && typed === pending.ws.name;
+  const actingOn = pending ? ownerLabel(pending.ws.owner) : "";
+  const restartProgressKey =
+    restartStep === "stopping"
+      ? ("admin.workspaces.restart.progress.stopping" as const)
+      : restartStep === "waiting"
+        ? ("admin.workspaces.restart.progress.waiting" as const)
+        : ("admin.workspaces.restart.progress.starting" as const);
 
   return (
     <AdminLayout
@@ -249,6 +398,27 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       </p>
 
       <ConfirmDialog
+        open={pending?.kind === "start"}
+        title={
+          pending ? t("admin.workspaces.start.title", { name: pending.ws.name }) : t("admin.workspaces.start.fallbackTitle")
+        }
+        confirmLabel={t("admin.workspaces.start.confirm")}
+        cancelLabel={t("admin.workspaces.dialog.cancel")}
+        destructive={false}
+        busy={busy}
+        onConfirm={() => void run()}
+        onCancel={close}
+      >
+        {pending ? (
+          <>
+            <p className="tc-admin-muted">{t("admin.workspaces.actingAs", { owner: actingOn })}</p>
+            <p>{t("admin.workspaces.start.body", { owner: actingOn })}</p>
+            <ApiErrorAlert error={actionError} />
+          </>
+        ) : null}
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={pending?.kind === "stop"}
         title={
           pending ? t("admin.workspaces.stop.title", { name: pending.ws.name }) : t("admin.workspaces.stop.fallbackTitle")
@@ -262,13 +432,49 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       >
         {pending ? (
           <>
+            <p className="tc-admin-muted">{t("admin.workspaces.actingAs", { owner: actingOn })}</p>
             <p>
-              {t("admin.workspaces.stop.body", { owner: ownerLabel(pending.ws.owner) })}{" "}
+              {t("admin.workspaces.stop.body")}{" "}
               {pending.ws.dataPolicy === "Retain"
                 ? t("admin.workspaces.stop.retain")
                 : t("admin.workspaces.stop.ephemeral")}
             </p>
             <ApiErrorAlert error={actionError} />
+          </>
+        ) : null}
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={pending?.kind === "restart"}
+        title={
+          pending ? t("admin.workspaces.restart.title", { name: pending.ws.name }) : t("admin.workspaces.restart.fallbackTitle")
+        }
+        confirmLabel={t("admin.workspaces.restart.confirm")}
+        cancelLabel={t("admin.workspaces.dialog.cancel")}
+        destructive={false}
+        busy={busy}
+        onConfirm={() => void run()}
+        onCancel={close}
+      >
+        {pending ? (
+          <>
+            <p className="tc-admin-muted">{t("admin.workspaces.actingAs", { owner: actingOn })}</p>
+            <p>
+              {t("admin.workspaces.restart.body")}{" "}
+              {t("admin.workspaces.restart.quota", { owner: actingOn })}
+            </p>
+            {busy && restartStep ? (
+              <p className="tc-admin-muted" aria-live="polite">
+                {t(restartProgressKey, { name: pending.ws.name })}
+              </p>
+            ) : null}
+            {actionError instanceof RestartTimeoutError ? (
+              <Alert tone="danger">{t("admin.workspaces.restart.timeout")}</Alert>
+            ) : actionError instanceof RestartAbortedError ? (
+              <Alert tone="danger">{t("admin.workspaces.restart.aborted")}</Alert>
+            ) : (
+              <ApiErrorAlert error={actionError} />
+            )}
           </>
         ) : null}
       </ConfirmDialog>
@@ -295,8 +501,9 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       >
         {pending ? (
           <>
+            <p className="tc-admin-muted">{t("admin.workspaces.actingAs", { owner: actingOn })}</p>
             <p>
-              {t("admin.workspaces.delete.body", { owner: ownerLabel(pending.ws.owner) })}{" "}
+              {t("admin.workspaces.delete.body")}{" "}
               {pending.ws.dataPolicy === "Retain"
                 ? t("admin.workspaces.delete.retain")
                 : t("admin.workspaces.delete.ephemeral")}

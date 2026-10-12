@@ -5,8 +5,10 @@ import { t } from "../i18n";
 import { phaseLabelKey } from "../workspaces/helpers";
 import {
   fetchQuota,
+  listScopedData,
   listScopedWorkspaces,
   type QuotaView,
+  type ScopedRetainedData,
   type ScopedWorkspace,
   type WorkspacePhase,
 } from "./api";
@@ -36,11 +38,20 @@ export function phaseCounts(items: ScopedWorkspace[]): { phase: WorkspacePhase; 
 interface Overview {
   quota: QuotaView;
   workspaces: ScopedWorkspace[];
+  retained: ScopedRetainedData[];
 }
 
 async function loadOverview(api: ApiClient): Promise<Overview> {
-  const [quota, ws] = await Promise.all([fetchQuota(api), listScopedWorkspaces(api, "tenant")]);
-  return { quota, workspaces: ws.items };
+  const [quota, ws, data] = await Promise.all([
+    fetchQuota(api),
+    listScopedWorkspaces(api, "tenant"),
+    listScopedData(api, "tenant"),
+  ]);
+  return {
+    quota,
+    workspaces: ws.items,
+    retained: data.items.filter((r) => r.state !== "Purged"),
+  };
 }
 
 export function OverviewPage({ now }: { now?: number }) {
@@ -80,6 +91,15 @@ export function OverviewPage({ now }: { now?: number }) {
                 ))}
               </Grid>
             )}
+          </Section>
+          <Section
+            title={t("admin.overview.data.title")}
+            actions={<Link to="/admin/data">{t("admin.overview.data.all")}</Link>}
+          >
+            <Card as="div" className="tc-admin-stat">
+              <span className="tc-admin-stat__value">{o.data.retained.length}</span>
+              <span className="tc-admin-muted">{t("admin.overview.data.disks")}</span>
+            </Card>
           </Section>
           {failed.length > 0 ? (
             <Alert

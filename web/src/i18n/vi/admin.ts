@@ -8,6 +8,7 @@ export default {
   "admin.nav.workspaces": "Workspace",
   "admin.nav.quota": "Hạn mức",
   "admin.nav.templates": "Template",
+  "admin.nav.data": "Dữ liệu",
   "admin.eyebrow": "Quản trị",
   "admin.eyebrow.tenant": "Quản trị · {tenant}",
   "admin.gate.checking": "Đang kiểm tra quyền",
@@ -21,6 +22,7 @@ export default {
   "admin.route.workspaces": "Workspace của tenant",
   "admin.route.quota": "Hạn mức",
   "admin.route.templates": "Danh mục template",
+  "admin.route.data": "Dữ liệu giữ lại",
 
   "admin.action.refresh": "Làm mới",
 
@@ -36,6 +38,9 @@ export default {
   "admin.overview.failed.one": "{n} workspace lỗi",
   "admin.overview.failed.other": "{n} workspace lỗi",
   "admin.overview.failedAgo": "lỗi {age}",
+  "admin.overview.data.title": "Dữ liệu giữ lại",
+  "admin.overview.data.disks": "đĩa được giữ lại",
+  "admin.overview.data.all": "Xem dữ liệu giữ lại",
 
   // Quota page.
   "admin.quota.title": "Hạn mức",
@@ -151,29 +156,65 @@ export default {
   "admin.workspaces.column.phase": "Trạng thái",
   "admin.workspaces.column.age": "Tuổi",
   "admin.workspaces.column.actions": "Thao tác",
+  "admin.workspaces.action.start": "Khởi động",
   "admin.workspaces.action.stop": "Dừng",
+  "admin.workspaces.action.restart": "Khởi động lại",
   "admin.workspaces.action.delete": "Xoá",
+  "admin.workspaces.action.connect": "Kết nối",
+  "admin.workspaces.action.startLabel": "Khởi động {name}",
   "admin.workspaces.action.stopLabel": "Dừng {name}",
+  "admin.workspaces.action.restartLabel": "Khởi động lại {name}",
   "admin.workspaces.action.deleteLabel": "Xoá {name}",
+  "admin.workspaces.action.connectLabel": "Kết nối tới {name}",
+  "admin.workspaces.action.menuLabel": "Thao tác cho {name}",
+  "admin.workspaces.notice.start": "Đã yêu cầu khởi động {name} ({owner}).",
   "admin.workspaces.notice.stop": "Đã yêu cầu dừng {name} ({owner}).",
+  "admin.workspaces.notice.restart": "Đã yêu cầu khởi động lại {name} ({owner}).",
   "admin.workspaces.notice.delete": "Đã yêu cầu xoá {name} ({owner}).",
+  "admin.workspaces.actingAs": "Bạn đang thao tác trên workspace của {owner}.",
+  "admin.workspaces.start.title": "Khởi động {name}?",
+  "admin.workspaces.start.fallbackTitle": "Khởi động workspace",
+  "admin.workspaces.start.confirm": "Khởi động workspace",
+  "admin.workspaces.start.body":
+    "Khởi động nó sẽ dùng giới hạn workspace đang chạy của {owner} và hạn mức tenant.",
+  "admin.workspaces.restart.title": "Khởi động lại {name}?",
+  "admin.workspaces.restart.fallbackTitle": "Khởi động lại workspace",
+  "admin.workspaces.restart.confirm": "Khởi động lại workspace",
+  "admin.workspaces.restart.body":
+    "Khởi động lại gồm hai thao tác: workspace dừng, rồi khởi động khi đạt trạng thái Đã dừng. Mọi phiên đang mở sẽ kết thúc ngay.",
+  "admin.workspaces.restart.quota":
+    "Khởi động lại sẽ dùng giới hạn workspace đang chạy của {owner} và hạn mức tenant.",
+  "admin.workspaces.restart.progress.stopping": "Đang dừng {name}…",
+  "admin.workspaces.restart.progress.waiting": "Đang chờ {name} đạt trạng thái Đã dừng…",
+  "admin.workspaces.restart.progress.starting": "Đang khởi động {name}…",
+  "admin.workspaces.restart.timeout":
+    "Workspace không dừng kịp. Kiểm tra trạng thái rồi thử lại — bước khởi động chưa được gửi.",
+  "admin.workspaces.restart.aborted": "Workspace đang bị xoá nên không thể khởi động lại.",
   "admin.workspaces.stop.title": "Dừng {name}?",
   "admin.workspaces.stop.fallbackTitle": "Dừng workspace",
   "admin.workspaces.stop.confirm": "Dừng workspace",
   "admin.workspaces.stop.body":
-    "Workspace thuộc về {owner}. Dừng nó sẽ kết thúc ngay mọi phiên đang mở; công việc chưa lưu trong desktop sẽ mất.",
+    "Dừng nó sẽ kết thúc ngay mọi phiên đang mở; công việc chưa lưu trong desktop sẽ mất.",
   "admin.workspaces.stop.retain": "Đĩa của nó được giữ và chủ sở hữu có thể khởi động lại.",
   "admin.workspaces.stop.ephemeral": "Dữ liệu của nó là tạm thời và bị huỷ khi dừng.",
   "admin.workspaces.delete.title": "Xoá {name}?",
   "admin.workspaces.delete.fallbackTitle": "Xoá workspace",
   "admin.workspaces.delete.confirm": "Xoá workspace",
   "admin.workspaces.delete.body":
-    "Thao tác này gỡ workspace của {owner} và thu hồi quyền truy cập.",
+    "Thao tác này gỡ workspace và thu hồi quyền truy cập.",
   "admin.workspaces.delete.retain":
     "Đĩa của nó chuyển sang kho dữ liệu giữ lại; xoá vĩnh viễn ở đó để huỷ nó.",
   "admin.workspaces.delete.ephemeral": "Dữ liệu của nó là tạm thời và sẽ bị huỷ.",
   "admin.workspaces.delete.typeConfirm": "Gõ {name} để xác nhận",
   "admin.workspaces.dialog.cancel": "Huỷ",
+
+  // Retained data page (tenant-scope inventory + purge).
+  "admin.data.title": "Dữ liệu giữ lại",
+  "admin.data.description":
+    "Đĩa được giữ lại sau khi workspace bị xoá, trong toàn tenant. Xoá vĩnh viễn sẽ huỷ đĩa hoàn toàn.",
+  "admin.data.caption": "Dữ liệu giữ lại trong tenant",
+  "admin.data.column.age": "Tuổi",
+  "admin.data.action.purgeLabel": "Xoá vĩnh viễn {id}",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Lỗi",

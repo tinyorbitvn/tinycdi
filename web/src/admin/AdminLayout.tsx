@@ -11,6 +11,7 @@ export const ADMIN_SECTIONS = [
   { path: "/admin/workspaces", labelKey: "admin.nav.workspaces" },
   { path: "/admin/quota", labelKey: "admin.nav.quota" },
   { path: "/admin/templates", labelKey: "admin.nav.templates" },
+  { path: "/admin/data", labelKey: "admin.nav.data" },
 ] as const satisfies readonly { path: string; labelKey: MessageKey }[];
 
 // Design-system Tabs as the section switcher: roving tabindex, arrow-key
