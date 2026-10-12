@@ -1,10 +1,15 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { cx } from "./cx";
 
+/** aria-sort value a sortable column currently holds ("none" = sortable, not sorted). */
+export type TableSort = "ascending" | "descending" | "none";
+
 export interface Column<T> {
   /** Stable column id. */
   key: string;
   header: ReactNode;
+  /** Set on sortable columns: exposes aria-sort on the header cell. */
+  sort?: TableSort;
   /** Cell content; defaults to String(row[key]). */
   render?: (row: T) => ReactNode;
   align?: "start" | "end" | "center";
@@ -61,7 +66,12 @@ export function Table<T>({
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c.key} scope="col" className={cellClass(c)}>
+              <th
+                key={c.key}
+                scope="col"
+                className={cellClass(c)}
+                {...(c.sort !== undefined ? { "aria-sort": c.sort } : {})}
+              >
                 {c.header}
               </th>
             ))}

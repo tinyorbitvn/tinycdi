@@ -21,6 +21,7 @@ import {
   IconPlayerStop,
   IconPower,
   IconRefresh,
+  IconSearch,
   IconTrash,
 } from "../design/icons";
 import { useApi } from "../api/context";
@@ -356,6 +357,8 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           placeholder={t("admin.workspaces.filter.placeholder")}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          icon={<IconSearch />}
+          onClear={() => setFilter("")}
         />
         <Select
           label={t("admin.workspaces.phase.label")}

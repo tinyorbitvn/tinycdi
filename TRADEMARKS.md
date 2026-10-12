@@ -17,3 +17,9 @@ image), so no source change is needed.
 Fonts and icons vendored under `web/src/design/orbit/` keep their own free
 licences (SIL OFL-1.1 for Manrope and JetBrains Mono, MIT for Tabler Icons);
 see `web/src/design/orbit/LICENSES/` and `THIRD_PARTY_LICENSES.md`.
+
+The duotone navigation artwork inlined in `web/src/design/nav-icons.tsx`
+(the Orbit "Dashboard icons" set) is original TinyOrbit design-system
+artwork used with permission of the brand owner. Like the marks above, it
+is **not** covered by the MIT licence — replace it if you rebrand the
+portal, the same way you replace the wordmark.

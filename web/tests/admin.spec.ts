@@ -40,29 +40,46 @@ test("a tenant admin sees all five admin pages", async ({ page, request }) => {
   // The admin nav appears in the shell and each section renders its page.
   await expect(page.getByRole("heading", { name: "Tenant overview" })).toBeVisible();
 
-  const adminNav = page.getByRole("navigation", { name: "Admin sections" });
-  await expect(adminNav.getByRole("link", { name: "Workspaces" })).toBeVisible();
-  await expect(adminNav.getByRole("link", { name: "Quota" })).toBeVisible();
-  await expect(adminNav.getByRole("link", { name: "Templates" })).toBeVisible();
-  await expect(adminNav.getByRole("link", { name: "Data" })).toBeVisible();
+  const adminNav = page.getByRole("tablist", { name: "Admin sections" });
+  await expect(adminNav.getByRole("tab", { name: "Workspaces" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Templates" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Data" })).toBeVisible();
 
-  await adminNav.getByRole("link", { name: "Workspaces" }).click();
+  // The route owns the selection: Overview is the selected tab on /admin.
+  await expect(adminNav.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await adminNav.getByRole("tab", { name: "Workspaces" }).click();
   await expect(page.getByRole("heading", { name: "Tenant workspaces" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Owner" })).toBeVisible();
   await expect(page.getByRole("link", { name: "grace-analysis" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Workspaces" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 
-  await adminNav.getByRole("link", { name: "Quota" }).click();
+  // Arrow keys move+activate: from Workspaces, ArrowRight selects Quota.
+  await adminNav.getByRole("tab", { name: "Workspaces" }).focus();
+  await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("heading", { name: "Quota" })).toBeVisible();
   await expect(page.getByRole("table", { name: "Usage by user" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeFocused();
 
-  await adminNav.getByRole("link", { name: "Templates" }).click();
+  await adminNav.getByRole("tab", { name: "Templates" }).click();
   await expect(page.getByRole("heading", { name: "Template catalog" })).toBeVisible();
 
-  await adminNav.getByRole("link", { name: "Data" }).click();
+  await adminNav.getByRole("tab", { name: "Data" }).click();
   await expect(page.getByRole("heading", { name: "Retained data" })).toBeVisible();
   await expect(
     page.getByRole("table", { name: "Retained data across the tenant" }),
   ).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Data" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });
 
 test("a regular user is redirected away from /admin", async ({ page }) => {

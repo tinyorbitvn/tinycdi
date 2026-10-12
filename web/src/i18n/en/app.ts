@@ -8,6 +8,7 @@ export default {
   "app.loadError.body": "Reload the page to try again.",
 
   "app.shell.byline": "by TinyOrbit",
+  "app.skipLink": "Skip to content",
   "app.theme.label": "Theme",
   "app.theme.light": "Light",
   "app.theme.dark": "Dark",
@@ -40,6 +41,7 @@ export default {
   "auth.gate.retrying": "Could not reach the workspace API ({error}). Retrying…",
 
   "nav.sections": "Sections",
+  "nav.menu": "Menu",
   "nav.workspaces": "Workspaces",
   "nav.admin": "Admin",
   "nav.newWorkspace": "New workspace",

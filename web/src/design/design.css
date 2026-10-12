@@ -318,7 +318,7 @@
   align-items: center;
   gap: var(--tc-space-1);
   max-width: 100%;
-  min-height: 1.375rem;
+  min-height: var(--tc-space-6);
   padding: 0 var(--tc-space-2);
   border-radius: var(--tc-radius-sm);
   font-size: var(--tc-text-xs);
@@ -860,6 +860,58 @@
   min-height: 5.5rem;
   padding: var(--tc-space-2) var(--tc-space-3);
   resize: vertical;
+}
+
+/* Affixed input: leading icon ornament / trailing clear button. */
+.tc-input-affixed {
+  position: relative;
+  display: block;
+}
+
+.tc-input--icon {
+  padding-left: var(--tc-space-8);
+}
+
+.tc-input--clearable {
+  padding-right: var(--tc-space-8);
+}
+
+.tc-input-affixed__icon {
+  position: absolute;
+  top: 50%;
+  left: var(--tc-space-3);
+  transform: translateY(-50%);
+  display: inline-flex;
+  pointer-events: none;
+  color: var(--tc-color-text-subtle);
+}
+
+.tc-input-affixed__clear {
+  position: absolute;
+  top: 50%;
+  right: var(--tc-space-2);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--tc-space-6);
+  height: var(--tc-space-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--tc-radius-sm);
+  background: transparent;
+  color: var(--tc-color-text-subtle);
+  cursor: pointer;
+}
+
+.tc-input-affixed__clear:hover {
+  background: var(--tc-color-surface-sunken);
+  color: var(--tc-color-text);
+}
+
+.tc-input-affixed__clear:focus-visible {
+  outline: 2px solid var(--tc-color-focus);
+  outline-offset: 2px;
 }
 
 .tc-select {

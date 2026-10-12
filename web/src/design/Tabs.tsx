@@ -65,7 +65,7 @@ export function Tabs({ tabs, label, value, defaultValue, onChange, className }: 
               role="tab"
               id={`${base}-tab-${t.id}`}
               aria-selected={isSel}
-              aria-controls={`${base}-panel-${t.id}`}
+              {...(t.content !== undefined ? { "aria-controls": `${base}-panel-${t.id}` } : {})}
               tabIndex={isSel ? 0 : -1}
               disabled={t.disabled}
               className={cx("tc-tabs__tab", isSel && "tc-tabs__tab--selected")}

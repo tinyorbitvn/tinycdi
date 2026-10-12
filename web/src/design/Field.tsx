@@ -1,12 +1,16 @@
 import {
   forwardRef,
+  useRef,
+  useState,
   type InputHTMLAttributes,
   type ReactNode,
+  type Ref,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
 import { cx } from "./cx";
-import { IconChevronDown } from "./icons";
+import { IconChevronDown, IconX } from "./icons";
+import { t } from "../i18n";
 import { useDomId } from "./useId";
 
 /** Ids/ARIA wiring handed to a custom control rendered inside <Field>. */
@@ -79,12 +83,38 @@ interface CommonFieldProps {
   fieldClassName?: string;
 }
 
-export interface InputProps extends CommonFieldProps, Omit<InputHTMLAttributes<HTMLInputElement>, "style"> {}
+export interface InputProps extends CommonFieldProps, Omit<InputHTMLAttributes<HTMLInputElement>, "style"> {
+  /** Leading ornament inside the control (e.g. <IconSearch />). */
+  icon?: ReactNode;
+  /**
+   * Called when the clear button is pressed (shown while the input has a
+   * value); the parent clears its state. Focus stays in the input.
+   */
+  onClear?: () => void;
+}
+
+function assignRef(ref: Ref<HTMLInputElement> | undefined, el: HTMLInputElement | null) {
+  if (typeof ref === "function") ref(el);
+  else if (ref) ref.current = el;
+}
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { label, hint, error, hideLabel, fieldClassName, required, id, className, ...rest },
+  { label, hint, error, hideLabel, fieldClassName, required, id, className, icon, onClear, ...rest },
   ref,
 ) {
+  const innerRef = useRef<HTMLInputElement | null>(null);
+  // Uncontrolled inputs track emptiness themselves; controlled ones derive
+  // it from `value` so an external clear still hides the button.
+  const [uncontrolledFilled, setUncontrolledFilled] = useState(
+    () => String(rest.defaultValue ?? "") !== "",
+  );
+  const filled = rest.value !== undefined ? String(rest.value) !== "" : uncontrolledFilled;
+
+  const onClearClick = () => {
+    onClear?.();
+    innerRef.current?.focus();
+  };
+
   return (
     <Field
       label={label}
@@ -95,7 +125,48 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       {...(id ? { id } : {})}
       {...(fieldClassName ? { className: fieldClassName } : {})}
     >
-      {(c) => <input ref={ref} required={required} className={cx("tc-input", className)} {...c} {...rest} />}
+      {(c) =>
+        icon || onClear ? (
+          <span className="tc-input-affixed">
+            {icon ? (
+              <span className="tc-input-affixed__icon" aria-hidden="true">
+                {icon}
+              </span>
+            ) : null}
+            <input
+              ref={(el) => {
+                innerRef.current = el;
+                assignRef(ref, el);
+              }}
+              required={required}
+              className={cx(
+                "tc-input",
+                icon ? "tc-input--icon" : undefined,
+                onClear ? "tc-input--clearable" : undefined,
+                className,
+              )}
+              {...c}
+              {...rest}
+              onChange={(e) => {
+                setUncontrolledFilled(e.target.value !== "");
+                rest.onChange?.(e);
+              }}
+            />
+            {onClear && filled ? (
+              <button
+                type="button"
+                className="tc-input-affixed__clear"
+                aria-label={t("common.clear")}
+                onClick={onClearClick}
+              >
+                <IconX size={14} />
+              </button>
+            ) : null}
+          </span>
+        ) : (
+          <input ref={ref} required={required} className={cx("tc-input", className)} {...c} {...rest} />
+        )
+      }
     </Field>
   );
 });

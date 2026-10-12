@@ -1,8 +1,7 @@
-import { useEffect, type ReactNode } from "react";
-import { EmptyState, Page, Spinner } from "../design";
+import { useEffect, useRef, type ReactNode } from "react";
+import { EmptyState, Page, Spinner, Tabs } from "../design";
 import { IconShieldCheck } from "../design/icons";
 import { Link, navigate, usePathname } from "../lib/router";
-import { cx } from "../design/cx";
 import { t, type MessageKey } from "../i18n";
 import { isTenantAdmin, useMeLoaded } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
@@ -15,27 +14,44 @@ export const ADMIN_SECTIONS = [
   { path: "/admin/data", labelKey: "admin.nav.data" },
 ] as const satisfies readonly { path: string; labelKey: MessageKey }[];
 
+// Design-system Tabs as the section switcher: roving tabindex, arrow-key
+// activation navigates. The route — not local state — owns the selection,
+// so a deep link highlights the right tab (longest-prefix wins: "/admin"
+// must not eat "/admin/workspaces"). Every admin page remounts this nav, so
+// a tab-initiated navigation sets a flag that puts focus back on the newly
+// selected tab — otherwise it would die on <body>.
+let focusSelectedTab = false;
+
 function AdminNav() {
+  const rootRef = useRef<HTMLDivElement>(null);
   const path = usePathname().replace(/\/+$/, "") || "/";
+  const selected =
+    [...ADMIN_SECTIONS]
+      .sort((a, b) => b.path.length - a.path.length)
+      .find((s) => path === s.path || path.startsWith(`${s.path}/`))?.path ??
+    ADMIN_SECTIONS[0].path;
+  // Mount only: the fresh page's nav restores focus to its selected tab
+  // when the last navigation was tab-initiated.
+  useEffect(() => {
+    if (!focusSelectedTab) return;
+    focusSelectedTab = false;
+    rootRef.current
+      ?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.focus();
+  }, []);
   return (
-    <nav aria-label={t("admin.nav.ariaLabel")} className="tc-admin-nav">
-      <ul>
-        {ADMIN_SECTIONS.map((s) => {
-          const current = path === s.path;
-          return (
-            <li key={s.path}>
-              <Link
-                to={s.path}
-                className={cx("tc-admin-nav__link", current && "tc-admin-nav__link--current")}
-                {...(current ? { "aria-current": "page" as const } : {})}
-              >
-                {t(s.labelKey)}
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
-    </nav>
+    <div ref={rootRef}>
+      <Tabs
+        className="tc-admin-tabs"
+        label={t("admin.nav.ariaLabel")}
+        value={selected}
+        onChange={(id) => {
+          focusSelectedTab = true;
+          navigate(id);
+        }}
+        tabs={ADMIN_SECTIONS.map((s) => ({ id: s.path, label: t(s.labelKey) }))}
+      />
+    </div>
   );
 }
 
