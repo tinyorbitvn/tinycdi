@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
@@ -29,10 +30,11 @@ type fakeIssuer struct {
 	gotTenant string
 	gotWS     string
 	gotTakeov bool
+	gotPolicy provisioning.SessionPolicy
 	calls     int
 }
 
-func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, takeover bool, _, _ string) (IssuedTicket, *Error) {
+func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, takeover bool, policy provisioning.SessionPolicy, _ string) (IssuedTicket, *Error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -40,6 +42,7 @@ func (f *fakeIssuer) IssueTicket(_ context.Context, p Principal, wsUID string, t
 	f.gotTenant = p.TenantID
 	f.gotWS = wsUID
 	f.gotTakeov = takeover
+	f.gotPolicy = policy
 	return f.ticket, f.err
 }
 
@@ -126,6 +129,56 @@ func TestCreateConnection_IssuesTicket(t *testing.T) {
 	// The verified principal (issuer URL + subject alice) reaches the issuer.
 	if !strings.HasSuffix(fi.gotOwner, "|alice") || fi.gotTenant == "" {
 		t.Fatalf("principal not forwarded: owner=%q tenant=%q", fi.gotOwner, fi.gotTenant)
+	}
+}
+
+// TestCreateConnection_ResolvedPolicyRidesTicket (ADR 0010 §2): the
+// session policy the WithClipboardSource resolver returns — template
+// policy ∧ tenant ceiling — is what reaches the ticket issuer and what
+// the response mirrors back, so the portal's frame flags always match
+// what the ticket recorded.
+func TestCreateConnection_ResolvedPolicyRidesTicket(t *testing.T) {
+	fi := &fakeIssuer{ticket: IssuedTicket{
+		WorkspaceID: "ws_00000000000000000000000001",
+		Token:       "tkt_testopaquevalue_0123456789abcdef",
+		ExpiresAt:   time.Now().Add(60 * time.Second).UTC(),
+	}}
+	env := newConnectionEnv(t, fi, func(h *ConnectionHandler) {
+		h.WithClipboardSource(func(_ context.Context, _ Principal, _ string) (provisioning.SessionPolicy, error) {
+			return provisioning.SessionPolicy{
+				Clipboard: provisioning.PolicyDisabled,
+				FileTransfer: provisioning.FileTransferPolicy{
+					Mode: provisioning.PolicyDisabled,
+				},
+			}, nil
+		})
+	})
+	sess, csrf := login(t, env, "alice")
+
+	r := doReq(t, env, sess, csrf, http.MethodPost,
+		"/v1/workspaces/ws_00000000000000000000000001/connections", "", nil)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("status=%d body=%s, want 201", r.StatusCode, b)
+	}
+	if fi.gotPolicy.Clipboard != "Disabled" {
+		t.Fatalf("issuer policy = %+v, want clipboard Disabled", fi.gotPolicy)
+	}
+	var view struct {
+		SessionPolicy struct {
+			Clipboard    string `json:"clipboard"`
+			FileTransfer struct {
+				Mode         string `json:"mode"`
+				MaxFileBytes *int64 `json:"maxFileBytes"`
+			} `json:"fileTransfer"`
+		} `json:"sessionPolicy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.SessionPolicy.Clipboard != "Disabled" || view.SessionPolicy.FileTransfer.Mode != "Disabled" {
+		t.Fatalf("response sessionPolicy = %+v, want Disabled/Disabled", view.SessionPolicy)
 	}
 }
 

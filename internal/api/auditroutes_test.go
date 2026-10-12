@@ -220,6 +220,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, newFakeDirectory(), tenants))
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, newFakeDirectory(), tenants, nil).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(&fakeUserLimitSource{overrides: map[string]int64{}}, newFakeDirectory(), tenants).WithAuditSink(sink))
+	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
 	// trusted-origin gate → mux. The replay requests carry no Origin or
@@ -337,6 +338,14 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"PUT /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultSet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits/default",
 				`{"limit":3}`, nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/session-policy", auditActionAdminSessionPolicyGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminSessionPolicyPath, "", nil).Body.Close()
+		}},
+		{"PUT /v1/admin/tenants/{}/session-policy", auditActionAdminSessionPolicySet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, adminSessionPolicyPath,
+				`{"clipboard":"Disabled"}`,
+				map[string]string{"If-Match": "*"}).Body.Close()
 		}},
 		{"POST /v1/logout", auditActionSessionLogout, func() {
 			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()

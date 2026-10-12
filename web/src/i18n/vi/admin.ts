@@ -10,6 +10,7 @@ export default {
   "admin.nav.templates": "Template",
   "admin.nav.data": "Dữ liệu",
   "admin.nav.users": "Người dùng",
+  "admin.nav.sessionPolicy": "Chính sách phiên",
   "admin.eyebrow": "Quản trị",
   "admin.eyebrow.tenant": "Quản trị · {tenant}",
   "admin.gate.checking": "Đang kiểm tra quyền",
@@ -26,6 +27,7 @@ export default {
   "admin.route.data": "Dữ liệu giữ lại",
   "admin.route.users": "Người dùng tenant",
   "admin.route.user": "Chi tiết người dùng",
+  "admin.route.sessionPolicy": "Chính sách phiên",
 
   "admin.action.refresh": "Làm mới",
 
@@ -247,6 +249,36 @@ export default {
   "admin.userDetail.disks.caption": "Đĩa giữ lại của người dùng",
   "admin.userDetail.disks.empty": "Người dùng này không có đĩa giữ lại nào.",
   "admin.userDetail.disks.all": "Mở dữ liệu giữ lại",
+
+  // Session policy page (giới hạn clipboard của tenant, ADR 0010).
+  "admin.policy.title": "Chính sách phiên",
+  "admin.policy.description":
+    "Những gì được phép di chuyển giữa thiết bị của người dùng và workspace.",
+  "admin.policy.loading": "Đang tải chính sách phiên",
+  "admin.policy.ceiling.title": "Giới hạn của tenant",
+  "admin.policy.ceiling.description":
+    "Giới hạn dữ liệu có thể di chuyển giữa thiết bị của người dùng và workspace. Giới hạn chỉ có thể thu hẹp chính sách của template — không thể nới rộng.",
+  "admin.policy.source.tenantRow": "Tenant này đã đặt giới hạn.",
+  "admin.policy.source.followTemplate":
+    "Chưa đặt giới hạn — chính sách riêng của từng template được áp dụng nguyên bản.",
+  "admin.policy.clipboard.label": "Clipboard",
+  "admin.policy.clipboard.hint":
+    "Send cho phép sao chép từ thiết bị vào workspace; Receive cho phép sao chép từ workspace về thiết bị.",
+  "admin.policy.fileTransfer.label": "Truyền tệp",
+  "admin.policy.fileTransfer.hint": "Sẽ có trong v1.3.",
+  "admin.policy.option.followTemplate": "Theo template",
+  "admin.policy.appliesNote":
+    "Siết chặt áp dụng ngay với các kết nối mới; workspace đang chạy nhận thay đổi ở lần khởi động tiếp theo.",
+  "admin.policy.save": "Lưu giới hạn",
+  "admin.policy.preview.title": "Chính sách hiệu lực theo template",
+  "admin.policy.preview.description":
+    "Điều người dùng nhận được cho từng template: chính sách clipboard của template bị thu hẹp bởi giới hạn đã chọn.",
+  "admin.policy.preview.caption": "Chính sách clipboard hiệu lực theo template",
+  "admin.policy.preview.template": "Template",
+  "admin.policy.preview.templatePolicy": "Chính sách template",
+  "admin.policy.preview.ceiling": "Giới hạn",
+  "admin.policy.preview.effective": "Hiệu lực với người dùng",
+  "admin.policy.preview.empty": "Không có template nào trong danh mục.",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Lỗi",

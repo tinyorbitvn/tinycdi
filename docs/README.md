@@ -26,6 +26,9 @@
   dashboards and alerts: enabling them and what each alert means
 - [runbooks/tenant-quotas.md](runbooks/tenant-quotas.md) — declarative
   tenant quotas, refusal codes, day-2 operations
+- [runbooks/session-policy.md](runbooks/session-policy.md) — the tenant
+  session data-transfer ceiling (clipboard) — toggling it, when it takes
+  effect, verifying
 - [runbooks/retained-data.md](runbooks/retained-data.md) — Retain policy,
   re-attach and purge flows
 - [runbooks/backup-restore.md](runbooks/backup-restore.md) — backup and restore

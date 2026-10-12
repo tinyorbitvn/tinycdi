@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 )
 
@@ -29,14 +30,16 @@ type IssuedTicket struct {
 
 // ConnectionIssuer is the ticket-issuing surface the handler needs. The
 // adapter translates domain errors into *Error with the stable codes.
-// clipboardPolicy is the workspace template's policy, recorded on the
-// ticket so the gateway's redirect can re-assert the client's flags; ""
-// records nothing.
+// policy is the resolved session data-transfer vector (template policy ∧
+// tenant ceiling, ADR 0010 §2): its clipboard feeds the ticket's
+// clipboard_policy column so the gateway's redirect re-asserts the
+// client's flags, and the whole vector is recorded verbatim on the ticket
+// row. A zero-value policy records nothing.
 type ConnectionIssuer interface {
 	// IssueTicket mints a launch ticket. portalSessionID is the caller's
 	// session id: the lease it produces records its digest so the stream's
 	// owner tab is only ever reported back to this session (R-V3c).
-	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool, clipboardPolicy, portalSessionID string) (IssuedTicket, *Error)
+	IssueTicket(ctx context.Context, p Principal, workspaceUID string, takeover bool, policy provisioning.SessionPolicy, portalSessionID string) (IssuedTicket, *Error)
 }
 
 // LaunchPath is the session-origin endpoint the browser POSTs the ticket to
@@ -49,9 +52,10 @@ type ConnectionHandler struct {
 	issuer  ConnectionIssuer
 	tenants TenantResolver
 	domain  sessionhost.Domain
-	// clipboard resolves the workspace's template clipboard policy so the
-	// ticket can record it (WithClipboardSource); nil records nothing.
-	clipboard func(ctx context.Context, p Principal, workspaceUID string) (string, error)
+	// clipboard resolves the workspace's session policy — template policy
+	// ∧ tenant ceiling — so the ticket can record the resolved vector
+	// (WithClipboardSource); nil records nothing.
+	clipboard func(ctx context.Context, p Principal, workspaceUID string) (provisioning.SessionPolicy, error)
 	maxBody   int64
 	// audit is the dedicated audit-event sink the route emits through
 	// (nil = no domain audit events).
@@ -82,9 +86,10 @@ func (h *ConnectionHandler) WithLogger(l *slog.Logger) *ConnectionHandler {
 }
 
 // WithClipboardSource wires the resolver that supplies the workspace's
-// template clipboard policy for ticket recording (V3.24: the gateway
-// redirect re-asserts the client flags from what the ticket recorded).
-func (h *ConnectionHandler) WithClipboardSource(fn func(ctx context.Context, p Principal, workspaceUID string) (string, error)) *ConnectionHandler {
+// resolved session policy for ticket recording (V3.24: the gateway
+// redirect re-asserts the client flags from what the ticket recorded;
+// ADR 0010: the recorded vector is the template policy ∧ tenant ceiling).
+func (h *ConnectionHandler) WithClipboardSource(fn func(ctx context.Context, p Principal, workspaceUID string) (provisioning.SessionPolicy, error)) *ConnectionHandler {
 	h.clipboard = fn
 	return h
 }
@@ -115,6 +120,13 @@ type launchTicketView struct {
 	Ticket      string    `json:"ticket"`
 	LaunchURL   string    `json:"launchUrl"`
 	ExpiresAt   time.Time `json:"expiresAt"`
+	// SessionPolicy is the resolved policy the ticket recorded (the meet of
+	// the template's policy and the tenant ceiling); the portal renders
+	// the session iframe's allow from it — what the ticket carries, not
+	// the template it happened to read earlier (ADR 0010 §2). Absent when
+	// resolution failed — the ticket then records nothing and least
+	// privilege applies.
+	SessionPolicy *provisioning.SessionPolicy `json:"sessionPolicy,omitempty"`
 }
 
 // Create handles POST /v1/workspaces/{id}/connections.
@@ -154,12 +166,12 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The template's clipboard policy rides the ticket: its redemption
+	// The resolved session policy rides the ticket: its redemption
 	// redirect is the URL the session frame actually loads, so the gateway
 	// — not the portal's iframe src — is what lands the client's clipboard
 	// flags (V3.24). Resolution is best effort: a failure records nothing
 	// and the ticket still issues (least privilege on the redirect).
-	var policy string
+	var policy provisioning.SessionPolicy
 	if h.clipboard != nil {
 		policy, _ = h.clipboard(r.Context(), p, id)
 	}
@@ -180,10 +192,15 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	var resolved *provisioning.SessionPolicy
+	if policy.Clipboard != "" {
+		resolved = &policy
+	}
 	_ = json.NewEncoder(w).Encode(launchTicketView{
-		WorkspaceID: tk.WorkspaceID,
-		Ticket:      tk.Token,
-		LaunchURL:   launchBase + LaunchPath,
-		ExpiresAt:   tk.ExpiresAt,
+		WorkspaceID:   tk.WorkspaceID,
+		Ticket:        tk.Token,
+		LaunchURL:     launchBase + LaunchPath,
+		ExpiresAt:     tk.ExpiresAt,
+		SessionPolicy: resolved,
 	})
 }

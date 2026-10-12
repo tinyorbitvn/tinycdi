@@ -58,3 +58,10 @@
 .tc-admin-list li + li {
   margin-top: var(--tc-space-1);
 }
+
+.tc-admin-policy-fields {
+  display: grid;
+  gap: var(--tc-space-4);
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 24rem));
+  margin-block: var(--tc-space-4);
+}

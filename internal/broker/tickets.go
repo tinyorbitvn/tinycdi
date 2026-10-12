@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -316,10 +317,14 @@ func requestID(ctx context.Context) string {
 // observed state is stale, and ErrConnectionInUse when a live lease exists and
 // takeover is false. With takeover the ticket may supersede the live lease at
 // redemption, fencing the old socket before the new session works.
-// clipboardPolicy is the workspace template's policy as resolved by the
-// API at issue: it is recorded on the ticket row so the gateway's
-// post-redemption redirect can re-assert the client's clipboard flags
-// (V3.24). "" records NULL — a ticket with no policy appends nothing.
+// policy is the session data-transfer vector resolved by the API at
+// issue — the meet of the workspace template's policy and the tenant
+// ceiling (ADR 0010 §2). Its Clipboard field is recorded on the ticket
+// row's clipboard_policy column so the gateway's post-redemption redirect
+// re-asserts the client's clipboard flags (V3.24), and the whole vector
+// is recorded verbatim as JSON on session_policy — the audit record of
+// which policy applied. A zero-value policy records NULLs — a ticket
+// with no policy appends nothing.
 // portalSessionDigest is SHA-256 of the issuing portal session's id,
 // stored on the ticket and copied onto the lease at redemption — the
 // session id itself never reaches the database (same convention as the
@@ -334,7 +339,7 @@ func portalSessionDigest(portalSessionID string) []byte {
 	return sum[:]
 }
 
-func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, clipboardPolicy, portalSessionID string) (Ticket, error) {
+func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, policy provisioning.SessionPolicy, portalSessionID string) (Ticket, error) {
 	now := b.now()
 
 	// Ownership check against the authoritative workspace row: cross-tenant
@@ -401,20 +406,28 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 		return Ticket{}, fmt.Errorf("broker: mint ticket: %w", err)
 	}
 	expires := now.Add(b.ticketTTL)
-	var policy *string
-	if clipboardPolicy != "" {
-		policy = &clipboardPolicy
+	// A resolved policy records both columns: clipboard_policy feeds the
+	// gateway redirect's client flags, session_policy is the whole vector
+	// verbatim — the audit record of which policy applied (ADR 0010 §2).
+	var clipboard, resolved *string
+	if policy.Clipboard != "" {
+		clipboard = &policy.Clipboard
+		if raw, err := json.Marshal(policy); err == nil {
+			s := string(raw)
+			resolved = &s
+		}
 	}
 	if _, err := b.db.Pool().Exec(ctx,
 		`INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience, takeover,
-			 request_id, expires_at, clipboard_policy, portal_session_digest)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			 request_id, expires_at, clipboard_policy, session_policy,
+			 portal_session_digest)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		ticketHash(token), workspaceUID, tenantID, owner,
 		int64(binding.RuntimeGeneration), binding.RuntimeUID,
-		b.audience, takeover, requestID(ctx), expires, policy,
-		portalSessionDigest(portalSessionID)); err != nil {
+		b.audience, takeover, requestID(ctx), expires, clipboard,
+		resolved, portalSessionDigest(portalSessionID)); err != nil {
 		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
 	}
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil

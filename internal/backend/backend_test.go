@@ -294,7 +294,7 @@ func TestRouteIsolation_SessionListener(t *testing.T) {
 // fakeConnIssuer satisfies api.ConnectionIssuer for route-table tests.
 type fakeConnIssuer struct{}
 
-func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, string, string) (api.IssuedTicket, *api.Error) {
+func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, provisioning.SessionPolicy, string) (api.IssuedTicket, *api.Error) {
 	return api.IssuedTicket{}, &api.Error{Code: api.CodeNotFound, Message: "no ticket in tests"}
 }
 
@@ -361,7 +361,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
 	pass := func(h http.Handler) http.Handler { return h }
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, pass, pass, pass)
+	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, nil, pass, pass, pass)
 	b := &Backend{log: testLog(), metrics: m}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
@@ -1195,7 +1195,7 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	tick, err := brk.IssueTicket(ctx,
 		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
-		"ws-shared-1", false, "", "")
+		"ws-shared-1", false, provisioning.SessionPolicy{}, "")
 	if err != nil {
 		t.Fatalf("issue ticket: %v", err)
 	}

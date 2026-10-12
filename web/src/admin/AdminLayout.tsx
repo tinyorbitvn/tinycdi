@@ -10,6 +10,7 @@ export const ADMIN_SECTIONS = [
   { path: "/admin", labelKey: "admin.nav.overview" },
   { path: "/admin/workspaces", labelKey: "admin.nav.workspaces" },
   { path: "/admin/quota", labelKey: "admin.nav.quota" },
+  { path: "/admin/session-policy", labelKey: "admin.nav.sessionPolicy" },
   { path: "/admin/templates", labelKey: "admin.nav.templates" },
   { path: "/admin/data", labelKey: "admin.nav.data" },
   { path: "/admin/users", labelKey: "admin.nav.users" },

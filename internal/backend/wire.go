@@ -682,16 +682,23 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithImageStaleAfter(cfg.ImageStaleAfter).
 		WithImageBlockAfter(cfg.ImageBlockAfter)
 	connHandler := api.NewConnectionHandler(broker.PublicIssuer{B: brk}, tenants, sessionDomain).
-		WithClipboardSource(func(ctx context.Context, p api.Principal, wsID string) (string, error) {
+		WithClipboardSource(func(ctx context.Context, p api.Principal, wsID string) (provisioning.SessionPolicy, error) {
+			// The ticket records the RESOLVED session policy — the meet of
+			// the template's clipboard policy and the tenant ceiling — so
+			// the gateway's redirect flags and the pod's DLP env (stamped
+			// at the same resolver) can never disagree (ADR 0010 §2).
 			rec, err := svc.GetWorkspace(ctx, p.TenantID, p.Owner(), wsID)
 			if err != nil {
-				return "", err
+				return provisioning.SessionPolicy{}, err
 			}
-			e, err := catalog.Resolve(ctx, p.TenantID, rec.Template.ID)
+			e, err := catalog.c.Get(ctx, p.TenantID, rec.Template.ID)
 			if err != nil {
-				return "", err
+				return provisioning.SessionPolicy{}, err
 			}
-			return e.ClipboardPolicy, nil
+			if e == nil {
+				return provisioning.SessionPolicy{}, provisioning.ErrTemplateNotFound
+			}
+			return svc.ResolveSessionPolicy(ctx, p.TenantID, *e)
 		}).
 		WithAuditSink(appAudit).
 		WithLogger(b.log)
@@ -712,6 +719,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas).
 		WithAuditSink(appAudit)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
+		WithAuditSink(appAudit)
+	// The tenant session-policy ceiling (ADR 0010, T10): API-managed rows
+	// only — no config declaration owns them.
+	adminSessionPolicyHandler := api.NewAdminSessionPolicyHandler(api.NewAdminSessionPolicySource(db), tenants).
 		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
@@ -738,7 +749,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, loginLimit, sessionLimit, callbackLimit)
+	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, adminSessionPolicyHandler, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
 }
@@ -752,7 +763,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
 	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
 	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
-	adminUserLimits *api.AdminUserLimitsHandler,
+	adminUserLimits *api.AdminUserLimitsHandler, adminSessionPolicy *api.AdminSessionPolicyHandler,
 	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
@@ -772,6 +783,9 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	}
 	if adminUserLimits != nil {
 		api.MountAdminUserLimitRoutes(mux, authn, adminUserLimits)
+	}
+	if adminSessionPolicy != nil {
+		api.MountAdminSessionPolicyRoutes(mux, authn, adminSessionPolicy)
 	}
 	return mux
 }
