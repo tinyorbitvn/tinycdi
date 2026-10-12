@@ -501,7 +501,9 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
 
   // --- Operator half, verified on ANY runtime image ---------------------
   const bidiId = await createWorkspaceOnTemplate(
-    page, `clipbi-${stamp}`, new RegExp(`Clip Bidi ${stamp}`, "i"),
+    // The option label is the catalog name ("<name> (Linux container)"),
+    // not the display-name annotation — match the object name.
+    page, `clipbi-${stamp}`, new RegExp(tplName, "i"),
   );
   const offId = await createBrowserWorkspace(page, `clipoff-${stamp}`);
   // The pod object lands during provisioning — poll until it exists.
