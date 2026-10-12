@@ -25,6 +25,21 @@ import {
   type WorkspaceFixture,
 } from "./fixtures.ts";
 import { DEMO_EVENTS, DEMO_TEMPLATES, DEMO_TRANSITIONAL, DEMO_WORKSPACES } from "./demo.ts";
+import { tenancy } from "./admin.ts";
+
+// meetClipboard mirrors the server-side lattice (ADR 0010 §1): the meet
+// of a template's clipboard policy and the tenant ceiling.
+function meetClipboard(template: string, ceiling: string): string {
+  switch (ceiling) {
+    case "Disabled":
+      return "Disabled";
+    case "Send":
+    case "Receive":
+      return template === ceiling || template === "Bidirectional" ? ceiling : "Disabled";
+    default:
+      return template;
+  }
+}
 
 // Demo-mode controller delays per phase (ms since the last update).
 const DEMO_STEP_MS: Partial<Record<WorkspaceFixture["phase"], number>> = {
@@ -242,11 +257,21 @@ export function workspacesArea(ctx: MockContext): MockArea {
       reason: takeover ? "SessionTakenOver" : "SessionStarted",
       message: takeover ? "Interactive session taken over" : "Interactive session started",
     });
+    const tpl = state.templates.find((tp) => tp.id === ws.template.id);
     return ok(201, {
       workspaceId: ws.id,
       ticket,
       launchUrl: sessionLaunchUrl(ctx, ws.id),
       expiresAt: new Date(ctx.now() + 60_000).toISOString(),
+      // The resolved vector the ticket records (ADR 0010): template
+      // policy ∧ tenant ceiling.
+      sessionPolicy: {
+        clipboard: meetClipboard(
+          tpl?.clipboardPolicy ?? "Bidirectional",
+          tenancy(ctx).sessionPolicy?.clipboard ?? "FollowTemplate",
+        ),
+        fileTransfer: { mode: "Disabled", maxFileBytes: null },
+      },
     });
   }
 

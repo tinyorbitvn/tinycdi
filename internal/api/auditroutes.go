@@ -37,6 +37,10 @@ const (
 	auditActionAdminUserLimitClear        = "admin.user_limit.clear"
 	auditActionAdminUserLimitDefaultSet   = "admin.user_limit.default.set"
 	auditActionAdminUserLimitDefaultClear = "admin.user_limit.default.clear"
+
+	auditActionAdminSessionPolicyGet   = "admin.session_policy.get"
+	auditActionAdminSessionPolicySet   = "admin.session_policy.set"
+	auditActionAdminSessionPolicyClear = "admin.session_policy.clear"
 )
 
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
@@ -58,6 +62,9 @@ const (
 	routeAdminUserLimitsGet    = "GET /v1/admin/tenants/{tenant}/user-limits"
 	routeAdminUserLimitsPut    = "PUT /v1/admin/tenants/{tenant}/user-limits"
 	routeAdminUserLimitDefault = "PUT /v1/admin/tenants/{tenant}/user-limits/default"
+
+	routeAdminSessionPolicyGet = "GET /v1/admin/tenants/{tenant}/session-policy"
+	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
 )
 
 // auditedRoute binds a route pattern to its audit action and the path-value
@@ -91,6 +98,11 @@ var auditedRoutes = map[string]auditedRoute{
 	routeAdminUserLimitsGet:    {auditActionAdminUserLimitGet, "tenant"},
 	routeAdminUserLimitsPut:    {auditActionAdminUserLimitSet, "tenant"},
 	routeAdminUserLimitDefault: {auditActionAdminUserLimitDefaultSet, "tenant"},
+	// As on the user-limit PUTs, the table action is the set attempt; an
+	// all-FollowTemplate body resolves to the clear variant via
+	// auditSetAction once it decodes.
+	routeAdminSessionPolicyGet: {auditActionAdminSessionPolicyGet, "tenant"},
+	routeAdminSessionPolicyPut: {auditActionAdminSessionPolicySet, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the

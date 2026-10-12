@@ -23,6 +23,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -65,7 +66,7 @@ func sessionAlive(t *testing.T, db *store.DB, sessionID string) bool {
 // exactly what the principal-scoped revoke matches on.
 func leaseForPrincipal(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, p api.Principal, wsUID broker.PlatformID, takeover bool) broker.Lease {
 	t.Helper()
-	tk, err := b.IssueTicket(ctx, p, wsUID, takeover, "", "")
+	tk, err := b.IssueTicket(ctx, p, wsUID, takeover, provisioning.SessionPolicy{}, "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -119,15 +120,15 @@ func TestRevokePrincipalSessions_RevokesAllInTenant(t *testing.T) {
 		t.Fatalf("BindSession 2: %v", err)
 	}
 
-	tk1, err := b.IssueTicket(ctx, alice, "ws-t1", false, "", "sess-1")
+	tk1, err := b.IssueTicket(ctx, alice, "ws-t1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket t1: %v", err)
 	}
-	tk2, err := b.IssueTicket(ctx, alice, "ws-t2", false, "", "sess-2")
+	tk2, err := b.IssueTicket(ctx, alice, "ws-t2", false, provisioning.SessionPolicy{}, "sess-2")
 	if err != nil {
 		t.Fatalf("IssueTicket t2: %v", err)
 	}
-	tkB, err := b.IssueTicket(ctx, aliceB, "ws-b", false, "", "sess-b")
+	tkB, err := b.IssueTicket(ctx, aliceB, "ws-b", false, provisioning.SessionPolicy{}, "sess-b")
 	if err != nil {
 		t.Fatalf("IssueTicket tenant-b: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestRevokePrincipalSessions_TenantScoped(t *testing.T) {
 	seedSessionRowFor(t, db, "sess-b", alice.Issuer, alice.Subject, "tenant-b")
 
 	leaseA := leaseFor(t, b, gwA, "ws-a", false)
-	tkB, err := b.IssueTicket(ctx, aliceB, "ws-b", false, "", "sess-b")
+	tkB, err := b.IssueTicket(ctx, aliceB, "ws-b", false, provisioning.SessionPolicy{}, "sess-b")
 	if err != nil {
 		t.Fatalf("IssueTicket tenant-b: %v", err)
 	}
@@ -266,7 +267,7 @@ func TestRevokePrincipalSessions_RedeemCommitThenRevoke(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedSessionRowFor(t, db, "sess-1", alice.Issuer, alice.Subject, "tenant-a")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -367,7 +368,7 @@ func TestRevokePrincipalSessions_RevokeCommitThenRedeem(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedSessionRowFor(t, db, "sess-1", alice.Issuer, alice.Subject, "tenant-a")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -439,11 +440,11 @@ func TestRevokePrincipalSessions_ConcurrentNoDeadlock(t *testing.T) {
 	seedSessionRowFor(t, db, "sess-2", alice.Issuer, alice.Subject, "tenant-a")
 	leaseForSess(t, db, b, gwA, "ws-2", false, "sess-2")
 
-	tkRace, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tkRace, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket race: %v", err)
 	}
-	tkDead, err := b.IssueTicket(ctx, alice, "ws-3", false, "", "sess-2")
+	tkDead, err := b.IssueTicket(ctx, alice, "ws-3", false, provisioning.SessionPolicy{}, "sess-2")
 	if err != nil {
 		t.Fatalf("IssueTicket dead: %v", err)
 	}
@@ -602,7 +603,7 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 		for _, s := range sessions {
 			wsSeq++
 			tk, err := b.IssueTicket(ctx, alice,
-				broker.PlatformID(fmt.Sprintf("ws-%d", wsSeq)), false, "", s)
+				broker.PlatformID(fmt.Sprintf("ws-%d", wsSeq)), false, provisioning.SessionPolicy{}, s)
 			if err != nil {
 				t.Fatalf("IssueTicket round %d %s: %v", round, s, err)
 			}

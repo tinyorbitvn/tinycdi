@@ -427,6 +427,24 @@ Controls:
   `TestClipboardPolicyDirectionSemantics`, pod env
   `TestPodCarriesClipboardPolicy`, kind smoke
   "clipboard follows the template policy"; S40).
+- **Tenant session-policy ceiling (ADR 0010)** — a tenant admin can cap
+  the data-transfer policy *below* every template's own policy through
+  `PUT /v1/admin/tenants/{tenant}/session-policy` (tenant-admin only,
+  CSRF + `If-Match`, audited, ceiling rows in `tenant_session_policy`;
+  the page is `/admin/session-policy`). A single resolver computes the
+  meet — `Send ∩ Receive = Disabled`, a ceiling never widens — and both
+  enforcement layers read it: launch tickets record the resolved vector
+  (`launch_ticket.session_policy`, with `clipboard_policy` driving the
+  gateway's redirect flags), and the workspace's `spec.sessionPolicy`
+  drives the pod's `TCDI_CLIPBOARD_POLICY`. **Residual:** tightening has
+  two propagation clocks — new connection tickets carry the narrowed
+  client flags immediately, but a *running* workspace keeps its boot-time
+  server-side policy until its next start (pod specs are immutable; no
+  mid-session restart is taken). Until then, the server-side residual is
+  bounded by the template's own policy, never wider than it. A no-row
+  tenant resolves `FollowTemplate` everywhere — the upgrade default —
+  and an all-`FollowTemplate` write deletes the row so "follow" keeps
+  exactly one representation.
 - **Node isolation (posture)** — chart defaults workspaces onto a dedicated
   tainted node pool; `allowSharedNodes` is opt-in and warns; node-profile
   DaemonSet delivers AppArmor/seccomp profiles (`deploy/node-profiles/`,

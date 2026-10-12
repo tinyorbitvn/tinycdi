@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
 // PublicIssuer adapts *Broker to the public API's api.ConnectionIssuer
@@ -17,8 +18,8 @@ type PublicIssuer struct {
 // IssueTicket issues a launch ticket and translates domain errors into the
 // public error model (api.Error). The ticket token is returned verbatim to
 // the handler and must only ever appear in the 201 response body.
-func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspaceUID string, takeover bool, clipboardPolicy, portalSessionID string) (api.IssuedTicket, *api.Error) {
-	tk, err := s.B.IssueTicket(ctx, p, PlatformID(workspaceUID), takeover, clipboardPolicy, portalSessionID)
+func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspaceUID string, takeover bool, policy provisioning.SessionPolicy, portalSessionID string) (api.IssuedTicket, *api.Error) {
+	tk, err := s.B.IssueTicket(ctx, p, PlatformID(workspaceUID), takeover, policy, portalSessionID)
 	if err != nil {
 		return api.IssuedTicket{}, PublicIssueError(err)
 	}

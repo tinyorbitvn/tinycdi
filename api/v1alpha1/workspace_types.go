@@ -47,6 +47,22 @@ type ServiceReference struct {
 	Port int32 `json:"port,omitempty"`
 }
 
+// SessionPolicySpec is the resolved session data-transfer policy the
+// platform API stamped on the workspace at its last create/start intent
+// (ADR 0010 §2): the meet of the WorkspaceTemplate's own policy and the
+// tenant's ceiling row. The operator renders pod env (TCDI_CLIPBOARD_*)
+// from it, preferring it over the status templateSnapshot for pod
+// building. It lives in spec — never an annotation — because it is a
+// pod-building input the operator must trust as API-authored.
+type SessionPolicySpec struct {
+	// clipboard is the resolved clipboard redirection policy: the meet of
+	// the template's spec.clipboardPolicy and the tenant's clipboard
+	// ceiling at intent time.
+	// +required
+	// +kubebuilder:validation:Enum=Disabled;Send;Receive;Bidirectional
+	Clipboard ClipboardPolicy `json:"clipboard"`
+}
+
 // DataReference records a data volume the workspace uses or retains. Persistent
 // volumes never carry an ownerReference to the Workspace; these refs are the
 // platform's bookkeeping for retention and purge.
@@ -105,6 +121,14 @@ type WorkspaceSpec struct {
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	IntentRevision int64 `json:"intentRevision"`
+
+	// sessionPolicy is the resolved session data-transfer policy the API
+	// recorded at the last create/start intent — the meet of the template's
+	// policy and the tenant ceiling (ADR 0010). Absent on CRs written
+	// before the field existed; pod building then falls back to the
+	// recorded template snapshot's own policy.
+	// +optional
+	SessionPolicy *SessionPolicySpec `json:"sessionPolicy,omitempty"`
 }
 
 // TemplateSnapshot is the operator-recorded copy of the WorkspaceTemplate

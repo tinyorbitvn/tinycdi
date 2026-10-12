@@ -4,6 +4,7 @@ import { navigate } from "../lib/router";
 import { t } from "../i18n";
 import { OverviewPage } from "./OverviewPage";
 import { QuotaPage } from "./QuotaPage";
+import { SessionPolicyPage } from "./SessionPolicyPage";
 import { TemplatesPage } from "./TemplatesPage";
 import { WorkspacesAdminPage } from "./WorkspacesAdminPage";
 import { DataAdminPage } from "./DataAdminPage";
@@ -38,6 +39,12 @@ export const routes: AppRoute[] = [
     title: t("admin.route.quota"),
     requires: "tenant-admin",
     render: () => <QuotaPage />,
+  },
+  {
+    path: "/admin/session-policy",
+    title: t("admin.route.sessionPolicy"),
+    requires: "tenant-admin",
+    render: () => <SessionPolicyPage />,
   },
   {
     path: "/admin/templates",

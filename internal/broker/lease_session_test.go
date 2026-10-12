@@ -27,6 +27,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -439,7 +440,7 @@ func TestLeaseSession_RedeemRejectsIdleDeadSession(t *testing.T) {
 	b := broker.New(db, src, broker.WithClock(clock), broker.WithSessionIdle(time.Minute))
 
 	seedPortalSession(t, db, "sess-1")
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}

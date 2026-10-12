@@ -45,6 +45,11 @@ type IntentSpec struct {
 	// ImageBuiltAt is the template's raw image-built-at annotation value at
 	// create time; the applier copies it onto the Workspace CR.
 	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
+	// SessionPolicy is the resolved session data-transfer policy (the meet
+	// of the template's policy and the tenant ceiling) at intent time; the
+	// applier stamps it as spec.sessionPolicy on create/start intents
+	// (ADR 0010 §2). Nil on intents that carry none.
+	SessionPolicy *SessionPolicy `json:"sessionPolicy,omitempty"`
 }
 
 // intentPayload is the JSON envelope stored in outbox_intent.payload.

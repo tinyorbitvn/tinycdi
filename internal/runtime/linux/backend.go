@@ -1032,13 +1032,20 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		ctr.Command = tpl.Spec.Linux.Command
 	}
 
-	// The template clipboard policy reaches the session server as a pod
-	// env var — the only path a Linux runtime contract offers (pod spec is
-	// rendered at start, containers are immutable after). A new policy —
-	// or a new operator that starts setting it — therefore applies to a
-	// workspace at its next start only, never mid-session.
+	// The clipboard policy reaches the session server as a pod env var —
+	// the only path a Linux runtime contract offers (pod spec is rendered
+	// at start, containers are immutable after). A new policy — or a new
+	// operator that starts setting it — therefore applies to a workspace
+	// at its next start only, never mid-session. The resolved policy the
+	// API stamped as spec.sessionPolicy (template policy ∧ tenant
+	// ceiling, ADR 0010) wins when present; CRs written before the field
+	// existed fall back to the snapshot's template policy.
+	clipboard := tpl.Spec.ClipboardPolicy
+	if ws.Spec.SessionPolicy != nil && ws.Spec.SessionPolicy.Clipboard != "" {
+		clipboard = ws.Spec.SessionPolicy.Clipboard
+	}
 	ctr.Env = append(ctr.Env,
-		corev1.EnvVar{Name: envClipboardPolicy, Value: string(tpl.Spec.ClipboardPolicy)})
+		corev1.EnvVar{Name: envClipboardPolicy, Value: string(clipboard)})
 
 	kasm := tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm
 	if kasm {

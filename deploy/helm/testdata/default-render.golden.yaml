@@ -106,6 +106,28 @@ spec:
                 format: int64
                 minimum: 0
                 type: integer
+              sessionPolicy:
+                description: |-
+                  sessionPolicy is the resolved session data-transfer policy the API
+                  recorded at the last create/start intent — the meet of the template's
+                  policy and the tenant ceiling (ADR 0010). Absent on CRs written
+                  before the field existed; pod building then falls back to the
+                  recorded template snapshot's own policy.
+                properties:
+                  clipboard:
+                    description: |-
+                      clipboard is the resolved clipboard redirection policy: the meet of
+                      the template's spec.clipboardPolicy and the tenant's clipboard
+                      ceiling at intent time.
+                    enum:
+                    - Disabled
+                    - Send
+                    - Receive
+                    - Bidirectional
+                    type: string
+                required:
+                - clipboard
+                type: object
               templateRef:
                 description: |-
                   templateRef is the WorkspaceTemplate this workspace runs from. It is

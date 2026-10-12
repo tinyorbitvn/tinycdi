@@ -520,7 +520,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ID: tpl.ID, Name: tpl.Name, Revision: tpl.Revision,
 		RevisionLabel: tpl.RevisionLabel,
 		Runtime:       tpl.Runtime, Experience: tpl.Experience,
-		ImageBuiltAt: tpl.ImageBuiltAt,
+		ImageBuiltAt: tpl.ImageBuiltAt, ClipboardPolicy: tpl.ClipboardPolicy,
 	}
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,

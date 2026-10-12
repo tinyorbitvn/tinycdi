@@ -557,6 +557,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/session-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant session data-transfer policy ceiling
+         * @description Administrator view of one tenant's session data-transfer policy —
+         *     the ceiling applied over every workspace template's own policy
+         *     (ADR 0010). Each channel reports its ceiling value;
+         *     `FollowTemplate` means the channel is not narrowed and the
+         *     template's policy applies unchanged. A tenant with no
+         *     session-policy row resolves `FollowTemplate` everywhere
+         *     (`source: FollowTemplate`) — the upgrade default. The ceiling can
+         *     only narrow, never widen: the effective policy a user gets is the
+         *     meet of the template's policy and this ceiling. Requires the
+         *     tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminSessionPolicy"];
+        /**
+         * Set a tenant's session data-transfer policy ceiling
+         * @description Writes the tenant's session data-transfer ceiling. Every channel
+         *     is named on each write: `FollowTemplate` restores the template's
+         *     own policy for that channel, and a PUT whose every channel is
+         *     `FollowTemplate` deletes the row — "no row" and "all-defaults
+         *     row" are the same state, and the store keeps exactly one
+         *     representation of it. `fileTransfer` is inert in this version
+         *     (the channel ships in v1.3): only its defaults are accepted — a
+         *     non-default `fileTransfer.mode` or any `maxFileBytes` answers
+         *     `400 INVALID_REQUEST`.
+         *
+         *     Tightening takes effect on two clocks (ADR 0010 §3): the next
+         *     minted connection ticket carries the new client flags
+         *     immediately, while a running workspace's server-side clipboard
+         *     enforcement follows at its next start — pod specs are immutable.
+         *     Requires the tenant-admin role on the named tenant, the
+         *     `X-CSRF-Token` header and an `If-Match` precondition: the
+         *     `version` returned by GET (a stale version answers
+         *     `412 PRECONDITION_FAILED`), or the literal `*` when the tenant
+         *     has no row yet. `If-Match: *` is not a bypass on an existing row —
+         *     it too answers 412. Every write is audited.
+         */
+        put: operations["putAdminSessionPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -1122,6 +1174,97 @@ export interface components {
             limit?: number | null;
         };
         /**
+         * @description A tenant's clipboard ceiling over every workspace template's
+         *     `clipboardPolicy` — direction names are from the user's point of
+         *     view (`Send` = device → workspace, `Receive` = workspace →
+         *     device). `FollowTemplate` narrows nothing: the template's own
+         *     policy applies. The effective clipboard policy is the meet of the
+         *     template's and this ceiling — `Send ∩ Receive = Disabled`, and a
+         *     ceiling never widens past the template (ADR 0010 §1).
+         * @enum {string}
+         */
+        ClipboardCeiling: "FollowTemplate" | "Disabled" | "Send" | "Receive" | "Bidirectional";
+        /**
+         * @description The tenant's file-transfer ceiling — the inert channel carried
+         *     for v1.3 (ADR 0010 T11). Only the defaults are meaningful in this
+         *     version: `mode: FollowTemplate`, `maxFileBytes: null`.
+         */
+        FileTransferCeiling: {
+            /**
+             * @description Ceiling over the template's file-transfer policy (`Upload` =
+             *     device → workspace home, `Download` = workspace → device).
+             *     Inert until v1.3 adds the template leg.
+             * @enum {string}
+             */
+            mode: "FollowTemplate" | "Disabled" | "Upload" | "Download" | "Bidirectional";
+            /**
+             * @description Per-file size bound; `null` = the platform default bound.
+             *     Inert until v1.3.
+             */
+            maxFileBytes: number | null;
+        };
+        /**
+         * @description Whether a session-policy row exists for the tenant. `TenantRow`:
+         *     a row was written through this API. `FollowTemplate`: no row —
+         *     every channel follows the template, the upgrade default.
+         * @enum {string}
+         */
+        AdminSessionPolicySource: "TenantRow" | "FollowTemplate";
+        /**
+         * @description The tenant's session data-transfer ceiling (ADR 0010): one value
+         *     per channel, `FollowTemplate` where the channel is not narrowed.
+         *     The effective policy a user gets is the meet of the template's
+         *     policy and this ceiling — it can only narrow, never widen.
+         *     `version` is the opaque change token PUT echoes in `If-Match`;
+         *     it is absent when no row exists.
+         */
+        AdminSessionPolicyView: {
+            tenant: string;
+            clipboard: components["schemas"]["ClipboardCeiling"];
+            fileTransfer: components["schemas"]["FileTransferCeiling"];
+            source: components["schemas"]["AdminSessionPolicySource"];
+            /**
+             * @description Opaque change token of the ceiling row — it changes on every
+             *     write and PUT echoes it verbatim in `If-Match`. Absent when
+             *     the tenant has no row — PUT then uses `If-Match: *`.
+             */
+            version?: string;
+        };
+        /**
+         * @description Write the tenant's session data-transfer ceiling. `clipboard` is
+         *     required; `fileTransfer` is the inert v1.3 channel and only its
+         *     defaults are accepted in this version. Setting every channel to
+         *     `FollowTemplate` deletes the row.
+         */
+        PutAdminSessionPolicy: {
+            clipboard: components["schemas"]["ClipboardCeiling"];
+            fileTransfer?: components["schemas"]["FileTransferCeiling"];
+        };
+        /**
+         * @description The resolved (effective) session data-transfer policy for a
+         *     (tenant, template) pair — the meet of the template's own policy
+         *     and the tenant ceiling, recorded on the launch ticket at issue
+         *     (ADR 0010 §2). The portal renders the session iframe's `allow`
+         *     from this record, not from a template it may have read earlier.
+         */
+        ResolvedSessionPolicy: {
+            /**
+             * @description The resolved clipboard policy.
+             * @enum {string}
+             */
+            clipboard: "Disabled" | "Send" | "Receive" | "Bidirectional";
+            /**
+             * @description The resolved file-transfer policy. Inert until v1.3 — `mode`
+             *     always resolves `Disabled` while no template leg exists.
+             */
+            fileTransfer: {
+                /** @enum {string} */
+                mode: "Disabled" | "Upload" | "Download" | "Bidirectional";
+                /** @description Per-file bound; `null` = platform default. */
+                maxFileBytes: number | null;
+            };
+        };
+        /**
          * @description Create intent. There is no owner field — ownership comes from the
          *     verified principal. `templateRef`, `dataPolicy` and `retainedDataRef`
          *     are immutable after creation (change requires a replacement workspace).
@@ -1284,6 +1427,7 @@ export interface components {
              * @description Ticket expiry (issued + 60 s).
              */
             expiresAt: string;
+            sessionPolicy?: components["schemas"]["ResolvedSessionPolicy"];
         };
         /**
          * @description Catalog entry. Revisions are immutable; end users can never supply raw
@@ -2297,6 +2441,82 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminSessionPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session policy ceiling for the named tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSessionPolicyView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    putAdminSessionPolicy: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Change token from the GET response's `version`, or `*` to
+                 *     create a row for a tenant that has none.
+                 */
+                "If-Match": string;
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutAdminSessionPolicy"];
+            };
+        };
+        responses: {
+            /** @description The updated session policy ceiling. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSessionPolicyView"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            412: components["responses"]["PreconditionFailed"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
