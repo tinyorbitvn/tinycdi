@@ -527,8 +527,11 @@ image digest with `cosign verify`.
   gone".
 - `network.udp` KasmVNC keys are left at upstream defaults; the streaming
   contract is websocket-only (G4a). UDP/WebRTC relay is not exercised.
-- Clipboard DLP defaults to fully disabled; per-template clipboard policy
-  is a later task (gateway/template layer), not image-level.
+- Clipboard DLP in the system config is fully off and stays the
+  fail-closed floor; the workspace's `spec.clipboardPolicy` reaches the
+  pod as `TCDI_CLIPBOARD_POLICY` and the entrypoint renders the real
+  `data_loss_prevention.clipboard` block into `$HOME/.vnc/kasmvnc.yaml`
+  (merges after `/etc` and wins) — unset/unknown renders Disabled.
 - The browser profile's Chromium sandbox needs the node security-profile
   pair (platform prerequisite C1); without it use `TCDI_BROWSER=firefox`
   (reduced isolation — seccomp-bpf only, no userns layer).

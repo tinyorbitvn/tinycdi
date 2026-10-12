@@ -133,6 +133,42 @@ for d in "$HOME"/.config/chromium "$HOME"/.config/google-chrome \
   [ -f "$p" ] && sed -i 's/"exited_cleanly":false/"exited_cleanly":true/; s/"exit_type":"Crashed"/"exit_type":"None"/' "$p" 2>/dev/null || true
 done
 
+# tcdi_clipboard_dlp renders the data_loss_prevention YAML block for the
+# workspace's clipboard policy. TCDI_CLIPBOARD_POLICY carries the
+# template's spec.clipboardPolicy verbatim (operator-rendered pod env);
+# direction semantics are defined once in internal/api/openapi.yaml:
+#   Send          = client -> workspace = client_to_server only
+#   Receive       = workspace -> client = server_to_client only
+#   Bidirectional = both directions
+#   Disabled      = neither
+# primary_clipboard_enabled follows server_to_client. An unset or unknown
+# value renders Disabled — the runtime must never widen a policy it
+# cannot read, and allow_client_to_override_kasm_server_settings stays
+# false so the browser cannot loosen this from the client side.
+# IDENTICAL in build/linux-base/entrypoint.sh — keep both copies
+# byte-identical (the clipboard-policy contract test diffs them).
+tcdi_clipboard_dlp() {
+  local s2c=false c2s=false
+  case "${TCDI_CLIPBOARD_POLICY:-}" in
+    Send)          c2s=true ;;
+    Receive)       s2c=true ;;
+    Bidirectional) s2c=true; c2s=true ;;
+    Disabled|'')   ;;
+    *) echo "tcdi-entrypoint: unknown TCDI_CLIPBOARD_POLICY='${TCDI_CLIPBOARD_POLICY}' — rendering clipboard Disabled" >&2 ;;
+  esac
+  cat <<YAML
+data_loss_prevention:
+  clipboard:
+    server_to_client:
+      enabled: ${s2c}
+      primary_clipboard_enabled: ${s2c}
+    client_to_server:
+      enabled: ${c2s}
+  logging:
+    level: off
+YAML
+}
+
 # Full policy, rewritten every boot: merges after the image's
 # /etc/kasmvnc/kasmvnc.yaml so every security-relevant key is pinned.
 # server.allow_environment_variables_to_override_config_settings exists only
@@ -176,15 +212,7 @@ network:
     require_ssl: true
 command_line:
   prompt: false
-data_loss_prevention:
-  clipboard:
-    server_to_client:
-      enabled: false
-      primary_clipboard_enabled: false
-    client_to_server:
-      enabled: false
-  logging:
-    level: off
+$(tcdi_clipboard_dlp)
 runtime_configuration:
   allow_client_to_override_kasm_server_settings: false
   allow_override_standard_vnc_server_settings: false

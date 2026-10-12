@@ -167,6 +167,12 @@ const (
 	// (CommandLineFlagSecurityWarningsEnabled=false, unrestricted
 	// DevTools/extensions, Safe Browsing off).
 	adapterPolicySubPath = "chromium-policy.json"
+
+	// envClipboardPolicy carries spec.clipboardPolicy verbatim to the
+	// runtime container; the session entrypoints render the KasmVNC DLP
+	// clipboard block from it (build/linux-base/entrypoint.sh,
+	// build/kasm-adapter/entrypoint.sh) and fail closed on unset/unknown.
+	envClipboardPolicy = "TCDI_CLIPBOARD_POLICY"
 )
 
 // AdapterBrowserWrappers are the Chromium-family launcher paths the shim
@@ -1025,6 +1031,14 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 	if len(tpl.Spec.Linux.Command) > 0 {
 		ctr.Command = tpl.Spec.Linux.Command
 	}
+
+	// The template clipboard policy reaches the session server as a pod
+	// env var — the only path a Linux runtime contract offers (pod spec is
+	// rendered at start, containers are immutable after). A new policy —
+	// or a new operator that starts setting it — therefore applies to a
+	// workspace at its next start only, never mid-session.
+	ctr.Env = append(ctr.Env,
+		corev1.EnvVar{Name: envClipboardPolicy, Value: string(tpl.Spec.ClipboardPolicy)})
 
 	kasm := tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm
 	if kasm {

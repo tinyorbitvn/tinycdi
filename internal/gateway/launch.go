@@ -66,9 +66,10 @@ const (
 )
 
 // clipboardDirections maps a template clipboard policy to the KasmVNC
-// client's direction flags (mirrors the portal's clipboardDirections:
+// client's direction flags (mirrors the portal's clipboardDirections).
+// The direction semantics are defined once in internal/api/openapi.yaml:
 // Send is client→workspace, Receive is workspace→client, Disabled is
-// neither; "" — a ticket with no recorded policy — is least privilege).
+// neither; "" — a ticket with no recorded policy — is least privilege.
 func clipboardDirections(policy string) (up, down bool) {
 	switch policy {
 	case "Send":

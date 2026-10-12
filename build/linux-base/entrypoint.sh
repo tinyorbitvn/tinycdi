@@ -102,15 +102,58 @@ chmod 600 "$RT/kasmpasswd"
 rm -rf "$HOME/.kasmpasswd"
 ln -s "$RT/kasmpasswd" "$HOME/.kasmpasswd"
 
+# tcdi_clipboard_dlp renders the data_loss_prevention YAML block for the
+# workspace's clipboard policy. TCDI_CLIPBOARD_POLICY carries the
+# template's spec.clipboardPolicy verbatim (operator-rendered pod env);
+# direction semantics are defined once in internal/api/openapi.yaml:
+#   Send          = client -> workspace = client_to_server only
+#   Receive       = workspace -> client = server_to_client only
+#   Bidirectional = both directions
+#   Disabled      = neither
+# primary_clipboard_enabled follows server_to_client. An unset or unknown
+# value renders Disabled — the runtime must never widen a policy it
+# cannot read, and allow_client_to_override_kasm_server_settings stays
+# false so the browser cannot loosen this from the client side.
+# IDENTICAL in build/kasm-adapter/entrypoint.sh — keep both copies
+# byte-identical (the clipboard-policy contract test diffs them).
+tcdi_clipboard_dlp() {
+  local s2c=false c2s=false
+  case "${TCDI_CLIPBOARD_POLICY:-}" in
+    Send)          c2s=true ;;
+    Receive)       s2c=true ;;
+    Bidirectional) s2c=true; c2s=true ;;
+    Disabled|'')   ;;
+    *) echo "tcdi-entrypoint: unknown TCDI_CLIPBOARD_POLICY='${TCDI_CLIPBOARD_POLICY}' — rendering clipboard Disabled" >&2 ;;
+  esac
+  cat <<YAML
+data_loss_prevention:
+  clipboard:
+    server_to_client:
+      enabled: ${s2c}
+      primary_clipboard_enabled: ${s2c}
+    client_to_server:
+      enabled: ${c2s}
+  logging:
+    level: off
+YAML
+}
+
 # kasmvncserver merges $HOME/.vnc/kasmvnc.yaml AFTER /etc/kasmvnc/kasmvnc.yaml
 # and auto-creates it with logging.level=100 when absent. Rewrite it every
-# boot with a fixed minimal file: stale content (e.g. require_ssl: false,
-# another port, a different password file) can never take effect.
-cat > "$HOME/.vnc/kasmvnc.yaml" <<'YAML'
+# boot: the system file stays the enforceable base policy while this file
+# pins the runtime log level and renders the workspace's clipboard policy
+# into the DLP block — stale content (e.g. require_ssl: false, another
+# port, a different password file, or a wider clipboard policy than the
+# template allows) can never take effect.
+cat > "$HOME/.vnc/kasmvnc.yaml" <<YAML
 # Managed by the tcdi entrypoint - rewritten on every container start.
-# The enforceable policy is /etc/kasmvnc/kasmvnc.yaml.
+# The enforceable base policy is /etc/kasmvnc/kasmvnc.yaml; the
+# data_loss_prevention block below is this workspace's rendered
+# spec.clipboardPolicy (pod env TCDI_CLIPBOARD_POLICY; unset/unknown
+# renders Disabled).
 logging:
   level: 30
+$(tcdi_clipboard_dlp)
 YAML
 
 # -SecurityTypes None: RFB security is None because authentication happens at

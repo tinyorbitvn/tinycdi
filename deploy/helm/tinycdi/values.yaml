@@ -843,6 +843,13 @@ templates: []
   #     # ClusterOnly egress narrows via runtime.networkProfiles above;
   #     # its unrestricted default flips in v1.2.
   #     networkProfile: Isolated
+  #     # Clipboard redirection between the user's device and the
+  #     # workspace, named from the user's point of view (normative
+  #     # semantics: internal/api/openapi.yaml): Disabled | Send (client
+  #     # to workspace) | Receive (workspace to client) | Bidirectional.
+  #     # Enforced server-side by the session server's KasmVNC DLP block —
+  #     # the operator passes it to the pod as TCDI_CLIPBOARD_POLICY and a
+  #     # change applies on the workspace's next start.
   #     clipboardPolicy: Disabled
   #     lifecycle: {idleTimeout: 30m, disconnectTimeout: 5m, maxDuration: 8h, dataPolicy: Ephemeral}
   # - name: browser01

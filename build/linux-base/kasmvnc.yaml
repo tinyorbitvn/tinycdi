@@ -28,10 +28,13 @@ network:
 command_line:
   prompt: false
 
-# Clipboard DLP default: both directions off until a per-template clipboard
-# policy is wired (the gateway/template layer owns that policy). Client-side
-# overrides are disabled entirely so the browser cannot re-enable server
-# policy at runtime.
+# Clipboard DLP system floor: both directions off. The workspace's
+# spec.clipboardPolicy reaches the pod as TCDI_CLIPBOARD_POLICY and the
+# entrypoint renders the real block into $HOME/.vnc/kasmvnc.yaml, which
+# merges after this file and wins for the keys it sets — so the values
+# below are only the fail-closed default when the env is absent or
+# unreadable. Client-side overrides are disabled entirely so the browser
+# cannot re-enable server policy at runtime.
 data_loss_prevention:
   clipboard:
     server_to_client:
