@@ -87,6 +87,9 @@
 - [adr/0009-mtls-cert-revocation.md](adr/0009-mtls-cert-revocation.md) —
   per-certificate revocation on the internal mTLS API: serial blocklist +
   shorter lifetimes (SR-3-F5; proposed)
+- [adr/0010-session-data-transfer-policy.md](adr/0010-session-data-transfer-policy.md) —
+  tenant ceilings over the template clipboard policy plus the v1.3 file
+  transfer design (accepted)
 
 ## Elsewhere in the repo
 
