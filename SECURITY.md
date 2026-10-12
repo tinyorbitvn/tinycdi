@@ -438,8 +438,9 @@ v0.2)
       (`--runtime-clusteronly-egress`) narrow the rule to
       selector-matched namespaces/pods and/or ports; a ports-only
       narrowing still never admits non-pod destinations. The default is
-      deprecated and flips to restricted egress in v1.2 — install NOTES
-      warn while a seeded `ClusterOnly` template runs unrestricted;
+      deprecated and flips to restricted egress in a future minor
+      release (planned v1.3) — install NOTES warn while a seeded
+      `ClusterOnly` template runs unrestricted;
     - `Isolated` denies all egress **except cluster DNS** — DNS
       resolution stays allowed by design (a deliberate unidirectional
       channel);

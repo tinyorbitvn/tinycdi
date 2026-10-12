@@ -107,15 +107,16 @@ ClusterOnly egress: WARNING — a seeded template uses networkProfile:
   ClusterOnly while runtime.networkProfiles.clusterOnly.egress* is unset,
   so those workspaces may reach ANY pod in ANY namespace on ANY port —
   confinement rests entirely on destination-side ingress policies.
-  The default flips to restricted egress in v1.2. Opt in now:
+  The default flips to restricted egress in a future minor release
+  (planned v1.3). Opt in now:
     runtime.networkProfiles.clusterOnly.egressNamespaceSelector
       (e.g. matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant,
         operator: Exists}] — confines egress to the managed namespaces)
     runtime.networkProfiles.clusterOnly.egressPodSelector   (optional)
     runtime.networkProfiles.clusterOnly.egressPorts         (optional)
-  To keep today's unrestricted posture after the v1.2 flip, pin explicit
-  values then — see the chart README "ClusterOnly egress" and
-  docs/releases/v1.1.0.md "Upgrading".
+  To keep today's unrestricted posture after the release that flips it,
+  pin explicit values then — see the chart README "ClusterOnly egress"
+  and docs/releases/v1.1.0.md "Upgrading".
 {{- end }}
 
 Reminder:
