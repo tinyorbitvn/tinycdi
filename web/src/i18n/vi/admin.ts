@@ -230,7 +230,6 @@ export default {
   "admin.users.filter.placeholder": "Tên hoặc subject",
   "admin.users.empty.all": "Chưa ghi nhận người dùng nào.",
   "admin.users.empty.filtered": "Không có người dùng nào khớp bộ lọc.",
-  "admin.users.shown": "Hiển thị {shown} / {total} người dùng",
   "admin.users.column.disks": "Đĩa",
   "admin.userDetail.titleFallback": "Chi tiết người dùng",
   "admin.userDetail.notFound.title": "Không tìm thấy người dùng",

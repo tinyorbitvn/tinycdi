@@ -231,7 +231,6 @@ export default {
   "admin.users.filter.placeholder": "Name or subject",
   "admin.users.empty.all": "No users recorded yet.",
   "admin.users.empty.filtered": "No users match the filter.",
-  "admin.users.shown": "{shown} of {total} users shown",
   "admin.users.column.disks": "Disks",
   "admin.userDetail.titleFallback": "User detail",
   "admin.userDetail.notFound.title": "User not found",
