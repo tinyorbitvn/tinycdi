@@ -333,8 +333,16 @@ TCDI_QS_USER=${DEMO_USER}
 TCDI_QS_NOQUOTA_USER=${NOQUOTA_USER}
 TCDI_QS_CA_FILE=${T}/local-ca.crt
 KUBECONFIG=${KUBECONFIG}
-TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=${TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT:-}
 ENVEOF
+# The opt-out is a free-text reason (upgrade-test.sh passes a sentence):
+# serialize it through qs_env_kv so the file still sources. Then prove the
+# whole file parses before a spec run finds out — the smoke specs source
+# it verbatim with `set -a; . env`. A child bash carries the check: only a
+# fresh `set -e` aborts the source mid-file (a plain `.` reports just the
+# file's last line, and -e is inert inside || / if subshells anyway).
+qs_env_kv TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT "${TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT:-}" >>"$STATE_DIR/env"
+bash -c 'set -ea; . "$1"' _ "$STATE_DIR/env" \
+  || die "generated env file does not source cleanly: $STATE_DIR/env"
 
 cat <<MSG
 

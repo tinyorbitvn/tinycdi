@@ -138,7 +138,15 @@ function podClipboard(workspaceId: string) {
       }
     },
     set(text: string) {
-      inHome(workspaceId, `${X} printf %s "$1" | ${X} /tmp/xclip -in -selection clipboard`, text);
+      // xclip -in stays alive to SERVE the selection (X selections are
+      // owned by a process). Run it in the background with the exec's
+      // streams detached — foreground it never returns and kubectl exec
+      // hits its 60 s timeout with the selection already set.
+      inHome(
+        workspaceId,
+        `${X} printf %s "$1" | ${X} /tmp/xclip -in -selection clipboard >/dev/null 2>&1 &`,
+        text,
+      );
     },
   };
 }
@@ -249,6 +257,21 @@ async function connectSessionFrame(page: Page, workspaceId: string): Promise<Fra
   const connect = await waitForConnect(page);
   await connect.click();
   await page.waitForURL(`**/workspaces/${encodeURIComponent(workspaceId)}/session`);
+  // A leftover workspace an earlier smoke connected to can still carry its
+  // live interactive lease — the sliding 30 s lease outlives the tab that
+  // owned it (resumable sessions, broker LeaseTTL), so the ticket request
+  // can answer 409 CONNECTION_IN_USE and the portal shows the "In use
+  // elsewhere" dialog. A takeover is the product's designed answer for
+  // exactly this case: the previous session's page is long gone.
+  const takeover = page.getByRole("button", { name: "Take over session" });
+  if (
+    await takeover
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false)
+  ) {
+    await takeover.click();
+  }
   const origin = `https://${workspaceId.replaceAll("_", "-").toLowerCase()}.${SESSION_DOMAIN}`;
   await expect
     .poll(

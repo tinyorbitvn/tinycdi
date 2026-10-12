@@ -94,6 +94,13 @@ log() { printf '==> %s\n' "$*" >&2; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# qs_env_kv <name> <value>: one KEY=VALUE line for the quickstart env file
+# up.sh writes. The specs source that file verbatim (`set -a; . env`), so
+# %q-quoting is mandatory for any value that can contain whitespace or
+# shell syntax — an unquoted multi-word value makes the source run the
+# tail words as a command (exit 127 in the upgrade job).
+qs_env_kv() { printf '%s=%q\n' "$1" "$2"; }
+
 need() {
   local t
   for t in "$@"; do
