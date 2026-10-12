@@ -222,7 +222,9 @@ type WorkspaceTemplateSpec struct {
 	NetworkProfile NetworkProfile `json:"networkProfile"`
 
 	// clipboardPolicy selects clipboard redirection between client and
-	// workspace.
+	// workspace, named from the user's point of view (Send = client to
+	// workspace, Receive = workspace to client); the normative direction
+	// semantics live in internal/api/openapi.yaml.
 	// +required
 	ClipboardPolicy ClipboardPolicy `json:"clipboardPolicy"`
 

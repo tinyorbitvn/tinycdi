@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -251,6 +253,69 @@ func TestOpenAPIContract_GetRetainedDataPath(t *testing.T) {
 	for _, code := range []string{"200", "404"} {
 		if _, ok := op.Responses[code]; !ok {
 			t.Fatalf("GET /v1/data/{dataId} lacks a %s response", code)
+		}
+	}
+}
+
+// The clipboardPolicy direction semantics are defined ONCE, here, from the
+// user's point of view — every other layer (CRD enum, gateway client flags,
+// entrypoint DLP render) maps onto this text. The test pins the normative
+// statements so the contract cannot silently drift, and ties the published
+// enum to the CRD's own constants.
+func TestClipboardPolicyDirectionSemantics(t *testing.T) {
+	raw, err := os.ReadFile("openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Enum        []string `yaml:"enum"`
+					Description string   `yaml:"description"`
+				} `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(raw, &spec); err != nil {
+		t.Fatalf("parse openapi.yaml: %v", err)
+	}
+	prop, ok := spec.Components.Schemas["TemplateView"].Properties["clipboardPolicy"]
+	if !ok {
+		t.Fatal("TemplateView.clipboardPolicy missing from openapi.yaml")
+	}
+
+	// The published enum is exactly the CRD enum — no fifth value may
+	// appear in one without the other.
+	wantEnum := []string{
+		string(workspacesv1alpha1.ClipboardDisabled),
+		string(workspacesv1alpha1.ClipboardSend),
+		string(workspacesv1alpha1.ClipboardReceive),
+		string(workspacesv1alpha1.ClipboardBidirectional),
+	}
+	if len(prop.Enum) != len(wantEnum) {
+		t.Fatalf("clipboardPolicy enum = %v, want %v", prop.Enum, wantEnum)
+	}
+	for i, v := range wantEnum {
+		if prop.Enum[i] != v {
+			t.Fatalf("clipboardPolicy enum = %v, want %v", prop.Enum, wantEnum)
+		}
+	}
+
+	// Each value's documented direction must appear verbatim — the entry
+	// point render and the gateway's client flags are pinned against these
+	// statements (KasmVNC DLP keys in parentheses). Line wrapping in the
+	// block scalar is normalized away first.
+	desc := strings.Join(strings.Fields(prop.Description), " ")
+	for _, fragment := range []string{
+		"`Disabled` allows neither direction",
+		"`Send` allows client to workspace only (`client_to_server`)",
+		"`Receive` allows workspace to client only (`server_to_client`",
+		"`Bidirectional` allows both directions",
+		"normative definition of the direction semantics",
+	} {
+		if !strings.Contains(desc, fragment) {
+			t.Errorf("clipboardPolicy description lacks %q:\n%s", fragment, desc)
 		}
 	}
 }

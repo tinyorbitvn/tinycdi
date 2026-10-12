@@ -83,8 +83,9 @@ writes the adapter files into the shared volume:
   management surface), seeds `/home/kasm-default-profile` into the
   persistent home on first boot, neutralizes `~/.kasmpasswd`
   (symlink → `/run/tcdi`), rewrites `~/.vnc/kasmvnc.yaml` every boot with
-  the full TinyCDI policy (port 8443, TLS pem → `/run/tcdi`, clipboard
-  DLP off, client overrides off, COEP/COOP headers, brute-force 5/10),
+  the full TinyCDI policy (port 8443, TLS pem → `/run/tcdi`, the
+  clipboard DLP block rendered from `TCDI_CLIPBOARD_POLICY`, client
+  overrides off, COEP/COOP headers, brute-force 5/10),
   then runs `kasmvncserver :1 -xstartup /opt/tcdi/xstartup.sh
   -select-de manual -SecurityTypes None -websocketPort 8443 -interface
   0.0.0.0 -sslOnly` and supervises Xvnc.
@@ -303,7 +304,9 @@ behaviour it wants (V3.24 decisions, `internal/gateway.DesktopPath` and
   `clipboard_seamless` only on Chrome-family browsers, mirroring the
   client's own non-embed guard (upstream disables it on Firefox and
   Safari). These client flags sit on top of the server-side DLP policy,
-  which today denies every direction.
+  which enforces exactly the directions the template allows — the
+  operator renders `spec.clipboardPolicy` into the pod env and the
+  entrypoint renders the DLP block from it (client overrides stay off).
 - The iframe `allow` attribute delegates `clipboard-read`/`clipboard-write`
   per the same policy (Send → read, Receive → write, Bidirectional →
   both), plus `fullscreen` and `keyboard-map` always: the client maps

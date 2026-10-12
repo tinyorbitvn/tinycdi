@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { expect, test, type Page } from "@playwright/test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { expect, test, type Frame, type Page } from "@playwright/test";
 
 // DEV-ONLY credentials of the throwaway Keycloak realm inside the kind
 // cluster (hack/quickstart/realm-export.json, printed by up.sh). The
@@ -85,6 +88,194 @@ function kubectl(...args: string[]): string {
 
 function inHome(workspaceId: string, script: string, ...args: string[]): string {
   return kubectl("exec", runtimePod(workspaceId), "-c", "desktop", "--", "sh", "-c", script, "_", ...args);
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard e2e: the template clipboardPolicy is enforced by the
+// session server — the operator renders it into the pod env and the image
+// entrypoint renders the KasmVNC DLP block from it. The oracle for "the
+// workspace clipboard" is xclip inside the runtime pod on DISPLAY :1.
+// ---------------------------------------------------------------------------
+
+// A bookworm-built xclip: the runtime images carry its deps (libX11/libXmu)
+// but not the tool itself, so the spec extracts the .deb out of a throwaway
+// debian:bookworm-slim container and kubectl-cp's it into the pod's /tmp.
+// Building from the same release the image is based on keeps the dynamic
+// link (glibc 2.36) satisfiable.
+let xclipHostPath: string | null = null;
+function ensureXclip(): string {
+  if (xclipHostPath) return xclipHostPath;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-xclip-"));
+  execFileSync(
+    "docker",
+    [
+      "run", "--rm", "-v", `${dir}:/out`, "debian:bookworm-slim",
+      "sh", "-c",
+      "apt-get update -qq && " +
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --download-only xclip >/dev/null && " +
+        "dpkg -x /var/cache/apt/archives/xclip_*.deb /out",
+    ],
+    { encoding: "utf8", timeout: 300_000 },
+  );
+  const bin = path.join(dir, "usr", "bin", "xclip");
+  expect(fs.existsSync(bin), `xclip extracted to ${bin}`).toBe(true);
+  xclipHostPath = bin;
+  return bin;
+}
+
+// Copies xclip into the workspace pod once, then returns exec helpers.
+function podClipboard(workspaceId: string) {
+  const pod = runtimePod(workspaceId);
+  kubectl("cp", ensureXclip(), `${pod}:/tmp/xclip`, "-c", "desktop");
+  inHome(workspaceId, "chmod +x /tmp/xclip");
+  const X = "DISPLAY=:1 XAUTHORITY=/home/workspace/.Xauthority";
+  return {
+    get(): string {
+      try {
+        return inHome(workspaceId, `${X} /tmp/xclip -o -selection clipboard 2>/dev/null`);
+      } catch {
+        return ""; // no CLIPBOARD owner yet — xclip exits non-zero
+      }
+    },
+    set(text: string) {
+      inHome(workspaceId, `${X} printf %s "$1" | ${X} /tmp/xclip -in -selection clipboard`, text);
+    },
+  };
+}
+
+// Clones the seeded Browser template with a different clipboardPolicy so
+// the non-Disabled case can run on a dedicated catalog entry (the seeded
+// templates are all Disabled). The clone keeps the quickstart-safe spec —
+// Firefox + no Localhost node profiles — verbatim.
+function cloneBrowserTemplate(name: string, display: string, policy: string) {
+  const list = JSON.parse(
+    kubectl(
+      "get", "workspacetemplates",
+      "-l", "workspaces.cdi.tinyorbit.vn/catalog-name=browser",
+      "-o", "json",
+    ),
+  ) as { items: Array<Record<string, any>> };
+  const src = list.items[0];
+  expect(src, "seeded browser template").toBeTruthy();
+  const clone = {
+    apiVersion: src.apiVersion,
+    kind: src.kind,
+    metadata: {
+      name,
+      namespace: TENANT_NAMESPACE,
+      labels: { "workspaces.cdi.tinyorbit.vn/catalog-name": name },
+      annotations: {
+        ...(src.metadata.annotations ?? {}),
+        "workspaces.cdi.tinyorbit.vn/display-name": display,
+      },
+    },
+    spec: { ...src.spec, revision: `clip-${name}`, clipboardPolicy: policy },
+  };
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-tpl-")), "tpl.json");
+  fs.writeFileSync(f, JSON.stringify(clone));
+  kubectl("apply", "-f", f);
+}
+
+// Creates a workspace on the template whose option label matches
+// `label`, retrying the API's retryable release_pending quota refusal —
+// a just-deleted workspace's compute holds the running slot until the
+// backend's 30 s recovery pass proves the runtime gone (the same
+// refusal the retained-attach smoke retries through).
+async function createWorkspaceOnTemplate(
+  page: Page,
+  name: string,
+  label: RegExp,
+): Promise<string> {
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    await page.goto("/workspaces/new");
+    await page.locator('input[name="name"]').fill(name);
+    const option = page.locator('select[name="template"] option', { hasText: label }).first();
+    await expect(option).toBeAttached();
+    await page
+      .locator('select[name="template"]')
+      .selectOption((await option.getAttribute("value")) ?? "");
+    const [resp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().endsWith("/v1/workspaces") && r.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Create workspace" }).click(),
+    ]);
+    const body = (await resp.json().catch(() => ({}))) as Record<string, any>;
+    if (resp.status() === 201) {
+      await page.waitForURL(/\/workspaces\/ws_/);
+      return workspaceIdFromUrl(page);
+    }
+    expect(
+      body?.details?.reason === "release_pending" && Date.now() < deadline,
+      `workspace create refused (${resp.status()}): ${JSON.stringify(body)}`,
+    ).toBeTruthy();
+    await page.waitForTimeout(5_000);
+  }
+}
+
+async function workspacePhase(page: Page, id: string): Promise<string> {
+  return page.evaluate(async (wid) => {
+    const r = await fetch(`/v1/workspaces/${encodeURIComponent(wid)}`);
+    return r.ok ? ((await r.json()) as { phase?: string }).phase ?? "?" : `http-${r.status}`;
+  }, id);
+}
+
+async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 60_000) {
+  await expect
+    .poll(() => workspacePhase(page, id), {
+      timeout: timeoutMs,
+      intervals: [3_000],
+      message: `${id} -> ${phase}`,
+    })
+    .toBe(phase);
+}
+
+// Stops the workspace through the portal UI — a stopped workspace frees
+// its running-quota slot once the backend's recovery pass proves the
+// runtime gone (the next create retries through release_pending).
+async function stopWorkspace(page: Page, workspaceId: string) {
+  await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await expect(stop).toBeVisible();
+  await stop.click();
+  await waitPhase(page, workspaceId, "Stopped");
+}
+
+// Connects to the workspace and returns the KasmVNC session frame once the
+// display canvas is up (same wait chain as the session smoke test).
+async function connectSessionFrame(page: Page, workspaceId: string): Promise<Frame> {
+  await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
+  const connect = await waitForConnect(page);
+  await connect.click();
+  await page.waitForURL(`**/workspaces/${encodeURIComponent(workspaceId)}/session`);
+  const origin = `https://${workspaceId.replaceAll("_", "-").toLowerCase()}.${SESSION_DOMAIN}`;
+  await expect
+    .poll(
+      () =>
+        page
+          .frames()
+          .some((f) => f.url().startsWith(`${origin}/`) && !f.url().includes("/v1/launch")),
+      { timeout: 120_000, message: `session frame on ${origin}` },
+    )
+    .toBe(true);
+  const frame = page
+    .frames()
+    .find((f) => f.url().startsWith(`${origin}/`) && !f.url().includes("/v1/launch"));
+  expect(frame, "session frame").toBeDefined();
+  await expect(frame!.locator("canvas:visible").first()).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible({ timeout: 120_000 });
+  return frame!;
+}
+
+// Types into the KasmVNC client's clipboard textarea and fires the change
+// event the client listens on — the same path a user's paste into the
+// client's clipboard panel takes (UI.clipboardSend -> clipboardPasteFrom).
+async function sendClipboard(frame: Frame, text: string) {
+  await frame.locator("#noVNC_clipboard_text").evaluate((el, t) => {
+    (el as HTMLTextAreaElement).value = t;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, text);
 }
 
 test("log in, create a browser workspace and see the session frame load", async ({ page }) => {
@@ -308,4 +499,166 @@ test("attach a retained disk: the file written before delete is there after", as
     "-o", "jsonpath={.spec.volumes[*].persistentVolumeClaim.claimName}",
   ).split(/\s+/).filter(Boolean);
   expect(claims, "claims mounted by the attached workspace").toHaveLength(1);
+});
+
+// The desktop container's env as name->value (spec.containers[0]).
+function podEnv(workspaceId: string): Record<string, string> {
+  const out = kubectl(
+    "get", "pod", runtimePod(workspaceId),
+    "-o", "jsonpath={.spec.containers[0].env}",
+  );
+  const env = (out ? JSON.parse(out) : []) as Array<{ name: string; value?: string }>;
+  return Object.fromEntries(env.map((e) => [e.name, e.value ?? ""]));
+}
+
+// True when the pod's runtime image carries the entrypoint DLP render.
+// The quickstart pins the PUBLISHED runtime train (common.sh digests or
+// TCDI_QS_*_DIGEST): an image built before this change has no
+// tcdi_clipboard_dlp in its entrypoint; one built after does. The
+// browser round-trip below capability-gates on this — the pod-env
+// assertion above it runs on every image.
+function runtimeRendersClipboard(workspaceId: string): boolean {
+  try {
+    inHome(workspaceId, "grep -q tcdi_clipboard_dlp /opt/tcdi/entrypoint.sh");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The platform workspace id (ws_<hex>) of a Running pod carrying the
+// rendered policy — found through the pod's workspace-name label and the
+// CR's workspace-uid label. null when no running pod matches.
+function runningWorkspaceWithPolicy(policy: string): string | null {
+  const pods = JSON.parse(kubectl("get", "pods", "-o", "json")) as {
+    items: Array<Record<string, any>>;
+  };
+  for (const p of pods.items ?? []) {
+    if (p.status?.phase !== "Running") continue;
+    const env = (p.spec?.containers?.[0]?.env ?? []) as Array<{ name: string; value?: string }>;
+    if (!env.some((e) => e.name === "TCDI_CLIPBOARD_POLICY" && e.value === policy)) continue;
+    const crName = p.metadata?.labels?.["workspaces.cdi.tinyorbit.vn/workspace-name"];
+    if (!crName) continue;
+    const cr = JSON.parse(kubectl("get", "workspace", crName, "-o", "json")) as Record<
+      string,
+      any
+    >;
+    const uid = cr.metadata?.labels?.["workspaces.cdi.tinyorbit.vn/workspace-uid"];
+    if (typeof uid === "string" && uid) return uid;
+  }
+  return null;
+}
+
+// The rendered policy env of a workspace's pod, tolerating a pod that is
+// not materialized yet (kubectl fails while provisioning is in flight).
+function podPolicy(workspaceId: string): string | null {
+  try {
+    return podEnv(workspaceId)["TCDI_CLIPBOARD_POLICY"] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// The template clipboardPolicy is enforced by the session
+// server — buildPod renders it into the pod env (TCDI_CLIPBOARD_POLICY)
+// and the image entrypoint renders the KasmVNC DLP block from it. A
+// Bidirectional template round-trips both directions through the real
+// KasmVNC client and the workspace X clipboard; the seeded Disabled
+// template lets neither direction through.
+test("clipboard follows the template policy (Bidirectional works, Disabled is blocked)", async ({ page }) => {
+  const stamp = Date.now().toString(36);
+
+  // A dedicated Bidirectional template — the seeded catalog is all
+  // Disabled, so the non-default direction needs its own catalog entry.
+  const tplName = `clip-bidi-${stamp}`;
+  cloneBrowserTemplate(tplName, `Clip Bidi ${stamp}`, "Bidirectional");
+
+  await login(page);
+
+  // runningWorkspaces=2 and the earlier smokes leave two workspaces
+  // running — no free slot. Every seeded template is Disabled, so a
+  // leftover covers the Disabled check; stopping it afterwards frees
+  // the slot the Bidirectional workspace needs. The pod-env assertions
+  // are the operator half and run on ANY runtime image; the browser
+  // round-trip additionally needs the runtime image's entrypoint render
+  // (the published quickstart train predates it — it activates on the
+  // post-change pins or an explicit TCDI_QS_BROWSER_DIGEST override).
+
+  // --- Disabled (a leftover seeded-template workspace) -----------------
+  const offId = runningWorkspaceWithPolicy("Disabled");
+  expect(
+    offId,
+    "a running workspace carries TCDI_CLIPBOARD_POLICY=Disabled " +
+      "(the earlier smokes leave one on the seeded browser template)",
+  ).toBeTruthy();
+
+  const capable = runtimeRendersClipboard(offId!);
+  if (capable) {
+    const offFrame = await connectSessionFrame(page, offId!);
+    const offClip = podClipboard(offId!);
+
+    // A cut inside the pod must never reach the client (SendCutText off).
+    const s2cOff = `s2c-off-${stamp}`;
+    offClip.set(s2cOff);
+    await page.waitForTimeout(15_000);
+    expect(
+      await offFrame.locator("#noVNC_clipboard_text").inputValue(),
+      "Disabled: remote cut must not reach the client",
+    ).not.toBe(s2cOff);
+
+    // A client-side paste must never reach the workspace (AcceptCutText
+    // off): the remote selection keeps the value set above.
+    const c2sOff = `c2s-off-${stamp}`;
+    await sendClipboard(offFrame, c2sOff);
+    await page.waitForTimeout(10_000);
+    expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
+  }
+
+  // Free the running slot for the Bidirectional workspace — a
+  // predecessor smoke workspace is stopped, per review.
+  await stopWorkspace(page, offId!);
+
+  // --- Bidirectional: both directions through the real client ----------
+  const bidiId = await createWorkspaceOnTemplate(
+    // The option label is the catalog name ("<name> (Linux container)"),
+    // not the display-name annotation — match the object name.
+    page, `clipbi-${stamp}`, new RegExp(tplName, "i"),
+  );
+  // The pod object lands during provisioning — poll until it exists.
+  await expect
+    .poll(() => podPolicy(bidiId), { timeout: 120_000 })
+    .toBe("Bidirectional");
+
+  try {
+    if (capable) {
+      const bidiFrame = await connectSessionFrame(page, bidiId);
+      const bidiClip = podClipboard(bidiId);
+
+      // workspace -> client: a cut inside the pod reaches the client's
+      // clipboard textarea (the client's own mirror of the remote
+      // clipboard).
+      const s2c = `s2c-${stamp}`;
+      bidiClip.set(s2c);
+      await expect
+        .poll(() => bidiFrame.locator("#noVNC_clipboard_text").inputValue(), {
+          timeout: 30_000,
+        })
+        .toBe(s2c);
+
+      // client -> workspace: pasting into the client's clipboard panel
+      // lands on the workspace CLIPBOARD selection.
+      const c2s = `c2s-${stamp}`;
+      await sendClipboard(bidiFrame, c2s);
+      await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
+    }
+  } finally {
+    // Leave no running workspace of ours behind either way.
+    await stopWorkspace(page, bidiId);
+  }
+
+  test.skip(
+    !capable,
+    "runtime image predates the entrypoint clipboard render — pod env asserted; " +
+      "browser round-trip gated on the post-change runtime train",
+  );
 });

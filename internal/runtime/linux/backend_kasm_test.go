@@ -102,10 +102,11 @@ func TestKasmAdapterPodShape(t *testing.T) {
 		t.Errorf("command = %v, want [%s]", ctr.Command, adapterEntrypoint)
 	}
 	for k, want := range map[string]string{
-		"HOME":             homeDir,
-		"VNC_PW":           "",
-		"VNC_VIEW_ONLY_PW": "",
-		"TCDI_SESSION_CMD": "/usr/bin/chromium-orig --start-maximized",
+		"HOME":                  homeDir,
+		"VNC_PW":                "",
+		"VNC_VIEW_ONLY_PW":      "",
+		"TCDI_SESSION_CMD":      "/usr/bin/chromium-orig --start-maximized",
+		"TCDI_CLIPBOARD_POLICY": "",
 	} {
 		if v, ok := envOf(&ctr, k); !ok || v != want {
 			t.Errorf("env %s = %q (present=%v), want %q", k, v, ok, want)
@@ -258,8 +259,10 @@ func TestNoAdapterPodUnchanged(t *testing.T) {
 	if len(ctr.Command) != 0 {
 		t.Errorf("no-adapter pod must keep the image entrypoint, command=%v", ctr.Command)
 	}
-	if len(ctr.Env) != 0 {
-		t.Errorf("no-adapter pod must not set env: %v", ctr.Env)
+	// The only env a no-adapter pod may carry is the rendered clipboard
+	// policy — every other knob stays the image entrypoint's own.
+	if len(ctr.Env) != 1 || ctr.Env[0].Name != "TCDI_CLIPBOARD_POLICY" {
+		t.Errorf("no-adapter pod env = %v, want only TCDI_CLIPBOARD_POLICY", ctr.Env)
 	}
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == adapterVolName {
