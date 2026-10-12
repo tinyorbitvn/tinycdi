@@ -162,6 +162,11 @@ export interface Tenancy {
   // unlimited) and ownerRef ("iss|sub") -> max running workspaces.
   userLimitDefault: number | null;
   userLimitOverrides: Map<string, number>;
+  // Tenant session-policy ceiling (ADR 0010): undefined = no row —
+  // every channel FollowTemplate. spVersion is its change token; PUT
+  // echoes it via If-Match.
+  sessionPolicy: { clipboard: string } | undefined;
+  spVersion: number;
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
   managed: boolean;
@@ -206,6 +211,8 @@ export function tenancy(ctx: MockContext): Tenancy {
     userLimits: { ...DEFAULT_USER_LIMITS },
     userLimitDefault: null,
     userLimitOverrides: new Map(),
+    sessionPolicy: undefined,
+    spVersion: 1,
     managed: false,
     version: 1,
     owners: new Map(),
@@ -275,6 +282,8 @@ export function adminArea(ctx: MockContext): MockArea {
     t.userLimits = { ...DEFAULT_USER_LIMITS };
     t.userLimitDefault = null;
     t.userLimitOverrides = new Map();
+    t.sessionPolicy = undefined;
+    t.spVersion = 1;
     t.managed = false;
     t.version = 1;
     t.owners = new Map();
@@ -478,6 +487,58 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  // GET/PUT /v1/admin/tenants/{tenant}/session-policy — tenant-admin of
+  // the named tenant only. No row resolves FollowTemplate everywhere
+  // (source FollowTemplate); a PUT whose every channel is
+  // FollowTemplate deletes the row. Optimistic-concurrency If-Match
+  // like quota: the reported version or "*" only on a missing row.
+  function sessionPolicyBody() {
+    return {
+      tenant: t.me.tenant,
+      clipboard: t.sessionPolicy?.clipboard ?? "FollowTemplate",
+      fileTransfer: { mode: "FollowTemplate", maxFileBytes: null },
+      source: t.sessionPolicy ? "TenantRow" : "FollowTemplate",
+      ...(t.sessionPolicy ? { version: `sp-${t.spVersion}` } : {}),
+    };
+  }
+
+  function adminSessionPolicy(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "session policy administration requires the tenant-admin role", false);
+    }
+    if (req.method === "GET") {
+      const failed = t.takeFailure(req);
+      if (failed) return failed;
+      return ok(200, sessionPolicyBody());
+    }
+    if (req.method === "PUT") {
+      const ifMatch = req.headers["if-match"];
+      if (!ifMatch) return err(400, "INVALID_REQUEST", "If-Match header required", false);
+      const b = req.body as Record<string, unknown> | null;
+      const CEILINGS = ["FollowTemplate", "Disabled", "Send", "Receive", "Bidirectional"];
+      const clip = b?.clipboard;
+      if (b === null || typeof clip !== "string" || !CEILINGS.includes(clip)) {
+        return err(400, "INVALID_REQUEST", "clipboard must be one of FollowTemplate, Disabled, Send, Receive, Bidirectional", false);
+      }
+      const ft = b.fileTransfer as { mode?: string; maxFileBytes?: number | null } | undefined;
+      if (ft !== undefined && ((ft.mode ?? "FollowTemplate") !== "FollowTemplate" || (ft.maxFileBytes ?? null) !== null)) {
+        return err(400, "INVALID_REQUEST", "fileTransfer is inert in this version; only FollowTemplate is accepted", false);
+      }
+      const match = t.sessionPolicy === undefined ? ifMatch === "*" : ifMatch === `sp-${t.spVersion}`;
+      if (!match) {
+        return err(412, "PRECONDITION_FAILED", "the session policy changed since it was read", false);
+      }
+      if (clip === "FollowTemplate") {
+        t.sessionPolicy = undefined;
+      } else {
+        t.sessionPolicy = { clipboard: clip };
+      }
+      t.spVersion += 1;
+      return ok(200, sessionPolicyBody());
+    }
+    return err(405, "INVALID_REQUEST", "method not allowed", false);
+  }
+
   function listWorkspaces(req: MockRequest): MockResponse {
     const scope = t.resolveScope(req);
     if ("status" in scope) return scope;
@@ -497,6 +558,8 @@ export function adminArea(ctx: MockContext): MockArea {
     if (mQuota) return adminQuota(req, mQuota[1]);
     const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(\/default)?$/);
     if (mUL) return adminUserLimits(req, mUL[1], mUL[2] !== undefined);
+    const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
+    if (mSP) return adminSessionPolicy(req, mSP[1]);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
       const failed = t.takeFailure(req);
       if (failed) return failed;
@@ -549,6 +612,14 @@ export function adminArea(ctx: MockContext): MockArea {
           }
         }
         return ok(200, userLimitsBody());
+      case "/_control/admin/session-policy":
+        if (req.body?.clipboard === null || req.body?.clipboard === "FollowTemplate") {
+          t.sessionPolicy = undefined;
+        } else if (typeof req.body?.clipboard === "string") {
+          t.sessionPolicy = { clipboard: req.body.clipboard };
+        }
+        t.spVersion += 1;
+        return ok(200, sessionPolicyBody());
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

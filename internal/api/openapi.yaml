@@ -950,6 +950,104 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/session-policy:
+    get:
+      operationId: getAdminSessionPolicy
+      summary: Tenant session data-transfer policy ceiling
+      description: |
+        Administrator view of one tenant's session data-transfer policy —
+        the ceiling applied over every workspace template's own policy
+        (ADR 0010). Each channel reports its ceiling value;
+        `FollowTemplate` means the channel is not narrowed and the
+        template's policy applies unchanged. A tenant with no
+        session-policy row resolves `FollowTemplate` everywhere
+        (`source: FollowTemplate`) — the upgrade default. The ceiling can
+        only narrow, never widen: the effective policy a user gets is the
+        meet of the template's policy and this ceiling. Requires the
+        tenant-admin role on the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Session policy ceiling for the named tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSessionPolicyView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: putAdminSessionPolicy
+      summary: Set a tenant's session data-transfer policy ceiling
+      description: |
+        Writes the tenant's session data-transfer ceiling. Every channel
+        is named on each write: `FollowTemplate` restores the template's
+        own policy for that channel, and a PUT whose every channel is
+        `FollowTemplate` deletes the row — "no row" and "all-defaults
+        row" are the same state, and the store keeps exactly one
+        representation of it. `fileTransfer` is inert in this version
+        (the channel ships in v1.3): only its defaults are accepted — a
+        non-default `fileTransfer.mode` or any `maxFileBytes` answers
+        `400 INVALID_REQUEST`.
+
+        Tightening takes effect on two clocks (ADR 0010 §3): the next
+        minted connection ticket carries the new client flags
+        immediately, while a running workspace's server-side clipboard
+        enforcement follows at its next start — pod specs are immutable.
+        Requires the tenant-admin role on the named tenant, the
+        `X-CSRF-Token` header and an `If-Match` precondition: the
+        `version` returned by GET (a stale version answers
+        `412 PRECONDITION_FAILED`), or the literal `*` when the tenant
+        has no row yet. `If-Match: *` is not a bypass on an existing row —
+        it too answers 412. Every write is audited.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - name: If-Match
+          in: header
+          required: true
+          description: |
+            Change token from the GET response's `version`, or `*` to
+            create a row for a tenant that has none.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAdminSessionPolicy"
+      responses:
+        "200":
+          description: The updated session policy ceiling.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSessionPolicyView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -1957,6 +2055,122 @@ components:
           minimum: 0
           description: Maximum concurrent running workspaces per principal; `null` clears the default.
 
+    ClipboardCeiling:
+      type: string
+      enum: [FollowTemplate, Disabled, Send, Receive, Bidirectional]
+      description: |
+        A tenant's clipboard ceiling over every workspace template's
+        `clipboardPolicy` — direction names are from the user's point of
+        view (`Send` = device → workspace, `Receive` = workspace →
+        device). `FollowTemplate` narrows nothing: the template's own
+        policy applies. The effective clipboard policy is the meet of the
+        template's and this ceiling — `Send ∩ Receive = Disabled`, and a
+        ceiling never widens past the template (ADR 0010 §1).
+
+    FileTransferCeiling:
+      type: object
+      additionalProperties: false
+      required: [mode, maxFileBytes]
+      description: |
+        The tenant's file-transfer ceiling — the inert channel carried
+        for v1.3 (ADR 0010 T11). Only the defaults are meaningful in this
+        version: `mode: FollowTemplate`, `maxFileBytes: null`.
+      properties:
+        mode:
+          type: string
+          enum: [FollowTemplate, Disabled, Upload, Download, Bidirectional]
+          description: |
+            Ceiling over the template's file-transfer policy (`Upload` =
+            device → workspace home, `Download` = workspace → device).
+            Inert until v1.3 adds the template leg.
+        maxFileBytes:
+          type: ["integer", "null"]
+          minimum: 1
+          description: |
+            Per-file size bound; `null` = the platform default bound.
+            Inert until v1.3.
+
+    AdminSessionPolicySource:
+      type: string
+      enum: [TenantRow, FollowTemplate]
+      description: |
+        Whether a session-policy row exists for the tenant. `TenantRow`:
+        a row was written through this API. `FollowTemplate`: no row —
+        every channel follows the template, the upgrade default.
+
+    AdminSessionPolicyView:
+      type: object
+      additionalProperties: false
+      required: [tenant, clipboard, fileTransfer, source]
+      description: |
+        The tenant's session data-transfer ceiling (ADR 0010): one value
+        per channel, `FollowTemplate` where the channel is not narrowed.
+        The effective policy a user gets is the meet of the template's
+        policy and this ceiling — it can only narrow, never widen.
+        `version` is the opaque change token PUT echoes in `If-Match`;
+        it is absent when no row exists.
+      properties:
+        tenant:
+          type: string
+        clipboard:
+          $ref: "#/components/schemas/ClipboardCeiling"
+        fileTransfer:
+          $ref: "#/components/schemas/FileTransferCeiling"
+        source:
+          $ref: "#/components/schemas/AdminSessionPolicySource"
+        version:
+          type: string
+          description: |
+            Opaque change token of the ceiling row — it changes on every
+            write and PUT echoes it verbatim in `If-Match`. Absent when
+            the tenant has no row — PUT then uses `If-Match: *`.
+
+    PutAdminSessionPolicy:
+      type: object
+      additionalProperties: false
+      required: [clipboard]
+      description: |
+        Write the tenant's session data-transfer ceiling. `clipboard` is
+        required; `fileTransfer` is the inert v1.3 channel and only its
+        defaults are accepted in this version. Setting every channel to
+        `FollowTemplate` deletes the row.
+      properties:
+        clipboard:
+          $ref: "#/components/schemas/ClipboardCeiling"
+        fileTransfer:
+          $ref: "#/components/schemas/FileTransferCeiling"
+
+    ResolvedSessionPolicy:
+      type: object
+      additionalProperties: false
+      required: [clipboard, fileTransfer]
+      description: |
+        The resolved (effective) session data-transfer policy for a
+        (tenant, template) pair — the meet of the template's own policy
+        and the tenant ceiling, recorded on the launch ticket at issue
+        (ADR 0010 §2). The portal renders the session iframe's `allow`
+        from this record, not from a template it may have read earlier.
+      properties:
+        clipboard:
+          type: string
+          enum: [Disabled, Send, Receive, Bidirectional]
+          description: The resolved clipboard policy.
+        fileTransfer:
+          type: object
+          additionalProperties: false
+          required: [mode, maxFileBytes]
+          description: |
+            The resolved file-transfer policy. Inert until v1.3 — `mode`
+            always resolves `Disabled` while no template leg exists.
+          properties:
+            mode:
+              type: string
+              enum: [Disabled, Upload, Download, Bidirectional]
+            maxFileBytes:
+              type: ["integer", "null"]
+              minimum: 1
+              description: Per-file bound; `null` = platform default.
+
     CreateWorkspaceRequest:
       type: object
       additionalProperties: false
@@ -2168,6 +2382,8 @@ components:
           type: string
           format: date-time
           description: Ticket expiry (issued + 60 s).
+        sessionPolicy:
+          $ref: "#/components/schemas/ResolvedSessionPolicy"
 
     TemplateView:
       type: object

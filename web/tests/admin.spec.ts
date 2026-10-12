@@ -32,7 +32,7 @@ test.beforeEach(async ({ request }) => {
   expect(res.ok()).toBeTruthy();
 });
 
-test("a tenant admin sees all six admin pages", async ({ page, request }) => {
+test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
   await makeAdmin(request);
 
   await login(page, "/admin");
@@ -43,6 +43,7 @@ test("a tenant admin sees all six admin pages", async ({ page, request }) => {
   const adminNav = page.getByRole("tablist", { name: "Admin sections" });
   await expect(adminNav.getByRole("tab", { name: "Workspaces" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Session policy" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Templates" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Data" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Users" })).toBeVisible();
@@ -68,6 +69,16 @@ test("a tenant admin sees all six admin pages", async ({ page, request }) => {
   await expect(page.getByRole("heading", { name: "Quota" })).toBeVisible();
   await expect(page.getByRole("table", { name: "Usage by user" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeFocused();
+
+  await adminNav.getByRole("tab", { name: "Session policy" }).click();
+  await expect(page.getByRole("heading", { name: "Session policy" })).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "Effective clipboard policy by template" }),
+  ).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Session policy" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 
   await adminNav.getByRole("tab", { name: "Templates" }).click();
   await expect(page.getByRole("heading", { name: "Template catalog" })).toBeVisible();

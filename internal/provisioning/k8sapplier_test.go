@@ -149,6 +149,51 @@ func TestK8sApplierLifecycle(t *testing.T) {
 	}
 }
 
+// TestK8sApplierSessionPolicy (ADR 0010 §2): a create intent stamps the
+// resolved session policy on spec.sessionPolicy, and a later start
+// intent re-stamps it — the mechanism by which a tightened ceiling lands
+// on the pod's next boot.
+func TestK8sApplierSessionPolicy(t *testing.T) {
+	c, applier := newFakeK8sApplier(t)
+	ctx := context.Background()
+	uid := provisioning.PlatformID("ws_aaaabbbbccccdddd0000111122223333")
+	name := provisioning.WorkspaceCRName(uid)
+
+	in := createIntent(uid, "req-sp-1", 1)
+	in.Spec.SessionPolicy = &provisioning.SessionPolicy{
+		Clipboard: provisioning.PolicyDisabled,
+	}
+	if err := applier.Apply(ctx, in); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ws := getWorkspace(t, c, "ns-a", name)
+	if ws.Spec.SessionPolicy == nil || ws.Spec.SessionPolicy.Clipboard != workspacev1alpha1.ClipboardDisabled {
+		t.Fatalf("create spec.sessionPolicy = %+v, want Disabled", ws.Spec.SessionPolicy)
+	}
+
+	// The next start carries the re-resolved policy: a tightened ceiling
+	// lands on the pod's next boot, no mid-session restart needed.
+	if err := applier.Apply(ctx, provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 2,
+		Kind: provisioning.IntentStop, DesiredState: "Stopped", RuntimeGeneration: 1,
+	}); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if err := applier.Apply(ctx, provisioning.Intent{
+		WorkspaceUID: uid, TenantID: "tenant-a", Revision: 3,
+		Kind: provisioning.IntentStart, DesiredState: "Running", RuntimeGeneration: 2,
+		Spec: provisioning.IntentSpec{
+			SessionPolicy: &provisioning.SessionPolicy{Clipboard: provisioning.ClipboardSend},
+		},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ws = getWorkspace(t, c, "ns-a", name)
+	if ws.Spec.SessionPolicy == nil || ws.Spec.SessionPolicy.Clipboard != workspacev1alpha1.ClipboardSend {
+		t.Fatalf("start spec.sessionPolicy = %+v, want Send", ws.Spec.SessionPolicy)
+	}
+}
+
 func TestK8sApplierUnknownTenant(t *testing.T) {
 	_, applier := newFakeK8sApplier(t)
 	in := createIntent("ws_0123456789abcdef0123456789abcdef", "req-1", 1)

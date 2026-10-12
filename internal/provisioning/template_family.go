@@ -140,6 +140,11 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		Runtime:       newest.Runtime,
 		Experience:    newest.Experience,
 		ImageBuiltAt:  newest.ImageBuiltAt,
+		// The guard already refuses a move whose clipboard policy differs
+		// (SkipReasonClipboardPolicyChanged), so the snapshot here equals
+		// the recorded revision's — carried explicitly since the row stores
+		// this struct.
+		ClipboardPolicy: newest.ClipboardPolicy,
 	}, name, "", newest.ImageBuiltAt, false, nil
 }
 

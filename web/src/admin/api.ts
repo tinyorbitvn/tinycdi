@@ -100,6 +100,42 @@ export async function putAdminUserLimitDefault(
   );
 }
 
+export type AdminSessionPolicyView = components["schemas"]["AdminSessionPolicyView"];
+export type PutAdminSessionPolicy = components["schemas"]["PutAdminSessionPolicy"];
+export type ClipboardCeiling = components["schemas"]["ClipboardCeiling"];
+export type AdminSessionPolicySource = components["schemas"]["AdminSessionPolicySource"];
+
+// Tenant session data-transfer ceiling
+// (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0010): a
+// ceiling narrows every template's own transfer policy, never widens.
+// `version` is the change token the GET returned — sent as If-Match so a
+// concurrent write lands as 412 PRECONDITION_FAILED, not a silent
+// clobber; "*" creates a row for a tenant that has none.
+export async function fetchAdminSessionPolicy(
+  api: ApiClient,
+  tenant: string,
+): Promise<AdminSessionPolicyView> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/session-policy", {
+      params: { path: { tenant } },
+    }),
+  );
+}
+
+export async function putAdminSessionPolicy(
+  api: ApiClient,
+  tenant: string,
+  policy: PutAdminSessionPolicy,
+  version: string | undefined,
+): Promise<AdminSessionPolicyView> {
+  return unwrap(
+    await api.PUT("/v1/admin/tenants/{tenant}/session-policy", {
+      params: { path: { tenant }, header: { "If-Match": version ?? "*" } },
+      body: policy,
+    }),
+  );
+}
+
 export function listScopedWorkspaces(api: ApiClient, scope: Scope, phase?: WorkspacePhase) {
   return listAll<ScopedWorkspace>(api, "/v1/workspaces", { scope, phase });
 }

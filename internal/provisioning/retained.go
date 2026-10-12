@@ -605,6 +605,15 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 		if tag.RowsAffected() == 0 {
 			return ErrRetainedState // raced a purge: the claim is lost
 		}
+		// As on the plain create path, the resolved session policy rides
+		// the create intent so the applier stamps spec.sessionPolicy from
+		// the admission-time snapshot (ADR 0010 §2).
+		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
+			ClipboardPolicy: req.Template.ClipboardPolicy,
+		})
+		if err != nil {
+			return fmt.Errorf("attach: resolve session policy: %w", err)
+		}
 		rev, err := appendIntent(ctx, tx, PlatformID(res.ID), IntentCreate, &IntentSpec{
 			WorkspaceName:   req.Name,
 			TemplateName:    req.Template.Name,
@@ -613,6 +622,7 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 			DataPolicy:      "Retain",
 			RetainedDataRef: dataID,
 			ImageBuiltAt:    req.Template.ImageBuiltAt,
+			SessionPolicy:   &sp,
 		})
 		if err != nil {
 			return err

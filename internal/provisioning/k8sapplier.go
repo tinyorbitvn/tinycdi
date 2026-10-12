@@ -198,6 +198,7 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 			DataPolicy:        workspacev1alpha1.DataPolicy(in.Spec.DataPolicy),
 			RuntimeGeneration: in.RuntimeGeneration,
 			IntentRevision:    int64(in.Revision),
+			SessionPolicy:     sessionPolicySpec(in.Spec.SessionPolicy),
 		},
 	}
 	if in.Spec.ImageBuiltAt != "" {
@@ -277,6 +278,11 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 				delete(ws.Annotations, AnnotationWorkspaceImageBuiltAt)
 			}
 		}
+		if in.Kind == IntentStart && in.Spec.SessionPolicy != nil {
+			// The resolved policy is re-stamped at every start so a
+			// tightened ceiling lands on the pod's next boot (ADR 0010 §3).
+			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
+		}
 		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
 		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
@@ -293,6 +299,19 @@ func setCRAnnotation(ws *workspacev1alpha1.Workspace, key, value string) {
 		ws.Annotations = map[string]string{}
 	}
 	ws.Annotations[key] = value
+}
+
+// sessionPolicySpec maps the intent's resolved session policy onto the
+// Workspace CR's spec.sessionPolicy — nil when the intent carries none or
+// the resolved clipboard is empty (the field is a CEL enum; an empty
+// value would reject the CR).
+func sessionPolicySpec(sp *SessionPolicy) *workspacev1alpha1.SessionPolicySpec {
+	if sp == nil || sp.Clipboard == "" {
+		return nil
+	}
+	return &workspacev1alpha1.SessionPolicySpec{
+		Clipboard: workspacev1alpha1.ClipboardPolicy(sp.Clipboard),
+	}
 }
 
 func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in Intent) error {
@@ -337,6 +356,9 @@ func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Wor
 		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
 		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
+		}
+		if in.Spec.SessionPolicy != nil {
+			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
 		}
 		ws.Spec.IntentRevision = int64(in.Revision)
 		clearIntentBehind(ws)

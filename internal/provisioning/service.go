@@ -149,6 +149,11 @@ type TemplateInfo struct {
 	// ImageBuiltAt is the template's raw image-built-at annotation value
 	// (RFC 3339 when well formed), snapshotted at create time.
 	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
+	// ClipboardPolicy is the template revision's spec.clipboardPolicy,
+	// snapshotted at create and refreshed by a re-pointing start — the
+	// template leg the session-policy meet is computed against (ADR 0010).
+	// Empty on rows written before the field existed.
+	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
 }
 
 // WorkspaceRecord is the API-facing read model of a workspace row.
@@ -259,6 +264,17 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 		if err := Reserve(ctx, tx, tenantID, res.ID, req.Vector); err != nil {
 			return err
 		}
+		// The resolved session policy rides the create intent: the applier
+		// stamps it as spec.sessionPolicy so pod building reads the meet —
+		// never re-derived (ADR 0010 §2). Resolution happens inside this
+		// transaction so the stamped value is the snapshot the workspace
+		// was admitted under.
+		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
+			ClipboardPolicy: req.Template.ClipboardPolicy,
+		})
+		if err != nil {
+			return fmt.Errorf("create: resolve session policy: %w", err)
+		}
 		rev, err := appendIntent(ctx, tx, PlatformID(res.ID), IntentCreate, &IntentSpec{
 			WorkspaceName:   req.Name,
 			TemplateName:    req.Template.Name,
@@ -267,6 +283,7 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 			DataPolicy:      dataPolicy,
 			RetainedDataRef: req.RetainedDataRef,
 			ImageBuiltAt:    req.Template.ImageBuiltAt,
+			SessionPolicy:   &sp,
 		})
 		if err != nil {
 			return err
@@ -501,6 +518,20 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				if err := reserveForStart(ctx, tx, tenantID, wsID); err != nil {
 					return err
 				}
+				// The resolved session policy rides every start intent: the
+				// applier re-stamps spec.sessionPolicy so a tightened ceiling
+				// lands on the pod's next start (ADR 0010 §3 — server-side
+				// enforcement is per-boot).
+				sp, err := s.startSessionPolicy(ctx, tx, tenantID, rec)
+				if err != nil {
+					return err
+				}
+				if sp != nil {
+					if sigSpec == nil {
+						sigSpec = &IntentSpec{}
+					}
+					sigSpec.SessionPolicy = sp
+				}
 			}
 			tpl, err := json.Marshal(rec.Template)
 			if err != nil {
@@ -543,6 +574,31 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 		return nil
 	})
 	return res, err
+}
+
+// startSessionPolicy resolves the session data-transfer policy a start
+// intent carries: the meet of the tenant ceiling and the clipboard policy
+// of the revision the start runs on — rec.Template is already the
+// post-re-point snapshot when the family moved. A workspace row predating
+// the snapshot field (ClipboardPolicy "") consults the live catalog for
+// the recorded revision; when that lookup also yields nothing the start
+// carries no stamped policy (nil) — the pod falls back to the operator's
+// template snapshot, the pre-field behaviour.
+func (s *Service) startSessionPolicy(ctx context.Context, tx store.Tx, tenantID string, rec *WorkspaceRecord) (*SessionPolicy, error) {
+	clipboard := rec.Template.ClipboardPolicy
+	if clipboard == "" && s.templates != nil {
+		if cur, err := s.templates.Get(ctx, tenantID, rec.Template.ID); err == nil && cur != nil {
+			clipboard = cur.ClipboardPolicy
+		}
+	}
+	if clipboard == "" {
+		return nil, nil
+	}
+	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{ClipboardPolicy: clipboard})
+	if err != nil {
+		return nil, fmt.Errorf("start: resolve session policy: %w", err)
+	}
+	return &sp, nil
 }
 
 // reserveForStart re-acquires the running-quota reservation a stopped

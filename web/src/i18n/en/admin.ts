@@ -11,6 +11,7 @@ export default {
   "admin.nav.templates": "Templates",
   "admin.nav.data": "Data",
   "admin.nav.users": "Users",
+  "admin.nav.sessionPolicy": "Session policy",
   "admin.eyebrow": "Admin",
   "admin.eyebrow.tenant": "Admin · {tenant}",
   "admin.gate.checking": "Checking permissions",
@@ -27,6 +28,7 @@ export default {
   "admin.route.data": "Retained data",
   "admin.route.users": "Tenant users",
   "admin.route.user": "User detail",
+  "admin.route.sessionPolicy": "Session policy",
 
   "admin.action.refresh": "Refresh",
 
@@ -248,6 +250,35 @@ export default {
   "admin.userDetail.disks.caption": "The user's retained disks",
   "admin.userDetail.disks.empty": "This user has no retained disks.",
   "admin.userDetail.disks.all": "Open retained data",
+
+  // Session policy page (tenant clipboard ceiling, ADR 0010).
+  "admin.policy.title": "Session policy",
+  "admin.policy.description": "What may move between a user's device and their workspace.",
+  "admin.policy.loading": "Loading session policy",
+  "admin.policy.ceiling.title": "Tenant ceiling",
+  "admin.policy.ceiling.description":
+    "Cap what data can move between a user's device and their workspace. A ceiling can only narrow a template's policy — never widen it.",
+  "admin.policy.source.tenantRow": "A ceiling is set for this tenant.",
+  "admin.policy.source.followTemplate":
+    "No ceiling is set — every template's own policy applies as published.",
+  "admin.policy.clipboard.label": "Clipboard",
+  "admin.policy.clipboard.hint":
+    "Send lets people copy from their device into the workspace; Receive lets them copy from the workspace back to their device.",
+  "admin.policy.fileTransfer.label": "File transfer",
+  "admin.policy.fileTransfer.hint": "Available in v1.3.",
+  "admin.policy.option.followTemplate": "Follow template",
+  "admin.policy.appliesNote":
+    "Tightening applies to new connections right away; a running workspace picks it up at its next start.",
+  "admin.policy.save": "Save ceiling",
+  "admin.policy.preview.title": "Effective policy by template",
+  "admin.policy.preview.description":
+    "What users get for each template: the template's own clipboard policy narrowed by the selected ceiling.",
+  "admin.policy.preview.caption": "Effective clipboard policy by template",
+  "admin.policy.preview.template": "Template",
+  "admin.policy.preview.templatePolicy": "Template policy",
+  "admin.policy.preview.ceiling": "Ceiling",
+  "admin.policy.preview.effective": "Effective for users",
+  "admin.policy.preview.empty": "No templates in the catalog.",
 
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Error",

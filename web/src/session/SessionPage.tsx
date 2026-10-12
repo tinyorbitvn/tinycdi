@@ -35,6 +35,8 @@ import {
   sessionFrameUrl,
   sessionTabId,
   submitLaunch,
+  type ClipboardPolicy,
+  type LaunchTicket,
   type SessionEmbedOpts,
   type SessionMarker,
 } from "./launch";
@@ -162,8 +164,23 @@ export function SessionPage({
   useEffect(() => {
     templateRef.current = template;
   }, [template]);
+  // The session policy the minted ticket recorded — template policy ∧
+  // tenant ceiling (ADR 0010). Once a launch returns it, it wins over the
+  // template the page read earlier: the portal renders allow/embed opts
+  // from what the ticket carries, not from a possibly-stale catalog read.
+  const [resolvedClipboard, setResolvedClipboard] = useState<ClipboardPolicy | undefined>(
+    undefined,
+  );
+  const resolvedClipboardRef = useRef<ClipboardPolicy | undefined>(undefined);
+  const noteResolvedPolicy = useCallback((ticket: LaunchTicket) => {
+    const clip = ticket.sessionPolicy?.clipboard;
+    resolvedClipboardRef.current = clip;
+    setResolvedClipboard(clip);
+  }, []);
   const embedOpts = useCallback(
-    (): SessionEmbedOpts => ({ clipboardPolicy: templateRef.current?.clipboardPolicy }),
+    (): SessionEmbedOpts => ({
+      clipboardPolicy: resolvedClipboardRef.current ?? templateRef.current?.clipboardPolicy,
+    }),
     [],
   );
 
@@ -346,6 +363,7 @@ export function SessionPage({
         );
         if (!mounted.current) return;
         assertLaunchTarget(ticket, workspaceId, sessionDomain);
+        noteResolvedPolicy(ticket);
         owned.current = true;
         if (mode === "tab") {
           // The new tab holds the lease now; a reload of this one must not
@@ -551,17 +569,20 @@ export function SessionPage({
       [observe],
     ),
     requestTicket: useCallback(
-      async () =>
+      async () => {
         // The lease is gone, so no takeover is needed; if the poll raced a
         // still-live lease the 409 surfaces as relaunch-error and the next
         // window entry retries.
-        unwrap(
+        const ticket = unwrap(
           await api.POST("/v1/workspaces/{workspaceId}/connections", {
             params: { path: { workspaceId } },
             body: { takeover: false },
           }),
-        ),
-      [api, workspaceId],
+        );
+        noteResolvedPolicy(ticket);
+        return ticket;
+      },
+      [api, workspaceId, noteResolvedPolicy],
     ),
     onEvent: useCallback(
       (ev: WatchEvent) => {
@@ -869,7 +890,7 @@ export function SessionPage({
         <LifecycleNotice workspace={workspace} template={template} live={isLive(state.status)} />
         <div className="tc-session__controls" role="group" aria-label={t("session.toolbar.controls")}>
           <span className="tc-session__printhint">{t("session.toolbar.printHint")}</span>
-          <ClipboardHint template={template} />
+          <ClipboardHint policy={resolvedClipboard ?? template?.clipboardPolicy} />
           <Button
             size="sm"
             variant="ghost"
@@ -909,7 +930,7 @@ export function SessionPage({
           className="tc-session__frame"
           sandbox={SESSION_FRAME_SANDBOX}
           allow={sessionFrameAllow(workspaceId, sessionDomain, {
-            clipboardPolicy: template?.clipboardPolicy,
+            clipboardPolicy: resolvedClipboard ?? template?.clipboardPolicy,
           })}
           aria-describedby="tc-session-keyboard-hint"
           inert={!connected}
@@ -1316,8 +1337,8 @@ function LifecycleNotice({
   );
 }
 
-function ClipboardHint({ template }: { template: TemplateView | null }) {
-  const disabled = template?.clipboardPolicy === "Disabled";
+function ClipboardHint({ policy }: { policy: ClipboardPolicy | undefined }) {
+  const disabled = policy === "Disabled";
   return (
     <details className="tc-session__clipboard">
       <summary className={buttonClass("ghost", "sm")}>

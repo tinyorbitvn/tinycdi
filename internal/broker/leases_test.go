@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // leaseFor issues and redeems a ticket, returning the live lease.
 func leaseFor(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool) broker.Lease {
 	t.Helper()
-	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "", "")
+	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, provisioning.SessionPolicy{}, "")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestLease_StaleRuntimeUID(t *testing.T) {
 		t.Fatalf("renew with stale runtimeUID = %v, want ErrStaleBinding", err)
 	}
 	// A new ticket binds the NEW incarnation and reconnects cleanly.
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, "", "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, provisioning.SessionPolicy{}, "")
 	if err != nil {
 		t.Fatalf("IssueTicket for reconnect: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestResolveTarget_RequiresLeaseAndGateway(t *testing.T) {
 func leaseForSess(t *testing.T, db *store.DB, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool, portalSession string) broker.Lease {
 	t.Helper()
 	seedPortalSession(t, db, portalSession)
-	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, "", portalSession)
+	tk, err := b.IssueTicket(ctx, alice, wsUID, takeover, provisioning.SessionPolicy{}, portalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}

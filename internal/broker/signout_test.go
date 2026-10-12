@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -99,7 +100,7 @@ func TestRevokePortalSession_RevokesOutstandingTickets(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedPortalSession(t, db, "sess-1")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestRedeemTicket_DeadPortalSessionDenied(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedPortalSession(t, db, "sess-1")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestRevokePortalSession_LiveSessionSurvivesRevoke(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedPortalSession(t, db, "sess-2")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-2")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-2")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestRevokePortalSession_RedeemCommitThenRevoke(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedPortalSession(t, db, "sess-1")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -336,7 +337,7 @@ func TestRevokePortalSession_RevokeCommitThenRedeem(t *testing.T) {
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	seedPortalSession(t, db, "sess-1")
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, "", "sess-1")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "sess-1")
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
