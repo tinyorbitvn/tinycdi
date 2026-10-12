@@ -199,6 +199,53 @@ func TestParseFlags_RateLimitReplicas(t *testing.T) {
 	}
 }
 
+// TestParseFlags_TenantAdminGroups: the admin-group set defaults to exactly
+// ["tenant-admin"] (zero behaviour change on upgrade), honors CSV/repeated
+// flags and TCDI_TENANT_ADMIN_GROUPS with the flag winning, and refuses an
+// explicitly empty list — there is no "nobody is admin" mode.
+func TestParseFlags_TenantAdminGroups(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !reflect.DeepEqual([]string(cfg.TenantAdminGroups), []string{api.TenantAdminGroup}) {
+		t.Fatalf("default TenantAdminGroups = %v, want [%s]", cfg.TenantAdminGroups, api.TenantAdminGroup)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-tenant-admin-groups", "platform-admins, sec-ops"), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !reflect.DeepEqual([]string(cfg.TenantAdminGroups), []string{"platform-admins", "sec-ops"}) {
+		t.Fatalf("flag TenantAdminGroups = %v, want [platform-admins sec-ops]", cfg.TenantAdminGroups)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_TENANT_ADMIN_GROUPS": "platform-admins"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !reflect.DeepEqual([]string(cfg.TenantAdminGroups), []string{"platform-admins"}) {
+		t.Fatalf("env TenantAdminGroups = %v, want [platform-admins]", cfg.TenantAdminGroups)
+	}
+	// The flag wins over the env.
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-tenant-admin-groups", "ops"),
+		envMap(map[string]string{"TCDI_TENANT_ADMIN_GROUPS": "platform-admins"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !reflect.DeepEqual([]string(cfg.TenantAdminGroups), []string{"ops"}) {
+		t.Fatalf("flag-over-env TenantAdminGroups = %v, want [ops]", cfg.TenantAdminGroups)
+	}
+	// An explicitly empty list is a startup error — never a silent
+	// "nobody is admin" (nor "everybody is admin").
+	for _, bad := range []string{"", " , ", "a,,b"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-tenant-admin-groups", bad), noEnv); err == nil {
+			t.Fatalf("-tenant-admin-groups %q must fail", bad)
+		}
+	}
+	if _, err := ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_TENANT_ADMIN_GROUPS": "a,,b"})); err == nil {
+		t.Fatal("TCDI_TENANT_ADMIN_GROUPS with an empty entry must fail")
+	}
+}
+
 // TestParseFlags_SessionStreamCap (V11): the per-workspace upstream bound
 // defaults to 32, honors TCDI_SESSION_STREAM_CAP with the flag winning,
 // and rejects < 1 — there is no unlimited mode (set a large value).

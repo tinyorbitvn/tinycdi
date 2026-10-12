@@ -406,7 +406,7 @@ Install-time invariants. Rendering FAILS when violated:
         chart-managed metrics listener and the split/test-mode broker
         client flags). */ -}}
 {{- include "tinycdi.denyExtraArgs" (dict "component" "operator" "args" .Values.operator.extraArgs "denied" (list "dev-allow-no-broker" "disable-builtin-egress-excepts" "metrics-bind-address" "metrics-secure" "metrics-cert-path" "metrics-cert-name" "metrics-cert-key")) -}}
-{{- include "tinycdi.denyExtraArgs" (dict "component" "backend" "args" .Values.backend.extraArgs "denied" (list "dev-insecure-db" "required-groups" "metrics-listen" "broker-url" "broker-ca" "mtls-cert" "mtls-key")) -}}
+{{- include "tinycdi.denyExtraArgs" (dict "component" "backend" "args" .Values.backend.extraArgs "denied" (list "dev-insecure-db" "required-groups" "tenant-admin-groups" "metrics-listen" "broker-url" "broker-ca" "mtls-cert" "mtls-key")) -}}
 {{- /* SR-3-F2: the same surfaces are reachable through <component>.extraEnv
         — the environment equivalents of the denied flags, plus the env
         names of security-relevant flags the chart already exposes as
@@ -427,6 +427,7 @@ Install-time invariants. Rendering FAILS when violated:
   "TCDI_OPERATOR_CN" "backend.operatorCN"
   "TCDI_WATCH_NAMESPACES" "managedNamespaces"
   "TCDI_REQUIRED_GROUPS" "oidc.requiredGroups"
+  "TCDI_TENANT_ADMIN_GROUPS" "oidc.tenantAdminGroups"
   "TCDI_CONTROL_TOKEN" "backend.controlToken.existingSecret"
   "TCDI_GW_CONTROL_TOKEN" "backend.controlToken.existingSecret"
   "TCDI_CONTROL_TOKEN_FILE" "backend.controlToken.existingSecret"

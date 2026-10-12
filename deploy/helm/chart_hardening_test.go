@@ -264,6 +264,7 @@ func TestHardeningDevGateBypasses(t *testing.T) {
 		{"operator metrics-secure flag", []string{"operator.extraArgs[0]=--metrics-secure=false"}},
 		{"backend dev-insecure-db flag", []string{"backend.extraArgs[0]=--dev-insecure-db"}},
 		{"backend required-groups override", []string{"backend.extraArgs[0]=--required-groups=other"}},
+		{"backend tenant-admin-groups override", []string{"backend.extraArgs[0]=--tenant-admin-groups=other"}},
 		{"backend metrics-listen bypass", []string{"backend.extraArgs[0]=--metrics-listen=:9090"}},
 		{"backend split-mode broker-url bypass", []string{"backend.extraArgs[0]=--broker-url=https://broker.example.net:9443"}},
 		{"capabilities.drop replaced", []string{"backend.securityContext.capabilities.drop[0]=NET_RAW"}},
@@ -407,5 +408,51 @@ func TestHardeningOIDCRequiredGroups(t *testing.T) {
 	out := renderErrArgs(t, "-f", vf, "--set", `oidc.requiredGroups[0]=a\,b`)
 	if !strings.Contains(out, "requiredGroups") && !strings.Contains(out, "pattern") {
 		t.Errorf("comma-containing requiredGroups entry must be rejected, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// oidc.tenantAdminGroups -> backend --tenant-admin-groups (tenant-admin role).
+// ---------------------------------------------------------------------------
+
+func TestHardeningTenantAdminGroups(t *testing.T) {
+	vf := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
+	// The default set is exactly ["tenant-admin"] and the flag always
+	// renders — the configured admin groups stay visible in the manifest.
+	dep := deployment(render(t, "minimal-values.yaml"), "backend")
+	found := false
+	for _, a := range firstContainerArgs(dep) {
+		if a == "--tenant-admin-groups=tenant-admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("default render missing --tenant-admin-groups=tenant-admin\nargs:\n%s",
+			strings.Join(firstContainerArgs(dep), "\n"))
+	}
+	// A custom list renders one CSV flag.
+	docs := renderArgs(t, "-f", vf,
+		"--set", "oidc.tenantAdminGroups[0]=platform-admins",
+		"--set", "oidc.tenantAdminGroups[1]=sec-ops")
+	args := firstContainerArgs(deployment(docs, "backend"))
+	found = false
+	for _, a := range args {
+		if a == "--tenant-admin-groups=platform-admins,sec-ops" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("backend args missing --tenant-admin-groups=platform-admins,sec-ops\nargs:\n%s", strings.Join(args, "\n"))
+	}
+	// An empty list would silently leave nobody admin — the schema refuses
+	// it (the flag itself also fails startup on an empty entry).
+	out := renderErrArgs(t, "-f", vf, "--set-json", `oidc.tenantAdminGroups=[]`)
+	if !strings.Contains(out, "tenantAdminGroups") && !strings.Contains(out, "minItems") {
+		t.Errorf("empty tenantAdminGroups must be rejected, got: %s", out)
+	}
+	// A comma inside a group name would break the CSV — schema rejects it.
+	out = renderErrArgs(t, "-f", vf, "--set", `oidc.tenantAdminGroups[0]=a\,b`)
+	if !strings.Contains(out, "tenantAdminGroups") && !strings.Contains(out, "pattern") {
+		t.Errorf("comma-containing tenantAdminGroups entry must be rejected, got: %s", out)
 	}
 }

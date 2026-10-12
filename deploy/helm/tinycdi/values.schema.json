@@ -111,6 +111,7 @@
         "existingSecret": {"type": "string", "minLength": 1},
         "clientSecretKey": {"type": "string", "minLength": 1},
         "requiredGroups": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}},
+        "tenantAdminGroups": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}},
         "endSession": {"type": "boolean"},
         "postLogoutRedirect": {"type": "string", "pattern": "^(https://\\S+)?$"},
         "egressCIDRs": {"type": "array", "items": {"type": "string", "pattern": "^[^,\\s]+$"}},

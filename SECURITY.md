@@ -551,7 +551,14 @@ v0.2)
    - `tenant_id` comes from an admin-controlled mapper (a hard-coded
      claim or a group mapping), **never** from a user-editable attribute;
    - the `groups` claim is emitted without full paths, so `tenant-admin`
-     matches;
+     (or your configured `oidc.tenantAdminGroups` names) matches;
+   - **grant tenant administration deliberately** with
+     `oidc.tenantAdminGroups` (default `["tenant-admin"]`): every member
+     of a listed group gets tenant-wide read, workspace stop/start,
+     retained-disk attach/purge and quota/per-user limit admin —
+     misconfiguration is a privilege grant, so keep the list small and
+     review the IdP group membership; the match is the same exact,
+     no-full-path form as the login gate and the list must not be empty;
    - **gate who may log in** with `oidc.requiredGroups` (e.g.
      `[platform-admins]`). Every account that passes gets a desktop with
      Internet egress inside your network. The match is verbatim, so emit

@@ -63,9 +63,10 @@ func (h *MeHandler) Get(w http.ResponseWriter, r *http.Request) {
 		displayName = p.Subject
 	}
 	// Every authenticated principal carries the "user" role;
-	// tenant-admin is added from the verified group claim.
+	// tenant-admin is added from the resolved role (the configured admin
+	// groups — the role NAME is API-stable and stays "tenant-admin").
 	roles := []string{"user"}
-	if p.InGroup(TenantAdminGroup) {
+	if p.IsTenantAdmin() {
 		roles = append(roles, TenantAdminGroup)
 	}
 	w.Header().Set("Cache-Control", "no-store")

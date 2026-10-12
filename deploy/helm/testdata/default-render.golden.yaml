@@ -1688,6 +1688,9 @@ spec:
             # graceful 1001 stream close -> drain-window hold (FX-R34).
             - -drain-propagation-delay=5s
             - -drain-window=8s
+            # Tenant-admin role group(s) — the rendered flag keeps the
+            # configured set visible in the manifest.
+            - --tenant-admin-groups=tenant-admin
             # Sign-out also ends the IdP session (RP-initiated logout).
             - --oidc-end-session=true
             # AEAD keys sealing the __Host-tcdi_login cookie (D20): the

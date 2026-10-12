@@ -114,14 +114,20 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			}
 			return
 		}
+		// Resolve the tenant-admin role once per request against the
+		// configured admin groups: handlers consult Principal.IsTenantAdmin
+		// and never name a group themselves. The session object is left
+		// untouched — the flag lives on the context copy only.
+		p := sess.Principal
+		p.tenantAdmin = a.isTenantAdmin(p)
 		// Fill the outer audit collector (set by AuditWithSink) — context
 		// values flow downward only, so the verified principal reaches the
 		// request-audit event through this shared pointer.
 		if col, ok := r.Context().Value(ctxKeyAuditCollector).(*auditCollector); ok {
-			col.principal = sess.Principal
+			col.principal = p
 			col.hasPrincipal = true
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, sess.Principal)
+		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, p)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

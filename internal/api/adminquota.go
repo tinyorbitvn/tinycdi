@@ -236,7 +236,7 @@ func tenantAdminPrincipal(tenants TenantResolver, w http.ResponseWriter, r *http
 		return p, false
 	}
 	tenant := r.PathValue("tenant")
-	if !p.InGroup(TenantAdminGroup) || tenant != p.TenantID {
+	if !p.IsTenantAdmin() || tenant != p.TenantID {
 		writeError(w, r, CodeForbidden, "tenant administration requires the tenant-admin role")
 		return p, false
 	}

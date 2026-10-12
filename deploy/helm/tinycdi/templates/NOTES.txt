@@ -23,6 +23,13 @@ Managed namespaces:
   NONE — set managedNamespaces or the platform manages nothing.
 {{- end }}
 
+Tenant admin: IdP tokens carrying one of
+  {{ join ", " .Values.oidc.tenantAdminGroups }}
+  in their `groups` claim hold the tenant-admin role (exact match — a
+  Keycloak full path "/group" does not match "group"). Members get
+  tenant-wide read, stop/start/purge and quota/user-limit admin; review
+  the IdP group membership (oidc.tenantAdminGroups).
+
 {{- $unquoted := list }}
 {{- range .Values.managedNamespaces }}{{ if not .quota }}{{ $unquoted = append $unquoted .tenant }}{{ end }}{{ end }}
 {{- if $unquoted }}

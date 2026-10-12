@@ -181,6 +181,15 @@ oidc:
   # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
   # login open to every IdP account — tighten this in production.
   requiredGroups: []
+  # Tenant-admin role: ID-token `groups` claim values that grant tenant
+  # administration — exact match, same semantics as requiredGroups (a
+  # Keycloak full path "/x" does NOT match "x"). Rendered as
+  # --tenant-admin-groups=<csv>; must name at least one group.
+  # SECURITY: every member of a listed group gets tenant-wide read,
+  # stop/start/purge of any workspace or retained disk, and admin of the
+  # tenant's quota and per-user limits — keep this list small and review
+  # the corresponding IdP group membership.
+  tenantAdminGroups: ["tenant-admin"]
   # Sign-out also ends the identity provider session (RP-initiated logout)
   # when the provider's discovery document has end_session_endpoint. Without
   # it the provider session survives and the next visit signs the user

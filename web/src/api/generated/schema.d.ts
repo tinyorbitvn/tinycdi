@@ -1192,7 +1192,7 @@ export interface components {
             email?: string;
             /** @description Tenant the principal belongs to. */
             tenant: string;
-            /** @description `user` for every authenticated principal; `tenant-admin` when the principal carries the tenant-admin group. */
+            /** @description `user` for every authenticated principal; `tenant-admin` when the principal carries one of the deployment's configured tenant-admin groups (`--tenant-admin-groups`, default `tenant-admin`). */
             roles: ("user" | "tenant-admin")[];
             /**
              * @description Session-bound CSRF token — echo it in the `X-CSRF-Token` header on
@@ -1332,9 +1332,15 @@ export interface components {
             };
             dataPolicyDefault: components["schemas"]["DataPolicy"];
             /**
-             * @description Server-side enforced per template. `Send` allows client to
-             *     workspace only, `Receive` workspace to client only, `Bidirectional`
-             *     both directions.
+             * @description Clipboard redirection between the user's device and the
+             *     workspace, named from the user's point of view and enforced
+             *     server-side by the session server — this description is the
+             *     single normative definition of the direction semantics
+             *     (KasmVNC DLP keys in parentheses): `Disabled` allows neither
+             *     direction; `Send` allows client to workspace only
+             *     (`client_to_server`); `Receive` allows workspace to client
+             *     only (`server_to_client`, primary selection included);
+             *     `Bidirectional` allows both directions.
              * @enum {string}
              */
             clipboardPolicy: "Disabled" | "Send" | "Receive" | "Bidirectional";

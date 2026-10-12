@@ -96,17 +96,22 @@ func rateLimitsUntrusted(c Config) bool {
 // Config is the parsed flag set for the merged backend.
 type Config struct {
 	// App listener (the public REST API surface).
-	Listen               string // empty disables the app listener
-	TLSCert              string // optional; empty serves plain HTTP
-	TLSKey               string
-	DatabaseURL          string
-	OIDCIssuer           string
-	OIDCClientID         string
-	OIDCClientSecret     string // env only — never a flag value
-	OIDCRedirectURL      string
-	OIDCEndSession       bool   // RP-initiated logout via the discovered end_session_endpoint
-	OIDCPostLogoutURL    string // post_logout_redirect_uri; empty omits it
-	RequiredGroups       groupList
+	Listen            string // empty disables the app listener
+	TLSCert           string // optional; empty serves plain HTTP
+	TLSKey            string
+	DatabaseURL       string
+	OIDCIssuer        string
+	OIDCClientID      string
+	OIDCClientSecret  string // env only — never a flag value
+	OIDCRedirectURL   string
+	OIDCEndSession    bool   // RP-initiated logout via the discovered end_session_endpoint
+	OIDCPostLogoutURL string // post_logout_redirect_uri; empty omits it
+	RequiredGroups    groupList
+	// TenantAdminGroups is the set of verified groups-claim values that
+	// grant the tenant-admin role (default "tenant-admin"). It must name
+	// at least one group — an empty list is a startup error, never a
+	// silent "nobody is admin".
+	TenantAdminGroups    groupList
 	DevInsecureDB        bool
 	DBSSLMode            string // resolved sslmode label, for logging
 	TenantNamespaces     string
@@ -264,6 +269,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"post_logout_redirect_uri sent to the identity provider at sign-out; must be registered there (empty omits it)")
 	fs.Var(&c.RequiredGroups, "required-groups",
 		"login requires the ID-token groups claim to carry one of these groups (repeatable or CSV; env TCDI_REQUIRED_GROUPS; empty disables the gate)")
+	fs.Var(&c.TenantAdminGroups, "tenant-admin-groups",
+		"ID-token groups claim values that grant the tenant-admin role (repeatable or CSV; env TCDI_TENANT_ADMIN_GROUPS; default \""+api.TenantAdminGroup+"\"; exact match — a Keycloak full path \"/x\" does not match \"x\"; must name at least one group)")
 	fs.BoolVar(&c.DevInsecureDB, "dev-insecure-db", envOr(getenv, "TCDI_DEV_INSECURE_DB", "") == "true",
 		"allow non-verifying PostgreSQL sslmode (disable/allow/prefer/require); local development only")
 	fs.StringVar(&c.TenantNamespaces, "tenant-namespaces", envOr(getenv, "TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
@@ -369,6 +376,14 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 			}
 		}
 	}
+	if !set["tenant-admin-groups"] {
+		// envOr's empty-string "unset" keeps the upgrade path at the
+		// "tenant-admin" default; a set-but-empty env is indistinguishable
+		// from unset through the getenv seam, exactly like required-groups.
+		if err := c.TenantAdminGroups.Set(envOr(getenv, "TCDI_TENANT_ADMIN_GROUPS", api.TenantAdminGroup)); err != nil {
+			return c, fmt.Errorf("TCDI_TENANT_ADMIN_GROUPS: %w", err)
+		}
+	}
 	if !set["login-key-file"] {
 		// TCDI_LOGIN_KEY_FILES is a legacy plural still read for compatibility.
 		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
@@ -394,6 +409,12 @@ func (c *Config) validate() error {
 	}
 	if _, err := provisioning.ParseTenantQuotas(c.TenantQuotas); err != nil {
 		return fmt.Errorf("-tenant-quotas: %w", err)
+	}
+	if len(c.TenantAdminGroups) == 0 {
+		// Unreachable through ParseFlags (the default lands first and
+		// groupList rejects empty entries) — kept so a future path can
+		// never silence every admin gate at once.
+		return errors.New("-tenant-admin-groups must name at least one group")
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)

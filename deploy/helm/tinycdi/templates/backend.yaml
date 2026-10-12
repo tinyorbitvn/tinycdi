@@ -152,6 +152,9 @@ spec:
             {{- if .Values.oidc.requiredGroups }}
             - --required-groups={{ join "," .Values.oidc.requiredGroups }}
             {{- end }}
+            # Tenant-admin role group(s) — the rendered flag keeps the
+            # configured set visible in the manifest.
+            - --tenant-admin-groups={{ join "," .Values.oidc.tenantAdminGroups }}
             # Sign-out also ends the IdP session (RP-initiated logout).
             - --oidc-end-session={{ ne (toString .Values.oidc.endSession) "false" }}
             {{- if .Values.oidc.postLogoutRedirect }}
