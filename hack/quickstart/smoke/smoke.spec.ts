@@ -231,6 +231,17 @@ async function waitPhase(page: Page, id: string, phase: string, timeoutMs = 5 * 
     .toBe(phase);
 }
 
+// Stops the workspace through the portal UI — a stopped workspace frees
+// its running-quota slot once the backend's recovery pass proves the
+// runtime gone (the next create retries through release_pending).
+async function stopWorkspace(page: Page, workspaceId: string) {
+  await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await expect(stop).toBeVisible();
+  await stop.click();
+  await waitPhase(page, workspaceId, "Stopped");
+}
+
 // Connects to the workspace and returns the KasmVNC session frame once the
 // display canvas is up (same wait chain as the session smoke test).
 async function connectSessionFrame(page: Page, workspaceId: string): Promise<Frame> {
@@ -603,10 +614,9 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
   }
 
-  // Free the running slot for the Bidirectional workspace.
-  await page.goto(`/workspaces/${encodeURIComponent(offId!)}`);
-  await page.getByRole("button", { name: "Stop", exact: true }).click();
-  await waitPhase(page, offId!, "Stopped");
+  // Free the running slot for the Bidirectional workspace — a
+  // predecessor smoke workspace is stopped, per review.
+  await stopWorkspace(page, offId!);
 
   // --- Bidirectional: both directions through the real client ----------
   const bidiId = await createWorkspaceOnTemplate(
@@ -619,26 +629,36 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     .poll(() => podPolicy(bidiId), { timeout: 120_000 })
     .toBe("Bidirectional");
 
+  try {
+    if (capable) {
+      const bidiFrame = await connectSessionFrame(page, bidiId);
+      const bidiClip = podClipboard(bidiId);
+
+      // workspace -> client: a cut inside the pod reaches the client's
+      // clipboard textarea (the client's own mirror of the remote
+      // clipboard).
+      const s2c = `s2c-${stamp}`;
+      bidiClip.set(s2c);
+      await expect
+        .poll(() => bidiFrame.locator("#noVNC_clipboard_text").inputValue(), {
+          timeout: 30_000,
+        })
+        .toBe(s2c);
+
+      // client -> workspace: pasting into the client's clipboard panel
+      // lands on the workspace CLIPBOARD selection.
+      const c2s = `c2s-${stamp}`;
+      await sendClipboard(bidiFrame, c2s);
+      await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
+    }
+  } finally {
+    // Leave no running workspace of ours behind either way.
+    await stopWorkspace(page, bidiId);
+  }
+
   test.skip(
     !capable,
     "runtime image predates the entrypoint clipboard render — pod env asserted; " +
       "browser round-trip gated on the post-change runtime train",
   );
-
-  const bidiFrame = await connectSessionFrame(page, bidiId);
-  const bidiClip = podClipboard(bidiId);
-
-  // workspace -> client: a cut inside the pod reaches the client's
-  // clipboard textarea (the client's own mirror of the remote clipboard).
-  const s2c = `s2c-${stamp}`;
-  bidiClip.set(s2c);
-  await expect
-    .poll(() => bidiFrame.locator("#noVNC_clipboard_text").inputValue(), { timeout: 30_000 })
-    .toBe(s2c);
-
-  // client -> workspace: pasting into the client's clipboard panel lands
-  // on the workspace CLIPBOARD selection.
-  const c2s = `c2s-${stamp}`;
-  await sendClipboard(bidiFrame, c2s);
-  await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
 });
