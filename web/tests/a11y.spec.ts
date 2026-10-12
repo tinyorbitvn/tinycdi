@@ -28,6 +28,8 @@ const ROUTES = [
   "/admin/templates",
   "/admin/workspaces",
   "/admin/data",
+  "/admin/users",
+  "/admin/users/user-01J4ZDGRC",
   "/data",
 ] as const;
 
@@ -100,7 +102,7 @@ for (const theme of THEMES) {
 // E11: the same axe gate runs for the Vietnamese UI on the two busiest
 // routes. navigator.language=vi-VN is the detection path — no stored
 // preference is set, so the portal picks it up on its own.
-const VI_ROUTES = ["/workspaces", "/admin", "/admin/data"] as const;
+const VI_ROUTES = ["/workspaces", "/admin", "/admin/data", "/admin/users"] as const;
 
 test.describe("locale: vi", () => {
   test.use({ locale: "vi-VN" });

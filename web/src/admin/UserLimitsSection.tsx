@@ -13,7 +13,7 @@ import { ApiErrorAlert } from "./ApiErrorAlert";
 import { useLoader } from "../app/me";
 
 // Editing target: the tenant default, or one principal's override.
-type EditTarget = "default" | AdminUserLimitEntry;
+export type UserLimitEditTarget = "default" | AdminUserLimitEntry;
 
 // A blank field means "clear": no override (the tenant default applies) or
 // no default (unlimited). Any other value must be a whole number >= 0.
@@ -25,14 +25,16 @@ function parseLimit(s: string): number | null | "invalid" {
   return n;
 }
 
-function LimitDialog({
+// Exported so the admin Users page edits a principal's limit through the
+// same dialog — one form, one parse rule, one PUT.
+export function LimitDialog({
   tenant,
   target,
   onClose,
   onSaved,
 }: {
   tenant: string;
-  target: EditTarget;
+  target: UserLimitEditTarget;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -129,7 +131,7 @@ function LimitDialog({
 // a failure here never hides the tenant meters.
 export function UserLimitsSection({ tenant }: { tenant: string }) {
   const q = useLoader((api) => fetchAdminUserLimits(api, tenant), "admin-user-limits");
-  const [editing, setEditing] = useState<EditTarget | null>(null);
+  const [editing, setEditing] = useState<UserLimitEditTarget | null>(null);
 
   const columns: Column<AdminUserLimitEntry>[] = [
     {

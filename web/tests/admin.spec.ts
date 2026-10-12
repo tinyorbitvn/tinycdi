@@ -32,7 +32,7 @@ test.beforeEach(async ({ request }) => {
   expect(res.ok()).toBeTruthy();
 });
 
-test("a tenant admin sees all five admin pages", async ({ page, request }) => {
+test("a tenant admin sees all six admin pages", async ({ page, request }) => {
   await makeAdmin(request);
 
   await login(page, "/admin");
@@ -45,6 +45,7 @@ test("a tenant admin sees all five admin pages", async ({ page, request }) => {
   await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Templates" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Data" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Users" })).toBeVisible();
 
   // The route owns the selection: Overview is the selected tab on /admin.
   await expect(adminNav.getByRole("tab", { name: "Overview" })).toHaveAttribute(
@@ -80,6 +81,14 @@ test("a tenant admin sees all five admin pages", async ({ page, request }) => {
     "aria-selected",
     "true",
   );
+
+  await adminNav.getByRole("tab", { name: "Users" }).click();
+  await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
+  await expect(page.getByRole("table", { name: "Tenant users" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Users" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });
 
 test("a regular user is redirected away from /admin", async ({ page }) => {
@@ -97,6 +106,77 @@ test("a regular user is redirected away from /admin/data", async ({ page }) => {
   // The tenant-scope read is refused server-side as well (contract 403).
   const res = await page.request.get("/v1/data?scope=tenant");
   expect(res.status()).toBe(403);
+});
+
+test("a regular user is redirected away from /admin/users and tenant reads stay 403", async ({
+  page,
+}) => {
+  await login(page);
+  await page.goto("/admin/users");
+  await page.waitForURL(/\/workspaces\/?$/);
+  // Every read behind the Users page is refused server-side for non-admins.
+  const limits = await page.request.get("/v1/admin/tenants/acme/user-limits");
+  expect(limits.status()).toBe(403);
+  const quota = await page.request.get("/v1/admin/tenants/acme/quota");
+  expect(quota.status()).toBe(403);
+  const ws = await page.request.get("/v1/workspaces?scope=tenant");
+  expect(ws.status()).toBe(403);
+});
+
+test("a tenant admin opens a user's detail and edits their running limit", async ({
+  page,
+  request,
+}) => {
+  await makeAdmin(request);
+  await login(page, "/admin/users");
+  await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
+
+  // The union table lists every principal the tenant knows.
+  const table = page.getByRole("table", { name: "Tenant users" });
+  await expect(table.getByRole("row", { name: /Grace Hopper/ })).toBeVisible();
+  await expect(table.getByRole("row", { name: /Linus Pauling/ })).toBeVisible();
+
+  // Search narrows the list.
+  await page.getByLabel("Filter").fill("grace");
+  await expect(table.getByRole("row", { name: /Linus Pauling/ })).toHaveCount(0);
+  await page.getByLabel("Filter").fill("");
+
+  // Row -> user detail page.
+  await table.getByRole("link", { name: "Grace Hopper" }).click();
+  await page.waitForURL(/\/admin\/users\/user-01J4ZDGRC$/);
+  await expect(page.getByRole("heading", { name: "Grace Hopper" })).toBeVisible();
+
+  // Her workspaces and retained disk — and nobody else's.
+  const wsTable = page.getByRole("table", { name: "The user's workspaces" });
+  await expect(wsTable.getByRole("link", { name: "grace-analysis" })).toBeVisible();
+  await expect(wsTable.getByText("grace-browser")).toBeVisible();
+  await expect(wsTable.getByText("linus-desktop")).toHaveCount(0);
+  const diskTable = page.getByRole("table", { name: "The user's retained disks" });
+  await expect(diskTable.getByRole("link", { name: GRACE_DISK })).toBeVisible();
+
+  // The limit editor is the shared dialog from the quota page.
+  await page.getByRole("button", { name: "Set limit" }).click();
+  const dialog = page.getByRole("dialog", { name: "Running limit — Grace Hopper" });
+  await dialog.getByLabel("Running workspaces").fill("3");
+  await dialog.getByRole("button", { name: "Save limit" }).click();
+
+  const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
+  expect(
+    reqs.requests.some(
+      (r: { method: string; path: string; rawBody: string }) =>
+        r.method === "PUT" &&
+        r.path === "/v1/admin/tenants/acme/user-limits" &&
+        JSON.parse(r.rawBody).limit === 3,
+    ),
+  ).toBeTruthy();
+
+  // Back on the list, Grace's row reflects the override (effective = 3).
+  // Cell order: running, cpu, memory, storage, override, effective, disks.
+  await page.goto("/admin/users");
+  const graceRow = page.getByRole("table", { name: "Tenant users" }).getByRole("row", {
+    name: /Grace Hopper/,
+  });
+  await expect(graceRow.getByRole("cell").nth(5)).toHaveText("3");
 });
 
 test("a tenant admin starts another user's stopped workspace", async ({ page, request }) => {
