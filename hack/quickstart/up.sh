@@ -12,7 +12,8 @@
 #
 # Environment: TCDI_QS_CLUSTER, TCDI_QS_DOMAIN, TCDI_QS_IMAGES (build|published),
 # TCDI_QS_IMAGE_TAG, TCDI_QS_STATE_DIR, TCDI_QS_CHART, TCDI_QS_CHART_VERSION,
-# TCDI_QS_VALUES, TCDI_QS_{BROWSER,DESKTOP}_{DIGEST,BUILT_AT} - see common.sh.
+# TCDI_QS_VALUES, TCDI_QS_{BROWSER,DESKTOP}_{DIGEST,BUILT_AT},
+# TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT - see common.sh.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=common.sh
@@ -319,6 +320,12 @@ fi
 # so the first workspace starts quickly (a slow pull is only a warning).
 for pid in "${PREFETCH_PIDS[@]}"; do wait "$pid" || true; done
 
+# TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT records an install-time opt-out of the
+# smoke's mandatory clipboard round-trip: set only when this install pinned
+# a runtime train older than the entrypoint DLP render (upgrade-test.sh
+# does for the previous release). Empty on the default pins — the smoke
+# then runs the round-trip unconditionally and fails loudly on a runtime
+# image without the render.
 cat >"$STATE_DIR/env" <<ENVEOF
 TCDI_QS_PORTAL_URL=https://${PORTAL_HOST}
 TCDI_QS_SESSION_DOMAIN=${SESSION_DOMAIN}
@@ -326,6 +333,7 @@ TCDI_QS_USER=${DEMO_USER}
 TCDI_QS_NOQUOTA_USER=${NOQUOTA_USER}
 TCDI_QS_CA_FILE=${T}/local-ca.crt
 KUBECONFIG=${KUBECONFIG}
+TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=${TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT:-}
 ENVEOF
 
 cat <<MSG

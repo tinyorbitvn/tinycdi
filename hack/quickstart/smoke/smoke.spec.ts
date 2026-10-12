@@ -511,12 +511,20 @@ function podEnv(workspaceId: string): Record<string, string> {
   return Object.fromEntries(env.map((e) => [e.name, e.value ?? ""]));
 }
 
-// True when the pod's runtime image carries the entrypoint DLP render.
-// The quickstart pins the PUBLISHED runtime train (common.sh digests or
-// TCDI_QS_*_DIGEST): an image built before this change has no
-// tcdi_clipboard_dlp in its entrypoint; one built after does. The
-// browser round-trip below capability-gates on this — the pod-env
-// assertion above it runs on every image.
+// The one allowed skip of the browser round-trip below: an explicit,
+// named opt-out. hack/quickstart/upgrade-test.sh sets it when it installs
+// a PREVIOUS release — that release's pinned runtime train predates the
+// entrypoint DLP render, so the round-trip cannot run there (up.sh writes
+// it into the install's env file). On the default runtime pins
+// (runtime-2026.10.12, hack/quickstart/common.sh) the round-trip is
+// MANDATORY — a runtime image without the render fails the check below
+// loudly instead of skipping silently.
+const ROUNDTRIP_OPTOUT = process.env.TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT ?? "";
+
+// True when the pod's runtime image carries the entrypoint DLP render:
+// an image built before the operator->entrypoint wiring has no
+// tcdi_clipboard_dlp in its entrypoint; one built after does. Used only
+// for the failure message — the round-trip no longer gates on it.
 function runtimeRendersClipboard(workspaceId: string): boolean {
   try {
     inHome(workspaceId, "grep -q tcdi_clipboard_dlp /opt/tcdi/entrypoint.sh");
@@ -566,6 +574,15 @@ function podPolicy(workspaceId: string): string | null {
 // KasmVNC client and the workspace X clipboard; the seeded Disabled
 // template lets neither direction through.
 test("clipboard follows the template policy (Bidirectional works, Disabled is blocked)", async ({ page }) => {
+  // The only allowed skip — the explicit, named opt-out (see
+  // ROUNDTRIP_OPTOUT). On the default runtime pins it never fires: the
+  // round-trip below is MANDATORY and a runtime image without the
+  // entrypoint render fails loudly instead of skipping.
+  test.skip(
+    ROUNDTRIP_OPTOUT !== "",
+    `clipboard round-trip opted out: ${ROUNDTRIP_OPTOUT}`,
+  );
+
   const stamp = Date.now().toString(36);
 
   // A dedicated Bidirectional template — the seeded catalog is all
@@ -579,10 +596,8 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
   // running — no free slot. Every seeded template is Disabled, so a
   // leftover covers the Disabled check; stopping it afterwards frees
   // the slot the Bidirectional workspace needs. The pod-env assertions
-  // are the operator half and run on ANY runtime image; the browser
-  // round-trip additionally needs the runtime image's entrypoint render
-  // (the published quickstart train predates it — it activates on the
-  // post-change pins or an explicit TCDI_QS_BROWSER_DIGEST override).
+  // are the operator half; the browser round-trip is the server half
+  // and runs unconditionally on the pinned runtime train.
 
   // --- Disabled (a leftover seeded-template workspace) -----------------
   const offId = runningWorkspaceWithPolicy("Disabled");
@@ -592,8 +607,21 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
       "(the earlier smokes leave one on the seeded browser template)",
   ).toBeTruthy();
 
+  // Gate kept only for the message: a missing render is a FAILURE on the
+  // pinned train (runtime-2026.10.12 carries it), never a skip — the skip
+  // path is the named opt-out above and nothing else.
   const capable = runtimeRendersClipboard(offId!);
-  if (capable) {
+  expect(
+    capable,
+    "the running workspace's runtime image lacks the entrypoint clipboard " +
+      "render (no tcdi_clipboard_dlp in /opt/tcdi/entrypoint.sh) — the " +
+      "default quickstart train runtime-2026.10.12 carries it. On an " +
+      "intentionally older runtime (e.g. the previous-release install in " +
+      "upgrade-test.sh) the only allowed skip is the named opt-out " +
+      "TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=<reason>.",
+  ).toBe(true);
+
+  {
     const offFrame = await connectSessionFrame(page, offId!);
     const offClip = podClipboard(offId!);
 
@@ -612,6 +640,7 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     await sendClipboard(offFrame, c2sOff);
     await page.waitForTimeout(10_000);
     expect(offClip.get(), "Disabled: client cut must not reach the workspace").toBe(s2cOff);
+    console.log(`clipboard Disabled negative ok: ${s2cOff} stayed server-side, ${c2sOff} stayed client-side`);
   }
 
   // Free the running slot for the Bidirectional workspace — a
@@ -630,35 +659,29 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     .toBe("Bidirectional");
 
   try {
-    if (capable) {
-      const bidiFrame = await connectSessionFrame(page, bidiId);
-      const bidiClip = podClipboard(bidiId);
+    const bidiFrame = await connectSessionFrame(page, bidiId);
+    const bidiClip = podClipboard(bidiId);
 
-      // workspace -> client: a cut inside the pod reaches the client's
-      // clipboard textarea (the client's own mirror of the remote
-      // clipboard).
-      const s2c = `s2c-${stamp}`;
-      bidiClip.set(s2c);
-      await expect
-        .poll(() => bidiFrame.locator("#noVNC_clipboard_text").inputValue(), {
-          timeout: 30_000,
-        })
-        .toBe(s2c);
+    // workspace -> client: a cut inside the pod reaches the client's
+    // clipboard textarea (the client's own mirror of the remote
+    // clipboard).
+    const s2c = `s2c-${stamp}`;
+    bidiClip.set(s2c);
+    await expect
+      .poll(() => bidiFrame.locator("#noVNC_clipboard_text").inputValue(), {
+        timeout: 30_000,
+      })
+      .toBe(s2c);
+    console.log(`clipboard workspace->client round-trip ok: ${s2c}`);
 
-      // client -> workspace: pasting into the client's clipboard panel
-      // lands on the workspace CLIPBOARD selection.
-      const c2s = `c2s-${stamp}`;
-      await sendClipboard(bidiFrame, c2s);
-      await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
-    }
+    // client -> workspace: pasting into the client's clipboard panel
+    // lands on the workspace CLIPBOARD selection.
+    const c2s = `c2s-${stamp}`;
+    await sendClipboard(bidiFrame, c2s);
+    await expect.poll(() => bidiClip.get(), { timeout: 30_000 }).toBe(c2s);
+    console.log(`clipboard client->workspace round-trip ok: ${c2s}`);
   } finally {
     // Leave no running workspace of ours behind either way.
     await stopWorkspace(page, bidiId);
   }
-
-  test.skip(
-    !capable,
-    "runtime image predates the entrypoint clipboard render — pod env asserted; " +
-      "browser round-trip gated on the post-change runtime train",
-  );
 });

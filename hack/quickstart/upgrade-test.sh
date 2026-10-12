@@ -330,6 +330,11 @@ trap 'kill "$BUILD_PID" 2>/dev/null || true' EXIT
 # The TCDI_QS_* overrides are scoped to the up.sh call only — exported, they
 # would leak into the spec's environment and the --apply leg would pin the
 # old release's runtime digests in the upgrade values instead of this tree's.
+# TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT is the smoke's named opt-out for this
+# exact case: the previous release's runtime train predates the entrypoint
+# clipboard render, so the round-trip cannot run on it. up.sh writes it
+# into the env file, so a smoke run against this install skips explicitly
+# instead of failing on the missing render.
 TCDI_QS_IMAGES=published \
 TCDI_QS_CHART="$CHART_TGZ" \
 TCDI_QS_VALUES="$QS_DIR/values-v0.3.yaml" \
@@ -337,6 +342,7 @@ TCDI_QS_BROWSER_DIGEST="$RT_BROWSER_DIGEST" \
 TCDI_QS_DESKTOP_DIGEST="$RT_DESKTOP_DIGEST" \
 TCDI_QS_BROWSER_BUILT_AT="" \
 TCDI_QS_DESKTOP_BUILT_AT="" \
+TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT="${UPGRADE_TAG} runtime train predates the entrypoint clipboard render" \
 "$QS_DIR/up.sh"
 
 # ---- 3b. seeding gate: the stack must be routable, not just Ready -----------
