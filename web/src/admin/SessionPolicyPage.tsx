@@ -14,11 +14,13 @@ import {
   type Tagged,
   type AdminTemplateView,
   type ClipboardCeiling,
+  type FileTransferCeiling,
 } from "./api";
 import { clipboardPolicyLabel } from "../templates/format";
 import { loadMe, useLoader } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
+import { ApplyPolicyDialog } from "./ApplyPolicyDialog";
 
 const CEILINGS: readonly ClipboardCeiling[] = [
   "FollowTemplate",
@@ -35,6 +37,19 @@ const CEILING_LABEL: Record<ClipboardCeiling, MessageKey> = {
   Receive: "templates.clipboard.receive",
   Bidirectional: "templates.clipboard.bidirectional",
 };
+
+const FT_LABEL: Record<FileTransferCeiling["mode"], MessageKey> = {
+  FollowTemplate: "admin.policy.option.followTemplate",
+  Disabled: "admin.policy.ft.option.disabled",
+  Upload: "admin.policy.ft.option.upload",
+  Download: "admin.policy.ft.option.download",
+  Bidirectional: "admin.policy.ft.option.bidirectional",
+};
+
+export function fileTransferLabel(policy: string): string {
+  const key = FT_LABEL[policy as FileTransferCeiling["mode"]];
+  return key ? t(key) : policy;
+}
 
 // meetClipboard resolves the direction lattice the backend enforces
 // (ADR 0010 §1): the effective policy is the meet of the template's own
@@ -91,6 +106,7 @@ export function SessionPolicyContent({
   const api = useApi();
   const { policy, templates } = data;
   const [ceiling, setCeiling] = useState<ClipboardCeiling>(policy.clipboard);
+  const [applyOpen, setApplyOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
   // The ETag the form's selection was read from — sent as If-Match so a
@@ -160,6 +176,7 @@ export function SessionPolicyContent({
     },
   ];
   const sort = useTableSort(columns, templates, { key: "template", direction: "ascending" });
+  const dirty = ceiling !== policy.clipboard;
 
   return (
     <>
@@ -191,11 +208,14 @@ export function SessionPolicyContent({
           <Button
             variant="primary"
             loading={busy}
-            disabled={ceiling === policy.clipboard}
+            disabled={!dirty}
             onClick={() => void save()}
           >
             {t("admin.policy.save")}
-          </Button>
+          </Button>{" "}
+          {policy.source === "TenantRow" && !dirty ? (
+            <Button onClick={() => setApplyOpen(true)}>{t("admin.policy.apply.button")}</Button>
+          ) : null}
         </div>
         <ApiErrorAlert error={saveError} />
       </Section>
@@ -214,6 +234,19 @@ export function SessionPolicyContent({
           empty={t("admin.policy.preview.empty")}
         />
       </Section>
+      {applyOpen ? (
+        <ApplyPolicyDialog
+          tenant={policy.tenant}
+          etag={policy.etag}
+          policyText={(p) =>
+            t("admin.policy.apply.policyText", {
+              clipboard: clipboardPolicyLabel(p.clipboard),
+              fileTransfer: fileTransferLabel(p.fileTransfer),
+            })
+          }
+          onClose={() => setApplyOpen(false)}
+        />
+      ) : null}
     </>
   );
 }

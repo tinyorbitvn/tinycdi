@@ -238,7 +238,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
-	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
+	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink).WithApply(&fakeApplyBackend{restarted: map[string]int64{}, live: map[string]bool{}}, fakeRunningPolicies{}, nil))
 	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(
 		&fakeLeaseSource{leases: []store.LiveLease{{ID: "lease-cov-1", WorkspaceID: "ws_0000000000000000000000000c", WorkspaceName: "cov", OwnerRef: "iss|sub", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}}},
 		newFakeDirectory(), &fakePrincipalRevoker{res: RevokeAllResult{Leases: 1}}, tenants).WithAuditSink(sink))
@@ -377,6 +377,10 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 			doReq(t, env, sessA, csrfA, http.MethodPut, adminSessionPolicyPath,
 				`{"clipboard":"Disabled"}`,
 				map[string]string{"If-Match": "*"}).Body.Close()
+		}},
+		{"POST /v1/admin/tenants/{}/session-policy:apply", auditActionAdminSessionPolicyApply, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPost, adminSessionPolicyPath+":apply",
+				`{"dryRun":true}`, map[string]string{"If-Match": ETagOf("v1")}).Body.Close()
 		}},
 		{"GET /v1/admin/tenants/{}/audit", auditActionAdminAuditGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, adminAuditPath, "", nil).Body.Close()

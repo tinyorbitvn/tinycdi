@@ -44,6 +44,10 @@ const (
 type SessionPolicy struct {
 	Clipboard    string                   `json:"clipboard"`
 	FileTransfer cdiv1.FileTransferPolicy `json:"fileTransfer"`
+	// MaxFileBytes is the per-file bound: the ceiling's file_max_bytes
+	// clipped to the platform bound (-file-transfer-max-bytes); 0 when
+	// FileTransfer is Disabled.
+	MaxFileBytes int64 `json:"maxFileBytes,omitempty"`
 }
 
 // meet resolves the shared direction lattice: Disabled is bottom,
@@ -124,4 +128,14 @@ func (s *Service) ResolveSessionPolicy(ctx context.Context, tenantID string, tpl
 		return SessionPolicy{}, err
 	}
 	return meetCeiling(tpl, c), nil
+}
+
+// PolicyWithin reports whether a workspace running with applied grants
+// nothing the effective policy does not: every channel of applied is at or
+// below effective in the lattice, and its size bound is no larger. F3 uses
+// it to find running workspaces a tightened ceiling has made too loose.
+func PolicyWithin(applied, effective SessionPolicy) bool {
+	return meet(applied.Clipboard, effective.Clipboard, ClipboardSend, ClipboardReceive) == applied.Clipboard &&
+		meet(string(applied.FileTransfer), string(effective.FileTransfer), FileTransferUpload, FileTransferDownload) == string(applied.FileTransfer) &&
+		applied.MaxFileBytes <= effective.MaxFileBytes
 }

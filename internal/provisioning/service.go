@@ -155,6 +155,10 @@ type TemplateInfo struct {
 	// template leg the session-policy meet is computed against (ADR 0010).
 	// Empty on rows written before the field existed.
 	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
+	// FileTransferPolicy is the template revision's spec.fileTransferPolicy,
+	// snapshotted like ClipboardPolicy; empty on rows written before the
+	// field existed.
+	FileTransferPolicy string `json:"fileTransferPolicy,omitempty"`
 }
 
 // templateRefName is the spec.templateRef value a create intent stamps:
@@ -191,6 +195,9 @@ type WorkspaceRecord struct {
 	Replayed        bool           `json:"replayed,omitempty"`
 	CreatedAt       time.Time      `json:"createdAt"`
 	UpdatedAt       time.Time      `json:"updatedAt"`
+	// RuntimeGeneration is the row's runtime_generation — the fence a
+	// restart is issued against; internal only, never serialized.
+	RuntimeGeneration int64 `json:"-"`
 }
 
 // CreateRequest is the admission input for a workspace create. The owner
@@ -370,14 +377,7 @@ func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phas
 		conds = append(conds, ks.where)
 		args = append(args, ks.args...)
 	}
-	q := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
-		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
-		COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
-		COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0)
-		FROM workspaces WHERE ` + strings.Join(conds, " AND ") + ks.orderLimit
+	q := `SELECT ` + workspaceSelectCols + ` FROM workspaces WHERE ` + strings.Join(conds, " AND ") + ks.orderLimit
 	r, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", "", err
@@ -659,11 +659,7 @@ func (s *Service) RestartWorkspace(ctx context.Context, tenantID, caller, ownerS
 		if rec.DesiredState != "Running" {
 			return ErrNotRunning
 		}
-		var gen int64
-		if err := tx.QueryRow(ctx, `SELECT runtime_generation FROM workspaces WHERE id = $1`, wsID).Scan(&gen); err != nil {
-			return fmt.Errorf("restart: read generation %w", err)
-		}
-		if gen == fromGeneration {
+		if rec.RuntimeGeneration == fromGeneration {
 			if err := CheckImageBlock(rec.Template.ImageBuiltAt, s.blockAfter, time.Now(), rec.Template.Name, true); err != nil {
 				return err
 			}
@@ -677,7 +673,7 @@ func (s *Service) RestartWorkspace(ctx context.Context, tenantID, caller, ownerS
 				WHERE id = $1 AND tenant_id = $2`, wsID, tenantID); err != nil {
 				return fmt.Errorf("restart: bump generation %w", err)
 			}
-			if err := s.revokeGeneration(ctx, tx, wsID, gen); err != nil {
+			if err := s.revokeGeneration(ctx, tx, wsID, rec.RuntimeGeneration); err != nil {
 				return err
 			}
 			if _, err := appendIntent(ctx, tx, PlatformID(wsID), IntentStart, &IntentSpec{SessionPolicy: sp}); err != nil {
@@ -695,6 +691,36 @@ func (s *Service) RestartWorkspace(ctx context.Context, tenantID, caller, ownerS
 		return nil
 	})
 	return res, err
+}
+
+// ListRunningWorkspaces returns up to limit active workspaces of tenantID
+// whose desired state is Running, oldest first, in ONE query with the same
+// projection as GetWorkspace (F3 policy apply). Tenant scoping is in the
+// WHERE clause; a workspace being deleted is excluded.
+func (s *Service) ListRunningWorkspaces(ctx context.Context, tenantID string, limit int) ([]WorkspaceRecord, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Pool().Query(ctx, `
+		SELECT `+workspaceSelectCols+` FROM workspaces
+		WHERE tenant_id = $1 AND state = 'active' AND desired_state = 'Running' AND phase <> 'Terminating'
+		ORDER BY created_at, id LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list running: %w", err)
+	}
+	defer rows.Close()
+	var out []WorkspaceRecord
+	for rows.Next() {
+		rec, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list running: %w", err)
+		}
+		out = append(out, *rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list running: %w", err)
+	}
+	return out, nil
 }
 
 // startSessionPolicy resolves the session data-transfer policy a start
@@ -779,7 +805,8 @@ func scanWorkspace(row rowScanner) (*WorkspaceRecord, error) {
 		&rec.Name, &tpl, &rec.DesiredState, &rec.DataPolicy, &rec.Phase,
 		&rec.FailureReason, &rec.RetainedDataRef, &rec.RequestID, &rev,
 		&rec.CreatedAt, &rec.UpdatedAt,
-		&rec.Vector.RunningSlots, &rec.Vector.CPUMillis, &rec.Vector.MemoryBytes, &rec.Vector.DiskBytes)
+		&rec.Vector.RunningSlots, &rec.Vector.CPUMillis, &rec.Vector.MemoryBytes, &rec.Vector.DiskBytes,
+		&rec.RuntimeGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -800,18 +827,22 @@ func getWorkspaceTx(ctx context.Context, q querier, tenantID, ownerScope, id str
 	return getWorkspace(ctx, q, tenantID, ownerScope, id, false, lock...)
 }
 
+// workspaceSelectCols is the projection scanWorkspace reads (keep the
+// order in step with it).
+const workspaceSelectCols = `id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
+	template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
+	COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
+	COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	runtime_generation`
+
 // getWorkspace reads one row. With visibleOnly it applies the read-side
 // visibility rule (visibleWorkspaceSQL); writers pass false so a repeated
 // delete or an idempotent replay still finds the tombstone.
 func getWorkspace(ctx context.Context, q querier, tenantID, ownerScope, id string, visibleOnly bool, lock ...string) (*WorkspaceRecord, error) {
-	query := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
-		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
-		COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
-		COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0)
-		FROM workspaces WHERE id = $1 AND tenant_id = $2`
+	query := `SELECT ` + workspaceSelectCols + ` FROM workspaces WHERE id = $1 AND tenant_id = $2`
 	args := []any{id, tenantID}
 	if ownerScope != "" {
 		query += ` AND owner_subject = $3`

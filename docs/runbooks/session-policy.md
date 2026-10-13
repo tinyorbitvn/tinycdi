@@ -59,8 +59,39 @@ Two clocks, by design:
   exposure in that window is bounded by the template's own policy —
   never wider than what was allowed before the ceiling existed.
 
-If a ceiling must take effect everywhere *now*, ask users to stop and
-start their workspaces; no platform-side restart action is triggered.
+If a ceiling must take effect everywhere *now*, apply it: the admin page's
+**Apply now** button (shown while a ceiling row exists and the form has no
+unsaved edits) or `POST .../session-policy:apply`. Both restart running
+workspaces whose applied policy is looser than the ceiling; home volumes
+are kept and open desktops reconnect to the new policy.
+
+1. **Dry run.** `{"dryRun": true}` restarts nothing and lists every running
+   workspace that is looser than the stored ceiling, with its owner, the
+   applied and the resulting policy, and whether a session is live.
+2. **Confirm.** `{"dryRun": false}` restarts the listed workspaces, except
+   those with a live session. Add `"includeActive": true` to restart those
+   too; their users are disconnected.
+3. **Limits.** One call lists and restarts at most 500 workspaces
+   (`truncated: true` says more qualify; call again once they have
+   restarted). A workspace whose earlier restart is not reconciled yet is
+   reported `skipped_moved`, never restarted twice.
+4. **Preconditions.** Tenant administrators only, CSRF token, and
+   `If-Match` carrying the ceiling's current `ETag` (a stale tag is `412`;
+   with no ceiling row the call is `409`).
+5. **Audit.** Every call, dry or confirmed, is recorded as
+   `admin.session_policy.apply` with `dryRun`, `includeActive`, `affected`
+   and `restarted` counts.
+
+```bash
+etag=$(curl -sD- -o /dev/null "https://<portal>/v1/admin/tenants/<tenant>/session-policy" \
+  -b cookies.txt | awk 'tolower($1)=="etag:"{print $2}' | tr -d '\r')
+curl -X POST "https://<portal>/v1/admin/tenants/<tenant>/session-policy:apply" \
+  -b cookies.txt -H "X-CSRF-Token: <token>" -H "If-Match: $etag" \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun":true}'
+```
+
+Without Apply now, workspaces pick the ceiling up at their next stop and start.
 
 ## Verify
 
@@ -68,7 +99,7 @@ start their workspaces; no platform-side restart action is triggered.
   `TenantRow` when a ceiling row exists, `FollowTemplate` when none
   does; `version` is the change token `PUT` echoes.
 - Affected workspaces show `spec.sessionPolicy` on their `Workspace`
-  custom resource at their next start:
+  custom resource at their next start (or right after an apply):
 
   ```bash
   kubectl -n <tenant-ns> get workspace <name> -o jsonpath='{.spec.sessionPolicy}'

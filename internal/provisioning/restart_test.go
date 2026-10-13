@@ -170,3 +170,29 @@ func TestRestartWorkspace_RefusesStoppedAndForeignAndRollsBackOnRevokeError(t *t
 		t.Fatalf("stopped: %v, want ErrNotRunning", err)
 	}
 }
+
+func TestListRunningWorkspaces_TenantScopedRunningOnly(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	svc := provisioning.NewService(db)
+	a := runningWorkspace(t, db, svc, "tenant-l", "l1")
+	b := runningWorkspace(t, db, svc, "tenant-l", "l2")
+	runningWorkspace(t, db, svc, "tenant-other", "o1")
+	if _, err := svc.SignalWorkspace(ctx, "tenant-l", "iss|sub", "", b.ID, "key-l-stop", provisioning.IntentStop, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.ListRunningWorkspaces(ctx, "tenant-l", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != a.ID {
+		t.Fatalf("running = %+v, want only %s", got, a.ID)
+	}
+	if want := generationOf(t, db, a.ID); got[0].RuntimeGeneration != want {
+		t.Fatalf("RuntimeGeneration = %d, want %d", got[0].RuntimeGeneration, want)
+	}
+	capped, _ := svc.ListRunningWorkspaces(ctx, "tenant-l", 0)
+	if len(capped) != 0 {
+		t.Fatal("limit 0 returns nothing")
+	}
+}

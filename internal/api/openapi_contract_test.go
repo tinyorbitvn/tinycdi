@@ -705,6 +705,12 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		{"PUT", "/v1/admin/tenants/{tenant}/session-policy", func() *http.Response {
 			return doReq(t, env, sessA, csrfA, "PUT", adminSessionPolicyPath, `{"clipboard":"Disabled"}`, stale)
 		}},
+		{"POST", "/v1/admin/tenants/{tenant}/session-policy:apply", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminSessionPolicyPath+":apply", `{"dryRun":true}`, map[string]string{"If-Match": ETagOf("v1")})
+		}},
+		{"POST", "/v1/admin/tenants/{tenant}/session-policy:apply", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminSessionPolicyPath+":apply", `{"dryRun":true}`, stale)
+		}},
 	}
 	statuses := map[string]map[int]bool{}
 	for _, c := range calls {

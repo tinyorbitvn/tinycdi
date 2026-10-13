@@ -667,3 +667,48 @@ func (v *K8sStatusView) TenantCounts(ctx context.Context, tenantID string, stuck
 	}
 	return out, nil
 }
+
+// AppliedPolicy is what a running Workspace CR was built with: the session
+// policy the applier stamped (spec.sessionPolicy), the generation it
+// belongs to, and whether the operator has applied the CR's latest intent
+// (status.lastAppliedIntentRevision == spec.intentRevision, the rule behind
+// ObservedStatus.IntentSettled from Task 6a). An unsettled CR is mid-change:
+// a restart or stop/start is applied to the spec but not reconciled yet.
+type AppliedPolicy struct {
+	Policy            provisioning.SessionPolicy
+	RuntimeGeneration int64
+	IntentSettled     bool
+}
+
+// RunningPolicies maps each Running-desired Workspace CR of tenantID
+// (keyed by platform workspace id) to its applied policy. fresh is false
+// when the watch is stale; callers must not act on a stale map.
+func (v *K8sStatusView) RunningPolicies(ctx context.Context, tenantID string) (map[string]AppliedPolicy, bool, error) {
+	v.mu.Lock()
+	synced, last := v.synced, v.lastEvent
+	v.mu.Unlock()
+	if !synced || v.now().Sub(last) > v.maxStale {
+		return nil, false, nil
+	}
+	var list cdiv1.WorkspaceList
+	if err := v.cache.List(ctx, &list, client.MatchingLabels{provisioning.LabelTenant: tenantID}); err != nil {
+		return nil, false, err
+	}
+	out := make(map[string]AppliedPolicy, len(list.Items))
+	for i := range list.Items {
+		ws := &list.Items[i]
+		id := ws.Labels[provisioning.LabelWorkspaceUID]
+		if id == "" || ws.Spec.DesiredState != cdiv1.DesiredStateRunning || ws.DeletionTimestamp != nil {
+			continue
+		}
+		sp := ws.Spec.SessionPolicy
+		out[id] = AppliedPolicy{
+			Policy: provisioning.SessionPolicy{
+				Clipboard: string(sp.Clipboard), FileTransfer: sp.FileTransfer, MaxFileBytes: sp.MaxFileBytes,
+			},
+			RuntimeGeneration: ws.Spec.RuntimeGeneration,
+			IntentSettled:     ws.Status.LastAppliedIntentRevision == ws.Spec.IntentRevision,
+		}
+	}
+	return out, true, nil
+}

@@ -744,9 +744,12 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
 	// The tenant session-policy ceiling (ADR 0010, T10): API-managed rows
-	// only — no config declaration owns them.
+	// only — no config declaration owns them. :apply restarts through the
+	// generation-fenced RestartWorkspace, judged against the informer's
+	// applied-policy view.
 	adminSessionPolicyHandler := api.NewAdminSessionPolicyHandler(api.NewAdminSessionPolicySource(db), tenants).
-		WithAuditSink(appAudit)
+		WithAuditSink(appAudit).
+		WithApply(policyApplyBackend{svc, db}, statusView, directory)
 	adminAuditHandler := api.NewAdminAuditHandler(db, tenants).WithAuditSink(appAudit)
 	adminUsersHandler := api.NewAdminUsersHandler(db, api.NewAdminUserLimitSource(db), tenants).WithAuditSink(appAudit)
 	// F5: live sessions are Postgres connection leases; sign-out-everywhere
@@ -1013,6 +1016,17 @@ func (a sessionStoreAdapter) TouchSessionDigest(ctx context.Context, digestHex s
 
 func (a sessionStoreAdapter) Delete(ctx context.Context, id string) error {
 	return a.s.Delete(ctx, id)
+}
+
+// policyApplyBackend joins the provisioning service and the lease store
+// into api.PolicyApplyBackend.
+type policyApplyBackend struct {
+	*provisioning.Service
+	db *store.DB
+}
+
+func (b policyApplyBackend) HasLiveLease(ctx context.Context, id string, now time.Time) (bool, error) {
+	return b.db.HasLiveLease(ctx, id, now)
 }
 
 // catalogAdapter maps provisioning's K8s catalog onto api.TemplateCatalog.

@@ -107,3 +107,31 @@ test("a regular user cannot see the session policy page", async ({ page }) => {
   const res = await page.request.get(`/v1/admin/tenants/acme/session-policy`);
   expect(res.status()).toBe(403);
 });
+
+test("apply now lists looser workspaces and restarts them", async ({ page, request }) => {
+  await makeAdmin(request);
+  await request.post(`${MOCK}/_control/admin/session-policy`, { data: { clipboard: "Disabled" } });
+  await login(page);
+
+  await page.getByRole("button", { name: "Apply now" }).click();
+  const dialog = page.getByRole("dialog", { name: "Apply the ceiling to running workspaces" });
+  await expect(dialog.getByRole("row", { name: /research-desktop/ })).toBeVisible();
+  await expect(dialog.getByRole("row", { name: /build-box/ }).getByText("Live session")).toBeVisible();
+
+  await dialog.getByLabel("Also restart workspaces someone is using right now").check();
+  await dialog.getByRole("button", { name: "Restart affected workspaces" }).click();
+  await expect(dialog.getByRole("row", { name: /research-desktop/ }).getByText("Restarted")).toBeVisible();
+  await expect(dialog.getByRole("row", { name: /build-box/ }).getByText("Restarted")).toBeVisible();
+  await expect(dialog.getByText("2 restarted, 0 skipped.")).toBeVisible();
+});
+
+test("apply now has nothing to do when every workspace follows the ceiling", async ({ page, request }) => {
+  await makeAdmin(request);
+  await request.post(`${MOCK}/_control/admin/session-policy`, { data: { clipboard: "Bidirectional" } });
+  await login(page);
+  await page.getByRole("button", { name: "Apply now" }).click();
+  await expect(
+    page.getByRole("dialog").getByText("Every running workspace already follows the ceiling."),
+  ).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Restart affected workspaces" })).toHaveCount(0);
+});

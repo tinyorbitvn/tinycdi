@@ -1080,3 +1080,70 @@ func TestK8sStatusView_TenantCounts(t *testing.T) {
 		t.Fatalf("stale counts = %+v, err %v: want Fresh=false and empty", stale, err)
 	}
 }
+
+// policyListCache serves only List from a fake client: RunningPolicies
+// reads nothing else from the cache, so the embedded nil Cache is never hit.
+type policyListCache struct {
+	crcache.Cache
+	c client.Client
+}
+
+func (p policyListCache) List(ctx context.Context, l client.ObjectList, opts ...client.ListOption) error {
+	return p.c.List(ctx, l, opts...)
+}
+
+func TestK8sStatusView_RunningPolicies(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := cdiv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name, tenant, uid string, desired cdiv1.DesiredState, clip cdiv1.ClipboardPolicy, gen int64) *cdiv1.Workspace {
+		return &cdiv1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "ns-" + tenant,
+				Labels: map[string]string{provisioning.LabelTenant: tenant, provisioning.LabelWorkspaceUID: uid},
+			},
+			Spec: cdiv1.WorkspaceSpec{
+				DesiredState: desired, RuntimeGeneration: gen, IntentRevision: 4,
+				SessionPolicy: cdiv1.SessionPolicySpec{
+					Clipboard: clip, FileTransfer: cdiv1.FileTransferUpload, MaxFileBytes: 4096,
+				},
+			},
+			Status: cdiv1.WorkspaceStatus{LastAppliedIntentRevision: 4},
+		}
+	}
+	unsettled := mk("d", "tenant-a", "ws_d", cdiv1.DesiredStateRunning, cdiv1.ClipboardSend, 2)
+	unsettled.Status.LastAppliedIntentRevision = 3 // the operator has not reconciled revision 4 yet
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		unsettled,
+		mk("a", "tenant-a", "ws_a", cdiv1.DesiredStateRunning, cdiv1.ClipboardBidirectional, 3),
+		mk("b", "tenant-a", "ws_b", cdiv1.DesiredStateStopped, cdiv1.ClipboardSend, 1),
+		mk("c", "tenant-b", "ws_c", cdiv1.DesiredStateRunning, cdiv1.ClipboardSend, 1),
+	).Build()
+	sv := &K8sStatusView{
+		cache: policyListCache{c: c}, now: time.Now, maxStale: time.Minute,
+		lastKnown: map[string]ObservedStatus{},
+	}
+	sv.MarkSynced()
+
+	got, fresh, err := sv.RunningPolicies(context.Background(), "tenant-a")
+	if err != nil || !fresh {
+		t.Fatalf("fresh=%v err=%v", fresh, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %+v, want ws_a and ws_d (Stopped and other-tenant CRs excluded)", got)
+	}
+	a := got["ws_a"]
+	if a.Policy.Clipboard != "Bidirectional" || a.Policy.FileTransfer != cdiv1.FileTransferUpload ||
+		a.Policy.MaxFileBytes != 4096 || a.RuntimeGeneration != 3 || !a.IntentSettled {
+		t.Fatalf("ws_a = %+v", a)
+	}
+	if got["ws_d"].IntentSettled {
+		t.Fatalf("ws_d = %+v, want IntentSettled=false (revision 3 applied, 4 wanted)", got["ws_d"])
+	}
+
+	stale := &K8sStatusView{cache: policyListCache{c: c}, now: time.Now, maxStale: time.Minute, lastKnown: map[string]ObservedStatus{}}
+	if _, fresh, _ := stale.RunningPolicies(context.Background(), "tenant-a"); fresh {
+		t.Fatal("an unsynced view must not report fresh")
+	}
+}

@@ -646,7 +646,9 @@ export interface paths {
          *     Tightening takes effect on two clocks (ADR 0010 §3): the next
          *     minted connection ticket carries the new client flags
          *     immediately, while a running workspace's server-side clipboard
-         *     enforcement follows at its next start — pod specs are immutable.
+         *     enforcement follows at its next start — pod specs are immutable;
+         *     `POST .../session-policy:apply` restarts the running workspaces
+         *     that are looser than the ceiling.
          *     Requires the tenant-admin role on the named tenant, the
          *     `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
          *     or `*` when the tenant has no row (`*` on an existing row is
@@ -654,6 +656,48 @@ export interface paths {
          */
         put: operations["putAdminSessionPolicy"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/session-policy:apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart running workspaces that are looser than the ceiling
+         * @description Applies the tenant's session data-transfer ceiling to running
+         *     workspaces whose stamped policy grants more than the ceiling now
+         *     allows (F3). Always dry run first (`{"dryRun": true}` lists the
+         *     affected workspaces and changes nothing); the confirmed call
+         *     restarts each listed workspace through the generation-fenced
+         *     restart — a double-submitted or superseded call never bumps a
+         *     generation twice, and a workspace whose latest intent the
+         *     operator has not reconciled yet is reported `skipped_moved`,
+         *     never restarted again.
+         *
+         *     Workspaces with a live desktop session are skipped
+         *     (`skipped_active`) unless `includeActive` is true; their users
+         *     are disconnected. One call lists and restarts at most 500
+         *     affected workspaces over a scan of at most 5000 running ones —
+         *     `truncated: true` means more qualify; call again after they
+         *     restart.
+         *
+         *     Requires the tenant-admin role on the named tenant, the
+         *     `X-CSRF-Token` header and `If-Match` carrying the policy row's
+         *     current `ETag` (a stale tag is `412`; a missing row is `409`).
+         *     When the informer view of running workspaces is stale the call
+         *     answers `503` rather than acting on out-of-date state. Every
+         *     call is audited as `admin.session_policy.apply`.
+         */
+        post: operations["applyAdminSessionPolicy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1435,6 +1479,30 @@ export interface components {
             clipboard: components["schemas"]["ClipboardCeiling"];
             fileTransfer?: components["schemas"]["FileTransferCeiling"];
         };
+        ApplySessionPolicyRequest: {
+            /** @description true lists the affected workspaces without restarting them. */
+            dryRun: boolean;
+            /**
+             * @description Also restart workspaces with a live desktop session.
+             * @default false
+             */
+            includeActive: boolean;
+        };
+        ApplySessionPolicyResult: {
+            dryRun: boolean;
+            /** @description More workspaces are affected (or running) than one call handles; only the first 500 affected are listed. Call again after they restart. */
+            truncated: boolean;
+            affected: {
+                workspaceId: string;
+                name: string;
+                owner: components["schemas"]["Owner"];
+                applied: components["schemas"]["ResolvedSessionPolicy"];
+                effective: components["schemas"]["ResolvedSessionPolicy"];
+                live: boolean;
+                /** @enum {string} */
+                result: "pending" | "restarted" | "skipped_active" | "skipped_moved" | "failed";
+            }[];
+        };
         AdminAuditEntry: {
             id: string;
             /** Format: date-time */
@@ -1541,6 +1609,11 @@ export interface components {
              * @enum {string}
              */
             fileTransfer: "Disabled" | "Upload" | "Download" | "Bidirectional";
+            /**
+             * Format: int64
+             * @description Per-file bound in bytes; 0 when fileTransfer is Disabled.
+             */
+            maxFileBytes?: number;
         };
         /**
          * @description Create intent. There is no owner field — ownership comes from the
@@ -3015,6 +3088,55 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    applyAdminSessionPolicy: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
+                 */
+                "If-Match": components["parameters"]["IfMatch"];
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApplySessionPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description The affected workspaces and what the call did with each. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplySessionPolicyResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             412: components["responses"]["PreconditionFailed"];
             428: components["responses"]["PreconditionRequired"];
             429: components["responses"]["RateLimited"];

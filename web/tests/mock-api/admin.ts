@@ -721,6 +721,43 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  // POST …/session-policy:apply — two running workspaces looser than any
+  // ceiling that narrows clipboard: one idle, one with a live session.
+  function adminSessionPolicyApply(req: MockRequest, tenant: string): MockResponse {
+    if (req.method !== "POST") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "session policy administration requires the tenant-admin role", false);
+    }
+    const pre = checkIfMatch(req, sessionPolicyTag());
+    if (pre) return pre;
+    if (!t.sessionPolicy) {
+      return err(409, "INVALID_STATE", "no ceiling is set; every workspace already follows its template", false);
+    }
+    const b = req.body as { dryRun?: unknown; includeActive?: unknown } | null;
+    if (!b || typeof b.dryRun !== "boolean") {
+      return err(400, "INVALID_REQUEST", "invalid request body", false);
+    }
+    const applied = { clipboard: "Bidirectional", fileTransfer: "Disabled" };
+    const effective = { clipboard: t.sessionPolicy.clipboard, fileTransfer: "Disabled" };
+    const owner = { subject: "alice", displayName: "Alice" };
+    const rows =
+      t.sessionPolicy.clipboard === "Bidirectional"
+        ? []
+        : [
+            { workspaceId: "ws_apply_1", name: "research-desktop", owner, applied, effective, live: false },
+            { workspaceId: "ws_apply_2", name: "build-box", owner, applied, effective, live: true },
+          ];
+    const affected = rows.map((r) => ({
+      ...r,
+      result: b.dryRun
+        ? "pending"
+        : r.live && b.includeActive !== true
+          ? "skipped_active"
+          : "restarted",
+    }));
+    return ok(200, { dryRun: b.dryRun, truncated: false, affected });
+  }
+
   function adminAudit(req: MockRequest, tenant: string): MockResponse {
     if (!t.isAdmin() || tenant !== t.me.tenant) {
       return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
@@ -832,6 +869,8 @@ export function adminArea(ctx: MockContext): MockArea {
     if (mUL) return adminUserLimits(req, mUL[1], mUL[2]);
     const mU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users(?:\/([^/]+))?$/);
     if (mU) return adminUsers(req, mU[1], mU[2] === undefined ? undefined : decodeURIComponent(mU[2]));
+    const mApply = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy:apply$/);
+    if (mApply) return adminSessionPolicyApply(req, mApply[1]);
     const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
     if (mSP) return adminSessionPolicy(req, mSP[1]);
     const mAU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/audit$/);

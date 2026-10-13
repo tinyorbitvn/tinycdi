@@ -101,6 +101,12 @@ type AdminSessionPolicyHandler struct {
 	// audit is the dedicated audit-event sink the admin routes emit
 	// through (nil = no domain audit events).
 	audit observability.AuditSink
+	// apply is the provisioning/store seam :apply restarts through;
+	// running is the informer view of applied policies; dir resolves owner
+	// display names. nil apply/running makes :apply answer 503.
+	apply   PolicyApplyBackend
+	running RunningPolicySource
+	dir     Directory
 }
 
 // NewAdminSessionPolicyHandler wires the handler.
@@ -124,6 +130,9 @@ func MountAdminSessionPolicyRoutes(mux RouteMux, authn *Authenticator, h *AdminS
 	mux.Handle(routeAdminSessionPolicyPut, authn.RequireAuth(
 		audited(h.audit, routeAdminSessionPolicyPut,
 			authn.RequireCSRF(http.HandlerFunc(h.Put)))))
+	mux.Handle(routeAdminSessionPolicyApply, authn.RequireAuth(
+		audited(h.audit, routeAdminSessionPolicyApply,
+			authn.RequireCSRF(http.HandlerFunc(h.Apply)))))
 }
 
 // view renders a ceiling row as the admin view.

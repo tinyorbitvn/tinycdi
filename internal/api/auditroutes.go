@@ -45,6 +45,7 @@ const (
 	auditActionAdminSessionPolicyGet   = "admin.session_policy.get"
 	auditActionAdminSessionPolicySet   = "admin.session_policy.set"
 	auditActionAdminSessionPolicyClear = "admin.session_policy.clear"
+	auditActionAdminSessionPolicyApply = "admin.session_policy.apply"
 
 	auditActionAdminAuditGet = "admin.audit.get"
 
@@ -77,6 +78,9 @@ const (
 
 	routeAdminSessionPolicyGet = "GET /v1/admin/tenants/{tenant}/session-policy"
 	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
+	// ServeMux matches a literal last segment containing ":" — no
+	// ActionRouter is involved.
+	routeAdminSessionPolicyApply = "POST /v1/admin/tenants/{tenant}/session-policy:apply"
 
 	routeAdminAuditGet = "GET /v1/admin/tenants/{tenant}/audit"
 
@@ -147,14 +151,15 @@ var auditedRoutes = map[string]auditedRoute{
 	// As on the user-limit PUTs, the table action is the set attempt; an
 	// all-FollowTemplate body resolves to the clear variant via
 	// auditSetAction once it decodes.
-	routeAdminSessionPolicyGet: {auditActionAdminSessionPolicyGet, "tenant"},
-	routeAdminSessionPolicyPut: {auditActionAdminSessionPolicySet, "tenant"},
-	routeAdminAuditGet:         {auditActionAdminAuditGet, "tenant"},
-	routeAdminUsersList:        {auditActionAdminUserList, "tenant"},
-	routeAdminUserGet:          {auditActionAdminUserGet, "tenant"},
-	routeAdminSessionsList:     {auditActionAdminSessionList, "tenant"},
-	routeAdminUserRevokeAll:    {auditActionAdminSessionRevoke, "tenant"},
-	routeAdminOverviewGet:      {auditActionAdminOverviewGet, "tenant"},
+	routeAdminSessionPolicyGet:   {auditActionAdminSessionPolicyGet, "tenant"},
+	routeAdminSessionPolicyPut:   {auditActionAdminSessionPolicySet, "tenant"},
+	routeAdminSessionPolicyApply: {auditActionAdminSessionPolicyApply, "tenant"},
+	routeAdminAuditGet:           {auditActionAdminAuditGet, "tenant"},
+	routeAdminUsersList:          {auditActionAdminUserList, "tenant"},
+	routeAdminUserGet:            {auditActionAdminUserGet, "tenant"},
+	routeAdminSessionsList:       {auditActionAdminSessionList, "tenant"},
+	routeAdminUserRevokeAll:      {auditActionAdminSessionRevoke, "tenant"},
+	routeAdminOverviewGet:        {auditActionAdminOverviewGet, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the

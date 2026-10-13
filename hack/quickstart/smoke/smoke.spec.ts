@@ -914,3 +914,102 @@ test("a deleted runtime pod is recovered by Start on the same home, and a new se
     await stopForCleanup(page, id);
   }
 });
+
+// Frees running-quota slots: the tenant runs two workspaces at most and the
+// earlier smokes leave some behind. Stops every Running workspace the page's
+// user owns, then waits until they are Stopped.
+async function stopAllRunning(page: Page) {
+  const list = await page.evaluate(async () => {
+    const r = await fetch("/v1/workspaces?limit=100");
+    return r.ok ? ((await r.json()) as { items: { id: string; desiredState: string }[] }).items : [];
+  });
+  for (const w of list.filter((x) => x.desiredState === "Running")) {
+    await stopWorkspace(page, w.id);
+  }
+}
+
+test("admin: session-policy apply restarts a workspace that is looser than the ceiling", async ({ browser }) => {
+  const stamp = Date.now().toString(36);
+  const tplName = `apply-bidi-${stamp}`;
+  cloneBrowserTemplate(tplName, `Apply Bidi ${stamp}`, "Bidirectional");
+
+  // The workspace owner: a Bidirectional workspace with an open session.
+  const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const user = await userCtx.newPage();
+  await login(user);
+  await stopAllRunning(user);
+  const id = await createWorkspaceOnTemplate(user, `apply-${stamp}`, new RegExp(tplName, "i"));
+  await expect.poll(() => podPolicy(id), { timeout: 120_000 }).toBe("Bidirectional");
+  await connectSessionFrame(user, id);
+
+  // The tenant administrator.
+  const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const admin = await adminCtx.newPage();
+  await login(admin, ADMIN_USER);
+  const policyUrl = `/v1/admin/tenants/${TENANT}/session-policy`;
+  const csrf = async () => ((await (await admin.request.get("/v1/me")).json()) as { csrfToken: string }).csrfToken;
+  const etagNow = async () => (await admin.request.get(policyUrl)).headers()["etag"] ?? "*";
+  const post = async (path: string, body: unknown, ifMatch: string) =>
+    admin.request.post(path, {
+      data: body,
+      headers: { "X-CSRF-Token": await csrf(), "If-Match": ifMatch },
+    });
+  type Row = { workspaceId: string; live: boolean; result: string; applied: { clipboard: string }; effective: { clipboard: string } };
+  const mine = (j: { affected: Row[] }) => j.affected.find((a) => a.workspaceId === id);
+
+  try {
+    // Narrow the ceiling to Disabled. Nothing is applied to running pods yet.
+    const put = await admin.request.put(policyUrl, {
+      data: { clipboard: "Disabled", fileTransfer: { mode: "FollowTemplate" } },
+      headers: { "X-CSRF-Token": await csrf(), "If-Match": await etagNow() },
+    });
+    expect(put.status()).toBe(200);
+    expect(podPolicy(id)).toBe("Bidirectional");
+
+    // Dry run: lists the workspace as live, restarts nothing.
+    const dry = await post(`${policyUrl}:apply`, { dryRun: true }, await etagNow());
+    expect(dry.status()).toBe(200);
+    const dryRow = mine((await dry.json()) as { affected: Row[] });
+    expect(dryRow, "dry run lists the Bidirectional workspace").toBeTruthy();
+    expect(dryRow).toMatchObject({ live: true, result: "pending", applied: { clipboard: "Bidirectional" }, effective: { clipboard: "Disabled" } });
+
+    // A confirmed call without includeActive skips the live workspace.
+    const skip = await post(`${policyUrl}:apply`, { dryRun: false }, await etagNow());
+    expect(skip.status()).toBe(200);
+    expect(mine((await skip.json()) as { affected: Row[] })?.result).toBe("skipped_active");
+    expect(podPolicy(id)).toBe("Bidirectional");
+
+    // A stale If-Match is refused with the envelope's PRECONDITION_FAILED.
+    const stale = await post(`${policyUrl}:apply`, { dryRun: true }, '"stale"');
+    expect(stale.status()).toBe(412);
+    expect(((await stale.json()) as { error: { code: string } }).error.code).toBe("PRECONDITION_FAILED");
+
+    // The UI: "Apply now" lists the live workspace; restarting it replaces the pod.
+    await admin.goto("/admin/session-policy");
+    await admin.getByRole("button", { name: "Apply now" }).click();
+    const dialog = admin.getByRole("dialog", { name: "Apply the ceiling to running workspaces" });
+    const row = dialog.getByRole("row", { name: new RegExp(`apply-${stamp}`) });
+    await expect(row.getByText("Live session")).toBeVisible();
+    await dialog.getByLabel("Also restart workspaces someone is using right now").check();
+    await dialog.getByRole("button", { name: "Restart affected workspaces" }).click();
+    await expect(row.getByText("Restarted")).toBeVisible();
+
+    // The replacement pod carries the narrowed policy.
+    await expect.poll(() => podPolicy(id), { timeout: 5 * 60_000, intervals: [3_000] }).toBe("Disabled");
+
+    // The apply is audited (Task 2's viewer).
+    const audit = await admin.request.get(`/v1/admin/tenants/${TENANT}/audit?action=admin.session_policy.apply`);
+    expect(audit.status()).toBe(200);
+    const rows = ((await audit.json()) as { items: { outcome: string }[] }).items;
+    expect(rows.some((e) => e.outcome === "success")).toBe(true);
+  } finally {
+    // Restore the ceiling (all FollowTemplate deletes the row) and free the slot.
+    await admin.request.put(policyUrl, {
+      data: { clipboard: "FollowTemplate", fileTransfer: { mode: "FollowTemplate" } },
+      headers: { "X-CSRF-Token": await csrf(), "If-Match": await etagNow() },
+    });
+    await stopWorkspace(user, id);
+    await userCtx.close();
+    await adminCtx.close();
+  }
+});

@@ -1131,7 +1131,9 @@ paths:
         Tightening takes effect on two clocks (ADR 0010 §3): the next
         minted connection ticket carries the new client flags
         immediately, while a running workspace's server-side clipboard
-        enforcement follows at its next start — pod specs are immutable.
+        enforcement follows at its next start — pod specs are immutable;
+        `POST .../session-policy:apply` restarts the running workspaces
+        that are looser than the ceiling.
         Requires the tenant-admin role on the named tenant, the
         `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
         or `*` when the tenant has no row (`*` on an existing row is
@@ -1162,6 +1164,70 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/admin/tenants/{tenant}/session-policy:apply:
+    post:
+      operationId: applyAdminSessionPolicy
+      summary: Restart running workspaces that are looser than the ceiling
+      description: |
+        Applies the tenant's session data-transfer ceiling to running
+        workspaces whose stamped policy grants more than the ceiling now
+        allows (F3). Always dry run first (`{"dryRun": true}` lists the
+        affected workspaces and changes nothing); the confirmed call
+        restarts each listed workspace through the generation-fenced
+        restart — a double-submitted or superseded call never bumps a
+        generation twice, and a workspace whose latest intent the
+        operator has not reconciled yet is reported `skipped_moved`,
+        never restarted again.
+
+        Workspaces with a live desktop session are skipped
+        (`skipped_active`) unless `includeActive` is true; their users
+        are disconnected. One call lists and restarts at most 500
+        affected workspaces over a scan of at most 5000 running ones —
+        `truncated: true` means more qualify; call again after they
+        restart.
+
+        Requires the tenant-admin role on the named tenant, the
+        `X-CSRF-Token` header and `If-Match` carrying the policy row's
+        current `ETag` (a stale tag is `412`; a missing row is `409`).
+        When the informer view of running workspaces is stale the call
+        answers `503` rather than acting on out-of-date state. Every
+        call is audited as `admin.session_policy.apply`.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplySessionPolicyRequest"
+      responses:
+        "200":
+          description: The affected workspaces and what the call did with each.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplySessionPolicyResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "428":
@@ -2564,6 +2630,35 @@ components:
         fileTransfer:
           $ref: "#/components/schemas/FileTransferCeiling"
 
+    ApplySessionPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [dryRun]
+      properties:
+        dryRun: {type: boolean, description: "true lists the affected workspaces without restarting them."}
+        includeActive: {type: boolean, default: false, description: "Also restart workspaces with a live desktop session."}
+    ApplySessionPolicyResult:
+      type: object
+      additionalProperties: false
+      required: [dryRun, truncated, affected]
+      properties:
+        dryRun: {type: boolean}
+        truncated: {type: boolean, description: "More workspaces are affected (or running) than one call handles; only the first 500 affected are listed. Call again after they restart."}
+        affected:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [workspaceId, name, owner, applied, effective, live, result]
+            properties:
+              workspaceId: {type: string}
+              name: {type: string}
+              owner: {$ref: '#/components/schemas/Owner'}
+              applied: {$ref: '#/components/schemas/ResolvedSessionPolicy'}
+              effective: {$ref: '#/components/schemas/ResolvedSessionPolicy'}
+              live: {type: boolean}
+              result: {type: string, enum: [pending, restarted, skipped_active, skipped_moved, failed]}
+
     AdminAuditEntry:
       type: object
       additionalProperties: false
@@ -2685,6 +2780,11 @@ components:
             WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
             v1.3 — always resolves `Disabled` while no template leg is
             wired into the catalog entry.
+        maxFileBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Per-file bound in bytes; 0 when fileTransfer is Disabled."
 
     CreateWorkspaceRequest:
       type: object

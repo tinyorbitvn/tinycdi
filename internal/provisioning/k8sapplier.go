@@ -314,9 +314,14 @@ func sessionPolicySpec(sp *SessionPolicy) cdiv1.SessionPolicySpec {
 	if ft == "" {
 		ft = cdiv1.FileTransferDisabled
 	}
+	max := sp.MaxFileBytes
+	if ft == cdiv1.FileTransferDisabled {
+		max = 0
+	}
 	return cdiv1.SessionPolicySpec{
 		Clipboard:    cdiv1.ClipboardPolicy(sp.Clipboard),
 		FileTransfer: ft,
+		MaxFileBytes: max,
 	}
 }
 
@@ -395,7 +400,11 @@ type TemplateCatalogEntry struct {
 	MaxRunning        time.Duration
 	DataPolicyDefault string
 	ClipboardPolicy   string
-	NetworkProfile    string
+	// FileTransferPolicy is the revision's spec.fileTransferPolicy leg the
+	// session-policy meet is computed against (F4); "" for entries that do
+	// not declare one, read as Disabled.
+	FileTransferPolicy string
+	NetworkProfile     string
 	// The remaining security-relevant dimensions a family re-point must
 	// not silently change: the E2 compatibility guard (revisionIncompatible)
 	// compares them verbatim and refuses the move when any differs.
@@ -621,6 +630,7 @@ func templateEntry(t *cdiv1.WorkspaceTemplate) TemplateCatalogEntry {
 	e.MaxRunning = t.Spec.Lifecycle.MaxDuration.Duration
 	e.DataPolicyDefault = string(t.Spec.Lifecycle.DataPolicy)
 	e.ClipboardPolicy = string(t.Spec.ClipboardPolicy)
+	e.FileTransferPolicy = string(t.Spec.FileTransferPolicy)
 	e.NetworkProfile = string(t.Spec.NetworkProfile)
 	if t.Spec.Linux != nil {
 		e.Adapter = string(t.Spec.Linux.Adapter)

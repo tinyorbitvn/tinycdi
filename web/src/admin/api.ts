@@ -212,7 +212,9 @@ export async function putAdminUserLimitDefault(
 export type AdminSessionPolicyView = components["schemas"]["AdminSessionPolicyView"];
 export type PutAdminSessionPolicy = components["schemas"]["PutAdminSessionPolicy"];
 export type ClipboardCeiling = components["schemas"]["ClipboardCeiling"];
+export type FileTransferCeiling = components["schemas"]["FileTransferCeiling"];
 export type AdminSessionPolicySource = components["schemas"]["AdminSessionPolicySource"];
+export type ApplySessionPolicyResult = components["schemas"]["ApplySessionPolicyResult"];
 
 // Tenant session data-transfer ceiling
 // (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0010): a
@@ -239,6 +241,20 @@ export async function putAdminSessionPolicy(
     await api.PUT("/v1/admin/tenants/{tenant}/session-policy", {
       params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
       body: policy,
+    }),
+  );
+}
+
+export async function applyAdminSessionPolicy(
+  api: ApiClient,
+  tenant: string,
+  body: { dryRun: boolean; includeActive?: boolean },
+  etag: string | undefined,
+): Promise<ApplySessionPolicyResult> {
+  return unwrap(
+    await api.POST("/v1/admin/tenants/{tenant}/session-policy:apply", {
+      params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
+      body: { dryRun: body.dryRun, includeActive: body.includeActive ?? false },
     }),
   );
 }

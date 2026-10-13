@@ -281,6 +281,13 @@ func TestAdminSessionPolicy_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
 	}
+
+	r = doReq(t, env, sess, csrf, http.MethodPost, adminSessionPolicyPath+":apply",
+		`{"dryRun":true}`, map[string]string{"If-Match": "*"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member apply: status=%d, want 403", r.StatusCode)
+	}
 }
 
 // TestAdminSessions_CustomAdminGroups: both F5 routes honour the configured admin group.
