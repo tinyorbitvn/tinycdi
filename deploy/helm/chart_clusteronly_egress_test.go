@@ -194,4 +194,3 @@ func TestClusterOnlyEgressSchema(t *testing.T) {
 		}
 	}
 }
-
