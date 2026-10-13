@@ -216,6 +216,10 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		Token:       "tkt_coveragereplay0000000000000",
 		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
 	}}, tenants, d).WithLogger(logger).WithAuditSink(sink)
+	tdeps := &fakeTransferDeps{
+		policy: provisioning.SessionPolicy{FileTransfer: "Bidirectional", MaxFileBytes: 1 << 20},
+		status: ObservedStatus{Fresh: true, Found: true, Phase: "Ready", RuntimeUID: "uid-cov", ObservedRuntimeGeneration: 1},
+	}
 
 	// env.login drives the /auth/* flow; everything below mirrors the
 	// appMux mount block — keep in sync with it. The direct registrations
@@ -233,6 +237,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountWorkspaceRoutes(mux, a, NewWorkspaceHandler(be, cat, tenants).WithAuditSink(sink), NewTemplateHandler(cat, tenants))
 	MountConnectionRoutes(mux, a, connH)
+	MountFileTransferRoutes(mux, a, NewFileTransferHandler(be, tdeps, tdeps, d).WithAuditSink(sink), noop)
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
@@ -330,6 +335,10 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"POST /v1/workspaces/{}/connections", auditActionConnectionCreate, func() {
 			doReq(t, env, sess, csrf, http.MethodPost,
 				"/v1/workspaces/"+wsID+"/connections", `{"takeover":true}`, nil).Body.Close()
+		}},
+		{"POST /v1/workspaces/{}/file-transfers", auditActionFileTransferUpload, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil).Body.Close()
 		}},
 		{"DELETE /v1/workspaces/{}", auditActionWorkspaceDelete, func() {
 			doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+wsID, "", nil).Body.Close()

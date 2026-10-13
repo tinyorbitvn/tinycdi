@@ -30,10 +30,13 @@ const (
 	auditActionWorkspaceStop    = "workspace.stop"
 	auditActionWorkspaceDelete  = "workspace.delete"
 	auditActionConnectionCreate = "connection.create"
-	auditActionDataAttach       = "data.attach"
-	auditActionDataPurge        = "data.purge"
-	auditActionAdminQuotaGet    = "admin.quota.get"
-	auditActionAdminQuotaSet    = "admin.quota.set"
+
+	auditActionFileTransferUpload   = "file.transfer.upload"
+	auditActionFileTransferDownload = "file.transfer.download"
+	auditActionDataAttach           = "data.attach"
+	auditActionDataPurge            = "data.purge"
+	auditActionAdminQuotaGet        = "admin.quota.get"
+	auditActionAdminQuotaSet        = "admin.quota.set"
 
 	auditActionAdminUserLimitGet          = "admin.user_limit.get"
 	auditActionAdminUserLimitSet          = "admin.user_limit.set"
@@ -61,14 +64,15 @@ const (
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
 // pattern can never drift from its action.
 const (
-	routeLogout           = "POST /v1/logout"
-	routeSessionTouch     = "POST /v1/session:touch"
-	routeSessionRevokeAll = "POST /v1/me/sessions:revoke-all"
-	routeWorkspaceCreate  = "POST /v1/workspaces"
-	routeWorkspaceDelete  = "DELETE /v1/workspaces/{id}"
-	routeConnectionCreate = "POST /v1/workspaces/{id}/connections"
-	routeAdminQuotaGet    = "GET /v1/admin/tenants/{tenant}/quota"
-	routeAdminQuotaSet    = "PUT /v1/admin/tenants/{tenant}/quota"
+	routeLogout             = "POST /v1/logout"
+	routeSessionTouch       = "POST /v1/session:touch"
+	routeSessionRevokeAll   = "POST /v1/me/sessions:revoke-all"
+	routeWorkspaceCreate    = "POST /v1/workspaces"
+	routeWorkspaceDelete    = "DELETE /v1/workspaces/{id}"
+	routeConnectionCreate   = "POST /v1/workspaces/{id}/connections"
+	routeFileTransferCreate = "POST /v1/workspaces/{id}/file-transfers"
+	routeAdminQuotaGet      = "GET /v1/admin/tenants/{tenant}/quota"
+	routeAdminQuotaSet      = "PUT /v1/admin/tenants/{tenant}/quota"
 
 	routeAdminUserLimitsGet       = "GET /v1/admin/tenants/{tenant}/user-limits"
 	routeAdminUserLimitPut        = "PUT /v1/admin/tenants/{tenant}/user-limits/{ownerRef}"
@@ -135,10 +139,14 @@ var auditedRoutes = map[string]auditedRoute{
 	routeWorkspaceStart:   {auditActionWorkspaceStart, actionTarget},
 	routeWorkspaceStop:    {auditActionWorkspaceStop, actionTarget},
 	routeConnectionCreate: {auditActionConnectionCreate, "id"},
-	routeDataAttach:       {auditActionDataAttach, actionTarget},
-	routeDataPurge:        {auditActionDataPurge, actionTarget},
-	routeAdminQuotaGet:    {auditActionAdminQuotaGet, "tenant"},
-	routeAdminQuotaSet:    {auditActionAdminQuotaSet, "tenant"},
+	// The handler switches to the download action via auditSetAction once
+	// the direction decodes; a request denied earlier keeps the upload
+	// attempt.
+	routeFileTransferCreate: {auditActionFileTransferUpload, "id"},
+	routeDataAttach:         {auditActionDataAttach, actionTarget},
+	routeDataPurge:          {auditActionDataPurge, actionTarget},
+	routeAdminQuotaGet:      {auditActionAdminQuotaGet, "tenant"},
+	routeAdminQuotaSet:      {auditActionAdminQuotaSet, "tenant"},
 	// The default PUT carries both halves of a set/clear pair: the table
 	// action is the attempt (what a pre-decode denial is audited as) and
 	// the handler replaces it with the clear variant via auditSetAction

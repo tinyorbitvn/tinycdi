@@ -125,6 +125,7 @@ var (
 		"workspace.create": {}, "workspace.start": {}, "workspace.stop": {},
 		"workspace.delete": {}, "connection.create": {},
 		"data.attach": {}, "data.purge": {},
+		"file.transfer.upload": {}, "file.transfer.download": {},
 		"admin.quota.get": {}, "admin.quota.set": {}, "admin.quota.config_apply": {},
 		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
 		"admin.user_limit.default.get": {}, "admin.user_limit.default.set": {},

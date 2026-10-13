@@ -618,6 +618,18 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		{"POST", "/v1/workspaces/{workspaceId}:start", func() *http.Response {
 			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+":start", "", nil)
 		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil)
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt"}`, nil) // 400: an upload needs bytes
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+unknownWS+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil) // 404
+		}},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/"+rec.ID, "", nil) }},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/rd_unknown", "", nil) }},
 		{"GET", "/v1/quota", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/quota", "", nil) }},

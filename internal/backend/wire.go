@@ -435,6 +435,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// just keeps every replica from paying the scan.
 	b.singletons = append(b.singletons, rateLimitWindowSweepLoop(db, log))
 
+	// Transfer-grant sweep (ADR 0010 T11): expires unclaimed mints past
+	// their 2-minute TTL, fails claims dead past 30 min and prunes finished
+	// rows. Leader-only like the other sweeps.
+	b.singletons = append(b.singletons, fileTransferSweepLoop(db, log))
+
 	// Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
 	// are append-mostly, so without a sweep every deployment's history
 	// grows both tables without bound — and every index build or
@@ -766,6 +771,25 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
 
+	// The claim-time transfer policy resolver: a claim re-resolves the
+	// policy in force NOW — the workspace's recorded template snapshot (the
+	// same input startSessionPolicy stamps on the pod) met against the
+	// current tenant ceiling — so a ceiling tightened between mint and
+	// claim refuses the claim (review focus 1).
+	brk.WithTransferPolicy(func(ctx context.Context, tenantID, wsID string) (broker.TransferPolicy, error) {
+		rec, err := svc.GetWorkspace(ctx, tenantID, "", wsID)
+		if err != nil {
+			return broker.TransferPolicy{}, err
+		}
+		sp, err := svc.ResolveSessionPolicy(ctx, tenantID, provisioning.TemplateCatalogEntry{
+			ClipboardPolicy: rec.Template.ClipboardPolicy, FileTransferPolicy: rec.Template.FileTransferPolicy,
+		})
+		if err != nil {
+			return broker.TransferPolicy{}, err
+		}
+		return broker.TransferPolicy{Mode: string(sp.FileTransfer), MaxBytes: sp.MaxFileBytes}, nil
+	})
+
 	// E7 + FX-R30: the login family shares one budget per KEY —
 	// /v1/login, /v1/auth/callback and the session probe (backlog 12),
 	// backed in merged mode by the Postgres window over the divided local
@@ -793,6 +817,8 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
 		adminAudit: adminAuditHandler, adminUsers: adminUsersHandler,
 		adminSessions: adminSessionsHandler, adminOverview: adminOverviewHandler,
+		fileTransfers: api.NewFileTransferHandler(svc, fileTransferDeps{svc, db}, statusView, sessionDomain).
+			WithAuditSink(appAudit),
 	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
@@ -816,6 +842,19 @@ type appRoutes struct {
 	adminUsers         *api.AdminUsersHandler
 	adminSessions      *api.AdminSessionsHandler
 	adminOverview      *api.AdminOverviewHandler
+	fileTransfers      *api.FileTransferHandler
+}
+
+// fileTransferDeps adapts the provisioning service and the store to the
+// mint handler's FileTransferDeps: the policy resolver is the service's
+// single-resolver entry point, the insert the package-level store call.
+type fileTransferDeps struct {
+	*provisioning.Service
+	db *store.DB
+}
+
+func (d fileTransferDeps) InsertFileTransfer(ctx context.Context, t store.FileTransfer) error {
+	return store.InsertFileTransfer(ctx, d.db, t)
 }
 
 // appMux assembles the public API route table. The session surface
@@ -836,6 +875,9 @@ func appMux(authn *api.Authenticator, h appRoutes,
 	api.MountMeRoutes(mux, authn, h.me)
 	api.MountWorkspaceRoutes(mux, authn, h.ws, h.tpl)
 	api.MountConnectionRoutes(mux, authn, h.conn)
+	if h.fileTransfers != nil {
+		api.MountFileTransferRoutes(mux, authn, h.fileTransfers, sessionLimit)
+	}
 	api.MountConnectionStatusRoutes(mux, authn, h.connStatus)
 	api.MountDataRoutes(mux, authn, h.data)
 	api.MountQuotaRoutes(mux, authn, h.quota)

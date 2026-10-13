@@ -669,6 +669,59 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/workspaces/{workspaceId}/file-transfers:
+    post:
+      operationId: createFileTransfer
+      summary: Mint a single-use file-transfer grant for a running workspace
+      description: |
+        Resolves the file-transfer policy in force now (template policy met
+        against the tenant ceiling and the platform bound), checks the
+        direction and, for an upload, the declared size, and records a
+        single-use grant bound to the workspace's current runtime
+        incarnation and to the caller. The browser then moves the bytes with
+        a credentialed request to `contentUrl` on the workspace's session
+        origin within 2 minutes; the gateway claims the grant (policy is
+        checked again) and streams the body. Only the workspace owner may
+        mint; a tenant administrator gets `404` on another user's workspace.
+        The workspace must be `Ready`, otherwise `409 INVALID_STATE`. A policy
+        that refuses the direction answers `403 FORBIDDEN` with
+        `details.reason: transfer_denied`.
+      tags: [workspaces]
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFileTransferRequest"
+      responses:
+        "201":
+          description: Grant minted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileTransfer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/workspaces/{workspaceId}/connection:
     get:
       operationId: getConnectionStatus
@@ -2040,8 +2093,10 @@ components:
                 when the caller's own teardown-pending holds cover the
                 shortfall. On `:start` of a Failed workspace: the
                 unrecoverable failure reason (`ImagePolicyDenied`,
-                `HomeVolumeLost`, `TemplateRejected`).
-              enum: [release_pending, UserLimitReached, ImagePolicyDenied, HomeVolumeLost, TemplateRejected]
+                `HomeVolumeLost`, `TemplateRejected`). `transfer_denied`
+                on `FORBIDDEN` means the policy in force refuses the
+                requested file-transfer direction.
+              enum: [release_pending, UserLimitReached, ImagePolicyDenied, HomeVolumeLost, TemplateRejected, transfer_denied]
             templateName:
               type: string
               description: |
@@ -3001,6 +3056,32 @@ components:
           description: Ticket expiry (issued + 60 s).
         sessionPolicy:
           $ref: "#/components/schemas/ResolvedSessionPolicy"
+
+    CreateFileTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [direction, path]
+      properties:
+        direction: {type: string, enum: [upload, download]}
+        path:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: A file name inside the workspace's Transfers folder ($HOME/transfers). No directories.
+        bytes: {type: integer, format: int64, minimum: 0, description: "Upload size in bytes (required for upload)."}
+
+    FileTransfer:
+      type: object
+      additionalProperties: false
+      required: [id, direction, path, declaredBytes, maxBytes, expiresAt, contentUrl]
+      properties:
+        id: {type: string, pattern: '^xf_[a-z2-7]{26}$'}
+        direction: {type: string, enum: [upload, download]}
+        path: {type: string}
+        declaredBytes: {type: integer, format: int64}
+        maxBytes: {type: integer, format: int64}
+        expiresAt: {type: string, format: date-time}
+        contentUrl: {type: string, format: uri, description: "Single-use URL on the workspace's session origin: PUT the bytes (upload) or GET them (download) with credentials, within 2 minutes."}
 
     TemplateView:
       type: object

@@ -243,7 +243,9 @@ func (f *fakeCatalog) List(_ context.Context, tenantID, _ string) ([]TemplateEnt
 	return out, nil
 }
 
-func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, tenants TenantResolver, opts ...func(*WorkspaceHandler)) *testEnv {
+// newEnvWithRoutes builds an authenticated test server; mount adds the
+// routes under test next to /auth/login and /auth/callback.
+func newEnvWithRoutes(t *testing.T, mount func(mux *http.ServeMux, a *Authenticator)) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
@@ -261,19 +263,24 @@ func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, ten
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
+	mux := http.NewServeMux()
+	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	mount(mux, a)
+	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
+	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
+	t.Cleanup(func() { srv.Close(); iss.Close() })
+	return env
+}
+
+func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, tenants TenantResolver, opts ...func(*WorkspaceHandler)) *testEnv {
+	t.Helper()
 	h := NewWorkspaceHandler(be, cat, tenants)
 	for _, o := range opts {
 		o(h)
 	}
 	th := NewTemplateHandler(cat, tenants)
-	mux := http.NewServeMux()
-	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
-	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
-	MountWorkspaceRoutes(mux, a, h, th)
-	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
-	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
-	t.Cleanup(func() { srv.Close(); iss.Close() })
-	return env
+	return newEnvWithRoutes(t, func(mux *http.ServeMux, a *Authenticator) { MountWorkspaceRoutes(mux, a, h, th) })
 }
 
 func defaultCatalog() *fakeCatalog {

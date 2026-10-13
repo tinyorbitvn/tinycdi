@@ -72,6 +72,13 @@ type ObservedStatus struct {
 	// RuntimeGeneration is the CR's spec.runtimeGeneration — the generation
 	// a restart is fenced on.
 	RuntimeGeneration int64
+	// RuntimeUID and ObservedRuntimeGeneration are the status-side fencing
+	// pair (the same two fields K8sBindingSource projects); they feed only
+	// the file-transfer mint, which binds the grant to exactly the
+	// incarnation the claim compares. They are never copied into
+	// WorkspaceView and never remembered — a stale view never mints.
+	RuntimeUID                string
+	ObservedRuntimeGeneration int64
 	// IntentSettled reports that the operator has applied the CR's latest
 	// spec.intentRevision (status.lastAppliedIntentRevision equals it), so
 	// Phase and FailureReason describe the current generation. Between the
@@ -175,6 +182,8 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	ws := &list.Items[0]
 	obs.Found = true
 	obs.Phase = string(ws.Status.Phase)
+	obs.RuntimeUID = ws.Status.RuntimeUID
+	obs.ObservedRuntimeGeneration = ws.Status.ObservedRuntimeGeneration
 	obs.RuntimeGeneration = ws.Spec.RuntimeGeneration
 	obs.IntentSettled = ws.Status.LastAppliedIntentRevision == ws.Spec.IntentRevision
 	obs.Conditions = projectConditions(ws.Status.Conditions, ws.Annotations)

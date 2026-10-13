@@ -393,6 +393,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workspaces/{workspaceId}/file-transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint a single-use file-transfer grant for a running workspace
+         * @description Resolves the file-transfer policy in force now (template policy met
+         *     against the tenant ceiling and the platform bound), checks the
+         *     direction and, for an upload, the declared size, and records a
+         *     single-use grant bound to the workspace's current runtime
+         *     incarnation and to the caller. The browser then moves the bytes with
+         *     a credentialed request to `contentUrl` on the workspace's session
+         *     origin within 2 minutes; the gateway claims the grant (policy is
+         *     checked again) and streams the body. Only the workspace owner may
+         *     mint; a tenant administrator gets `404` on another user's workspace.
+         *     The workspace must be `Ready`, otherwise `409 INVALID_STATE`. A policy
+         *     that refuses the direction answers `403 FORBIDDEN` with
+         *     `details.reason: transfer_denied`.
+         */
+        post: operations["createFileTransfer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/workspaces/{workspaceId}/connection": {
         parameters: {
             query?: never;
@@ -1046,10 +1077,12 @@ export interface components {
                  *     when the caller's own teardown-pending holds cover the
                  *     shortfall. On `:start` of a Failed workspace: the
                  *     unrecoverable failure reason (`ImagePolicyDenied`,
-                 *     `HomeVolumeLost`, `TemplateRejected`).
+                 *     `HomeVolumeLost`, `TemplateRejected`). `transfer_denied`
+                 *     on `FORBIDDEN` means the policy in force refuses the
+                 *     requested file-transfer direction.
                  * @enum {string}
                  */
-                reason?: "release_pending" | "UserLimitReached" | "ImagePolicyDenied" | "HomeVolumeLost" | "TemplateRejected";
+                reason?: "release_pending" | "UserLimitReached" | "ImagePolicyDenied" | "HomeVolumeLost" | "TemplateRejected" | "transfer_denied";
                 /**
                  * @description `IMAGE_STALE` only: the template whose runtime image is
                  *     over `-image-block-after` — the message names it too.
@@ -1780,6 +1813,34 @@ export interface components {
              */
             expiresAt: string;
             sessionPolicy?: components["schemas"]["ResolvedSessionPolicy"];
+        };
+        CreateFileTransferRequest: {
+            /** @enum {string} */
+            direction: "upload" | "download";
+            /** @description A file name inside the workspace's Transfers folder ($HOME/transfers). No directories. */
+            path: string;
+            /**
+             * Format: int64
+             * @description Upload size in bytes (required for upload).
+             */
+            bytes?: number;
+        };
+        FileTransfer: {
+            id: string;
+            /** @enum {string} */
+            direction: "upload" | "download";
+            path: string;
+            /** Format: int64 */
+            declaredBytes: number;
+            /** Format: int64 */
+            maxBytes: number;
+            /** Format: date-time */
+            expiresAt: string;
+            /**
+             * Format: uri
+             * @description Single-use URL on the workspace's session origin: PUT the bytes (upload) or GET them (download) with credentials, within 2 minutes.
+             */
+            contentUrl: string;
         };
         /**
          * @description Catalog entry. Revisions are immutable; end users can never supply raw
@@ -2594,6 +2655,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LaunchTicket"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createFileTransfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated workspace identifier. */
+                workspaceId: components["parameters"]["WorkspaceId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateFileTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description Grant minted. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileTransfer"];
                 };
             };
             400: components["responses"]["BadRequest"];

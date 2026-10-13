@@ -70,6 +70,27 @@ func terminalRetentionSweepLoop(db *store.DB, days int, m *observability.Metrics
 	}
 }
 
+// fileTransferSweepLoop expires unclaimed transfer grants, fails dead
+// claims and prunes finished rows every 30 s (leader only).
+func fileTransferSweepLoop(db *store.DB, log *slog.Logger) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if e, f, p, err := db.SweepFileTransfers(ctx, time.Now()); err != nil && !errors.Is(err, context.Canceled) {
+					log.Error("file transfer sweep failed", "err", err)
+				} else if e+f+p > 0 {
+					log.Info("file transfer sweep", "expired", e, "failed", f, "pruned", p)
+				}
+			}
+		}
+	}
+}
+
 const (
 	auditRetentionInterval = 24 * time.Hour
 	auditRetentionBatch    = 1000
