@@ -65,3 +65,11 @@
   grid-template-columns: repeat(auto-fit, minmax(16rem, 24rem));
   margin-block: var(--tc-space-4);
 }
+
+.tc-admin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--tc-space-3);
+  margin-block-end: var(--tc-space-4);
+}

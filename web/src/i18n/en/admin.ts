@@ -12,6 +12,7 @@ export default {
   "admin.nav.data": "Data",
   "admin.nav.users": "Users",
   "admin.nav.sessionPolicy": "Session policy",
+  "admin.nav.audit": "Audit log",
   "admin.eyebrow": "Admin",
   "admin.eyebrow.tenant": "Admin · {tenant}",
   "admin.gate.checking": "Checking permissions",
@@ -29,8 +30,33 @@ export default {
   "admin.route.users": "Tenant users",
   "admin.route.user": "User detail",
   "admin.route.sessionPolicy": "Session policy",
+  "admin.route.audit": "Audit log",
 
   "admin.action.refresh": "Refresh",
+
+  // Audit page.
+  "admin.audit.title": "Audit log",
+  "admin.audit.description":
+    "Every administrative and mutating action in this tenant, newest first. Events older than the platform retention period (90 days by default) are removed.",
+  "admin.audit.filter.action": "Action",
+  "admin.audit.filter.actor": "Actor",
+  "admin.audit.filter.actorHint": "An actor reference (oidc:…) or a user reference (issuer|subject)",
+  "admin.audit.filter.target": "Target",
+  "admin.audit.filter.since": "From",
+  "admin.audit.filter.until": "To",
+  "admin.audit.filter.apply": "Apply",
+  "admin.audit.filter.clear": "Clear",
+  "admin.audit.column.time": "Time",
+  "admin.audit.column.actor": "Actor",
+  "admin.audit.column.action": "Action",
+  "admin.audit.column.target": "Target",
+  "admin.audit.column.outcome": "Outcome",
+  "admin.audit.column.details": "Details",
+  "admin.audit.outcome.success": "Success",
+  "admin.audit.outcome.denied": "Denied",
+  "admin.audit.outcome.failure": "Failed",
+  "admin.audit.caption": "Audit events",
+  "admin.audit.empty": "No audit events match.",
 
   // Overview page.
   "admin.overview.title": "Tenant overview",

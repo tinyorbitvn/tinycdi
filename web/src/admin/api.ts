@@ -301,3 +301,33 @@ export function listTemplatePageAdmin(
 export function scanAdminTemplates(api: ApiClient): Promise<AdminTemplateView[]> {
   return scanTemplates(api);
 }
+
+export type AdminAuditEntry = components["schemas"]["AdminAuditEntry"];
+export type AuditFilter = { action?: string; actor?: string; target?: string; since?: string; until?: string };
+
+// GET .../audit: newest first (the only order), filtered server-side. Empty
+// filter fields are omitted. exactOptionalPropertyTypes is on, so the query
+// is built with conditional spreads, not undefined values.
+export async function listAdminAuditPage(
+  api: ApiClient,
+  tenant: string,
+  filter: AuditFilter,
+  cursor?: string,
+): Promise<ServerPage<AdminAuditEntry>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/audit", {
+      params: {
+        path: { tenant },
+        query: {
+          sort: "-createdAt",
+          ...(filter.action ? { action: filter.action } : {}),
+          ...(filter.actor ? { actor: filter.actor } : {}),
+          ...(filter.target ? { target: filter.target } : {}),
+          ...(filter.since ? { since: filter.since } : {}),
+          ...(filter.until ? { until: filter.until } : {}),
+          ...(cursor ? { cursor } : {}),
+        },
+      },
+    }),
+  );
+}

@@ -93,6 +93,10 @@
 - [adr/0010-session-data-transfer-policy.md](adr/0010-session-data-transfer-policy.md) —
   tenant ceilings over the template clipboard policy plus the v1.3 file
   transfer design (accepted)
+- [adr/0011-audit-store-and-retention.md](adr/0011-audit-store-and-retention.md) —
+  durable `audit_event` store written in the audited mutation's transaction
+  (fail closed), pseudonymous actors, 90-day retention and the tenant-admin
+  viewer (accepted)
 
 ## Elsewhere in the repo
 

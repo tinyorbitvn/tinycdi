@@ -9,6 +9,7 @@ import { TemplatesPage } from "./TemplatesPage";
 import { WorkspacesAdminPage } from "./WorkspacesAdminPage";
 import { DataAdminPage } from "./DataAdminPage";
 import { UserDetailPage, UsersAdminPage } from "./UsersAdminPage";
+import { AuditPage } from "./AuditPage";
 import "./admin.css";
 
 function Redirect({ to }: { to: string }) {
@@ -69,6 +70,12 @@ export const routes: AppRoute[] = [
     title: t("admin.route.user"),
     requires: "tenant-admin",
     render: (p) => <UserDetailPage subject={p.subject!} />,
+  },
+  {
+    path: "/admin/audit",
+    title: t("admin.route.audit"),
+    requires: "tenant-admin",
+    render: () => <AuditPage />,
   },
   {
     path: "/admin/*",

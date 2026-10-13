@@ -1162,6 +1162,81 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/audit:
+    get:
+      operationId: listAdminAudit
+      summary: Audit log (paged)
+      description: |
+        One tenant's persisted audit log, newest first: every audited
+        administrative and mutating action. Requires the tenant-admin
+        role on the named tenant — the read is itself audited
+        (`admin.audit.get`). Retention is the platform setting (default
+        90 days); older events are pruned. `since` is inclusive and
+        `until` exclusive. Sort: `-createdAt` only (default).
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - name: action
+          in: query
+          required: false
+          description: Exact audit action (for example `workspace.start`).
+          schema:
+            type: string
+            maxLength: 128
+        - name: actor
+          in: query
+          required: false
+          description: |
+            An actor reference `oidc:<hex>`/`anonymous`, or an
+            `issuer|sub` owner reference, which is pseudonymized
+            server-side.
+          schema:
+            type: string
+            maxLength: 512
+        - name: target
+          in: query
+          required: false
+          description: Exact target identifier (for example a workspace ID).
+          schema:
+            type: string
+            maxLength: 256
+        - name: since
+          in: query
+          required: false
+          description: Inclusive lower bound on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: Exclusive upper bound on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200":
+          description: One page of audit events for the named tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuditPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -2286,6 +2361,29 @@ components:
           $ref: "#/components/schemas/ClipboardCeiling"
         fileTransfer:
           $ref: "#/components/schemas/FileTransferCeiling"
+
+    AdminAuditEntry:
+      type: object
+      additionalProperties: false
+      required: [id, createdAt, actor, action, targetKind, targetId, outcome, requestId, details]
+      properties:
+        id: {type: string}
+        createdAt: {type: string, format: date-time}
+        actor: {type: string, description: "Pseudonymous actor reference (oidc:<16 hex>) or anonymous."}
+        action: {type: string}
+        targetKind: {type: string, enum: ["", workspace, data, tenant, session], description: "What targetId identifies; derived from the action namespace (auditTargetKind)."}
+        targetId: {type: string}
+        outcome: {type: string, enum: [success, denied, failure]}
+        errorCode: {type: string}
+        requestId: {type: string}
+        details: {type: object, additionalProperties: {type: string}}
+    AdminAuditPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminAuditEntry'}}
+        nextCursor: {$ref: '#/components/schemas/NextCursor'}
 
     ResolvedSessionPolicy:
       type: object

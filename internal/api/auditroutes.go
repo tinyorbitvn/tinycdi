@@ -45,6 +45,8 @@ const (
 	auditActionAdminSessionPolicyGet   = "admin.session_policy.get"
 	auditActionAdminSessionPolicySet   = "admin.session_policy.set"
 	auditActionAdminSessionPolicyClear = "admin.session_policy.clear"
+
+	auditActionAdminAuditGet = "admin.audit.get"
 )
 
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
@@ -67,6 +69,8 @@ const (
 
 	routeAdminSessionPolicyGet = "GET /v1/admin/tenants/{tenant}/session-policy"
 	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
+
+	routeAdminAuditGet = "GET /v1/admin/tenants/{tenant}/audit"
 )
 
 // :verb custom methods. ServeMux cannot match the verb labels (the verb
@@ -129,6 +133,7 @@ var auditedRoutes = map[string]auditedRoute{
 	// auditSetAction once it decodes.
 	routeAdminSessionPolicyGet: {auditActionAdminSessionPolicyGet, "tenant"},
 	routeAdminSessionPolicyPut: {auditActionAdminSessionPolicySet, "tenant"},
+	routeAdminAuditGet:         {auditActionAdminAuditGet, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the

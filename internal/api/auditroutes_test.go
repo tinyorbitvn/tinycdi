@@ -239,6 +239,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
+	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(&fakeAuditSource{rows: auditRows(2)}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
 	// trusted-origin gate → mux. The replay requests carry no Origin or
@@ -371,6 +372,9 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 			doReq(t, env, sessA, csrfA, http.MethodPut, adminSessionPolicyPath,
 				`{"clipboard":"Disabled"}`,
 				map[string]string{"If-Match": "*"}).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/audit", auditActionAdminAuditGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminAuditPath, "", nil).Body.Close()
 		}},
 		{"POST /v1/logout", auditActionSessionLogout, func() {
 			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()

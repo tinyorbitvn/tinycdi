@@ -58,7 +58,46 @@ export const ME: Owner = { subject: "user-01J4ZDADA", displayName: "Ada Lovelace
 export const OTHER_USERS: Owner[] = [
   { subject: "user-01J4ZDGRC", displayName: "Grace Hopper" },
   { subject: "user-01J4ZDLIN", displayName: "Linus Pauling" },
-];
+]
+
+export interface AuditRow {
+  id: string;
+  createdAt: string;
+  actor: string;
+  action: string;
+  targetKind: string;
+  targetId: string;
+  outcome: string;
+  errorCode?: string | undefined;
+  requestId: string;
+  details: Record<string, string>;
+}
+
+export const AUDIT_ROWS = 60;
+
+// Deterministic audit rows for the /admin/audit mock: newest first, row 0 a
+// denied workspace.start; workspace.start rows total 12 (one per 5). The 60
+// rows exceed the mock's default page (50), so the UI exercises Load more.
+function auditRows(): AuditRow[] {
+  const ACTIONS = ["workspace.start", "workspace.stop", "admin.quota.set", "admin.user_limit.get", "data.purge"];
+  const rows: AuditRow[] = [];
+  for (let i = 0; i < AUDIT_ROWS; i += 1) {
+    const action = ACTIONS[i % 5];
+    rows.push({
+      id: String(AUDIT_ROWS - i),
+      createdAt: new Date(Date.UTC(2026, 9, 13, 12, 0) - i * 60_000).toISOString(),
+      actor: "oidc:0011223344556677",
+      action,
+      targetKind: action.startsWith("workspace.") ? "workspace" : "tenant",
+      targetId: action.startsWith("workspace.") ? `ws_audit${i}` : TENANT,
+      outcome: i % 7 === 0 ? "denied" : "success",
+      errorCode: i % 7 === 0 ? "FORBIDDEN" : undefined,
+      requestId: `req-${i}`,
+      details: {},
+    });
+  }
+  return rows;
+};
 
 export const DEFAULT_LIMITS: QuotaAmounts = {
   workspaces: 20,
@@ -591,6 +630,33 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  function adminAudit(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const sort = req.query.get("sort") || "-createdAt";
+    if (sort !== "-createdAt") {
+      return err(400, "INVALID_REQUEST", "audit lists newest first only", false);
+    }
+    const action = req.query.get("action");
+    const actor = req.query.get("actor");
+    const target = req.query.get("target");
+    const since = req.query.get("since");
+    const until = req.query.get("until");
+    const rows = auditRows().filter((r) => {
+      if (action !== null && r.action !== action) return false;
+      if (actor !== null && r.actor !== actor) return false;
+      if (target !== null && r.targetId !== target) return false;
+      if (since !== null && Date.parse(r.createdAt) < Date.parse(since)) return false;
+      if (until !== null && Date.parse(r.createdAt) >= Date.parse(until)) return false;
+      return true;
+    });
+    return paginate(req, rows, { createdAt: byString((a) => a.createdAt) }, "-createdAt", (a) => a.id);
+  }
+
   function listWorkspaces(req: MockRequest): MockResponse {
     const scope = t.resolveScope(req);
     if ("status" in scope) return scope;
@@ -614,6 +680,8 @@ export function adminArea(ctx: MockContext): MockArea {
     if (mUL) return adminUserLimits(req, mUL[1], mUL[2]);
     const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
     if (mSP) return adminSessionPolicy(req, mSP[1]);
+    const mAU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/audit$/);
+    if (mAU) return adminAudit(req, mAU[1]);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
       const failed = t.takeFailure(req);
       if (failed) return failed;

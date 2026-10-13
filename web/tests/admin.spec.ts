@@ -32,7 +32,7 @@ test.beforeEach(async ({ request }) => {
   expect(res.ok()).toBeTruthy();
 });
 
-test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
+test("a tenant admin sees all eight admin pages", async ({ page, request }) => {
   await makeAdmin(request);
 
   await login(page, "/admin");
@@ -47,6 +47,7 @@ test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
   await expect(adminNav.getByRole("tab", { name: "Templates" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Data" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Users" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Audit log" })).toBeVisible();
 
   // The route owns the selection: Overview is the selected tab on /admin.
   await expect(adminNav.getByRole("tab", { name: "Overview" })).toHaveAttribute(
@@ -313,4 +314,33 @@ test("a tenant admin purges another owner's retained disk", async ({ page, reque
 
   await expect(page.getByText("Purge scheduled.")).toBeVisible();
   await expect(graceRow).toContainText("Purging");
+});
+
+test("audit log lists, filters and pages", async ({ page, request }) => {
+  await makeAdmin(request);
+  const errors: string[] = [];
+  page.on("console", (m) => {
+    // The optional operator branding file is served as 200 {} by the real
+    // frontend; the Vite dev server 404s it — not a page error.
+    if (m.type() === "error" && !m.location()?.url.endsWith("/branding/branding.json")) {
+      errors.push(m.text());
+    }
+  });
+  await login(page, "/admin/audit");
+  await expect(page.getByRole("heading", { name: "Audit log", exact: true })).toBeVisible();
+
+  const table = page.getByRole("table", { name: "Audit events" });
+  await expect(table.getByRole("row")).toHaveCount(51); // header + 50
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(table.getByRole("row")).toHaveCount(61); // header + 60
+  await expect(table.getByText("Denied").first()).toBeVisible();
+
+  await page.getByLabel("Action", { exact: true }).fill("workspace.start");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(table.getByRole("row")).toHaveCount(13); // header + 12
+  await expect(table.getByRole("cell", { name: "workspace.stop" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Clear" }).click();
+  await expect(table.getByRole("row")).toHaveCount(51);
+  expect(errors).toEqual([]);
 });

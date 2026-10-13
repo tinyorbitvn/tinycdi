@@ -635,6 +635,12 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		{"GET", "/v1/admin/tenants/{tenant}/session-policy", func() *http.Response {
 			return doReq(t, env, sess, csrf, "GET", adminSessionPolicyPath, "", nil)
 		}},
+		{"GET", "/v1/admin/tenants/{tenant}/audit", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminAuditPath, "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/audit", func() *http.Response {
+			return doReq(t, env, sess, csrf, "GET", adminAuditPath, "", nil)
+		}},
 		// One mutation per admin resource, then its stale precondition.
 		{"PUT", "/v1/admin/tenants/{tenant}/quota", func() *http.Response {
 			return doReq(t, env, sessA, csrfA, "PUT", adminQuotaPath, adminQuotaBody, star)

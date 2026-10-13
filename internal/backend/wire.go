@@ -738,6 +738,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// only — no config declaration owns them.
 	adminSessionPolicyHandler := api.NewAdminSessionPolicyHandler(api.NewAdminSessionPolicySource(db), tenants).
 		WithAuditSink(appAudit)
+	adminAuditHandler := api.NewAdminAuditHandler(db, tenants).WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
@@ -767,6 +768,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		ws: wsHandler, tpl: tplHandler, conn: connHandler, me: meHandler, connStatus: connStatusHandler,
 		data: dataHandler, quota: quotaHandler, adminQuota: adminQuotaHandler,
 		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
+		adminAudit: adminAuditHandler,
 	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
@@ -786,6 +788,7 @@ type appRoutes struct {
 	adminQuota         *api.AdminQuotaHandler
 	adminUserLimits    *api.AdminUserLimitsHandler
 	adminSessionPolicy *api.AdminSessionPolicyHandler
+	adminAudit         *api.AdminAuditHandler
 }
 
 // appMux assembles the public API route table. The session surface
@@ -817,6 +820,9 @@ func appMux(authn *api.Authenticator, h appRoutes,
 	}
 	if h.adminSessionPolicy != nil {
 		api.MountAdminSessionPolicyRoutes(mux, authn, h.adminSessionPolicy)
+	}
+	if h.adminAudit != nil {
+		api.MountAdminAuditRoutes(mux, authn, h.adminAudit)
 	}
 	return mux
 }

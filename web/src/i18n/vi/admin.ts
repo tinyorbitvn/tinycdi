@@ -11,6 +11,7 @@ export default {
   "admin.nav.data": "Dữ liệu",
   "admin.nav.users": "Người dùng",
   "admin.nav.sessionPolicy": "Chính sách phiên",
+  "admin.nav.audit": "Nhật ký kiểm toán",
   "admin.eyebrow": "Quản trị",
   "admin.eyebrow.tenant": "Quản trị · {tenant}",
   "admin.gate.checking": "Đang kiểm tra quyền",
@@ -28,8 +29,33 @@ export default {
   "admin.route.users": "Người dùng tenant",
   "admin.route.user": "Chi tiết người dùng",
   "admin.route.sessionPolicy": "Chính sách phiên",
+  "admin.route.audit": "Nhật ký kiểm toán",
 
   "admin.action.refresh": "Làm mới",
+
+  // Audit page.
+  "admin.audit.title": "Nhật ký kiểm toán",
+  "admin.audit.description":
+    "Mọi thao tác quản trị và thay đổi trong tenant này, mới nhất trước. Sự kiện cũ hơn thời hạn lưu của nền tảng (mặc định 90 ngày) sẽ bị xoá.",
+  "admin.audit.filter.action": "Hành động",
+  "admin.audit.filter.actor": "Người thực hiện",
+  "admin.audit.filter.actorHint": "Mã người thực hiện (oidc:…) hoặc mã người dùng (issuer|subject)",
+  "admin.audit.filter.target": "Đối tượng",
+  "admin.audit.filter.since": "Từ",
+  "admin.audit.filter.until": "Đến",
+  "admin.audit.filter.apply": "Áp dụng",
+  "admin.audit.filter.clear": "Xoá lọc",
+  "admin.audit.column.time": "Thời gian",
+  "admin.audit.column.actor": "Người thực hiện",
+  "admin.audit.column.action": "Hành động",
+  "admin.audit.column.target": "Đối tượng",
+  "admin.audit.column.outcome": "Kết quả",
+  "admin.audit.column.details": "Chi tiết",
+  "admin.audit.outcome.success": "Thành công",
+  "admin.audit.outcome.denied": "Bị từ chối",
+  "admin.audit.outcome.failure": "Thất bại",
+  "admin.audit.caption": "Sự kiện kiểm toán",
+  "admin.audit.empty": "Không có sự kiện nào khớp.",
 
   // Overview page.
   "admin.overview.title": "Tổng quan tenant",

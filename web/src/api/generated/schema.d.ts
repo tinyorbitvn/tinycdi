@@ -649,6 +649,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Audit log (paged)
+         * @description One tenant's persisted audit log, newest first: every audited
+         *     administrative and mutating action. Requires the tenant-admin
+         *     role on the named tenant — the read is itself audited
+         *     (`admin.audit.get`). Retention is the platform setting (default
+         *     90 days); older events are pruned. `since` is inclusive and
+         *     `until` exclusive. Sort: `-createdAt` only (default).
+         */
+        get: operations["listAdminAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -1268,6 +1293,31 @@ export interface components {
         PutAdminSessionPolicy: {
             clipboard: components["schemas"]["ClipboardCeiling"];
             fileTransfer?: components["schemas"]["FileTransferCeiling"];
+        };
+        AdminAuditEntry: {
+            id: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** @description Pseudonymous actor reference (oidc:<16 hex>) or anonymous. */
+            actor: string;
+            action: string;
+            /**
+             * @description What targetId identifies; derived from the action namespace (auditTargetKind).
+             * @enum {string}
+             */
+            targetKind: "" | "workspace" | "data" | "tenant" | "session";
+            targetId: string;
+            /** @enum {string} */
+            outcome: "success" | "denied" | "failure";
+            errorCode?: string;
+            requestId: string;
+            details: {
+                [key: string]: string;
+            };
+        };
+        AdminAuditPage: {
+            items: components["schemas"]["AdminAuditEntry"][];
+            nextCursor?: components["schemas"]["NextCursor"];
         };
         /**
          * @description The resolved (effective) session data-transfer policy for a
@@ -2077,6 +2127,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2112,6 +2163,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2150,6 +2202,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2186,6 +2239,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2762,6 +2816,67 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             412: components["responses"]["PreconditionFailed"];
             428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminAudit: {
+        parameters: {
+            query?: {
+                /** @description Exact audit action (for example `workspace.start`). */
+                action?: string;
+                /**
+                 * @description An actor reference `oidc:<hex>`/`anonymous`, or an
+                 *     `issuer|sub` owner reference, which is pseudonymized
+                 *     server-side.
+                 */
+                actor?: string;
+                /** @description Exact target identifier (for example a workspace ID). */
+                target?: string;
+                /** @description Inclusive lower bound on `createdAt`. */
+                since?: string;
+                /** @description Exclusive upper bound on `createdAt`. */
+                until?: string;
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of audit events for the named tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAuditPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
