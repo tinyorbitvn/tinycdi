@@ -200,19 +200,19 @@ func TestAdminSessionPolicy_GetNoRow(t *testing.T) {
 }
 
 // TestAdminSessionPolicy_PutValidation: bad enums, a missing clipboard and
-// a non-default fileTransfer (the inert T11 channel) are 400s; the store
-// is untouched.
+// bad fileTransfer values (an unknown mode, a zero bound) are 400s; the
+// store is untouched.
 func TestAdminSessionPolicy_PutValidation(t *testing.T) {
 	src := &fakeSessionPolicySource{}
 	env := newSessionPolicyEnv(t, src)
 	sess, csrf := loginAdmin(t, env, "admin-a")
 
 	for name, body := range map[string]string{
-		"not json":           `nope`,
-		"empty object":       `{}`,
-		"bad enum":           `{"clipboard":"HalfDuplex"}`,
-		"fileTransfer mode":  `{"clipboard":"Disabled","fileTransfer":{"mode":"Upload","maxFileBytes":null}}`,
-		"fileTransfer bound": `{"clipboard":"Disabled","fileTransfer":{"mode":"FollowTemplate","maxFileBytes":1024}}`,
+		"not json":                `nope`,
+		"empty object":            `{}`,
+		"bad enum":                `{"clipboard":"HalfDuplex"}`,
+		"fileTransfer bad mode":   `{"clipboard":"Disabled","fileTransfer":{"mode":"Sideways"}}`,
+		"fileTransfer zero bound": `{"clipboard":"Disabled","fileTransfer":{"mode":"Upload","maxFileBytes":0}}`,
 	} {
 		r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath, body,
 			map[string]string{"If-Match": "*"})
@@ -381,6 +381,11 @@ func TestAdminSessionPolicy_Contract(t *testing.T) {
 		FileTransfer: cdiv1.FileTransferDisabled,
 	}
 	requireValid(t, "ResolvedSessionPolicy", resolved)
+	requireValid(t, "ResolvedSessionPolicy", provisioning.SessionPolicy{
+		Clipboard:    provisioning.PolicyDisabled,
+		FileTransfer: cdiv1.FileTransferUpload,
+		MaxFileBytes: 1 << 20,
+	})
 	requireValid(t, "LaunchTicket", launchTicketView{
 		WorkspaceID:   "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E",
 		Ticket:        "tkt_0123456789abcdef0123456789abcdef",
@@ -388,4 +393,39 @@ func TestAdminSessionPolicy_Contract(t *testing.T) {
 		ExpiresAt:     time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
 		SessionPolicy: &resolved,
 	})
+}
+
+// TestAdminSessionPolicy_FileTransferWrites: the file channel is live —
+// a mode and a bound write through to the store; a bad mode, a zero
+// bound and a bound over the platform maximum are 400s that never reach
+// it.
+func TestAdminSessionPolicy_FileTransferWrites(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"clipboard":"FollowTemplate","fileTransfer":{"mode":"Upload","maxFileBytes":1048576}}`, http.StatusOK},
+		{`{"clipboard":"FollowTemplate","fileTransfer":{"mode":"Sideways"}}`, http.StatusBadRequest},
+		{`{"clipboard":"FollowTemplate","fileTransfer":{"mode":"Upload","maxFileBytes":0}}`, http.StatusBadRequest},
+		{`{"clipboard":"FollowTemplate","fileTransfer":{"mode":"Upload","maxFileBytes":104857601}}`, http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		src := &fakeSessionPolicySource{}
+		env := newSessionPolicyEnv(t, src, func(h *AdminSessionPolicyHandler) { h.WithFileTransferBound(104857600) })
+		sess, csrf := loginAdmin(t, env, "admin-a")
+		res := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath, c.body,
+			map[string]string{"If-Match": "*"})
+		res.Body.Close()
+		if res.StatusCode != c.want {
+			t.Errorf("%s: status %d, want %d", c.body, res.StatusCode, c.want)
+		}
+		if c.want == http.StatusOK {
+			w := src.lastWrite
+			if w.FileTransfer == nil || *w.FileTransfer != "Upload" || w.FileMaxBytes == nil || *w.FileMaxBytes != 1048576 {
+				t.Errorf("store write = %+v, want Upload/1048576", w)
+			}
+		} else if src.setCall != 0 {
+			t.Errorf("%s reached the store", c.body)
+		}
+	}
 }

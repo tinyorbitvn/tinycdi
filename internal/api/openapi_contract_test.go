@@ -88,14 +88,15 @@ func contractTemplate(clipboard string) templateView {
 		LifecycleDefaults: lifecycleDefaults{
 			IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
 		},
-		DataPolicyDefault: "Ephemeral",
-		ClipboardPolicy:   clipboard,
-		NetworkProfile:    "InternetOnly",
-		PublishedAt:       built,
-		ImageBuiltAt:      &built,
-		ImageStale:        &stale,
-		ImageBlocked:      &stale,
-		ImageEngines:      map[string]string{"chromium": "154.0.8037.92", "firefox": "153.4.0esr"},
+		DataPolicyDefault:  "Ephemeral",
+		ClipboardPolicy:    clipboard,
+		FileTransferPolicy: "Disabled",
+		NetworkProfile:     "InternetOnly",
+		PublishedAt:        built,
+		ImageBuiltAt:       &built,
+		ImageStale:         &stale,
+		ImageBlocked:       &stale,
+		ImageEngines:       map[string]string{"chromium": "154.0.8037.92", "firefox": "153.4.0esr"},
 	}
 }
 

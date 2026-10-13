@@ -396,6 +396,7 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 			RevisionLabel: tpl.RevisionLabel,
 			Runtime:       tpl.Runtime, Experience: tpl.Experience,
 			ImageBuiltAt: tpl.ImageBuiltAt, ClipboardPolicy: tpl.ClipboardPolicy,
+			FileTransferPolicy: tpl.FileTransferPolicy,
 		},
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1,

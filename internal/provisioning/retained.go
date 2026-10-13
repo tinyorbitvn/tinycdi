@@ -129,6 +129,10 @@ const purgeNonceTTL = 15 * time.Minute
 //     is Retained/Attaching/Purging (see restoreDiskQuota on import).
 type RetainedStore struct {
 	db *store.DB
+	// fileBound is the platform per-file bound
+	// (-file-transfer-max-bytes) the attach path's resolved session
+	// policy is clipped to (ADR 0010 T11).
+	fileBound int64
 
 	keyMu  sync.Mutex
 	macKey []byte // cached purge-nonce MAC key (migration 008)
@@ -136,6 +140,13 @@ type RetainedStore struct {
 
 // NewRetainedStore returns the Postgres-backed retained-data store.
 func NewRetainedStore(db *store.DB) *RetainedStore { return &RetainedStore{db: db} }
+
+// WithFileTransferMaxBytes sets the platform per-file bound the attach
+// path's resolved session policy is clipped to.
+func (r *RetainedStore) WithFileTransferMaxBytes(bound int64) *RetainedStore {
+	r.fileBound = bound
+	return r
+}
 
 const retainedCols = `id, tenant_id, owner_subject, state, transition_seq,
 	pvc_namespace, pvc_name, pvc_uid, source_workspace_id, source_workspace_name,
@@ -623,8 +634,9 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 		// the create intent so the applier stamps spec.sessionPolicy from
 		// the admission-time snapshot (ADR 0010 §2).
 		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
-			ClipboardPolicy: req.Template.ClipboardPolicy,
-		})
+			ClipboardPolicy:    req.Template.ClipboardPolicy,
+			FileTransferPolicy: req.Template.FileTransferPolicy,
+		}, s.fileBound)
 		if err != nil {
 			return fmt.Errorf("attach: resolve session policy: %w", err)
 		}

@@ -207,6 +207,13 @@
             "auditDays": {"type": "integer", "minimum": 1, "maximum": 3650}
           }
         },
+        "fileTransfer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxFileBytes": {"type": "integer", "minimum": 1, "maximum": 10737418240}
+          }
+        },
         "service": {
           "type": "object",
           "additionalProperties": false,

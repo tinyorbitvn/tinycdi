@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Section, Select, Spinner, Table, useTableSort } from "../design";
+import { Alert, Button, Card, Input, Section, Select, Spinner, Table, useTableSort } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import { t, type MessageKey } from "../i18n";
@@ -38,6 +38,9 @@ const CEILING_LABEL: Record<ClipboardCeiling, MessageKey> = {
   Bidirectional: "templates.clipboard.bidirectional",
 };
 
+const FT_MODES: readonly FileTransferCeiling["mode"][] = [
+  "FollowTemplate", "Disabled", "Upload", "Download", "Bidirectional",
+];
 const FT_LABEL: Record<FileTransferCeiling["mode"], MessageKey> = {
   FollowTemplate: "admin.policy.option.followTemplate",
   Disabled: "admin.policy.ft.option.disabled",
@@ -45,6 +48,8 @@ const FT_LABEL: Record<FileTransferCeiling["mode"], MessageKey> = {
   Download: "admin.policy.ft.option.download",
   Bidirectional: "admin.policy.ft.option.bidirectional",
 };
+const MIB = 1048576;
+const mibOf = (bytes: number | null | undefined): string => (bytes ? String(bytes / MIB) : "");
 
 export function fileTransferLabel(policy: string): string {
   const key = FT_LABEL[policy as FileTransferCeiling["mode"]];
@@ -67,6 +72,20 @@ export function meetClipboard(template: string, ceiling: string): string {
       // FollowTemplate, Bidirectional — or an unrecognised value, which
       // narrows nothing.
       return template;
+  }
+}
+
+// meetFileTransfer is the same direction lattice as meetClipboard with
+// Upload/Download as the two incomparable directions (ADR 0010 §1).
+export function meetFileTransfer(template: string, ceiling: string): string {
+  switch (ceiling) {
+    case "Disabled":
+      return "Disabled";
+    case "Upload":
+    case "Download":
+      return template === ceiling || template === "Bidirectional" ? ceiling : "Disabled";
+    default:
+      return template; // FollowTemplate, Bidirectional, or unrecognised: narrows nothing
   }
 }
 
@@ -106,6 +125,8 @@ export function SessionPolicyContent({
   const api = useApi();
   const { policy, templates } = data;
   const [ceiling, setCeiling] = useState<ClipboardCeiling>(policy.clipboard);
+  const [ftMode, setFtMode] = useState<FileTransferCeiling["mode"]>(policy.fileTransfer.mode);
+  const [ftMax, setFtMax] = useState<string>(mibOf(policy.fileTransfer.maxFileBytes));
   const [applyOpen, setApplyOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
@@ -119,6 +140,8 @@ export function SessionPolicyContent({
   // and retry" guidance to stay visible while the new values land.
   useEffect(() => {
     setCeiling(policy.clipboard);
+    setFtMode(policy.fileTransfer.mode);
+    setFtMax(mibOf(policy.fileTransfer.maxFileBytes));
     etagRef.current = policy.etag;
   }, [policy]);
 
@@ -129,7 +152,7 @@ export function SessionPolicyContent({
       await putAdminSessionPolicy(
         api,
         policy.tenant,
-        { clipboard: ceiling, fileTransfer: { mode: "FollowTemplate", maxFileBytes: null } },
+        { clipboard: ceiling, fileTransfer: { mode: ftMode, maxFileBytes: ftBytes } },
         etagRef.current,
       );
       onChanged();
@@ -174,9 +197,29 @@ export function SessionPolicyContent({
       header: t("admin.policy.preview.effective"),
       render: (tpl) => clipboardPolicyLabel(meetClipboard(tpl.clipboardPolicy, ceiling)),
     },
+    {
+      key: "templateFt",
+      header: t("admin.policy.preview.templateFt"),
+      render: (tpl) => fileTransferLabel(tpl.fileTransferPolicy),
+    },
+    {
+      key: "effectiveFt",
+      sortable: true,
+      compare: (a, b) =>
+        meetFileTransfer(a.fileTransferPolicy, ftMode).localeCompare(
+          meetFileTransfer(b.fileTransferPolicy, ftMode),
+        ),
+      header: t("admin.policy.preview.effectiveFt"),
+      render: (tpl) => fileTransferLabel(meetFileTransfer(tpl.fileTransferPolicy, ftMode)),
+    },
   ];
   const sort = useTableSort(columns, templates, { key: "template", direction: "ascending" });
-  const dirty = ceiling !== policy.clipboard;
+  const ftBytes = ftMax === "" ? null : Math.round(Number(ftMax) * MIB);
+  const ftInvalid = ftBytes !== null && !(ftBytes >= 1);
+  const dirty =
+    ceiling !== policy.clipboard ||
+    ftMode !== policy.fileTransfer.mode ||
+    ftMax !== mibOf(policy.fileTransfer.maxFileBytes);
 
   return (
     <>
@@ -198,9 +241,19 @@ export function SessionPolicyContent({
             label={t("admin.policy.fileTransfer.label")}
             hint={t("admin.policy.fileTransfer.hint")}
             name="file-transfer-ceiling"
-            value="FollowTemplate"
-            disabled
-            options={[{ value: "FollowTemplate", label: t(CEILING_LABEL.FollowTemplate) }]}
+            value={ftMode}
+            onChange={(e) => setFtMode(e.target.value as FileTransferCeiling["mode"])}
+            options={FT_MODES.map((v) => ({ value: v, label: t(FT_LABEL[v]) }))}
+          />
+          <Input
+            label={t("admin.policy.ft.maxLabel")}
+            hint={t("admin.policy.ft.maxHint")}
+            name="file-max-mib"
+            type="number"
+            min={0}
+            step="any"
+            value={ftMax}
+            onChange={(e) => setFtMax(e.target.value)}
           />
         </div>
         <Alert tone="info">{t("admin.policy.appliesNote")}</Alert>
@@ -208,7 +261,7 @@ export function SessionPolicyContent({
           <Button
             variant="primary"
             loading={busy}
-            disabled={!dirty}
+            disabled={!dirty || ftInvalid}
             onClick={() => void save()}
           >
             {t("admin.policy.save")}

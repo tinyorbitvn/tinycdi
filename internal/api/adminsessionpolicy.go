@@ -6,8 +6,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -57,8 +59,8 @@ const (
 
 // adminFileTransferCeiling is the fileTransfer block of the admin
 // session-policy view and PUT body (openapi AdminFileTransferCeiling):
-// the inert channel shipped for T11 — mode is FollowTemplate and
-// maxFileBytes is null until v1.3 makes them live.
+// mode narrows the file channel the same way clipboard does;
+// maxFileBytes lowers the per-file bound below the platform bound.
 type adminFileTransferCeiling struct {
 	Mode         string `json:"mode"`
 	MaxFileBytes *int64 `json:"maxFileBytes"`
@@ -77,8 +79,8 @@ type adminSessionPolicyView struct {
 }
 
 // putSessionPolicyRequest is the PUT body (openapi
-// PutAdminSessionPolicy). clipboard is required; fileTransfer is the
-// inert T11 channel — accepted only at its defaults in this version.
+// PutAdminSessionPolicy). clipboard is required; fileTransfer narrows
+// the file channel and lowers the per-file bound.
 type putSessionPolicyRequest struct {
 	Clipboard    *string                 `json:"clipboard"`
 	FileTransfer *putFileTransferCeiling `json:"fileTransfer"`
@@ -98,6 +100,10 @@ type AdminSessionPolicyHandler struct {
 	source  SessionPolicySource
 	tenants TenantResolver
 	maxBody int64
+	// fileBound is the platform per-file bound
+	// (-file-transfer-max-bytes) a ceiling write's maxFileBytes is
+	// checked against; 0 leaves it unchecked.
+	fileBound int64
 	// audit is the dedicated audit-event sink the admin routes emit
 	// through (nil = no domain audit events).
 	audit observability.AuditSink
@@ -118,6 +124,14 @@ func NewAdminSessionPolicyHandler(src SessionPolicySource, t TenantResolver) *Ad
 // their dedicated audit events to.
 func (h *AdminSessionPolicyHandler) WithAuditSink(s observability.AuditSink) *AdminSessionPolicyHandler {
 	h.audit = s
+	return h
+}
+
+// WithFileTransferBound sets the platform per-file bound
+// (-file-transfer-max-bytes) a PUT's fileTransfer.maxFileBytes may not
+// exceed.
+func (h *AdminSessionPolicyHandler) WithFileTransferBound(bound int64) *AdminSessionPolicyHandler {
+	h.fileBound = bound
 	return h
 }
 
@@ -197,9 +211,9 @@ func validCeilingValue(v string, dirA, dirB string) bool {
 // PRECONDITION_REQUIRED without it, 412 PRECONDITION_FAILED when stale;
 // "*" creates only a missing row). A PUT whose every channel is FollowTemplate
 // deletes the row — "no row" and "all-defaults row" are the same state.
-// The fileTransfer channel is inert in this version (T11, v1.3): the
-// schema carries it so the write is already shaped correctly, but any
-// non-default fileTransfer value is a 400 until the channel goes live.
+// fileTransfer.mode narrows the file channel; maxFileBytes lowers the
+// per-file bound and may not exceed the platform bound
+// (-file-transfer-max-bytes).
 func (h *AdminSessionPolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 	if _, ok := tenantAdminPrincipal(h.tenants, w, r); !ok {
 		return
@@ -226,29 +240,36 @@ func (h *AdminSessionPolicyHandler) Put(w http.ResponseWriter, r *http.Request) 
 			"clipboard must be one of FollowTemplate, Disabled, Send, Receive, Bidirectional")
 		return
 	}
-	// fileTransfer is the inert T11 channel: the schema carries it so T11
-	// is additive, but only the defaults write. A non-default mode or a
-	// maxFileBytes bound is refused — a stored value would otherwise arm
-	// silently for v1.3.
+	var write store.SessionPolicyWrite
+	if clip != provisioning.PolicyFollowTemplate {
+		write.Clipboard = &clip
+	}
 	if req.FileTransfer != nil {
 		ft := req.FileTransfer
-		mode := provisioning.PolicyFollowTemplate
-		if ft.Mode != nil {
-			mode = *ft.Mode
+		if ft.Mode != nil && *ft.Mode != provisioning.PolicyFollowTemplate {
+			if !validCeilingValue(*ft.Mode, provisioning.FileTransferUpload, provisioning.FileTransferDownload) {
+				writeError(w, r, CodeInvalidRequest,
+					"fileTransfer.mode must be one of FollowTemplate, Disabled, Upload, Download, Bidirectional")
+				return
+			}
+			mode := *ft.Mode
+			write.FileTransfer = &mode
+			auditSetDetail(r.Context(), "policy", "fileTransfer="+mode)
 		}
-		if mode != provisioning.PolicyFollowTemplate || ft.MaxFileBytes != nil {
-			writeError(w, r, CodeInvalidRequest,
-				"fileTransfer is inert in this version; only FollowTemplate is accepted")
-			return
+		if ft.MaxFileBytes != nil {
+			if *ft.MaxFileBytes < 1 || (h.fileBound > 0 && *ft.MaxFileBytes > h.fileBound) {
+				writeError(w, r, CodeInvalidRequest,
+					fmt.Sprintf("fileTransfer.maxFileBytes must be 1..%d (the platform bound)", h.fileBound))
+				return
+			}
+			n := *ft.MaxFileBytes
+			write.FileMaxBytes = &n
+			auditSetDetail(r.Context(), "bytes", strconv.FormatInt(n, 10))
 		}
 	}
 	// Record the attempted write on the in-flight audit event — success
 	// or refusal carries it alike.
 	auditSetDetail(r.Context(), "clipboard", clip)
-	var write store.SessionPolicyWrite
-	if clip != provisioning.PolicyFollowTemplate {
-		write.Clipboard = &clip
-	}
 	if write.Defaults() {
 		// Every channel follows the template: the write resolves to the
 		// row's deletion, audited as the clear variant.

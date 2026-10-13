@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -174,6 +175,12 @@ const (
 	// clipboard block from it (build/linux-base/entrypoint.sh,
 	// build/kasm-adapter/entrypoint.sh) and fail closed on unset/unknown.
 	envClipboardPolicy = "TCDI_CLIPBOARD_POLICY"
+
+	// envXferPolicy / envXferMaxBytes carry spec.sessionPolicy.fileTransfer
+	// and .maxFileBytes to the runtime; tcdi-xferd fails closed (Disabled)
+	// on an unset or unknown policy.
+	envXferPolicy   = "TCDI_XFER_POLICY"
+	envXferMaxBytes = "TCDI_XFER_MAX_BYTES"
 )
 
 // AdapterBrowserWrappers are the Chromium-family launcher paths the shim
@@ -1119,7 +1126,9 @@ func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev
 	// spec.sessionPolicy (template policy ∧ tenant ceiling, ADR 0010) is
 	// required — it is the only source pod building reads.
 	ctr.Env = append(ctr.Env,
-		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)})
+		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)},
+		corev1.EnvVar{Name: envXferPolicy, Value: string(ws.Spec.SessionPolicy.FileTransfer)},
+		corev1.EnvVar{Name: envXferMaxBytes, Value: strconv.FormatInt(ws.Spec.SessionPolicy.MaxFileBytes, 10)})
 
 	kasm := tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm
 	if kasm {

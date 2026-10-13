@@ -83,3 +83,26 @@ func TestPodSessionPolicyWins(t *testing.T) {
 		t.Fatalf("resolved env = %q (present=%v), want Send", v, ok)
 	}
 }
+
+func TestPodCarriesFileTransferEnv(t *testing.T) {
+	for _, adapter := range []cdiv1.RuntimeAdapter{cdiv1.AdapterNone, cdiv1.AdapterKasm} {
+		tpl := testTemplate(nil)
+		opts := Options{}
+		if adapter == cdiv1.AdapterKasm {
+			tpl.Spec.Linux.Adapter = adapter
+			opts.KasmAdapterImage = testAdapterImage
+		}
+		ws := testWorkspace()
+		ws.Spec.SessionPolicy = cdiv1.SessionPolicySpec{
+			Clipboard:    cdiv1.ClipboardDisabled,
+			FileTransfer: cdiv1.FileTransferUpload,
+			MaxFileBytes: 4096,
+		}
+		ctr := ensurePodSpecWS(t, ws, tpl, opts).Spec.Containers[0]
+		for k, want := range map[string]string{"TCDI_XFER_POLICY": "Upload", "TCDI_XFER_MAX_BYTES": "4096"} {
+			if v, ok := envOf(&ctr, k); !ok || v != want {
+				t.Errorf("adapter=%q: env %s = %q (present=%v), want %q", adapter, k, v, ok, want)
+			}
+		}
+	}
+}

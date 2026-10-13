@@ -215,9 +215,10 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	svc := provisioning.NewService(db).
 		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants)).
 		WithImageBlockAfter(cfg.ImageBlockAfter).
+		WithFileTransferMaxBytes(cfg.FileTransferMaxBytes).
 		WithLogger(log)
 	outbox := provisioning.NewOutbox(db)
-	retained := provisioning.NewRetainedStore(db)
+	retained := provisioning.NewRetainedStore(db).WithFileTransferMaxBytes(cfg.FileTransferMaxBytes)
 	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants).WithLogger(log), kc, tenants, retained)
 	disp := provisioning.NewDispatcher(outbox, applier,
 		provisioning.WithPollInterval(250*time.Millisecond))
@@ -749,6 +750,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// applied-policy view.
 	adminSessionPolicyHandler := api.NewAdminSessionPolicyHandler(api.NewAdminSessionPolicySource(db), tenants).
 		WithAuditSink(appAudit).
+		WithFileTransferBound(cfg.FileTransferMaxBytes).
 		WithApply(policyApplyBackend{svc, db}, statusView, directory)
 	adminAuditHandler := api.NewAdminAuditHandler(db, tenants).WithAuditSink(appAudit)
 	adminUsersHandler := api.NewAdminUsersHandler(db, api.NewAdminUserLimitSource(db), tenants).WithAuditSink(appAudit)
@@ -1088,6 +1090,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		MaxRunningSeconds:      int64(e.MaxRunning / time.Second),
 		DataPolicyDefault:      e.DataPolicyDefault,
 		ClipboardPolicy:        e.ClipboardPolicy,
+		FileTransferPolicy:     e.FileTransferPolicy,
 		NetworkProfile:         e.NetworkProfile,
 		ImageUpdate:            e.ImageUpdate,
 		PublishedAt:            e.PublishedAt,

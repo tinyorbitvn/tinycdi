@@ -126,9 +126,13 @@ type Config struct {
 	// grow without bound (SR-4-F5).
 	TerminalRetentionDays int
 	AuditRetentionDays    int // days an audit_event row is kept before the leader's daily prune (ADR 0011); 1..3650
-	ImageStaleAfter       time.Duration
-	ImageBlockAfter       time.Duration // 0 disables the stale-image admission block (E3)
-	LoginRate             int           // per-client requests/min on the login-family routes; 0 disables
+	// FileTransferMaxBytes is the platform per-file bound for session
+	// file transfer (ADR 0010 T11): every resolved policy is clipped to
+	// it and a tenant ceiling's maxFileBytes may only lower it. 1..10 GiB.
+	FileTransferMaxBytes int64
+	ImageStaleAfter      time.Duration
+	ImageBlockAfter      time.Duration // 0 disables the stale-image admission block (E3)
+	LoginRate            int           // per-client requests/min on the login-family routes; 0 disables
 
 	// Session listener (the former cmd/gateway surface).
 	SessionListen       string // empty disables the session listener
@@ -246,6 +250,17 @@ func envInt(getenv func(string) string, key string, def int) int {
 	return def
 }
 
+func envInt64(getenv func(string) string, key string, def int64) int64 {
+	if getenv != nil {
+		if v := getenv(key); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				return n
+			}
+		}
+	}
+	return def
+}
+
 // ParseFlags fills a Config from args (flag values) and getenv (TCDI_* env
 // fallback: a flag's env is its name uppercased with '-' → '_'). A flag
 // always wins over its env.
@@ -286,6 +301,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"days a terminal connection_lease/launch_ticket row is kept before the leader's hourly sweep deletes it; 0 disables (env TCDI_TERMINAL_RETENTION_DAYS)")
 	fs.IntVar(&c.AuditRetentionDays, "audit-retention-days", envInt(getenv, "TCDI_AUDIT_RETENTION_DAYS", 90),
 		"days audit_event rows are kept; a daily leader task prunes older rows (env TCDI_AUDIT_RETENTION_DAYS)")
+	fs.Int64Var(&c.FileTransferMaxBytes, "file-transfer-max-bytes", envInt64(getenv, "TCDI_FILE_TRANSFER_MAX_BYTES", 104857600),
+		"platform per-file bound for session file transfer; a tenant maxFileBytes may only lower it (env TCDI_FILE_TRANSFER_MAX_BYTES)")
 	fs.DurationVar(&c.RecoveryInterval, "recovery-interval", envDur(getenv, "TCDI_RECOVERY_INTERVAL", 30*time.Second),
 		"quota/intent recovery pass interval; one pass runs at every leader acquisition, then every interval; "+
 			"<=0 runs the single startup pass only. Quota settlement is event-driven (Workspace informer) with "+
@@ -428,6 +445,9 @@ func (c *Config) validate() error {
 	}
 	if c.AuditRetentionDays < 1 || c.AuditRetentionDays > 3650 {
 		return errors.New("-audit-retention-days must be 1..3650")
+	}
+	if c.FileTransferMaxBytes < 1 || c.FileTransferMaxBytes > 10<<30 {
+		return errors.New("-file-transfer-max-bytes must be 1..10737418240")
 	}
 	if c.RateLimitReplicas < 1 {
 		return errors.New("-rate-limit-replicas must be >= 1")

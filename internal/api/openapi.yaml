@@ -1123,10 +1123,10 @@ paths:
         `FollowTemplate` deletes the row — "no row" and "all-defaults
         row" are the same state, and the store keeps exactly one
         representation of it; after it `If-Match: *` is valid again.
-        `fileTransfer` is inert in this version (the channel ships in
-        v1.3): only its defaults are accepted — a non-default
-        `fileTransfer.mode` or any `maxFileBytes` answers
-        `400 INVALID_REQUEST`.
+        `fileTransfer.mode` narrows the file-transfer channel the same
+        way `clipboard` does; `fileTransfer.maxFileBytes` lowers the
+        per-file bound and may not exceed the platform bound
+        (`-file-transfer-max-bytes`), else `400 INVALID_REQUEST`.
 
         Tightening takes effect on two clocks (ADR 0010 §3): the next
         minted connection ticket carries the new client flags
@@ -2569,9 +2569,9 @@ components:
       additionalProperties: false
       required: [mode, maxFileBytes]
       description: |
-        The tenant's file-transfer ceiling — the inert channel carried
-        for v1.3 (ADR 0010 T11). Only the defaults are meaningful in this
-        version: `mode: FollowTemplate`, `maxFileBytes: null`.
+        The tenant's file-transfer ceiling over the template's
+        `fileTransferPolicy`: `mode` narrows the direction,
+        `maxFileBytes` lowers the per-file size bound.
       properties:
         mode:
           type: string
@@ -2579,13 +2579,12 @@ components:
           description: |
             Ceiling over the template's file-transfer policy (`Upload` =
             device → workspace home, `Download` = workspace → device).
-            Inert until v1.3 adds the template leg.
         maxFileBytes:
           type: ["integer", "null"]
           minimum: 1
           description: |
-            Per-file size bound; `null` = the platform default bound.
-            Inert until v1.3.
+            Per-file size bound, 1 up to the platform bound; `null` = the
+            platform bound.
 
     AdminSessionPolicySource:
       type: string
@@ -2621,9 +2620,8 @@ components:
       required: [clipboard]
       description: |
         Write the tenant's session data-transfer ceiling. `clipboard` is
-        required; `fileTransfer` is the inert v1.3 channel and only its
-        defaults are accepted in this version. Setting every channel to
-        `FollowTemplate` deletes the row.
+        required. Setting every channel to `FollowTemplate` deletes the
+        row.
       properties:
         clipboard:
           $ref: "#/components/schemas/ClipboardCeiling"
@@ -2776,10 +2774,9 @@ components:
           type: string
           enum: [Disabled, Upload, Download, Bidirectional]
           description: |
-            The resolved file-transfer direction policy — the same enum
-            WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
-            v1.3 — always resolves `Disabled` while no template leg is
-            wired into the catalog entry.
+            The resolved file-transfer direction policy: the meet of the
+            template's `fileTransferPolicy` and the tenant ceiling — the
+            same enum WorkspaceSpec.sessionPolicy.fileTransfer carries.
         maxFileBytes:
           type: integer
           format: int64
@@ -3019,6 +3016,7 @@ components:
         - lifecycleDefaults
         - dataPolicyDefault
         - clipboardPolicy
+        - fileTransferPolicy
         - networkProfile
         - publishedAt
       description: |
@@ -3096,6 +3094,14 @@ components:
             (`client_to_server`); `Receive` allows workspace to client
             only (`server_to_client`, primary selection included);
             `Bidirectional` allows both directions.
+        fileTransferPolicy:
+          type: string
+          enum: [Disabled, Upload, Download, Bidirectional]
+          description: |
+            File transfer between the user's device and the workspace
+            home (Upload = device to workspace, Download = workspace to
+            device). Disabled unless the template opts in; the tenant
+            ceiling can only narrow it.
         networkProfile:
           type: string
           enum: [InternetOnly, ClusterOnly, Isolated]

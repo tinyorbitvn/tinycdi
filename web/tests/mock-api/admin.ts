@@ -249,7 +249,7 @@ export interface Tenancy {
   // Tenant session-policy ceiling (ADR 0010): undefined = no row —
   // every channel FollowTemplate. spVersion is its version; the ETag
   // "sp-<n>" travels as a header and PUT echoes it via If-Match.
-  sessionPolicy: { clipboard: string } | undefined;
+  sessionPolicy: { clipboard: string; fileTransfer: string; maxFileBytes: number | null } | undefined;
   spVersion: number;
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
@@ -678,7 +678,10 @@ export function adminArea(ctx: MockContext): MockArea {
     return {
       tenant: t.me.tenant,
       clipboard: t.sessionPolicy?.clipboard ?? "FollowTemplate",
-      fileTransfer: { mode: "FollowTemplate", maxFileBytes: null },
+      fileTransfer: {
+        mode: t.sessionPolicy?.fileTransfer ?? "FollowTemplate",
+        maxFileBytes: t.sessionPolicy?.maxFileBytes ?? null,
+      },
       source: t.sessionPolicy ? "TenantRow" : "FollowTemplate",
     };
   }
@@ -706,14 +709,21 @@ export function adminArea(ctx: MockContext): MockArea {
       if (b === null || typeof clip !== "string" || !CEILINGS.includes(clip)) {
         return err(400, "INVALID_REQUEST", "clipboard must be one of FollowTemplate, Disabled, Send, Receive, Bidirectional", false);
       }
-      const ft = b.fileTransfer as { mode?: string; maxFileBytes?: number | null } | undefined;
-      if (ft !== undefined && ((ft.mode ?? "FollowTemplate") !== "FollowTemplate" || (ft.maxFileBytes ?? null) !== null)) {
-        return err(400, "INVALID_REQUEST", "fileTransfer is inert in this version; only FollowTemplate is accepted", false);
+      const FT_MODES = ["FollowTemplate", "Disabled", "Upload", "Download", "Bidirectional"];
+      const PLATFORM_FILE_BOUND = 104857600;
+      const ft = (b.fileTransfer ?? {}) as { mode?: string; maxFileBytes?: number | null };
+      const ftMode = ft.mode ?? "FollowTemplate";
+      const ftMax = ft.maxFileBytes ?? null;
+      if (
+        !FT_MODES.includes(ftMode) ||
+        (ftMax !== null && (!Number.isInteger(ftMax) || ftMax < 1 || ftMax > PLATFORM_FILE_BOUND))
+      ) {
+        return err(400, "INVALID_REQUEST", "fileTransfer.mode or maxFileBytes is invalid", false);
       }
-      if (clip === "FollowTemplate") {
+      if (clip === "FollowTemplate" && ftMode === "FollowTemplate" && ftMax === null) {
         t.sessionPolicy = undefined;
       } else {
-        t.sessionPolicy = { clipboard: clip };
+        t.sessionPolicy = { clipboard: clip, fileTransfer: ftMode, maxFileBytes: ftMax };
       }
       t.spVersion += 1;
       return withTag(200, sessionPolicyBody(), sessionPolicyTag());
@@ -931,7 +941,11 @@ export function adminArea(ctx: MockContext): MockArea {
         if (req.body?.clipboard === null || req.body?.clipboard === "FollowTemplate") {
           t.sessionPolicy = undefined;
         } else if (typeof req.body?.clipboard === "string") {
-          t.sessionPolicy = { clipboard: req.body.clipboard };
+          t.sessionPolicy = {
+            clipboard: req.body.clipboard,
+            fileTransfer: String(req.body?.fileTransfer ?? "FollowTemplate"),
+            maxFileBytes: typeof req.body?.maxFileBytes === "number" ? req.body.maxFileBytes : null,
+          };
         }
         t.spVersion += 1;
         return ok(200, sessionPolicyBody());

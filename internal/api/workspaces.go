@@ -90,6 +90,7 @@ type TemplateEntry struct {
 	MaxRunningSeconds      int64
 	DataPolicyDefault      string
 	ClipboardPolicy        string
+	FileTransferPolicy     string
 	NetworkProfile         string
 	// ImageUpdate is the revision's lifecycle.imageUpdate policy
 	// (OnStart | Pinned); "" reads as the OnStart default.
@@ -538,6 +539,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RevisionLabel: tpl.RevisionLabel,
 		Runtime:       tpl.Runtime, Experience: tpl.Experience,
 		ImageBuiltAt: tpl.ImageBuiltAt, ClipboardPolicy: tpl.ClipboardPolicy,
+		FileTransferPolicy: tpl.FileTransferPolicy,
 	}
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,

@@ -310,12 +310,15 @@ export default {
   "admin.policy.clipboard.hint":
     "Send lets people copy from their device into the workspace; Receive lets them copy from the workspace back to their device.",
   "admin.policy.fileTransfer.label": "File transfer",
-  "admin.policy.fileTransfer.hint": "Available in v1.3.",
+  "admin.policy.fileTransfer.hint":
+    "Upload is device → workspace, Download is workspace → device. Files land in the Transfers folder of the workspace home.",
   "admin.policy.option.followTemplate": "Follow template",
   "admin.policy.ft.option.upload": "Upload only",
   "admin.policy.ft.option.download": "Download only",
   "admin.policy.ft.option.bidirectional": "Both directions",
   "admin.policy.ft.option.disabled": "Disabled",
+  "admin.policy.ft.maxLabel": "Largest file (MiB)",
+  "admin.policy.ft.maxHint": "Empty uses the platform limit.",
   "admin.policy.appliesNote":
     "Tightening applies to new connections and new file transfers right away; a running workspace's clipboard limits follow at its next start, or at once with Apply now.",
   "admin.policy.apply.button": "Apply now",
@@ -345,12 +348,14 @@ export default {
   "admin.policy.save": "Save ceiling",
   "admin.policy.preview.title": "Effective policy by template",
   "admin.policy.preview.description":
-    "What users get for each template: the template's own clipboard policy narrowed by the selected ceiling.",
+    "What users get for each template: the template's own clipboard and file-transfer policy narrowed by the selected ceilings.",
   "admin.policy.preview.caption": "Effective clipboard policy by template",
   "admin.policy.preview.template": "Template",
   "admin.policy.preview.templatePolicy": "Template policy",
   "admin.policy.preview.ceiling": "Ceiling",
   "admin.policy.preview.effective": "Effective for users",
+  "admin.policy.preview.templateFt": "Template file transfer",
+  "admin.policy.preview.effectiveFt": "Effective file transfer",
   "admin.policy.preview.empty": "No templates in the catalog.",
 
   // Error guidance (stable code -> next step; server messages are detail).

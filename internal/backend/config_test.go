@@ -656,3 +656,19 @@ func TestParseFlags_AuditRetentionDays(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlags_FileTransferMaxBytes(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil || cfg.FileTransferMaxBytes != 104857600 {
+		t.Fatalf("default = %d, %v; want 104857600", cfg.FileTransferMaxBytes, err)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_FILE_TRANSFER_MAX_BYTES": "1048576"}))
+	if err != nil || cfg.FileTransferMaxBytes != 1048576 {
+		t.Fatalf("env = %d, %v; want 1048576", cfg.FileTransferMaxBytes, err)
+	}
+	for _, bad := range []string{"0", "-1", "10737418241"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-file-transfer-max-bytes", bad), noEnv); err == nil {
+			t.Fatalf("-file-transfer-max-bytes=%s accepted", bad)
+		}
+	}
+}

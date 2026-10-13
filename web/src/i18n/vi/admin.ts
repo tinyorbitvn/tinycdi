@@ -310,12 +310,15 @@ export default {
   "admin.policy.clipboard.hint":
     "Send cho phép sao chép từ thiết bị vào workspace; Receive cho phép sao chép từ workspace về thiết bị.",
   "admin.policy.fileTransfer.label": "Truyền tệp",
-  "admin.policy.fileTransfer.hint": "Sẽ có trong v1.3.",
+  "admin.policy.fileTransfer.hint":
+    "Tải lên là thiết bị → workspace, Tải xuống là workspace → thiết bị. Tệp nằm trong thư mục Transfers của thư mục chính workspace.",
   "admin.policy.option.followTemplate": "Theo template",
   "admin.policy.ft.option.upload": "Chỉ tải lên",
   "admin.policy.ft.option.download": "Chỉ tải xuống",
   "admin.policy.ft.option.bidirectional": "Cả hai chiều",
   "admin.policy.ft.option.disabled": "Tắt",
+  "admin.policy.ft.maxLabel": "Tệp lớn nhất (MiB)",
+  "admin.policy.ft.maxHint": "Để trống để dùng giới hạn của nền tảng.",
   "admin.policy.appliesNote":
     "Siết chặt áp dụng ngay với các kết nối mới và lượt truyền tệp mới; giới hạn clipboard của workspace đang chạy có hiệu lực ở lần khởi động tiếp theo, hoặc ngay với Áp dụng ngay.",
   "admin.policy.apply.button": "Áp dụng ngay",
@@ -345,12 +348,14 @@ export default {
   "admin.policy.save": "Lưu giới hạn",
   "admin.policy.preview.title": "Chính sách hiệu lực theo template",
   "admin.policy.preview.description":
-    "Điều người dùng nhận được cho từng template: chính sách clipboard của template bị thu hẹp bởi giới hạn đã chọn.",
+    "Người dùng nhận được gì với từng template: chính sách clipboard và truyền tệp của template, được thu hẹp bởi các giới hạn đã chọn.",
   "admin.policy.preview.caption": "Chính sách clipboard hiệu lực theo template",
   "admin.policy.preview.template": "Template",
   "admin.policy.preview.templatePolicy": "Chính sách template",
   "admin.policy.preview.ceiling": "Giới hạn",
   "admin.policy.preview.effective": "Hiệu lực với người dùng",
+  "admin.policy.preview.templateFt": "Truyền tệp của template",
+  "admin.policy.preview.effectiveFt": "Truyền tệp hiệu lực",
   "admin.policy.preview.empty": "Không có template nào trong danh mục.",
 
   // Error guidance (stable code -> next step; server messages are detail).

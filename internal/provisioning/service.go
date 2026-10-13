@@ -28,6 +28,10 @@ type Service struct {
 	// (-image-block-after): a start whose resolved revision's image is
 	// older fails with *ImageStaleError. <=0 disables the block.
 	blockAfter time.Duration
+	// fileBound is the platform per-file bound
+	// (-file-transfer-max-bytes) every resolved session policy is clipped
+	// to (ADR 0010 T11).
+	fileBound int64
 	// revokeGeneration fences the previous runtime generation inside the
 	// RestartWorkspace transaction (F1); nil refuses a restart.
 	revokeGeneration GenerationRevoker
@@ -55,6 +59,17 @@ func (s *Service) WithImageBlockAfter(d time.Duration) *Service {
 	s.blockAfter = d
 	return s
 }
+
+// WithFileTransferMaxBytes sets the platform per-file bound
+// (-file-transfer-max-bytes) every resolved policy is clipped to.
+func (s *Service) WithFileTransferMaxBytes(bound int64) *Service {
+	s.fileBound = bound
+	s.retained.fileBound = bound
+	return s
+}
+
+// FileTransferMaxBytes returns the platform per-file bound.
+func (s *Service) FileTransferMaxBytes() int64 { return s.fileBound }
 
 // WithLogger attaches a logger for lifecycle warnings; nil keeps
 // slog.Default.
@@ -292,8 +307,9 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 		// transaction so the stamped value is the snapshot the workspace
 		// was admitted under.
 		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
-			ClipboardPolicy: req.Template.ClipboardPolicy,
-		})
+			ClipboardPolicy:    req.Template.ClipboardPolicy,
+			FileTransferPolicy: req.Template.FileTransferPolicy,
+		}, s.fileBound)
 		if err != nil {
 			return fmt.Errorf("create: resolve session policy: %w", err)
 		}
@@ -733,15 +749,20 @@ func (s *Service) ListRunningWorkspaces(ctx context.Context, tenantID string, li
 // template snapshot, the pre-field behaviour.
 func (s *Service) startSessionPolicy(ctx context.Context, tx store.Tx, tenantID string, rec *WorkspaceRecord) (*SessionPolicy, error) {
 	clipboard := rec.Template.ClipboardPolicy
+	fileTransfer := rec.Template.FileTransferPolicy
 	if clipboard == "" && s.templates != nil {
 		if cur, err := s.templates.Get(ctx, tenantID, rec.Template.ID); err == nil && cur != nil {
 			clipboard = cur.ClipboardPolicy
+			fileTransfer = cur.FileTransferPolicy
 		}
 	}
 	if clipboard == "" {
 		return nil, nil
 	}
-	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{ClipboardPolicy: clipboard})
+	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
+		ClipboardPolicy:    clipboard,
+		FileTransferPolicy: fileTransfer,
+	}, s.fileBound)
 	if err != nil {
 		return nil, fmt.Errorf("start: resolve session policy: %w", err)
 	}

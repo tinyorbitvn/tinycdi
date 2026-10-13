@@ -638,10 +638,10 @@ export interface paths {
          *     `FollowTemplate` deletes the row — "no row" and "all-defaults
          *     row" are the same state, and the store keeps exactly one
          *     representation of it; after it `If-Match: *` is valid again.
-         *     `fileTransfer` is inert in this version (the channel ships in
-         *     v1.3): only its defaults are accepted — a non-default
-         *     `fileTransfer.mode` or any `maxFileBytes` answers
-         *     `400 INVALID_REQUEST`.
+         *     `fileTransfer.mode` narrows the file-transfer channel the same
+         *     way `clipboard` does; `fileTransfer.maxFileBytes` lowers the
+         *     per-file bound and may not exceed the platform bound
+         *     (`-file-transfer-max-bytes`), else `400 INVALID_REQUEST`.
          *
          *     Tightening takes effect on two clocks (ADR 0010 §3): the next
          *     minted connection ticket carries the new client flags
@@ -1431,21 +1431,20 @@ export interface components {
          */
         ClipboardCeiling: "FollowTemplate" | "Disabled" | "Send" | "Receive" | "Bidirectional";
         /**
-         * @description The tenant's file-transfer ceiling — the inert channel carried
-         *     for v1.3 (ADR 0010 T11). Only the defaults are meaningful in this
-         *     version: `mode: FollowTemplate`, `maxFileBytes: null`.
+         * @description The tenant's file-transfer ceiling over the template's
+         *     `fileTransferPolicy`: `mode` narrows the direction,
+         *     `maxFileBytes` lowers the per-file size bound.
          */
         FileTransferCeiling: {
             /**
              * @description Ceiling over the template's file-transfer policy (`Upload` =
              *     device → workspace home, `Download` = workspace → device).
-             *     Inert until v1.3 adds the template leg.
              * @enum {string}
              */
             mode: "FollowTemplate" | "Disabled" | "Upload" | "Download" | "Bidirectional";
             /**
-             * @description Per-file size bound; `null` = the platform default bound.
-             *     Inert until v1.3.
+             * @description Per-file size bound, 1 up to the platform bound; `null` = the
+             *     platform bound.
              */
             maxFileBytes: number | null;
         };
@@ -1471,9 +1470,8 @@ export interface components {
         };
         /**
          * @description Write the tenant's session data-transfer ceiling. `clipboard` is
-         *     required; `fileTransfer` is the inert v1.3 channel and only its
-         *     defaults are accepted in this version. Setting every channel to
-         *     `FollowTemplate` deletes the row.
+         *     required. Setting every channel to `FollowTemplate` deletes the
+         *     row.
          */
         PutAdminSessionPolicy: {
             clipboard: components["schemas"]["ClipboardCeiling"];
@@ -1602,10 +1600,9 @@ export interface components {
              */
             clipboard: "Disabled" | "Send" | "Receive" | "Bidirectional";
             /**
-             * @description The resolved file-transfer direction policy — the same enum
-             *     WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
-             *     v1.3 — always resolves `Disabled` while no template leg is
-             *     wired into the catalog entry.
+             * @description The resolved file-transfer direction policy: the meet of the
+             *     template's `fileTransferPolicy` and the tenant ceiling — the
+             *     same enum WorkspaceSpec.sessionPolicy.fileTransfer carries.
              * @enum {string}
              */
             fileTransfer: "Disabled" | "Upload" | "Download" | "Bidirectional";
@@ -1843,6 +1840,14 @@ export interface components {
              * @enum {string}
              */
             clipboardPolicy: "Disabled" | "Send" | "Receive" | "Bidirectional";
+            /**
+             * @description File transfer between the user's device and the workspace
+             *     home (Upload = device to workspace, Download = workspace to
+             *     device). Disabled unless the template opts in; the tenant
+             *     ceiling can only narrow it.
+             * @enum {string}
+             */
+            fileTransferPolicy: "Disabled" | "Upload" | "Download" | "Bidirectional";
             /**
              * @description Runtime egress policy of the WorkspaceTemplate CRD —
              *     `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
