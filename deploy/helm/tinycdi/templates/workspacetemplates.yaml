@@ -13,8 +13,7 @@
 # tpl_<name> (and lists) to the newest published revision.
 #
 # Per-entry structured fields map to the annotations the runtime backend
-# honors (internal/runtime/linux/backend.go). The v0.1 nodeSelector entry
-# field is gone (E14): the render fails below — pod placement lives in the
+# honors (internal/runtime/linux/backend.go). Pod placement lives in the
 # typed spec.placement block, with unset fields falling back to the
 # operator defaults rendered from runtime.placement.
 #   image:           key into .Values.images (e.g. "linuxDesktop",
@@ -81,16 +80,13 @@
 {{- if .appArmorProfile }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/apparmor-profile" (printf "localhost/%s" (.appArmorProfile | trimPrefix "localhost/")) }}
 {{- end }}
-{{- if .nodeSelector }}
-{{- fail (printf "templates[%s]: nodeSelector was removed in v0.3 — use spec.placement.nodeSelector" $tplName) }}
-{{- end }}
 {{- $sc := .storageClass | default $.Values.storageClass }}
 {{- if and $sc (not (index $ann "workspaces.cdi.tinyorbit.vn/storage-class")) }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/storage-class" $sc }}
 {{- end }}
 {{- $hash := sha256sum (printf "%s\n%s" (toYaml $spec) (toYaml $ann)) | trunc 8 }}
 ---
-apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+apiVersion: workspaces.cdi.tinyorbit.vn/v1
 kind: WorkspaceTemplate
 metadata:
   name: {{ printf "%s-%s" $tplName $hash | trunc 63 | trimSuffix "-" }}

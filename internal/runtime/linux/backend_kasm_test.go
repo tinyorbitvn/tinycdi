@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 const testAdapterImage = "ghcr.io/tinyorbitvn/tinycdi-kasm-adapter@sha256:" +
@@ -31,7 +31,7 @@ func ensureKasmPod(t *testing.T, sessionCmd string, opts Options) *corev1.Pod {
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 	tpl.Spec.Linux.SessionCmd = sessionCmd
 	if _, err := New(c, opts).Ensure(context.Background(), ws, tpl); err != nil {
 		t.Fatalf("Ensure: %v", err)
@@ -229,7 +229,7 @@ func TestKasmAdapterRejectedWithoutImage(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 	_, err := New(c, Options{}).Ensure(context.Background(), ws, tpl)
 	if err == nil {
 		t.Fatal("adapter=kasm without KasmAdapterImage must be rejected")

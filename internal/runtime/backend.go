@@ -13,7 +13,7 @@ package runtime
 import (
 	"context"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // Observation is the backend's report of the current runtime incarnation for
@@ -36,7 +36,7 @@ type Observation struct {
 
 	// ServiceRef is the internal Service fronting this incarnation. Nil
 	// while no Service exists. Never a client-facing endpoint.
-	ServiceRef *workspacesv1alpha1.ServiceReference
+	ServiceRef *cdiv1.ServiceReference
 
 	// RuntimeUID is the UID of the current incarnation (Pod UID or VMI UID).
 	// A new incarnation — after crash, reschedule, or recreate inside the
@@ -64,20 +64,20 @@ type Backend interface {
 	// Ensure converges the runtime for ws toward the spec captured by tpl.
 	// It is called for desiredState=Running and returns the observation for
 	// the incarnation it is converging.
-	Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (Observation, error)
+	Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (Observation, error)
 
 	// Observe reports the current incarnation without changing anything.
 	// Called for periodic freshness and while desiredState != Running.
-	Observe(ctx context.Context, ws *workspacesv1alpha1.Workspace) (Observation, error)
+	Observe(ctx context.Context, ws *cdiv1.Workspace) (Observation, error)
 
 	// Stop terminates the current incarnation but keeps data allowed by
 	// dataPolicy (home PVC, retained disk). It is not Delete.
-	Stop(ctx context.Context, ws *workspacesv1alpha1.Workspace) error
+	Stop(ctx context.Context, ws *cdiv1.Workspace) error
 
 	// DeleteRuntime removes the runtime and its ephemeral child objects
 	// (Service, secrets, scratch). Persistent data is handled by the
 	// retention flow, not here.
-	DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Workspace) error
+	DeleteRuntime(ctx context.Context, ws *cdiv1.Workspace) error
 
 	// PodMatchesTemplate reports whether the workspace's current runtime
 	// incarnation exists, is owned by ws (controller ownerRef), and
@@ -87,21 +87,21 @@ type Backend interface {
 	// It is the upgrade-adoption proof for template snapshots recorded
 	// before status.templateSnapshot existed; a false answer means the
 	// record may NOT be trusted and convergence must re-snapshot.
-	PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error)
+	PodMatchesTemplate(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (bool, error)
 
 	// PodTemplateIdentity returns the template-revision identity the
 	// runtime incarnation pod was stamped with — operator-written pod
 	// metadata, never user input. Owned is false when no pod exists or
 	// the pod is not operator-owned for ws; the caller then treats the
 	// workspace as having no proving incarnation.
-	PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (PodTemplateIdentity, error)
+	PodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace) (PodTemplateIdentity, error)
 
 	// StampPodTemplateIdentity backfills the template-identity stamps
 	// onto the workspace's operator-owned incarnation pod after its
 	// provenance was proven by another means (the pre-stamp upgrade
 	// path) — later reconciles and upgrades read the identity directly.
 	// No-op when no owned pod exists.
-	StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error
+	StampPodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) error
 }
 
 // PodTemplateIdentity is the stamped template-revision identity of a

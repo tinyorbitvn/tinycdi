@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // fakeClock is a settable time source for the reconciler.
@@ -42,7 +42,7 @@ func (f *fakeClock) Advance(d time.Duration) {
 }
 
 // setIntent writes a new spec intent the way the backend does.
-func setIntent(t *testing.T, c client.Client, key types.NamespacedName, state workspacesv1alpha1.DesiredState, gen int64) {
+func setIntent(t *testing.T, c client.Client, key types.NamespacedName, state cdiv1.DesiredState, gen int64) {
 	t.Helper()
 	ws := getWorkspace(t, c, key)
 	ws.Spec.DesiredState = state
@@ -54,28 +54,28 @@ func setIntent(t *testing.T, c client.Client, key types.NamespacedName, state wo
 }
 
 // bringToReady reconciles until the workspace is Ready, marking the pod ready.
-func bringToReady(t *testing.T, c client.Client, r *WorkspaceReconciler, key types.NamespacedName, ns string) *workspacesv1alpha1.Workspace {
+func bringToReady(t *testing.T, c client.Client, r *WorkspaceReconciler, key types.NamespacedName, ns string) *cdiv1.Workspace {
 	t.Helper()
 	reconcile(t, r, key)
 	ws := getWorkspace(t, c, key)
 	markPodReady(t, c, thePod(t, c, ns, ws.UID))
 	reconcile(t, r, key)
 	ws = getWorkspace(t, c, key)
-	if ws.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+	if ws.Status.Phase != cdiv1.WorkspacePhaseReady {
 		t.Fatalf("phase=%q want Ready (applied=%q)", ws.Status.Phase, ws.Annotations[AnnotationAppliedIntent])
 	}
 	return ws
 }
 
 // bringToStopped applies a stop intent and reconciles until Stopped.
-func bringToStopped(t *testing.T, c client.Client, r *WorkspaceReconciler, key types.NamespacedName, gen int64) *workspacesv1alpha1.Workspace {
+func bringToStopped(t *testing.T, c client.Client, r *WorkspaceReconciler, key types.NamespacedName, gen int64) *cdiv1.Workspace {
 	t.Helper()
-	setIntent(t, c, key, workspacesv1alpha1.DesiredStateStopped, gen)
+	setIntent(t, c, key, cdiv1.DesiredStateStopped, gen)
 	for i := 0; i < 5; i++ {
 		reconcile(t, r, key)
 	}
 	ws := getWorkspace(t, c, key)
-	if ws.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+	if ws.Status.Phase != cdiv1.WorkspacePhaseStopped {
 		t.Fatalf("phase=%q want Stopped", ws.Status.Phase)
 	}
 	return ws
@@ -90,7 +90,7 @@ func TestStartedAt_IncarnationScoped(t *testing.T) {
 	}()
 	const maxDur = 8 * time.Hour
 
-	newRig := func(t *testing.T, name string) (*WorkspaceReconciler, *fakeClock, types.NamespacedName, string, *workspacesv1alpha1.Workspace) {
+	newRig := func(t *testing.T, name string) (*WorkspaceReconciler, *fakeClock, types.NamespacedName, string, *cdiv1.Workspace) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-"+name, nil)
 		ws := newWorkspace(t, c, ns, "ws-"+name, "tpl-"+name, nil)
@@ -111,13 +111,13 @@ func TestStartedAt_IncarnationScoped(t *testing.T) {
 			t.Fatalf("startedAt=%v on a Stopped workspace; it belongs to the ended incarnation", got)
 		}
 
-		setIntent(t, c, key, workspacesv1alpha1.DesiredStateRunning, 2)
+		setIntent(t, c, key, cdiv1.DesiredStateRunning, 2)
 		restarted := bringToReady(t, c, r, key, ns)
 		if restarted.Annotations[AnnotationAppliedIntent] == "" {
 			t.Fatal("applied intent missing")
 		}
 		applied, err := appliedIntent(restarted)
-		if err != nil || applied.DesiredState != workspacesv1alpha1.DesiredStateRunning {
+		if err != nil || applied.DesiredState != cdiv1.DesiredStateRunning {
 			t.Fatalf("applied=%+v err=%v; start intent was flipped back to Stopped", applied, err)
 		}
 		got := restarted.Status.StartedAt
@@ -136,7 +136,7 @@ func TestStartedAt_IncarnationScoped(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			reconcile(t, r, key)
 		}
-		if ph := getWorkspace(t, c, key).Status.Phase; ph != workspacesv1alpha1.WorkspacePhaseStopped {
+		if ph := getWorkspace(t, c, key).Status.Phase; ph != cdiv1.WorkspacePhaseStopped {
 			t.Fatalf("phase=%q want Stopped once the new incarnation passes maxDuration", ph)
 		}
 	})
@@ -158,11 +158,11 @@ func TestStartedAt_IncarnationScoped(t *testing.T) {
 
 	t.Run("pre-fix stale row self-heals on the next start", func(t *testing.T) {
 		r, clock, key, ns := staleStopped(t, "stale")
-		setIntent(t, c, key, workspacesv1alpha1.DesiredStateRunning, 2)
+		setIntent(t, c, key, cdiv1.DesiredStateRunning, 2)
 		// The very first pass after the start intent must not expire it.
 		reconcile(t, r, key)
 		applied, _ := appliedIntent(getWorkspace(t, c, key))
-		if applied.DesiredState != workspacesv1alpha1.DesiredStateRunning {
+		if applied.DesiredState != cdiv1.DesiredStateRunning {
 			t.Fatalf("start intent was flipped to Stopped by the stale startedAt")
 		}
 		ws := bringToReady(t, c, r, key, ns)
@@ -185,7 +185,7 @@ func TestStartedAt_IncarnationScoped(t *testing.T) {
 		// The state right after a start intent on a stopped workspace:
 		// status still describes the ended incarnation.
 		old := metav1.NewTime(clock.Now().Add(-maxDur - time.Hour))
-		ws.Status.Phase = workspacesv1alpha1.WorkspacePhaseStopped
+		ws.Status.Phase = cdiv1.WorkspacePhaseStopped
 		ws.Status.StartedAt = &old
 		if next := r.NextLifecycleRequeue(ws); next != 0 && next <= 2*requeueASAP {
 			t.Fatalf("NextLifecycleRequeue=%v: a stale startedAt must not schedule an immediate expiry", next)

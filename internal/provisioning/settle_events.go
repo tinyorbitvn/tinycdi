@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	toolscache "k8s.io/client-go/tools/cache"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -61,10 +61,10 @@ func (t *SettleTrigger) Enqueue(uid PlatformID) {
 // carried in its workspace-uid label and enqueues it. Delete events may
 // arrive as DeletedFinalStateUnknown tombstones.
 func (t *SettleTrigger) EnqueueObject(obj interface{}) {
-	ws, ok := obj.(*workspacev1alpha1.Workspace)
+	ws, ok := obj.(*cdiv1.Workspace)
 	if !ok {
 		if tomb, isTomb := obj.(toolscache.DeletedFinalStateUnknown); isTomb {
-			ws, _ = tomb.Obj.(*workspacev1alpha1.Workspace)
+			ws, _ = tomb.Obj.(*cdiv1.Workspace)
 		}
 	}
 	if ws == nil {

@@ -22,12 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // netPolFor runs Ensure against a fake client and returns the converged
 // boundary NetworkPolicy.
-func netPolFor(t *testing.T, opts Options, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (*networkingv1.NetworkPolicy, client.Client) {
+func netPolFor(t *testing.T, opts Options, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (*networkingv1.NetworkPolicy, client.Client) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	if _, err := New(c, opts).Ensure(context.Background(), ws, tpl); err != nil {
@@ -45,7 +45,7 @@ func internetExcepts(t *testing.T, opts Options) []string {
 	t.Helper()
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileInternetOnly
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileInternetOnly
 	np, _ := netPolFor(t, opts, ws, tpl)
 	for _, rule := range np.Spec.Egress {
 		for _, peer := range rule.To {
@@ -127,7 +127,7 @@ func TestInternetOnlyBuiltinExceptsOptOut(t *testing.T) {
 func TestNetPolReconcilesSpecDrift(t *testing.T) {
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileInternetOnly
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileInternetOnly
 
 	_, c := netPolFor(t, Options{}, ws, tpl)
 
@@ -248,7 +248,7 @@ func TestPodEphemeralStorageBounds(t *testing.T) {
 func TestPodEphemeralStorageBoundsRetain(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
-	ws.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	ws.Spec.DataPolicy = cdiv1.DataPolicyRetain
 	if _, err := New(c, Options{}).Ensure(context.Background(), ws, testTemplate(nil)); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestPodAutomountServiceAccountTokenFalse(t *testing.T) {
 func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
 	np, _ := netPolFor(t, Options{}, ws, tpl)
 
 	if len(np.Spec.Egress) != 2 {
@@ -330,7 +330,7 @@ func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
 func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
 
 	opts := Options{ClusterOnlyEgress: &ClusterOnlyEgress{
 		NamespaceSelector: &metav1.LabelSelector{
@@ -395,7 +395,7 @@ func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
 func TestClusterOnlyEgressPortsOnlyStaysPodOnly(t *testing.T) {
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.NetworkProfile = workspacesv1alpha1.NetworkProfileClusterOnly
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
 
 	np, _ := netPolFor(t, Options{ClusterOnlyEgress: &ClusterOnlyEgress{
 		Ports: []networkingv1.NetworkPolicyPort{{

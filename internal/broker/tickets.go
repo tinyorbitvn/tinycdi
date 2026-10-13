@@ -74,7 +74,7 @@ const (
 	DefaultGatewayAudience = "session.example.dev"
 
 	// PhaseReady is the Workspace phase that permits issuing tickets
-	// (mirrors api/v1alpha1.WorkspacePhaseReady — kept as a string so the
+	// (mirrors api/v1.WorkspacePhaseReady — kept as a string so the
 	// broker does not depend on the CRD types for its core contract).
 	PhaseReady = "Ready"
 )

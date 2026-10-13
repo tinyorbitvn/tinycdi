@@ -1,4 +1,4 @@
-apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+apiVersion: workspaces.cdi.tinyorbit.vn/v1
 kind: WorkspaceTemplate
 metadata:
   labels:

@@ -312,7 +312,7 @@ v0.2)
     or privileges. Templates are admin-only, their images are
     digest-pinned and their specs are CEL-immutable. The operator
     re-validates whatever it builds a Pod from.
-    *Enforced:* CRD CEL + `api/v1alpha1/validation_test.go` (incl.
+    *Enforced:* CRD CEL + `api/v1/validation_test.go` (incl.
     `adapter` enum, `sessionCmd`-only-with-kasm, `command` forbidden
     with kasm, digest-pinned image for kasm templates too),
     `TestImageDigestPinning`, `TestForgedSnapshot*`

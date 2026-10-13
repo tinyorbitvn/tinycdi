@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -705,7 +705,7 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	env := &envtest.Environment{
@@ -775,7 +775,7 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 
 	// The CR the dispatcher would have applied, then operator-observed
 	// status: Ready with all conditions True.
-	cr := &workspacesv1alpha1.Workspace{
+	cr := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      provisioning.WorkspaceCRName(provisioning.PlatformID(created.ID)),
 			Namespace: ns.Name,
@@ -784,23 +784,27 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 				provisioning.LabelTenant:       "tenant-a",
 			},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef: workspacesv1alpha1.TemplateReference{Name: "linuxdesktop"},
-			OwnerSubject: workspacesv1alpha1.OwnerSubject{
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef: cdiv1.TemplateReference{Name: "linuxdesktop"},
+			OwnerSubject: cdiv1.OwnerSubject{
 				Issuer: "https://issuer.test", Subject: "user-a",
 			},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, cr); err != nil {
 		t.Fatalf("create CR: %v", err)
 	}
-	setCRStatus := func(phase workspacesv1alpha1.WorkspacePhase, conds []metav1.Condition) {
+	setCRStatus := func(phase cdiv1.WorkspacePhase, conds []metav1.Condition) {
 		t.Helper()
-		var cur workspacesv1alpha1.Workspace
+		var cur cdiv1.Workspace
 		if err := kc.Get(ctx, client.ObjectKeyFromObject(cr), &cur); err != nil {
 			t.Fatalf("get CR: %v", err)
 		}
@@ -811,16 +815,16 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 		}
 	}
 	now := metav1.NewTime(time.Now())
-	setCRStatus(workspacesv1alpha1.WorkspacePhaseReady, []metav1.Condition{
-		{Type: workspacesv1alpha1.ConditionAdmitted, Status: metav1.ConditionTrue,
+	setCRStatus(cdiv1.WorkspacePhaseReady, []metav1.Condition{
+		{Type: cdiv1.ConditionAdmitted, Status: metav1.ConditionTrue,
 			Reason: "TemplateResolved", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionStorageReady, Status: metav1.ConditionTrue,
+		{Type: cdiv1.ConditionStorageReady, Status: metav1.ConditionTrue,
 			Reason: "Ready", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionRuntimeReady, Status: metav1.ConditionTrue,
+		{Type: cdiv1.ConditionRuntimeReady, Status: metav1.ConditionTrue,
 			Reason: "Ready", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionConnectionReady, Status: metav1.ConditionTrue,
+		{Type: cdiv1.ConditionConnectionReady, Status: metav1.ConditionTrue,
 			Reason: "Ready", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionDegraded, Status: metav1.ConditionFalse,
+		{Type: cdiv1.ConditionDegraded, Status: metav1.ConditionFalse,
 			Reason: "Nominal", LastTransitionTime: now},
 	})
 
@@ -848,12 +852,12 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 	}
 
 	// CR goes Failed -> view reports Failed with the operator's reason.
-	setCRStatus(workspacesv1alpha1.WorkspacePhaseFailed, []metav1.Condition{
-		{Type: workspacesv1alpha1.ConditionRuntimeReady, Status: metav1.ConditionFalse,
+	setCRStatus(cdiv1.WorkspacePhaseFailed, []metav1.Condition{
+		{Type: cdiv1.ConditionRuntimeReady, Status: metav1.ConditionFalse,
 			Reason: "BootDeadlineExceeded", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionConnectionReady, Status: metav1.ConditionFalse,
+		{Type: cdiv1.ConditionConnectionReady, Status: metav1.ConditionFalse,
 			Reason: "Provisioning", LastTransitionTime: now},
-		{Type: workspacesv1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+		{Type: cdiv1.ConditionDegraded, Status: metav1.ConditionTrue,
 			Reason: "BootDeadlineExceeded", LastTransitionTime: now},
 	})
 	deadline = time.Now().Add(15 * time.Second)
@@ -995,7 +999,7 @@ func TestStaleConditions_DropsParams(t *testing.T) {
 // recorded through the condition-params annotation.
 func TestProjectConditions_IntentBehind(t *testing.T) {
 	cond := metav1.Condition{
-		Type:   workspacesv1alpha1.ConditionIntentBehind,
+		Type:   cdiv1.ConditionIntentBehind,
 		Status: metav1.ConditionTrue, Reason: "IntentBehind",
 		Message: "the platform's intent stream is behind this workspace; new intents are held until it is realigned",
 	}

@@ -11,7 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -135,7 +135,7 @@ func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent, claim *ret
 	// A CR left behind by a delivery that predates single-write creation
 	// (same request, no stamp) is repaired here so a replay still converges;
 	// for a CR created by this version the patch is a no-op.
-	ws := &workspacev1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	if err := a.Client.Get(ctx, client.ObjectKey{
 		Namespace: claim.ns, Name: WorkspaceCRName(in.WorkspaceUID),
 	}, ws); err != nil {
@@ -384,7 +384,7 @@ func (s *PurgeSweeper) attached(ctx context.Context, rec *RetainedRecord) (bool,
 			}
 		}
 	}
-	var wss workspacev1alpha1.WorkspaceList
+	var wss cdiv1.WorkspaceList
 	if err := s.Client.List(ctx, &wss, client.InNamespace(rec.PVCNamespace)); err != nil {
 		return false, err
 	}

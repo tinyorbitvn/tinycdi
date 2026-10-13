@@ -1,7 +1,7 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-package v1alpha1
+package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +47,24 @@ type ServiceReference struct {
 	Port int32 `json:"port,omitempty"`
 }
 
+// FileTransferPolicy is the session file-transfer direction policy,
+// named from the user's point of view (Upload = device to workspace home,
+// Download = workspace to device); the normative direction semantics live
+// in internal/api/openapi.yaml.
+// +kubebuilder:validation:Enum=Disabled;Upload;Download;Bidirectional
+type FileTransferPolicy string
+
+const (
+	// FileTransferDisabled blocks all file transfer.
+	FileTransferDisabled FileTransferPolicy = "Disabled"
+	// FileTransferUpload allows device -> workspace transfers only.
+	FileTransferUpload FileTransferPolicy = "Upload"
+	// FileTransferDownload allows workspace -> device transfers only.
+	FileTransferDownload FileTransferPolicy = "Download"
+	// FileTransferBidirectional allows transfers in both directions.
+	FileTransferBidirectional FileTransferPolicy = "Bidirectional"
+)
+
 // SessionPolicySpec is the resolved session data-transfer policy the
 // platform API stamped on the workspace at its last create/start intent
 // (ADR 0010 §2): the meet of the WorkspaceTemplate's own policy and the
@@ -61,6 +79,12 @@ type SessionPolicySpec struct {
 	// +required
 	// +kubebuilder:validation:Enum=Disabled;Send;Receive;Bidirectional
 	Clipboard ClipboardPolicy `json:"clipboard"`
+
+	// fileTransfer is the resolved file-transfer direction policy: the
+	// meet of the template's spec.fileTransferPolicy and the tenant's
+	// file-transfer ceiling at intent time.
+	// +required
+	FileTransfer FileTransferPolicy `json:"fileTransfer"`
 }
 
 // DataReference records a data volume the workspace uses or retains. Persistent
@@ -124,11 +148,10 @@ type WorkspaceSpec struct {
 
 	// sessionPolicy is the resolved session data-transfer policy the API
 	// recorded at the last create/start intent — the meet of the template's
-	// policy and the tenant ceiling (ADR 0010). Absent on CRs written
-	// before the field existed; pod building then falls back to the
-	// recorded template snapshot's own policy.
-	// +optional
-	SessionPolicy *SessionPolicySpec `json:"sessionPolicy,omitempty"`
+	// policy and the tenant ceiling (ADR 0010). Required: pod building
+	// reads it and nothing else.
+	// +required
+	SessionPolicy SessionPolicySpec `json:"sessionPolicy"`
 }
 
 // TemplateSnapshot is the operator-recorded copy of the WorkspaceTemplate
@@ -174,11 +197,10 @@ type TemplateSnapshot struct {
 
 	// sourceRef is the spec.templateRef.name the snapshot was taken from
 	// (the catalog base name the create path writes, or the revision object
-	// name a carried re-point writes). Empty on snapshots recorded before
-	// the re-snapshot machinery existed — the recorded object name is the
-	// fallback source for those.
-	// +optional
-	SourceRef string `json:"sourceRef,omitempty"`
+	// name a carried re-point writes).
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SourceRef string `json:"sourceRef"`
 }
 
 // WorkspaceStatus is operator-populated. Phase is only a summary; conditions
@@ -254,6 +276,7 @@ type WorkspaceStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Desired",type=string,JSONPath=".spec.desiredState"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="RuntimeGen",type=integer,JSONPath=".spec.runtimeGeneration"

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-package v1alpha1
+package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
@@ -228,6 +228,13 @@ type WorkspaceTemplateSpec struct {
 	// +required
 	ClipboardPolicy ClipboardPolicy `json:"clipboardPolicy"`
 
+	// fileTransferPolicy selects file transfer between client device and
+	// workspace home, named from the user's point of view (Upload =
+	// device to workspace, Download = workspace to device).
+	// +optional
+	// +kubebuilder:default=Disabled
+	FileTransferPolicy FileTransferPolicy `json:"fileTransferPolicy,omitempty"`
+
 	// lifecycle carries the default idle/disconnect/max-duration and data
 	// policy for workspaces from this template.
 	// +required
@@ -250,6 +257,7 @@ type WorkspaceTemplateStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Runtime",type=string,JSONPath=".spec.runtime"
 // +kubebuilder:printcolumn:name="Experience",type=string,JSONPath=".spec.experience"
 // +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=".spec.revision"

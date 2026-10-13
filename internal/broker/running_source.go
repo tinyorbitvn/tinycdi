@@ -10,7 +10,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
@@ -34,7 +34,7 @@ func NewK8sRunningSource(c crcache.Cache) *K8sRunningSource {
 
 // RunningWorkspaces implements RunningSource.
 func (s *K8sRunningSource) RunningWorkspaces(ctx context.Context) ([]RunningWorkspace, error) {
-	var list workspacesv1alpha1.WorkspaceList
+	var list cdiv1.WorkspaceList
 	if err := s.cache.List(ctx, &list,
 		client.HasLabels{provisioning.LabelWorkspaceUID}); err != nil {
 		return nil, fmt.Errorf("broker: list running workspaces: %w", err)
@@ -42,8 +42,8 @@ func (s *K8sRunningSource) RunningWorkspaces(ctx context.Context) ([]RunningWork
 	var out []RunningWorkspace
 	for i := range list.Items {
 		ws := &list.Items[i]
-		if ws.Spec.DesiredState != workspacesv1alpha1.DesiredStateRunning ||
-			ws.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady ||
+		if ws.Spec.DesiredState != cdiv1.DesiredStateRunning ||
+			ws.Status.Phase != cdiv1.WorkspacePhaseReady ||
 			ws.Status.StartedAt == nil {
 			continue
 		}
@@ -61,7 +61,7 @@ func (s *K8sRunningSource) RunningWorkspaces(ctx context.Context) ([]RunningWork
 // CR still holds the Running intent the row pinned but whose applied intent
 // the operator flipped to Stopped (its max-duration backstop).
 func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]OperatorStopped, error) {
-	var list workspacesv1alpha1.WorkspaceList
+	var list cdiv1.WorkspaceList
 	if err := s.cache.List(ctx, &list,
 		client.HasLabels{provisioning.LabelWorkspaceUID}); err != nil {
 		return nil, fmt.Errorf("broker: list operator-stopped workspaces: %w", err)
@@ -69,8 +69,8 @@ func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]Ope
 	var out []OperatorStopped
 	for i := range list.Items {
 		ws := &list.Items[i]
-		if ws.Spec.DesiredState != workspacesv1alpha1.DesiredStateRunning ||
-			ws.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+		if ws.Spec.DesiredState != cdiv1.DesiredStateRunning ||
+			ws.Status.Phase != cdiv1.WorkspacePhaseStopped {
 			continue
 		}
 		raw := ws.Annotations[operator.AnnotationAppliedIntent]
@@ -84,7 +84,7 @@ func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]Ope
 		// The exact signature of the operator's backstop: the applied record
 		// is the spec's own intent (same revision and runtime generation)
 		// flipped to Stopped. Anything looser is somebody else's stop.
-		if applied.DesiredState != workspacesv1alpha1.DesiredStateStopped ||
+		if applied.DesiredState != cdiv1.DesiredStateStopped ||
 			applied.Revision != ws.Spec.IntentRevision ||
 			applied.RuntimeGeneration != ws.Spec.RuntimeGeneration ||
 			ws.Status.LastAppliedIntentRevision != applied.Revision {
@@ -104,7 +104,7 @@ func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]Ope
 // Only the spec's lifecycle matters here — the admitted revision's caps.
 type snapshotPolicy struct {
 	Spec struct {
-		Lifecycle workspacesv1alpha1.LifecycleDefaults `json:"lifecycle"`
+		Lifecycle cdiv1.LifecycleDefaults `json:"lifecycle"`
 	} `json:"spec"`
 }
 
@@ -127,7 +127,7 @@ type snapshotPolicy struct {
 // untrusted: their caps come from the resolved template's lifecycle and
 // the chart defaults, the STRICTER of the two per cap — an annotation
 // carrying an inflated cap can never stretch a held session.
-func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) TimeoutPolicy {
+func (s *K8sRunningSource) policyFor(ctx context.Context, ws *cdiv1.Workspace) TimeoutPolicy {
 	held := snapshotHeld(ws)
 	lc := s.lifecycleFor(ctx, ws, held)
 	pol := DefaultTimeoutPolicy
@@ -152,11 +152,11 @@ func (s *K8sRunningSource) policyFor(ctx context.Context, ws *workspacesv1alpha1
 // (TemplateRevisionGone, TemplateInvalid). While held, the snapshot
 // annotation is provably untrusted — the operator already refused its
 // bytes — so no planner input may come from it.
-func snapshotHeld(ws *workspacesv1alpha1.Workspace) bool {
+func snapshotHeld(ws *cdiv1.Workspace) bool {
 	if ws.Status.TemplateSnapshot != nil {
 		return false
 	}
-	c := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+	c := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionDegraded)
 	return c != nil && c.Status == metav1.ConditionTrue &&
 		(c.Reason == operator.ReasonTemplateRevisionGone ||
 			c.Reason == operator.ReasonTemplateInvalid)
@@ -171,9 +171,9 @@ func snapshotHeld(ws *workspacesv1alpha1.Workspace) bool {
 // and a corrupt annotation resolves the live template rather than
 // failing closed: an unplannable workspace must never silently drop its
 // caps.
-func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alpha1.Workspace, held bool) *workspacesv1alpha1.LifecycleDefaults {
+func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *cdiv1.Workspace, held bool) *cdiv1.LifecycleDefaults {
 	if snap := ws.Status.TemplateSnapshot; snap != nil &&
-		snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+		snap.Spec.Lifecycle != (cdiv1.LifecycleDefaults{}) {
 		lc := snap.Spec.Lifecycle
 		return &lc
 	}
@@ -183,7 +183,7 @@ func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alp
 			// An all-zero lifecycle — e.g. a snapshot written without the key —
 			// carries no recorded contract; resolve the live template instead.
 			if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
-				snap.Spec.Lifecycle != (workspacesv1alpha1.LifecycleDefaults{}) {
+				snap.Spec.Lifecycle != (cdiv1.LifecycleDefaults{}) {
 				lc := snap.Spec.Lifecycle
 				return &lc
 			}
@@ -199,7 +199,7 @@ func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *workspacesv1alp
 // shared by-name resolver (exact object, else newest catalog-name
 // revision); nil when neither exists or the lookup errors — a broken
 // reference falls back to DefaultTimeoutPolicy rather than disabling caps.
-func (s *K8sRunningSource) template(ctx context.Context, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.WorkspaceTemplate {
+func (s *K8sRunningSource) template(ctx context.Context, ws *cdiv1.Workspace) *cdiv1.WorkspaceTemplate {
 	tpl, err := provisioning.ResolveTemplateByName(ctx, s.cache, ws.Namespace, ws.Spec.TemplateRef.Name)
 	if err != nil {
 		return nil

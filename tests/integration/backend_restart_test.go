@@ -54,7 +54,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/backend"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -507,7 +507,7 @@ func (f *restartFixture) seedWorkspace(t *testing.T, upPort int32) {
 		t.Fatalf("create namespace: %v", err)
 	}
 
-	ws := &workspacev1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      provisioning.WorkspaceCRName(provisioning.PlatformID(f.wsUID)),
 			Namespace: restartNamespace,
@@ -516,16 +516,20 @@ func (f *restartFixture) seedWorkspace(t *testing.T, upPort int32) {
 				provisioning.LabelTenant:       restartTenant,
 			},
 		},
-		Spec: workspacev1alpha1.WorkspaceSpec{
-			TemplateRef: workspacev1alpha1.TemplateReference{Name: "tpl-it"},
-			OwnerSubject: workspacev1alpha1.OwnerSubject{
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef: cdiv1.TemplateReference{Name: "tpl-it"},
+			OwnerSubject: cdiv1.OwnerSubject{
 				Issuer:  f.iss.URL(),
 				Subject: restartSubject,
 			},
-			DesiredState:      workspacev1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacev1alpha1.DataPolicyEphemeral,
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := k8sClient.Create(ctx, ws); err != nil {
@@ -548,12 +552,12 @@ func (f *restartFixture) seedWorkspace(t *testing.T, upPort int32) {
 		t.Fatalf("create runtime secret: %v", err)
 	}
 
-	ws.Status = workspacev1alpha1.WorkspaceStatus{
-		Phase:                     workspacev1alpha1.WorkspacePhaseReady,
+	ws.Status = cdiv1.WorkspaceStatus{
+		Phase:                     cdiv1.WorkspacePhaseReady,
 		ObservedRuntimeGeneration: 1,
 		RuntimeUID:                "rt-" + string(cruid),
 		StartedAt:                 &metav1.Time{Time: time.Now()},
-		ServiceRef:                &workspacev1alpha1.ServiceReference{Name: restartUpstreamName, Port: upPort},
+		ServiceRef:                &cdiv1.ServiceReference{Name: restartUpstreamName, Port: upPort},
 	}
 	if err := k8sClient.Status().Update(ctx, ws); err != nil {
 		t.Fatalf("publish workspace status: %v", err)

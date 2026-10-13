@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -44,7 +44,7 @@ func snapScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(s); err != nil {
+	if err := cdiv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -52,7 +52,7 @@ func snapScheme(t *testing.T) *runtime.Scheme {
 
 // forgedSnapshot builds a snapshot annotation body. specHash may be a
 // real hash over spec or an attacker-supplied lie.
-func forgedSnapshot(name, uid, revision, specHash string, spec workspacesv1alpha1.WorkspaceTemplateSpec, ann map[string]string) string {
+func forgedSnapshot(name, uid, revision, specHash string, spec cdiv1.WorkspaceTemplateSpec, ann map[string]string) string {
 	raw, _ := json.Marshal(map[string]any{
 		"name": name, "uid": uid, "revision": revision, "specHash": specHash,
 		"spec": spec, "annotations": ann,
@@ -60,43 +60,47 @@ func forgedSnapshot(name, uid, revision, specHash string, spec workspacesv1alpha
 	return string(raw)
 }
 
-func forgedSpec(image string) workspacesv1alpha1.WorkspaceTemplateSpec {
-	return workspacesv1alpha1.WorkspaceTemplateSpec{
-		Revision: "x", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-		Experience: workspacesv1alpha1.ExperienceDesktop,
-		Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+func forgedSpec(image string) cdiv1.WorkspaceTemplateSpec {
+	return cdiv1.WorkspaceTemplateSpec{
+		Revision: "x", Runtime: cdiv1.RuntimeLinuxContainer,
+		Experience: cdiv1.ExperienceDesktop,
+		Linux: &cdiv1.LinuxRuntimeSpec{
 			Image:   image,
 			Command: []string{"/bin/sh", "-c", "echo arbitrary"},
 		},
-		Resources: workspacesv1alpha1.ResourceProfile{
+		Resources: cdiv1.ResourceProfile{
 			CPU: resource.MustParse("64"), Memory: resource.MustParse("256Gi"),
 			Storage: resource.MustParse("1Ti"),
 		},
 		BootDeadline:   metav1.Duration{Duration: time.Hour},
-		NetworkProfile: workspacesv1alpha1.NetworkProfileClusterOnly,
+		NetworkProfile: cdiv1.NetworkProfileClusterOnly,
 	}
 }
 
-func forgedWorkspace(ann string) *workspacesv1alpha1.Workspace {
-	return &workspacesv1alpha1.Workspace{
+func forgedWorkspace(ann string) *cdiv1.Workspace {
+	return &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-forged", Namespace: "tinycdi-tenant-a",
 			UID:         types.UID("cccccccc-0000-0000-0000-000000000001"),
 			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_forged"},
 			Annotations: map[string]string{AnnotationTemplateSnapshot: ann},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "does-not-exist"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "does-not-exist"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 }
 
-func reconcileForged(t *testing.T, ws *workspacesv1alpha1.Workspace, extra ...client.Object) (client.Client, *workspacesv1alpha1.Workspace) {
+func reconcileForged(t *testing.T, ws *cdiv1.Workspace, extra ...client.Object) (client.Client, *cdiv1.Workspace) {
 	t.Helper()
 	s := snapScheme(t)
 	b := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws)
@@ -109,14 +113,14 @@ func reconcileForged(t *testing.T, ws *workspacesv1alpha1.Workspace, extra ...cl
 		ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &workspacesv1alpha1.Workspace{}
+	got := &cdiv1.Workspace{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
 		t.Fatal(err)
 	}
 	return c, got
 }
 
-func assertSnapshotRejected(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace, got *workspacesv1alpha1.Workspace) {
+func assertSnapshotRejected(t *testing.T, c client.Client, ws *cdiv1.Workspace, got *cdiv1.Workspace) {
 	t.Helper()
 	pod := &corev1.Pod{}
 	err := c.Get(context.Background(), client.ObjectKey{
@@ -125,7 +129,7 @@ func assertSnapshotRejected(t *testing.T, c client.Client, ws *workspacesv1alpha
 		t.Fatalf("forged snapshot produced a pod: image=%s command=%v",
 			pod.Spec.Containers[0].Image, pod.Spec.Containers[0].Command)
 	}
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(got, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue ||
 		cond.Reason != ReasonTemplateInvalid {
 		t.Fatalf("want Degraded=True reason=%s, got %+v",
@@ -162,8 +166,8 @@ func TestForgedSnapshotUndigestImageRejected(t *testing.T) {
 // the runtime-block exclusivity CEL rule is violated (linux AND windows).
 func TestForgedSnapshotCELInvariantRejected(t *testing.T) {
 	spec := forgedSpec("cr.example/img@sha256:" + fmt.Sprintf("%064x", 7))
-	spec.Windows = &workspacesv1alpha1.WindowsRuntimeSpec{
-		SourcePVCRef:   workspacesv1alpha1.WindowsSourcePVCRef{Name: "seed"},
+	spec.Windows = &cdiv1.WindowsRuntimeSpec{
+		SourcePVCRef:   cdiv1.WindowsSourcePVCRef{Name: "seed"},
 		SourceChecksum: "sha256:" + fmt.Sprintf("%064x", 7),
 	}
 	raw, _ := json.Marshal(spec)
@@ -181,23 +185,23 @@ func TestForgedSnapshotCELInvariantRejected(t *testing.T) {
 // the forged spec never converges, the pod is built from the template's
 // own spec.
 func TestForgedSnapshotLiveTemplateMismatchRejected(t *testing.T) {
-	live := &workspacesv1alpha1.WorkspaceTemplate{
+	live := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "tpl-live", Namespace: "tinycdi-tenant-a",
 			UID: types.UID("dddddddd-0000-0000-0000-000000000001"),
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
 	// Attacker claims the snapshot records tpl-live but embeds their own spec.
@@ -242,37 +246,41 @@ func TestForgedSnapshotLiveTemplateMismatchRejected(t *testing.T) {
 // recorded revision (design §4: the snapshot outlives the template).
 func TestHonestSnapshotSurvivesTemplateDeletion(t *testing.T) {
 	s := snapScheme(t)
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "tpl-honest", Namespace: "tinycdi-tenant-a",
 			UID: types.UID("eeeeeeee-0000-0000-0000-000000000001"),
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-honest", Namespace: "tinycdi-tenant-a",
 			UID: types.UID("cccccccc-0000-0000-0000-000000000002"),
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl-honest"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "tpl-honest"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -306,22 +314,22 @@ func TestForgedSnapshotAdapterInvariantsRejected(t *testing.T) {
 	img := "cr.example/img@sha256:" + fmt.Sprintf("%064x", 7)
 	for _, tc := range []struct {
 		name   string
-		mutate func(spec *workspacesv1alpha1.WorkspaceTemplateSpec)
+		mutate func(spec *cdiv1.WorkspaceTemplateSpec)
 	}{
-		{"sessionCmd without adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+		{"sessionCmd without adapter", func(s *cdiv1.WorkspaceTemplateSpec) {
 			s.Linux.Command = nil
 			s.Linux.SessionCmd = "xterm"
 		}},
-		{"unknown adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+		{"unknown adapter", func(s *cdiv1.WorkspaceTemplateSpec) {
 			s.Linux.Command = nil
 			s.Linux.Adapter = "docker"
 		}},
-		{"command with kasm adapter", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
-			s.Linux.Adapter = workspacesv1alpha1.AdapterKasm // Command already set by forgedSpec
+		{"command with kasm adapter", func(s *cdiv1.WorkspaceTemplateSpec) {
+			s.Linux.Adapter = cdiv1.AdapterKasm // Command already set by forgedSpec
 		}},
-		{"sessionCmd with newline", func(s *workspacesv1alpha1.WorkspaceTemplateSpec) {
+		{"sessionCmd with newline", func(s *cdiv1.WorkspaceTemplateSpec) {
 			s.Linux.Command = nil
-			s.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+			s.Linux.Adapter = cdiv1.AdapterKasm
 			s.Linux.SessionCmd = "xterm\nid"
 		}},
 	} {
@@ -348,7 +356,7 @@ func TestValidateSnapshotSpecKasmAdapter(t *testing.T) {
 	img := "cr.example/img@sha256:" + fmt.Sprintf("%064x", 7)
 	ok := forgedSpec(img)
 	ok.Linux.Command = nil
-	ok.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	ok.Linux.Adapter = cdiv1.AdapterKasm
 	ok.Linux.SessionCmd = "/usr/bin/chromium-orig --start-maximized"
 	if err := validateSnapshotSpec(&ok); err != nil {
 		t.Fatalf("valid kasm spec rejected: %v", err)
@@ -368,7 +376,7 @@ func TestValidateSnapshotSpecKasmAdapter(t *testing.T) {
 func TestForgedSnapshotStructurallyValidRejected(t *testing.T) {
 	spec := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
 	// Attacker-chosen placement: land the pod on control-plane nodes.
-	spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	spec.Placement = &cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
 		Tolerations: []corev1.Toleration{{
 			Key:      "node-role.kubernetes.io/control-plane",
@@ -378,7 +386,7 @@ func TestForgedSnapshotStructurallyValidRejected(t *testing.T) {
 	}
 	rc := "kata-containers"
 	spec.Placement.RuntimeClassName = &rc
-	spec.NetworkProfile = workspacesv1alpha1.NetworkProfileInternetOnly
+	spec.NetworkProfile = cdiv1.NetworkProfileInternetOnly
 	raw, _ := json.Marshal(spec)
 	sum := sha256.Sum256(raw)
 	ann := forgedSnapshot("never-published", "ffffffff-0000-0000-0000-000000000001",
@@ -481,23 +489,23 @@ func TestTemplateRevisionGoneEventEmittedOnce(t *testing.T) {
 // even when the annotation is replaced by a forgery — the mirror is
 // repaired, never read.
 func TestStatusSnapshotAuthoritativeOverForgedAnnotation(t *testing.T) {
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "tpl-honest", Namespace: "tinycdi-tenant-a",
 			UID: types.UID("eeeeeeee-0000-0000-0000-000000000002"),
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
 	honest, err := snapshotTemplate(tpl)
@@ -510,7 +518,7 @@ func TestStatusSnapshotAuthoritativeOverForgedAnnotation(t *testing.T) {
 	// Forged annotation with control-plane placement claims the same
 	// source — it must lose to the status record and be overwritten.
 	spec := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
-	spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	spec.Placement = &cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
 	}
 	fraw, _ := json.Marshal(spec)
@@ -546,24 +554,24 @@ func TestStatusSnapshotAuthoritativeOverForgedAnnotation(t *testing.T) {
 // mirrors it to the annotation for readers — the operator builds the
 // record from the live template, never from caller-supplied bytes.
 func TestStatusSnapshotRecordedAtFirstAdmit(t *testing.T) {
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "tpl-admit", Namespace: "tinycdi-tenant-a",
 			UID:         types.UID("eeeeeeee-0000-0000-0000-000000000003"),
 			Annotations: map[string]string{linux.AnnotationSeccompProfile: "localhost/browser-sandbox"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-09-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-09-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
 	ws := forgedWorkspace("")
@@ -602,7 +610,7 @@ func TestStatusSnapshotRecordedAtFirstAdmit(t *testing.T) {
 // differ only in placement must not share a specHash — placement is spec
 // (immutable, admin-only), not metadata (D24).
 func TestSnapshot_IncludesPlacement(t *testing.T) {
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tpl-place", UID: types.UID("u-place")},
 		Spec:       forgedSpec("tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 8)),
 	}
@@ -611,7 +619,7 @@ func TestSnapshot_IncludesPlacement(t *testing.T) {
 		t.Fatalf("snapshotTemplate: %v", err)
 	}
 	placed := tpl.DeepCopy()
-	placed.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	placed.Spec.Placement = &cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"workload": "runtime"},
 	}
 	snapPlaced, err := snapshotTemplate(placed)

@@ -15,7 +15,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -34,11 +34,11 @@ func (c *countingCatalog) Resolve(ctx context.Context, tenantID, id string) (Tem
 // listCache is the one controller-runtime cache method K8sStatusView reads.
 type listCache struct {
 	crcache.Cache
-	items []workspacesv1alpha1.Workspace
+	items []cdiv1.Workspace
 }
 
 func (c listCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
-	list.(*workspacesv1alpha1.WorkspaceList).Items = c.items
+	list.(*cdiv1.WorkspaceList).Items = c.items
 	return nil
 }
 
@@ -49,15 +49,15 @@ func (c listCache) List(_ context.Context, list client.ObjectList, _ ...client.L
 func TestImageStale_SurvivesSupersededRevision(t *testing.T) {
 	now := time.Now().UTC()
 	builtAt := now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)
-	cr := workspacesv1alpha1.Workspace{
+	cr := cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "w", Namespace: "ns-a",
 			Annotations: map[string]string{provisioning.AnnotationWorkspaceImageBuiltAt: builtAt},
 		},
-		Status: workspacesv1alpha1.WorkspaceStatus{Phase: workspacesv1alpha1.WorkspacePhaseReady},
+		Status: cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady},
 	}
 	sv := &K8sStatusView{
-		cache: listCache{items: []workspacesv1alpha1.Workspace{cr}},
+		cache: listCache{items: []cdiv1.Workspace{cr}},
 		now:   time.Now, maxStale: time.Minute,
 		lastKnown: map[string]ObservedStatus{},
 	}

@@ -22,7 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // TestRequestStop_StaleGeneration: a stop pinned to generation 1 must be
@@ -38,7 +38,7 @@ func TestRequestStop_StaleGeneration(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-stop", nil)
-	ws := newWorkspace(t, c, ns, "ws-stop", "tpl-stop", func(ws *workspacesv1alpha1.Workspace) {
+	ws := newWorkspace(t, c, ns, "ws-stop", "tpl-stop", func(ws *cdiv1.Workspace) {
 		ws.Spec.RuntimeGeneration = 2
 	})
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -59,7 +59,7 @@ func TestRequestStop_StaleGeneration(t *testing.T) {
 
 	// No side effects: desiredState untouched, runtime still there.
 	wsNow = getWorkspace(t, c, key)
-	if wsNow.Spec.DesiredState != workspacesv1alpha1.DesiredStateRunning {
+	if wsNow.Spec.DesiredState != cdiv1.DesiredStateRunning {
 		t.Fatalf("stale stop flipped desiredState to %q", wsNow.Spec.DesiredState)
 	}
 	if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 1 {
@@ -79,7 +79,7 @@ func TestRequestStop_CurrentGeneration(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-stop2", nil)
-	ws := newWorkspace(t, c, ns, "ws-stop2", "tpl-stop2", func(ws *workspacesv1alpha1.Workspace) {
+	ws := newWorkspace(t, c, ns, "ws-stop2", "tpl-stop2", func(ws *cdiv1.Workspace) {
 		ws.Spec.RuntimeGeneration = 2
 	})
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -102,7 +102,7 @@ func TestRequestStop_CurrentGeneration(t *testing.T) {
 		reconcile(t, r, key)
 	}
 	wsNow = getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+	if wsNow.Status.Phase != cdiv1.WorkspacePhaseStopped {
 		t.Fatalf("phase=%q after applied stop, want Stopped", wsNow.Status.Phase)
 	}
 	if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 0 {
@@ -122,7 +122,7 @@ func TestLifecycle_FailedCleanupDeadline(t *testing.T) {
 	}()
 
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-fail", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-fail", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Spec.BootDeadline = metav1.Duration{Duration: time.Millisecond}
 	})
 	ws := newWorkspace(t, c, ns, "ws-fail", "tpl-fail", nil)
@@ -136,7 +136,7 @@ func TestLifecycle_FailedCleanupDeadline(t *testing.T) {
 	now = now.Add(time.Second) // past the 1ms boot deadline
 	reconcile(t, r, key)       // -> Failed
 	wsNow := getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+	if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("phase=%q want Failed", wsNow.Status.Phase)
 	}
 	thePod(t, c, ns, ws.UID) // failed incarnation still present
@@ -179,7 +179,7 @@ func TestLifecycle_ExplicitRetryAfterFailed(t *testing.T) {
 	}()
 
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-retry", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-retry", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Spec.BootDeadline = metav1.Duration{Duration: 5 * time.Minute}
 	})
 	ws := newWorkspace(t, c, ns, "ws-retry", "tpl-retry", nil)
@@ -194,7 +194,7 @@ func TestLifecycle_ExplicitRetryAfterFailed(t *testing.T) {
 	now = now.Add(6 * time.Minute) // past the 5 m boot deadline, never ready
 	reconcile(t, r, key)
 	wsNow := getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+	if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("phase=%q want Failed", wsNow.Status.Phase)
 	}
 
@@ -207,7 +207,7 @@ func TestLifecycle_ExplicitRetryAfterFailed(t *testing.T) {
 	// Explicit retry: the API issues a start intent — new generation, new
 	// revision, same desiredState Running.
 	wsNow = getWorkspace(t, c, key)
-	wsNow.Spec.DesiredState = workspacesv1alpha1.DesiredStateRunning
+	wsNow.Spec.DesiredState = cdiv1.DesiredStateRunning
 	wsNow.Spec.RuntimeGeneration = 2
 	wsNow.Spec.IntentRevision = 2
 	if err := c.Update(context.Background(), wsNow); err != nil {
@@ -218,7 +218,7 @@ func TestLifecycle_ExplicitRetryAfterFailed(t *testing.T) {
 		reconcile(t, r, key)
 	}
 	wsNow = getWorkspace(t, c, key)
-	if wsNow.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed {
+	if wsNow.Status.Phase == cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("explicit retry did not recover the workspace; phase=Failed, conds=%v",
 			wsNow.Status.Conditions)
 	}
@@ -236,7 +236,7 @@ func TestLifecycle_ExplicitRetryAfterFailed(t *testing.T) {
 	markPodReady(t, c, pod2)
 	reconcile(t, r, key)
 	wsNow = getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+	if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
 		t.Fatalf("phase=%q after retry+ready, want Ready", wsNow.Status.Phase)
 	}
 	if wsNow.Status.RuntimeUID != string(pod2.UID) {
@@ -256,7 +256,7 @@ func TestLifecycle_NoInfiniteRetryCreatingRuntimes(t *testing.T) {
 	}()
 
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-noloop", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-noloop", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Spec.BootDeadline = metav1.Duration{Duration: time.Millisecond}
 	})
 	ws := newWorkspace(t, c, ns, "ws-noloop", "tpl-noloop", nil)
@@ -267,7 +267,7 @@ func TestLifecycle_NoInfiniteRetryCreatingRuntimes(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	reconcile(t, r, key)
 	wsNow := getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+	if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("phase=%q want Failed", wsNow.Status.Phase)
 	}
 	pod := thePod(t, c, ns, ws.UID)

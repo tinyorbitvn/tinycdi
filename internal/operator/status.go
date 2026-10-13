@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -52,7 +52,7 @@ const (
 // deadline and the drain window stay stable across reconciles.
 // A write without params drops any the previous condition of this type
 // recorded — they described the old message, not the new one.
-func SetWorkspaceCondition(ws *workspacesv1alpha1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, now time.Time) {
+func SetWorkspaceCondition(ws *cdiv1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, now time.Time) {
 	SetWorkspaceConditionParams(ws, condType, status, reason, message, nil, now)
 }
 
@@ -61,7 +61,7 @@ func SetWorkspaceCondition(ws *workspacesv1alpha1.Workspace, condType string, st
 // persisted on the condition-params annotation keyed "<type>.<reason>" so
 // the API can project them alongside the condition. Params must never
 // carry secrets, tokens or internal hosts — they are tenant-visible.
-func SetWorkspaceConditionParams(ws *workspacesv1alpha1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, params map[string]string, now time.Time) {
+func SetWorkspaceConditionParams(ws *cdiv1.Workspace, condType string, status metav1.ConditionStatus, reason, message string, params map[string]string, now time.Time) {
 	meta.SetStatusCondition(&ws.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
@@ -77,7 +77,7 @@ func SetWorkspaceConditionParams(ws *workspacesv1alpha1.Workspace, condType stri
 // provisioning.AnnotationConditionParams annotation, clearing the type's
 // previous entry first; nil/empty params just clears. The annotation
 // itself is deleted once it would be empty.
-func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason string, params map[string]string) {
+func setConditionParams(ws *cdiv1.Workspace, condType, reason string, params map[string]string) {
 	m := map[string]map[string]string{}
 	if raw := ws.Annotations[provisioning.AnnotationConditionParams]; raw != "" {
 		_ = json.Unmarshal([]byte(raw), &m)
@@ -108,7 +108,7 @@ func setConditionParams(ws *workspacesv1alpha1.Workspace, condType, reason strin
 // condition (status=True, reason from the step) so a stuck teardown is
 // visible on the object itself. Called by Finalizer.Run before returning a
 // step error; never called once the workspace's finalizer may be removed.
-func MarkFinalizerStepBlocked(ws *workspacesv1alpha1.Workspace, step FinalizerStep, err error, now time.Time) {
+func MarkFinalizerStepBlocked(ws *cdiv1.Workspace, step FinalizerStep, err error, now time.Time) {
 	reason := ReasonCleanupRetry
 	switch step {
 	case StepRetention:
@@ -123,7 +123,7 @@ func MarkFinalizerStepBlocked(ws *workspacesv1alpha1.Workspace, step FinalizerSt
 	// names, upstream errors) stay in the operator logs. The Reason and
 	// the step name carry the machine-readable cause.
 	msg := fmt.Sprintf("teardown step %s blocked; retrying — detail in the operator logs", step)
-	SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+	SetWorkspaceConditionParams(ws, cdiv1.ConditionDegraded,
 		metav1.ConditionTrue, reason, msg,
 		map[string]string{"step": string(step)}, now)
 }

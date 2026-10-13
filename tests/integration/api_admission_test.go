@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
@@ -1032,7 +1032,7 @@ func TestAPIEndToEnd(t *testing.T) {
 	crName := provisioning.WorkspaceCRName(provisioning.PlatformID(created.ID))
 	eventually(t, "workspace CR exists", 15*time.Second, func() bool {
 		return k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "ns-e2e", Name: crName},
-			&workspacev1alpha1.Workspace{}) == nil
+			&cdiv1.Workspace{}) == nil
 	})
 
 	// Idempotent replay: same key + same body -> same stored result.
@@ -1182,7 +1182,7 @@ func TestOutboxCrashRecoveryEnvtest(t *testing.T) {
 	}
 
 	// The CR carries the fencing numbers and request ID label.
-	var cr workspacev1alpha1.Workspace
+	var cr cdiv1.Workspace
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "ns-crash", Name: provisioning.WorkspaceCRName(provisioning.PlatformID(resB.ID))}, &cr); err != nil {
 		t.Fatal(err)
 	}

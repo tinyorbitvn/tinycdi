@@ -30,7 +30,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -47,12 +47,12 @@ const ReasonObservedStale = "StatusStale"
 // viewConditionTypes limits projected conditions to the OpenAPI
 // ConditionType enum; anything else the CR carries stays internal.
 var viewConditionTypes = map[string]bool{
-	workspacesv1alpha1.ConditionAdmitted:        true,
-	workspacesv1alpha1.ConditionStorageReady:    true,
-	workspacesv1alpha1.ConditionRuntimeReady:    true,
-	workspacesv1alpha1.ConditionConnectionReady: true,
-	workspacesv1alpha1.ConditionDegraded:        true,
-	workspacesv1alpha1.ConditionIntentBehind:    true,
+	cdiv1.ConditionAdmitted:        true,
+	cdiv1.ConditionStorageReady:    true,
+	cdiv1.ConditionRuntimeReady:    true,
+	cdiv1.ConditionConnectionReady: true,
+	cdiv1.ConditionDegraded:        true,
+	cdiv1.ConditionIntentBehind:    true,
 }
 
 // ObservedStatus is the projected, UI-safe slice of a Workspace CR's
@@ -103,7 +103,7 @@ type K8sStatusView struct {
 // informer. The caller starts the cache and calls MarkSynced once
 // WaitForCacheSync reports true.
 func NewK8sStatusView(ctx context.Context, c crcache.Cache) (*K8sStatusView, error) {
-	inf, err := c.GetInformer(ctx, &workspacesv1alpha1.Workspace{})
+	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	if !synced || v.now().Sub(last) > v.maxStale {
 		return v.snapshot(workspaceUID, last), nil
 	}
-	var list workspacesv1alpha1.WorkspaceList
+	var list cdiv1.WorkspaceList
 	if err := v.cache.List(ctx, &list, client.MatchingLabels{
 		provisioning.LabelWorkspaceUID: workspaceUID,
 		provisioning.LabelTenant:       tenantID,
@@ -291,7 +291,7 @@ func conditionParamsOf(annotations map[string]string) map[string]map[string]stri
 // BootDeadlineExceeded).
 func failureReasonOf(conds []metav1.Condition) string {
 	for _, c := range conds {
-		if c.Type == workspacesv1alpha1.ConditionDegraded &&
+		if c.Type == cdiv1.ConditionDegraded &&
 			c.Status == metav1.ConditionTrue && c.Reason != "" {
 			return c.Reason
 		}
@@ -308,12 +308,12 @@ func staleConditions(obs ObservedStatus) []workspaceCondition {
 	degraded := false
 	for _, c := range obs.Conditions {
 		switch {
-		case c.Type == workspacesv1alpha1.ConditionConnectionReady && c.Status == "True":
+		case c.Type == cdiv1.ConditionConnectionReady && c.Status == "True":
 			c.Status = "Unknown"
 			c.Reason = ReasonObservedStale
 			c.Message = "observed status is stale; connectivity is unverified"
 			c.Params = nil
-		case c.Type == workspacesv1alpha1.ConditionDegraded:
+		case c.Type == cdiv1.ConditionDegraded:
 			degraded = true
 			c.Status = "Unknown"
 			c.Reason = ReasonObservedStale
@@ -324,7 +324,7 @@ func staleConditions(obs ObservedStatus) []workspaceCondition {
 	}
 	if !degraded {
 		out = append(out, workspaceCondition{
-			Type:               workspacesv1alpha1.ConditionDegraded,
+			Type:               cdiv1.ConditionDegraded,
 			Status:             "Unknown",
 			Reason:             ReasonObservedStale,
 			Message:            "observed status is stale; showing last known state",
@@ -354,16 +354,16 @@ func mergeObservedStatus(v *WorkspaceView, rec *provisioning.WorkspaceRecord, ob
 		// CR absent or the operator has not reconciled it yet: the DB
 		// row's intent-side phase is the only truth.
 	default:
-		if obs.Phase != "" && obs.Phase != string(workspacesv1alpha1.WorkspacePhaseReady) {
+		if obs.Phase != "" && obs.Phase != string(cdiv1.WorkspacePhaseReady) {
 			v.Phase = obs.Phase
 		}
 		v.Conditions = staleConditions(obs)
 	}
-	if rec.Phase == string(workspacesv1alpha1.WorkspacePhaseTerminating) {
+	if rec.Phase == string(cdiv1.WorkspacePhaseTerminating) {
 		v.Phase = rec.Phase
 	}
 	v.FailureReason = ""
-	if v.Phase == string(workspacesv1alpha1.WorkspacePhaseFailed) {
+	if v.Phase == string(cdiv1.WorkspacePhaseFailed) {
 		if obs.FailureReason != "" {
 			v.FailureReason = obs.FailureReason
 		} else {

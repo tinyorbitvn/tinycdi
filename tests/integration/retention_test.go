@@ -36,7 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -114,17 +114,21 @@ func newRetainedPVC(t *testing.T, ns string, wsUID types.UID, wsName string, ret
 	return pvc
 }
 
-func newRetainedWorkspace(t *testing.T, ns, name string, policy workspacesv1alpha1.DataPolicy) *workspacesv1alpha1.Workspace {
+func newRetainedWorkspace(t *testing.T, ns, name string, policy cdiv1.DataPolicy) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
-			DesiredState:      workspacesv1alpha1.DesiredStateStopped,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
+			DesiredState:      cdiv1.DesiredStateStopped,
 			DataPolicy:        policy,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := k8sClient.Create(context.Background(), ws); err != nil {
@@ -164,7 +168,7 @@ func TestRetention_DeleteRetainToInventory(t *testing.T) {
 	ctx := context.Background()
 	ns := newRetainedNamespace(t)
 
-	ws := newRetainedWorkspace(t, ns, "ws-retain", workspacesv1alpha1.DataPolicyRetain)
+	ws := newRetainedWorkspace(t, ns, "ws-retain", cdiv1.DataPolicyRetain)
 	pvc := newRetainedPVC(t, ns, ws.UID, ws.Name, false)
 
 	inv := operator.NewRetentionInventory(k8sClient)

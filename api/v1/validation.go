@@ -1,7 +1,7 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-package v1alpha1
+package v1
 
 // Shared enum types and condition/phase constants for the workspaces API.
 // Values are validated at the apiserver by CRD schema (Enum) and CEL

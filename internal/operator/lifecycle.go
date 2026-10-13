@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -56,7 +56,7 @@ type StopRequest struct {
 // newer than the request's, it returns ErrStaleGeneration with no side
 // effects: a delayed expiry intent can never kill a fresh runtime. A
 // request that already matches an applied stop is idempotent.
-func (r *WorkspaceReconciler) RequestStop(ctx context.Context, ws *workspacesv1alpha1.Workspace, req StopRequest) (bool, error) {
+func (r *WorkspaceReconciler) RequestStop(ctx context.Context, ws *cdiv1.Workspace, req StopRequest) (bool, error) {
 	applied, err := appliedIntent(ws)
 	if err != nil {
 		return false, err
@@ -70,10 +70,10 @@ func (r *WorkspaceReconciler) RequestStop(ctx context.Context, ws *workspacesv1a
 	if req.RuntimeGeneration != current {
 		return false, ErrStaleGeneration
 	}
-	if applied.DesiredState == workspacesv1alpha1.DesiredStateStopped {
+	if applied.DesiredState == cdiv1.DesiredStateStopped {
 		return true, nil // stop already applied for this generation
 	}
-	applied.DesiredState = workspacesv1alpha1.DesiredStateStopped
+	applied.DesiredState = cdiv1.DesiredStateStopped
 	applied.AppliedAt = metav1.NewTime(r.now())
 	raw, err := json.Marshal(applied)
 	if err != nil {
@@ -94,7 +94,7 @@ func (r *WorkspaceReconciler) RequestStop(ctx context.Context, ws *workspacesv1a
 // is pending. The operator uses this for reconcile requeues instead of
 // fixed polls, so a restart recomputes identical deadlines and a crash can
 // never strand a pending cleanup.
-func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Workspace) time.Duration {
+func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *cdiv1.Workspace) time.Duration {
 	now := r.now()
 
 	// Deleting: the only deadline left is the stream-drain window anchored
@@ -118,7 +118,7 @@ func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Worksp
 	// A workspace Failed on the currently-applied intent is terminal until
 	// an explicit retry; its only deadline is the incarnation teardown at
 	// Degraded-transition + FailedCleanupDelay.
-	if ws.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed &&
+	if ws.Status.Phase == cdiv1.WorkspacePhaseFailed &&
 		ws.Status.LastAppliedIntentRevision == applied.Revision {
 		anchor := degradedTransitionTime(ws)
 		if anchor.IsZero() {
@@ -127,7 +127,7 @@ func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Worksp
 		return positive(anchor.Add(FailedCleanupDelay).Sub(now))
 	}
 
-	if applied.DesiredState != workspacesv1alpha1.DesiredStateRunning {
+	if applied.DesiredState != cdiv1.DesiredStateRunning {
 		return 0
 	}
 	snap := recordedSnapshot(ws)
@@ -143,7 +143,7 @@ func (r *WorkspaceReconciler) NextLifecycleRequeue(ws *workspacesv1alpha1.Worksp
 		}
 	}
 	switch ws.Status.Phase {
-	case workspacesv1alpha1.WorkspacePhasePending, workspacesv1alpha1.WorkspacePhaseProvisioning:
+	case cdiv1.WorkspacePhasePending, cdiv1.WorkspacePhaseProvisioning:
 		// Boot deadline bounds the admit->Ready window, anchored the same
 		// way reconcile computes it: max(appliedAt, first observation of
 		// the current runtime incarnation) — the incarnation-start
@@ -178,9 +178,9 @@ func positive(d time.Duration) time.Duration {
 
 // degradedTransitionTime reads the persisted anchor of the current
 // impairment: the Degraded condition's lastTransitionTime.
-func degradedTransitionTime(ws *workspacesv1alpha1.Workspace) time.Time {
+func degradedTransitionTime(ws *cdiv1.Workspace) time.Time {
 	for _, c := range ws.Status.Conditions {
-		if c.Type == workspacesv1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+		if c.Type == cdiv1.ConditionDegraded && c.Status == metav1.ConditionTrue {
 			return c.LastTransitionTime.Time
 		}
 	}
@@ -190,7 +190,7 @@ func degradedTransitionTime(ws *workspacesv1alpha1.Workspace) time.Time {
 // failedCleanupRemaining is the live counterpart of the Failed branch in
 // NextLifecycleRequeue: how long until the failed incarnation is torn
 // down. <=0 means the deadline already passed.
-func (r *WorkspaceReconciler) failedCleanupRemaining(ws *workspacesv1alpha1.Workspace) time.Duration {
+func (r *WorkspaceReconciler) failedCleanupRemaining(ws *cdiv1.Workspace) time.Duration {
 	anchor := degradedTransitionTime(ws)
 	if anchor.IsZero() {
 		return FailedCleanupDelay

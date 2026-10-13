@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 func kasmEnvtestAssets(t *testing.T) string {
@@ -85,7 +85,7 @@ func TestKasmAdapterInitAdmittedUnderQuota(t *testing.T) {
 	}
 
 	tpl := testTemplate(nil)
-	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 	ws := testWorkspace()
 	ws.Namespace = ns.Name
 	pod := buildPod(ws, tpl, nil, nil, Options{KasmAdapterImage: testAdapterImage})

@@ -1,10 +1,10 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-// Package v1alpha1 contains API Schema definitions for the workspaces v1alpha1 API group.
+// Package v1 contains API Schema definitions for the workspaces v1 API group.
 // +kubebuilder:object:generate=true
 // +groupName=workspaces.cdi.tinyorbit.vn
-package v1alpha1
+package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,7 +15,7 @@ import (
 var (
 	// SchemeGroupVersion is group version used to register these objects.
 	// This name is used by applyconfiguration generators (e.g. controller-gen).
-	SchemeGroupVersion = schema.GroupVersion{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1alpha1"}
+	SchemeGroupVersion = schema.GroupVersion{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1"}
 
 	// GroupVersion is an alias for SchemeGroupVersion, for backward compatibility.
 	GroupVersion = SchemeGroupVersion

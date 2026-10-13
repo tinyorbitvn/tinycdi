@@ -10,7 +10,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -35,7 +35,7 @@ type K8sBindingSource struct {
 // informer. The caller starts the cache and calls MarkSynced once
 // WaitForCacheSync reports true.
 func NewK8sBindingSource(ctx context.Context, c crcache.Cache) (*K8sBindingSource, error) {
-	inf, err := c.GetInformer(ctx, &workspacesv1alpha1.Workspace{})
+	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return nil, fmt.Errorf("broker: workspace informer: %w", err)
 	}
@@ -77,7 +77,7 @@ func (s *K8sBindingSource) CurrentBinding(ctx context.Context, workspaceUID Plat
 	if !synced || time.Since(last) > MaxBindingAge {
 		return RuntimeBinding{}, ErrFreshness
 	}
-	var list workspacesv1alpha1.WorkspaceList
+	var list cdiv1.WorkspaceList
 	if err := s.cache.List(ctx, &list,
 		client.MatchingLabels{provisioning.LabelWorkspaceUID: string(workspaceUID)}); err != nil {
 		return RuntimeBinding{}, fmt.Errorf("broker: list workspaces: %w", err)

@@ -45,7 +45,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -54,7 +53,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	tcdiruntime "github.com/tinyorbitvn/tinycdi/internal/runtime"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -162,17 +161,17 @@ const (
 // operator adopted. It is the fencing record: a spec carrying
 // intentRevision <= Revision is ignored entirely.
 type AppliedIntent struct {
-	Revision          int64                           `json:"revision"`
-	DesiredState      workspacesv1alpha1.DesiredState `json:"desiredState"`
-	RuntimeGeneration int64                           `json:"runtimeGeneration"`
-	DataPolicy        workspacesv1alpha1.DataPolicy   `json:"dataPolicy"`
-	AppliedAt         metav1.Time                     `json:"appliedAt"`
+	Revision          int64              `json:"revision"`
+	DesiredState      cdiv1.DesiredState `json:"desiredState"`
+	RuntimeGeneration int64              `json:"runtimeGeneration"`
+	DataPolicy        cdiv1.DataPolicy   `json:"dataPolicy"`
+	AppliedAt         metav1.Time        `json:"appliedAt"`
 }
 
 // templateSnapshot aliases the status record type: the snapshot the
 // operator writes to status.templateSnapshot (and mirrors to the
 // annotation) is the api type, shared with every reader.
-type templateSnapshot = workspacesv1alpha1.TemplateSnapshot
+type templateSnapshot = cdiv1.TemplateSnapshot
 
 // WorkspaceReconciler reconciles Workspace objects against a runtime backend.
 type WorkspaceReconciler struct {
@@ -257,8 +256,8 @@ const backendErrorMessage = "the platform could not complete a runtime step; ret
 // workspace alone: its runtime is up, and a transient control-plane error
 // must not flicker the condition. Best effort: a failed status write is
 // logged, never returned over the original error.
-func (r *WorkspaceReconciler) recordBackendError(ctx context.Context, ws *workspacesv1alpha1.Workspace, err error, keepReady bool) {
-	r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionRuntimeReady, ReasonBackendError,
+func (r *WorkspaceReconciler) recordBackendError(ctx context.Context, ws *cdiv1.Workspace, err error, keepReady bool) {
+	r.recordStepStatus(ctx, ws, cdiv1.ConditionRuntimeReady, ReasonBackendError,
 		backendErrorMessage, err, keepReady)
 }
 
@@ -268,12 +267,12 @@ const waitingForDiskMessage = "waiting for the retained disk to be handed over t
 // recordStepStatus is the best-effort write behind recordBackendError and
 // the WaitingForDisk step: condition typ is set False with reason/msg and
 // nothing else changes. The caller returns err itself.
-func (r *WorkspaceReconciler) recordStepStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, typ, reason, msg string, err error, keepReady bool) {
+func (r *WorkspaceReconciler) recordStepStatus(ctx context.Context, ws *cdiv1.Workspace, typ, reason, msg string, err error, keepReady bool) {
 	if err == nil || apierrors.IsConflict(err) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
-	if keepReady && ws.Status.Phase == workspacesv1alpha1.WorkspacePhaseReady {
+	if keepReady && ws.Status.Phase == cdiv1.WorkspacePhaseReady {
 		return
 	}
 	cur := meta.FindStatusCondition(ws.Status.Conditions, typ)
@@ -291,7 +290,7 @@ func (r *WorkspaceReconciler) recordStepStatus(ctx context.Context, ws *workspac
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	if err := r.Get(ctx, req.NamespacedName, ws); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -362,7 +361,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// A spec carrying intentRevision <= applied.Revision is stale: its fields
 	// are ignored; convergence below targets the applied record only.
 
-	if applied.DesiredState == workspacesv1alpha1.DesiredStateStopped {
+	if applied.DesiredState == cdiv1.DesiredStateStopped {
 		return r.reconcileStopped(ctx, ws, applied)
 	}
 	return r.reconcileRunning(ctx, ws, applied)
@@ -370,7 +369,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // reconcileStopped terminates the incarnation while keeping data allowed by
 // dataPolicy.
-func (r *WorkspaceReconciler) reconcileStopped(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) reconcileStopped(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
 	if err := r.Backend.Stop(ctx, ws); err != nil && !errors.Is(err, linux.ErrNameConflict) {
 		r.recordBackendError(ctx, ws, err, false)
 		return ctrl.Result{}, err
@@ -381,22 +380,22 @@ func (r *WorkspaceReconciler) reconcileStopped(ctx context.Context, ws *workspac
 		return ctrl.Result{}, err
 	}
 
-	phase := workspacesv1alpha1.WorkspacePhaseStopped
+	phase := cdiv1.WorkspacePhaseStopped
 	if obs.RuntimeUID != "" {
-		phase = workspacesv1alpha1.WorkspacePhaseStopping
+		phase = cdiv1.WorkspacePhaseStopping
 	}
 	return ctrl.Result{}, r.writeStatus(ctx, ws, applied, obs, phase, nil, nil)
 }
 
 // reconcileRunning converges toward a running incarnation under the applied
 // generation.
-func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
 	// --- terminal failure for this applied intent ---------------------------
 	// Once a workspace goes Failed its incarnation is never respawned: the
 	// only ways forward are the bounded cleanup at FailedCleanupDelay or an
 	// explicit new intent (higher intentRevision). This is the guard against
 	// an infinite create-fail-create loop.
-	if ws.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed &&
+	if ws.Status.Phase == cdiv1.WorkspacePhaseFailed &&
 		ws.Status.LastAppliedIntentRevision == applied.Revision {
 		return r.reconcileFailed(ctx, ws, applied)
 	}
@@ -515,7 +514,7 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 		statusErr = errors.New(ReasonTemplateRejected)
 		obs, _ = r.Backend.Observe(ctx, ws)
 	case errors.Is(berr, linux.ErrRetainedNotClaimed):
-		r.recordStepStatus(ctx, ws, workspacesv1alpha1.ConditionStorageReady, ReasonWaitingForDisk,
+		r.recordStepStatus(ctx, ws, cdiv1.ConditionStorageReady, ReasonWaitingForDisk,
 			waitingForDiskMessage, berr, true)
 		return ctrl.Result{}, berr
 	default:
@@ -524,7 +523,7 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	}
 
 	// --- phase ---------------------------------------------------------------
-	phase := workspacesv1alpha1.WorkspacePhaseProvisioning
+	phase := cdiv1.WorkspacePhaseProvisioning
 	anchor, err := r.bootAnchor(ctx, ws, applied, obs)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -532,9 +531,9 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	deadline := anchor.Add(snap.Spec.BootDeadline.Duration)
 	switch {
 	case obs.StorageReady && obs.RuntimeReady && obs.ConnectionReady:
-		phase = workspacesv1alpha1.WorkspacePhaseReady
+		phase = cdiv1.WorkspacePhaseReady
 	case !r.now().Before(deadline):
-		phase = workspacesv1alpha1.WorkspacePhaseFailed
+		phase = cdiv1.WorkspacePhaseFailed
 		statusErr = errors.New(ReasonBootDeadlineExceeded)
 	}
 
@@ -556,8 +555,8 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 	}
 
 	res := ctrl.Result{}
-	if phase != workspacesv1alpha1.WorkspacePhaseReady &&
-		phase != workspacesv1alpha1.WorkspacePhaseFailed {
+	if phase != cdiv1.WorkspacePhaseReady &&
+		phase != cdiv1.WorkspacePhaseFailed {
 		res.RequeueAfter = requeueNotReady
 	}
 	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr, snap)
@@ -565,11 +564,11 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *workspac
 
 // incarnationEnded reports whether phase says the runtime incarnation that
 // status.startedAt described is over.
-func incarnationEnded(phase workspacesv1alpha1.WorkspacePhase) bool {
+func incarnationEnded(phase cdiv1.WorkspacePhase) bool {
 	switch phase {
-	case workspacesv1alpha1.WorkspacePhaseStopped,
-		workspacesv1alpha1.WorkspacePhaseStopping,
-		workspacesv1alpha1.WorkspacePhaseFailed:
+	case cdiv1.WorkspacePhaseStopped,
+		cdiv1.WorkspacePhaseStopping,
+		cdiv1.WorkspacePhaseFailed:
 		return true
 	}
 	return false
@@ -578,7 +577,7 @@ func incarnationEnded(phase workspacesv1alpha1.WorkspacePhase) bool {
 // incarnationStartedAt returns when the running incarnation became Ready,
 // or nil when status.startedAt is unset or was left by an incarnation that
 // has since ended (a workspace written by an operator that never cleared it).
-func incarnationStartedAt(ws *workspacesv1alpha1.Workspace) *metav1.Time {
+func incarnationStartedAt(ws *cdiv1.Workspace) *metav1.Time {
 	if ws.Status.StartedAt == nil || incarnationEnded(ws.Status.Phase) {
 		return nil
 	}
@@ -593,7 +592,7 @@ type incarnationRecord struct {
 }
 
 // incarnationStart reads the persisted incarnation-start record.
-func incarnationStart(ws *workspacesv1alpha1.Workspace) (rec incarnationRecord, ok bool) {
+func incarnationStart(ws *cdiv1.Workspace) (rec incarnationRecord, ok bool) {
 	raw := ws.Annotations[AnnotationIncarnationStart]
 	if raw == "" {
 		return rec, false
@@ -612,7 +611,7 @@ func incarnationStart(ws *workspacesv1alpha1.Workspace) (rec incarnationRecord, 
 // backup gets a fresh window from the incarnation created after restore;
 // a genuinely stuck boot still fails bootDeadline after its incarnation
 // appeared.
-func (r *WorkspaceReconciler) bootAnchor(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation) (time.Time, error) {
+func (r *WorkspaceReconciler) bootAnchor(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation) (time.Time, error) {
 	anchor := applied.AppliedAt.Time
 	if obs.RuntimeUID == "" {
 		return anchor, nil
@@ -639,7 +638,7 @@ func (r *WorkspaceReconciler) bootAnchor(ctx context.Context, ws *workspacesv1al
 // currently applied intent: no runtime is ever recreated — the failed
 // incarnation is deleted once the persisted cleanup deadline passes, and
 // the record stays Failed until an explicit new intent arrives.
-func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
 	obs, err := r.Backend.Observe(ctx, ws)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -655,14 +654,14 @@ func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *workspace
 		}
 		statusErr = errors.New(ReasonFailedCleanup)
 	}
-	return res, r.writeStatus(ctx, ws, applied, obs, workspacesv1alpha1.WorkspacePhaseFailed, statusErr, nil)
+	return res, r.writeStatus(ctx, ws, applied, obs, cdiv1.WorkspacePhaseFailed, statusErr, nil)
 }
 
 // expireRunning applies an out-of-band stop to the live generation: the
 // applied intent is flipped to Stopped and the stopped path converges the
 // incarnation down in the same pass.
-func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
-	applied.DesiredState = workspacesv1alpha1.DesiredStateStopped
+func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (ctrl.Result, error) {
+	applied.DesiredState = cdiv1.DesiredStateStopped
 	applied.AppliedAt = metav1.NewTime(r.now())
 	raw, err := json.Marshal(applied)
 	if err != nil {
@@ -680,7 +679,7 @@ func (r *WorkspaceReconciler) expireRunning(ctx context.Context, ws *workspacesv
 // snap, when non-nil, is the pass's recorded template snapshot — re-staged
 // here because the drift path's main-resource update returns the stored
 // (unstaged) status.
-func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase workspacesv1alpha1.WorkspacePhase, statusErr error, snap *templateSnapshot) error {
+func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, obs tcdiruntime.Observation, phase cdiv1.WorkspacePhase, statusErr error, snap *templateSnapshot) error {
 	gen := ws.Generation
 	// Intent-fence drift: reconcile the params annotation BEFORE any status
 	// field is staged — persisting it needs a main-resource update whose
@@ -697,8 +696,8 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 	// conditions as they were: they record which step stalled, and the
 	// incarnation cleanup would otherwise overwrite them with "Provisioning"
 	// once the pod is gone.
-	frozen := phase == workspacesv1alpha1.WorkspacePhaseFailed &&
-		st.Phase == workspacesv1alpha1.WorkspacePhaseFailed &&
+	frozen := phase == cdiv1.WorkspacePhaseFailed &&
+		st.Phase == cdiv1.WorkspacePhaseFailed &&
 		st.LastAppliedIntentRevision == applied.Revision
 	// The persisted phase is read before it is overwritten: a startedAt
 	// recorded under an ended phase must not carry into the next incarnation.
@@ -731,11 +730,11 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		setConditionParams(ws, typ, reason, nil)
 	}
 
-	if applied.DesiredState == workspacesv1alpha1.DesiredStateRunning {
-		setCond(workspacesv1alpha1.ConditionAdmitted, metav1.ConditionTrue,
+	if applied.DesiredState == cdiv1.DesiredStateRunning {
+		setCond(cdiv1.ConditionAdmitted, metav1.ConditionTrue,
 			ReasonTemplateResolved, "template snapshot recorded at first admit")
 	} else {
-		setCond(workspacesv1alpha1.ConditionAdmitted, metav1.ConditionTrue,
+		setCond(cdiv1.ConditionAdmitted, metav1.ConditionTrue,
 			"IntentApplied", "stop intent applied")
 	}
 
@@ -747,20 +746,20 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 	}
 	switch {
 	case obs.StorageReady:
-		setStep(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionTrue, ReasonReady, "")
+		setStep(cdiv1.ConditionStorageReady, metav1.ConditionTrue, ReasonReady, "")
 	default:
-		setStep(workspacesv1alpha1.ConditionStorageReady, metav1.ConditionFalse,
+		setStep(cdiv1.ConditionStorageReady, metav1.ConditionFalse,
 			ReasonProvisioning, "waiting for volumes")
 	}
 
 	switch {
-	case applied.DesiredState == workspacesv1alpha1.DesiredStateStopped:
-		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
+	case applied.DesiredState == cdiv1.DesiredStateStopped:
+		setStep(cdiv1.ConditionRuntimeReady, metav1.ConditionFalse,
 			ReasonStopped, "runtime stopped by intent")
-		setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse,
+		setStep(cdiv1.ConditionConnectionReady, metav1.ConditionFalse,
 			ReasonStopped, "runtime stopped by intent")
 	case obs.RuntimeReady:
-		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionTrue, ReasonReady, "")
+		setStep(cdiv1.ConditionRuntimeReady, metav1.ConditionTrue, ReasonReady, "")
 	default:
 		reason := obs.Reason
 		if reason == "" {
@@ -769,26 +768,26 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 		if statusErr != nil && statusErr.Error() == ReasonBootDeadlineExceeded {
 			reason = ReasonBootDeadlineExceeded
 		}
-		setStep(workspacesv1alpha1.ConditionRuntimeReady, metav1.ConditionFalse, reason, "")
+		setStep(cdiv1.ConditionRuntimeReady, metav1.ConditionFalse, reason, "")
 	}
-	if applied.DesiredState == workspacesv1alpha1.DesiredStateRunning {
+	if applied.DesiredState == cdiv1.DesiredStateRunning {
 		if obs.ConnectionReady {
-			setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionTrue, ReasonReady, "")
+			setStep(cdiv1.ConditionConnectionReady, metav1.ConditionTrue, ReasonReady, "")
 		} else {
 			reason := obs.Reason
 			if reason == "" || reason == "Ready" {
 				reason = ReasonProvisioning
 			}
-			setStep(workspacesv1alpha1.ConditionConnectionReady, metav1.ConditionFalse, reason, "")
+			setStep(cdiv1.ConditionConnectionReady, metav1.ConditionFalse, reason, "")
 		}
 	}
 
 	switch {
 	case statusErr != nil:
-		setCond(workspacesv1alpha1.ConditionDegraded, metav1.ConditionTrue,
+		setCond(cdiv1.ConditionDegraded, metav1.ConditionTrue,
 			statusErr.Error(), "")
 	default:
-		setCond(workspacesv1alpha1.ConditionDegraded, metav1.ConditionFalse, ReasonNominal, "")
+		setCond(cdiv1.ConditionDegraded, metav1.ConditionFalse, ReasonNominal, "")
 	}
 
 	// IntentBehind reports intent-fence drift (the applier's marker or a
@@ -796,14 +795,14 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 	// aligned again. A workspace that never drifted gets no row.
 	switch {
 	case drift.drifted:
-		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind,
+		SetWorkspaceConditionParams(ws, cdiv1.ConditionIntentBehind,
 			metav1.ConditionTrue, ReasonIntentBehind, intentBehindMessage,
 			map[string]string{
 				"crRevision":  drift.crRevision,
 				"rowRevision": drift.rowRevision,
 			}, now.Time)
 	case drift.had:
-		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind,
+		SetWorkspaceConditionParams(ws, cdiv1.ConditionIntentBehind,
 			metav1.ConditionFalse, ReasonNominal, intentAlignedMessage, nil, now.Time)
 	}
 
@@ -813,13 +812,13 @@ func (r *WorkspaceReconciler) writeStatus(ctx context.Context, ws *workspacesv1a
 	if priorEnded || incarnationEnded(phase) {
 		st.StartedAt = nil
 	}
-	if phase == workspacesv1alpha1.WorkspacePhaseReady && st.StartedAt == nil {
+	if phase == cdiv1.WorkspacePhaseReady && st.StartedAt == nil {
 		st.StartedAt = &now
 	}
-	if phase == workspacesv1alpha1.WorkspacePhaseStopped && st.StoppedAt == nil {
+	if phase == cdiv1.WorkspacePhaseStopped && st.StoppedAt == nil {
 		st.StoppedAt = &now
 	}
-	if phase != workspacesv1alpha1.WorkspacePhaseStopped {
+	if phase != cdiv1.WorkspacePhaseStopped {
 		st.StoppedAt = nil
 	}
 
@@ -850,7 +849,7 @@ const intentAlignedMessage = "the intent stream is aligned with the workspace ag
 // stale drop (the freshest signal — it carries the dropped intent's row
 // revision), or spec.intentRevision itself predates the applied record.
 // Returns the CR-side and stream-side revisions for the condition params.
-func intentFenceDrift(ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (crRev, rowRev int64, drifted bool) {
+func intentFenceDrift(ws *cdiv1.Workspace, applied *AppliedIntent) (crRev, rowRev int64, drifted bool) {
 	if raw := ws.Annotations[provisioning.AnnotationIntentBehind]; raw != "" {
 		var m provisioning.IntentBehindMark
 		if err := json.Unmarshal([]byte(raw), &m); err == nil {
@@ -879,9 +878,9 @@ type intentDrift struct {
 // and that update must happen before status fields are staged because its
 // response restores the stored status. A workspace that never drifted
 // writes nothing — no update, no annotation entry.
-func (r *WorkspaceReconciler) evalIntentDrift(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (intentDrift, error) {
+func (r *WorkspaceReconciler) evalIntentDrift(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (intentDrift, error) {
 	var d intentDrift
-	cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionIntentBehind)
+	cur := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionIntentBehind)
 	crRev, rowRev, drifted := intentFenceDrift(ws, applied)
 	d.drifted = drifted
 	d.had = cur != nil
@@ -894,10 +893,10 @@ func (r *WorkspaceReconciler) evalIntentDrift(ctx context.Context, ws *workspace
 
 	annotations := maps.Clone(ws.Annotations)
 	if drifted {
-		setConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind, ReasonIntentBehind,
+		setConditionParams(ws, cdiv1.ConditionIntentBehind, ReasonIntentBehind,
 			map[string]string{"crRevision": d.crRevision, "rowRevision": d.rowRevision})
 	} else {
-		setConditionParams(ws, workspacesv1alpha1.ConditionIntentBehind, "", nil)
+		setConditionParams(ws, cdiv1.ConditionIntentBehind, "", nil)
 	}
 	if !maps.Equal(annotations, ws.Annotations) {
 		if err := r.Update(ctx, ws); err != nil {
@@ -909,7 +908,7 @@ func (r *WorkspaceReconciler) evalIntentDrift(ctx context.Context, ws *workspace
 
 // appliedIntent reads the persisted applied-intent record; a missing
 // annotation yields a zero record (revision 0 < any real intentRevision).
-func appliedIntent(ws *workspacesv1alpha1.Workspace) (*AppliedIntent, error) {
+func appliedIntent(ws *cdiv1.Workspace) (*AppliedIntent, error) {
 	raw := ws.Annotations[AnnotationAppliedIntent]
 	if raw == "" {
 		return &AppliedIntent{}, nil
@@ -924,11 +923,11 @@ func appliedIntent(ws *workspacesv1alpha1.Workspace) (*AppliedIntent, error) {
 // resolveTemplate fetches the WorkspaceTemplate named by
 // spec.templateRef.name through the shared by-name resolver: the exact
 // object first, else the newest revision carrying the catalog-name label
-// equal to the reference, so a stopped workspace created before an upgrade
-// that replaced the chart-seeded immutable revision still resolves.
-// Nothing else is retried: a reference to a specific revision object that
-// was deleted stays TemplateNotFound.
-func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*workspacesv1alpha1.WorkspaceTemplate, error) {
+// equal to the reference — the create path records the catalog (family)
+// name, which resolves through immutable revision churn. Nothing else is
+// retried: a reference to a specific revision object that was deleted
+// stays TemplateNotFound.
+func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *cdiv1.Workspace) (*cdiv1.WorkspaceTemplate, error) {
 	return provisioning.ResolveTemplateByName(ctx, r.Client, ws.Namespace, ws.Spec.TemplateRef.Name)
 }
 
@@ -938,7 +937,7 @@ func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *workspace
 // hints only (deadline requeues, retained-disk runtime labels): any caller
 // needing provenance must go through status or the adoption pod proof —
 // convergence never does this.
-func recordedSnapshot(ws *workspacesv1alpha1.Workspace) *templateSnapshot {
+func recordedSnapshot(ws *cdiv1.Workspace) *templateSnapshot {
 	if s := ws.Status.TemplateSnapshot; s != nil {
 		return s
 	}
@@ -956,8 +955,8 @@ func recordedSnapshot(ws *workspacesv1alpha1.Workspace) *templateSnapshot {
 // templateFromSnapshot reconstructs the WorkspaceTemplate the runtime
 // backend converges on from a recorded snapshot — the object is never
 // re-read, the record is the whole contract.
-func templateFromSnapshot(ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) *workspacesv1alpha1.WorkspaceTemplate {
-	return &workspacesv1alpha1.WorkspaceTemplate{
+func templateFromSnapshot(ws *cdiv1.Workspace, snap *templateSnapshot) *cdiv1.WorkspaceTemplate {
+	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        snap.Name,
 			Namespace:   ws.Namespace,
@@ -973,7 +972,7 @@ func templateFromSnapshot(ws *workspacesv1alpha1.Workspace, snap *templateSnapsh
 // writeStatus to persist — the status subresource sees exactly one write
 // per reconcile, and a crash can leave at most a stale mirror, never a
 // stale truth.
-func (r *WorkspaceReconciler) recordSnapshot(ctx context.Context, ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) error {
+func (r *WorkspaceReconciler) recordSnapshot(ctx context.Context, ws *cdiv1.Workspace, snap *templateSnapshot) error {
 	if err := r.mirrorSnapshotAnnotation(ctx, ws, snap); err != nil {
 		return err
 	}
@@ -986,7 +985,7 @@ func (r *WorkspaceReconciler) recordSnapshot(ctx context.Context, ws *workspaces
 // broker's expiry projection reads status first and falls back to the
 // annotation only for pre-upgrade rows). A Workspace writer can rewrite
 // the annotation at any time — harmless: nothing in convergence reads it.
-func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *workspacesv1alpha1.Workspace, snap *templateSnapshot) error {
+func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *cdiv1.Workspace, snap *templateSnapshot) error {
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		return err
@@ -1021,7 +1020,7 @@ func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *
 // exists but its revision cannot be proven, done is true and the
 // returned ctrl.Result is the Degraded/TemplateRevisionGone hold the
 // caller must return — the pod is left running untouched.
-func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
+func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
 	ident, ierr := r.Backend.PodTemplateIdentity(ctx, ws)
 	if ierr != nil {
 		return nil, ctrl.Result{}, false, ierr
@@ -1041,7 +1040,7 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 		hres, hErr := r.holdTemplateInvalid(ctx, ws, applied, detail)
 		return nil, hres, hErr == nil, hErr
 	}
-	var live *workspacesv1alpha1.WorkspaceTemplate
+	var live *cdiv1.WorkspaceTemplate
 	if ident.Name == "" {
 		// Pre-stamp pod: the only trustworthy candidate is the live
 		// revision spec.templateRef resolves to — a catalog base name
@@ -1055,7 +1054,7 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 			return nil, ctrl.Result{}, false, err
 		}
 	} else {
-		live = &workspacesv1alpha1.WorkspaceTemplate{}
+		live = &cdiv1.WorkspaceTemplate{}
 		gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
 		switch {
 		case apierrors.IsNotFound(gerr):
@@ -1123,12 +1122,12 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *work
 // reconnect. An owned pod that is not serving leaves the phase Pending
 // with the observed step conditions, and a hold with no operator-owned
 // pod is Pending.
-func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, reason, eventMsg string) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, reason, eventMsg string) (ctrl.Result, error) {
 	edge := func() bool {
-		cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+		cur := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionDegraded)
 		return cur == nil || cur.Status != metav1.ConditionTrue || cur.Reason != reason
 	}()
-	phase := workspacesv1alpha1.WorkspacePhasePending
+	phase := cdiv1.WorkspacePhasePending
 	obs := tcdiruntime.Observation{
 		RuntimeGeneration: applied.RuntimeGeneration,
 		Reason:            reason,
@@ -1151,7 +1150,7 @@ func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1
 			// dead or still booting must never mint tickets.
 			obs = live
 			if live.StorageReady && live.RuntimeReady && live.ConnectionReady {
-				phase = workspacesv1alpha1.WorkspacePhaseReady
+				phase = cdiv1.WorkspacePhaseReady
 			}
 		}
 	}
@@ -1177,7 +1176,7 @@ func (r *WorkspaceReconciler) holdDegraded(ctx context.Context, ws *workspacesv1
 // reason=TemplateInvalid — Ready while the operator-owned pod is
 // serving, Pending otherwise — and requeues (a later-published
 // template still resolves).
-func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("no trustworthy template source; convergence held",
 		"detail", detail)
 	return r.holdDegraded(ctx, ws, applied, ReasonTemplateInvalid,
@@ -1189,7 +1188,7 @@ func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *works
 // proven — the pod predates identity stamps, the stamped object was
 // pruned or republished, or the pod does not match it. The pod keeps
 // running untouched; a stop/start re-snapshots from the live template.
-func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
+func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("recorded template revision unavailable; workspace held",
 		"detail", detail)
 	return r.holdDegraded(ctx, ws, applied, ReasonTemplateRevisionGone,
@@ -1209,48 +1208,23 @@ func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *
 // member on every generation — silently overriding a guard/pinned stay the
 // API's start path already decided. Only an actual reference move (the
 // carried re-point of a start intent, or an admin edit made while Stopped)
-// re-takes the snapshot.
-//
-// Snapshots recorded before this machinery existed carry no SourceRef:
-// their recorded object name is the fallback source, extended by the
-// catalog-name label while that object still exists, so a legacy workspace
-// whose templateRef still holds the family name keeps its revision while a
-// carried re-point to a sibling revision object re-takes it. Only a clean
-// NotFound on the recorded object counts as "the revision is gone, resolve
-// the reference fresh" — any other read error propagates and the reconcile
-// retries, so a transient catalog miss can never look like a re-point.
-func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *workspacesv1alpha1.Workspace, applied *AppliedIntent, snap *templateSnapshot) (bool, error) {
+// re-takes the snapshot. sourceRef is required, so every recorded snapshot
+// carries it.
+func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, snap *templateSnapshot) (bool, error) {
 	if applied.RuntimeGeneration <= snap.RuntimeGeneration {
 		return false, nil
 	}
-	ref := ws.Spec.TemplateRef.Name
-	if snap.SourceRef != "" {
-		return ref != snap.SourceRef, nil
-	}
-	if ref == snap.Name {
-		return false, nil
-	}
-	live := &workspacesv1alpha1.WorkspaceTemplate{}
-	gerr := r.Get(ctx, types.NamespacedName{Name: snap.Name, Namespace: ws.Namespace}, live)
-	switch {
-	case apierrors.IsNotFound(gerr):
-		// The recorded revision object is gone — the moved reference stands
-		// alone and re-resolves (a deleted revision adopts the newest).
-		return true, nil
-	case gerr != nil:
-		return false, gerr
-	}
-	return live.Labels[provisioning.LabelCatalogName] != ref, nil
+	return ws.Spec.TemplateRef.Name != snap.SourceRef, nil
 }
 
 // snapshotDigestPattern mirrors the apiserver's Pattern validation on
 // LinuxRuntimeSpec.Image — the digest-only invariant every real template
 // satisfies and a forged snapshot must re-satisfy (SEC-10).
-var snapshotDigestPattern = regexp.MustCompile(workspacesv1alpha1.DigestPattern)
+var snapshotDigestPattern = regexp.MustCompile(cdiv1.DigestPattern)
 
 // snapshotSessionCmdPattern mirrors the Pattern on
 // LinuxRuntimeSpec.SessionCmd (printable ASCII, 1..512 chars).
-var snapshotSessionCmdPattern = regexp.MustCompile(workspacesv1alpha1.SessionCmdPattern)
+var snapshotSessionCmdPattern = regexp.MustCompile(cdiv1.SessionCmdPattern)
 
 // verifySnapshotRecord re-checks the integrity and invariants of a recorded
 // template snapshot before it may drive convergence:
@@ -1295,9 +1269,9 @@ func verifySnapshotRecord(snap *templateSnapshot) error {
 // validateSnapshotSpec re-checks the invariants the CRD enforces on a
 // WorkspaceTemplate — the boundary a forged snapshot bypasses, so the
 // embedded spec is checked again here (SEC-10).
-func validateSnapshotSpec(spec *workspacesv1alpha1.WorkspaceTemplateSpec) error {
+func validateSnapshotSpec(spec *cdiv1.WorkspaceTemplateSpec) error {
 	switch spec.Runtime {
-	case workspacesv1alpha1.RuntimeLinuxContainer:
+	case cdiv1.RuntimeLinuxContainer:
 		if spec.Linux == nil || spec.Windows != nil {
 			return errors.New("runtime=LinuxContainer requires spec.linux and forbids spec.windows")
 		}
@@ -1307,22 +1281,22 @@ func validateSnapshotSpec(spec *workspacesv1alpha1.WorkspaceTemplateSpec) error 
 		// The adapter/sessionCmd invariants are enforced on real templates
 		// by CRD enum + CEL; a forged snapshot must re-satisfy them here.
 		switch spec.Linux.Adapter {
-		case workspacesv1alpha1.AdapterNone, workspacesv1alpha1.AdapterKasm:
+		case cdiv1.AdapterNone, cdiv1.AdapterKasm:
 		default:
 			return fmt.Errorf("unknown spec.linux.adapter %q", spec.Linux.Adapter)
 		}
 		if spec.Linux.SessionCmd != "" {
-			if spec.Linux.Adapter != workspacesv1alpha1.AdapterKasm {
+			if spec.Linux.Adapter != cdiv1.AdapterKasm {
 				return errors.New("spec.linux.sessionCmd is only valid with adapter=kasm")
 			}
 			if !snapshotSessionCmdPattern.MatchString(spec.Linux.SessionCmd) {
 				return errors.New("spec.linux.sessionCmd is not printable ASCII within 512 chars")
 			}
 		}
-		if spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm && len(spec.Linux.Command) > 0 {
+		if spec.Linux.Adapter == cdiv1.AdapterKasm && len(spec.Linux.Command) > 0 {
 			return errors.New("spec.linux.command must be empty with adapter=kasm")
 		}
-	case workspacesv1alpha1.RuntimeWindowsVM:
+	case cdiv1.RuntimeWindowsVM:
 		if spec.Windows == nil || spec.Linux != nil {
 			return errors.New("runtime=WindowsVM requires spec.windows and forbids spec.linux")
 		}
@@ -1337,7 +1311,7 @@ func validateSnapshotSpec(spec *workspacesv1alpha1.WorkspaceTemplateSpec) error 
 
 // snapshotTemplate records the template's identity and a hash of its spec so
 // the workspace provably runs the revision that was admitted.
-func snapshotTemplate(tpl *workspacesv1alpha1.WorkspaceTemplate) (*templateSnapshot, error) {
+func snapshotTemplate(tpl *cdiv1.WorkspaceTemplate) (*templateSnapshot, error) {
 	specJSON, err := json.Marshal(tpl.Spec)
 	if err != nil {
 		return nil, err
@@ -1357,7 +1331,7 @@ func snapshotTemplate(tpl *workspacesv1alpha1.WorkspaceTemplate) (*templateSnaps
 	}, nil
 }
 
-func setAnnotation(ws *workspacesv1alpha1.Workspace, key, value string) {
+func setAnnotation(ws *cdiv1.Workspace, key, value string) {
 	if ws.Annotations == nil {
 		ws.Annotations = map[string]string{}
 	}
@@ -1368,7 +1342,7 @@ func setAnnotation(ws *workspacesv1alpha1.Workspace, key, value string) {
 // owned child kind, with a bounded exponential failure limiter.
 func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&workspacesv1alpha1.Workspace{}).
+		For(&cdiv1.Workspace{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).

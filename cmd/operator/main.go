@@ -35,7 +35,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi/opclient"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	linuxruntime "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -87,7 +87,7 @@ func parseExceptCIDRs(csv string) ([]string, error) {
 // same shape spec.linux.image requires. The adapter init image is
 // operator-supplied infrastructure; a mutable tag would let an image
 // swap change what runs inside every kasm-template pod.
-var kasmAdapterImagePattern = regexp.MustCompile(workspacesv1alpha1.DigestPattern)
+var kasmAdapterImagePattern = regexp.MustCompile(cdiv1.DigestPattern)
 
 // parseKasmAdapterImage validates --kasm-adapter-image: empty stays empty
 // (adapter=kasm templates are then rejected by the backend); a set value
@@ -364,7 +364,7 @@ func brokerSeam(bf brokerFlags) (*opclient.Client, error) {
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(workspacesv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(cdiv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -607,7 +607,7 @@ func main() {
 			DisableBuiltinEgressExcepts: disableBuiltinExcepts,
 			GatewayNamespace:            gatewayNamespace,
 			KasmAdapterImage:            kasmAdapter,
-			DefaultPlacement: workspacesv1alpha1.PlacementSpec{
+			DefaultPlacement: cdiv1.PlacementSpec{
 				NodeSelector: placement.nodeSelector,
 				Tolerations:  placement.tolerations,
 			},

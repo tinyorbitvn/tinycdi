@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -64,7 +64,7 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("KUBEBUILDER_ASSETS") != "" {
 		scheme := runtime.NewScheme()
-		if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		if err := cdiv1.AddToScheme(scheme); err != nil {
 			panic(err)
 		}
 		if err := corev1.AddToScheme(scheme); err != nil {
@@ -188,7 +188,7 @@ func repoPath(rel string) string {
 
 func countWorkspaceCRs(t *testing.T, ns string) int {
 	t.Helper()
-	list := &workspacev1alpha1.WorkspaceList{}
+	list := &cdiv1.WorkspaceList{}
 	if err := k8sClient.List(context.Background(), list, client.InNamespace(ns)); err != nil {
 		t.Fatalf("list workspaces in %s: %v", ns, err)
 	}
@@ -248,9 +248,9 @@ func eventually(t *testing.T, what string, timeout time.Duration, cond func() bo
 
 // workspaceCRCount counts Workspace CRs carrying the given workspace UID
 // label — namespace-independent so shared envtest namespaces stay usable.
-func workspaceCRByUID(t *testing.T, wsUID string) *workspacev1alpha1.Workspace {
+func workspaceCRByUID(t *testing.T, wsUID string) *cdiv1.Workspace {
 	t.Helper()
-	list := &workspacev1alpha1.WorkspaceList{}
+	list := &cdiv1.WorkspaceList{}
 	if err := k8sClient.List(context.Background(), list,
 		client.MatchingLabels{"workspaces.cdi.tinyorbit.vn/workspace-uid": wsUID}); err != nil {
 		t.Fatalf("list workspace CRs: %v", err)

@@ -44,7 +44,7 @@ const (
 var (
 	vapGVR   = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}
 	vapbGVR  = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
-	wsVAPGVR = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1alpha1", Resource: "workspaces"}
+	wsVAPGVR = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1", Resource: "workspaces"}
 	nsGVR    = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 )
 
@@ -68,7 +68,7 @@ func vapWorkspace(name, ns string, withAnnot bool) *unstructured.Unstructured {
 		md["annotations"] = map[string]any{vapAnnotKey: vapAnnotValue}
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1alpha1",
+		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1",
 		"kind":       "Workspace",
 		"metadata":   md,
 		"spec": map[string]any{
@@ -78,6 +78,10 @@ func vapWorkspace(name, ns string, withAnnot bool) *unstructured.Unstructured {
 			"dataPolicy":        "Ephemeral",
 			"runtimeGeneration": int64(0),
 			"intentRevision":    int64(1),
+			"sessionPolicy": map[string]any{
+				"clipboard":    "Disabled",
+				"fileTransfer": "Disabled",
+			},
 		},
 	}}
 }

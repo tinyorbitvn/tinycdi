@@ -1,7 +1,7 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-package v1alpha1_test
+package v1_test
 
 import (
 	"context"
@@ -30,8 +30,8 @@ var (
 	dyn    dynamic.Interface
 	crdCli apiextensionsclient.Interface
 
-	tplGVR = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1alpha1", Resource: "workspacetemplates"}
-	wsGVR  = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1alpha1", Resource: "workspaces"}
+	tplGVR = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1", Resource: "workspacetemplates"}
+	wsGVR  = schema.GroupVersionResource{Group: "workspaces.cdi.tinyorbit.vn", Version: "v1", Resource: "workspaces"}
 	crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
 )
 
@@ -77,7 +77,7 @@ func digest() string { return strings.Repeat("a", 64) }
 
 func linuxTemplate(name string) map[string]interface{} {
 	return map[string]interface{}{
-		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1alpha1",
+		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1",
 		"kind":       "WorkspaceTemplate",
 		"metadata":   map[string]interface{}{"name": name, "namespace": testNS},
 		"spec": map[string]interface{}{
@@ -106,7 +106,7 @@ func linuxTemplate(name string) map[string]interface{} {
 
 func windowsTemplate(name string) map[string]interface{} {
 	return map[string]interface{}{
-		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1alpha1",
+		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1",
 		"kind":       "WorkspaceTemplate",
 		"metadata":   map[string]interface{}{"name": name, "namespace": testNS},
 		"spec": map[string]interface{}{
@@ -133,7 +133,7 @@ func windowsTemplate(name string) map[string]interface{} {
 
 func workspace(name string) map[string]interface{} {
 	return map[string]interface{}{
-		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1alpha1",
+		"apiVersion": "workspaces.cdi.tinyorbit.vn/v1",
 		"kind":       "Workspace",
 		"metadata":   map[string]interface{}{"name": name, "namespace": testNS},
 		"spec": map[string]interface{}{
@@ -143,6 +143,10 @@ func workspace(name string) map[string]interface{} {
 			"dataPolicy":        "Ephemeral",
 			"runtimeGeneration": int64(1),
 			"intentRevision":    int64(1),
+			"sessionPolicy": map[string]interface{}{
+				"clipboard":    "Bidirectional",
+				"fileTransfer": "Disabled",
+			},
 		},
 	}
 }

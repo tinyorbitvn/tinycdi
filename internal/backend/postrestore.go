@@ -57,7 +57,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -219,7 +219,7 @@ func newLiveCRSource(kubeconfig string, tenants provisioning.TenantNamespaces) (
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("scheme: %w", err)
 	}
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("scheme: %w", err)
 	}
 	kc, err := client.New(rcfg, client.Options{Scheme: scheme})
@@ -239,8 +239,8 @@ func newLiveCRSource(kubeconfig string, tenants provisioning.TenantNamespaces) (
 }
 
 func (s *kubeCRSource) List(ctx context.Context) ([]liveCR, error) {
-	list := func(ns string) (*workspacev1alpha1.WorkspaceList, error) {
-		l := &workspacev1alpha1.WorkspaceList{}
+	list := func(ns string) (*cdiv1.WorkspaceList, error) {
+		l := &cdiv1.WorkspaceList{}
 		opts := []client.ListOption{}
 		if ns != "" {
 			opts = append(opts, client.InNamespace(ns))
@@ -276,7 +276,7 @@ func (s *kubeCRSource) List(ctx context.Context) ([]liveCR, error) {
 // liveCRFromWorkspace projects a Workspace CR. The platform uid comes from
 // the workspace-uid label the applier stamps; a CR without it still counts
 // as an orphan candidate via its name.
-func liveCRFromWorkspace(ws *workspacev1alpha1.Workspace) liveCR {
+func liveCRFromWorkspace(ws *cdiv1.Workspace) liveCR {
 	uid := ws.Labels[provisioning.LabelWorkspaceUID]
 	if uid == "" {
 		uid = "ws_" + strings.TrimPrefix(ws.Name, "ws-")

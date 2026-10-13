@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -47,8 +47,8 @@ func TestRetainedClaimMissingRefused(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-rcm", nil)
-	ws := newWorkspace(t, c, ns, "ws-rcm", "tpl-rcm", func(w *workspacesv1alpha1.Workspace) {
-		w.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	ws := newWorkspace(t, c, ns, "ws-rcm", "tpl-rcm", func(w *cdiv1.Workspace) {
+		w.Spec.DataPolicy = cdiv1.DataPolicyRetain
 		w.Annotations = map[string]string{linux.AnnotationRetainedDataRef: "rd_missingclaim"}
 	})
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -58,7 +58,7 @@ func TestRetainedClaimMissingRefused(t *testing.T) {
 	reconcile(t, r, key)
 
 	got := getWorkspace(t, c, key)
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(got, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonRetainedClaimMissing {
 		t.Fatalf("want Degraded=True reason=%q, got %+v", ReasonRetainedClaimMissing, cond)
 	}
@@ -81,8 +81,8 @@ func TestAttachedWorkspaceRecoversByStopStart(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-rec", nil)
-	ws := newWorkspace(t, c, ns, "ws-rec", "tpl-rec", func(w *workspacesv1alpha1.Workspace) {
-		w.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	ws := newWorkspace(t, c, ns, "ws-rec", "tpl-rec", func(w *cdiv1.Workspace) {
+		w.Spec.DataPolicy = cdiv1.DataPolicyRetain
 	})
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
 	r := newReconciler(c)
@@ -132,7 +132,7 @@ func TestAttachedWorkspaceRecoversByStopStart(t *testing.T) {
 	// Stop, then start (a new runtime generation): the pod is rebuilt from
 	// the CR as it is now.
 	cur = getWorkspace(t, c, key)
-	cur.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+	cur.Spec.DesiredState = cdiv1.DesiredStateStopped
 	cur.Spec.IntentRevision = 2
 	if err := c.Update(ctx, cur); err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestAttachedWorkspaceRecoversByStopStart(t *testing.T) {
 		reconcile(t, r, key)
 	}
 	cur = getWorkspace(t, c, key)
-	cur.Spec.DesiredState = workspacesv1alpha1.DesiredStateRunning
+	cur.Spec.DesiredState = cdiv1.DesiredStateRunning
 	cur.Spec.RuntimeGeneration = 2
 	cur.Spec.IntentRevision = 3
 	if err := c.Update(ctx, cur); err != nil {

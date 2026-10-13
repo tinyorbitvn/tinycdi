@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	tcdiruntime "github.com/tinyorbitvn/tinycdi/internal/runtime"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -65,7 +65,7 @@ func (f *fakeBackend) callCount(s string) int {
 	return n
 }
 
-func (f *fakeBackend) Ensure(context.Context, *workspacesv1alpha1.Workspace, *workspacesv1alpha1.WorkspaceTemplate) (tcdiruntime.Observation, error) {
+func (f *fakeBackend) Ensure(context.Context, *cdiv1.Workspace, *cdiv1.WorkspaceTemplate) (tcdiruntime.Observation, error) {
 	f.record("ensure")
 	if f.ensureFn != nil {
 		f.ensureFn()
@@ -73,33 +73,33 @@ func (f *fakeBackend) Ensure(context.Context, *workspacesv1alpha1.Workspace, *wo
 	return f.obs, nil
 }
 
-func (f *fakeBackend) Observe(context.Context, *workspacesv1alpha1.Workspace) (tcdiruntime.Observation, error) {
+func (f *fakeBackend) Observe(context.Context, *cdiv1.Workspace) (tcdiruntime.Observation, error) {
 	f.record("observe")
 	return f.obs, nil
 }
 
-func (f *fakeBackend) Stop(context.Context, *workspacesv1alpha1.Workspace) error {
+func (f *fakeBackend) Stop(context.Context, *cdiv1.Workspace) error {
 	f.record("stop")
 	return f.stopErr
 }
 
-func (f *fakeBackend) DeleteRuntime(context.Context, *workspacesv1alpha1.Workspace) error {
+func (f *fakeBackend) DeleteRuntime(context.Context, *cdiv1.Workspace) error {
 	f.record("deleteRuntime")
 	return f.delErr
 }
 
 // PodMatchesTemplate reports nothing adoptable: the fake keeps no pods.
-func (f *fakeBackend) PodMatchesTemplate(context.Context, *workspacesv1alpha1.Workspace, *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
+func (f *fakeBackend) PodMatchesTemplate(context.Context, *cdiv1.Workspace, *cdiv1.WorkspaceTemplate) (bool, error) {
 	return false, nil
 }
 
 // PodTemplateIdentity reports no owned pod: the fake keeps no pods.
-func (f *fakeBackend) PodTemplateIdentity(context.Context, *workspacesv1alpha1.Workspace) (tcdiruntime.PodTemplateIdentity, error) {
+func (f *fakeBackend) PodTemplateIdentity(context.Context, *cdiv1.Workspace) (tcdiruntime.PodTemplateIdentity, error) {
 	return tcdiruntime.PodTemplateIdentity{}, nil
 }
 
 // StampPodTemplateIdentity is a no-op: the fake keeps no pods.
-func (f *fakeBackend) StampPodTemplateIdentity(context.Context, *workspacesv1alpha1.Workspace, *workspacesv1alpha1.WorkspaceTemplate) error {
+func (f *fakeBackend) StampPodTemplateIdentity(context.Context, *cdiv1.Workspace, *cdiv1.WorkspaceTemplate) error {
 	return nil
 }
 
@@ -189,7 +189,7 @@ func (r *stepRecorder) DrainStatus(_ context.Context, uid provisioning.PlatformI
 	}
 	return open, drained, nil
 }
-func (r *stepRecorder) ApplyRetention(context.Context, *workspacesv1alpha1.Workspace) error {
+func (r *stepRecorder) ApplyRetention(context.Context, *cdiv1.Workspace) error {
 	return r.hit(StepRetention)
 }
 
@@ -198,9 +198,9 @@ func (r *stepRecorder) ApplyRetention(context.Context, *workspacesv1alpha1.Works
 // stamps the platform workspace-id label the API applier would set —
 // production teardown keys broker seams by it and never falls back to
 // the k8s object UID.
-func deletingWorkspace(t *testing.T, c client.Client, ns, name, tpl string, mutate func(*workspacesv1alpha1.Workspace)) (*workspacesv1alpha1.Workspace, types.NamespacedName) {
+func deletingWorkspace(t *testing.T, c client.Client, ns, name, tpl string, mutate func(*cdiv1.Workspace)) (*cdiv1.Workspace, types.NamespacedName) {
 	t.Helper()
-	ws := newWorkspace(t, c, ns, name, tpl, func(ws *workspacesv1alpha1.Workspace) {
+	ws := newWorkspace(t, c, ns, name, tpl, func(ws *cdiv1.Workspace) {
 		if ws.Labels == nil {
 			ws.Labels = map[string]string{}
 		}
@@ -393,7 +393,7 @@ func TestFinalizer_UnavailableDepsNeverDrop(t *testing.T) {
 			}
 			// The blockage must be visible on the object: Degraded=True with a
 			// teardown reason — operators must not need logs to see it.
-			if cond := condition(cur, workspacesv1alpha1.ConditionDegraded); cond == nil ||
+			if cond := condition(cur, cdiv1.ConditionDegraded); cond == nil ||
 				cond.Status != metav1.ConditionTrue {
 				t.Fatalf("missing Degraded=True while teardown blocked; conds=%v", cur.Status.Conditions)
 			}
@@ -415,8 +415,8 @@ func TestFinalizer_RetentionPendingKeepsFinalizer(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-ret", nil)
-	ws, key := deletingWorkspace(t, c, ns, "ws-ret", "tpl-ret", func(ws *workspacesv1alpha1.Workspace) {
-		ws.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	ws, key := deletingWorkspace(t, c, ns, "ws-ret", "tpl-ret", func(ws *cdiv1.Workspace) {
+		ws.Spec.DataPolicy = cdiv1.DataPolicyRetain
 	})
 
 	rec := newStepRecorder()
@@ -439,7 +439,7 @@ func TestFinalizer_RetentionPendingKeepsFinalizer(t *testing.T) {
 	if !found {
 		t.Fatal("finalizer dropped with retention unhandled")
 	}
-	if cond := condition(cur, workspacesv1alpha1.ConditionDegraded); cond == nil ||
+	if cond := condition(cur, cdiv1.ConditionDegraded); cond == nil ||
 		cond.Reason != ReasonRetentionPending {
 		t.Fatalf("want Degraded reason %q while retention pending, conds=%v",
 			ReasonRetentionPending, cur.Status.Conditions)
@@ -509,7 +509,7 @@ func TestFinalizer_DrainBounded45s(t *testing.T) {
 		t.Fatalf("backend stop called %d times, want exactly 1", n)
 	}
 	cur := getWorkspace(t, c, key)
-	if cond := condition(cur, workspacesv1alpha1.ConditionDegraded); cond == nil ||
+	if cond := condition(cur, cdiv1.ConditionDegraded); cond == nil ||
 		cond.Reason != ReasonDrainTimedOut {
 		t.Fatalf("want Degraded reason %q after drain timeout, conds=%v",
 			ReasonDrainTimedOut, cur.Status.Conditions)
@@ -529,7 +529,7 @@ func TestFinalizer_PartialCleanupRetried(t *testing.T) {
 
 	ns := newNamespace(t, c)
 	newTemplate(t, c, ns, "tpl-partial", nil)
-	ws0 := newWorkspace(t, c, ns, "ws-partial", "tpl-partial", func(ws *workspacesv1alpha1.Workspace) {
+	ws0 := newWorkspace(t, c, ns, "ws-partial", "tpl-partial", func(ws *cdiv1.Workspace) {
 		ws.Labels = map[string]string{provisioning.LabelWorkspaceUID: "ws_it_partial"}
 	})
 	key := types.NamespacedName{Name: ws0.Name, Namespace: ns}
@@ -649,7 +649,7 @@ func TestFinalizer_MissingWorkspaceIDDegrades(t *testing.T) {
 	ws = getWorkspace(t, c, key)
 	var cond *metav1.Condition
 	for i := range ws.Status.Conditions {
-		if ws.Status.Conditions[i].Type == workspacesv1alpha1.ConditionDegraded {
+		if ws.Status.Conditions[i].Type == cdiv1.ConditionDegraded {
 			cond = &ws.Status.Conditions[i]
 		}
 	}
@@ -700,7 +700,7 @@ func TestFinalizer_RevokeClosesDrainAccounting(t *testing.T) {
 		t.Fatal("drain step never polled")
 	}
 	cur := getWorkspace(t, c, key)
-	if cond := condition(cur, workspacesv1alpha1.ConditionDegraded); cond != nil &&
+	if cond := condition(cur, cdiv1.ConditionDegraded); cond != nil &&
 		(cond.Reason == ReasonDrainTimedOut || cond.Reason == ReasonStreamDraining) {
 		t.Fatalf("healthy teardown degraded: %+v", cond)
 	}

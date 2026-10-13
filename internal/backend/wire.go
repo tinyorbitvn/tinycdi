@@ -24,7 +24,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -195,7 +195,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("scheme: %w", err)
 	}
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("scheme: %w", err)
 	}
 	kc, err := client.New(rcfg, client.Options{Scheme: scheme})
@@ -339,7 +339,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// catch-all, so a lost event or an early leader change only delays the
 	// release back to the tick.
 	settle := provisioning.NewSettleTrigger()
-	wsInformer, err := kcache.GetInformer(ctx, &workspacev1alpha1.Workspace{})
+	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return fmt.Errorf("workspace informer: %w", err)
 	}
@@ -365,7 +365,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// Template ages for the workspace image-age fallback are read from the
 	// same informer cache (registered before Start so cache sync covers it):
 	// a page of old workspaces never costs API-server GETs.
-	if _, err := kcache.GetInformer(ctx, &workspacev1alpha1.WorkspaceTemplate{}); err != nil {
+	if _, err := kcache.GetInformer(ctx, &cdiv1.WorkspaceTemplate{}); err != nil {
 		return fmt.Errorf("template cache: %w", err)
 	}
 	cachedKC, err := client.New(rcfg, client.Options{Scheme: scheme, Cache: &client.CacheOptions{Reader: kcache}})

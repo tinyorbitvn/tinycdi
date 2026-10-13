@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 func backendScheme(t *testing.T) *runtime.Scheme {
@@ -37,44 +37,44 @@ func backendScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(s); err != nil {
+	if err := cdiv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
-func testWorkspace() *workspacesv1alpha1.Workspace {
-	return &workspacesv1alpha1.Workspace{
+func testWorkspace() *cdiv1.Workspace {
+	return &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ws-test",
 			Namespace: "tenant-a",
 			UID:       types.UID("11111111-2222-3333-4444-555555555555"),
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 		},
 	}
 }
 
-func testTemplate(annotations map[string]string) *workspacesv1alpha1.WorkspaceTemplate {
-	return &workspacesv1alpha1.WorkspaceTemplate{
+func testTemplate(annotations map[string]string) *cdiv1.WorkspaceTemplate {
+	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "tpl-test",
 			Namespace:   "tenant-a",
 			Annotations: annotations,
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "registry.example.com/tinycdi/linux-desktop@sha256:" +
 					"0000000000000000000000000000000000000000000000000000000000000000",
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU:     resource.MustParse("500m"),
 				Memory:  resource.MustParse("1Gi"),
 				Storage: resource.MustParse("1Gi"),
 			},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
 }
@@ -89,10 +89,16 @@ func ensurePodSpec(t *testing.T, annotations map[string]string) *corev1.Pod {
 
 // ensurePodSpecFor is ensurePodSpec with an explicit template and backend
 // options — the placement tests vary both axes.
-func ensurePodSpecFor(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate, opts Options) *corev1.Pod {
+func ensurePodSpecFor(t *testing.T, tpl *cdiv1.WorkspaceTemplate, opts Options) *corev1.Pod {
+	t.Helper()
+	return ensurePodSpecWS(t, testWorkspace(), tpl, opts)
+}
+
+// ensurePodSpecWS is ensurePodSpecFor with an explicit workspace — the
+// session-policy tests vary what the API stamped on spec.sessionPolicy.
+func ensurePodSpecWS(t *testing.T, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options) *corev1.Pod {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
-	ws := testWorkspace()
 	if _, err := New(c, opts).Ensure(context.Background(), ws, tpl); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -192,7 +198,7 @@ var poolToleration = corev1.Toleration{
 }
 
 func defaultPlacementOptions() Options {
-	return Options{DefaultPlacement: workspacesv1alpha1.PlacementSpec{
+	return Options{DefaultPlacement: cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"pool": "default"},
 		Tolerations: []corev1.Toleration{{
 			Key:      "default-taint",
@@ -205,7 +211,7 @@ func defaultPlacementOptions() Options {
 
 func TestBuildPod_PlacementFromTemplate(t *testing.T) {
 	tpl := testTemplate(nil)
-	tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	tpl.Spec.Placement = &cdiv1.PlacementSpec{
 		NodeSelector:     map[string]string{"workload": "runtime"},
 		Tolerations:      []corev1.Toleration{poolToleration},
 		RuntimeClassName: ptr("gvisor"),
@@ -237,7 +243,7 @@ func TestBuildPod_PlacementDefaults(t *testing.T) {
 
 func TestBuildPod_PerFieldFallback(t *testing.T) {
 	tpl := testTemplate(nil)
-	tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	tpl.Spec.Placement = &cdiv1.PlacementSpec{
 		RuntimeClassName: ptr("gvisor"),
 	}
 	pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
@@ -281,7 +287,7 @@ func TestBuildPod_AnnotationNoLongerHonoured(t *testing.T) {
 		tpl := testTemplate(map[string]string{
 			legacyAnnotation: `{"workload":"annotated"}`,
 		})
-		tpl.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+		tpl.Spec.Placement = &cdiv1.PlacementSpec{
 			RuntimeClassName: ptr("gvisor"),
 		}
 		pod := ensurePodSpecFor(t, tpl, Options{})
@@ -337,7 +343,7 @@ func TestEnsureRefusesRetainedDataWithoutClaim(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 			ws := testWorkspace()
-			ws.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+			ws.Spec.DataPolicy = cdiv1.DataPolicyRetain
 			ws.Annotations = ann
 			_, err := New(c, Options{}).Ensure(context.Background(), ws, testTemplate(nil))
 			if !errors.Is(err, ErrRetainedClaimMissing) {

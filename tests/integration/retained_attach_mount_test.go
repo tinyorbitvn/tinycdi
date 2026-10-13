@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -61,7 +61,7 @@ type laggyClient struct {
 var fxr20Runs atomic.Int64
 
 func (c laggyClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*workspacesv1alpha1.Workspace); ok {
+	if _, ok := obj.(*cdiv1.Workspace); ok {
 		time.Sleep(c.delay)
 	}
 	return c.Client.Get(ctx, key, obj, opts...)
@@ -81,7 +81,7 @@ func startOperatorClock(t *testing.T, ns string, now func() time.Time) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
 	}
 	mgr, err := ctrl.NewManager(testEnvConfig, ctrl.Options{
@@ -125,28 +125,28 @@ func startOperatorClock(t *testing.T, ns string, now func() time.Time) {
 
 func fxr20Template(t *testing.T, ns, name string) {
 	t.Helper()
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   "2026-10-a",
-			Runtime:    workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU:     resource.MustParse("500m"),
 				Memory:  resource.MustParse("512Mi"),
 				Storage: resource.MustParse("1Gi"),
 			},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 30 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 10 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 8 * time.Hour},
-				DataPolicy:        workspacesv1alpha1.DataPolicyRetain,
+				DataPolicy:        cdiv1.DataPolicyRetain,
 			},
 		},
 	}

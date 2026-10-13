@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -37,7 +37,7 @@ func brokerEnv(t *testing.T) (client.Client, *runtime.Scheme, *rest.Config, stri
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	env := &envtest.Environment{
@@ -86,49 +86,53 @@ func TestK8sRunningSource_OperatorStopped(t *testing.T) {
 	ctx := context.Background()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 
-	mk := func(name string, desired workspacesv1alpha1.DesiredState, specRev int64, applied operator.AppliedIntent, phase workspacesv1alpha1.WorkspacePhase) {
+	mk := func(name string, desired cdiv1.DesiredState, specRev int64, applied operator.AppliedIntent, phase cdiv1.WorkspacePhase) {
 		t.Helper()
 		raw, _ := json.Marshal(applied)
-		ws := &workspacesv1alpha1.Workspace{
+		ws := &cdiv1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: ns.Name,
 				Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_" + name},
 				Annotations: map[string]string{operator.AnnotationAppliedIntent: string(raw)},
 			},
-			Spec: workspacesv1alpha1.WorkspaceSpec{
-				TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl"},
-				OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			Spec: cdiv1.WorkspaceSpec{
+				TemplateRef:       cdiv1.TemplateReference{Name: "tpl"},
+				OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
 				DesiredState:      desired,
-				DataPolicy:        workspacesv1alpha1.DataPolicyRetain,
+				DataPolicy:        cdiv1.DataPolicyRetain,
 				RuntimeGeneration: 2,
 				IntentRevision:    specRev,
+				SessionPolicy: cdiv1.SessionPolicySpec{
+					Clipboard:    cdiv1.ClipboardDisabled,
+					FileTransfer: cdiv1.FileTransferDisabled,
+				},
 			},
 		}
 		if err := kc.Create(ctx, ws); err != nil {
 			t.Fatal(err)
 		}
-		ws.Status = workspacesv1alpha1.WorkspaceStatus{Phase: phase, LastAppliedIntentRevision: applied.Revision}
+		ws.Status = cdiv1.WorkspaceStatus{Phase: phase, LastAppliedIntentRevision: applied.Revision}
 		if err := kc.Status().Update(ctx, ws); err != nil {
 			t.Fatal(err)
 		}
 	}
-	stopped := operator.AppliedIntent{Revision: 3, DesiredState: workspacesv1alpha1.DesiredStateStopped, RuntimeGeneration: 2}
-	running := operator.AppliedIntent{Revision: 3, DesiredState: workspacesv1alpha1.DesiredStateRunning, RuntimeGeneration: 2}
+	stopped := operator.AppliedIntent{Revision: 3, DesiredState: cdiv1.DesiredStateStopped, RuntimeGeneration: 2}
+	running := operator.AppliedIntent{Revision: 3, DesiredState: cdiv1.DesiredStateRunning, RuntimeGeneration: 2}
 
 	// stuck: the operator's backstop flipped the applied intent to Stopped.
-	mk("stuck", workspacesv1alpha1.DesiredStateRunning, 3, stopped, workspacesv1alpha1.WorkspacePhaseStopped)
+	mk("stuck", cdiv1.DesiredStateRunning, 3, stopped, cdiv1.WorkspacePhaseStopped)
 	// stopped by the user: spec Stopped, nothing to reconcile.
-	mk("byuser", workspacesv1alpha1.DesiredStateStopped, 3, stopped, workspacesv1alpha1.WorkspacePhaseStopped)
+	mk("byuser", cdiv1.DesiredStateStopped, 3, stopped, cdiv1.WorkspacePhaseStopped)
 	// healthy: running.
-	mk("healthy", workspacesv1alpha1.DesiredStateRunning, 3, running, workspacesv1alpha1.WorkspacePhaseReady)
+	mk("healthy", cdiv1.DesiredStateRunning, 3, running, cdiv1.WorkspacePhaseReady)
 	// applied Running at the spec's own revision: nothing stopped.
-	mk("appliedrunning", workspacesv1alpha1.DesiredStateRunning, 3, running, workspacesv1alpha1.WorkspacePhaseStopped)
+	mk("appliedrunning", cdiv1.DesiredStateRunning, 3, running, cdiv1.WorkspacePhaseStopped)
 	// applied Stopped for another runtime generation than the spec's.
 	other := stopped
 	other.RuntimeGeneration = 1
-	mk("othergen", workspacesv1alpha1.DesiredStateRunning, 3, other, workspacesv1alpha1.WorkspacePhaseStopped)
+	mk("othergen", cdiv1.DesiredStateRunning, 3, other, cdiv1.WorkspacePhaseStopped)
 	// a newer start (rev 4) the operator has not applied yet.
-	mk("newstart", workspacesv1alpha1.DesiredStateRunning, 4, stopped, workspacesv1alpha1.WorkspacePhaseStopped)
+	mk("newstart", cdiv1.DesiredStateRunning, 4, stopped, cdiv1.WorkspacePhaseStopped)
 
 	src := brokerSource(t, scheme, restCfg, ns.Name)
 	var got []broker.OperatorStopped
@@ -160,49 +164,53 @@ func TestK8sRunningSource_PolicyFromCatalogRevision(t *testing.T) {
 	kc, scheme, restCfg, ns := brokerEnv(t)
 	ctx := context.Background()
 
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "linux-desktop-e795139d", Namespace: ns,
 			Labels: map[string]string{provisioning.LabelCatalogName: "linux-desktop"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "r1", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1)},
-			Resources: workspacesv1alpha1.ResourceProfile{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "r1", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux:      &cdiv1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1)},
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 20 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 5 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 4 * time.Hour},
-				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+				DataPolicy:        cdiv1.DataPolicyEphemeral,
 			},
 		},
 	}
 	if err := kc.Create(ctx, tpl); err != nil {
 		t.Fatal(err)
 	}
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pol", Namespace: ns,
 			Labels: map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_pol"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "linux-desktop"}, // base name
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "linux-desktop"}, // base name
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1, IntentRevision: 1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
 	started := metav1.Now()
-	ws.Status = workspacesv1alpha1.WorkspaceStatus{Phase: workspacesv1alpha1.WorkspacePhaseReady, StartedAt: &started}
+	ws.Status = cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady, StartedAt: &started}
 	if err := kc.Status().Update(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
@@ -239,25 +247,25 @@ func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
 
 	// The republished catalog revision carries different lifecycle caps;
 	// under the old resolver-based read the planner would have used these.
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "linux-desktop-ffff9999", Namespace: ns,
 			Labels: map[string]string{provisioning.LabelCatalogName: "linux-desktop"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "r2", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 2)},
-			Resources: workspacesv1alpha1.ResourceProfile{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "r2", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux:      &cdiv1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 2)},
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 90 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 45 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 24 * time.Hour},
-				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+				DataPolicy:        cdiv1.DataPolicyEphemeral,
 			},
 		},
 	}
@@ -268,37 +276,41 @@ func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
 	// The admitted snapshot (the annotation the operator writes at first
 	// admit) records the lifecycle the workspace actually runs under.
 	snapJSON, err := json.Marshal(struct {
-		Spec workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
-	}{Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-		Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+		Spec cdiv1.WorkspaceTemplateSpec `json:"spec"`
+	}{Spec: cdiv1.WorkspaceTemplateSpec{
+		Lifecycle: cdiv1.LifecycleDefaults{
 			IdleTimeout:       metav1.Duration{Duration: 7 * time.Minute},
 			DisconnectTimeout: metav1.Duration{Duration: 2 * time.Minute},
 			MaxDuration:       metav1.Duration{Duration: time.Hour},
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 		},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "snap-pol", Namespace: ns,
 			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_snap-pol"},
 			Annotations: map[string]string{operator.AnnotationTemplateSnapshot: string(snapJSON)},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "linux-desktop"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "linux-desktop"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1, IntentRevision: 1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
 	started := metav1.Now()
-	ws.Status = workspacesv1alpha1.WorkspaceStatus{Phase: workspacesv1alpha1.WorkspacePhaseReady, StartedAt: &started}
+	ws.Status = cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady, StartedAt: &started}
 	if err := kc.Status().Update(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
@@ -339,9 +351,9 @@ func TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation(t *testing.T) {
 
 	// Inflated annotation caps — the bytes a forger would write.
 	inflated, _ := json.Marshal(struct {
-		Spec workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
-	}{Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-		Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+		Spec cdiv1.WorkspaceTemplateSpec `json:"spec"`
+	}{Spec: cdiv1.WorkspaceTemplateSpec{
+		Lifecycle: cdiv1.LifecycleDefaults{
 			IdleTimeout:       metav1.Duration{Duration: 30 * 24 * time.Hour},
 			DisconnectTimeout: metav1.Duration{Duration: 30 * 24 * time.Hour},
 			MaxDuration:       metav1.Duration{Duration: 90 * 24 * time.Hour},
@@ -350,29 +362,33 @@ func TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation(t *testing.T) {
 
 	mk := func(name, tplRef, reason string) {
 		t.Helper()
-		ws := &workspacesv1alpha1.Workspace{
+		ws := &cdiv1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: nsName,
 				Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_" + name},
 				Annotations: map[string]string{operator.AnnotationTemplateSnapshot: string(inflated)},
 			},
-			Spec: workspacesv1alpha1.WorkspaceSpec{
-				TemplateRef:       workspacesv1alpha1.TemplateReference{Name: tplRef},
-				OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-				DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			Spec: cdiv1.WorkspaceSpec{
+				TemplateRef:       cdiv1.TemplateReference{Name: tplRef},
+				OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+				DesiredState:      cdiv1.DesiredStateRunning,
+				DataPolicy:        cdiv1.DataPolicyEphemeral,
 				RuntimeGeneration: 1, IntentRevision: 1,
+				SessionPolicy: cdiv1.SessionPolicySpec{
+					Clipboard:    cdiv1.ClipboardDisabled,
+					FileTransfer: cdiv1.FileTransferDisabled,
+				},
 			},
 		}
 		if err := kc.Create(ctx, ws); err != nil {
 			t.Fatal(err)
 		}
 		started := metav1.Now()
-		ws.Status = workspacesv1alpha1.WorkspaceStatus{
-			Phase:     workspacesv1alpha1.WorkspacePhaseReady,
+		ws.Status = cdiv1.WorkspaceStatus{
+			Phase:     cdiv1.WorkspacePhaseReady,
 			StartedAt: &started,
 			Conditions: []metav1.Condition{{
-				Type:               string(workspacesv1alpha1.ConditionDegraded),
+				Type:               string(cdiv1.ConditionDegraded),
 				Status:             metav1.ConditionTrue,
 				Reason:             reason,
 				Message:            "held",
@@ -388,24 +404,24 @@ func TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation(t *testing.T) {
 	// (a) Held + inflated annotation, nothing resolves: pure defaults.
 	mk("held-none", "missing-tpl", "TemplateRevisionGone")
 	// (b) Held + laxer-than-default template: defaults win (stricter).
-	lax := &workspacesv1alpha1.WorkspaceTemplate{
+	lax := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "tpl-lax", Namespace: nsName,
 			Labels: map[string]string{provisioning.LabelCatalogName: "tpl-lax"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "r1", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 9)},
-			Resources: workspacesv1alpha1.ResourceProfile{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "r1", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux:      &cdiv1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 9)},
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout: metav1.Duration{Duration: 10 * 24 * time.Hour},
 				MaxDuration: metav1.Duration{Duration: 30 * 24 * time.Hour},
-				DataPolicy:  workspacesv1alpha1.DataPolicyEphemeral,
+				DataPolicy:  cdiv1.DataPolicyEphemeral,
 				// DisconnectTimeout unset — default applies.
 			},
 		},
@@ -419,11 +435,11 @@ func TestK8sRunningSource_HeldWorkspaceNeverReadsAnnotation(t *testing.T) {
 	tight.Name = "tpl-tight"
 	tight.ResourceVersion = ""
 	tight.Labels = map[string]string{provisioning.LabelCatalogName: "tpl-tight"}
-	tight.Spec.Lifecycle = workspacesv1alpha1.LifecycleDefaults{
+	tight.Spec.Lifecycle = cdiv1.LifecycleDefaults{
 		IdleTimeout:       metav1.Duration{Duration: 5 * time.Minute},
 		DisconnectTimeout: metav1.Duration{Duration: time.Minute},
 		MaxDuration:       metav1.Duration{Duration: 2 * time.Hour},
-		DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		DataPolicy:        cdiv1.DataPolicyEphemeral,
 	}
 	if err := kc.Create(ctx, tight); err != nil {
 		t.Fatal(err)

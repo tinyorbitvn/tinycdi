@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -89,7 +89,7 @@ func NewRetentionInventory(c client.Client) *RetentionInventory {
 // squats on the workspace's deterministic home-volume name while carrying
 // a different workspace UID (ErrForeignPVC): dataset identity is PVC UID +
 // workspace UID, never an arbitrary name.
-func (i *RetentionInventory) MarkRetained(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (i *RetentionInventory) MarkRetained(ctx context.Context, ws *cdiv1.Workspace) error {
 	uid := ws.UID
 
 	// Foreign-PVC guard: a same-named volume owned by a different
@@ -135,7 +135,7 @@ func (i *RetentionInventory) MarkRetained(ctx context.Context, ws *workspacesv1a
 			rt = pvc.Annotations[AnnotationRetainedRuntime]
 		}
 		if rt == "" {
-			rt = string(workspacesv1alpha1.RuntimeLinuxContainer)
+			rt = string(cdiv1.RuntimeLinuxContainer)
 		}
 		pvc.Annotations[AnnotationRetainedRuntime] = rt
 		if pvc.Annotations[AnnotationRetainedAt] == "" {
@@ -152,11 +152,11 @@ func (i *RetentionInventory) MarkRetained(ctx context.Context, ws *workspacesv1a
 // immutable template snapshot first (authoritative for a workspace that
 // ran), then the live WorkspaceTemplate CR. "" when neither resolves — the
 // caller falls back to the PVC's existing annotation, then LinuxContainer.
-func (i *RetentionInventory) runtimeFor(ctx context.Context, ws *workspacesv1alpha1.Workspace) string {
+func (i *RetentionInventory) runtimeFor(ctx context.Context, ws *cdiv1.Workspace) string {
 	if snap := recordedSnapshot(ws); snap != nil && snap.Spec.Runtime != "" {
 		return string(snap.Spec.Runtime)
 	}
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{}
+	tpl := &cdiv1.WorkspaceTemplate{}
 	if err := i.Client.Get(ctx, client.ObjectKey{
 		Namespace: ws.Namespace, Name: ws.Spec.TemplateRef.Name,
 	}, tpl); err == nil && tpl.Spec.Runtime != "" {
@@ -348,7 +348,7 @@ func (i *RetentionInventory) volumeAttached(ctx context.Context, namespace, clai
 			}
 		}
 	}
-	var wss workspacesv1alpha1.WorkspaceList
+	var wss cdiv1.WorkspaceList
 	if err := i.Client.List(ctx, &wss, client.InNamespace(namespace)); err != nil {
 		return false, err
 	}
@@ -371,12 +371,12 @@ type RetentionApplier struct {
 }
 
 // ApplyRetention applies ws's dataPolicy to its persistent volumes.
-func (a *RetentionApplier) ApplyRetention(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (a *RetentionApplier) ApplyRetention(ctx context.Context, ws *cdiv1.Workspace) error {
 	inv := a.Inventory
 	if inv == nil {
 		inv = NewRetentionInventory(a.Client)
 	}
-	if ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyRetain {
+	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		return inv.MarkRetained(ctx, ws)
 	}
 	// Ephemeral: destroy the workspace's data volumes. A volume already

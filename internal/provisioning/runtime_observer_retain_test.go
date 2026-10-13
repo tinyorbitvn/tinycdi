@@ -18,29 +18,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
-func retainTemplate(ns string) *workspacev1alpha1.WorkspaceTemplate {
-	return &workspacev1alpha1.WorkspaceTemplate{
+func retainTemplate(ns string) *cdiv1.WorkspaceTemplate {
+	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: ns},
-		Spec: workspacev1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   "r1",
-			Runtime:    workspacev1alpha1.RuntimeLinuxContainer,
-			Experience: workspacev1alpha1.ExperienceDesktop,
-			Linux:      &workspacev1alpha1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1)},
-			Resources: workspacev1alpha1.ResourceProfile{
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux:      &cdiv1.LinuxRuntimeSpec{Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1)},
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), Storage: resource.MustParse("1Gi")},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacev1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacev1alpha1.ClipboardDisabled,
-			Lifecycle: workspacev1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 30 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 5 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 8 * time.Hour},
-				DataPolicy:        workspacev1alpha1.DataPolicyRetain,
+				DataPolicy:        cdiv1.DataPolicyRetain,
 			},
 		},
 	}
@@ -56,15 +56,15 @@ func TestK8sRuntimeObserver_StoppedRetainWorkspace(t *testing.T) {
 	tenants := provisioning.TenantNamespaces{"tenant-a": ns}
 
 	for _, tc := range []struct {
-		policy   workspacev1alpha1.DataPolicy
+		policy   cdiv1.DataPolicy
 		wantGone bool
 	}{
-		{workspacev1alpha1.DataPolicyEphemeral, true},
-		{workspacev1alpha1.DataPolicyRetain, true},
+		{cdiv1.DataPolicyEphemeral, true},
+		{cdiv1.DataPolicyRetain, true},
 	} {
 		t.Run(string(tc.policy), func(t *testing.T) {
 			ws := obsCR(provisioning.WorkspaceCRName(platformUID), ns, platformUID, "cr-uid-r")
-			ws.Spec.DesiredState = workspacev1alpha1.DesiredStateRunning
+			ws.Spec.DesiredState = cdiv1.DesiredStateRunning
 			ws.Spec.DataPolicy = tc.policy
 			c := fake.NewClientBuilder().WithScheme(observerScheme(t)).WithObjects(ws).Build()
 			be := linux.New(c, linux.Options{})

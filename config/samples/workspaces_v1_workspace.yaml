@@ -1,4 +1,4 @@
-apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+apiVersion: workspaces.cdi.tinyorbit.vn/v1
 kind: Workspace
 metadata:
   labels:
@@ -15,3 +15,6 @@ spec:
   dataPolicy: Ephemeral
   runtimeGeneration: 1
   intentRevision: 1
+  sessionPolicy:
+    clipboard: Disabled
+    fileTransfer: Disabled

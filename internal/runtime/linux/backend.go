@@ -52,7 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/runtime"
 )
 
@@ -225,7 +225,7 @@ func NetPolName(uid CRUID) string  { return "ws-" + string(uid) + "-boundary" }
 // pvcNameFor returns the home claim for ws: an attached workspace mounts
 // the retained PVC referenced by its annotations; every other workspace
 // uses its deterministic own-volume name.
-func pvcNameFor(ws *workspacesv1alpha1.Workspace) string {
+func pvcNameFor(ws *cdiv1.Workspace) string {
 	if ref := ws.Annotations[AnnotationRetainedPVC]; ref != "" {
 		return ref
 	}
@@ -272,7 +272,7 @@ var ErrRetainedClaimMissing = errors.New("linux backend: workspace consumes reta
 
 // retainedClaimMissing reports whether ws declares retained data without
 // the claim reference that makes the mount unambiguous.
-func retainedClaimMissing(ws *workspacesv1alpha1.Workspace) bool {
+func retainedClaimMissing(ws *cdiv1.Workspace) bool {
 	if ws.Annotations[AnnotationRetainedDataRef] == "" {
 		return false
 	}
@@ -321,7 +321,7 @@ type Options struct {
 	// template leaves a spec.placement field unset. Per field the
 	// precedence is template → this default; a field the template sets
 	// replaces the default outright.
-	DefaultPlacement workspacesv1alpha1.PlacementSpec
+	DefaultPlacement cdiv1.PlacementSpec
 
 	// DefaultHostUsers is the operator-wide pod hostUsers value applied
 	// when spec.linux.hostUsers is unset. Nil leaves the pod field nil
@@ -430,7 +430,7 @@ func New(c client.Client, opts Options) *Backend {
 	return &Backend{client: c, opts: opts}
 }
 
-func labels(ws *workspacesv1alpha1.Workspace) map[string]string {
+func labels(ws *cdiv1.Workspace) map[string]string {
 	return map[string]string{
 		LabelWorkspaceUID:  string(ws.UID),
 		LabelWorkspaceName: ws.Name,
@@ -449,7 +449,7 @@ func checkOwned(kind string, obj metav1.Object, uid CRUID) error {
 
 // Ensure converges the runtime for ws toward the spec captured by tpl and
 // returns the observation of the incarnation it converged.
-func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (runtime.Observation, error) {
+func (b *Backend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (runtime.Observation, error) {
 	// Policy gate: a template requesting an out-of-policy runtime profile
 	// is rejected before ANY child object is created — a half-converged
 	// workspace that can never become valid must not exist.
@@ -461,7 +461,7 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 	if err != nil {
 		return runtime.Observation{}, err
 	}
-	if tpl.Spec.Linux != nil && tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm &&
+	if tpl.Spec.Linux != nil && tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm &&
 		b.opts.KasmAdapterImage == "" {
 		// The adapter is delivered by the operator-configured init image;
 		// without it the pod cannot satisfy the runtime contract, so the
@@ -474,7 +474,7 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 	if _, err := b.ensureSecret(ctx, ws); err != nil {
 		return runtime.Observation{}, err
 	}
-	if ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyRetain {
+	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		if _, err := b.ensurePVC(ctx, ws, tpl); err != nil {
 			return runtime.Observation{}, err
 		}
@@ -492,7 +492,7 @@ func (b *Backend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, 
 }
 
 // Observe reports the current incarnation without changing anything.
-func (b *Backend) Observe(ctx context.Context, ws *workspacesv1alpha1.Workspace) (runtime.Observation, error) {
+func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Observation, error) {
 	uid := ws.UID
 	obs := runtime.Observation{RuntimeGeneration: ws.Spec.RuntimeGeneration}
 
@@ -523,14 +523,14 @@ func (b *Backend) Observe(ctx context.Context, ws *workspacesv1alpha1.Workspace)
 	case svcErr != nil:
 		return obs, svcErr
 	default:
-		obs.ServiceRef = &workspacesv1alpha1.ServiceReference{Name: svc.Name, Port: streamingPort}
+		obs.ServiceRef = &cdiv1.ServiceReference{Name: svc.Name, Port: streamingPort}
 	}
 	// ConnectionReady: the streaming endpoint answers when the runtime is
 	// ready and the fronting Service exists (endpoints are populated by the
 	// control plane from the same Ready signal).
 	obs.ConnectionReady = obs.RuntimeReady && obs.ServiceRef != nil
 
-	if ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyRetain {
+	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcErr := b.client.Get(ctx, client.ObjectKey{Name: pvcNameFor(ws), Namespace: ws.Namespace}, pvc)
 		switch {
@@ -552,7 +552,7 @@ func (b *Backend) Observe(ctx context.Context, ws *workspacesv1alpha1.Workspace)
 // Stop terminates the current incarnation but keeps data allowed by
 // dataPolicy. Service/Secret/NetworkPolicy stay; they are cheap and the
 // (runtimeGeneration, runtimeUID) fencing rejects stale connections anyway.
-func (b *Backend) Stop(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (b *Backend) Stop(ctx context.Context, ws *cdiv1.Workspace) error {
 	uid := ws.UID
 	pod := &corev1.Pod{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
@@ -574,7 +574,7 @@ func (b *Backend) Stop(ctx context.Context, ws *workspacesv1alpha1.Workspace) er
 // DeleteRuntime removes the runtime and its ephemeral child objects. A Retain
 // home PVC is deliberately left behind (retention contract); an Ephemeral
 // PVC, if present, is removed.
-func (b *Backend) DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (b *Backend) DeleteRuntime(ctx context.Context, ws *cdiv1.Workspace) error {
 	uid := ws.UID
 
 	del := func(kind string, obj client.Object) error {
@@ -619,7 +619,7 @@ func (b *Backend) DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Work
 		// through the explicit purge path.
 	case pvc.Labels[LabelWorkspaceUID] != string(uid):
 		// foreign PVC squatting on the name — leave it alone
-	case ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyRetain:
+	case ws.Spec.DataPolicy == cdiv1.DataPolicyRetain:
 		// Retention contract: no ownerReference was ever set, so it survives
 		// workspace deletion. Mark it for the retained-inventory flow.
 		patch := client.MergeFrom(pvc.DeepCopy())
@@ -637,7 +637,7 @@ func (b *Backend) DeleteRuntime(ctx context.Context, ws *workspacesv1alpha1.Work
 
 // --- children ---------------------------------------------------------------
 
-func (b *Backend) ensureSecret(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*corev1.Secret, error) {
+func (b *Backend) ensureSecret(ctx context.Context, ws *cdiv1.Workspace) (*corev1.Secret, error) {
 	uid := ws.UID
 	sec := &corev1.Secret{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: SecretName(uid), Namespace: ws.Namespace}, sec)
@@ -716,7 +716,7 @@ func generateCredentials(uid CRUID) (map[string][]byte, error) {
 	}, nil
 }
 
-func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (*corev1.PersistentVolumeClaim, error) {
+func (b *Backend) ensurePVC(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (*corev1.PersistentVolumeClaim, error) {
 	uid := ws.UID
 	if ref := ws.Annotations[AnnotationRetainedPVC]; ref != "" {
 		// Attach path (design §5): mount the retained PVC by reference —
@@ -749,7 +749,7 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspac
 		return nil, err
 	}
 	l := labels(ws)
-	l[LabelDataRole] = string(workspacesv1alpha1.DataRoleHome)
+	l[LabelDataRole] = string(cdiv1.DataRoleHome)
 	pvc = &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      PVCName(uid),
@@ -776,7 +776,7 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *workspacesv1alpha1.Workspac
 	return pvc, nil
 }
 
-func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile) error {
+func (b *Backend) ensurePod(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile) error {
 	uid := ws.UID
 	pod := &corev1.Pod{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(uid), Namespace: ws.Namespace}, pod)
@@ -807,7 +807,7 @@ func (b *Backend) ensurePod(ctx context.Context, ws *workspacesv1alpha1.Workspac
 // template's declared storage size — the same quantity a Retain policy
 // would provision as a PVC. A non-positive quantity gets a safe default
 // so a degenerate spec still yields a bounded volume (SEC-11).
-func ephemeralHomeSize(tpl *workspacesv1alpha1.WorkspaceTemplate) resource.Quantity {
+func ephemeralHomeSize(tpl *cdiv1.WorkspaceTemplate) resource.Quantity {
 	q := tpl.Spec.Resources.Storage.DeepCopy()
 	if q.Sign() <= 0 {
 		q = resource.MustParse("1Gi")
@@ -828,16 +828,16 @@ var (
 // request/limit: every disk-backed volume the pod can fill plus the
 // writable-rootfs/log allowance. A Retain home is a PVC — it is not
 // counted in pod ephemeral storage.
-func ephemeralStorageBudget(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) resource.Quantity {
+func ephemeralStorageBudget(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) resource.Quantity {
 	budget := tmpSizeLimit.DeepCopy()
 	budget.Add(rootfsAllowance)
-	if ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyEphemeral {
+	if ws.Spec.DataPolicy == cdiv1.DataPolicyEphemeral {
 		budget.Add(ephemeralHomeSize(tpl))
 	}
 	return budget
 }
 
-func shmSizeLimit(tpl *workspacesv1alpha1.WorkspaceTemplate) resource.Quantity {
+func shmSizeLimit(tpl *cdiv1.WorkspaceTemplate) resource.Quantity {
 	// /dev/shm is a Memory emptyDir: its sizeLimit is counted against the
 	// pod's memory cgroup. Bound it at memory/4, clamped to [64Mi, 512Mi].
 	q := tpl.Spec.Resources.Memory.DeepCopy()
@@ -947,7 +947,7 @@ func ValidateSeccompAnnotation(annotations map[string]string) error {
 	return err
 }
 
-func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile, opts Options) *corev1.Pod {
+func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev1.AppArmorProfile, seccomp *corev1.SeccompProfile, opts Options) *corev1.Pod {
 	if opts.AppArmorNotRequired && appArmor != nil && appArmor.Type == corev1.AppArmorProfileTypeRuntimeDefault {
 		appArmor = nil
 	}
@@ -966,7 +966,7 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 		Name:         "home",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}
-	if ws.Spec.DataPolicy == workspacesv1alpha1.DataPolicyRetain {
+	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		home.VolumeSource = corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: pvcNameFor(ws),
@@ -1034,20 +1034,14 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 
 	// The clipboard policy reaches the session server as a pod env var —
 	// the only path a Linux runtime contract offers (pod spec is rendered
-	// at start, containers are immutable after). A new policy — or a new
-	// operator that starts setting it — therefore applies to a workspace
-	// at its next start only, never mid-session. The resolved policy the
-	// API stamped as spec.sessionPolicy (template policy ∧ tenant
-	// ceiling, ADR 0010) wins when present; CRs written before the field
-	// existed fall back to the snapshot's template policy.
-	clipboard := tpl.Spec.ClipboardPolicy
-	if ws.Spec.SessionPolicy != nil && ws.Spec.SessionPolicy.Clipboard != "" {
-		clipboard = ws.Spec.SessionPolicy.Clipboard
-	}
+	// at start, containers are immutable after). A new policy therefore
+	// applies to a workspace at its next start only, never mid-session.
+	// spec.sessionPolicy (template policy ∧ tenant ceiling, ADR 0010) is
+	// required — it is the only source pod building reads.
 	ctr.Env = append(ctr.Env,
-		corev1.EnvVar{Name: envClipboardPolicy, Value: string(clipboard)})
+		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)})
 
-	kasm := tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm
+	kasm := tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm
 	if kasm {
 		// Approach A (docs/kasm-images.md): the UNMODIFIED kasmweb/* image's
 		// own startup is bypassed — the adapter scripts (delivered into the
@@ -1253,10 +1247,10 @@ func buildPod(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Workspac
 // are covered deliberately — seccomp-profile/apparmor-profile change the
 // pod spec while a spec-only hash would not move, so a stamp covering only
 // the spec would let a forged record ride an honest hash.
-func templateHash(tpl *workspacesv1alpha1.WorkspaceTemplate) (string, error) {
+func templateHash(tpl *cdiv1.WorkspaceTemplate) (string, error) {
 	raw, err := json.Marshal(struct {
-		Spec        workspacesv1alpha1.WorkspaceTemplateSpec `json:"spec"`
-		Annotations map[string]string                        `json:"annotations,omitempty"`
+		Spec        cdiv1.WorkspaceTemplateSpec `json:"spec"`
+		Annotations map[string]string           `json:"annotations,omitempty"`
 	}{Spec: tpl.Spec, Annotations: tpl.Annotations})
 	if err != nil {
 		return "", err
@@ -1273,7 +1267,7 @@ func templateHash(tpl *workspacesv1alpha1.WorkspaceTemplate) (string, error) {
 // stamp, or (pods built before the stamp) a spec equal to a fresh build
 // after discounting apiserver defaults. false means the record may not
 // be trusted.
-func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (bool, error) {
+func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (bool, error) {
 	pod, owned, err := b.ownedPod(ctx, ws)
 	if err != nil || !owned {
 		return false, err
@@ -1292,7 +1286,7 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 	if err != nil || serr != nil || tpl.Spec.Linux == nil {
 		return false, nil
 	}
-	if tpl.Spec.Linux.Adapter == workspacesv1alpha1.AdapterKasm && b.opts.KasmAdapterImage == "" {
+	if tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm && b.opts.KasmAdapterImage == "" {
 		return false, nil
 	}
 	expected := buildPod(ws, tpl, appArmor, seccomp, b.opts)
@@ -1304,7 +1298,7 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *workspacesv1alpha1
 // plus the full managed label set for the live generation. Anything
 // less and a foreign object squatting on the workspace-pod name could
 // "prove" a record it was never built from.
-func (b *Backend) ownedPod(ctx context.Context, ws *workspacesv1alpha1.Workspace) (*corev1.Pod, bool, error) {
+func (b *Backend) ownedPod(ctx context.Context, ws *cdiv1.Workspace) (*corev1.Pod, bool, error) {
 	pod := &corev1.Pod{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: PodName(ws.UID), Namespace: ws.Namespace}, pod)
 	switch {
@@ -1331,7 +1325,7 @@ func (b *Backend) ownedPod(ctx context.Context, ws *workspacesv1alpha1.Workspace
 // identity the incarnation pod was stamped with, when the pod exists and
 // is operator-owned. Empty Name/Revision mark a pod that predates the
 // stamps — the caller must not guess its revision from anywhere else.
-func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace) (runtime.PodTemplateIdentity, error) {
+func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace) (runtime.PodTemplateIdentity, error) {
 	pod, owned, err := b.ownedPod(ctx, ws)
 	if err != nil || !owned {
 		return runtime.PodTemplateIdentity{}, err
@@ -1347,7 +1341,7 @@ func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha
 // template-identity stamps onto an operator-owned pod whose provenance
 // was proven by the normalized rebuild — later reconciles and upgrades
 // read the identity directly instead of re-running the compare.
-func (b *Backend) StampPodTemplateIdentity(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error {
+func (b *Backend) StampPodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) error {
 	pod, owned, err := b.ownedPod(ctx, ws)
 	if err != nil || !owned {
 		return err
@@ -1416,7 +1410,7 @@ func stripAdmissionTolerations(tols []corev1.Toleration) []corev1.Toleration {
 	return out
 }
 
-func (b *Backend) ensureService(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (b *Backend) ensureService(ctx context.Context, ws *cdiv1.Workspace) error {
 	uid := ws.UID
 	svc := &corev1.Service{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: ServiceName(uid), Namespace: ws.Namespace}, svc)
@@ -1451,7 +1445,7 @@ func (b *Backend) ensureService(ctx context.Context, ws *workspacesv1alpha1.Work
 	return checkOwned("Service", svc, uid)
 }
 
-func (b *Backend) ensureNetPol(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) error {
+func (b *Backend) ensureNetPol(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) error {
 	uid := ws.UID
 	np := &networkingv1.NetworkPolicy{}
 	err := b.client.Get(ctx, client.ObjectKey{Name: NetPolName(uid), Namespace: ws.Namespace}, np)
@@ -1481,7 +1475,7 @@ func (b *Backend) ensureNetPol(ctx context.Context, ws *workspacesv1alpha1.Works
 	return b.client.Update(ctx, np)
 }
 
-func buildNetPol(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate, opts Options) *networkingv1.NetworkPolicy {
+func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP
 	dnsPort := intstr.FromInt32(53)
@@ -1505,7 +1499,7 @@ func buildNetPol(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Works
 
 	var profile []networkingv1.NetworkPolicyEgressRule
 	switch tpl.Spec.NetworkProfile {
-	case workspacesv1alpha1.NetworkProfileInternetOnly:
+	case cdiv1.NetworkProfileInternetOnly:
 		// (c) internet minus the always-on private/reserved excepts and
 		// the configured cluster pod/service/node CIDRs (the proven
 		// network-isolation fixture policy shape, SEC-02).
@@ -1515,7 +1509,7 @@ func buildNetPol(ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.Works
 				IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: except},
 			}},
 		})
-	case workspacesv1alpha1.NetworkProfileClusterOnly:
+	case cdiv1.NetworkProfileClusterOnly:
 		profile = append(profile, clusterOnlyEgressRule(opts))
 	}
 	// NetworkProfileIsolated: DNS only, no extra rules.

@@ -15,7 +15,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -204,8 +204,8 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 			t.Fatalf("recover: %v", err)
 		}
 	}
-	crOf := func() *workspacev1alpha1.Workspace { return workspaceCRByUID(t, res.ID) }
-	ready := func(what string, startedAfter time.Time) *workspacev1alpha1.Workspace {
+	crOf := func() *cdiv1.Workspace { return workspaceCRByUID(t, res.ID) }
+	ready := func(what string, startedAfter time.Time) *cdiv1.Workspace {
 		t.Helper()
 		eventually(t, what, 60*time.Second, func() bool {
 			cr := crOf()
@@ -224,7 +224,7 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 				}
 				_ = k8sClient.Status().Update(ctx, pod)
 			}
-			return cr.Status.Phase == workspacev1alpha1.WorkspacePhaseReady &&
+			return cr.Status.Phase == cdiv1.WorkspacePhaseReady &&
 				cr.Status.StartedAt != nil && !cr.Status.StartedAt.Time.Before(startedAfter)
 		})
 		return crOf()
@@ -245,8 +245,8 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 		if cr.Annotations == nil {
 			return false
 		}
-		if cr.Status.Phase != workspacev1alpha1.WorkspacePhaseReady || cr.Status.StartedAt == nil {
-			return cr.Status.Phase == workspacev1alpha1.WorkspacePhaseStopped
+		if cr.Status.Phase != cdiv1.WorkspacePhaseReady || cr.Status.StartedAt == nil {
+			return cr.Status.Phase == cdiv1.WorkspacePhaseStopped
 		}
 		// Poke a reconcile: the cap's requeue is 8 real hours away.
 		cr.Annotations["fxr24/poke"] = clock.Now().String()
@@ -289,7 +289,7 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 	if got := restarted.Status.StartedAt.Time; !got.Equal(clock.Now()) || !got.After(firstStart) {
 		t.Fatalf("restarted startedAt=%v want the new start %v (first start %v)", got, clock.Now(), firstStart)
 	}
-	if restarted.Spec.DesiredState != workspacev1alpha1.DesiredStateRunning || restarted.Status.Phase != workspacev1alpha1.WorkspacePhaseReady {
+	if restarted.Spec.DesiredState != cdiv1.DesiredStateRunning || restarted.Status.Phase != cdiv1.WorkspacePhaseReady {
 		t.Fatalf("restarted CR = %s/%s, want Running/Ready", restarted.Spec.DesiredState, restarted.Status.Phase)
 	}
 	if held := heldSlots(t, db, tenant); held != 1 {

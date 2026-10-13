@@ -3685,3 +3685,20 @@ tests:
 		t.Fatalf("promtool test rules failed: %v\n%s", err, out)
 	}
 }
+
+// TestChartCRDsMatchGenerated: the chart's crds/ directory must equal the
+// generated config/crd/bases byte for byte — drift means a CRD change was
+// made without `make sync-chart-crds`.
+func TestChartCRDsMatchGenerated(t *testing.T) {
+	gen, _ := filepath.Glob("../../config/crd/bases/*.yaml")
+	if len(gen) == 0 {
+		t.Fatal("no generated CRDs")
+	}
+	for _, g := range gen {
+		want, _ := os.ReadFile(g)
+		got, err := os.ReadFile(filepath.Join("tinycdi/crds", filepath.Base(g)))
+		if err != nil || !bytes.Equal(want, got) {
+			t.Fatalf("%s differs from chart copy; run make sync-chart-crds", filepath.Base(g))
+		}
+	}
+}

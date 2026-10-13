@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -288,10 +288,10 @@ func TestClipboardPolicyDirectionSemantics(t *testing.T) {
 	// The published enum is exactly the CRD enum — no fifth value may
 	// appear in one without the other.
 	wantEnum := []string{
-		string(workspacesv1alpha1.ClipboardDisabled),
-		string(workspacesv1alpha1.ClipboardSend),
-		string(workspacesv1alpha1.ClipboardReceive),
-		string(workspacesv1alpha1.ClipboardBidirectional),
+		string(cdiv1.ClipboardDisabled),
+		string(cdiv1.ClipboardSend),
+		string(cdiv1.ClipboardReceive),
+		string(cdiv1.ClipboardBidirectional),
 	}
 	if len(prop.Enum) != len(wantEnum) {
 		t.Fatalf("clipboardPolicy enum = %v, want %v", prop.Enum, wantEnum)

@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -41,25 +41,25 @@ import (
 // adoptTemplate builds the revision object a v0.5.0 workspace would have
 // been admitted under — catalog-name labeled fam32, the way published
 // revisions carry their family.
-func adoptTemplate(ns, name string, uid types.UID) *workspacesv1alpha1.WorkspaceTemplate {
-	return &workspacesv1alpha1.WorkspaceTemplate{
+func adoptTemplate(ns, name string, uid types.UID) *cdiv1.WorkspaceTemplate {
+	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: ns, UID: uid,
 			Labels:      map[string]string{provisioning.LabelCatalogName: "fam32"},
 			Annotations: map[string]string{linux.AnnotationSeccompProfile: "localhost/browser-sandbox"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-10-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-10-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "cr.example/img@sha256:" + fmt.Sprintf("%064x", 0xa1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+			NetworkProfile: cdiv1.NetworkProfileIsolated,
 		},
 	}
 }
@@ -67,24 +67,28 @@ func adoptTemplate(ns, name string, uid types.UID) *workspacesv1alpha1.Workspace
 // adoptWorkspace seeds a Running workspace in the upgrade-time shape —
 // no status.templateSnapshot. ann, when non-empty, seeds the
 // (never-trusted) snapshot annotation.
-func adoptWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspace {
+func adoptWorkspace(ref, ann string, uid types.UID) *cdiv1.Workspace {
 	annotations := map[string]string{}
 	if ann != "" {
 		annotations[AnnotationTemplateSnapshot] = ann
 	}
-	return &workspacesv1alpha1.Workspace{
+	return &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-pre", Namespace: "tinycdi-tenant-a", UID: uid,
 			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_pre"},
 			Annotations: annotations,
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: ref},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: ref},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 }
@@ -92,7 +96,7 @@ func adoptWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspac
 // snapshotAnnotation renders the annotation bytes a v0.5.0 operator
 // recorded — used to prove the annotation is never read, and to seed the
 // legacy (pre-V3.2, no sourceRef/runtimeGeneration) shape.
-func snapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate, ref string, gen int64) string {
+func snapshotAnnotation(t *testing.T, tpl *cdiv1.WorkspaceTemplate, ref string, gen int64) string {
 	t.Helper()
 	s, err := snapshotTemplate(tpl)
 	if err != nil {
@@ -110,8 +114,8 @@ func snapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate,
 // seedBuiltPod lets the real backend build the workspace's pod from tpl
 // (as the recording operator would have — stamped with the template's
 // identity + hash). The stored pod is returned.
-func seedBuiltPod(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace,
-	tpl *workspacesv1alpha1.WorkspaceTemplate) *corev1.Pod {
+func seedBuiltPod(t *testing.T, c client.Client, ws *cdiv1.Workspace,
+	tpl *cdiv1.WorkspaceTemplate) *corev1.Pod {
 	t.Helper()
 	b := linux.New(c, linux.Options{})
 	if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
@@ -128,7 +132,7 @@ func seedBuiltPod(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspac
 // adoptReconcile runs the seeded workspace through one reconcile and
 // returns the stored object.
 func adoptReconcile(t *testing.T, s *runtime.Scheme, c client.Client,
-	ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.Workspace {
+	ws *cdiv1.Workspace) *cdiv1.Workspace {
 	t.Helper()
 	r := &WorkspaceReconciler{Client: c, Scheme: s,
 		Backend: linux.New(c, linux.Options{})}
@@ -220,7 +224,7 @@ func TestAdoptSnapshot_AnnotationNeverConsulted(t *testing.T) {
 
 	forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
 	forged.Revision = "2026-10-a"
-	forged.Placement = &workspacesv1alpha1.PlacementSpec{
+	forged.Placement = &cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
 	}
 	fraw, _ := json.Marshal(forged)
@@ -270,7 +274,7 @@ func TestAdoptSnapshot_ForgedNetworkProfileLeavesNetPol(t *testing.T) {
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
 	forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
 	forged.Revision = "2026-10-a"
-	forged.NetworkProfile = workspacesv1alpha1.NetworkProfileInternetOnly
+	forged.NetworkProfile = cdiv1.NetworkProfileInternetOnly
 	fraw, _ := json.Marshal(forged)
 	fsum := sha256.Sum256(fraw)
 	forgedRaw, _ := json.Marshal(&templateSnapshot{
@@ -292,7 +296,7 @@ func TestAdoptSnapshot_ForgedNetworkProfileLeavesNetPol(t *testing.T) {
 
 	got := adoptReconcile(t, s, c, ws)
 	if got.Status.TemplateSnapshot == nil ||
-		got.Status.TemplateSnapshot.Spec.NetworkProfile != workspacesv1alpha1.NetworkProfileIsolated {
+		got.Status.TemplateSnapshot.Spec.NetworkProfile != cdiv1.NetworkProfileIsolated {
 		t.Fatalf("forged profile adopted: %+v", got.Status.TemplateSnapshot)
 	}
 	after := &networkingv1.NetworkPolicy{}
@@ -383,7 +387,7 @@ func TestAdoptSnapshot_UnstampedPodCandidateMatch(t *testing.T) {
 			if snap.SpecHash != want.SpecHash || snap.Name != "fam32-aaaa1111" {
 				t.Fatalf("adopted %q/%q, want live revision fam32-aaaa1111", snap.Name, snap.SpecHash)
 			}
-			cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+			cond := condition(got, cdiv1.ConditionDegraded)
 			if cond != nil && cond.Status == metav1.ConditionTrue {
 				t.Fatalf("Degraded set on a successful candidate match: %+v", cond)
 			}
@@ -413,14 +417,14 @@ func TestAdoptSnapshot_UnstampedPodCandidateMismatch(t *testing.T) {
 
 	forgedBuilt := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
 	forgedBuilt.Spec.Linux.Image = "attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 4)
-	forgedBuilt.Spec.Placement = &workspacesv1alpha1.PlacementSpec{
+	forgedBuilt.Spec.Placement = &cdiv1.PlacementSpec{
 		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
 	}
 
 	cases := []struct {
 		name     string
-		podTpl   *workspacesv1alpha1.WorkspaceTemplate // what the pod was built from
-		liveTpl  *workspacesv1alpha1.WorkspaceTemplate // nil: family pruned
+		podTpl   *cdiv1.WorkspaceTemplate // what the pod was built from
+		liveTpl  *cdiv1.WorkspaceTemplate // nil: family pruned
 		mungePod func(pod *corev1.Pod)
 	}{
 		{name: "forged-spec pod mismatch", podTpl: forgedBuilt, liveTpl: tpl},
@@ -533,7 +537,7 @@ func TestAdoptSnapshot_RequiresPod(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).
 			WithObjects(ws).WithStatusSubresource(ws).Build()
 		got := adoptReconcile(t, s, c, ws)
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonTemplateInvalid {
 			t.Fatalf("want Degraded=True reason=%s, got %+v",
@@ -569,7 +573,7 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 		}},
 		{name: "matching labels, non-controller ownerRef", munge: func(pod *corev1.Pod) {
 			pod.OwnerReferences = []metav1.OwnerReference{{
-				APIVersion: "workspaces.cdi.tinyorbit.vn/v1alpha1",
+				APIVersion: "workspaces.cdi.tinyorbit.vn/v1",
 				Kind:       "Workspace",
 				Name:       "ws-legacy",
 				UID:        "ws-pre-x",
@@ -578,7 +582,7 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 		{name: "matching labels, controller ownerRef to another uid", munge: func(pod *corev1.Pod) {
 			tr := true
 			pod.OwnerReferences = []metav1.OwnerReference{{
-				APIVersion: "workspaces.cdi.tinyorbit.vn/v1alpha1",
+				APIVersion: "workspaces.cdi.tinyorbit.vn/v1",
 				Kind:       "Workspace",
 				Name:       "other",
 				UID:        "not-this-workspace",
@@ -610,7 +614,7 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 			if got.Status.TemplateSnapshot != nil {
 				t.Fatal("snapshot recorded behind a foreign pod")
 			}
-			cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+			cond := condition(got, cdiv1.ConditionDegraded)
 			if cond == nil || cond.Status != metav1.ConditionTrue ||
 				cond.Reason != ReasonTemplateInvalid {
 				t.Fatalf("want Degraded TemplateInvalid, got %+v", got.Status.Conditions)
@@ -621,9 +625,9 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 
 // assertRevisionGone asserts the workspace holds Degraded with reason
 // TemplateRevisionGone.
-func assertRevisionGone(t *testing.T, got *workspacesv1alpha1.Workspace) {
+func assertRevisionGone(t *testing.T, got *cdiv1.Workspace) {
 	t.Helper()
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(got, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue ||
 		cond.Reason != ReasonTemplateRevisionGone {
 		t.Fatalf("want Degraded=True reason=%s, got %+v",

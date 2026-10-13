@@ -23,7 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -52,10 +52,10 @@ func (o *K8sRuntimeObserver) RuntimeGone(ctx context.Context, workspaceUID Platf
 	// Locate the CR inside the managed namespaces — its name is
 	// deterministic, and more than one hit means label/name corruption we
 	// must not reason about.
-	var cr *workspacesv1alpha1.Workspace
+	var cr *cdiv1.Workspace
 	var found int
 	for _, ns := range o.tenants {
-		var w workspacesv1alpha1.Workspace
+		var w cdiv1.Workspace
 		err := o.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: crName}, &w)
 		switch {
 		case apierrors.IsNotFound(err):

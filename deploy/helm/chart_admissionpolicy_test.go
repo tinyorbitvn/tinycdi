@@ -64,8 +64,8 @@ func TestAdmissionPolicyObjects(t *testing.T) {
 	if got := toSlice(rule["apiGroups"]); len(got) != 1 || got[0] != "workspaces.cdi.tinyorbit.vn" {
 		t.Errorf("apiGroups = %v, want [workspaces.cdi.tinyorbit.vn]", got)
 	}
-	if got := toSlice(rule["apiVersions"]); len(got) != 1 || got[0] != "v1alpha1" {
-		t.Errorf("apiVersions = %v, want [v1alpha1]", got)
+	if got := toSlice(rule["apiVersions"]); len(got) != 1 || got[0] != "v1" {
+		t.Errorf("apiVersions = %v, want [v1]", got)
 	}
 	if got := toSlice(rule["resources"]); len(got) != 1 || got[0] != "workspaces" {
 		t.Errorf("resources = %v, want [workspaces] (not workspaces/status)", got)
