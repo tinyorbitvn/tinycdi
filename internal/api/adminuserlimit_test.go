@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -24,16 +25,43 @@ import (
 )
 
 // fakeUserLimitSource serves the admin user-limits seam from memory:
-// Report merges the stored overrides/default into the canned quota report
-// the way the Postgres-backed source does, and the write methods mutate
-// that state so GET-after-PUT assertions read what admission would.
+// Report merges the stored overrides/default (with their versions) into
+// the canned quota report the way the Postgres-backed source does, and the
+// conditional writes enforce the version the way the store's do.
 type fakeUserLimitSource struct {
 	mu        sync.Mutex
 	report    store.QuotaReport
 	overrides map[string]int64
+	versions  map[string]string
 	def       *int64
+	defVer    string
+	seq       int
 	setErr    error
-	writes    []string // "set:ref:n" | "clear:ref" | "default:n" | "default:clear"
+	writes    []string // "set:ref" | "clear:ref" | "default" | "default:clear"
+}
+
+func newFakeUserLimitSource() *fakeUserLimitSource {
+	return &fakeUserLimitSource{overrides: map[string]int64{}, versions: map[string]string{}}
+}
+
+func (f *fakeUserLimitSource) nextVersion() string {
+	f.seq++
+	return fmt.Sprintf("v%d", f.seq)
+}
+
+// seed stores an override directly (test setup) and returns its version.
+func (f *fakeUserLimitSource) seed(owner string, max int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.overrides[owner] = max
+	f.versions[owner] = f.nextVersion()
+	return f.versions[owner]
+}
+
+func (f *fakeUserLimitSource) writeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.writes)
 }
 
 func (f *fakeUserLimitSource) Report(_ context.Context, _ string) (store.QuotaReport, error) {
@@ -41,60 +69,96 @@ func (f *fakeUserLimitSource) Report(_ context.Context, _ string) (store.QuotaRe
 	defer f.mu.Unlock()
 	rep := f.report
 	rep.DefaultUserLimit = f.def
+	rep.DefaultUserLimitVersion = f.defVer
 	rep.UserLimits = map[string]int64{}
+	rep.UserLimitVersions = map[string]string{}
 	for k, v := range f.overrides {
 		rep.UserLimits[k] = v
+		rep.UserLimitVersions[k] = f.versions[k]
 	}
 	return rep, nil
 }
 
-func (f *fakeUserLimitSource) SetOverride(_ context.Context, _ string, owner string, max int64) error {
+// precondition mirrors the store's conditional write: create matches only
+// a missing row, an update only the row's current version.
+func precondition(cur string, exists bool, expected string, create bool) error {
+	if create == exists || (!create && cur != expected) {
+		return store.ErrVersionMismatch
+	}
+	return nil
+}
+
+func (f *fakeUserLimitSource) SetOverride(_ context.Context, _ string, owner string, max int64, expected string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.setErr != nil {
-		return f.setErr
+		return "", f.setErr
+	}
+	_, exists := f.overrides[owner]
+	if err := precondition(f.versions[owner], exists, expected, create); err != nil {
+		return "", err
 	}
 	f.overrides[owner] = max
+	f.versions[owner] = f.nextVersion()
 	f.writes = append(f.writes, "set:"+owner)
-	return nil
+	return f.versions[owner], nil
 }
 
-func (f *fakeUserLimitSource) ClearOverride(_ context.Context, _ string, owner string) error {
+func (f *fakeUserLimitSource) ClearOverride(_ context.Context, _ string, owner string, expected string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.setErr != nil {
-		return f.setErr
+		return "", f.setErr
+	}
+	_, exists := f.overrides[owner]
+	if create && !exists {
+		return "", nil
+	}
+	if err := precondition(f.versions[owner], exists, expected, create); err != nil {
+		return "", err
 	}
 	delete(f.overrides, owner)
+	delete(f.versions, owner)
 	f.writes = append(f.writes, "clear:"+owner)
-	return nil
+	return "", nil
 }
 
-func (f *fakeUserLimitSource) SetDefault(_ context.Context, _ string, max int64) error {
+func (f *fakeUserLimitSource) SetDefault(_ context.Context, _ string, max int64, expected string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.setErr != nil {
-		return f.setErr
+		return "", f.setErr
+	}
+	if err := precondition(f.defVer, f.def != nil, expected, create); err != nil {
+		return "", err
 	}
 	v := max
 	f.def = &v
+	f.defVer = f.nextVersion()
 	f.writes = append(f.writes, "default")
-	return nil
+	return f.defVer, nil
 }
 
-func (f *fakeUserLimitSource) ClearDefault(_ context.Context, _ string) error {
+func (f *fakeUserLimitSource) ClearDefault(_ context.Context, _ string, expected string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.setErr != nil {
-		return f.setErr
+		return "", f.setErr
+	}
+	if create && f.def == nil {
+		return "", nil
+	}
+	if err := precondition(f.defVer, f.def != nil, expected, create); err != nil {
+		return "", err
 	}
 	f.def = nil
+	f.defVer = ""
 	f.writes = append(f.writes, "default:clear")
-	return nil
+	return "", nil
 }
 
-// newUserLimitsEnv mounts GET/PUT /v1/admin/tenants/{tenant}/user-limits
-// backed by src; sink may be nil.
+// newUserLimitsEnv mounts the /v1/admin/tenants/{tenant}/user-limits
+// routes backed by src; sink may be nil.
 func newUserLimitsEnv(t *testing.T, src UserLimitSource, sink observability.AuditSink) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
@@ -134,15 +198,27 @@ type userLimitEntryJSON struct {
 	Limit       *int64 `json:"limit"`
 	Effective   *int64 `json:"effective"`
 	Running     int64  `json:"running"`
+	ETag        string `json:"etag"`
 }
 
-type userLimitsViewJSON struct {
-	Tenant  string               `json:"tenant"`
-	Default *int64               `json:"default"`
-	Users   []userLimitEntryJSON `json:"users"`
+type userLimitPageJSON struct {
+	Items      []userLimitEntryJSON `json:"items"`
+	NextCursor string               `json:"nextCursor"`
+}
+
+type userLimitDefaultJSON struct {
+	Tenant string `json:"tenant"`
+	Limit  *int64 `json:"limit"`
 }
 
 const userLimitsPath = "/v1/admin/tenants/tenant-a/user-limits"
+const userLimitDefaultPath = userLimitsPath + "/default"
+
+// userLimitPath is the item path of ownerRef — escaped, since an issuer
+// URL carries '/' and the reference itself a '|'.
+func userLimitPath(ownerRef string) string {
+	return userLimitsPath + "/" + url.PathEscape(ownerRef)
+}
 
 // ulFixture: two owners with usage (caller is user-a by default login).
 func ulFixture(iss string) store.QuotaReport {
@@ -155,87 +231,95 @@ func ulFixture(iss string) store.QuotaReport {
 	}
 }
 
-// TestAdminUserLimits_Authz: tenant-admin of the named tenant only — a
-// regular user gets 403, a tenant admin naming another tenant gets 403,
-// and no session gets 401.
-func TestAdminUserLimits_Authz(t *testing.T) {
-	src := &fakeUserLimitSource{report: ulFixture("x"), overrides: map[string]int64{}}
+// TestUserLimits_PagedAndPerItemETag: the list is a cursor-paged
+// collection ordered by ownerRef; walking it with limit=2 visits every
+// override exactly once, and every override row carries its own strong
+// quoted etag.
+func TestUserLimits_PagedAndPerItemETag(t *testing.T) {
+	src := newFakeUserLimitSource()
 	env := newUserLimitsEnv(t, src, nil)
+	want := map[string]string{}
+	for i := 0; i < 5; i++ {
+		ref := fmt.Sprintf("%s|user-%d", env.issuer.URL(), i)
+		want[ref] = src.seed(ref, int64(i+1))
+	}
+	sess, csrf := loginAdmin(t, env, "admin-a")
 
-	// Regular user: read and writes all denied.
-	sess, csrf := login(t, env, "user-a")
-	for _, tc := range []struct{ method, path, body string }{
-		{http.MethodGet, userLimitsPath, ""},
-		{http.MethodPut, userLimitsPath, `{"ownerRef":"iss|sub","limit":3}`},
-		{http.MethodPut, userLimitsPath + "/default", `{"limit":3}`},
-	} {
-		r := doReq(t, env, sess, csrf, tc.method, tc.path, tc.body, nil)
-		e := decodeErr(t, r)
-		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
-			t.Fatalf("user %s %s: status=%d code=%q, want 403 FORBIDDEN", tc.method, tc.path, r.StatusCode, e.Code)
+	var seen []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 5 {
+			t.Fatal("paging did not terminate")
+		}
+		path := userLimitsPath + "?limit=2"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		r := doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
+		if r.StatusCode != http.StatusOK {
+			r.Body.Close()
+			t.Fatalf("GET %s: status=%d", path, r.StatusCode)
+		}
+		p := decodeBody[userLimitPageJSON](t, r)
+		if len(p.Items) > 2 {
+			t.Fatalf("page of %d items, want <= 2", len(p.Items))
+		}
+		for _, it := range p.Items {
+			if !strings.HasPrefix(it.ETag, `"`) || !strings.HasSuffix(it.ETag, `"`) || len(it.ETag) < 3 {
+				t.Fatalf("item %s etag=%q, want a non-empty quoted strong tag", it.OwnerRef, it.ETag)
+			}
+			if it.ETag != ETagOf(want[it.OwnerRef]) {
+				t.Fatalf("item %s etag=%q, want the tag of its own version", it.OwnerRef, it.ETag)
+			}
+			seen = append(seen, it.OwnerRef)
+		}
+		if p.NextCursor == "" {
+			break
+		}
+		cursor = p.NextCursor
+	}
+	if len(seen) != 5 {
+		t.Fatalf("walk visited %d rows, want 5: %v", len(seen), seen)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i-1] >= seen[i] {
+			t.Fatalf("walk not strictly ordered by ownerRef: %v", seen)
 		}
 	}
 
-	// Tenant admin of tenant-a naming tenant-b: cross-tenant denied.
-	sessA, csrfA := loginAdmin(t, env, "admin-a")
-	for _, tc := range []struct{ method, path, body string }{
-		{http.MethodGet, "/v1/admin/tenants/tenant-b/user-limits", ""},
-		{http.MethodPut, "/v1/admin/tenants/tenant-b/user-limits", `{"ownerRef":"iss|sub","limit":3}`},
-		{http.MethodPut, "/v1/admin/tenants/tenant-b/user-limits/default", `{"limit":3}`},
-	} {
-		r := doReq(t, env, sessA, csrfA, tc.method, tc.path, tc.body, nil)
-		e := decodeErr(t, r)
-		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
-			t.Fatalf("cross-tenant %s %s: status=%d code=%q, want 403 FORBIDDEN", tc.method, tc.path, r.StatusCode, e.Code)
-		}
-	}
-	if len(src.writes) != 0 {
-		t.Fatalf("denied requests reached the store: %v", src.writes)
-	}
-
-	// No session: 401.
-	req, _ := http.NewRequest(http.MethodGet, env.server.URL+userLimitsPath, nil)
-	r, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated: status=%d, want 401", r.StatusCode)
-	}
-	r.Body.Close()
+	requireErr(t, doReq(t, env, sess, csrf, http.MethodGet, userLimitsPath+"?sort=running", "", nil),
+		http.StatusBadRequest, CodeInvalidRequest, "unsupported sort")
+	requireAdminGuards(t, env, http.MethodGet, userLimitsPath, "", nil, src.writeCount)
 }
 
-// TestAdminUserLimits_GetView: the view carries the tenant default and one
-// row per principal with usage or an override — including an override on a
-// principal with no usage yet.
+// TestAdminUserLimits_GetView: the collection unions the principals with
+// usage and the ones with an override — an override on a principal with
+// no usage yet included — with the stored and effective limits resolved.
 func TestAdminUserLimits_GetView(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	src := newFakeUserLimitSource()
 	env := newUserLimitsEnv(t, src, nil)
 	src.report = ulFixture(env.issuer.URL())
 	def := int64(4)
 	src.def = &def
-	src.overrides[env.issuer.URL()+"|user-b"] = 2
-	src.overrides[env.issuer.URL()+"|ghost"] = 7
+	src.seed(env.issuer.URL()+"|user-b", 2)
+	src.seed(env.issuer.URL()+"|ghost", 7)
 	sess, csrf := loginAdmin(t, env, "admin-a")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, userLimitsPath, "", nil)
-	v := decodeBody[userLimitsViewJSON](t, r)
+	p := decodeBody[userLimitPageJSON](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
-	if v.Default == nil || *v.Default != 4 {
-		t.Fatalf("default=%v, want 4", v.Default)
-	}
-	if len(v.Users) != 3 {
-		t.Fatalf("users len=%d, want 3 (usage owners + override-only)", len(v.Users))
+	if len(p.Items) != 3 || p.NextCursor != "" {
+		t.Fatalf("items=%d next=%q, want 3 on one page (usage owners + override-only)", len(p.Items), p.NextCursor)
 	}
 	by := map[string]userLimitEntryJSON{}
-	for _, u := range v.Users {
+	for _, u := range p.Items {
 		by[u.Subject] = u
 	}
 	a := by["user-a"]
-	if a.Running != 2 || a.Limit != nil || a.Effective == nil || *a.Effective != 4 {
-		t.Fatalf("user-a row=%+v, want running=2 limit=null effective=4", a)
+	if a.Running != 2 || a.Limit != nil || a.Effective == nil || *a.Effective != 4 || a.ETag != "" {
+		t.Fatalf("user-a row=%+v, want running=2 limit=null effective=4 and no etag (no override row)", a)
 	}
 	b := by["user-b"]
 	if b.Limit == nil || *b.Limit != 2 || b.Effective == nil || *b.Effective != 2 || b.Running != 1 {
@@ -247,95 +331,159 @@ func TestAdminUserLimits_GetView(t *testing.T) {
 	}
 }
 
-// TestAdminUserLimits_PutOverrideAndDefault: PUT sets or clears rows and
-// the response is the refreshed view.
-func TestAdminUserLimits_PutOverrideAndDefault(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+// TestUserLimit_PutRequiresIfMatch: PUT .../user-limits/{ownerRef} is a
+// strong-ETag write — 428 without If-Match, "*" creates a missing override
+// (and is 412 once it exists), a stale tag is 412, the current tag writes
+// and answers the item with a new ETag.
+func TestUserLimit_PutRequiresIfMatch(t *testing.T) {
+	src := newFakeUserLimitSource()
 	env := newUserLimitsEnv(t, src, nil)
 	src.report = ulFixture(env.issuer.URL())
 	sess, csrf := loginAdmin(t, env, "admin-a")
 	me := env.issuer.URL() + "|user-a"
-
-	// Set an override on the caller.
-	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":5}`, nil)
-	v := decodeBody[userLimitsViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("PUT override: status=%d, want 200", r.StatusCode)
-	}
-	var meRow *userLimitEntryJSON
-	for i := range v.Users {
-		if v.Users[i].OwnerRef == me {
-			meRow = &v.Users[i]
-		}
-	}
-	if meRow == nil || meRow.Limit == nil || *meRow.Limit != 5 || meRow.Effective == nil || *meRow.Effective != 5 {
-		t.Fatalf("view after set=%+v, want override+effective 5", meRow)
+	put := func(body string, hdrs map[string]string) *http.Response {
+		return doReq(t, env, sess, csrf, http.MethodPut, userLimitPath(me), body, hdrs)
 	}
 
-	// Set the tenant default; the override still wins for the caller.
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":1}`, nil)
-	v = decodeBody[userLimitsViewJSON](t, r)
-	if r.StatusCode != http.StatusOK || v.Default == nil || *v.Default != 1 {
-		t.Fatalf("PUT default: status=%d default=%v, want 200 limit 1", r.StatusCode, v.Default)
-	}
-	for _, u := range v.Users {
-		if u.Subject == "user-b" && (u.Effective == nil || *u.Effective != 1) {
-			t.Fatalf("user-b effective=%v, want default 1", u.Effective)
-		}
+	requireErr(t, put(`{"limit":5}`, nil), http.StatusPreconditionRequired, CodePreconditionRequired, "no If-Match")
+	requireErr(t, put(`{"limit":5}`, map[string]string{"If-Match": ETagOf("v1")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "tag on a missing override")
+	if src.writeCount() != 0 {
+		t.Fatalf("refused preconditions reached the store: %v", src.writes)
 	}
 
-	// Clear the override — back to inherit; clear the default — unlimited.
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":null}`, nil)
-	v = decodeBody[userLimitsViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("PUT clear: status=%d", r.StatusCode)
+	r := put(`{"limit":5}`, map[string]string{"If-Match": "*"})
+	it := decodeBody[userLimitEntryJSON](t, r)
+	tag := r.Header.Get("ETag")
+	if r.StatusCode != http.StatusOK || tag == "" || it.ETag != tag {
+		t.Fatalf("create: status=%d ETag=%q item=%+v", r.StatusCode, tag, it)
 	}
-	for _, u := range v.Users {
-		if u.OwnerRef == me && (u.Limit != nil || u.Effective == nil || *u.Effective != 1) {
-			t.Fatalf("after clear=%+v, want limit=null effective=1 (default)", u)
-		}
+	if it.OwnerRef != me || it.Limit == nil || *it.Limit != 5 || it.Effective == nil || *it.Effective != 5 || it.Running != 2 {
+		t.Fatalf("created item=%+v, want override+effective 5, running 2", it)
 	}
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":null}`, nil)
-	v = decodeBody[userLimitsViewJSON](t, r)
-	if r.StatusCode != http.StatusOK || v.Default != nil {
-		t.Fatalf("PUT clear default: status=%d default=%v, want null", r.StatusCode, v.Default)
+
+	requireErr(t, put(`{"limit":6}`, map[string]string{"If-Match": "*"}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "* on an existing override")
+	requireErr(t, put(`{"limit":6}`, map[string]string{"If-Match": ETagOf("v0")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "stale tag")
+	r = put(`{"limit":6}`, map[string]string{"If-Match": tag})
+	it = decodeBody[userLimitEntryJSON](t, r)
+	next := r.Header.Get("ETag")
+	if r.StatusCode != http.StatusOK || next == "" || next == tag || it.Limit == nil || *it.Limit != 6 {
+		t.Fatalf("update: status=%d ETag=%q (was %q) item=%+v", r.StatusCode, next, tag, it)
 	}
-	wantWrites := []string{"set:" + me, "default", "clear:" + me, "default:clear"}
-	if len(src.writes) != len(wantWrites) {
-		t.Fatalf("writes=%v, want %v", src.writes, wantWrites)
+
+	requireAdminGuards(t, env, http.MethodPut, userLimitPath(me), `{"limit":7}`,
+		map[string]string{"If-Match": next}, src.writeCount)
+}
+
+// TestUserLimit_DeleteRequiresIfMatch: DELETE .../user-limits/{ownerRef}
+// clears the override only under the current tag — 428 without If-Match,
+// 412 for a stale tag or "*", 204 on a match, 404 once the row is gone.
+func TestUserLimit_DeleteRequiresIfMatch(t *testing.T) {
+	src := newFakeUserLimitSource()
+	env := newUserLimitsEnv(t, src, nil)
+	me := env.issuer.URL() + "|user-a"
+	ver := src.seed(me, 3)
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	del := func(hdrs map[string]string) *http.Response {
+		return doReq(t, env, sess, csrf, http.MethodDelete, userLimitPath(me), "", hdrs)
 	}
-	for i := range wantWrites {
-		if src.writes[i] != wantWrites[i] {
-			t.Fatalf("writes=%v, want %v", src.writes, wantWrites)
-		}
+
+	requireAdminGuards(t, env, http.MethodDelete, userLimitPath(me), "",
+		map[string]string{"If-Match": ETagOf(ver)}, src.writeCount)
+
+	requireErr(t, del(nil), http.StatusPreconditionRequired, CodePreconditionRequired, "no If-Match")
+	requireErr(t, del(map[string]string{"If-Match": ETagOf("v0")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "stale tag")
+	requireErr(t, del(map[string]string{"If-Match": "*"}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "* on an existing override")
+	if src.writeCount() != 0 {
+		t.Fatalf("refused deletes reached the store: %v", src.writes)
 	}
+	r := del(map[string]string{"If-Match": ETagOf(ver)})
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("matching delete: status=%d, want 204", r.StatusCode)
+	}
+	if _, ok := src.overrides[me]; ok {
+		t.Fatal("override survived its delete")
+	}
+	requireErr(t, del(map[string]string{"If-Match": ETagOf(ver)}),
+		http.StatusNotFound, CodeNotFound, "delete of a missing override")
+}
+
+// TestUserLimitDefault_IfMatch: the tenant default is its own strong-ETag
+// resource — GET carries the ETag while a row exists; PUT needs If-Match,
+// "*" creates, a stale tag is 412, and limit null clears the row.
+func TestUserLimitDefault_IfMatch(t *testing.T) {
+	src := newFakeUserLimitSource()
+	env := newUserLimitsEnv(t, src, nil)
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	put := func(body string, hdrs map[string]string) *http.Response {
+		return doReq(t, env, sess, csrf, http.MethodPut, userLimitDefaultPath, body, hdrs)
+	}
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, userLimitDefaultPath, "", nil)
+	d := decodeBody[userLimitDefaultJSON](t, r)
+	if r.StatusCode != http.StatusOK || d.Limit != nil || d.Tenant != "tenant-a" || r.Header.Get("ETag") != "" {
+		t.Fatalf("GET without a default: status=%d body=%+v ETag=%q", r.StatusCode, d, r.Header.Get("ETag"))
+	}
+	requireErr(t, put(`{"limit":3}`, nil), http.StatusPreconditionRequired, CodePreconditionRequired, "no If-Match")
+	r = put(`{"limit":3}`, map[string]string{"If-Match": "*"})
+	d = decodeBody[userLimitDefaultJSON](t, r)
+	tag := r.Header.Get("ETag")
+	if r.StatusCode != http.StatusOK || d.Limit == nil || *d.Limit != 3 || tag == "" {
+		t.Fatalf("create: status=%d body=%+v ETag=%q", r.StatusCode, d, tag)
+	}
+	r = doReq(t, env, sess, csrf, http.MethodGet, userLimitDefaultPath, "", nil)
+	r.Body.Close()
+	if r.Header.Get("ETag") != tag {
+		t.Fatalf("GET ETag=%q, want the write's %q", r.Header.Get("ETag"), tag)
+	}
+	requireErr(t, put(`{"limit":4}`, map[string]string{"If-Match": "*"}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "* on an existing default")
+	requireErr(t, put(`{"limit":4}`, map[string]string{"If-Match": ETagOf("v0")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "stale tag")
+	r = put(`{"limit":null}`, map[string]string{"If-Match": tag})
+	d = decodeBody[userLimitDefaultJSON](t, r)
+	if r.StatusCode != http.StatusOK || d.Limit != nil || r.Header.Get("ETag") != "" {
+		t.Fatalf("clear: status=%d body=%+v ETag=%q", r.StatusCode, d, r.Header.Get("ETag"))
+	}
+	if want := []string{"default", "default:clear"}; strings.Join(src.writes, ",") != strings.Join(want, ",") {
+		t.Fatalf("writes=%v, want %v", src.writes, want)
+	}
+
+	requireAdminGuards(t, env, http.MethodPut, userLimitDefaultPath, `{"limit":3}`,
+		map[string]string{"If-Match": "*"}, src.writeCount)
+	requireAdminGuards(t, env, http.MethodGet, userLimitDefaultPath, "", nil, src.writeCount)
 }
 
 // TestAdminUserLimits_Validation: malformed bodies, bad owner refs and
 // negative limits are 400s that never reach the store.
 func TestAdminUserLimits_Validation(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	src := newFakeUserLimitSource()
 	env := newUserLimitsEnv(t, src, nil)
 	sess, csrf := loginAdmin(t, env, "admin-a")
+	ok := userLimitPath("iss|sub")
 
 	for name, tc := range map[string]struct {
-		path, body string
+		method, path, body string
 	}{
-		"not json":         {userLimitsPath, `nope`},
-		"missing ownerRef": {userLimitsPath, `{"limit":3}`},
-		"empty ownerRef":   {userLimitsPath, `{"ownerRef":"","limit":3}`},
-		"no separator":     {userLimitsPath, `{"ownerRef":"justsub","limit":3}`},
-		"empty issuer":     {userLimitsPath, `{"ownerRef":"|sub","limit":3}`},
-		"empty subject":    {userLimitsPath, `{"ownerRef":"iss|","limit":3}`},
-		"negative limit":   {userLimitsPath, `{"ownerRef":"iss|sub","limit":-1}`},
-		"unknown field":    {userLimitsPath, `{"ownerRef":"iss|sub","limit":3,"x":1}`},
-		"negative default": {userLimitsPath + "/default", `{"limit":-2}`},
-		"fractional":       {userLimitsPath + "/default", `{"limit":1.5}`},
-		"trailing doc":     {userLimitsPath + "/default", `{"limit":1} {}`},
+		"not json":         {http.MethodPut, ok, `nope`},
+		"missing limit":    {http.MethodPut, ok, `{}`},
+		"null limit":       {http.MethodPut, ok, `{"limit":null}`},
+		"no separator":     {http.MethodPut, userLimitPath("justsub"), `{"limit":3}`},
+		"empty issuer":     {http.MethodPut, userLimitPath("|sub"), `{"limit":3}`},
+		"empty subject":    {http.MethodPut, userLimitPath("iss|"), `{"limit":3}`},
+		"negative limit":   {http.MethodPut, ok, `{"limit":-1}`},
+		"unknown field":    {http.MethodPut, ok, `{"limit":3,"x":1}`},
+		"bad delete ref":   {http.MethodDelete, userLimitPath("justsub"), ``},
+		"negative default": {http.MethodPut, userLimitDefaultPath, `{"limit":-2}`},
+		"fractional":       {http.MethodPut, userLimitDefaultPath, `{"limit":1.5}`},
+		"trailing doc":     {http.MethodPut, userLimitDefaultPath, `{"limit":1} {}`},
 	} {
-		r := doReq(t, env, sess, csrf, http.MethodPut, tc.path, tc.body, nil)
+		r := doReq(t, env, sess, csrf, tc.method, tc.path, tc.body, map[string]string{"If-Match": "*"})
 		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 			t.Fatalf("%s: status=%d code=%q, want 400 INVALID_REQUEST", name, r.StatusCode, e.Code)
@@ -367,36 +515,33 @@ func userLimitAuditEvents(t *testing.T, buf *bytes.Buffer) []observability.Audit
 }
 
 // TestAdminUserLimits_Audit: every request emits a dedicated audit record
-// through the route wrapper — the read and each write, with the resolved
-// set/clear action, the pseudonymous actor and target owner, the tenant
-// as target.
+// through the route wrapper — the reads and each write, with the route's
+// action, the pseudonymous actor and target owner, the tenant as target.
 func TestAdminUserLimits_Audit(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	src := newFakeUserLimitSource()
 	buf := &bytes.Buffer{}
 	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
 	sess, csrf := loginAdmin(t, env, "admin-a")
 	me := env.issuer.URL() + "|user-a"
 
-	r := doReq(t, env, sess, csrf, http.MethodGet, userLimitsPath, "", nil)
+	doReq(t, env, sess, csrf, http.MethodGet, userLimitsPath, "", nil).Body.Close()
+	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitPath(me), `{"limit":2}`, map[string]string{"If-Match": "*"})
 	r.Body.Close()
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":2}`, nil)
-	r.Body.Close()
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
-	r.Body.Close()
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":null}`, nil)
-	r.Body.Close()
+	tag := r.Header.Get("ETag")
+	doReq(t, env, sess, csrf, http.MethodPut, userLimitDefaultPath, `{"limit":3}`, map[string]string{"If-Match": "*"}).Body.Close()
+	doReq(t, env, sess, csrf, http.MethodGet, userLimitDefaultPath, "", nil).Body.Close()
+	doReq(t, env, sess, csrf, http.MethodDelete, userLimitPath(me), "", map[string]string{"If-Match": tag}).Body.Close()
 
 	events := userLimitAuditEvents(t, buf)
-	if len(events) != 4 {
-		t.Fatalf("audit events=%d, want 4: %v", len(events), events)
-	}
 	want := []string{
 		auditActionAdminUserLimitGet,
 		auditActionAdminUserLimitSet,
 		auditActionAdminUserLimitDefaultSet,
+		auditActionAdminUserLimitDefaultGet,
 		auditActionAdminUserLimitClear,
+	}
+	if len(events) != len(want) {
+		t.Fatalf("audit events=%d, want %d: %v", len(events), len(want), events)
 	}
 	for i, e := range events {
 		if e.Action != want[i] {
@@ -415,8 +560,10 @@ func TestAdminUserLimits_Audit(t *testing.T) {
 			t.Fatalf("event[%d] lacks role=%q: %+v", i, TenantAdminGroup, e)
 		}
 	}
-	if events[1].Details["owner"] == me {
-		t.Fatal("audit must pseudonymize the target owner, not store the raw ref")
+	for _, i := range []int{1, 4} {
+		if o := events[i].Details["owner"]; o == "" || o == me {
+			t.Fatalf("event[%d] owner=%q, want the pseudonymized target owner", i, o)
+		}
 	}
 	if events[1].Details["max_running"] != "2" || events[2].Details["max_running"] != "3" {
 		t.Fatalf("details=%v %v, want max_running recorded", events[1].Details, events[2].Details)
@@ -427,21 +574,18 @@ func TestAdminUserLimits_Audit(t *testing.T) {
 // land in the audit stream as denied events carrying the caller's actor
 // and FORBIDDEN — like admin quota, not only the http.request record.
 func TestAdminUserLimits_AuditDenied(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	src := newFakeUserLimitSource()
 	buf := &bytes.Buffer{}
 	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
 
-	// Non-admin PUT: denied under the route's attempt action (the body
-	// never decoded, so the set/clear variant does not resolve).
 	sess, csrf := login(t, env, "user-a")
-	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"iss|sub","limit":3}`, nil)
+	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitPath("iss|sub"), `{"limit":3}`,
+		map[string]string{"If-Match": "*"})
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-admin PUT: status=%d, want 403", r.StatusCode)
 	}
 
-	// Tenant admin of tenant-a reading tenant-b: cross-tenant denied.
 	sessA, csrfA := loginAdmin(t, env, "admin-a")
 	r = doReq(t, env, sessA, csrfA, http.MethodGet,
 		"/v1/admin/tenants/tenant-b/user-limits", "", nil)
@@ -475,28 +619,19 @@ func TestAdminUserLimits_AuditDenied(t *testing.T) {
 // codes — a transport outage is retryable 503 UNAVAILABLE, a permanent
 // failure 500 INTERNAL — and the audited event carries the real code.
 func TestAdminUserLimits_StoreErrors(t *testing.T) {
-	src := &fakeUserLimitSource{overrides: map[string]int64{}}
+	src := newFakeUserLimitSource()
 	buf := &bytes.Buffer{}
 	env := newUserLimitsEnv(t, src, observability.NewJSONSink(buf))
 	sess, csrf := loginAdmin(t, env, "admin-a")
 	me := env.issuer.URL() + "|user-a"
 
 	src.setErr = fmt.Errorf("dial postgres: %w", context.DeadlineExceeded)
-	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
-		`{"ownerRef":"`+me+`","limit":2}`, nil)
-	e := decodeErr(t, r)
-	r.Body.Close()
-	if r.StatusCode != http.StatusServiceUnavailable || e.Code != CodeUnavailable {
-		t.Fatalf("transient store error: status=%d code=%q, want 503 UNAVAILABLE", r.StatusCode, e.Code)
-	}
+	requireErr(t, doReq(t, env, sess, csrf, http.MethodPut, userLimitPath(me), `{"limit":2}`,
+		map[string]string{"If-Match": "*"}), http.StatusServiceUnavailable, CodeUnavailable, "transient store error")
 
 	src.setErr = errors.New("pg: check constraint violated")
-	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
-	e = decodeErr(t, r)
-	r.Body.Close()
-	if r.StatusCode != http.StatusInternalServerError || e.Code != CodeInternal {
-		t.Fatalf("permanent store error: status=%d code=%q, want 500 INTERNAL", r.StatusCode, e.Code)
-	}
+	requireErr(t, doReq(t, env, sess, csrf, http.MethodPut, userLimitDefaultPath, `{"limit":3}`,
+		map[string]string{"If-Match": "*"}), http.StatusInternalServerError, CodeInternal, "permanent store error")
 
 	events := userLimitAuditEvents(t, buf)
 	if len(events) != 2 {
@@ -563,7 +698,7 @@ func TestUserLimitReachedMapping(t *testing.T) {
 }
 
 // TestQuota_UserLimitFields: GET /v1/quota reports the caller's effective
-// limit in userLimits and each owner's in users[].limit.
+// limit in userLimits and no per-user array.
 func TestQuota_UserLimitFields(t *testing.T) {
 	src := &fakeQuotaSource{}
 	env := newQuotaEnv(t, src, newFakeDirectory(), defaultTenants())
@@ -580,10 +715,7 @@ func TestQuota_UserLimitFields(t *testing.T) {
 		UserLimits *struct {
 			RunningWorkspaces int64 `json:"runningWorkspaces"`
 		} `json:"userLimits"`
-		Users []struct {
-			Subject string `json:"subject"`
-			Limit   *int64 `json:"limit"`
-		} `json:"users"`
+		Users any `json:"users"`
 	}
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
@@ -592,7 +724,7 @@ func TestQuota_UserLimitFields(t *testing.T) {
 	if v.UserLimits == nil || v.UserLimits.RunningWorkspaces != 2 {
 		t.Fatalf("userLimits=%+v, want runningWorkspaces=2 (caller override)", v.UserLimits)
 	}
-	if len(v.Users) != 1 || v.Users[0].Subject != "user-a" || v.Users[0].Limit == nil || *v.Users[0].Limit != 2 {
-		t.Fatalf("users=%+v, want only caller with limit 2", v.Users)
+	if v.Users != nil {
+		t.Fatalf("users=%v, want no per-user array (the admin user-limits list owns it)", v.Users)
 	}
 }

@@ -204,7 +204,7 @@ func (f *fakeCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 				Runtime: e.Runtime, Experience: e.Experience,
 				CPUMillis: 2000, MemoryMiB: 4096, StorageGiB: 20,
 				IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
-				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled",
+				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled", NetworkProfile: "InternetOnly",
 				PublishedAt: time.Now().UTC(),
 			}, nil
 		}

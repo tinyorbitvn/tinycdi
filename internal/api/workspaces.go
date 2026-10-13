@@ -221,7 +221,7 @@ func (h *WorkspaceHandler) WithImageBlockAfter(d time.Duration) *WorkspaceHandle
 // authn middleware applied: RequireAuthPassive on reads — the portal polls
 // them on an interval, and only mutations and desktop input are user
 // activity (D18) — RequireAuth+RequireCSRF on writes.
-func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *WorkspaceHandler, th *TemplateHandler) {
+func MountWorkspaceRoutes(mux RouteMux, authn *Authenticator, h *WorkspaceHandler, th *TemplateHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuthPassive(h) }
 	// unsafe mounts an audited mutation route: RequireAuth verifies the
 	// principal, audited records the request's outcome on the shared

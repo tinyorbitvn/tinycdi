@@ -35,6 +35,7 @@ const (
 	auditActionAdminUserLimitGet          = "admin.user_limit.get"
 	auditActionAdminUserLimitSet          = "admin.user_limit.set"
 	auditActionAdminUserLimitClear        = "admin.user_limit.clear"
+	auditActionAdminUserLimitDefaultGet   = "admin.user_limit.default.get"
 	auditActionAdminUserLimitDefaultSet   = "admin.user_limit.default.set"
 	auditActionAdminUserLimitDefaultClear = "admin.user_limit.default.clear"
 
@@ -55,9 +56,11 @@ const (
 	routeAdminQuotaGet    = "GET /v1/admin/tenants/{tenant}/quota"
 	routeAdminQuotaSet    = "PUT /v1/admin/tenants/{tenant}/quota"
 
-	routeAdminUserLimitsGet    = "GET /v1/admin/tenants/{tenant}/user-limits"
-	routeAdminUserLimitsPut    = "PUT /v1/admin/tenants/{tenant}/user-limits"
-	routeAdminUserLimitDefault = "PUT /v1/admin/tenants/{tenant}/user-limits/default"
+	routeAdminUserLimitsGet       = "GET /v1/admin/tenants/{tenant}/user-limits"
+	routeAdminUserLimitPut        = "PUT /v1/admin/tenants/{tenant}/user-limits/{ownerRef}"
+	routeAdminUserLimitDelete     = "DELETE /v1/admin/tenants/{tenant}/user-limits/{ownerRef}"
+	routeAdminUserLimitDefaultGet = "GET /v1/admin/tenants/{tenant}/user-limits/default"
+	routeAdminUserLimitDefault    = "PUT /v1/admin/tenants/{tenant}/user-limits/default"
 
 	routeAdminSessionPolicyGet = "GET /v1/admin/tenants/{tenant}/session-policy"
 	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
@@ -104,13 +107,15 @@ var auditedRoutes = map[string]auditedRoute{
 	routeDataPurge:        {auditActionDataPurge, actionTarget},
 	routeAdminQuotaGet:    {auditActionAdminQuotaGet, "tenant"},
 	routeAdminQuotaSet:    {auditActionAdminQuotaSet, "tenant"},
-	// The PUTs carry both halves of a set/clear pair: the table action is
-	// the attempt (what a pre-decode denial is audited as) and the handler
-	// replaces it with the clear variant via auditSetAction once the body
-	// decodes.
-	routeAdminUserLimitsGet:    {auditActionAdminUserLimitGet, "tenant"},
-	routeAdminUserLimitsPut:    {auditActionAdminUserLimitSet, "tenant"},
-	routeAdminUserLimitDefault: {auditActionAdminUserLimitDefaultSet, "tenant"},
+	// The default PUT carries both halves of a set/clear pair: the table
+	// action is the attempt (what a pre-decode denial is audited as) and
+	// the handler replaces it with the clear variant via auditSetAction
+	// once a null limit decodes. An override is cleared by its DELETE.
+	routeAdminUserLimitsGet:       {auditActionAdminUserLimitGet, "tenant"},
+	routeAdminUserLimitPut:        {auditActionAdminUserLimitSet, "tenant"},
+	routeAdminUserLimitDelete:     {auditActionAdminUserLimitClear, "tenant"},
+	routeAdminUserLimitDefaultGet: {auditActionAdminUserLimitDefaultGet, "tenant"},
+	routeAdminUserLimitDefault:    {auditActionAdminUserLimitDefaultSet, "tenant"},
 	// As on the user-limit PUTs, the table action is the set attempt; an
 	// all-FollowTemplate body resolves to the clear variant via
 	// auditSetAction once it decodes.
@@ -240,7 +245,7 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 // MountLogoutRoutes registers POST /v1/logout audited with the
 // authenticator's own sink (logout also emits the dedicated session.revoke
 // record for the lease-material revocation).
-func MountLogoutRoute(mux *http.ServeMux, authn *Authenticator) {
+func MountLogoutRoute(mux RouteMux, authn *Authenticator) {
 	mux.Handle(routeLogout, authn.RequireAuth(
 		audited(authn.auditSink, routeLogout,
 			authn.RequireCSRF(http.HandlerFunc(authn.LogoutHandler)))))
@@ -270,7 +275,7 @@ func (s lateAuditSink) WriteAudit(ctx context.Context, e observability.AuditEven
 // middleware wraps the whole chain (the production mount applies the
 // session-digest-keyed login-family limiter: the op is self-scoped and
 // idempotent, the limit only bounds repeat DB churn).
-func MountRevokeAllRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+func MountRevokeAllRoute(mux RouteMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
 	var h http.Handler = authn.RequireAuth(
 		audited(lateAuditSink{func() observability.AuditSink { return authn.auditSink }}, routeSessionRevokeAll,
 			authn.RequireCSRF(http.HandlerFunc(authn.RevokeAllSessionsHandler))))

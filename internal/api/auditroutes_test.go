@@ -166,6 +166,21 @@ type coverageFixtures struct {
 	env      *testEnv
 	backend  *fakeWorkspaceBackend
 	retained *fakeRetainedStore
+	// mux records every pattern the Mount* functions register.
+	mux *recordingMux
+}
+
+// recordingMux is the RouteMux the coverage env mounts through: it
+// registers on a real ServeMux and remembers each pattern, so a test can
+// compare the mounted route set with the published contract.
+type recordingMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *recordingMux) Handle(pattern string, h http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, h)
 }
 
 func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
@@ -202,14 +217,15 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
 	}}, tenants, d).WithLogger(logger).WithAuditSink(sink)
 
-	mux := http.NewServeMux()
 	// env.login drives the /auth/* flow; everything below mirrors the
-	// appMux mount block — keep in sync with it.
-	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
-	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	// appMux mount block — keep in sync with it. The direct registrations
+	// go to the inner ServeMux; only the Mount* calls are recorded.
+	mux := &recordingMux{ServeMux: http.NewServeMux()}
+	mux.ServeMux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.ServeMux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
 	noop := func(h http.Handler) http.Handler { return h }
-	mux.Handle("GET /v1/login", noop(http.HandlerFunc(a.LoginHandler)))
-	mux.Handle("GET /v1/auth/callback", noop(http.HandlerFunc(a.CallbackHandler)))
+	mux.ServeMux.Handle("GET /v1/login", noop(http.HandlerFunc(a.LoginHandler)))
+	mux.ServeMux.Handle("GET /v1/auth/callback", noop(http.HandlerFunc(a.CallbackHandler)))
 	MountLogoutRoute(mux, a)
 	MountRevokeAllRoute(mux, a, noop)
 	MountSessionTouchRoute(mux, a, noop)
@@ -219,9 +235,9 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountConnectionRoutes(mux, a, connH)
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
-	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, newFakeDirectory(), tenants))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, newFakeDirectory(), tenants, nil).WithAuditSink(sink))
-	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(&fakeUserLimitSource{overrides: map[string]int64{}}, newFakeDirectory(), tenants).WithAuditSink(sink))
+	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
+	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
@@ -231,7 +247,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		RequireTrustedOrigin(a.SessionCookieName(), nil)(mux))))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
-	return &coverageFixtures{env: env, backend: be, retained: fs}
+	return &coverageFixtures{env: env, backend: be, retained: fs, mux: mux}
 }
 
 // requiredMutatingOps is the coverage domain: every openapi operation a
@@ -333,13 +349,20 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"GET /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/admin/tenants/tenant-a/user-limits", "", nil).Body.Close()
 		}},
-		{"PUT /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitSet, func() {
-			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits",
-				`{"ownerRef":"iss|sub","limit":3}`, nil).Body.Close()
+		{"PUT /v1/admin/tenants/{}/user-limits/{}", auditActionAdminUserLimitSet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, userLimitPath("iss|sub"),
+				`{"limit":3}`, map[string]string{"If-Match": "*"}).Body.Close()
+		}},
+		{"DELETE /v1/admin/tenants/{}/user-limits/{}", auditActionAdminUserLimitClear, func() {
+			doReq(t, env, sessA, csrfA, http.MethodDelete, userLimitPath("iss|gone"),
+				"", map[string]string{"If-Match": `"stale"`}).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, userLimitDefaultPath, "", nil).Body.Close()
 		}},
 		{"PUT /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultSet, func() {
-			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits/default",
-				`{"limit":3}`, nil).Body.Close()
+			doReq(t, env, sessA, csrfA, http.MethodPut, userLimitDefaultPath,
+				`{"limit":3}`, map[string]string{"If-Match": "*"}).Body.Close()
 		}},
 		{"GET /v1/admin/tenants/{}/session-policy", auditActionAdminSessionPolicyGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, adminSessionPolicyPath, "", nil).Body.Close()

@@ -53,8 +53,8 @@ func TestResolveSessionPolicy_CeilingNarrows(t *testing.T) {
 		{"Bidirectional ceiling cannot widen", provisioning.ClipboardSend, provisioning.PolicyBidirectional, provisioning.ClipboardSend},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := sps.SetCeiling(ctx, "tenant-a",
-				store.SessionPolicyWrite{Clipboard: strPtr(tc.ceiling)}, store.IfMatchCreate); err != nil {
+			if _, err := sps.SetCeiling(ctx, "tenant-a",
+				store.SessionPolicyWrite{Clipboard: strPtr(tc.ceiling)}, "", true); err != nil {
 				t.Fatal(err)
 			}
 			got, err := svc.ResolveSessionPolicy(ctx, "tenant-a",
@@ -67,8 +67,8 @@ func TestResolveSessionPolicy_CeilingNarrows(t *testing.T) {
 					tc.template, tc.ceiling, got.Clipboard, tc.want)
 			}
 			// Re-tighten for the next case (each subtest rewrites the row).
-			if err := sps.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{},
-				mustVersion(t, sps, "tenant-a")); err != nil {
+			if _, err := sps.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{},
+				mustVersion(t, sps, "tenant-a"), false); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -100,9 +100,9 @@ func TestService_SessionPolicyRidesIntents(t *testing.T) {
 	}
 	svc := provisioning.NewService(db)
 	sps := store.NewSessionPolicyStore(db)
-	if err := sps.SetCeiling(ctx, tenant,
+	if _, err := sps.SetCeiling(ctx, tenant,
 		store.SessionPolicyWrite{Clipboard: strPtr(provisioning.ClipboardSend)},
-		store.IfMatchCreate); err != nil {
+		"", true); err != nil {
 		t.Fatalf("set ceiling: %v", err)
 	}
 
@@ -139,9 +139,9 @@ func TestService_SessionPolicyRidesIntents(t *testing.T) {
 		"key-sp-stop", provisioning.IntentStop, []byte("{}")); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if err := sps.SetCeiling(ctx, tenant,
+	if _, err := sps.SetCeiling(ctx, tenant,
 		store.SessionPolicyWrite{Clipboard: strPtr(provisioning.PolicyDisabled)},
-		mustVersion(t, sps, tenant)); err != nil {
+		mustVersion(t, sps, tenant), false); err != nil {
 		t.Fatalf("tighten ceiling: %v", err)
 	}
 	if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "", res.ID,

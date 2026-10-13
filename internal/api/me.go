@@ -28,7 +28,7 @@ func NewMeHandler(sessionDomain string) *MeHandler {
 // MountMeRoutes registers GET /v1/me behind passive auth: it is the
 // portal bootstrap read, re-issued by retry loops, so it must not slide
 // the idle timer (D18) — only mutations and desktop input do.
-func MountMeRoutes(mux *http.ServeMux, authn *Authenticator, h *MeHandler) {
+func MountMeRoutes(mux RouteMux, authn *Authenticator, h *MeHandler) {
 	mux.Handle("GET /v1/me", authn.RequireAuthPassive(http.HandlerFunc(h.Get)))
 }
 

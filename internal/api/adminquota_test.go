@@ -50,18 +50,18 @@ func (f *fakeAdminQuotaSource) Report(_ context.Context, _ string) (store.QuotaR
 	return rep, nil
 }
 
-func (f *fakeAdminQuotaSource) SetLimits(_ context.Context, _ string, v provisioning.ResourceVector, ifMatch string) error {
+func (f *fakeAdminQuotaSource) SetLimits(_ context.Context, _ string, v provisioning.ResourceVector, expectedVersion string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.setCall++
 	if f.setErr != nil {
-		return f.setErr
+		return "", f.setErr
 	}
 	switch {
-	case f.hasRow && ifMatch != fmt.Sprintf("v%d", f.version):
-		return ErrQuotaVersionMismatch
-	case !f.hasRow && ifMatch != IfMatchCreate:
-		return ErrQuotaVersionMismatch
+	case create && f.hasRow:
+		return "", store.ErrVersionMismatch
+	case !create && (!f.hasRow || expectedVersion != fmt.Sprintf("v%d", f.version)):
+		return "", store.ErrVersionMismatch
 	}
 	f.hasRow = true
 	f.version++
@@ -69,7 +69,7 @@ func (f *fakeAdminQuotaSource) SetLimits(_ context.Context, _ string, v provisio
 		RunningSlots: v.RunningSlots, CPUMillis: v.CPUMillis,
 		MemoryBytes: v.MemoryBytes, DiskBytes: v.DiskBytes,
 	}
-	return nil
+	return fmt.Sprintf("v%d", f.version), nil
 }
 
 // set limits directly, bypassing the If-Match check (test setup).
@@ -109,7 +109,7 @@ func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]boo
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	mux := http.NewServeMux()
-	h := NewAdminQuotaHandler(src, newFakeDirectory(), defaultTenants(), managed)
+	h := NewAdminQuotaHandler(src, defaultTenants(), managed)
 	for _, o := range opts {
 		o(h)
 	}
@@ -126,10 +126,8 @@ type adminQuotaViewJSON struct {
 	Tenant     string           `json:"tenant"`
 	Configured bool             `json:"configured"`
 	Source     string           `json:"source"`
-	Version    string           `json:"version"`
 	Limits     quotaAmountsJSON `json:"limits"`
 	Usage      quotaAmountsJSON `json:"usage"`
-	Users      []userUsageJSON  `json:"users"`
 }
 
 const adminQuotaPath = "/v1/admin/tenants/tenant-a/quota"
@@ -302,8 +300,8 @@ func TestAdminQuota_PutWrites(t *testing.T) {
 	if v.Source != QuotaSourceAPI || !v.Configured {
 		t.Fatalf("after PUT: source=%q configured=%v, want api,true", v.Source, v.Configured)
 	}
-	if v.Version == "" {
-		t.Fatal("PUT response must carry the new row's version for the next If-Match")
+	if et := r.Header.Get("ETag"); et == "" || et != ETagOf(src.currentVersion()) {
+		t.Fatalf("PUT response ETag = %q, want the new row's strong tag", et)
 	}
 	if v.Limits.RunningWorkspaces != 4 || v.Limits.CPUMillicores != 8000 ||
 		v.Limits.MemoryMib != 16384 || v.Limits.StorageGib != 200 {
@@ -331,7 +329,7 @@ func TestAdminQuota_LimitBelowUsageAccepted(t *testing.T) {
 
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath,
 		`{"runningWorkspaces":2,"cpuMillicores":4000,"memoryMib":8192,"storageGib":100}`,
-		map[string]string{"If-Match": src.currentVersion()})
+		map[string]string{"If-Match": ETagOf(src.currentVersion())})
 	v := decodeBody[adminQuotaViewJSON](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200 (a lowered limit is accepted)", r.StatusCode)
@@ -341,11 +339,57 @@ func TestAdminQuota_LimitBelowUsageAccepted(t *testing.T) {
 	}
 }
 
-// TestAdminQuota_IfMatch: PUT is an optimistic-concurrency write — the
-// If-Match header must name the row's current version (or IfMatchCreate on
-// a tenant without a row); a stale or wrong precondition answers 412
-// PRECONDITION_FAILED and writes nothing.
-func TestAdminQuota_IfMatch(t *testing.T) {
+// requireAdminGuards asserts the security behavior every admin route keeps
+// on top of its precondition: a mutation without the CSRF token is 403
+// CSRF_FAILED, a non-admin principal is 403 FORBIDDEN, and an admin of
+// another tenant is 403 FORBIDDEN. stored reports how many writes reached
+// the store; none of the refused requests may add one.
+func requireAdminGuards(t *testing.T, env *testEnv, method, path, body string, hdrs map[string]string, stored func() int) {
+	t.Helper()
+	groups, tenant := env.issuer.Groups, env.issuer.TenantID
+	defer func() { env.issuer.Groups, env.issuer.TenantID = groups, tenant }()
+	before := stored()
+
+	if method != http.MethodGet {
+		sess, _ := loginAdmin(t, env, "guard-admin")
+		r := doReq(t, env, sess, &http.Cookie{Value: "wrong-token"}, method, path, body, hdrs)
+		if e := decodeErr(t, r); r.StatusCode != http.StatusForbidden || e.Code != CodeCSRFFailed {
+			t.Fatalf("%s %s without CSRF: status=%d code=%q, want 403 CSRF_FAILED", method, path, r.StatusCode, e.Code)
+		}
+	}
+
+	env.issuer.Groups = nil
+	sess, csrf := login(t, env, "guard-user")
+	r := doReq(t, env, sess, csrf, method, path, body, hdrs)
+	if e := decodeErr(t, r); r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
+		t.Fatalf("%s %s as non-admin: status=%d code=%q, want 403 FORBIDDEN", method, path, r.StatusCode, e.Code)
+	}
+
+	env.issuer.TenantID = "tenant-b"
+	sessB, csrfB := loginAdmin(t, env, "guard-admin-b")
+	r = doReq(t, env, sessB, csrfB, method, path, body, hdrs)
+	if e := decodeErr(t, r); r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
+		t.Fatalf("%s %s as another tenant's admin: status=%d code=%q, want 403 FORBIDDEN", method, path, r.StatusCode, e.Code)
+	}
+	if n := stored(); n != before {
+		t.Fatalf("refused %s %s reached the store (%d -> %d writes)", method, path, before, n)
+	}
+}
+
+// requireErr asserts a refusal's status and stable code.
+func requireErr(t *testing.T, r *http.Response, status int, code ErrorCode, what string) {
+	t.Helper()
+	e := decodeErr(t, r)
+	if r.StatusCode != status || e.Code != code {
+		t.Fatalf("%s: status=%d code=%q, want %d %s", what, r.StatusCode, e.Code, status, code)
+	}
+}
+
+// TestAdminQuota_IfMatchMatrix: PUT is a strong-ETag precondition write.
+// GET carries the ETag (and no version in the body); no If-Match is 428
+// PRECONDITION_REQUIRED, a stale tag 412, the current tag 200 with a new,
+// different ETag; "*" is 412 on an existing row and 200 on a fresh tenant.
+func TestAdminQuota_IfMatchMatrix(t *testing.T) {
 	src := &fakeAdminQuotaSource{}
 	src.seedLimits(store.QuotaAmounts{RunningSlots: 8, CPUMillis: 16000})
 	env := newAdminQuotaEnv(t, src, nil)
@@ -354,74 +398,120 @@ func TestAdminQuota_IfMatch(t *testing.T) {
 		return doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody, hdrs)
 	}
 
-	// No If-Match at all: 400 INVALID_REQUEST, never a store write.
-	r := put(nil)
-	e := decodeErr(t, r)
-	if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
-		t.Fatalf("missing If-Match: status=%d code=%q, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
+	r := doReq(t, env, sess, csrf, http.MethodGet, adminQuotaPath, "", nil)
+	tag := r.Header.Get("ETag")
+	body := decodeBody[map[string]any](t, r)
+	if tag != ETagOf(src.currentVersion()) || !strings.HasPrefix(tag, `"`) {
+		t.Fatalf("GET ETag = %q, want the strong tag of the row version", tag)
+	}
+	for _, k := range []string{"version", "users"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("GET body still carries %q: %v", k, body)
+		}
 	}
 
-	// "*" only creates; on an existing row it must not skip the check.
-	r = put(map[string]string{"If-Match": IfMatchCreate})
-	e = decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("If-Match * on existing row: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
-	}
-	if e.Retryable {
-		t.Fatal("PRECONDITION_FAILED must not be retryable")
+	requireErr(t, put(nil), http.StatusPreconditionRequired, CodePreconditionRequired, "no If-Match")
+	requireErr(t, put(map[string]string{"If-Match": ETagOf("v999")}), http.StatusPreconditionFailed, CodePreconditionFailed, "stale ETag")
+	requireErr(t, put(map[string]string{"If-Match": "*"}), http.StatusPreconditionFailed, CodePreconditionFailed, "* on an existing row")
+	if src.setCall != 0 || src.limits.RunningSlots != 8 {
+		t.Fatalf("refused preconditions reached the store: setCall=%d limits=%+v", src.setCall, src.limits)
 	}
 
-	// A stale version is refused; the row keeps its values.
-	r = put(map[string]string{"If-Match": "v999"})
-	e = decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("stale version: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
-	}
-	// setCall counts the two refused preconditions that reached SetLimits
-	// (the header-less PUT failed earlier); the row is unchanged.
-	if src.setCall != 2 || src.limits.RunningSlots != 8 {
-		t.Fatalf("refused writes mutated state: setCall=%d limits=%+v", src.setCall, src.limits)
-	}
-
-	// The version reported by GET matches, the write lands and the
-	// response carries the next version; replaying the old one 412s.
-	v1 := src.currentVersion()
-	r = put(map[string]string{"If-Match": v1})
-	v := decodeBody[adminQuotaViewJSON](t, r)
+	r = put(map[string]string{"If-Match": tag})
+	r.Body.Close()
 	if r.StatusCode != http.StatusOK {
-		t.Fatalf("If-Match %q: status=%d, want 200", v1, r.StatusCode)
+		t.Fatalf("matching ETag: status=%d, want 200", r.StatusCode)
 	}
-	if v.Version == "" || v.Version == v1 {
-		t.Fatalf("version after write = %q, want a changed token (was %q)", v.Version, v1)
+	next := r.Header.Get("ETag")
+	if next == "" || next == tag || next != ETagOf(src.currentVersion()) {
+		t.Fatalf("ETag after write = %q, want a new tag (was %q)", next, tag)
 	}
-	r = put(map[string]string{"If-Match": v1})
-	e = decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("replayed version: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
+	requireErr(t, put(map[string]string{"If-Match": tag}), http.StatusPreconditionFailed, CodePreconditionFailed, "replayed ETag")
+
+	// A fresh tenant has no row: GET has no ETag and "*" creates.
+	fresh := &fakeAdminQuotaSource{}
+	env2 := newAdminQuotaEnv(t, fresh, nil)
+	sess2, csrf2 := loginAdmin(t, env2, "admin-a")
+	r = doReq(t, env2, sess2, csrf2, http.MethodGet, adminQuotaPath, "", nil)
+	r.Body.Close()
+	if r.Header.Get("ETag") != "" {
+		t.Fatalf("GET without a row carries ETag %q", r.Header.Get("ETag"))
 	}
+	r = doReq(t, env2, sess2, csrf2, http.MethodPut, adminQuotaPath, adminQuotaBody, map[string]string{"If-Match": "*"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK || r.Header.Get("ETag") == "" {
+		t.Fatalf("* on a fresh tenant: status=%d ETag=%q, want 200 with a tag", r.StatusCode, r.Header.Get("ETag"))
+	}
+
+	requireAdminGuards(t, env, http.MethodPut, adminQuotaPath, adminQuotaBody,
+		map[string]string{"If-Match": ETagOf(src.currentVersion())},
+		func() int { src.mu.Lock(); defer src.mu.Unlock(); return src.setCall })
+	requireAdminGuards(t, env, http.MethodGet, adminQuotaPath, "", nil, func() int { return 0 })
 }
 
-// TestAdminQuota_IfMatchCreate: on a tenant without a quota row only
-// IfMatchCreate ("*") passes the precondition; a concrete version on a
-// missing row is a stale read and answers 412.
-func TestAdminQuota_IfMatchCreate(t *testing.T) {
+// TestAdminQuota_ConcurrentIfMatchOneWins: two writers holding the same
+// ETag race behind a barrier; exactly one lands (200), the other is 412,
+// and a GET returns the winner's limits.
+func TestAdminQuota_ConcurrentIfMatchOneWins(t *testing.T) {
 	src := &fakeAdminQuotaSource{}
+	src.seedLimits(store.QuotaAmounts{RunningSlots: 1})
 	env := newAdminQuotaEnv(t, src, nil)
 	sess, csrf := loginAdmin(t, env, "admin-a")
+	tag := ETagOf(src.currentVersion())
 
-	r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
-		map[string]string{"If-Match": "v1"})
-	e := decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("version on missing row: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
+	bodies := []string{
+		`{"runningWorkspaces":2,"cpuMillicores":2000,"memoryMib":2048,"storageGib":20}`,
+		`{"runningWorkspaces":3,"cpuMillicores":3000,"memoryMib":3072,"storageGib":30}`,
 	}
-	r = doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
-		map[string]string{"If-Match": IfMatchCreate})
-	if r.StatusCode != http.StatusOK {
-		r.Body.Close()
-		t.Fatalf("If-Match * on missing row: status=%d, want 200", r.StatusCode)
+	status := make([]int, len(bodies))
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	for i, b := range bodies {
+		ready.Add(1)
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			// No t.Fatal off the test goroutine: a transport error
+			// records status 0, which the check below rejects.
+			req, _ := http.NewRequest(http.MethodPut, env.server.URL+adminQuotaPath, strings.NewReader(b))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(env.auth.CSRFHeader(), csrf.Value)
+			req.Header.Set("If-Match", tag)
+			req.AddCookie(sess)
+			r, err := noRedirectClient().Do(req)
+			if err != nil {
+				return
+			}
+			r.Body.Close()
+			status[i] = r.StatusCode
+		}()
 	}
-	r.Body.Close()
+	ready.Wait()
+	close(start)
+	done.Wait()
+
+	winner := -1
+	for i, st := range status {
+		switch st {
+		case http.StatusOK:
+			if winner >= 0 {
+				t.Fatalf("both writers won: %v", status)
+			}
+			winner = i
+		case http.StatusPreconditionFailed:
+		default:
+			t.Fatalf("statuses=%v, want one 200 and one 412", status)
+		}
+	}
+	if winner < 0 {
+		t.Fatalf("no writer won: %v", status)
+	}
+	v := decodeBody[adminQuotaViewJSON](t, doReq(t, env, sess, csrf, http.MethodGet, adminQuotaPath, "", nil))
+	if want := int64(winner + 2); v.Limits.RunningWorkspaces != want {
+		t.Fatalf("limits after the race = %+v, want the winner's runningWorkspaces=%d", v.Limits, want)
+	}
 }
 
 // TestAdminQuota_Audit: the quota change is captured by the request audit —
@@ -452,14 +542,13 @@ func TestAdminQuota_Audit(t *testing.T) {
 // the published AdminQuotaView schema in both source states.
 func TestAdminQuota_Contract(t *testing.T) {
 	usage := quotaAmounts{Workspaces: 2, RunningWorkspaces: 1, CPUMillicores: 4000, MemoryMib: 8192, StorageGib: 40}
-	users := []userUsage{{Subject: "user-a", DisplayName: "User A", Usage: usage}}
 	limits := quotaAmounts{RunningWorkspaces: 4, CPUMillicores: 16000, MemoryMib: 32768, StorageGib: 200}
 	requireValid(t, "AdminQuotaView", adminQuotaView{
-		Tenant: "acme", Configured: true, Source: QuotaSourceAPI, Version: "96153",
-		Limits: &limits, Usage: usage, Users: users,
+		Tenant: "acme", Configured: true, Source: QuotaSourceAPI,
+		Limits: &limits, Usage: usage,
 	})
 	requireValid(t, "AdminQuotaView", adminQuotaView{
 		Tenant: "acme", Configured: false, Source: QuotaSourceNone,
-		Usage: quotaAmounts{}, Users: []userUsage{},
+		Usage: quotaAmounts{},
 	})
 }

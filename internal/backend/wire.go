@@ -711,7 +711,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithDirectory(directory).
 		WithReleaseRetryAfter(b.recoveryTickETA).
 		WithAuditSink(appAudit)
-	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
+	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), tenants)
 
 	// Tenants declared in -tenant-quotas are config-managed: the admin quota
 	// API reports them but refuses writes with QUOTA_MANAGED_BY_CONFIG.
@@ -719,7 +719,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	for _, q := range declaredQuotas {
 		managedQuotas[q.TenantID] = true
 	}
-	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas).
+	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), tenants, managedQuotas).
 		WithAuditSink(appAudit)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)

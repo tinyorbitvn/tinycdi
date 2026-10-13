@@ -24,13 +24,13 @@ import (
 // fakeSessionPolicySource scripts the SessionPolicySource the handler
 // reads/writes through — optimistic-concurrency If-Match like the store's.
 type fakeSessionPolicySource struct {
-	mu          sync.Mutex
-	hasRow      bool
-	version     int
-	clip        string
-	setCall     int
-	lastWrite   store.SessionPolicyWrite
-	lastIfMatch string
+	mu         sync.Mutex
+	hasRow     bool
+	version    int
+	clip       string
+	setCall    int
+	lastWrite  store.SessionPolicyWrite
+	lastCreate bool
 }
 
 func (f *fakeSessionPolicySource) Ceiling(_ context.Context, _ string) (store.SessionPolicyCeiling, error) {
@@ -44,28 +44,28 @@ func (f *fakeSessionPolicySource) Ceiling(_ context.Context, _ string) (store.Se
 	return out, nil
 }
 
-func (f *fakeSessionPolicySource) SetCeiling(_ context.Context, _ string, w store.SessionPolicyWrite, ifMatch string) error {
+func (f *fakeSessionPolicySource) SetCeiling(_ context.Context, _ string, w store.SessionPolicyWrite, expectedVersion string, create bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.setCall++
 	f.lastWrite = w
-	f.lastIfMatch = ifMatch
+	f.lastCreate = create
 	switch {
-	case f.hasRow && ifMatch != fmt.Sprintf("v%d", f.version):
-		return store.ErrSessionPolicyVersionMismatch
-	case !f.hasRow && ifMatch != store.IfMatchCreate:
-		return store.ErrSessionPolicyVersionMismatch
+	case create && f.hasRow:
+		return "", store.ErrVersionMismatch
+	case !create && (!f.hasRow || expectedVersion != fmt.Sprintf("v%d", f.version)):
+		return "", store.ErrVersionMismatch
 	}
 	f.version++
 	if w.Defaults() {
 		f.hasRow = false
-		return nil
+		return "", nil
 	}
 	f.hasRow = true
 	if w.Clipboard != nil {
 		f.clip = *w.Clipboard
 	}
-	return nil
+	return fmt.Sprintf("v%d", f.version), nil
 }
 
 // newSessionPolicyEnv mounts GET/PUT /v1/admin/tenants/{tenant}/
@@ -111,8 +111,7 @@ type adminSessionPolicyViewJSON struct {
 		Mode         string `json:"mode"`
 		MaxFileBytes *int64 `json:"maxFileBytes"`
 	} `json:"fileTransfer"`
-	Source  string `json:"source"`
-	Version string `json:"version"`
+	Source string `json:"source"`
 }
 
 // TestAdminSessionPolicy_Authz: admin-only and tenant-scoped — a regular
@@ -195,7 +194,7 @@ func TestAdminSessionPolicy_GetNoRow(t *testing.T) {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
 	if v.Source != SessionPolicySourceFollowTemplate || v.Clipboard != provisioning.PolicyFollowTemplate ||
-		v.FileTransfer.Mode != provisioning.PolicyFollowTemplate || v.Version != "" {
+		v.FileTransfer.Mode != provisioning.PolicyFollowTemplate || r.Header.Get("ETag") != "" {
 		t.Fatalf("no-row view: %+v", v)
 	}
 }
@@ -222,61 +221,76 @@ func TestAdminSessionPolicy_PutValidation(t *testing.T) {
 			t.Fatalf("%s: status=%d code=%q, want 400 INVALID_REQUEST", name, r.StatusCode, e.Code)
 		}
 	}
-	// Missing If-Match is a 400, not a write.
-	r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
-		`{"clipboard":"Disabled"}`, nil)
-	e := decodeErr(t, r)
-	if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
-		t.Fatalf("no If-Match: status=%d code=%q, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
-	}
 	if src.setCall != 0 || src.hasRow {
 		t.Fatalf("invalid writes reached the store: setCall=%d hasRow=%v", src.setCall, src.hasRow)
 	}
 }
 
-// TestAdminSessionPolicy_IfMatch: optimistic concurrency — create needs
-// "*", updates need the reported version, a stale version answers 412
-// PRECONDITION_FAILED.
-func TestAdminSessionPolicy_IfMatch(t *testing.T) {
+// TestSessionPolicy_IfMatchMatrix: the ceiling is a strong-ETag resource.
+// GET carries the ETag only while a row exists; no If-Match is 428, "*"
+// creates a missing row and is 412 on an existing one, a stale tag is 412,
+// the current tag writes and answers a new tag; an all-defaults PUT deletes
+// the row, after which "*" is valid again.
+func TestSessionPolicy_IfMatchMatrix(t *testing.T) {
 	src := &fakeSessionPolicySource{}
 	env := newSessionPolicyEnv(t, src)
 	sess, csrf := loginAdmin(t, env, "admin-a")
-
 	put := func(body string, hdrs map[string]string) *http.Response {
 		return doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath, body, hdrs)
 	}
 
-	r := put(`{"clipboard":"Disabled"}`, map[string]string{"If-Match": "v1"})
-	e := decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("version on missing row: status=%d code=%q, want 412", r.StatusCode, e.Code)
+	requireErr(t, put(`{"clipboard":"Disabled"}`, nil), http.StatusPreconditionRequired, CodePreconditionRequired, "no If-Match")
+	requireErr(t, put(`{"clipboard":"Disabled"}`, map[string]string{"If-Match": ETagOf("v1")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "tag on a missing row")
+	if src.setCall != 0 {
+		t.Fatalf("refused preconditions reached the store %d times", src.setCall)
 	}
 
-	r = put(`{"clipboard":"Disabled"}`, map[string]string{"If-Match": "*"})
+	r := put(`{"clipboard":"Disabled"}`, map[string]string{"If-Match": "*"})
 	v := decodeBody[adminSessionPolicyViewJSON](t, r)
-	if r.StatusCode != http.StatusOK || v.Source != SessionPolicySourceTenantRow || v.Version == "" {
-		t.Fatalf("create: status=%d view=%+v", r.StatusCode, v)
+	tag := r.Header.Get("ETag")
+	if r.StatusCode != http.StatusOK || v.Source != SessionPolicySourceTenantRow || tag == "" {
+		t.Fatalf("create: status=%d view=%+v ETag=%q", r.StatusCode, v, tag)
 	}
-	if src.lastIfMatch != "*" || src.lastWrite.Clipboard == nil || *src.lastWrite.Clipboard != "Disabled" {
-		t.Fatalf("store saw: ifMatch=%q write=%+v", src.lastIfMatch, src.lastWrite)
+	if !src.lastCreate || src.lastWrite.Clipboard == nil || *src.lastWrite.Clipboard != "Disabled" {
+		t.Fatalf("store saw: create=%v write=%+v", src.lastCreate, src.lastWrite)
+	}
+	g := doReq(t, env, sess, csrf, http.MethodGet, adminSessionPolicyPath, "", nil)
+	body := decodeBody[map[string]any](t, g)
+	if g.Header.Get("ETag") != tag {
+		t.Fatalf("GET ETag = %q, want the write's %q", g.Header.Get("ETag"), tag)
+	}
+	if _, ok := body["version"]; ok {
+		t.Fatalf("GET body still carries version: %v", body)
 	}
 
-	// Stale version 412s; the live version writes.
-	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": "*"})
-	e = decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("* on existing row: status=%d code=%q, want 412", r.StatusCode, e.Code)
-	}
-	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": "v0"})
-	e = decodeErr(t, r)
-	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
-		t.Fatalf("stale version: status=%d code=%q, want 412", r.StatusCode, e.Code)
-	}
-	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": v.Version})
+	requireErr(t, put(`{"clipboard":"Send"}`, map[string]string{"If-Match": "*"}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "* on an existing row")
+	requireErr(t, put(`{"clipboard":"Send"}`, map[string]string{"If-Match": ETagOf("v0")}),
+		http.StatusPreconditionFailed, CodePreconditionFailed, "stale tag")
+	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": tag})
 	v2 := decodeBody[adminSessionPolicyViewJSON](t, r)
-	if r.StatusCode != http.StatusOK || v2.Clipboard != "Send" {
-		t.Fatalf("update: status=%d view=%+v", r.StatusCode, v2)
+	next := r.Header.Get("ETag")
+	if r.StatusCode != http.StatusOK || v2.Clipboard != "Send" || next == "" || next == tag {
+		t.Fatalf("update: status=%d view=%+v ETag=%q (was %q)", r.StatusCode, v2, next, tag)
 	}
+
+	// All-defaults deletes the row: no ETag after, and "*" is valid again.
+	r = put(`{"clipboard":"FollowTemplate"}`, map[string]string{"If-Match": next})
+	v3 := decodeBody[adminSessionPolicyViewJSON](t, r)
+	if r.StatusCode != http.StatusOK || v3.Source != SessionPolicySourceFollowTemplate || r.Header.Get("ETag") != "" {
+		t.Fatalf("delete-on-defaults: status=%d view=%+v ETag=%q", r.StatusCode, v3, r.Header.Get("ETag"))
+	}
+	r = put(`{"clipboard":"Receive"}`, map[string]string{"If-Match": "*"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("* after the delete: status=%d, want 200", r.StatusCode)
+	}
+
+	requireAdminGuards(t, env, http.MethodPut, adminSessionPolicyPath, `{"clipboard":"Disabled"}`,
+		map[string]string{"If-Match": "*"},
+		func() int { src.mu.Lock(); defer src.mu.Unlock(); return src.setCall })
+	requireAdminGuards(t, env, http.MethodGet, adminSessionPolicyPath, "", nil, func() int { return 0 })
 }
 
 // TestAdminSessionPolicy_DeleteOnDefault: an all-FollowTemplate PUT
@@ -289,12 +303,12 @@ func TestAdminSessionPolicy_DeleteOnDefault(t *testing.T) {
 
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
 		`{"clipboard":"FollowTemplate","fileTransfer":{"mode":"FollowTemplate","maxFileBytes":null}}`,
-		map[string]string{"If-Match": "v3"})
+		map[string]string{"If-Match": ETagOf("v3")})
 	v := decodeBody[adminSessionPolicyViewJSON](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
-	if v.Source != SessionPolicySourceFollowTemplate || v.Version != "" {
+	if v.Source != SessionPolicySourceFollowTemplate || r.Header.Get("ETag") != "" {
 		t.Fatalf("post-delete view: %+v", v)
 	}
 	if !src.lastWrite.Defaults() {
@@ -317,13 +331,13 @@ func TestAdminSessionPolicy_Audit(t *testing.T) {
 	sess, csrf := loginAdmin(t, env, "admin-a")
 
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
-		`{"clipboard":"Send"}`, map[string]string{"If-Match": "v1"})
+		`{"clipboard":"Send"}`, map[string]string{"If-Match": ETagOf("v1")})
 	r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("set: status=%d, want 200", r.StatusCode)
 	}
 	r = doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
-		`{"clipboard":"FollowTemplate"}`, map[string]string{"If-Match": "v2"})
+		`{"clipboard":"FollowTemplate"}`, map[string]string{"If-Match": ETagOf("v2")})
 	r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("clear: status=%d, want 200", r.StatusCode)
@@ -359,8 +373,7 @@ func TestAdminSessionPolicy_Contract(t *testing.T) {
 		FileTransfer: adminFileTransferCeiling{
 			Mode: "FollowTemplate",
 		},
-		Source:  SessionPolicySourceTenantRow,
-		Version: "v7",
+		Source: SessionPolicySourceTenantRow,
 	})
 
 	resolved := provisioning.SessionPolicy{

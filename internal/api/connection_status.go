@@ -73,7 +73,7 @@ func NewConnectionStatusHandler(stater ConnectionStater, workspaces workspaceGet
 
 // MountConnectionStatusRoutes registers the route behind passive auth:
 // authenticated like everything else, but never sliding the idle timer.
-func MountConnectionStatusRoutes(mux *http.ServeMux, authn *Authenticator, h *ConnectionStatusHandler) {
+func MountConnectionStatusRoutes(mux RouteMux, authn *Authenticator, h *ConnectionStatusHandler) {
 	mux.Handle("GET /v1/workspaces/{id}/connection",
 		authn.RequireAuthPassive(http.HandlerFunc(h.Get)))
 }

@@ -733,10 +733,11 @@ paths:
       operationId: getQuota
       summary: Tenant quota and usage snapshot
       description: |
-        Returns the tenant's configured quota limits and current usage in
+        Returns the caller's tenant quota limits and current usage in
         display units (CPU in millicores, memory in MiB, storage in GiB),
-        plus a per-user usage breakdown. Tenant administrators see every
-        user in `users`; other principals see only their own row.
+        plus the caller's own effective per-user running-workspace limit.
+        Per-user rows are the paged admin collection
+        `GET /v1/admin/tenants/{tenant}/user-limits`.
       tags: [admin]
       responses:
         "200":
@@ -763,17 +764,22 @@ paths:
       description: |
         Administrator view of one tenant's quota: the configured limits and
         current usage in display units (CPU in millicores, memory in MiB,
-        storage in GiB), the per-user breakdown, and `source`, which names
-        the layer owning the limits row. Usage counts held reservations —
-        including disk-only holds a stopped Retain workspace keeps — plus
-        active workspaces, exactly what admission counts. Requires the
-        tenant-admin role on the named tenant.
+        storage in GiB), and `source`, which names the layer owning the
+        limits row. Usage counts held reservations — including disk-only
+        holds a stopped Retain workspace keeps — plus active workspaces,
+        exactly what admission counts. The `ETag` header carries the limits
+        row's strong entity tag; it is absent while the tenant has no row
+        (PUT then creates it with `If-Match: *`). Requires the tenant-admin
+        role on the named tenant.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
       responses:
         "200":
           description: Quota snapshot for the named tenant.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
@@ -799,26 +805,13 @@ paths:
         held reservations stay, new ones are refused — a lowered limit
         therefore takes effect without forcing a release. Requires the
         tenant-admin role on the named tenant, the `X-CSRF-Token` header
-        and an `If-Match` precondition: the `version` returned by GET
-        (optimistic concurrency — a stale version answers
-        `412 PRECONDITION_FAILED`), or the literal `*` when the tenant has
-        no quota row yet. `If-Match: *` is not a bypass on an existing row —
-        it too answers 412.
+        and `If-Match`: the `ETag` of the last read, or `*` when the tenant
+        has no quota row yet (`*` on an existing row is `412`). The
+        response carries the new `ETag`.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
-        - name: If-Match
-          in: header
-          required: true
-          description: |
-            Change token from the GET response's `version`, or `*` to create
-            a row for a tenant that has none. The value is the opaque
-            RFC3339Nano change-token from the last read, sent verbatim
-            without quotes — it is not an RFC 7232 entity-tag; a quoted or
-            otherwise unparseable token is treated as stale and answers
-            `412 PRECONDITION_FAILED`.
-          schema:
-            type: string
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -828,6 +821,9 @@ paths:
       responses:
         "200":
           description: The updated quota snapshot.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
@@ -842,6 +838,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -851,69 +849,31 @@ paths:
 
   /v1/admin/tenants/{tenant}/user-limits:
     get:
-      operationId: getAdminUserLimits
-      summary: Per-user running-workspace limits
+      operationId: listAdminUserLimits
+      summary: Per-user running-workspace limits (paged)
       description: |
-        Administrator view of one tenant's per-principal running-workspace
-        limits: the tenant-wide `default` (`null` = unlimited) and one row
-        per principal who has usage or a stored override. Each row carries
-        the stored `limit` (`null` = inherit the default), the resolved
-        `effective` limit (`null` = unlimited) and the `running` workspaces
-        the principal currently holds — the same held reservations
-        admission counts. Requires the tenant-admin role on the named
-        tenant.
+        Administrator collection of one tenant's per-principal
+        running-workspace limits: one item per principal who has usage or a
+        stored override. Each item carries the stored `limit` (`null` =
+        inherit the tenant default), the resolved `effective` limit (`null`
+        = unlimited), the `running` workspaces the principal currently
+        holds — the same held reservations admission counts — and, when an
+        override row exists, that row's own `etag` for
+        `PUT`/`DELETE .../user-limits/{ownerRef}`. Sort: `ownerRef`
+        (default). Requires the tenant-admin role on the named tenant.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
       responses:
         "200":
-          description: Per-user limits for the named tenant.
+          description: One page of per-user limits for the named tenant.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AdminUserLimitsView"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "429":
-          $ref: "#/components/responses/RateLimited"
-        "500":
-          $ref: "#/components/responses/InternalError"
-        "503":
-          $ref: "#/components/responses/Unavailable"
-    put:
-      operationId: putAdminUserLimit
-      summary: Set or clear a user's running-workspace limit
-      description: |
-        Sets (integer `limit`) or clears (`limit: null`) one principal's
-        running-workspace override. An override wins over the tenant
-        default; clearing restores the default. `ownerRef` is the
-        `issuer|sub` pair `GET` reports; a limit on a principal with no
-        usage is accepted and applies at their next launch. Enforcement is
-        race-free: the check runs inside the same transaction and row lock
-        as the tenant quota reservation, and a refused launch answers
-        `409 QUOTA_EXHAUSTED` with `details.reason: UserLimitReached`.
-        Limits below current usage are accepted: running workspaces keep
-        running, new ones are refused. Every write is audited. Requires
-        the tenant-admin role on the named tenant and the `X-CSRF-Token`
-        header.
-      tags: [admin]
-      parameters:
-        - $ref: "#/components/parameters/Tenant"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SetUserLimitRequest"
-      responses:
-        "200":
-          description: The updated per-user limits view.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AdminUserLimitsView"
+                $ref: "#/components/schemas/AdminUserLimitPage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -927,19 +887,141 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/user-limits/{ownerRef}:
+    put:
+      operationId: putAdminUserLimit
+      summary: Set a user's running-workspace limit
+      description: |
+        Writes one principal's running-workspace override. An override wins
+        over the tenant default; a limit on a principal with no usage is
+        accepted and applies at their next launch. Enforcement is
+        race-free: the check runs inside the same transaction and row lock
+        as the tenant quota reservation, and a refused launch answers
+        `409 QUOTA_EXHAUSTED` with `details.reason: UserLimitReached`.
+        Limits below current usage are accepted: running workspaces keep
+        running, new ones are refused. Requires the tenant-admin role on
+        the named tenant, the `X-CSRF-Token` header and `If-Match`: the
+        item's `etag`, or `*` to create an override that does not exist
+        yet. Every write is audited.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/OwnerRef"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetUserLimitRequest"
+      responses:
+        "200":
+          description: The principal's updated limit row.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserLimitEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteAdminUserLimit
+      summary: Remove a user's running-workspace limit
+      description: |
+        Removes one principal's override; the tenant default (or unlimited)
+        applies again. Requires the tenant-admin role on the named tenant,
+        the `X-CSRF-Token` header and `If-Match` carrying the item's
+        current `etag` (`*` is `412`: the override exists). A principal
+        without an override answers `404`. Every write is audited.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/OwnerRef"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: The override was removed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/admin/tenants/{tenant}/user-limits/default:
+    get:
+      operationId: getAdminUserLimitDefault
+      summary: The tenant's default user limit
+      description: |
+        The tenant-wide fallback running-workspace limit applied to every
+        principal without an override (`limit: null` = unlimited). The
+        `ETag` header carries the default row's strong entity tag; it is
+        absent while no default is set. Requires the tenant-admin role on
+        the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: The tenant default.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserLimitDefault"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
     put:
       operationId: putAdminUserLimitDefault
       summary: Set or clear the tenant's default user limit
       description: |
         Sets (integer `limit`) or clears (`limit: null`) the tenant-wide
-        fallback running-workspace limit applied to every principal
-        without an override. Clearing restores unlimited — the upgrade
-        default. Every write is audited. Requires the tenant-admin role on
-        the named tenant and the `X-CSRF-Token` header.
+        fallback running-workspace limit. Clearing restores unlimited.
+        Requires the tenant-admin role on the named tenant, the
+        `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
+        or `*` when no default is set. Every write is audited.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -948,17 +1030,24 @@ paths:
               $ref: "#/components/schemas/SetUserLimitDefaultRequest"
       responses:
         "200":
-          description: The updated per-user limits view.
+          description: The updated tenant default.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AdminUserLimitsView"
+                $ref: "#/components/schemas/AdminUserLimitDefault"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -977,16 +1066,20 @@ paths:
         `FollowTemplate` means the channel is not narrowed and the
         template's policy applies unchanged. A tenant with no
         session-policy row resolves `FollowTemplate` everywhere
-        (`source: FollowTemplate`) — the upgrade default. The ceiling can
-        only narrow, never widen: the effective policy a user gets is the
-        meet of the template's policy and this ceiling. Requires the
-        tenant-admin role on the named tenant.
+        (`source: FollowTemplate`). The ceiling can only narrow, never
+        widen: the effective policy a user gets is the meet of the
+        template's policy and this ceiling. The `ETag` header carries the
+        row's strong entity tag; it is absent while no row exists.
+        Requires the tenant-admin role on the named tenant.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
       responses:
         "200":
           description: Session policy ceiling for the named tenant.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
@@ -1010,9 +1103,10 @@ paths:
         own policy for that channel, and a PUT whose every channel is
         `FollowTemplate` deletes the row — "no row" and "all-defaults
         row" are the same state, and the store keeps exactly one
-        representation of it. `fileTransfer` is inert in this version
-        (the channel ships in v1.3): only its defaults are accepted — a
-        non-default `fileTransfer.mode` or any `maxFileBytes` answers
+        representation of it; after it `If-Match: *` is valid again.
+        `fileTransfer` is inert in this version (the channel ships in
+        v1.3): only its defaults are accepted — a non-default
+        `fileTransfer.mode` or any `maxFileBytes` answers
         `400 INVALID_REQUEST`.
 
         Tightening takes effect on two clocks (ADR 0010 §3): the next
@@ -1020,26 +1114,13 @@ paths:
         immediately, while a running workspace's server-side clipboard
         enforcement follows at its next start — pod specs are immutable.
         Requires the tenant-admin role on the named tenant, the
-        `X-CSRF-Token` header and an `If-Match` precondition: the
-        `version` returned by GET (a stale version answers
-        `412 PRECONDITION_FAILED`), or the literal `*` when the tenant
-        has no row yet. `If-Match: *` is not a bypass on an existing row —
-        it too answers 412. Every write is audited.
+        `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
+        or `*` when the tenant has no row (`*` on an existing row is
+        `412`). Every write is audited.
       tags: [admin]
       parameters:
         - $ref: "#/components/parameters/Tenant"
-        - name: If-Match
-          in: header
-          required: true
-          description: |
-            Change token from the GET response's `version`, or `*` to
-            create a row for a tenant that has none. The value is the
-            opaque RFC3339Nano change-token from the last read, sent
-            verbatim without quotes — it is not an RFC 7232 entity-tag;
-            a quoted or otherwise unparseable token is treated as stale
-            and answers `412 PRECONDITION_FAILED`.
-          schema:
-            type: string
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -1048,7 +1129,10 @@ paths:
               $ref: "#/components/schemas/PutAdminSessionPolicy"
       responses:
         "200":
-          description: The updated session policy ceiling.
+          description: The updated session policy ceiling; `ETag` is absent after a delete.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
@@ -1061,6 +1145,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1302,6 +1388,18 @@ components:
       schema:
         type: string
         example: acme
+    OwnerRef:
+      name: ownerRef
+      in: path
+      required: true
+      description: |
+        The principal's `issuer|sub` owner reference, as the user-limits
+        list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+        the issuer → `%2F`).
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 512
     IdempotencyKeyRequired:
       name: Idempotency-Key
       in: header
@@ -1916,31 +2014,10 @@ components:
           type: integer
           description: Storage in GiB.
 
-    UserUsage:
-      type: object
-      additionalProperties: false
-      required: [subject, displayName, usage]
-      description: One tenant member's usage share.
-      properties:
-        subject:
-          type: string
-          description: Bare OIDC subject of the user.
-        displayName:
-          type: string
-          description: Name from the principal directory; falls back to `subject`.
-        usage:
-          $ref: "#/components/schemas/QuotaAmounts"
-        limit:
-          type: integer
-          description: |
-            The user's effective per-principal running-workspace limit —
-            their stored override when set, else the tenant default.
-            Absent when the user is unlimited.
-
     QuotaView:
       type: object
       additionalProperties: false
-      required: [tenant, configured, usage, users]
+      required: [tenant, configured, usage]
       description: |
         Tenant quota snapshot. `configured` is false when the tenant has no
         quota row: new workspaces are then refused, so the absence of
@@ -1948,9 +2025,7 @@ components:
         state. `userLimits` is present only when the caller has an
         effective per-principal running-workspace limit; inside it only
         `runningWorkspaces` is meaningful (the other dimensions stay zero —
-        per-user limits cover the running count only). `users` lists every
-        tenant member for tenant administrators and only the caller for
-        regular users.
+        per-user limits cover the running count only).
       properties:
         tenant:
           type: string
@@ -1966,10 +2041,6 @@ components:
           $ref: "#/components/schemas/QuotaAmounts"
         userLimits:
           $ref: "#/components/schemas/QuotaAmounts"
-        users:
-          type: array
-          items:
-            $ref: "#/components/schemas/UserUsage"
 
     QuotaSource:
       type: string
@@ -2015,15 +2086,14 @@ components:
     AdminQuotaView:
       type: object
       additionalProperties: false
-      required: [tenant, configured, source, usage, users]
+      required: [tenant, configured, source, usage]
       description: |
         Administrator quota snapshot for one tenant: `QuotaView` plus
         `source`, which names the layer owning the limits row. `limits` is
         absent when the tenant has no quota row (`configured: false`,
         `source: none` — or `config` while a declared row is still pending
-        the startup upsert). `users` lists every owner with usage.
-        `version` is the opaque change token of the limits row — PUT echoes
-        it in `If-Match`; it is absent when no row exists.
+        the startup upsert). The row's version travels as the `ETag`
+        response header.
       properties:
         tenant:
           type: string
@@ -2035,44 +2105,28 @@ components:
             "no limit".
         source:
           $ref: "#/components/schemas/QuotaSource"
-        version:
-          type: string
-          description: |
-            Opaque change token of the limits row — it changes on every
-            write and PUT echoes it verbatim in `If-Match`. Absent when the
-            tenant has no quota row — PUT then uses `If-Match: *`.
         limits:
           $ref: "#/components/schemas/QuotaAmounts"
         usage:
           $ref: "#/components/schemas/QuotaAmounts"
-        users:
-          type: array
-          items:
-            $ref: "#/components/schemas/UserUsage"
 
-    AdminUserLimitsView:
+    AdminUserLimitPage:
       type: object
       additionalProperties: false
-      required: [tenant, default, users]
+      required: [items]
       description: |
-        Per-principal running-workspace limits for one tenant: the
-        tenant-wide `default` (`null` = unlimited — the upgrade default)
-        and one row per principal who has usage or a stored override.
-        Limits cap concurrent running workspaces — a workspace counts
-        while its reservation holds a running slot (from the start/create
-        intent until the runtime is proven gone); stopped Retain
-        workspaces' disk-only holds and retained disks never count.
+        One page of per-principal running-workspace limits, ordered by
+        `ownerRef`. Limits cap concurrent running workspaces — a workspace
+        counts while its reservation holds a running slot (from the
+        start/create intent until the runtime is proven gone); stopped
+        Retain workspaces' disk-only holds and retained disks never count.
       properties:
-        tenant:
-          type: string
-        default:
-          type: integer
-          nullable: true
-          description: Tenant-wide fallback limit; `null` = unlimited.
-        users:
+        items:
           type: array
           items:
             $ref: "#/components/schemas/AdminUserLimitEntry"
+        nextCursor:
+          $ref: "#/components/schemas/NextCursor"
 
     AdminUserLimitEntry:
       type: object
@@ -2084,7 +2138,7 @@ components:
           type: string
           description: |
             The `issuer|sub` owner reference admission enforces on — the
-            value `PUT` writes back.
+            `{ownerRef}` of the item's `PUT`/`DELETE` path.
         subject:
           type: string
           description: Bare OIDC subject of the user.
@@ -2092,36 +2146,33 @@ components:
           type: string
           description: Name from the principal directory; falls back to `subject`.
         limit:
-          type: integer
-          nullable: true
+          type: ["integer", "null"]
           description: Stored override; `null` = inherits the tenant default.
         effective:
-          type: integer
-          nullable: true
+          type: ["integer", "null"]
           description: Resolved limit (override, else default); `null` = unlimited.
         running:
           type: integer
           description: Running workspaces the principal currently holds.
+        etag:
+          type: string
+          description: |
+            Strong entity tag of the principal's override row, sent as
+            `If-Match` on `PUT`/`DELETE`. Absent while the principal has no
+            override — `PUT` then creates it with `If-Match: *`.
 
     SetUserLimitRequest:
       type: object
       additionalProperties: false
-      required: [ownerRef]
+      required: [limit]
       description: |
-        Write one principal's running-workspace override. `limit` sets it;
-        `null` (or absent) clears the override so the tenant default (or
-        unlimited) applies again.
+        Write one principal's running-workspace override. An override is
+        removed with `DELETE`, so `limit` is required.
       properties:
-        ownerRef:
-          type: string
-          minLength: 1
-          maxLength: 512
-          description: The `issuer|sub` owner reference of the principal.
         limit:
           type: integer
-          nullable: true
           minimum: 0
-          description: Maximum concurrent running workspaces; `null` clears the override.
+          description: Maximum concurrent running workspaces.
 
     SetUserLimitDefaultRequest:
       type: object
@@ -2131,10 +2182,24 @@ components:
         sets it; `null` (or absent) clears it back to unlimited.
       properties:
         limit:
-          type: integer
-          nullable: true
+          type: ["integer", "null"]
           minimum: 0
           description: Maximum concurrent running workspaces per principal; `null` clears the default.
+
+    AdminUserLimitDefault:
+      type: object
+      additionalProperties: false
+      required: [tenant, limit]
+      description: |
+        The tenant-wide fallback running-workspace limit applied to every
+        principal without an override. Its version travels as the `ETag`
+        response header.
+      properties:
+        tenant:
+          type: string
+        limit:
+          type: ["integer", "null"]
+          description: Tenant-wide fallback limit; `null` = unlimited.
 
     ClipboardCeiling:
       type: string
@@ -2187,9 +2252,8 @@ components:
         The tenant's session data-transfer ceiling (ADR 0010): one value
         per channel, `FollowTemplate` where the channel is not narrowed.
         The effective policy a user gets is the meet of the template's
-        policy and this ceiling — it can only narrow, never widen.
-        `version` is the opaque change token PUT echoes in `If-Match`;
-        it is absent when no row exists.
+        policy and this ceiling — it can only narrow, never widen. The
+        row's version travels as the `ETag` response header.
       properties:
         tenant:
           type: string
@@ -2199,12 +2263,6 @@ components:
           $ref: "#/components/schemas/FileTransferCeiling"
         source:
           $ref: "#/components/schemas/AdminSessionPolicySource"
-        version:
-          type: string
-          description: |
-            Opaque change token of the ceiling row — it changes on every
-            write and PUT echoes it verbatim in `If-Match`. Absent when
-            the tenant has no row — PUT then uses `If-Match: *`.
 
     PutAdminSessionPolicy:
       type: object

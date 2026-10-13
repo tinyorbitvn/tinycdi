@@ -30,19 +30,20 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 		RunningSlots: 4, CPUMillis: 8000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30,
 	}
 
-	// No row: no version; only "*" creates.
+	// No row: no version; only a create writes.
 	rep, err := src.Report(ctx, "tenant-a")
 	if err != nil || rep.HasLimits || rep.Version != "" {
 		t.Fatalf("empty report = %+v err=%v, want no row and no version", rep, err)
 	}
-	if err := src.SetLimits(ctx, "tenant-a", limits, "12"); !errors.Is(err, api.ErrQuotaVersionMismatch) {
+	if _, err := src.SetLimits(ctx, "tenant-a", limits, "2026-10-13T10:00:00Z", false); !errors.Is(err, store.ErrVersionMismatch) {
 		t.Fatalf("concrete version on missing row: %v, want mismatch", err)
 	}
-	if err := src.SetLimits(ctx, "tenant-a", limits, api.IfMatchCreate); err != nil {
-		t.Fatalf("create with If-Match *: %v", err)
+	created, err := src.SetLimits(ctx, "tenant-a", limits, "", true)
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
 	rep, err = src.Report(ctx, "tenant-a")
-	if err != nil || !rep.HasLimits || rep.Version == "" {
+	if err != nil || !rep.HasLimits || rep.Version == "" || rep.Version != created {
 		t.Fatalf("post-create report = %+v err=%v", rep, err)
 	}
 	// The token is the row's updated_at rendered RFC3339Nano — opaque to
@@ -52,12 +53,12 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 		t.Fatalf("version %q is not RFC3339Nano: %v", v1, err)
 	}
 
-	// "*" does not bypass the check on an existing row.
-	if err := src.SetLimits(ctx, "tenant-a", limits, api.IfMatchCreate); !errors.Is(err, api.ErrQuotaVersionMismatch) {
-		t.Fatalf("If-Match * on existing row: %v, want mismatch", err)
+	// Create does not bypass the check on an existing row.
+	if _, err := src.SetLimits(ctx, "tenant-a", limits, "", true); !errors.Is(err, store.ErrVersionMismatch) {
+		t.Fatalf("create on existing row: %v, want mismatch", err)
 	}
 	// A stale or invented token is refused; the row keeps v1's limits.
-	if err := src.SetLimits(ctx, "tenant-a", limits, "999999"); !errors.Is(err, api.ErrQuotaVersionMismatch) {
+	if _, err := src.SetLimits(ctx, "tenant-a", limits, "999999", false); !errors.Is(err, store.ErrVersionMismatch) {
 		t.Fatalf("stale version: %v, want mismatch", err)
 	}
 	rep, _ = src.Report(ctx, "tenant-a")
@@ -69,7 +70,7 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 	lower := provisioning.ResourceVector{
 		RunningSlots: 2, CPUMillis: 4000, MemoryBytes: 4 << 30, DiskBytes: 50 << 30,
 	}
-	if err := src.SetLimits(ctx, "tenant-a", lower, v1); err != nil {
+	if _, err := src.SetLimits(ctx, "tenant-a", lower, v1, false); err != nil {
 		t.Fatalf("matching If-Match: %v", err)
 	}
 	rep, _ = src.Report(ctx, "tenant-a")
@@ -80,7 +81,7 @@ func TestAdminQuotaStore_IfMatch(t *testing.T) {
 		t.Fatalf("limits after write = %+v", rep.Limits)
 	}
 	// The old token is dead.
-	if err := src.SetLimits(ctx, "tenant-a", limits, v1); !errors.Is(err, api.ErrQuotaVersionMismatch) {
+	if _, err := src.SetLimits(ctx, "tenant-a", limits, v1, false); !errors.Is(err, store.ErrVersionMismatch) {
 		t.Fatalf("replayed version: %v, want mismatch", err)
 	}
 

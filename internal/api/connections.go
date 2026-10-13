@@ -104,7 +104,7 @@ func (h *ConnectionHandler) WithAuditSink(s observability.AuditSink) *Connection
 
 // MountConnectionRoutes registers the connections route with authn + CSRF
 // inside the dedicated audit wrapper (see MountWorkspaceRoutes).
-func MountConnectionRoutes(mux *http.ServeMux, authn *Authenticator, h *ConnectionHandler) {
+func MountConnectionRoutes(mux RouteMux, authn *Authenticator, h *ConnectionHandler) {
 	mux.Handle(routeConnectionCreate,
 		authn.RequireAuth(audited(h.audit, routeConnectionCreate,
 			authn.RequireCSRF(http.HandlerFunc(h.Create)))))

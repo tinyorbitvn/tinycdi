@@ -29,7 +29,7 @@ type sessionProbeView struct {
 // wraps the handler (the production mount applies the login rate limit —
 // the probe is anonymous and needs a limit like the rest of the
 // unauthenticated surface, backlog 12).
-func MountSessionProbeRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+func MountSessionProbeRoute(mux RouteMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
 	var h http.Handler = http.HandlerFunc(authn.SessionProbeHandler)
 	for _, w := range wrap {
 		h = w(h)
@@ -64,7 +64,7 @@ func (a *Authenticator) SessionProbeHandler(w http.ResponseWriter, r *http.Reque
 // audited wrapper emits the session.touch event; optional middleware wraps
 // the chain (the production mount applies the session-digest-keyed
 // login-family limiter).
-func MountSessionTouchRoute(mux *http.ServeMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
+func MountSessionTouchRoute(mux RouteMux, authn *Authenticator, wrap ...func(http.Handler) http.Handler) {
 	var h http.Handler = authn.RequireAuthPassive(
 		audited(lateAuditSink{func() observability.AuditSink { return authn.auditSink }}, routeSessionTouch,
 			authn.RequireCSRF(http.HandlerFunc(authn.SessionTouchHandler))))

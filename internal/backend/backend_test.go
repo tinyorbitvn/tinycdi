@@ -361,7 +361,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	me := api.NewMeHandler(sdom.String())
 	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
-	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
+	quota := api.NewQuotaHandler(fakeQuotaSource{}, tenants)
 	pass := func(h http.Handler) http.Handler { return h }
 	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, nil, pass, pass, pass)
 	b := &Backend{log: testLog(), metrics: m}
