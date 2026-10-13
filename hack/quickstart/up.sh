@@ -195,6 +195,7 @@ kc -n "$NS_DEPS" create secret generic keycloak-admin --from-literal=username=ad
 sed -e "s|@CLIENT_SECRET@|${CLIENT_SECRET}|g" -e "s|@PORTAL_HOST@|${PORTAL_HOST}|g" \
   -e "s|@DEMO_USER@|${DEMO_USER}|g" -e "s|@DEMO_PASSWORD@|${DEMO_PASSWORD}|g" \
   -e "s|@NOQUOTA_USER@|${NOQUOTA_USER}|g" \
+  -e "s|@ADMIN_USER@|${ADMIN_USER}|g" \
   "$QS_DIR/realm-export.json" >"$STATE_DIR/realm.json"
 chmod 600 "$STATE_DIR/realm.json"
 kc -n "$NS_DEPS" create secret generic keycloak-realm --from-file=tinycdi-realm.json="$STATE_DIR/realm.json" \
@@ -330,6 +331,7 @@ TCDI_QS_PORTAL_URL=https://${PORTAL_HOST}
 TCDI_QS_SESSION_DOMAIN=${SESSION_DOMAIN}
 TCDI_QS_USER=${DEMO_USER}
 TCDI_QS_NOQUOTA_USER=${NOQUOTA_USER}
+TCDI_QS_ADMIN_USER=${ADMIN_USER}
 TCDI_QS_CA_FILE=${T}/local-ca.crt
 KUBECONFIG=${KUBECONFIG}
 ENVEOF
@@ -349,6 +351,7 @@ TinyCDI quickstart is up after ${SECONDS}s (DEV ONLY - loopback, throwaway).
 
   Portal   https://${PORTAL_HOST}
   Login    ${DEMO_USER} / ${DEMO_PASSWORD}   (dev realm; exists only inside kind cluster ${CLUSTER})
+  Admin    ${ADMIN_USER} / ${DEMO_PASSWORD}   (tenant administrator)
   CA       ${T}/local-ca.crt   (import it, or accept the browser's certificate warning)
   kubectl  export KUBECONFIG=${KUBECONFIG}
   Remove   hack/quickstart/down.sh

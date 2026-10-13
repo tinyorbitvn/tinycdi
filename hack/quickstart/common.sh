@@ -89,6 +89,8 @@ DEMO_USER="demo"
 DEMO_PASSWORD="tcdi-demo-dev-only"
 # A second dev user whose tenant has no quota row (B5.4 refusal check).
 NOQUOTA_USER="${NOQUOTA_USER:-demo-noquota}"
+# A tenant administrator of tenant-a (member of the realm group tenant-admin) for the admin e2e.
+ADMIN_USER="${ADMIN_USER:-demo-admin}"
 
 log() { printf '==> %s\n' "$*" >&2; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }

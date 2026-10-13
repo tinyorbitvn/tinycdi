@@ -272,6 +272,20 @@ export default {
   "admin.userDetail.disks.empty": "This user has no retained disks.",
   "admin.userDetail.disks.all": "Open retained data",
 
+  // Live sessions section on the user detail page (F5).
+  "admin.sessions.title": "Live sessions",
+  "admin.sessions.caption": "Live desktop sessions of this user",
+  "admin.sessions.column.workspace": "Workspace",
+  "admin.sessions.column.started": "Started",
+  "admin.sessions.column.lastActive": "Last renewed",
+  "admin.sessions.column.ref": "Reference",
+  "admin.sessions.empty": "No live sessions.",
+  "admin.sessions.signOutAll": "Sign out everywhere",
+  "admin.sessions.confirm.title": "Sign {name} out everywhere?",
+  "admin.sessions.confirm.body":
+    "Every portal session of this user ends and their open desktops disconnect. Their workspaces keep running.",
+  "admin.sessions.done": "Signed out: {sessions} portal sessions, {leases} desktop sessions.",
+
   // Session policy page (tenant clipboard ceiling, ADR 0010).
   "admin.policy.title": "Session policy",
   "admin.policy.description": "What may move between a user's device and their workspace.",

@@ -10,6 +10,9 @@ import { expect, test, type Frame, type Page } from "@playwright/test";
 const USER = process.env.TCDI_QS_USER ?? "demo";
 const PASSWORD = process.env.TCDI_QS_PASSWORD ?? "tcdi-demo-dev-only";
 const NOQUOTA_USER = process.env.TCDI_QS_NOQUOTA_USER ?? "demo-noquota";
+const ADMIN_USER = process.env.TCDI_QS_ADMIN_USER ?? "demo-admin";
+// The tenant id the dev realm maps demo and demo-admin to (hack/quickstart/values.yaml).
+const TENANT = process.env.TCDI_QS_TENANT ?? "tenant-a";
 const SESSION_DOMAIN =
   process.env.TCDI_QS_SESSION_DOMAIN ??
   `session.${process.env.TCDI_QS_DOMAIN ?? "tcdi.localtest.me"}`;
@@ -706,4 +709,61 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     // Leave no running workspace of ours behind either way.
     await stopWorkspace(page, bidiId);
   }
+});
+
+test("admin: the live session is listed from Postgres, Sign out everywhere ends it, the audit row exists", async ({ browser }) => {
+  // The user opens a desktop, which mints a live connection lease.
+  const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const userPage = await userCtx.newPage();
+  await login(userPage);
+  const name = `adm-${Date.now().toString(36)}`;
+  const id = await createBrowserWorkspace(userPage, name);
+  await connectSessionFrame(userPage, id);
+
+  const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await adminCtx.newPage();
+  await login(page, ADMIN_USER);
+
+  type Live = { ownerRef: string; workspaceId: string; leaseRef: string };
+  const listed = async (): Promise<Live[]> => {
+    const r = await page.request.get(`/v1/admin/tenants/${TENANT}/sessions`);
+    expect(r.status()).toBe(200);
+    return ((await r.json()) as { items: Live[] }).items;
+  };
+  await expect
+    .poll(async () => (await listed()).some((s) => s.workspaceId === id), { timeout: 60_000 })
+    .toBe(true);
+  const mine = (await listed()).find((s) => s.workspaceId === id)!;
+  expect(mine.leaseRef).toMatch(/^[0-9a-f]{16}$/);
+  const ownerRef = mine.ownerRef;
+
+  // F8 (Task 3): the tenant directory lists the signed-in user with a workspace count.
+  const dir = await page.request.get(`/v1/admin/tenants/${TENANT}/users?sort=-lastSeen&limit=500`);
+  expect(dir.status()).toBe(200);
+  const users = ((await dir.json()) as { items: { ownerRef: string; workspaces: number; lastSeenAt: string }[] }).items;
+  const me = users.find((u) => u.ownerRef === ownerRef);
+  expect(me?.workspaces).toBeGreaterThanOrEqual(1);
+  expect(me?.lastSeenAt).toBeTruthy();
+  await page.goto("/admin/users");
+  await expect(page.locator(`a[href="/admin/users/${Buffer.from(ownerRef).toString("base64url")}"]`)).toBeVisible();
+
+  // The user detail page shows the session and signs the user out after a confirmation.
+  // Task 3's detail route carries the owner reference as base64url (a dotted issuer would 404 percent-encoded).
+  await page.goto(`/admin/users/${Buffer.from(ownerRef).toString("base64url")}`);
+  const section = page.getByRole("region", { name: "Live sessions" });
+  await expect(section.getByText(name)).toBeVisible();
+  await section.getByRole("button", { name: "Sign out everywhere" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Sign out everywhere" }).click();
+  await expect(section.getByRole("status")).toContainText("Signed out");
+
+  // Effects: the principal has no live lease, their portal session is gone, the audit row is there.
+  await expect.poll(async () => (await listed()).some((s) => s.ownerRef === ownerRef)).toBe(false);
+  expect((await userCtx.request.get("/v1/me")).status()).toBe(401);
+  const audit = await page.request.get(`/v1/admin/tenants/${TENANT}/audit?action=admin.session.revoke`);
+  expect(audit.status()).toBe(200);
+  const rows = ((await audit.json()) as { items: { action: string; outcome: string; details?: Record<string, string> }[] }).items;
+  expect(rows.some((e) => e.outcome === "success" && Number(e.details?.counts?.match(/leases=(\d+)/)?.[1] ?? 0) >= 1)).toBe(true);
+
+  await userCtx.close();
+  await adminCtx.close();
 });

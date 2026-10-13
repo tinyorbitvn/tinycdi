@@ -740,6 +740,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithAuditSink(appAudit)
 	adminAuditHandler := api.NewAdminAuditHandler(db, tenants).WithAuditSink(appAudit)
 	adminUsersHandler := api.NewAdminUsersHandler(db, api.NewAdminUserLimitSource(db), tenants).WithAuditSink(appAudit)
+	// F5: live sessions are Postgres connection leases; sign-out-everywhere
+	// reuses the principal revoker the self-service route shares.
+	adminSessionsHandler := api.NewAdminSessionsHandler(db, directory, broker.PublicRevoker{B: brk}, tenants).
+		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
@@ -770,6 +774,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		data: dataHandler, quota: quotaHandler, adminQuota: adminQuotaHandler,
 		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
 		adminAudit: adminAuditHandler, adminUsers: adminUsersHandler,
+		adminSessions: adminSessionsHandler,
 	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
@@ -791,6 +796,7 @@ type appRoutes struct {
 	adminSessionPolicy *api.AdminSessionPolicyHandler
 	adminAudit         *api.AdminAuditHandler
 	adminUsers         *api.AdminUsersHandler
+	adminSessions      *api.AdminSessionsHandler
 }
 
 // appMux assembles the public API route table. The session surface
@@ -828,6 +834,9 @@ func appMux(authn *api.Authenticator, h appRoutes,
 	}
 	if h.adminUsers != nil {
 		api.MountAdminUserRoutes(mux, authn, h.adminUsers)
+	}
+	if h.adminSessions != nil {
+		api.MountAdminSessionRoutes(mux, authn, h.adminSessions)
 	}
 	return mux
 }

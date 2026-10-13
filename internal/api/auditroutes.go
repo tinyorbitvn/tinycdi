@@ -50,6 +50,9 @@ const (
 
 	auditActionAdminUserList = "admin.user.list"
 	auditActionAdminUserGet  = "admin.user.get"
+
+	auditActionAdminSessionList   = "admin.session.list"
+	auditActionAdminSessionRevoke = "admin.session.revoke"
 )
 
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
@@ -77,6 +80,9 @@ const (
 
 	routeAdminUsersList = "GET /v1/admin/tenants/{tenant}/users"
 	routeAdminUserGet   = "GET /v1/admin/tenants/{tenant}/users/{ownerRef}"
+
+	routeAdminSessionsList  = "GET /v1/admin/tenants/{tenant}/sessions"
+	routeAdminUserRevokeAll = "POST /v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all"
 )
 
 // :verb custom methods. ServeMux cannot match the verb labels (the verb
@@ -142,6 +148,8 @@ var auditedRoutes = map[string]auditedRoute{
 	routeAdminAuditGet:         {auditActionAdminAuditGet, "tenant"},
 	routeAdminUsersList:        {auditActionAdminUserList, "tenant"},
 	routeAdminUserGet:          {auditActionAdminUserGet, "tenant"},
+	routeAdminSessionsList:     {auditActionAdminSessionList, "tenant"},
+	routeAdminUserRevokeAll:    {auditActionAdminSessionRevoke, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the

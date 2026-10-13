@@ -83,6 +83,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, defaultTenants(), nil))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(fx.uls, nil, defaultTenants()))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(fx.sps, defaultTenants()))
+	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(&fakeLeaseSource{}, nil, &fakePrincipalRevoker{}, defaultTenants()))
 	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(fx.aud, defaultTenants()))
 	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(fx.ud, fx.uls, defaultTenants()))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
@@ -278,6 +279,31 @@ func TestAdminSessionPolicy_CustomAdminGroups(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
+	}
+}
+
+// TestAdminSessions_CustomAdminGroups: both F5 routes honour the configured admin group.
+func TestAdminSessions_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+	calls := []struct{ method, path string }{
+		{http.MethodGet, adminSessionsPath},
+		{http.MethodPost, adminRevokePath("https://idp|alice")},
+	}
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	for _, c := range calls {
+		r := doReq(t, env, sess, csrf, c.method, c.path, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("member %s: status=%d, want 200", c.method, r.StatusCode)
+		}
+	}
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	for _, c := range calls {
+		r := doReq(t, env, sess, csrf, c.method, c.path, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusForbidden {
+			t.Fatalf("non-member %s: status=%d, want 403", c.method, r.StatusCode)
+		}
 	}
 }
 

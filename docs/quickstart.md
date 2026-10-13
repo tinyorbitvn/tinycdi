@@ -84,7 +84,7 @@ alone (`docker builder prune` reclaims it).
 | kind cluster `tcdi-quickstart` | one node, Kubernetes v1.37 image pinned by digest, host ports 80/443 on loopback → ingress |
 | Ingress | Traefik (Helm chart `41.6.1`, checksum-verified, image pinned by digest) — it terminates browser TLS and re-encrypts to the TinyCDI pods |
 | PostgreSQL | `postgres:18.0` by digest with TLS from the quickstart CA; the backend connects with `verify-full` |
-| Identity | Keycloak 26.8.0 in `start-dev` mode, realm `tinycdi` imported from `realm-export.json`: one confidential client and the `demo` user |
+| Identity | Keycloak 26.8.0 in `start-dev` mode, realm `tinycdi` imported from `realm-export.json`: one confidential client, the `demo` user and the `demo-admin` tenant administrator |
 | TLS | two local CAs (edge/Postgres, internal mTLS) and a leaf certificate covering `portal.`, `keycloak.` and `*.session.` names under the domain |
 | DNS inside the cluster | a CoreDNS rewrite sends `*.tcdi.localtest.me` to the ingress Service, so pods reach the OIDC issuer under the same name the browser uses |
 | TinyCDI | `helm upgrade --install` of `deploy/helm/tinycdi` from your checkout with `hack/quickstart/values.yaml`, plus two seeded templates (browser, Linux desktop) using the published runtime images pinned by digest |

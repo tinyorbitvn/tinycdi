@@ -129,10 +129,11 @@ var (
 		"admin.user_limit.get": {}, "admin.user_limit.set": {}, "admin.user_limit.clear": {},
 		"admin.user_limit.default.get": {}, "admin.user_limit.default.set": {},
 		"admin.user_limit.default.clear": {},
-		"admin.session_policy.get": {}, "admin.session_policy.set": {}, "admin.session_policy.clear": {},
+		"admin.session_policy.get":       {}, "admin.session_policy.set": {}, "admin.session_policy.clear": {},
 		"admin.audit.get": {},
 		"admin.user.list": {}, "admin.user.get": {},
-		"launch.redeem":                  {}, "launch.host_mismatch": {},
+		"admin.session.list": {}, "admin.session.revoke": {},
+		"launch.redeem": {}, "launch.host_mismatch": {},
 		"session.lookup": {}, "session.stream": {},
 	}
 )

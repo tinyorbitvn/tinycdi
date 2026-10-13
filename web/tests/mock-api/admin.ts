@@ -207,6 +207,31 @@ function seedRetained(): { rec: RetainedFixture; owner: Owner }[] {
   ];
 }
 
+interface MockLiveSession {
+  leaseRef: string;
+  workspaceId: string;
+  workspaceName: string;
+  ownerRef: string;
+  owner: Owner;
+  createdAt: string;
+  lastRenewedAt?: string;
+  expiresAt: string;
+}
+
+// Two live sessions for Grace, one for Linus (newest first by createdAt).
+function seedLiveSessions(): MockLiveSession[] {
+  const [grace, linus] = OTHER_USERS;
+  const row = (leaseRef: string, workspaceId: string, workspaceName: string, o: Owner, createdAt: string): MockLiveSession => ({
+    leaseRef, workspaceId, workspaceName, ownerRef: ownerRefOf(o.subject), owner: o,
+    createdAt, lastRenewedAt: createdAt, expiresAt: "2099-01-01T00:00:00Z",
+  });
+  return [
+    row("0123456789abcdef", SEED_WORKSPACE_IDS.graceReady, "grace-analysis", grace, "2026-10-13T08:00:00Z"),
+    row("fedcba9876543210", "ws_01J4ZGRACEREADY02", "grace-notes", grace, "2026-10-13T08:05:00Z"),
+    row("00112233445566aa", SEED_WORKSPACE_IDS.linusStopped, "linus-desktop", linus, "2026-10-13T08:10:00Z"),
+  ];
+}
+
 export interface Tenancy {
   me: MockMe;
   // undefined = the tenant has no quota row (the API then omits `limits`).
@@ -317,6 +342,7 @@ function ownerRefOf(subject: string): string {
 export function adminArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const t = tenancy(ctx);
+  let liveSessions = seedLiveSessions();
 
   function seed(): void {
     for (const { ws, owner } of seedWorkspaces()) {
@@ -345,6 +371,7 @@ export function adminArea(ctx: MockContext): MockArea {
     t.owners = new Map();
     t.failNext = new Map();
     t.scopesSeen = [];
+    liveSessions = seedLiveSessions();
     if (ctx.demo) seed();
   }
 
@@ -734,8 +761,46 @@ export function adminArea(ctx: MockContext): MockArea {
     );
   }
 
+  function adminSessions(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    if ((req.query.get("sort") || "-createdAt") !== "-createdAt") {
+      return err(400, "INVALID_REQUEST", "sessions list newest first only (sort=-createdAt)", false);
+    }
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const owner = req.query.get("ownerRef");
+    const rows = liveSessions.filter((s) => !owner || s.ownerRef === owner);
+    return paginate(req, rows, { createdAt: byString((s) => s.createdAt) }, "-createdAt", (s) => s.workspaceId);
+  }
+
+  function adminRevokeSessions(req: MockRequest, tenant: string, rawRef: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "POST") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    let ref: string;
+    try {
+      ref = decodeURIComponent(rawRef);
+    } catch {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    if (!ref.includes("|") || ref.endsWith("|") || ref.startsWith("|")) {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    const gone = liveSessions.filter((s) => s.ownerRef === ref);
+    liveSessions = liveSessions.filter((s) => s.ownerRef !== ref);
+    return ok(200, { sessions: gone.length > 0 ? 1 : 0, tickets: 0, leases: gone.length });
+  }
+
   function api(req: MockRequest): MockResponse | undefined {
     const { method, path } = req;
+    const mSess = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/sessions$/);
+    if (mSess) return adminSessions(req, mSess[1]);
+    const mRevoke = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users\/([^/]+)\/sessions:revoke-all$/);
+    if (mRevoke) return adminRevokeSessions(req, mRevoke[1], mRevoke[2]);
     const mQuota = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/quota$/);
     if (mQuota) return adminQuota(req, mQuota[1]);
     const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(?:\/([^/]+))?$/);

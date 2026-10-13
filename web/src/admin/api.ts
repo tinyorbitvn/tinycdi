@@ -102,6 +102,34 @@ export async function listAdminUserLimitPage(
 }
 
 export type AdminTenantUser = components["schemas"]["AdminTenantUser"];
+export type AdminLiveSession = components["schemas"]["AdminLiveSession"];
+export type AdminRevokeResult = components["schemas"]["AdminRevokeResult"];
+
+// GET /v1/admin/tenants/{tenant}/sessions — live leases from Postgres, newest first.
+export async function listAdminSessionPage(
+  api: ApiClient,
+  tenant: string,
+  ownerRef?: string,
+  cursor?: string,
+): Promise<ServerPage<AdminLiveSession>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/sessions", {
+      params: {
+        path: { tenant },
+        query: { sort: "-createdAt", ...(ownerRef ? { ownerRef } : {}), ...(cursor ? { cursor } : {}) },
+      },
+    }),
+  );
+}
+
+// POST .../users/{ownerRef}/sessions:revoke-all — "sign out everywhere" for another user.
+export async function revokeAdminUserSessions(api: ApiClient, tenant: string, ownerRef: string): Promise<AdminRevokeResult> {
+  return unwrap(
+    await api.POST("/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all", {
+      params: { path: { tenant, ownerRef } },
+    }),
+  );
+}
 
 // GET .../users: everyone who signed in to the tenant (the principal
 // directory). `sort` is ownerRef | displayName | lastSeen, `-` = descending.

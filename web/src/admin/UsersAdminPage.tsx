@@ -37,6 +37,7 @@ import { DataStateBadge } from "../data/DataListPage";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 import { LimitDialog } from "./UserLimitsSection";
+import { UserSessionsSection } from "./UserSessionsSection";
 
 export interface AdminUserRow {
   subject: string;
@@ -435,6 +436,7 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
             empty={t("admin.userDetail.workspaces.empty")}
           />
         </Section>
+        <UserSessionsSection tenant={u.data.tenant} ownerRef={row.ownerRef} displayName={row.displayName} />
         <Section
           title={t("admin.userDetail.disks.title")}
           actions={<Link to="/admin/data">{t("admin.userDetail.disks.all")}</Link>}

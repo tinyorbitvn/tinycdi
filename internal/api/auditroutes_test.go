@@ -239,6 +239,9 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
+	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(
+		&fakeLeaseSource{leases: []store.LiveLease{{ID: "lease-cov-1", WorkspaceID: "ws_0000000000000000000000000c", WorkspaceName: "cov", OwnerRef: "iss|sub", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}}},
+		newFakeDirectory(), &fakePrincipalRevoker{res: RevokeAllResult{Leases: 1}}, tenants).WithAuditSink(sink))
 	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(&fakeAuditSource{rows: auditRows(2)}, tenants).WithAuditSink(sink))
 	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(&fakeUserDirectory{users: directoryUsers()}, newFakeUserLimitSource(), tenants).WithAuditSink(sink))
 
@@ -382,6 +385,12 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		}},
 		{"GET /v1/admin/tenants/{}/users/{}", auditActionAdminUserGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, adminUserPath("https://idp|alice"), "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/sessions", auditActionAdminSessionList, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminSessionsPath, "", nil).Body.Close()
+		}},
+		{"POST /v1/admin/tenants/{}/users/{}/sessions:revoke-all", auditActionAdminSessionRevoke, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPost, adminRevokePath("iss|sub"), "", nil).Body.Close()
 		}},
 		{"POST /v1/logout", auditActionSessionLogout, func() {
 			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()

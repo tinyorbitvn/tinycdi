@@ -1310,6 +1310,88 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/sessions:
+    get:
+      operationId: listAdminSessions
+      summary: Live desktop sessions of a tenant (paged)
+      description: |
+        Administrator list of the tenant's live connection leases (state
+        `active` and not past `expiresAt`), read from the shared PostgreSQL
+        session directory, so every backend replica answers the same.
+        `ownerRef` narrows the list to one principal. Items never carry the
+        lease id: `leaseRef` is a stable, non-secret reference. Sort:
+        `-createdAt` only (newest first; anything else is `INVALID_REQUEST`).
+        Requires the tenant-admin role on the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - name: ownerRef
+          in: query
+          required: false
+          description: Only this principal's sessions (`issuer|sub`).
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 512
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200":
+          description: One page of live sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLiveSessionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all:
+    post:
+      operationId: revokeAdminUserSessions
+      summary: Sign a user out everywhere
+      description: |
+        The administrator variant of `POST /v1/me/sessions:revoke-all`: in
+        one store transaction it ends every portal session the named
+        principal holds in the named tenant and revokes their active
+        connection leases and outstanding launch tickets. The administrator's
+        own session is untouched (unless they name themselves). Workspaces
+        keep running. Requires the tenant-admin role on the named tenant and
+        the `X-CSRF-Token` header; audited as `admin.session.revoke`.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/OwnerRef"
+      responses:
+        "200":
+          description: What the revocation destroyed (all zero when the principal had nothing).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminRevokeResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -2477,6 +2559,35 @@ components:
       properties:
         items: {type: array, items: {$ref: '#/components/schemas/AdminTenantUser'}}
         nextCursor: {$ref: '#/components/schemas/NextCursor'}
+
+    AdminLiveSession:
+      type: object
+      additionalProperties: false
+      required: [leaseRef, workspaceId, workspaceName, ownerRef, owner, createdAt, expiresAt]
+      properties:
+        leaseRef: {type: string, pattern: '^[0-9a-f]{16}$', description: "Stable non-secret reference (SHA-256 prefix of the lease id)."}
+        workspaceId: {type: string}
+        workspaceName: {type: string}
+        ownerRef: {type: string}
+        owner: {$ref: '#/components/schemas/Owner'}
+        createdAt: {type: string, format: date-time}
+        lastRenewedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+    AdminLiveSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminLiveSession'}}
+        nextCursor: {$ref: '#/components/schemas/NextCursor'}
+    AdminRevokeResult:
+      type: object
+      additionalProperties: false
+      required: [sessions, tickets, leases]
+      properties:
+        sessions: {type: integer, minimum: 0}
+        tickets: {type: integer, minimum: 0}
+        leases: {type: integer, minimum: 0}
 
     ResolvedSessionPolicy:
       type: object

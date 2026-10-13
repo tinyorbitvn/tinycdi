@@ -723,6 +723,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live desktop sessions of a tenant (paged)
+         * @description Administrator list of the tenant's live connection leases (state
+         *     `active` and not past `expiresAt`), read from the shared PostgreSQL
+         *     session directory, so every backend replica answers the same.
+         *     `ownerRef` narrows the list to one principal. Items never carry the
+         *     lease id: `leaseRef` is a stable, non-secret reference. Sort:
+         *     `-createdAt` only (newest first; anything else is `INVALID_REQUEST`).
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["listAdminSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign a user out everywhere
+         * @description The administrator variant of `POST /v1/me/sessions:revoke-all`: in
+         *     one store transaction it ends every portal session the named
+         *     principal holds in the named tenant and revokes their active
+         *     connection leases and outstanding launch tickets. The administrator's
+         *     own session is untouched (unless they name themselves). Workspaces
+         *     keep running. Requires the tenant-admin role on the named tenant and
+         *     the `X-CSRF-Token` header; audited as `admin.session.revoke`.
+         */
+        post: operations["revokeAdminUserSessions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -1382,6 +1434,29 @@ export interface components {
         AdminTenantUserPage: {
             items: components["schemas"]["AdminTenantUser"][];
             nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminLiveSession: {
+            /** @description Stable non-secret reference (SHA-256 prefix of the lease id). */
+            leaseRef: string;
+            workspaceId: string;
+            workspaceName: string;
+            ownerRef: string;
+            owner: components["schemas"]["Owner"];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastRenewedAt?: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        AdminLiveSessionPage: {
+            items: components["schemas"]["AdminLiveSession"][];
+            nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminRevokeResult: {
+            sessions: number;
+            tickets: number;
+            leases: number;
         };
         /**
          * @description The resolved (effective) session data-transfer policy for a
@@ -3028,6 +3103,94 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminSessions: {
+        parameters: {
+            query?: {
+                /** @description Only this principal's sessions (`issuer|sub`). */
+                ownerRef?: string;
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of live sessions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminLiveSessionPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    revokeAdminUserSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the revocation destroyed (all zero when the principal had nothing). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminRevokeResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

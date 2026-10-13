@@ -271,6 +271,20 @@ export default {
   "admin.userDetail.disks.empty": "Người dùng này không có đĩa giữ lại nào.",
   "admin.userDetail.disks.all": "Mở dữ liệu giữ lại",
 
+  // Live sessions section on the user detail page (F5).
+  "admin.sessions.title": "Phiên đang hoạt động",
+  "admin.sessions.caption": "Các phiên desktop đang hoạt động của người dùng này",
+  "admin.sessions.column.workspace": "Workspace",
+  "admin.sessions.column.started": "Bắt đầu",
+  "admin.sessions.column.lastActive": "Gia hạn gần nhất",
+  "admin.sessions.column.ref": "Mã tham chiếu",
+  "admin.sessions.empty": "Không có phiên nào đang hoạt động.",
+  "admin.sessions.signOutAll": "Đăng xuất khỏi mọi nơi",
+  "admin.sessions.confirm.title": "Đăng xuất {name} khỏi mọi nơi?",
+  "admin.sessions.confirm.body":
+    "Mọi phiên portal của người dùng này sẽ kết thúc và các desktop đang mở sẽ ngắt kết nối. Workspace vẫn tiếp tục chạy.",
+  "admin.sessions.done": "Đã đăng xuất: {sessions} phiên portal, {leases} phiên desktop.",
+
   // Session policy page (giới hạn clipboard của tenant, ADR 0010).
   "admin.policy.title": "Chính sách phiên",
   "admin.policy.description":

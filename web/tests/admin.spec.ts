@@ -360,3 +360,33 @@ test("audit log lists, filters and pages", async ({ page, request }) => {
   await expect(table.getByRole("row")).toHaveCount(51);
   expect(errors).toEqual([]);
 });
+
+test("admin signs a user out everywhere", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin/users");
+  await page.getByRole("table", { name: "Tenant users" }).getByRole("link", { name: "Grace Hopper" }).click();
+  await page.waitForURL(/\/admin\/users\/.+/);
+
+  const section = page.getByRole("region", { name: "Live sessions" });
+  const table = section.getByRole("table", { name: "Live desktop sessions of this user" });
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+  await expect(table.getByText("grace-analysis")).toBeVisible();
+  await expect(table.getByText("linus-desktop")).toHaveCount(0);
+
+  await section.getByRole("button", { name: "Sign out everywhere" }).click();
+  const dialog = page.getByRole("alertdialog", { name: "Sign Grace Hopper out everywhere?" });
+  await dialog.getByRole("button", { name: "Sign out everywhere" }).click();
+
+  await expect(section.getByRole("status")).toContainText("Signed out: 1 portal sessions, 2 desktop sessions.");
+  await expect(table.getByText("No live sessions.")).toBeVisible();
+
+  const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
+  expect(
+    reqs.requests.some(
+      (r: { method: string; path: string; headers: Record<string, string> }) =>
+        r.method === "POST" &&
+        decodeURIComponent(r.path) === "/v1/admin/tenants/acme/users/https://idp.invalid|user-01J4ZDGRC/sessions:revoke-all" &&
+        Boolean(r.headers["x-csrf-token"]),
+    ),
+  ).toBeTruthy();
+});
