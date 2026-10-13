@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -66,7 +66,7 @@ func (f *finalizationFixture) create(t *testing.T, name, policy string) provisio
 	t.Helper()
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-fx", Name: name,
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: policy,
 	}
@@ -90,7 +90,8 @@ func (f *finalizationFixture) del(t *testing.T, id string) provisioning.Workspac
 
 func (f *finalizationFixture) listed(t *testing.T, id string) bool {
 	t.Helper()
-	recs, _, err := f.svc.ListWorkspaces(context.Background(), f.tenant, f.owner, "", "", 200)
+	recs, _, _, err := f.svc.ListWorkspaces(context.Background(), f.tenant, f.owner, "",
+		provisioning.ListPage{Limit: 200, SortField: "createdAt"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -338,7 +339,7 @@ func TestDeleteFinalization_CRVanishesUnderReporter(t *testing.T) {
 	ws := f.create(t, "fx-crgone", "Ephemeral")
 	crName := provisioning.WorkspaceCRName(provisioning.PlatformID(ws.ID))
 
-	cr := newRetainedWorkspace(t, f.ns, crName, workspacesv1alpha1.DataPolicyEphemeral)
+	cr := newRetainedWorkspace(t, f.ns, crName, cdiv1.DataPolicyEphemeral)
 	cr.Finalizers = []string{operator.FinalizerRuntimeCleanup}
 	cr.Labels = map[string]string{provisioning.LabelWorkspaceUID: ws.ID, provisioning.LabelTenant: f.tenant}
 	if err := k8sClient.Update(ctx, cr); err != nil {
@@ -367,7 +368,7 @@ func TestDeleteFinalization_CRVanishesUnderReporter(t *testing.T) {
 	if err := k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)); err != nil {
 		t.Fatalf("delete pod: %v", err)
 	}
-	cur := &workspacesv1alpha1.Workspace{}
+	cur := &cdiv1.Workspace{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), cur); err != nil {
 		t.Fatalf("get terminating CR: %v", err)
 	}

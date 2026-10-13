@@ -619,3 +619,24 @@ func TestParseFlags_SignOut(t *testing.T) {
 		t.Fatalf("flag -oidc-end-session=false: err=%v endSession=%v", err, cfg.OIDCEndSession)
 	}
 }
+
+// Only the documented env names feed the config: an unrecognised env name
+// neither fills the control token nor satisfies the required
+// -login-key-file input.
+func TestParseFlags_UnknownEnvNamesIgnored(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), envMap(map[string]string{
+		"TCDI_UNDOCUMENTED_TOKEN": "stray-token",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ControlToken != "" {
+		t.Fatalf("an undocumented env name must be ignored, ControlToken = %q", cfg.ControlToken)
+	}
+
+	_, err = ParseFlags(dropArg(mergedArgs(), "-login-key-file"),
+		envMap(map[string]string{"TCDI_UNDOCUMENTED_KEYS": "/run/secrets/login.key"}))
+	if err == nil || !strings.Contains(err.Error(), "login-key-file") {
+		t.Fatalf("an undocumented env name must not satisfy -login-key-file, got %v", err)
+	}
+}

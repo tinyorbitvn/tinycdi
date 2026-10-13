@@ -52,6 +52,11 @@ the apiserver NetworkPolicy peers.
 
 ## Upgrade
 
+There is no upgrade from a pre-1.0 release: the CRDs are `v1` only and the
+database schema is a fresh `0001_baseline`, so you uninstall the old
+release, remove its CRDs and database, and reinstall. The backend refuses
+to start on a pre-1.0 database. Later releases upgrade with:
+
 ```bash
 helm upgrade tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
 ```
@@ -82,70 +87,21 @@ templates:
       experience: Desktop    # was: Browser
 ```
 
-`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
-pin — lag 4), so a Browser template pinned to it only has option B. See
+The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
+155 pin — lag 1) but the allowlist ships empty, so a Browser template
+pinned to it needs option A (allowlist the ref) or option B. See
 `docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
 gate" and `docs/kasm-images.md`.
 
-## Upgrading to 0.3.0
+## Removed values
 
-Chart 0.3.0 removes the deprecated `templates[].nodeSelector` entry field
-(the v0.1 knob that rendered the `workspaces.cdi.tinyorbit.vn/node-selector`
-annotation — pod placement has been typed `spec.placement` since v0.2). A
-values file that still sets it **fails the render**, both via the values
-schema (`additionalProperties`) and an explicit check for
-`--skip-schema-validation` renders. Move the selector into the template
-spec before upgrading:
+Chart 1.0.0 is the first stable chart — every deprecated knob of the
+pre-1.0 releases is gone. There is no upgrade path: install fresh.
 
-```yaml
-templates:
-  - name: <tpl>
-    spec:
-      placement:               # was: nodeSelector: {workload: runtime}
-        nodeSelector:
-          workload: runtime
-```
-
-WorkspaceTemplate objects already in the cluster keep working — the
-annotation is simply ignored now; only chart-rendered values fail.
-
-## Upgrading to 0.2.0
-
-Chart 0.2.0 replaces the `api`, `gateway` and `portal` components with
-`backend` (the public API and the session gateway merged into one
-binary — `api-internal.<ns>.svc:9443` becomes `backend.<ns>.svc:9443`)
-and `frontend` (the static portal SPA server). The schema still accepts
-the old `api.*`/`gateway.*`/`portal.*`/`images.{api,gateway,portal}` keys
-only so the render can fail with a migration hint instead of a bare
-schema error. Mapping:
-
-| 0.1.x | 0.2.0 |
+| Removed | Replacement |
 |---|---|
-| `api.*` | `backend.*` (`internalTLS` → `tls.internal`, `clientCA`/`extraCA`/`operatorCN`/`sessionIdle`/`extraPortalOrigins` keep their names) |
-| `gateway.*` | `backend.*` (`tls` → `tls.session`, `metricsListen` → `metrics.{enabled,port}`, `id` → `gatewayID`; `mtls`/`trustedCA`/`service` removed — the gateway reaches the broker in-process and the session edge is exposed via ingress/gatewayApi) |
-| `portal.*` | `frontend.*` (`tls` keeps its name; `apiUpstream`/`service` removed — the edge routes `/v1` to the backend) |
-| `images.{api,gateway}` | `images.backend` |
-| `images.portal` | `images.frontend` |
-| `<c>.podDisruptionBudget` | `backend.pdb` / `frontend.pdb` (`operator.podDisruptionBudget` unchanged) |
-| `sessionHost` | `sessionDomain` — every workspace session gets its own `<label>.<sessionDomain>` host; the edge carries ONE wildcard route and needs ONE wildcard certificate for `*.<sessionDomain>` (DNS-01). `portalHost` must not equal or sit inside `sessionDomain` |
-| `backend.extraAllowedHosts` | `backend.controlHosts` — the session Host allowlist is the session domain itself plus the in-cluster Service names |
-
-New required value: `backend.loginKeys` — the AEAD key(s) sealing the
-`__Host-tcdi_login` cookie that makes OIDC logins survive replica
-failover. `backend` defaults to **2 replicas** with `maxUnavailable: 0`,
-`minAvailable: 1` PDB and preferred node anti-affinity — size your cluster
-accordingly.
-
-Upgrading from 0.1.x additionally requires: a wildcard DNS record and
-wildcard certificate for `*.<sessionDomain>` (the session listener
-terminates TLS per workspace host), a dedicated workspace node pool
-(`runtime.placement.*` — `allowSharedNodes: true` opts out for kind/dev),
-and the login-key Secret above. **Every open session drops once** — users
-re-launch from the portal after the upgrade — and database migrations
-011/012 are forward-only, so rollback means restoring the pre-upgrade
-database backup together with the 0.1.x chart. The full procedure,
-prerequisite checklist and post-upgrade checks are in
-`docs/runbooks/upgrade.md` → "Upgrading from v0.1 to v0.2".
+| `templates[].nodeSelector` | `templates[].spec.placement.nodeSelector` — a values file still carrying it fails the render via the values schema (`additionalProperties: false`) |
+| the implicit unrestricted ClusterOnly default | `networkProfile: ClusterOnly` is **restricted** by default — egress confined to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant`; `runtime.networkProfiles.clusterOnly.unrestricted: true` opts back into any-pod-any-namespace egress (see [ClusterOnly egress](#clusteronly-egress)) |
 
 ## Uninstall and CRD policy
 
@@ -258,7 +214,7 @@ the value to set instead:
 | `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
 | `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
 | `TCDI_TENANT_ADMIN_GROUPS` | `oidc.tenantAdminGroups` |
-| `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
+| `TCDI_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
 | `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
 | `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
 | `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
@@ -358,25 +314,37 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
 | `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps pre-v0.3.1 packed-by-scoring placement |
-| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | OPT-IN hardening for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress`). Empty keeps today's posture: egress to **any pod in any namespace on any port** — confinement then rests entirely on destination-side ingress policies (**deprecated default — flips to restricted in a future minor release (planned v1.3)**, see [ClusterOnly egress](#clusteronly-egress)). Set a label selector to confine ClusterOnly egress to pods in matching namespaces (e.g. the managed tenant namespaces, `matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}]`). DNS egress is unaffected |
+| `runtime.networkProfiles.clusterOnly.unrestricted` | `false` | opt-out of the restricted ClusterOnly default: `true` renders `--runtime-clusteronly-egress=unrestricted` — egress to **any pod in any namespace on any port**, confinement resting entirely on destination-side ingress policies — and install NOTES state the opt-out. Cannot be combined with the `egress*` selectors below (render fails). See [ClusterOnly egress](#clusteronly-egress) |
+| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | narrowing for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress=<json>`). Empty keeps the restricted default: egress to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant` (the managed namespaces). Set a label selector to confine ClusterOnly egress to pods in matching namespaces instead. DNS egress is unaffected |
 | `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
 | `runtime.networkProfiles.clusterOnly.egressPorts` | `[]` | optional port/protocol list on the same rule (`[{protocol: TCP, port: 443}]`); empty keeps every port open to the selected destinations |
 
 #### ClusterOnly egress
 
-`networkProfile: ClusterOnly` workspaces may reach **any pod in any
-namespace on any port** by default — confinement rests entirely on
-destination-side ingress policies, so any pod without its own
-NetworkPolicy is reachable. The opt-in
-`runtime.networkProfiles.clusterOnly.*` values render
-`--runtime-clusteronly-egress`, which rewrites every workspace's
+`networkProfile: ClusterOnly` workspaces are **restricted by default**:
+egress reaches pods in namespaces labelled
+`workspaces.cdi.tinyorbit.vn/tenant` — the managed namespaces — and no
+pod outside them. To opt back into any-pod-any-namespace egress (the
+pre-1.0 posture — confinement then rests entirely on destination-side
+ingress policies, so any pod without its own NetworkPolicy is
+reachable), set:
+
+```yaml
+runtime:
+  networkProfiles:
+    clusterOnly:
+      unrestricted: true    # renders --runtime-clusteronly-egress=unrestricted
+```
+
+Install NOTES state the opt-out on one line. `unrestricted` cannot be
+combined with the `egress*` selectors — the render fails.
+
+To narrow the destination set instead, the
+`runtime.networkProfiles.clusterOnly.egress*` values render
+`--runtime-clusteronly-egress=<json>`, which rewrites every workspace's
 ClusterOnly egress rule to a single narrowed peer — selector-matched
 namespaces/pods, optionally port-limited — and can never admit non-pod
-destinations. **Deprecated default:** the default flips to restricted
-egress in **a future minor release (planned v1.3)**; install NOTES warn
-while a seeded `ClusterOnly` template runs with the narrowing unset.
-Opt in now — e.g. confine ClusterOnly egress to the managed tenant
-namespaces:
+destinations:
 
 ```yaml
 runtime:
@@ -384,18 +352,15 @@ runtime:
     clusterOnly:
       egressNamespaceSelector:
         matchExpressions:
-          - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+          - {key: example.com/team, operator: Exists}
       egressPodSelector: {}          # optional second axis (pods in the selected namespaces)
       egressPorts:                   # optional port/protocol list (empty = every port)
         - {protocol: TCP, port: 443}
 ```
 
-To **keep today's unrestricted posture** after the release that flips
-it, pin the explicit unrestricted value its release notes will document
-— see `docs/releases/v1.1.0.md` "Upgrading". DNS resolution is
-unaffected either way: every profile keeps cluster DNS egress by design
-— for `Isolated` that is the only egress, a deliberate unidirectional
-channel.
+DNS resolution is unaffected either way: every profile keeps cluster
+DNS egress by design — for `Isolated` that is the only egress, a
+deliberate unidirectional channel.
 
 #### Nodes without AppArmor
 
@@ -710,8 +675,8 @@ binary), and the runtime `image:` as a literal digest-pinned
 from Docker Hub — never mirrored/republished). The digest must be a
 `build/kasm-catalog.txt` entry — CI enforces the catalog (digest pin,
 trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
-ships a complete `kasmweb/chromium` example (a **Desktop**-experience
-seed — the image is desktop-class under E13).
+ships a complete `kasmweb/chrome` example (a **Desktop**-experience
+seed; the image is browser-class but not on the empty allowlist).
 
 ### Node-profile installer (`nodeProfiles.install`) — default OFF
 

@@ -24,7 +24,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
@@ -195,7 +195,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("scheme: %w", err)
 	}
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("scheme: %w", err)
 	}
 	kc, err := client.New(rcfg, client.Options{Scheme: scheme})
@@ -339,7 +339,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// catch-all, so a lost event or an early leader change only delays the
 	// release back to the tick.
 	settle := provisioning.NewSettleTrigger()
-	wsInformer, err := kcache.GetInformer(ctx, &workspacev1alpha1.Workspace{})
+	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return fmt.Errorf("workspace informer: %w", err)
 	}
@@ -365,7 +365,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// Template ages for the workspace image-age fallback are read from the
 	// same informer cache (registered before Start so cache sync covers it):
 	// a page of old workspaces never costs API-server GETs.
-	if _, err := kcache.GetInformer(ctx, &workspacev1alpha1.WorkspaceTemplate{}); err != nil {
+	if _, err := kcache.GetInformer(ctx, &cdiv1.WorkspaceTemplate{}); err != nil {
 		return fmt.Errorf("template cache: %w", err)
 	}
 	cachedKC, err := client.New(rcfg, client.Options{Scheme: scheme, Cache: &client.CacheOptions{Reader: kcache}})
@@ -711,7 +711,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithDirectory(directory).
 		WithReleaseRetryAfter(b.recoveryTickETA).
 		WithAuditSink(appAudit)
-	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), directory, tenants)
+	quotaHandler := api.NewQuotaHandler(api.NewQuotaSource(db), tenants)
 
 	// Tenants declared in -tenant-quotas are config-managed: the admin quota
 	// API reports them but refuses writes with QUOTA_MANAGED_BY_CONFIG.
@@ -719,7 +719,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	for _, q := range declaredQuotas {
 		managedQuotas[q.TenantID] = true
 	}
-	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), directory, tenants, managedQuotas).
+	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), tenants, managedQuotas).
 		WithAuditSink(appAudit)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
@@ -942,10 +942,6 @@ func (a sessionStoreAdapter) Peek(ctx context.Context, id string) (*api.Session,
 	return storeSessionToAPI(rec), nil
 }
 
-func (a sessionStoreAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
-	return a.s.TouchPrincipal(ctx, principal)
-}
-
 func (a sessionStoreAdapter) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
 	return a.s.TouchSessionDigest(ctx, digestHex)
 }
@@ -970,16 +966,16 @@ func (a catalogAdapter) Resolve(ctx context.Context, tenantID, id string) (api.T
 	return catalogEntry(*e), nil
 }
 
-func (a catalogAdapter) List(ctx context.Context, tenantID, runtimeFilter, _ string, _ int) ([]api.TemplateEntry, string, error) {
+func (a catalogAdapter) List(ctx context.Context, tenantID, runtimeFilter string) ([]api.TemplateEntry, error) {
 	list, err := a.c.List(ctx, tenantID, runtimeFilter)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	out := make([]api.TemplateEntry, 0, len(list))
 	for _, e := range list {
 		out = append(out, catalogEntry(e))
 	}
-	return out, "", nil
+	return out, nil
 }
 
 // NewestInFamily implements api.FamilyCatalog for the updateAvailable

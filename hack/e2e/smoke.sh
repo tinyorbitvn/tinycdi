@@ -160,7 +160,7 @@ host_of() { sed -E 's|^[a-z]+://([^/:?]+).*|\1|' <<<"$1"; }
 origin_of() { sed -E 's|^([a-z]+://[^/?]+).*|\1|' <<<"$1"; }
 # path_of returns the URL path ("" when absent) without query/fragment.
 path_of() { sed -E 's|^[a-z]+://[^/]*||; s|[?#].*$||' <<<"$1"; }
-err_code() { jq -r '.code // "-"' "$RESP" 2>/dev/null || echo "-"; }
+err_code() { jq -r '.error.code // "-"' "$RESP" 2>/dev/null || echo "-"; }
 
 expect_code() { # expect_code <check> <url> <want> [curl args...]
   local check="$1" url="$2" want="$3"; shift 3
@@ -347,16 +347,16 @@ else
   fail "workspace-ready: not Ready after ${READY_TIMEOUT}s"
 fi
 
-c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID/stop" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-stop1")"
-[ "$c" = "200" ] || fail "workspace-stop: POST stop -> $c $(err_code)"
+c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID:stop" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-stop1")"
+[ "$c" = "202" ] || fail "workspace-stop: POST stop -> $c $(err_code)"
 if wait_phase "$WS1_ID" Stopped "$DELETE_TIMEOUT"; then
   pass "workspace-stop"
 else
   fail "workspace-stop: not Stopped after ${DELETE_TIMEOUT}s"
 fi
 
-c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID/start" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-start1")"
-[ "$c" = "200" ] || fail "workspace-start: POST start -> $c $(err_code)"
+c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID:start" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-start1")"
+[ "$c" = "202" ] || fail "workspace-start: POST start -> $c $(err_code)"
 if wait_phase "$WS1_ID" Ready "$READY_TIMEOUT"; then
   pass "workspace-start"
 elif [ "$?" = 2 ]; then
@@ -388,7 +388,7 @@ while [ "$q_i" -le "$MAX_WORKSPACES" ]; do
     WS_IDS+=("$qid"); q_i=$((q_i + 1)); continue
   fi
   if [ "$c" = "409" ] && [ "$(err_code)" = "QUOTA_EXHAUSTED" ]; then
-    reason="$(jq -r '.details.reason // "-"' "$RESP" 2>/dev/null || echo "-")"
+    reason="$(jq -r '.error.details.reason // "-"' "$RESP" 2>/dev/null || echo "-")"
     quota_note="refused QUOTA_EXHAUSTED reason=$reason"
     quota_result="pass"
   else

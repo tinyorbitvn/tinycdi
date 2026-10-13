@@ -22,10 +22,10 @@ DOMAIN="${TCDI_QS_DOMAIN:-tcdi.localtest.me}"
 IMAGES="${TCDI_QS_IMAGES:-build}"
 IMAGE_TAG="${TCDI_QS_IMAGE_TAG:-}"
 # What `helm upgrade --install` targets: the chart in this tree by default,
-# an OCI ref or a packaged .tgz when TCDI_QS_CHART says so (the N-1 -> N
-# upgrade test installs the previous release from the registry).
+# an OCI ref or a packaged .tgz when TCDI_QS_CHART says so (e.g. installing
+# an older release from the registry).
 # TCDI_QS_CHART_VERSION pins the OCI version; TCDI_QS_VALUES swaps the
-# primary values file (a previous release's chart knows fewer keys).
+# primary values file (another release's chart knows fewer keys).
 CHART="${TCDI_QS_CHART:-$REPO_ROOT/deploy/helm/tinycdi}"
 CHART_VERSION="${TCDI_QS_CHART_VERSION:-}"
 VALUES_FILE="${TCDI_QS_VALUES:-$QS_DIR/values.yaml}"
@@ -75,9 +75,9 @@ POSTGRES_IMAGE="docker.io/library/postgres:18.0@sha256:41fc5342eefba6cc2ccda736a
 # rt-20261012.1 — the first train carrying the entrypoint clipboard DLP
 # render, so the smoke's browser round-trip is mandatory on these pins),
 # digest-pinned exactly like a production values file would. The env
-# overrides exist for installing a previous release with ITS chart's pinned
-# runtime digests (upgrade test — set TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT
-# with them); leave them unset otherwise.
+# overrides exist for installing an older release with ITS chart's pinned
+# runtime digests (set TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT with them when
+# the train predates the entrypoint render); leave them unset otherwise.
 BROWSER_DIGEST="${TCDI_QS_BROWSER_DIGEST:-sha256:960ed53041e616ff544085b389360298a99bd31d2f0803f1fbcb4f0a682131c6}"
 BROWSER_BUILT_AT="${TCDI_QS_BROWSER_BUILT_AT:-2026-10-12T05:33:32Z}"
 DESKTOP_DIGEST="${TCDI_QS_DESKTOP_DIGEST:-sha256:7dbfe5a5247250000abeea01a943a7673bd97a5bb02dce049a3d190f03d8f4d8}"
@@ -98,7 +98,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # up.sh writes. The specs source that file verbatim (`set -a; . env`), so
 # %q-quoting is mandatory for any value that can contain whitespace or
 # shell syntax — an unquoted multi-word value makes the source run the
-# tail words as a command (exit 127 in the upgrade job).
+# tail words as a command.
 qs_env_kv() { printf '%s=%q\n' "$1" "$2"; }
 
 need() {

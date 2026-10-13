@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -56,12 +56,12 @@ func servingPod(t *testing.T, c client.Client, pod *corev1.Pod, uid types.UID) {
 // assertHeldReady asserts the with-pod hold shape: phase Ready — the
 // serving incarnation — with Degraded carrying the hold reason and every
 // status field the broker's serving paths read still populated.
-func assertHeldReady(t *testing.T, c client.Client, got *workspacesv1alpha1.Workspace, pod *corev1.Pod, reason string) {
+func assertHeldReady(t *testing.T, c client.Client, got *cdiv1.Workspace, pod *corev1.Pod, reason string) {
 	t.Helper()
-	if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+	if got.Status.Phase != cdiv1.WorkspacePhaseReady {
 		t.Fatalf("held workspace with a serving pod: phase=%q, want Ready", got.Status.Phase)
 	}
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(got, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reason {
 		t.Fatalf("want Degraded=True reason=%s, got %+v", reason, got.Status.Conditions)
 	}
@@ -139,8 +139,8 @@ func TestHoldWithPodStaysReady(t *testing.T) {
 		// held workspace still reports RuntimeReady/ConnectionReady — the
 		// reconnect surface ticket issuance rides on.
 		for _, typ := range []string{
-			workspacesv1alpha1.ConditionRuntimeReady,
-			workspacesv1alpha1.ConditionConnectionReady,
+			cdiv1.ConditionRuntimeReady,
+			cdiv1.ConditionConnectionReady,
 		} {
 			cc := condition(got, typ)
 			if cc == nil || cc.Status != metav1.ConditionTrue {
@@ -166,11 +166,11 @@ func TestHoldWithoutServingPodStaysPending(t *testing.T) {
 		podUID(t, c, pod, "pod-uid-6")
 
 		got := adoptReconcile(t, s, c, ws)
-		if got.Status.Phase != workspacesv1alpha1.WorkspacePhasePending {
+		if got.Status.Phase != cdiv1.WorkspacePhasePending {
 			t.Fatalf("held workspace with a not-serving pod: phase=%q, want Pending",
 				got.Status.Phase)
 		}
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonTemplateRevisionGone {
 			t.Fatalf("want Degraded=True reason=%s, got %+v",
@@ -186,7 +186,7 @@ func TestHoldWithoutServingPodStaysPending(t *testing.T) {
 		if got.Status.ServiceRef == nil {
 			t.Fatal("serviceRef empty although the pod's Service exists")
 		}
-		if rr := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rr == nil ||
+		if rr := condition(got, cdiv1.ConditionRuntimeReady); rr == nil ||
 			rr.Status != metav1.ConditionFalse {
 			t.Fatalf("RuntimeReady = %+v, want False for a not-serving pod", rr)
 		}
@@ -198,10 +198,10 @@ func TestHoldWithoutServingPodStaysPending(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).
 			WithObjects(ws).WithStatusSubresource(ws).Build()
 		got := adoptReconcile(t, s, c, ws)
-		if got.Status.Phase != workspacesv1alpha1.WorkspacePhasePending {
+		if got.Status.Phase != cdiv1.WorkspacePhasePending {
 			t.Fatalf("held workspace with no pod: phase=%q, want Pending", got.Status.Phase)
 		}
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonTemplateInvalid {
 			t.Fatalf("want Degraded=True reason=%s, got %+v",
@@ -228,10 +228,10 @@ func TestHoldWithoutServingPodStaysPending(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := adoptReconcile(t, s, c, ws)
-		if got.Status.Phase != workspacesv1alpha1.WorkspacePhasePending {
+		if got.Status.Phase != cdiv1.WorkspacePhasePending {
 			t.Fatalf("held workspace behind a foreign pod: phase=%q, want Pending", got.Status.Phase)
 		}
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonTemplateInvalid {
 			t.Fatalf("want Degraded=True reason=%s, got %+v",

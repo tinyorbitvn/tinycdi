@@ -602,10 +602,7 @@ func TestLogout_StoreDeleteFailureReturns503(t *testing.T) {
 	if resp.Header.Get("Retry-After") == "" {
 		t.Fatal("503 sign-out refusal carries no Retry-After")
 	}
-	var body Error
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
+	body := decodeErr(t, resp)
 	if body.Code != CodeUnavailable || !body.Retryable {
 		t.Fatalf("error body = %+v, want UNAVAILABLE retryable", body)
 	}

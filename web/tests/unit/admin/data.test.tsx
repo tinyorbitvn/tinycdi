@@ -1,38 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { makeAdmin, seedTenant } from "./helpers";
-import { adminDataRows, DataAdminPage } from "../../../src/admin/DataAdminPage";
+import { DataAdminPage } from "../../../src/admin/DataAdminPage";
 import { adminArea, tenancy, SEED_DATA_IDS, SEED_WORKSPACE_IDS } from "../../mock-api/admin.ts";
 import { dataArea } from "../../mock-api/data.ts";
 import { workspacesArea } from "../../mock-api/workspaces.ts";
-import type { ScopedRetainedData } from "../../../src/admin/api";
-
-function rec(overrides: Partial<ScopedRetainedData> = {}): ScopedRetainedData {
-  return {
-    id: "rd_x",
-    state: "Retained",
-    owner: { subject: "u1", displayName: "User One" },
-    sizeGib: 10,
-    runtime: "LinuxContainer",
-    sourceWorkspaceName: "src",
-    retainedAt: "2026-09-30T10:00:00Z",
-    purgeConfirmationNonce: "n",
-    ...overrides,
-  } as ScopedRetainedData;
-}
-
-describe("adminDataRows", () => {
-  it("drops Purged records and orders newest-retained first", () => {
-    const rows = adminDataRows([
-      rec({ id: "old", retainedAt: "2026-09-01T00:00:00Z" }),
-      rec({ id: "gone", state: "Purged", retainedAt: "2026-10-01T00:00:00Z" }),
-      rec({ id: "new", retainedAt: "2026-09-29T00:00:00Z" }),
-      rec({ id: "mid", retainedAt: "2026-09-15T00:00:00Z" }),
-    ]);
-    expect(rows.map((r) => r.id)).toEqual(["new", "mid", "old"]);
-  });
-});
 
 describe("DataAdminPage", () => {
   function setup() {
@@ -103,6 +76,44 @@ describe("DataAdminPage", () => {
 
     await screen.findByText("Purge scheduled.");
     expect(api.state.retained.get(SEED_DATA_IDS.grace)?.state).toBe("Purging");
+  }, 20000);
+
+  it("pages on the server: newest first, header clicks re-query, Load more follows the cursor", async () => {
+    const api = setup();
+    // 60 more Retained disks: two server pages at the default limit (50).
+    for (let i = 0; i < 60; i++) {
+      const id = `rd_01J4ZDBULK${String(i).padStart(2, "0")}X`;
+      api.state.retained.set(id, {
+        id,
+        state: "Retained",
+        owner: { subject: "user-01J4ZDGRC", displayName: "Grace Hopper" },
+        sizeGib: 1,
+        runtime: "LinuxContainer",
+        sourceWorkspaceName: `bulk-${String(i).padStart(2, "0")}`,
+        retainedAt: `2026-08-${String((i % 28) + 1).padStart(2, "0")}T00:00:00Z`,
+        purgeConfirmationNonce: "n",
+      });
+    }
+    renderWithApi(
+      <DataAdminPage now={Date.parse("2026-10-02T12:00:00Z")} pollIntervalMs={60_000} />,
+      api,
+    );
+    const table = await screen.findByRole("table", { name: "Retained data across the tenant" });
+    await within(table).findByRole("row", { name: new RegExp(SEED_DATA_IDS.grace) });
+    const lists = () =>
+      api.state.requests.filter((r) => r.method === "GET" && r.path === "/v1/data").map((r) => new URLSearchParams(r.query));
+    expect(lists()[0].get("sort")).toBe("-retainedAt");
+    expect(lists()[0].get("scope")).toBe("tenant");
+    expect(within(table).getAllByRole("row")).toHaveLength(1 + 50);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(within(table).getAllByRole("row").length).toBeGreaterThan(51));
+    expect(lists().at(-1)?.get("cursor")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(table).getByRole("button", { name: /From workspace/ }));
+    await waitFor(() => expect(lists().at(-1)?.get("sort")).toBe("name"));
+    expect(lists().at(-1)?.get("cursor")).toBeNull();
   }, 20000);
 
   it("renders the empty state when the tenant has no retained disks", async () => {

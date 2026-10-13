@@ -1,9 +1,9 @@
-import { Alert, Badge, Button, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Spinner } from "../design";
+import { Alert, Badge, Button, buttonClass, Card, DescriptionList, EmptyState, Grid, Page, Pagination, Spinner } from "../design";
 import { IconLayoutGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
 import { isPortalApiError } from "../api/errors";
 import { Link } from "../lib/router";
-import { useTemplates } from "../templates/useTemplates";
+import { useTemplatePages } from "../templates/useTemplates";
 import { TemplateIcon } from "../templates/TemplateIcon";
 import {
   clipboardPolicyLabel,
@@ -94,7 +94,7 @@ export function TemplateCard({ template }: { template: TemplateView }) {
 }
 
 export function CatalogPage() {
-  const list = useTemplates();
+  const list = useTemplatePages();
 
   if (isPortalApiError(list.error) && list.error.code === "UNAUTHENTICATED") {
     window.location.assign("/v1/login");
@@ -103,17 +103,26 @@ export function CatalogPage() {
 
   return (
     <Page title={t("templates.catalog.title")}>
-      <ErrorBanner error={list.error} onRetry={() => void list.refresh()} onDismiss={list.clearError} />
-      {list.loading && !list.data ? (
-        <Spinner label={t("templates.catalog.loading")} />
-      ) : (list.data ?? []).length === 0 ? (
+      <ErrorBanner error={list.error} onRetry={list.refresh} onDismiss={list.clearError} />
+      {!list.loaded ? (
+        list.loading ? <Spinner label={t("templates.catalog.loading")} /> : null
+      ) : list.items.length === 0 ? (
         <EmptyState icon={<IconLayoutGrid size={24} />} title={t("templates.catalog.empty")} />
       ) : (
-        <Grid min="md">
-          {(list.data ?? []).map((tpl) => (
-            <TemplateCard key={`${tpl.id}@${tpl.revision}`} template={tpl} />
-          ))}
-        </Grid>
+        <>
+          <Grid min="md">
+            {list.items.map((tpl) => (
+              <TemplateCard key={`${tpl.id}@${tpl.revision}`} template={tpl} />
+            ))}
+          </Grid>
+          <Pagination
+            loaded={list.items.length}
+            hasNext={list.hasNext}
+            loading={list.loading}
+            onLoadMore={list.next}
+            label={t("common.pagination.label", { name: t("templates.catalog.title") })}
+          />
+        </>
       )}
     </Page>
   );

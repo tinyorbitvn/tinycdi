@@ -40,7 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -51,7 +51,7 @@ var (
 
 func init() {
 	_ = clientgoscheme.AddToScheme(testScheme)
-	_ = workspacesv1alpha1.AddToScheme(testScheme)
+	_ = cdiv1.AddToScheme(testScheme)
 }
 
 // startEnv boots envtest once per test process with the project CRDs.
@@ -105,30 +105,30 @@ func newNamespace(t *testing.T, c client.Client) string {
 	return ns.Name
 }
 
-func newTemplate(t *testing.T, c client.Client, ns, name string, mutate func(*workspacesv1alpha1.WorkspaceTemplate)) {
+func newTemplate(t *testing.T, c client.Client, ns, name string, mutate func(*cdiv1.WorkspaceTemplate)) {
 	t.Helper()
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   "2026-09-a",
-			Runtime:    workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 1),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU:     resource.MustParse("500m"),
 				Memory:  resource.MustParse("512Mi"),
 				Storage: resource.MustParse("1Gi"),
 			},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 30 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 10 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 8 * time.Hour},
-				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+				DataPolicy:        cdiv1.DataPolicyEphemeral,
 			},
 		},
 	}
@@ -140,17 +140,21 @@ func newTemplate(t *testing.T, c client.Client, ns, name string, mutate func(*wo
 	}
 }
 
-func newWorkspace(t *testing.T, c client.Client, ns, name, tplName string, mutate func(*workspacesv1alpha1.Workspace)) *workspacesv1alpha1.Workspace {
+func newWorkspace(t *testing.T, c client.Client, ns, name, tplName string, mutate func(*cdiv1.Workspace)) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: tplName},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: tplName},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if mutate != nil {
@@ -162,9 +166,9 @@ func newWorkspace(t *testing.T, c client.Client, ns, name, tplName string, mutat
 	return ws
 }
 
-func getWorkspace(t *testing.T, c client.Client, key types.NamespacedName) *workspacesv1alpha1.Workspace {
+func getWorkspace(t *testing.T, c client.Client, key types.NamespacedName) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	if err := c.Get(context.Background(), key, ws); err != nil {
 		t.Fatalf("get workspace: %v", err)
 	}
@@ -228,7 +232,7 @@ func thePod(t *testing.T, c client.Client, ns string, uid types.UID) *corev1.Pod
 	return &pods.Items[0]
 }
 
-func condition(ws *workspacesv1alpha1.Workspace, typ string) *metav1.Condition {
+func condition(ws *cdiv1.Workspace, typ string) *metav1.Condition {
 	for i := range ws.Status.Conditions {
 		if ws.Status.Conditions[i].Type == typ {
 			return &ws.Status.Conditions[i]
@@ -323,10 +327,10 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 
 		// Not Ready while the kubelet has not reported readiness.
 		wsNow := getWorkspace(t, c, key)
-		if wsNow.Status.Phase == workspacesv1alpha1.WorkspacePhaseReady {
+		if wsNow.Status.Phase == cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase=Ready without a passing readiness probe")
 		}
-		if cond := condition(wsNow, workspacesv1alpha1.ConditionAdmitted); cond == nil ||
+		if cond := condition(wsNow, cdiv1.ConditionAdmitted); cond == nil ||
 			cond.Status != metav1.ConditionTrue {
 			t.Fatalf("Admitted condition missing/false: %+v", cond)
 		}
@@ -335,7 +339,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		markPodReady(t, c, pod)
 		reconcile(t, r, key)
 		wsNow = getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase=%q after ready pod, want Ready (conds=%v)",
 				wsNow.Status.Phase, wsNow.Status.Conditions)
 		}
@@ -348,7 +352,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		if wsNow.Status.ObservedGeneration != wsNow.Generation {
 			t.Fatalf("observedGeneration=%d want %d", wsNow.Status.ObservedGeneration, wsNow.Generation)
 		}
-		if cond := condition(wsNow, workspacesv1alpha1.ConditionRuntimeReady); cond == nil ||
+		if cond := condition(wsNow, cdiv1.ConditionRuntimeReady); cond == nil ||
 			cond.Status != metav1.ConditionTrue {
 			t.Fatalf("RuntimeReady condition not true: %+v", cond)
 		}
@@ -393,7 +397,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			t.Fatalf("foreign pod was mutated")
 		}
 		wsNow := getWorkspace(t, c, key)
-		if cond := condition(wsNow, workspacesv1alpha1.ConditionDegraded); cond == nil ||
+		if cond := condition(wsNow, cdiv1.ConditionDegraded); cond == nil ||
 			cond.Status != metav1.ConditionTrue {
 			t.Fatalf("expected Degraded=True on name conflict, conds=%v", wsNow.Status.Conditions)
 		}
@@ -402,7 +406,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 	t.Run("deletion timestamp prevents runtime creation", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-del", nil)
-		ws := newWorkspace(t, c, ns, "ws-del", "tpl-del", func(ws *workspacesv1alpha1.Workspace) {
+		ws := newWorkspace(t, c, ns, "ws-del", "tpl-del", func(ws *cdiv1.Workspace) {
 			// the applier's platform workspace-id label — teardown keys
 			// broker seams by it
 			ws.Labels = map[string]string{provisioning.LabelWorkspaceUID: "ws_it_del"}
@@ -430,7 +434,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			t.Fatalf("runtime children created under deletionTimestamp")
 		}
 		// Finalizer released -> apiserver removes the object.
-		if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); err == nil {
+		if err := c.Get(context.Background(), key, &cdiv1.Workspace{}); err == nil {
 			t.Fatalf("workspace still present after finalizer removal")
 		}
 	})
@@ -449,7 +453,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 
 		// Apply intent rev 2: Stop.
 		wsNow := getWorkspace(t, c, key)
-		wsNow.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+		wsNow.Spec.DesiredState = cdiv1.DesiredStateStopped
 		wsNow.Spec.IntentRevision = 2
 		if err := c.Update(context.Background(), wsNow); err != nil {
 			t.Fatalf("stop intent: %v", err)
@@ -458,7 +462,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			reconcile(t, r, key)
 		}
 		wsNow = getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseStopped {
 			t.Fatalf("phase=%q want Stopped", wsNow.Status.Phase)
 		}
 		if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 0 {
@@ -477,16 +481,16 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		wsNow = getWorkspace(t, c, key)
 		applied, _ := json.Marshal(AppliedIntent{
 			Revision:          5,
-			DesiredState:      workspacesv1alpha1.DesiredStateStopped,
+			DesiredState:      cdiv1.DesiredStateStopped,
 			RuntimeGeneration: 1,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 		})
 		wsNow.Annotations[AnnotationAppliedIntent] = string(applied)
 		if err := c.Update(context.Background(), wsNow); err != nil {
 			t.Fatalf("applied annotation: %v", err)
 		}
 		wsNow = getWorkspace(t, c, key)
-		wsNow.Spec.DesiredState = workspacesv1alpha1.DesiredStateRunning
+		wsNow.Spec.DesiredState = cdiv1.DesiredStateRunning
 		wsNow.Spec.IntentRevision = 3
 		if err := c.Update(context.Background(), wsNow); err != nil {
 			t.Fatalf("stale spec: %v", err)
@@ -499,7 +503,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 0 {
 			t.Fatalf("stale intent resurrected a pod")
 		}
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseStopped {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseStopped {
 			t.Fatalf("stale intent reversed desiredState, phase=%q", wsNow.Status.Phase)
 		}
 		if wsNow.Status.LastAppliedIntentRevision != 5 {
@@ -527,7 +531,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 
 		// Template snapshot is immutable for the running generation: deleting
 		// the template must not stop convergence.
-		if err := c.Delete(context.Background(), &workspacesv1alpha1.WorkspaceTemplate{
+		if err := c.Delete(context.Background(), &cdiv1.WorkspaceTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "tpl-repl", Namespace: ns},
 		}); err != nil {
 			t.Fatalf("delete template: %v", err)
@@ -576,14 +580,14 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		markPodReady(t, c, pod)
 		reconcile(t, rB, key)
 		wsNow := getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase=%q after restart, want Ready", wsNow.Status.Phase)
 		}
 	})
 
 	t.Run("boot deadline marks workspace failed", func(t *testing.T) {
 		ns := newNamespace(t, c)
-		newTemplate(t, c, ns, "tpl-deadline", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+		newTemplate(t, c, ns, "tpl-deadline", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.BootDeadline = metav1.Duration{Duration: time.Millisecond}
 		})
 		ws := newWorkspace(t, c, ns, "ws-deadline", "tpl-deadline", nil)
@@ -595,10 +599,10 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		reconcile(t, r, key)
 
 		wsNow := getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed {
 			t.Fatalf("phase=%q want Failed", wsNow.Status.Phase)
 		}
-		cond := condition(wsNow, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(wsNow, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonBootDeadlineExceeded {
 			t.Fatalf("want Degraded=True reason=%q, got %+v",
@@ -624,19 +628,19 @@ func TestBootDeadlineIncarnationAnchor(t *testing.T) {
 	staleApplied := map[string]string{}
 	raw, _ := json.Marshal(AppliedIntent{
 		Revision:          1,
-		DesiredState:      workspacesv1alpha1.DesiredStateRunning,
+		DesiredState:      cdiv1.DesiredStateRunning,
 		RuntimeGeneration: 1,
-		DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		DataPolicy:        cdiv1.DataPolicyEphemeral,
 		AppliedAt:         metav1.NewTime(time.Now().Add(-2 * time.Hour)),
 	})
 	staleApplied[AnnotationAppliedIntent] = string(raw)
 
 	t.Run("restored CR with stale appliedAt converges to Ready", func(t *testing.T) {
 		ns := newNamespace(t, c)
-		newTemplate(t, c, ns, "tpl-rst", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+		newTemplate(t, c, ns, "tpl-rst", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.BootDeadline = metav1.Duration{Duration: 400 * time.Millisecond}
 		})
-		ws := newWorkspace(t, c, ns, "ws-rst", "tpl-rst", func(ws *workspacesv1alpha1.Workspace) {
+		ws := newWorkspace(t, c, ns, "ws-rst", "tpl-rst", func(ws *cdiv1.Workspace) {
 			ws.Annotations = staleApplied
 		})
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -647,36 +651,36 @@ func TestBootDeadlineIncarnationAnchor(t *testing.T) {
 		// instead of instantly latching Failed/BootDeadlineExceeded.
 		reconcile(t, r, key)
 		wsNow := getWorkspace(t, c, key)
-		if wsNow.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed {
+		if wsNow.Status.Phase == cdiv1.WorkspacePhaseFailed {
 			t.Fatalf("restored workspace latched Failed (phase=%v, conds=%v)",
 				wsNow.Status.Phase, wsNow.Status.Conditions)
 		}
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseProvisioning &&
-			wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhasePending {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseProvisioning &&
+			wsNow.Status.Phase != cdiv1.WorkspacePhasePending {
 			t.Fatalf("phase=%q want Provisioning while runtime boots", wsNow.Status.Phase)
 		}
 		pod := thePod(t, c, ns, ws.UID)
 		markPodReady(t, c, pod)
 		reconcile(t, r, key)
 		wsNow = getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase=%q want Ready", wsNow.Status.Phase)
 		}
 		// Well past appliedAt+bootDeadline now — must stay Ready.
 		time.Sleep(450 * time.Millisecond)
 		reconcile(t, r, key)
 		wsNow = getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase=%q must stay Ready past stale-appliedAt deadline", wsNow.Status.Phase)
 		}
 	})
 
 	t.Run("genuinely stuck boot still fails after deadline", func(t *testing.T) {
 		ns := newNamespace(t, c)
-		newTemplate(t, c, ns, "tpl-stuck", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+		newTemplate(t, c, ns, "tpl-stuck", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.BootDeadline = metav1.Duration{Duration: 300 * time.Millisecond}
 		})
-		ws := newWorkspace(t, c, ns, "ws-stuck", "tpl-stuck", func(ws *workspacesv1alpha1.Workspace) {
+		ws := newWorkspace(t, c, ns, "ws-stuck", "tpl-stuck", func(ws *cdiv1.Workspace) {
 			ws.Annotations = staleApplied
 		})
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -684,29 +688,30 @@ func TestBootDeadlineIncarnationAnchor(t *testing.T) {
 
 		reconcile(t, r, key) // incarnation observed; deadline = incarnation start + 300ms
 		wsNow := getWorkspace(t, c, key)
-		if wsNow.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed {
+		if wsNow.Status.Phase == cdiv1.WorkspacePhaseFailed {
 			t.Fatalf("incarnation window must start at first observation, not stale appliedAt")
 		}
 		time.Sleep(400 * time.Millisecond)
 		reconcile(t, r, key) // pod never ready -> deadline exceeded
 		wsNow = getWorkspace(t, c, key)
-		if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed {
 			t.Fatalf("phase=%q want Failed after boot deadline", wsNow.Status.Phase)
 		}
-		if cond := condition(wsNow, workspacesv1alpha1.ConditionDegraded); cond == nil ||
+		if cond := condition(wsNow, cdiv1.ConditionDegraded); cond == nil ||
 			cond.Status != metav1.ConditionTrue || cond.Reason != ReasonBootDeadlineExceeded {
 			t.Fatalf("want Degraded=True reason=%q, got %+v", ReasonBootDeadlineExceeded, cond)
 		}
 	})
 }
 
-// TestTemplateCatalogFallback covers the F1 follow-through: a Workspace
-// whose spec.templateRef.name is a catalog base name resolves to the
-// newest published immutable revision ("<name>-<hash8>" carrying the
-// workspaces.cdi.tinyorbit.vn/catalog-name label) when no object bears the
-// exact name — e.g. a stopped workspace created before an upgrade that
-// swapped the seeded template objects.
-func TestTemplateCatalogFallback(t *testing.T) {
+// TestTemplateCatalogNameNotResolved pins the removed F1 follow-through:
+// a Workspace whose spec.templateRef.name is a catalog base name does
+// NOT resolve to the newest labeled revision — spec.templateRef names a
+// concrete WorkspaceTemplate object (the admission path stamps the
+// resolved revision name), so a base name is simply a reference to an
+// object that does not exist. The workspace fails closed
+// Degraded/TemplateInvalid and builds no pod.
+func TestTemplateCatalogNameNotResolved(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
 		if err := env.Stop(); err != nil {
@@ -715,7 +720,7 @@ func TestTemplateCatalogFallback(t *testing.T) {
 	}()
 
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-fb-aaaa0000", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-fb-aaaa0000", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Labels = map[string]string{provisioning.LabelCatalogName: "tpl-fb"}
 	})
 	// The workspace references the bare base name — no such object exists.
@@ -725,16 +730,15 @@ func TestTemplateCatalogFallback(t *testing.T) {
 
 	reconcile(t, r, key)
 	wsNow := getWorkspace(t, c, key)
-	if cond := condition(wsNow, workspacesv1alpha1.ConditionDegraded); cond != nil &&
-		cond.Status == metav1.ConditionTrue && cond.Reason == ReasonTemplateNotFound {
-		t.Fatalf("base-name templateRef must resolve via catalog-name label, got TemplateNotFound")
+	if cond := condition(wsNow, cdiv1.ConditionDegraded); cond == nil ||
+		cond.Status != metav1.ConditionTrue || cond.Reason != ReasonTemplateInvalid {
+		t.Fatalf("base-name templateRef must hold Degraded/TemplateInvalid, got %+v", wsNow.Status.Conditions)
 	}
-	pod := thePod(t, c, ns, ws.UID)
-	markPodReady(t, c, pod)
-	reconcile(t, r, key)
-	wsNow = getWorkspace(t, c, key)
-	if wsNow.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
-		t.Fatalf("phase=%q want Ready via fallback-resolved template", wsNow.Status.Phase)
+	if wsNow.Status.TemplateSnapshot != nil {
+		t.Fatalf("catalog-name resolution leaked a snapshot into status: %+v", wsNow.Status.TemplateSnapshot)
+	}
+	if got := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); got != 0 {
+		t.Fatalf("unresolvable templateRef built %d pods", got)
 	}
 }
 
@@ -753,7 +757,7 @@ func TestTemplateRejectedAppArmor(t *testing.T) {
 	}()
 
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-badaa", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-badaa", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Annotations = map[string]string{
 			linux.AnnotationAppArmorProfile: "unconfined",
 		}
@@ -766,7 +770,7 @@ func TestTemplateRejectedAppArmor(t *testing.T) {
 	reconcile(t, r, key)
 
 	wsNow := getWorkspace(t, c, key)
-	cond := condition(wsNow, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(wsNow, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue ||
 		cond.Reason != ReasonTemplateRejected {
 		t.Fatalf("want Degraded=True reason=%q, got %+v", ReasonTemplateRejected, cond)

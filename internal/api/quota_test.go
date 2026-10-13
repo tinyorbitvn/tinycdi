@@ -98,7 +98,7 @@ func newQuotaEnv(t *testing.T, src QuotaSource, dir Directory, tenants TenantRes
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
-	MountQuotaRoutes(mux, a, NewQuotaHandler(src, dir, tenants))
+	MountQuotaRoutes(mux, a, NewQuotaHandler(src, tenants))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
@@ -137,79 +137,35 @@ type quotaAmountsJSON struct {
 	StorageGib        int64 `json:"storageGib"`
 }
 
-type userUsageJSON struct {
-	Subject     string           `json:"subject"`
-	DisplayName string           `json:"displayName"`
-	Usage       quotaAmountsJSON `json:"usage"`
-}
-
 type quotaViewJSON struct {
 	Tenant string           `json:"tenant"`
 	Limits quotaAmountsJSON `json:"limits"`
 	Usage  quotaAmountsJSON `json:"usage"`
-	Users  []userUsageJSON  `json:"users"`
 }
 
-// TestQuota_AdminSeesAllUsers: a tenant-admin's users[] lists every owner
-// that has usage, each with subject + displayName (directory-backed, with
-// subject fallback).
-func TestQuota_AdminSeesAllUsers(t *testing.T) {
-	src := &fakeQuotaSource{}
-	dir := newFakeDirectory()
-	env := newQuotaEnv(t, src, dir, defaultTenants())
-	src.report = quotaFixture(env.issuer.URL())
-	dir.entries["tenant-a\x00"+env.issuer.URL()+"|user-a"] = store.DirectoryEntry{
-		OwnerRef: env.issuer.URL() + "|user-a", Subject: "user-a", DisplayName: "Alice A"}
-	env.issuer.Groups = []string{TenantAdminGroup}
-	sess, csrf := login(t, env, "admin-1")
-
-	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/quota", "", nil)
-	v := decodeBody[quotaViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d, want 200", r.StatusCode)
-	}
-	if v.Tenant != "tenant-a" {
-		t.Fatalf("tenant=%q, want tenant-a", v.Tenant)
-	}
-	if len(v.Users) != 2 {
-		t.Fatalf("users len=%d, want 2 (every owner)", len(v.Users))
-	}
-	if v.Users[0].Subject != "user-a" || v.Users[1].Subject != "user-b" {
-		t.Fatalf("subjects=%q,%q, want user-a,user-b", v.Users[0].Subject, v.Users[1].Subject)
-	}
-	if v.Users[0].DisplayName != "Alice A" {
-		t.Fatalf("displayName=%q, want directory name", v.Users[0].DisplayName)
-	}
-	if v.Users[1].DisplayName != "user-b" {
-		t.Fatalf("displayName=%q, want subject fallback", v.Users[1].DisplayName)
-	}
-}
-
-// TestQuota_UserSeesSelf: a regular user's users[] contains only their own
-// row even when other owners have usage.
-func TestQuota_UserSeesSelf(t *testing.T) {
+// TestQuota_NoUsersArray: GET /v1/quota is the caller's tenant snapshot —
+// admins and regular users alike get no per-user array (the paged admin
+// user-limits list owns per-principal rows), while tenant-wide numbers stay
+// visible.
+func TestQuota_NoUsersArray(t *testing.T) {
 	src := &fakeQuotaSource{}
 	env := newQuotaEnv(t, src, newFakeDirectory(), defaultTenants())
 	src.report = quotaFixture(env.issuer.URL())
-	sess, csrf := login(t, env, "user-b")
+	user, userCSRF := login(t, env, "user-b")
+	admin, adminCSRF := loginAdmin(t, env, "admin-a")
 
-	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/quota", "", nil)
-	v := decodeBody[quotaViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d, want 200", r.StatusCode)
-	}
-	if len(v.Users) != 1 {
-		t.Fatalf("users len=%d, want 1 (self only)", len(v.Users))
-	}
-	if v.Users[0].Subject != "user-b" {
-		t.Fatalf("subject=%q, want user-b", v.Users[0].Subject)
-	}
-	if v.Users[0].Usage.Workspaces != 1 {
-		t.Fatalf("self usage=%d workspaces, want 1", v.Users[0].Usage.Workspaces)
-	}
-	// Tenant-wide numbers are still visible to the caller.
-	if v.Usage.Workspaces != 3 {
-		t.Fatalf("tenant usage=%d, want 3", v.Usage.Workspaces)
+	for name, c := range map[string][2]*http.Cookie{"user": {user, userCSRF}, "admin": {admin, adminCSRF}} {
+		r := doReq(t, env, c[0], c[1], http.MethodGet, "/v1/quota", "", nil)
+		v := decodeBody[map[string]any](t, r)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status=%d, want 200", name, r.StatusCode)
+		}
+		if _, ok := v["users"]; ok {
+			t.Fatalf("%s: body still carries users: %v", name, v)
+		}
+		if u, _ := v["usage"].(map[string]any); u == nil || u["workspaces"] != float64(3) {
+			t.Fatalf("%s: tenant usage=%v, want workspaces 3", name, v["usage"])
+		}
 	}
 }
 

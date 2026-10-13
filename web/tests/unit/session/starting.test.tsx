@@ -68,7 +68,7 @@ function setup(workspace: WorkspaceFixture) {
       control.workspaceGets += 1;
       if (control.workspace401) {
         return new Response(
-          JSON.stringify({ code: "UNAUTHENTICATED", message: "expired", retryable: false }),
+          JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "expired", retryable: false } }),
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }

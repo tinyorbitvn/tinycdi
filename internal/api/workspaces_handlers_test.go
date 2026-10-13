@@ -117,11 +117,11 @@ func (f *fakeWorkspaceBackend) GetWorkspace(_ context.Context, tenantID, ownerSc
 	return rec, nil
 }
 
-func (f *fakeWorkspaceBackend) ListWorkspaces(_ context.Context, tenantID, ownerScope, phase, _ string, _ int) ([]provisioning.WorkspaceRecord, string, error) {
+func (f *fakeWorkspaceBackend) ListWorkspaces(_ context.Context, tenantID, ownerScope, phase string, p provisioning.ListPage) ([]provisioning.WorkspaceRecord, string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
-		return nil, "", f.listErr
+		return nil, "", "", f.listErr
 	}
 	var out []provisioning.WorkspaceRecord
 	for _, r := range f.recs {
@@ -136,7 +136,35 @@ func (f *fakeWorkspaceBackend) ListWorkspaces(_ context.Context, tenantID, owner
 		}
 		out = append(out, r)
 	}
-	return out, "", nil
+	recs, key, id := fakeKeysetPage(out, p, func(r provisioning.WorkspaceRecord) string {
+		if p.SortField == "name" {
+			return r.Name
+		}
+		return fakeSortTime(r.CreatedAt)
+	}, func(r provisioning.WorkspaceRecord) string { return r.ID })
+	return recs, key, id, nil
+}
+
+// fakeSortTime renders a timestamp key whose string order is time order.
+func fakeSortTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
+
+// fakeKeysetPage is the in-memory stand-in for the store's keyset query:
+// it orders rows by (key, id), skips to strictly after (AfterKey, AfterID)
+// and reports the last row's position when another page exists.
+func fakeKeysetPage[T any](rows []T, p provisioning.ListPage, key, id func(T) string) ([]T, string, string) {
+	pr := PageRequest{Limit: p.Limit, Sort: SortSpec{Field: p.SortField, Desc: p.Desc}}
+	if pr.Limit <= 0 {
+		pr.Limit = DefaultPageLimit
+	}
+	if p.AfterID != "" {
+		pr.After = &Cursor{Key: p.AfterKey, ID: p.AfterID}
+	}
+	page := pageInMemory(rows, pr, key, id)
+	if page.NextCursor == "" {
+		return page.Items, "", ""
+	}
+	last := page.Items[len(page.Items)-1]
+	return page.Items, key(last), id(last)
 }
 
 func (f *fakeWorkspaceBackend) SignalWorkspace(_ context.Context, tenantID, _, ownerScope, id, _ string, kind provisioning.IntentKind, _ []byte) (provisioning.WorkspaceRecord, error) {
@@ -176,7 +204,7 @@ func (f *fakeCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 				Runtime: e.Runtime, Experience: e.Experience,
 				CPUMillis: 2000, MemoryMiB: 4096, StorageGiB: 20,
 				IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
-				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled",
+				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled", NetworkProfile: "InternetOnly",
 				PublishedAt: time.Now().UTC(),
 			}, nil
 		}
@@ -184,13 +212,13 @@ func (f *fakeCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 	return TemplateEntry{}, ErrTemplateNotFound
 }
 
-func (f *fakeCatalog) List(_ context.Context, tenantID, _ string, _ string, _ int) ([]TemplateEntry, string, error) {
+func (f *fakeCatalog) List(_ context.Context, tenantID, _ string) ([]TemplateEntry, error) {
 	var out []TemplateEntry
 	for _, e := range f.entries[tenantID] {
 		e2, _ := f.Resolve(context.Background(), tenantID, "tpl_"+e.Name)
 		out = append(out, e2)
 	}
-	return out, "", nil
+	return out, nil
 }
 
 func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, tenants TenantResolver, opts ...func(*WorkspaceHandler)) *testEnv {
@@ -343,8 +371,8 @@ func TestWorkspaceOwnership(t *testing.T) {
 	sessB, csrfB := login(t, env, "user-b")
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/workspaces/" + created.ID},
-		{http.MethodPost, "/v1/workspaces/" + created.ID + "/start"},
-		{http.MethodPost, "/v1/workspaces/" + created.ID + "/stop"},
+		{http.MethodPost, "/v1/workspaces/" + created.ID + ":start"},
+		{http.MethodPost, "/v1/workspaces/" + created.ID + ":stop"},
 		{http.MethodDelete, "/v1/workspaces/" + created.ID},
 	} {
 		r := doReq(t, env, sessB, csrfB, tc.method, tc.path, "",
@@ -356,14 +384,14 @@ func TestWorkspaceOwnership(t *testing.T) {
 	}
 	// B's list must not contain A's workspace.
 	r = doReq(t, env, sessB, csrfB, http.MethodGet, "/v1/workspaces", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	r.Body.Close()
 	if len(list.Items) != 0 {
 		t.Fatalf("B sees %d workspaces, want 0", len(list.Items))
 	}
 	// A sees exactly their own.
 	r = doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/workspaces", "", nil)
-	list = decodeBody[WorkspaceList](t, r)
+	list = decodeBody[Page[WorkspaceView]](t, r)
 	r.Body.Close()
 	if len(list.Items) != 1 || list.Items[0].ID != created.ID {
 		t.Fatalf("A list = %+v", list.Items)
@@ -477,7 +505,7 @@ func TestStartQuotaExhaustedMapping(t *testing.T) {
 	be.signalErr = &provisioning.QuotaExceededError{
 		TenantID: "tenant-a", Dimension: "runningSlots", Limit: 1, Used: 1, Requested: 1,
 	}
-	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", "",
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+":start", "",
 		map[string]string{"Idempotency-Key": "key-q-start-0"})
 	if r.StatusCode != http.StatusConflict || decodeError(t, r) != string(CodeQuotaExhausted) {
 		t.Fatalf("start over quota: status=%d, want 409 QUOTA_EXHAUSTED", r.StatusCode)
@@ -533,7 +561,7 @@ func TestQuotaReleasePending(t *testing.T) {
 		TenantID: "tenant-a", Dimension: "runningSlots", Limit: 2, Used: 2, Requested: 1,
 		ReleasePending: true,
 	}
-	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", "",
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+":start", "",
 		map[string]string{"Idempotency-Key": "key-rel-0003"})
 	if r.StatusCode != http.StatusConflict || r.Header.Get("Retry-After") != "7" {
 		t.Fatalf("release_pending start: status=%d Retry-After=%q", r.StatusCode, r.Header.Get("Retry-After"))
@@ -613,7 +641,7 @@ func TestWorkspaceHandlerNoSecretsInLogs(t *testing.T) {
 
 // TestCreateRetainedDataRef_RoutesThroughAttach: a create carrying
 // retainedDataRef goes through the claimed attach path — the same
-// owner-scoped, state-checked transaction as POST /v1/data/{id}/attach —
+// owner-scoped, state-checked transaction as POST /v1/data/{id}:attach —
 // never the plain CreateWorkspace. The caller is the verified principal
 // and the owner scope follows admin membership.
 func TestCreateRetainedDataRef_RoutesThroughAttach(t *testing.T) {
@@ -761,34 +789,39 @@ func TestSignalBodyValidated(t *testing.T) {
 	}
 
 	for _, body := range []string{"not json", `{"a":1} {"b":2}`} {
-		r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", body,
+		r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+":start", body,
 			map[string]string{"Idempotency-Key": "key-sig-00002"})
 		if r.StatusCode != http.StatusBadRequest {
 			t.Fatalf("start body %q: status=%d, want 400", body, r.StatusCode)
 		}
 		r.Body.Close()
 	}
-	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", `{}`,
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+created.ID+":start", `{}`,
 		map[string]string{"Idempotency-Key": "key-sig-00003"})
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("start with {} body: status=%d, want 200", r.StatusCode)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf("start with {} body: status=%d, want 202", r.StatusCode)
 	}
 	r.Body.Close()
 }
 
-// TestListWorkspaces_BadPageToken: a malformed pageToken is a client error
-// (400 INVALID_REQUEST), not an internal one (SEC-I7).
-func TestListWorkspaces_BadPageToken(t *testing.T) {
+// TestListWorkspaces_BadCursor: a malformed cursor — undecodable, minted
+// under another sort, or carrying a key the store cannot parse — is a
+// client error (400 INVALID_REQUEST), not an internal one (SEC-I7).
+func TestListWorkspaces_BadCursor(t *testing.T) {
 	be := newFakeBackend()
-	be.listErr = fmt.Errorf("decode: %w", provisioning.ErrBadCursor)
 	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants())
 	sess, csrf := login(t, env, "user-a")
 
-	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?pageToken=not-a-token", "", nil)
-	if r.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad pageToken: status=%d, want 400", r.StatusCode)
+	other := NextCursor(SortSpec{Field: "name"}, "a", "ws_x")
+	for _, q := range []string{"cursor=not-a-token", "sort=-createdAt&cursor=" + other} {
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?"+q, "", nil)
+		if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+			t.Fatalf("%s: status=%d code=%s, want 400 INVALID_REQUEST", q, r.StatusCode, e.Code)
+		}
 	}
-	if e := errBody(t, r); e.Code != CodeInvalidRequest {
-		t.Fatalf("code=%s, want INVALID_REQUEST", e.Code)
+	be.listErr = fmt.Errorf("decode: %w", provisioning.ErrBadCursor)
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+		t.Fatalf("bad cursor key: status=%d code=%s, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
 	}
 }

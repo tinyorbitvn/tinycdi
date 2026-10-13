@@ -19,7 +19,16 @@
 //
 // Erasable-syntax TypeScript only (Node type-stripping runs it directly).
 
-import { CSRF_TOKEN_VALUE, err, ok, type MockArea, type MockContext, type MockRequest, type MockResponse } from "./core.ts";
+import {
+  byString,
+  checkIfMatch,
+  CSRF_TOKEN_VALUE,
+  err,
+  etagOf,
+  ok,
+  paginate,
+  WORKSPACE_SORTS,
+  type MockArea, type MockContext, type MockRequest, type MockResponse } from "./core.ts";
 import { makeWorkspace, readyWorkspace, TEMPLATE_BROWSER, TEMPLATE_LINUX } from "./fixtures.ts";
 import type { RetainedFixture, TemplateFixture, WorkspaceFixture } from "./fixtures.ts";
 
@@ -162,16 +171,21 @@ export interface Tenancy {
   // unlimited) and ownerRef ("iss|sub") -> max running workspaces.
   userLimitDefault: number | null;
   userLimitOverrides: Map<string, number>;
+  // ownerRef -> the override row's version (its ETag is "ul-<n>"); the
+  // default's version is userLimitDefaultVersion ("uld-<n>").
+  userLimitVersions: Map<string, number>;
+  userLimitDefaultVersion: number;
+  userLimitSeq: number;
   // Tenant session-policy ceiling (ADR 0010): undefined = no row —
-  // every channel FollowTemplate. spVersion is its change token; PUT
-  // echoes it via If-Match.
+  // every channel FollowTemplate. spVersion is its version; the ETag
+  // "sp-<n>" travels as a header and PUT echoes it via If-Match.
   sessionPolicy: { clipboard: string } | undefined;
   spVersion: number;
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
   managed: boolean;
-  // Limits-row change token — bumps on every quota write; PUT echoes it via
-  // If-Match (optimistic concurrency).
+  // Limits-row version — bumps on every quota write; its ETag "q-<n>"
+  // travels as a header and PUT echoes it via If-Match.
   version: number;
   // Record ID -> owner; records without an entry belong to the principal.
   owners: Map<string, Owner>;
@@ -185,7 +199,6 @@ export interface Tenancy {
   // Resolves ?scope: { mine } or an error response (403 tenant for
   // non-admins, 400 unknown value). Omitted = admin sees the tenant.
   resolveScope(req: MockRequest): { mine: boolean } | MockResponse;
-  paginate(req: MockRequest, items: unknown[]): MockResponse;
   takeFailure(req: MockRequest): MockResponse | undefined;
 }
 
@@ -211,6 +224,9 @@ export function tenancy(ctx: MockContext): Tenancy {
     userLimits: { ...DEFAULT_USER_LIMITS },
     userLimitDefault: null,
     userLimitOverrides: new Map(),
+    userLimitVersions: new Map(),
+    userLimitDefaultVersion: 1,
+    userLimitSeq: 1,
     sessionPolicy: undefined,
     spVersion: 1,
     managed: false,
@@ -230,14 +246,6 @@ export function tenancy(ctx: MockContext): Tenancy {
       if (scope === "mine") return { mine: true };
       if (scope) return err(400, "INVALID_REQUEST", `unknown scope ${scope}`, false);
       return { mine: !self.isAdmin() };
-    },
-    // Offset cursor; pageToken is opaque to clients.
-    paginate(req, items) {
-      const limit = Math.min(Math.max(Number(req.query.get("limit") ?? 50) || 50, 1), 200);
-      const offset = Number(req.query.get("pageToken") ?? 0) || 0;
-      const page = items.slice(offset, offset + limit);
-      const next = offset + limit < items.length ? String(offset + limit) : undefined;
-      return ok(200, next ? { items: page, nextPageToken: next } : { items: page });
     },
     takeFailure(req) {
       const f = self.failNext.get(req.path);
@@ -282,6 +290,9 @@ export function adminArea(ctx: MockContext): MockArea {
     t.userLimits = { ...DEFAULT_USER_LIMITS };
     t.userLimitDefault = null;
     t.userLimitOverrides = new Map();
+    t.userLimitVersions = new Map();
+    t.userLimitDefaultVersion = 1;
+    t.userLimitSeq = 1;
     t.sessionPolicy = undefined;
     t.spVersion = 1;
     t.managed = false;
@@ -332,31 +343,20 @@ export function adminArea(ctx: MockContext): MockArea {
     for (const b of perUser.values()) {
       for (const k of Object.keys(usage) as (keyof QuotaAmounts)[]) usage[k] += b.usage[k];
     }
-    const users = [...perUser.values()]
-      .filter((b) => t.isAdmin() || b.owner.subject === t.me.subject)
-      .map((b) => {
-        // users[].limit mirrors the contract: the owner's effective
-        // per-principal running limit, absent when unlimited.
-        const limit = t.userLimitOverrides.get(`${ISS}|${b.owner.subject}`) ?? t.userLimitDefault;
-        return {
-          subject: b.owner.subject,
-          displayName: b.owner.displayName,
-          usage: b.usage,
-          ...(limit === null ? {} : { limit }),
-        };
-      });
     return {
-      tenant: t.me.tenant,
-      configured: t.limits !== undefined,
-      ...(t.limits ? { limits: t.limits } : {}),
-      usage,
-      users,
+      perUser,
+      body: {
+        tenant: t.me.tenant,
+        configured: t.limits !== undefined,
+        ...(t.limits ? { limits: t.limits } : {}),
+        usage,
+      },
     };
   }
 
   function quota(): MockResponse {
     return ok(200, {
-      ...quotaBody(),
+      ...quotaBody().body,
       ...(t.userLimits ? { userLimits: t.userLimits } : {}),
     });
   }
@@ -365,10 +365,18 @@ export function adminArea(ctx: MockContext): MockArea {
   // and drops userLimits, which no store backs.
   function adminQuotaBody() {
     return {
-      ...quotaBody(),
+      ...quotaBody().body,
       source: t.managed ? "config" : t.limits !== undefined ? "api" : "none",
-      ...(t.limits !== undefined ? { version: String(t.version) } : {}),
     };
+  }
+
+  // The quota row's strong ETag; undefined while the tenant has no row.
+  function quotaTag(): string | undefined {
+    return t.limits === undefined ? undefined : etagOf(`q-${t.version}`);
+  }
+
+  function withTag(status: number, body: unknown, tag: string | undefined): MockResponse {
+    return ok(status, body, tag ? { etag: tag } : {});
   }
 
   // GET/PUT /v1/admin/tenants/{tenant}/quota — tenant-admin of the named
@@ -382,14 +390,14 @@ export function adminArea(ctx: MockContext): MockArea {
     if (req.method === "GET") {
       const failed = t.takeFailure(req);
       if (failed) return failed;
-      return ok(200, adminQuotaBody());
+      return withTag(200, adminQuotaBody(), quotaTag());
     }
     if (req.method === "PUT") {
       if (t.managed) {
         return err(409, "QUOTA_MANAGED_BY_CONFIG", "quota for this tenant is managed by configuration", false);
       }
-      const ifMatch = req.headers["if-match"];
-      if (!ifMatch) return err(400, "INVALID_REQUEST", "If-Match header required", false);
+      const pre = checkIfMatch(req, quotaTag());
+      if (pre) return pre;
       const b = req.body as Record<string, unknown> | null;
       const keys = ["runningWorkspaces", "cpuMillicores", "memoryMib", "storageGib"];
       const valid =
@@ -397,10 +405,6 @@ export function adminArea(ctx: MockContext): MockArea {
         keys.every((k) => Number.isInteger(b[k]) && (b[k] as number) >= 0) &&
         Object.keys(b).every((k) => keys.includes(k));
       if (!valid) return err(400, "INVALID_REQUEST", "invalid limits", false);
-      const match = t.limits === undefined ? ifMatch === "*" : ifMatch === String(t.version);
-      if (!match) {
-        return err(412, "PRECONDITION_FAILED", "the quota changed since it was read", false);
-      }
       t.version += 1;
       t.limits = {
         workspaces: 0,
@@ -409,25 +413,27 @@ export function adminArea(ctx: MockContext): MockArea {
         memoryMib: b!.memoryMib as number,
         storageGib: b!.storageGib as number,
       };
-      return ok(200, adminQuotaBody());
+      return withTag(200, adminQuotaBody(), quotaTag());
     }
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
-  // GET/PUT /v1/admin/tenants/{tenant}/user-limits[...] — tenant-admin of
-  // the named tenant only. The view unions principals with usage and
-  // stored overrides; PUT upserts (`limit: null` clears back to inherit).
-  function userLimitsBody() {
+  // /v1/admin/tenants/{tenant}/user-limits — tenant-admin of the named
+  // tenant only. GET pages one item per principal with usage or a stored
+  // override (sort `ownerRef`); PUT/DELETE .../{ownerRef} write one
+  // override under If-Match (its etag, or `*` to create); GET/PUT
+  // .../default read and write the tenant fallback under its own ETag.
+  function userLimitEntries() {
     const rows = new Map<
       string,
       { ownerRef: string; subject: string; displayName: string; running: number }
     >();
-    for (const u of quotaBody().users) {
-      rows.set(ownerRefOf(u.subject), {
-        ownerRef: ownerRefOf(u.subject),
-        subject: u.subject,
-        displayName: u.displayName,
-        running: u.usage.runningWorkspaces,
+    for (const b of quotaBody().perUser.values()) {
+      rows.set(ownerRefOf(b.owner.subject), {
+        ownerRef: ownerRefOf(b.owner.subject),
+        subject: b.owner.subject,
+        displayName: b.owner.displayName,
+        running: b.usage.runningWorkspaces,
       });
     }
     for (const ref of t.userLimitOverrides.keys()) {
@@ -441,30 +447,56 @@ export function adminArea(ctx: MockContext): MockArea {
         running: 0,
       });
     }
+    return [...rows.values()].map((u) => entryOf(u));
+  }
+
+  function overrideTag(ref: string): string | undefined {
+    const v = t.userLimitVersions.get(ref);
+    return t.userLimitOverrides.has(ref) && v !== undefined ? etagOf(`ul-${v}`) : undefined;
+  }
+
+  function entryOf(u: { ownerRef: string; subject: string; displayName: string; running: number }) {
+    const tag = overrideTag(u.ownerRef);
     return {
-      tenant: t.me.tenant,
-      default: t.userLimitDefault,
-      users: [...rows.values()].map((u) => ({
-        ...u,
-        limit: t.userLimitOverrides.get(u.ownerRef) ?? null,
-        effective: t.userLimitOverrides.get(u.ownerRef) ?? t.userLimitDefault,
-      })),
+      ...u,
+      limit: t.userLimitOverrides.get(u.ownerRef) ?? null,
+      effective: t.userLimitOverrides.get(u.ownerRef) ?? t.userLimitDefault,
+      ...(tag ? { etag: tag } : {}),
     };
   }
 
-  function adminUserLimits(req: MockRequest, tenant: string, isDefault: boolean): MockResponse {
+  function defaultTag(): string {
+    return etagOf(`uld-${t.userLimitDefaultVersion}`);
+  }
+
+  function setOverride(ref: string, limit: number | null): void {
+    if (limit === null) {
+      t.userLimitOverrides.delete(ref);
+      t.userLimitVersions.delete(ref);
+      return;
+    }
+    t.userLimitOverrides.set(ref, limit);
+    t.userLimitVersions.set(ref, ++t.userLimitSeq);
+  }
+
+  function adminUserLimits(req: MockRequest, tenant: string, sub: string | undefined): MockResponse {
     if (!t.isAdmin() || tenant !== t.me.tenant) {
       return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
     }
-    if (req.method === "GET" && !isDefault) {
+    if (sub === undefined) {
+      if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
       const failed = t.takeFailure(req);
       if (failed) return failed;
-      return ok(200, userLimitsBody());
+      return paginate(req, userLimitEntries(), { ownerRef: byString((u) => u.ownerRef) }, "ownerRef", (u) => u.ownerRef);
     }
-    if (req.method === "PUT") {
-      const b = req.body as Record<string, unknown> | null;
-      if (b === null) return err(400, "INVALID_REQUEST", "invalid request body", false);
-      const limit = b.limit;
+    if (sub === "default") {
+      if (req.method === "GET") {
+        return withTag(200, { tenant: t.me.tenant, limit: t.userLimitDefault }, defaultTag());
+      }
+      if (req.method !== "PUT") return err(405, "INVALID_REQUEST", "method not allowed", false);
+      const pre = checkIfMatch(req, defaultTag());
+      if (pre) return pre;
+      const limit = req.body?.limit;
       const lv =
         limit === null || limit === undefined
           ? null
@@ -472,17 +504,37 @@ export function adminArea(ctx: MockContext): MockArea {
             ? (limit as number)
             : undefined;
       if (lv === undefined) return err(400, "INVALID_REQUEST", "invalid limit", false);
-      if (isDefault) {
-        t.userLimitDefault = lv;
-      } else {
-        const ref = b.ownerRef;
-        if (typeof ref !== "string" || !ref.includes("|") || ref.endsWith("|") || ref.startsWith("|")) {
-          return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
-        }
-        if (lv === null) t.userLimitOverrides.delete(ref);
-        else t.userLimitOverrides.set(ref, lv);
+      t.userLimitDefault = lv;
+      t.userLimitDefaultVersion += 1;
+      return withTag(200, { tenant: t.me.tenant, limit: t.userLimitDefault }, defaultTag());
+    }
+    let ref: string;
+    try {
+      ref = decodeURIComponent(sub);
+    } catch {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    if (!ref.includes("|") || ref.endsWith("|") || ref.startsWith("|")) {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    if (req.method === "DELETE") {
+      const current = overrideTag(ref);
+      if (current === undefined) return err(404, "NOT_FOUND", "no override for this principal", false);
+      const pre = checkIfMatch(req, current);
+      if (pre) return pre;
+      setOverride(ref, null);
+      return { status: 204, headers: {}, body: undefined };
+    }
+    if (req.method === "PUT") {
+      const pre = checkIfMatch(req, overrideTag(ref));
+      if (pre) return pre;
+      const limit = req.body?.limit;
+      if (!Number.isInteger(limit) || (limit as number) < 0) {
+        return err(400, "INVALID_REQUEST", "limit must be a whole number >= 0", false);
       }
-      return ok(200, userLimitsBody());
+      setOverride(ref, limit as number);
+      const row = userLimitEntries().find((u) => u.ownerRef === ref)!;
+      return withTag(200, row, overrideTag(ref));
     }
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
@@ -498,8 +550,12 @@ export function adminArea(ctx: MockContext): MockArea {
       clipboard: t.sessionPolicy?.clipboard ?? "FollowTemplate",
       fileTransfer: { mode: "FollowTemplate", maxFileBytes: null },
       source: t.sessionPolicy ? "TenantRow" : "FollowTemplate",
-      ...(t.sessionPolicy ? { version: `sp-${t.spVersion}` } : {}),
     };
+  }
+
+  // The policy row's strong ETag; undefined while the tenant has no row.
+  function sessionPolicyTag(): string | undefined {
+    return t.sessionPolicy ? etagOf(`sp-${t.spVersion}`) : undefined;
   }
 
   function adminSessionPolicy(req: MockRequest, tenant: string): MockResponse {
@@ -509,11 +565,11 @@ export function adminArea(ctx: MockContext): MockArea {
     if (req.method === "GET") {
       const failed = t.takeFailure(req);
       if (failed) return failed;
-      return ok(200, sessionPolicyBody());
+      return withTag(200, sessionPolicyBody(), sessionPolicyTag());
     }
     if (req.method === "PUT") {
-      const ifMatch = req.headers["if-match"];
-      if (!ifMatch) return err(400, "INVALID_REQUEST", "If-Match header required", false);
+      const pre = checkIfMatch(req, sessionPolicyTag());
+      if (pre) return pre;
       const b = req.body as Record<string, unknown> | null;
       const CEILINGS = ["FollowTemplate", "Disabled", "Send", "Receive", "Bidirectional"];
       const clip = b?.clipboard;
@@ -524,17 +580,13 @@ export function adminArea(ctx: MockContext): MockArea {
       if (ft !== undefined && ((ft.mode ?? "FollowTemplate") !== "FollowTemplate" || (ft.maxFileBytes ?? null) !== null)) {
         return err(400, "INVALID_REQUEST", "fileTransfer is inert in this version; only FollowTemplate is accepted", false);
       }
-      const match = t.sessionPolicy === undefined ? ifMatch === "*" : ifMatch === `sp-${t.spVersion}`;
-      if (!match) {
-        return err(412, "PRECONDITION_FAILED", "the session policy changed since it was read", false);
-      }
       if (clip === "FollowTemplate") {
         t.sessionPolicy = undefined;
       } else {
         t.sessionPolicy = { clipboard: clip };
       }
       t.spVersion += 1;
-      return ok(200, sessionPolicyBody());
+      return withTag(200, sessionPolicyBody(), sessionPolicyTag());
     }
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
@@ -543,12 +595,14 @@ export function adminArea(ctx: MockContext): MockArea {
     const scope = t.resolveScope(req);
     if ("status" in scope) return scope;
     const phase = req.query.get("phase");
-    let items = [...state.workspaces.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    let items = [...state.workspaces.values()];
     if (scope.mine) items = items.filter((w) => t.ownerOf(w.id).subject === t.me.subject);
     if (phase) items = items.filter((w) => w.phase === phase);
-    return t.paginate(
+    return paginate(
       req,
       items.map((w) => ({ ...w, owner: t.ownerOf(w.id) })),
+      WORKSPACE_SORTS,
+      "-createdAt",
     );
   }
 
@@ -556,8 +610,8 @@ export function adminArea(ctx: MockContext): MockArea {
     const { method, path } = req;
     const mQuota = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/quota$/);
     if (mQuota) return adminQuota(req, mQuota[1]);
-    const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(\/default)?$/);
-    if (mUL) return adminUserLimits(req, mUL[1], mUL[2] !== undefined);
+    const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(?:\/([^/]+))?$/);
+    if (mUL) return adminUserLimits(req, mUL[1], mUL[2]);
     const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
     if (mSP) return adminSessionPolicy(req, mSP[1]);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
@@ -571,7 +625,7 @@ export function adminArea(ctx: MockContext): MockArea {
       if (path === "/v1/quota") return quota();
       return listWorkspaces(req);
     }
-    const m = path.match(/^\/v1\/workspaces\/([^/]+)(\/[a-z]+)?$/);
+    const m = path.match(/^\/v1\/workspaces\/([^/:]+)([/:][a-z]+)?$/);
     if (!m) return undefined;
     const ws = state.workspaces.get(m[1]);
     if (!ws) return undefined;
@@ -604,14 +658,14 @@ export function adminArea(ctx: MockContext): MockArea {
       case "/_control/admin/userlimits":
         if (req.body?.default !== undefined) {
           t.userLimitDefault = req.body.default === null ? null : Number(req.body.default);
+          t.userLimitDefaultVersion += 1;
         }
         if (req.body?.overrides) {
           for (const [ref, v] of Object.entries(req.body.overrides as Record<string, number | null>)) {
-            if (v === null) t.userLimitOverrides.delete(ref);
-            else t.userLimitOverrides.set(ref, v);
+            setOverride(ref, v);
           }
         }
-        return ok(200, userLimitsBody());
+        return ok(200, { default: t.userLimitDefault, items: userLimitEntries() });
       case "/_control/admin/session-policy":
         if (req.body?.clipboard === null || req.body?.clipboard === "FollowTemplate") {
           t.sessionPolicy = undefined;

@@ -13,7 +13,7 @@ function retainedRow(): HTMLElement {
 }
 
 describe("data attach", () => {
-  it("posts to /v1/data/{id}/attach with an idempotency key and navigates to the new workspace", async () => {
+  it("posts to /v1/data/{id}:attach with an idempotency key and navigates to the new workspace", async () => {
     const api = createMockApi();
     loginCookies();
     renderWithApi(<DataListPage />, api);
@@ -34,7 +34,7 @@ describe("data attach", () => {
     );
 
     const attachReq = api.state.requests.find((r) =>
-      r.path.endsWith(`/data/${RETAINED_DISK.id}/attach`),
+      r.path.endsWith(`/data/${RETAINED_DISK.id}:attach`),
     );
     expect(attachReq).toBeTruthy();
     expect(attachReq!.headers["idempotency-key"]).toBeTruthy();
@@ -72,7 +72,7 @@ describe("data attach", () => {
       expect(window.location.pathname).toMatch(/^\/workspaces\/ws_/),
     );
     const attachReqs = api.state.requests.filter((r) =>
-      r.path.endsWith(`/data/${RETAINED_DISK.id}/attach`),
+      r.path.endsWith(`/data/${RETAINED_DISK.id}:attach`),
     );
     expect(attachReqs).toHaveLength(2);
     expect(attachReqs[0]!.headers["idempotency-key"]).toBe(
@@ -114,20 +114,20 @@ describe("data attach", () => {
     const calls: string[] = [];
     let refused = true;
     api.handle = (req) => {
-      if (req.method === "POST" && req.path.endsWith("/attach")) {
+      if (req.method === "POST" && req.path.endsWith(":attach")) {
         calls.push(req.headers["idempotency-key"] ?? "");
         if (refused) {
           refused = false;
           return {
             status: 409,
             headers: { "content-type": "application/json", "retry-after": "30" },
-            body: {
+            body: { error: {
               code: "QUOTA_EXHAUSTED",
               message: "quota exhausted",
               retryable: true,
               requestId: "req_rp",
               details: { reason: "release_pending" },
-            },
+            } },
           };
         }
       }
@@ -160,16 +160,16 @@ describe("data attach", () => {
     loginCookies();
     const origHandle = api.handle;
     api.handle = (req) => {
-      if (req.method === "POST" && req.path.endsWith("/attach")) {
+      if (req.method === "POST" && req.path.endsWith(":attach")) {
         return {
           status: 409,
           headers: { "content-type": "application/json" },
-          body: {
+          body: { error: {
             code: "QUOTA_EXHAUSTED",
             message: "quota exhausted",
             retryable: false,
             requestId: "req_qe",
-          },
+          } },
         };
       }
       return origHandle(req);

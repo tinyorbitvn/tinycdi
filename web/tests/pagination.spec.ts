@@ -1,10 +1,11 @@
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
 
-// Client-side table pagination + sortable columns (T5) against the contract
-// mock: 60 workspaces upserted through /_control/workspaces/{id} push the
-// admin table past one page; page-size change, filter reset and a two-way
-// sort are exercised end to end, plus axe on both themes and vi.
+// Server-side table paging + sorting against the contract mock: 60
+// workspaces upserted through /_control/workspaces/{id} push the admin
+// table past one server page (limit 50). "Load more" follows the cursor,
+// a header click re-queries the server under the new sort, plus axe on
+// both themes and vi.
 const MOCK = process.env.PW_MOCK_API ?? "http://127.0.0.1:4310";
 const BULK = 60;
 // 1 base + 3 admin-seed + 60 bulk workspaces.
@@ -42,54 +43,50 @@ test.beforeEach(async ({ request }) => {
   expect(res.ok()).toBeTruthy();
 });
 
-test("pages through 60+ tenant workspaces: next, number, page size, filter reset", async ({
+test("loads 60+ tenant workspaces page by page: Load more, filter over loaded rows", async ({
   page,
   request,
 }) => {
   await makeAdmin(request);
   await seedWorkspaces(request);
+  const lists: URL[] = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (r.method() === "GET" && u.pathname === "/v1/workspaces") lists.push(u);
+  });
   await login(page, "/admin/workspaces");
   await expect(page.getByRole("heading", { name: "Tenant workspaces" })).toBeVisible();
 
+  const table = page.getByRole("table", { name: "Tenant workspaces" });
   const nav = page.getByRole("navigation", { name: "Tenant workspaces pages" });
-  const status = page.getByText(/^Showing \d+–\d+ of \d+$/);
-  await expect(status).toHaveText(`Showing 1–50 of ${TOTAL}`);
-  await expect(nav.getByRole("button", { name: "Page 1" })).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
+  await expect(nav.getByText("Showing the first 50")).toBeVisible();
+  await expect(table.getByRole("row")).toHaveCount(1 + 50);
+  expect(lists[0]?.searchParams.get("sort")).toBe("-createdAt");
+  expect(lists[0]?.searchParams.get("scope")).toBe("tenant");
 
-  // Next advances; a numbered page returns.
-  await nav.getByRole("button", { name: "Next" }).click();
-  await expect(status).toHaveText(`Showing 51–${TOTAL} of ${TOTAL}`);
-  await expect(nav.getByRole("button", { name: "Page 2" })).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
-  await nav.getByRole("button", { name: "Page 1" }).click();
-  await expect(status).toHaveText(`Showing 1–50 of ${TOTAL}`);
-
-  // Previous on page 1 is disabled; the strip offers every page at this size.
-  await expect(nav.getByRole("button", { name: "Previous" })).toBeDisabled();
-  await page.getByRole("combobox", { name: "Rows per page" }).selectOption("25");
-  await expect(status).toHaveText(`Showing 1–25 of ${TOTAL}`);
-  await expect(nav.getByRole("button", { name: "Page 3" })).toBeVisible();
-
-  // Keyboard: Enter on the focused Next button turns the page.
-  await nav.getByRole("button", { name: "Next" }).focus();
+  // Load more (a real button: Enter activates it) appends the next server
+  // page; the last page drops the control.
+  await nav.getByRole("button", { name: "Load more" }).focus();
   await page.keyboard.press("Enter");
-  await expect(status).toHaveText(`Showing 26–50 of ${TOTAL}`);
+  await expect(nav.getByText(`Showing all ${TOTAL}`)).toBeVisible();
+  await expect(table.getByRole("row")).toHaveCount(1 + TOTAL);
+  await expect(nav.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  expect(lists.at(-1)?.searchParams.get("cursor")).toBeTruthy();
 
-  // A search filter narrows the list and brings the view back to page 1.
+  // The search narrows the rows loaded so far.
   await page.getByRole("searchbox", { name: "Filter" }).fill("grace");
-  await expect(status).toHaveText("Showing 1–2 of 2");
-  await expect(nav.getByRole("button", { name: "Page 2" })).toHaveCount(0);
   await expect(page.getByRole("row", { name: /grace-analysis/ })).toBeVisible();
+  await expect(table.getByRole("row")).toHaveCount(1 + 2);
 });
 
-test("sorts the workspace column in both directions", async ({ page, request }) => {
+test("sorts the workspace column in both directions on the server", async ({ page, request }) => {
   await makeAdmin(request);
   await seedWorkspaces(request);
+  const sorts: (string | null)[] = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (r.method() === "GET" && u.pathname === "/v1/workspaces") sorts.push(u.searchParams.get("sort"));
+  });
   await login(page, "/admin/workspaces");
   const table = page.getByRole("table", { name: "Tenant workspaces" });
   await expect(table.getByRole("row").nth(1)).toBeVisible();
@@ -102,21 +99,26 @@ test("sorts the workspace column in both directions", async ({ page, request }) 
   await nameHeader.getByRole("button").click();
   await expect(nameHeader).toHaveAttribute("aria-sort", "ascending");
   await expect.poll(firstRowName).toContain("grace-analysis");
+  expect(sorts.at(-1)).toBe("name");
 
   // Same column again flips to descending: research-desktop leads.
   await nameHeader.getByRole("button").click();
   await expect(nameHeader).toHaveAttribute("aria-sort", "descending");
   await expect.poll(firstRowName).toContain("research-desktop");
+  expect(sorts.at(-1)).toBe("-name");
 
-  // The sorted order holds across the page boundary.
+  // The order holds across the page boundary: the next page continues it.
   await page.getByRole("navigation", { name: "Tenant workspaces pages" })
-    .getByRole("button", { name: "Next" })
+    .getByRole("button", { name: "Load more" })
     .click();
-  await expect.poll(firstRowName).not.toContain("research-desktop");
+  await expect(table.getByRole("row")).toHaveCount(1 + TOTAL);
+  await expect.poll(() => table.getByRole("row").last().getByRole("rowheader").textContent()).toContain(
+    "grace-analysis",
+  );
 });
 
 for (const theme of ["light", "dark"] as const) {
-  test(`axe [${theme}]: paginated admin workspaces has no serious/critical violations`, async ({
+  test(`axe [${theme}]: server-paged admin workspaces has no serious/critical violations`, async ({
     page,
     request,
     context,
@@ -126,7 +128,7 @@ for (const theme of ["light", "dark"] as const) {
     await makeAdmin(request);
     await seedWorkspaces(request);
     await login(page, "/admin/workspaces");
-    await expect(page.getByText(`Showing 1–50 of ${TOTAL}`)).toBeVisible();
+    await expect(page.getByText("Showing the first 50")).toBeVisible();
     const results = await new AxeBuilder({ page }).analyze();
     const bad = results.violations.filter(
       (v) => v.impact === "serious" || v.impact === "critical",
@@ -152,10 +154,9 @@ test.describe("locale: vi", () => {
     await expect(page.locator("html")).toHaveAttribute("lang", "vi");
 
     const nav = page.getByRole("navigation", { name: "Phân trang Workspace của tenant" });
-    await expect(page.getByText(`Hiển thị 1–50 trên ${TOTAL}`)).toBeVisible();
-    await expect(nav.getByRole("button", { name: "Trang 2" })).toBeVisible();
-    await nav.getByRole("button", { name: "Sau" }).click();
-    await expect(page.getByText(`Hiển thị 51–${TOTAL} trên ${TOTAL}`)).toBeVisible();
+    await expect(nav.getByText("Đang hiển thị 50 mục đầu tiên")).toBeVisible();
+    await nav.getByRole("button", { name: "Tải thêm" }).click();
+    await expect(nav.getByText(`Đang hiển thị tất cả ${TOTAL} mục`)).toBeVisible();
 
     const results = await new AxeBuilder({ page }).analyze();
     const bad = results.violations.filter(

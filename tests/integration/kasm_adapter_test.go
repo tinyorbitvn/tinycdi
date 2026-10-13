@@ -10,7 +10,7 @@
 // browser-shim/policy subPath mounts, and readOnlyRootFilesystem.
 //
 // Image-bound suite, gated on TCDI_IT_KASM_IMAGE (a digest-pinned
-// kasmweb/* ref, e.g. kasmweb/chromium@sha256:… — unset = skip). The pull
+// kasmweb/* ref, e.g. kasmweb/chrome@sha256:… — unset = skip). The pull
 // is ~1–2 GB compressed / ~4.5 GB uncompressed, so the test first checks
 // for >= 10 GiB of free disk and removes the pulled image on exit when it
 // did the pulling. The adapter image defaults to tcdi/kasm-adapter:it
@@ -19,7 +19,7 @@
 // Containers/volumes are labelled tcdi.it=w15 and prefixed tcdi-it-w15-;
 // everything is removed on exit.
 //
-//	Run:  TCDI_IT_KASM_IMAGE=kasmweb/chromium@sha256:<digest> \
+//	Run:  TCDI_IT_KASM_IMAGE=kasmweb/chrome@sha256:<digest> \
 //	        TCDI_IT_BUILD=1 \
 //	        go test -tags=integration ./tests/integration \
 //	        -run TestKasmAdapterChromium -v
@@ -42,8 +42,7 @@ import (
 
 const (
 	kasmItLabelValue   = "w15"
-	kasmMinFreeBytes   = 10 << 30 // pulling the kasmweb image needs ~4.5 GB
-	kasmSessionCmd     = "/usr/bin/chromium-orig --start-maximized about:blank"
+	kasmMinFreeBytes   = 10 << 30          // pulling the kasmweb image needs ~4.5 GB
 	kasmRunTimeout     = 240 * time.Second // cold xfce+kasmvnc boot is slower
 	defaultAdapterItIm = "tcdi/kasm-adapter:it"
 )
@@ -52,6 +51,71 @@ var (
 	kasmImage    = os.Getenv("TCDI_IT_KASM_IMAGE") // unset => suite skips
 	adapterImage = envOr("TCDI_IT_KASM_ADAPTER_IMAGE", defaultAdapterItIm)
 )
+
+// kasmBrowserLayout is the per-image engine layout the contract asserts
+// against. The catalog's kasmweb/* images ship one of two Chromium-family
+// layouts: Debian's chromium wrapper diverts the real binary to
+// /usr/bin/chromium-orig, while the chrome image ships Google's
+// /opt/google/chrome tree with /usr/bin/google-chrome the (shimmed)
+// wrapper.
+type kasmBrowserLayout struct {
+	SessionCmd     string // binary the session command launches
+	RendererPgrep  string // pgrep -f pattern matching sandboxed renderers
+	ProcessPattern string // pgrep pattern for the browser main process
+	PkillPattern   string // pkill -f pattern that ends the browser
+	PolicyDir      string // managed policy directory checked by ReadinessEndpointAndAuth
+	RelaunchBin    string // path RelaunchPathsStaySandboxed invokes directly
+}
+
+var (
+	layoutDebianChromium = kasmBrowserLayout{"/usr/bin/chromium-orig", "chromium.*--type=renderer", "chromiu[m]", "/usr/lib/chromium/chromiu[m]", "/etc/chromium", "/usr/bin/chromium"}
+	layoutGoogleChrome   = kasmBrowserLayout{"/opt/google/chrome/google-chrome", "chrome.*--type=renderer", "chrom[e]", "/opt/google/chrome/chrom[e]", "/etc/opt/chrome", "/usr/bin/google-chrome"}
+)
+
+// sessionPage is the page the session (and each relaunch) opens. It must
+// spawn a renderer so the sandbox assertions have a process to check:
+// Chrome serves about:blank from the browser process — no renderer ever
+// starts — while the WebUI NTP is a renderer (and equally sandboxed).
+func (l kasmBrowserLayout) sessionPage() string {
+	if l == layoutGoogleChrome {
+		return "chrome://newtab/"
+	}
+	return "about:blank"
+}
+
+// sessionArgs are the TCDI_SESSION_CMD arguments appended to SessionCmd.
+// Chrome needs --no-first-run on a fresh profile or the welcome flow
+// defers the page (and its renderer); the Debian layout keeps the
+// original minimal form.
+func (l kasmBrowserLayout) sessionArgs() string {
+	if l == layoutGoogleChrome {
+		return " --start-maximized --no-first-run " + l.sessionPage()
+	}
+	return " --start-maximized " + l.sessionPage()
+}
+
+// probeKasmLayout picks the image's engine layout once per run, before
+// any session container starts: which real binary TCDI_SESSION_CMD must
+// launch, which patterns find its processes, and where its managed
+// policy lands.
+func probeKasmLayout(t *testing.T) kasmBrowserLayout {
+	t.Helper()
+	// ls exits non-zero when a layout's marker is absent — that's the
+	// signal, not a failure.
+	out, _ := docker("run", "--rm",
+		"--label", itLabelKey+"="+kasmItLabelValue,
+		"--entrypoint", "sh", kasmImage, "-c",
+		"ls /usr/bin/chromium-orig /opt/google/chrome/google-chrome 2>/dev/null; true")
+	switch {
+	case strings.Contains(out, "/usr/bin/chromium-orig"):
+		return layoutDebianChromium
+	case strings.Contains(out, "/opt/google/chrome/google-chrome"):
+		return layoutGoogleChrome
+	default:
+		t.Fatalf("no known Chromium-family layout in %s; probe output: %q", kasmImage, out)
+		return kasmBrowserLayout{}
+	}
+}
 
 // requireFreeDisk skips unless the root filesystem (docker's storage home)
 // has at least minFree bytes free.
@@ -146,7 +210,7 @@ func kasmMountArgs(filesDir string) []string {
 // /home/workspace in its rootfs), so a missing homeVol is emulated with
 // a fresh fsGroup-equivalent volume. The container mirrors the pod's
 // readOnlyRootFilesystem with a tmpfs /tmp like the pod's emptyDir.
-func runKasmContainer(t *testing.T, runID, name, image, adapterVol, secretDir, homeVol string, extraArgs ...string) string {
+func runKasmContainer(t *testing.T, runID, name, image, adapterVol, secretDir, homeVol string, layout kasmBrowserLayout, extraArgs ...string) string {
 	t.Helper()
 	if homeVol == "" {
 		homeVol = newVolume(t, runID, name+"-home")
@@ -169,7 +233,7 @@ func runKasmContainer(t *testing.T, runID, name, image, adapterVol, secretDir, h
 			"--health-retries", "12",
 			"--health-start-period", "5s",
 			"-e", "HOME=/home/workspace",
-			"-e", "TCDI_SESSION_CMD=" + kasmSessionCmd,
+			"-e", "TCDI_SESSION_CMD=" + layout.SessionCmd + layout.sessionArgs(),
 			"-e", "VNC_PW=",
 			"-e", "VNC_VIEW_ONLY_PW=",
 		}, append(kasmMountArgs(kasmAdapterFiles(t, adapterVol)), extraArgs...)...)...)
@@ -247,8 +311,12 @@ func assertSandboxedRenderers(t *testing.T, c string) {
 			if !strings.Contains(status, "Seccomp:\t2") && !strings.Contains(status, "Seccomp: 2") {
 				t.Fatalf("renderer pid %s is not under seccomp filter mode:\n%s", pid, status)
 			}
+			// A pid that exits between the status read and this awk is
+			// skipped — not turned into a fake 0 that trips the check.
+			// (A live unsandboxed renderer would read the container
+			// baseline, never 0.)
 			f, err := strconv.Atoi(strings.TrimSpace(mustExec(t, c,
-				"awk '/^Seccomp_filters:/{print $2}' /proc/"+pid+"/status 2>/dev/null || echo 0")))
+				"awk '/^Seccomp_filters:/{print $2}' /proc/"+pid+"/status 2>/dev/null || true")))
 			if err != nil {
 				continue // died
 			}
@@ -292,13 +360,13 @@ done; true`)
 
 // waitSandboxedRenderer polls until at least one sandboxed renderer
 // exists, then asserts ALL of them (plus the flag sweep).
-func waitSandboxedRenderer(t *testing.T, c string, timeout time.Duration) {
+func waitSandboxedRenderer(t *testing.T, c string, layout kasmBrowserLayout, timeout time.Duration) {
 	t.Helper()
 	initNS := strings.TrimSpace(mustExec(t, c, "readlink /proc/1/ns/user"))
 	var found bool
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) && !found {
-		out, err := execIn(t, c, "pgrep -f 'chromium.*--type=renderer' || true")
+		out, err := execIn(t, c, "pgrep -f '"+layout.RendererPgrep+"' || true")
 		if err != nil {
 			t.Fatalf("renderer pgrep: %v", err)
 		}
@@ -324,7 +392,7 @@ func waitSandboxedRenderer(t *testing.T, c string, timeout time.Duration) {
 	}
 	if !found {
 		ps, _ := execIn(t, c, "ps aux | head -40")
-		t.Fatalf("no Chromium renderer with engaged sandbox (nested userns + Seccomp:2, uid 1000) within %s\nps:\n%s", timeout, ps)
+		t.Fatalf("no browser renderer with engaged sandbox (nested userns + Seccomp:2, uid 1000) within %s\nps:\n%s", timeout, ps)
 	}
 	assertSandboxedRenderers(t, c)
 	assertNoSandboxFlags(t, c)
@@ -339,6 +407,8 @@ func TestKasmAdapterChromium(t *testing.T) {
 	}
 	requireImage(t, adapterImage, "build/kasm-adapter")
 	pulled := pullImageOnce(t, kasmImage)
+	layout := probeKasmLayout(t)
+	t.Logf("browser layout: session binary %s, policy dir %s", layout.SessionCmd, layout.PolicyDir)
 
 	runBytes := make([]byte, 4)
 	if _, err := rand.Read(runBytes); err != nil {
@@ -391,7 +461,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		// --ulimit mirrors the pod ambient (~1M RLIMIT_NOFILE from the
 		// host) so the fd bound below asserts the adapter entrypoint's own
 		// cap, not a low ambient the runtime happened to inherit.
-		c := runKasmContainer(t, runID, "desktop", kasmImage, adapterVol(), secret, "",
+		c := runKasmContainer(t, runID, "desktop", kasmImage, adapterVol(), secret, "", layout,
 			"--ulimit", "nofile=1048576:1048576")
 		waitHealthyTimeout(t, c, kasmRunTimeout)
 
@@ -457,15 +527,15 @@ func TestKasmAdapterChromium(t *testing.T) {
 		// cannot remove or rewrite them (CAP_SYS_ADMIN is dropped, and the
 		// mounts are ro either way).
 		if out := strings.TrimSpace(mustExec(t, c,
-			"rm -f /usr/bin/chromium 2>/dev/null; test -x /usr/bin/chromium && echo present || echo gone")); out != "present" {
+			"rm -f "+layout.RelaunchBin+" 2>/dev/null; test -x "+layout.RelaunchBin+" && echo present || echo gone")); out != "present" {
 			t.Fatalf("wrapper shim removable/replaced: %s", out)
 		}
 		if out := strings.TrimSpace(mustExec(t, c,
-			"umount /usr/bin/chromium 2>/dev/null && echo unmounted || echo held")); out != "held" {
+			"umount "+layout.RelaunchBin+" 2>/dev/null && echo unmounted || echo held")); out != "held" {
 			t.Fatalf("shim mount unmountable by session user: %s", out)
 		}
 		// Managed policy landed (KASM-8).
-		mustExec(t, c, "grep -q CommandLineFlagSecurityWarningsEnabled /etc/chromium/policies/managed/zz-tcdi.json")
+		mustExec(t, c, "grep -q CommandLineFlagSecurityWarningsEnabled "+layout.PolicyDir+"/policies/managed/zz-tcdi.json")
 		// Same fd bound as the native images: the adapter entrypoint caps
 		// the soft RLIMIT_NOFILE below FD_SETSIZE so a reconnect burst
 		// degrades to EMFILE refusals instead of a select() stack overwrite.
@@ -478,7 +548,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		// not register as an authentication failure, or KasmVNC's
 		// brute-force protection blacklists loopback after a few cycles.
 		secret, _ := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "probe", kasmImage, adapterVol(), secret, "")
+		c := runKasmContainer(t, runID, "probe", kasmImage, adapterVol(), secret, "", layout)
 		waitHealthyTimeout(t, c, kasmRunTimeout)
 		for i := 0; i < 20; i++ {
 			if _, err := execIn(t, c, "/opt/tcdi/healthcheck.sh"); err != nil {
@@ -523,7 +593,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		if err := os.Chmod(secMissing, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		c := runKasmContainer(t, runID, "crlf", kasmImage, adapterVol(), secret, "",
+		c := runKasmContainer(t, runID, "crlf", kasmImage, adapterVol(), secret, "", layout,
 			"-v", secLF+":/tmp/sec-lf:ro",
 			"-v", secEmpty+":/tmp/sec-empty:ro",
 			"-v", secMissing+":/tmp/sec-missing:ro")
@@ -553,7 +623,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 
 	t.Run("DisplayDeathNotReady", func(t *testing.T) {
 		secret, _ := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "death", kasmImage, adapterVol(), secret, "")
+		c := runKasmContainer(t, runID, "death", kasmImage, adapterVol(), secret, "", layout)
 		waitHealthyTimeout(t, c, kasmRunTimeout)
 
 		mustExec(t, c, "pkill -x Xvnc")
@@ -571,7 +641,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 
 	t.Run("BrowserSandbox", func(t *testing.T) {
 		secret, password := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "browser", kasmImage, adapterVol(), secret, "")
+		c := runKasmContainer(t, runID, "browser", kasmImage, adapterVol(), secret, "", layout)
 		waitHealthyTimeout(t, c, kasmRunTimeout)
 
 		code, err := httpsGet(t, c, "kasm_user", password)
@@ -582,8 +652,9 @@ func TestKasmAdapterChromium(t *testing.T) {
 		// Every renderer must be inside the nested-userns + stacked
 		// seccomp sandbox, and no process may carry a sandbox-killing
 		// flag. TCDI_SESSION_CMD points at the REAL binary — the image's
-		// /usr/bin/chromium wrapper hardcodes --no-sandbox.
-		waitSandboxedRenderer(t, c, 180*time.Second)
+		// wrapper (/usr/bin/chromium or /usr/bin/google-chrome) hardcodes
+		// --no-sandbox.
+		waitSandboxedRenderer(t, c, layout, 180*time.Second)
 		assertNoSecret(t, c, password)
 	})
 
@@ -594,9 +665,9 @@ func TestKasmAdapterChromium(t *testing.T) {
 	// unsandboxed renderers.
 	t.Run("RelaunchPathsStaySandboxed", func(t *testing.T) {
 		secret, password := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "relaunch", kasmImage, adapterVol(), secret, "")
+		c := runKasmContainer(t, runID, "relaunch", kasmImage, adapterVol(), secret, "", layout)
 		waitHealthyTimeout(t, c, kasmRunTimeout)
-		waitSandboxedRenderer(t, c, 180*time.Second)
+		waitSandboxedRenderer(t, c, layout, 180*time.Second)
 
 		launch := func(desc, cmd string) {
 			t.Helper()
@@ -606,15 +677,20 @@ func TestKasmAdapterChromium(t *testing.T) {
 		}
 
 		// Binary + alternatives paths, each a fresh profile dir so a new
-		// browser process actually spawns through the shim.
-		launch("/usr/bin/chromium", "/usr/bin/chromium --user-data-dir=/tmp/rl1 --no-first-run about:blank")
-		launch("x-www-browser", "x-www-browser --user-data-dir=/tmp/rl2 --no-first-run about:blank")
-		launch("sensible-browser", "sensible-browser --user-data-dir=/tmp/rl3 --no-first-run about:blank")
+		// browser process actually spawns through the shim. The page is
+		// the layout's sessionPage — it must spawn a renderer, which
+		// about:blank never does on Chrome.
+		launch(layout.RelaunchBin, layout.RelaunchBin+" --user-data-dir=/tmp/rl1 --no-first-run "+layout.sessionPage())
+		launch("x-www-browser", "x-www-browser --user-data-dir=/tmp/rl2 --no-first-run "+layout.sessionPage())
+		launch("sensible-browser", "sensible-browser --user-data-dir=/tmp/rl3 --no-first-run "+layout.sessionPage())
 		// Even a user explicitly passing --no-sandbox gets it stripped.
-		launch("explicit --no-sandbox", "/usr/bin/chromium --no-sandbox --user-data-dir=/tmp/rl4 --no-first-run about:blank")
-		// Desktop-file paths (best-effort — needs a session bus).
-		launch("gtk-launch chromium.desktop", "gtk-launch chromium.desktop https://example.com || true")
-		launch("gio launch ~/Desktop/chromium.desktop", "gio launch /home/workspace/Desktop/chromium.desktop || true")
+		launch("explicit --no-sandbox", layout.RelaunchBin+" --no-sandbox --user-data-dir=/tmp/rl4 --no-first-run "+layout.sessionPage())
+		// Desktop-file paths (best-effort — needs a session bus). The
+		// desktop-id takes the wrapper's basename (chromium.desktop /
+		// google-chrome.desktop).
+		desktopID := filepath.Base(layout.RelaunchBin) + ".desktop"
+		launch("gtk-launch "+desktopID, "gtk-launch "+desktopID+" https://example.com || true")
+		launch("gio launch ~/Desktop/"+desktopID, "gio launch /home/workspace/Desktop/"+desktopID+" || true")
 
 		// Prove each binary-path launch actually spawned a NEW browser
 		// (its profile dir appears in a live process' cmdline) — then that
@@ -623,7 +699,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 			deadline := time.Now().Add(60 * time.Second)
 			spawned := false
 			for time.Now().Before(deadline) && !spawned {
-				out := mustExec(t, c, "pgrep -f 'chromiu[m].*"+dir+"' || true")
+				out := mustExec(t, c, "pgrep -f '"+layout.ProcessPattern+".*"+dir+"' || true")
 				spawned = strings.TrimSpace(out) != ""
 				if !spawned {
 					time.Sleep(2 * time.Second)
@@ -643,13 +719,13 @@ func TestKasmAdapterChromium(t *testing.T) {
 	// die with it — no lingered desktop to relaunch through.
 	t.Run("SessionEndsWithPayload", func(t *testing.T) {
 		secret, _ := selfSignedSecret(t)
-		c := runKasmContainer(t, runID, "session-end", kasmImage, adapterVol(), secret, "")
+		c := runKasmContainer(t, runID, "session-end", kasmImage, adapterVol(), secret, "", layout)
 		waitHealthyTimeout(t, c, kasmRunTimeout)
-		waitSandboxedRenderer(t, c, 180*time.Second)
+		waitSandboxedRenderer(t, c, layout, 180*time.Second)
 
 		// User closes the browser. ([m] keeps pkill from matching this
 		// exec's own sh -c cmdline.)
-		mustExec(t, c, "pkill -f '/usr/lib/chromium/chromiu[m]' || true")
+		mustExec(t, c, "pkill -f '"+layout.PkillPattern+"' || true")
 		deadline := time.Now().Add(90 * time.Second)
 		for time.Now().Before(deadline) {
 			status, _ := containerState(t, c)
@@ -667,7 +743,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		prepVolumeWritable(t, home, "/home/workspace", kasmImage)
 		av := adapterVol()
 
-		c1 := runKasmContainer(t, runID, "restart-a", kasmImage, av, secret, home)
+		c1 := runKasmContainer(t, runID, "restart-a", kasmImage, av, secret, home, layout)
 		waitHealthyTimeout(t, c1, kasmRunTimeout)
 
 		mustExec(t, c1, "echo persist-me > /home/workspace/marker.txt")
@@ -684,7 +760,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 
 		dockerOK(t, "rm", "-f", c1)
 
-		c2 := runKasmContainer(t, runID, "restart-b", kasmImage, av, secret, home)
+		c2 := runKasmContainer(t, runID, "restart-b", kasmImage, av, secret, home, layout)
 		waitHealthyTimeout(t, c2, kasmRunTimeout)
 
 		mustExec(t, c2, "grep -q persist-me /home/workspace/marker.txt")

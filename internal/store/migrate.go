@@ -65,6 +65,38 @@ func (d *DB) Migrate(ctx context.Context) (err error) {
 	}
 	sort.Strings(files)
 
+	// Fail closed on a database written by an earlier build: every recorded
+	// migration must be one of the embedded set (same version and name).
+	known := make(map[int]string, len(files))
+	for _, name := range files {
+		version, err := migrationVersion(name)
+		if err != nil {
+			return err
+		}
+		known[version] = name
+	}
+	rows, err := conn.Query(ctx, `SELECT version, name FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("store: read schema_migrations %w", err)
+	}
+	for rows.Next() {
+		var v int
+		var n string
+		if err := rows.Scan(&v, &n); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: scan schema_migrations %w", err)
+		}
+		if want, ok := known[v]; !ok || want != n {
+			rows.Close()
+			return fmt.Errorf("store: schema_migrations holds migration %d %q that this build does not embed; "+
+				"the database was written by a pre-1.0 build and cannot be upgraded: reinstall with a fresh database", v, n)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: read schema_migrations %w", err)
+	}
+
 	for _, name := range files {
 		version, err := migrationVersion(name)
 		if err != nil {

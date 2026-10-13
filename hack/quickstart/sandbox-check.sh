@@ -97,7 +97,7 @@ check_ws() { # check_ws <catalog-name>
   [ -n "$ref" ] || fail "$tpl" "no WorkspaceTemplate with catalog-name $tpl in $NS"
 
   kc apply -f - >/dev/null <<EOF
-apiVersion: workspaces.cdi.tinyorbit.vn/v1alpha1
+apiVersion: workspaces.cdi.tinyorbit.vn/v1
 kind: Workspace
 metadata:
   name: ${ws}
@@ -109,6 +109,7 @@ spec:
   dataPolicy: Retain
   runtimeGeneration: ${gen}
   intentRevision: ${rev}
+  sessionPolicy: {clipboard: Disabled, fileTransfer: Disabled}
 EOF
 
   if [[ " $CHECKS " == *" ready "* ]]; then

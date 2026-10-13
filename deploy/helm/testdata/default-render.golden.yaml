@@ -29,7 +29,7 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: v1alpha1
+    name: v1
     schema:
       openAPIV3Schema:
         description: Workspace is the Schema for the workspaces API.
@@ -110,9 +110,8 @@ spec:
                 description: |-
                   sessionPolicy is the resolved session data-transfer policy the API
                   recorded at the last create/start intent — the meet of the template's
-                  policy and the tenant ceiling (ADR 0010). Absent on CRs written
-                  before the field existed; pod building then falls back to the
-                  recorded template snapshot's own policy.
+                  policy and the tenant ceiling (ADR 0010). Required: pod building
+                  reads it and nothing else.
                 properties:
                   clipboard:
                     description: |-
@@ -125,8 +124,20 @@ spec:
                     - Receive
                     - Bidirectional
                     type: string
+                  fileTransfer:
+                    description: |-
+                      fileTransfer is the resolved file-transfer direction policy: the
+                      meet of the template's spec.fileTransferPolicy and the tenant's
+                      file-transfer ceiling at intent time.
+                    enum:
+                    - Disabled
+                    - Upload
+                    - Download
+                    - Bidirectional
+                    type: string
                 required:
                 - clipboard
+                - fileTransfer
                 type: object
               templateRef:
                 description: |-
@@ -148,6 +159,7 @@ spec:
             - intentRevision
             - ownerSubject
             - runtimeGeneration
+            - sessionPolicy
             - templateRef
             type: object
             x-kubernetes-validations:
@@ -363,9 +375,8 @@ spec:
                     description: |-
                       sourceRef is the spec.templateRef.name the snapshot was taken from
                       (the catalog base name the create path writes, or the revision object
-                      name a carried re-point writes). Empty on snapshots recorded before
-                      the re-snapshot machinery existed — the recorded object name is the
-                      fallback source for those.
+                      name a carried re-point writes).
+                    minLength: 1
                     type: string
                   spec:
                     description: spec is the recorded template spec.
@@ -392,6 +403,18 @@ spec:
                         enum:
                         - Desktop
                         - Browser
+                        type: string
+                      fileTransferPolicy:
+                        default: Disabled
+                        description: |-
+                          fileTransferPolicy selects file transfer between client device and
+                          workspace home, named from the user's point of view (Upload =
+                          device to workspace, Download = workspace to device).
+                        enum:
+                        - Disabled
+                        - Upload
+                        - Download
+                        - Bidirectional
                         type: string
                       lifecycle:
                         description: |-
@@ -686,6 +709,7 @@ spec:
                 required:
                 - name
                 - revision
+                - sourceRef
                 - spec
                 - specHash
                 - uid
@@ -730,7 +754,7 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: v1alpha1
+    name: v1
     schema:
       openAPIV3Schema:
         description: WorkspaceTemplate is the Schema for the workspacetemplates API.
@@ -777,6 +801,18 @@ spec:
                 enum:
                 - Desktop
                 - Browser
+                type: string
+              fileTransferPolicy:
+                default: Disabled
+                description: |-
+                  fileTransferPolicy selects file transfer between client device and
+                  workspace home, named from the user's point of view (Upload =
+                  device to workspace, Download = workspace to device).
+                enum:
+                - Disabled
+                - Upload
+                - Download
+                - Bidirectional
                 type: string
               lifecycle:
                 description: |-
@@ -1103,7 +1139,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 ---
 # Source: tinycdi/templates/namespaces.yaml
 apiVersion: v1
@@ -1119,7 +1155,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 # The release (platform) namespace itself is labeled by Helm only when
 # Helm creates it; the installer applies the PSS labels (see install.md).
 ---
@@ -1381,7 +1417,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 automountServiceAccountToken: false
 ---
 # Source: tinycdi/templates/serviceaccounts.yaml
@@ -1395,7 +1431,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 automountServiceAccountToken: false
 ---
 # Source: tinycdi/templates/rbac.yaml
@@ -1694,7 +1730,7 @@ spec:
             weight: 100
       containers:
         - name: backend
-          image: ghcr.io/tinyorbitvn/tinycdi-backend:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-backend:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - {name: app, containerPort: 8443}
@@ -1898,7 +1934,7 @@ spec:
       
       containers:
         - name: frontend
-          image: ghcr.io/tinyorbitvn/tinycdi-frontend:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-frontend:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - -listen=:8443
@@ -1981,7 +2017,7 @@ spec:
       
       containers:
         - name: operator
-          image: ghcr.io/tinyorbitvn/tinycdi-operator:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-operator:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - --health-probe-bind-address=:8081
@@ -2103,8 +2139,7 @@ spec:
 # tpl_<name> (and lists) to the newest published revision.
 #
 # Per-entry structured fields map to the annotations the runtime backend
-# honors (internal/runtime/linux/backend.go). The v0.1 nodeSelector entry
-# field is gone (E14): the render fails below — pod placement lives in the
+# honors (internal/runtime/linux/backend.go). Pod placement lives in the
 # typed spec.placement block, with unset fields falling back to the
 # operator defaults rendered from runtime.placement.
 #   image:           key into .Values.images (e.g. "linuxDesktop",

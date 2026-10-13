@@ -15,7 +15,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -34,11 +34,11 @@ func (c *countingCatalog) Resolve(ctx context.Context, tenantID, id string) (Tem
 // listCache is the one controller-runtime cache method K8sStatusView reads.
 type listCache struct {
 	crcache.Cache
-	items []workspacesv1alpha1.Workspace
+	items []cdiv1.Workspace
 }
 
 func (c listCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
-	list.(*workspacesv1alpha1.WorkspaceList).Items = c.items
+	list.(*cdiv1.WorkspaceList).Items = c.items
 	return nil
 }
 
@@ -49,15 +49,15 @@ func (c listCache) List(_ context.Context, list client.ObjectList, _ ...client.L
 func TestImageStale_SurvivesSupersededRevision(t *testing.T) {
 	now := time.Now().UTC()
 	builtAt := now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)
-	cr := workspacesv1alpha1.Workspace{
+	cr := cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "w", Namespace: "ns-a",
 			Annotations: map[string]string{provisioning.AnnotationWorkspaceImageBuiltAt: builtAt},
 		},
-		Status: workspacesv1alpha1.WorkspaceStatus{Phase: workspacesv1alpha1.WorkspacePhaseReady},
+		Status: cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady},
 	}
 	sv := &K8sStatusView{
-		cache: listCache{items: []workspacesv1alpha1.Workspace{cr}},
+		cache: listCache{items: []cdiv1.Workspace{cr}},
 		now:   time.Now, maxStale: time.Minute,
 		lastKnown: map[string]ObservedStatus{},
 	}
@@ -117,7 +117,7 @@ func TestList_NoTemplateGets(t *testing.T) {
 		}
 	}
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?limit=200", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK || len(list.Items) != 200 {
 		t.Fatalf("status=%d items=%d, want 200/200", r.StatusCode, len(list.Items))
 	}
@@ -191,7 +191,7 @@ func TestList_AtMostOneLookupPerTemplate(t *testing.T) {
 	oldWorkspaces(be, env, 150, "tpl_one", "tpl_two", "tpl_gone")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?limit=200", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK || len(list.Items) != 150 {
 		t.Fatalf("status=%d items=%d, want 200/150", r.StatusCode, len(list.Items))
 	}
@@ -249,7 +249,7 @@ func TestTemplateFamily_StableAcrossRevisions(t *testing.T) {
 	owner := env.issuer.URL() + "|" + env.issuer.Subject
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/templates", "", nil)
-	list := decodeBody[templateList](t, r)
+	list := decodeBody[Page[templateView]](t, r)
 	if len(list.Items) != 2 {
 		t.Fatalf("got %d templates, want 2", len(list.Items))
 	}
@@ -271,7 +271,7 @@ func TestTemplateFamily_StableAcrossRevisions(t *testing.T) {
 		}
 	}
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if len(wl.Items) != 2 {
 		t.Fatalf("got %d workspaces, want 2", len(wl.Items))
 	}

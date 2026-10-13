@@ -259,25 +259,6 @@ func TestLeaseExpiry_ZeroesOpenStreams(t *testing.T) {
 	}
 }
 
-// TestMigration011_Idempotent: the digest/epoch migration applies cleanly on
-// a fresh database and on re-run, and the partial unique index exists.
-func TestMigration011_Idempotent(t *testing.T) {
-	db := newDB(t)
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-	var def string
-	if err := db.Pool().QueryRow(ctx,
-		`SELECT indexdef FROM pg_indexes
-		 WHERE schemaname = 'public' AND indexname = 'connection_lease_session_digest'`).
-		Scan(&def); err != nil {
-		t.Fatalf("connection_lease_session_digest index missing: %v", err)
-	}
-	if !strings.Contains(def, "UNIQUE") || !strings.Contains(def, "WHERE") {
-		t.Fatalf("index %q is not the pinned partial unique index", def)
-	}
-}
-
 // TestLeaseBySession_MissUsesIndex: the dead-row check on the miss path
 // must be an index probe, not a scan of the lease history — otherwise
 // random cookies become full scans. The retention sweep bounds how much
@@ -289,9 +270,10 @@ func TestLeaseBySession_MissUsesIndex(t *testing.T) {
 		INSERT INTO connection_lease
 		  (id, workspace_id, tenant_id, principal_subject, runtime_generation,
 		   runtime_uid, fencing_version, gateway_id, state, expires_at, closed_at,
-		   session_digest)
+		   session_digest, portal_session_digest)
 		SELECT 'dead-' || g, 'ws-1', 'tenant-a', 'iss|alice', 1, 'rt-1', 1, 'gw-a',
-		       'revoked', now(), now(), sha256(('cookie-' || g)::bytea)
+		       'revoked', now(), now(), sha256(('cookie-' || g)::bytea),
+		       sha256('test-portal-session'::bytea)
 		FROM generate_series(1, 5000) AS g`); err != nil {
 		t.Fatalf("seed dead leases: %v", err)
 	}

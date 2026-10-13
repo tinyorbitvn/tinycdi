@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -52,7 +52,7 @@ func startLeaderOperator(t *testing.T, ns, leaseNS string) (ctrl.Manager, func()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
 	}
 	mgr, err := ctrl.NewManager(testEnvConfig, ctrl.Options{
@@ -94,17 +94,21 @@ func startLeaderOperator(t *testing.T, ns, leaseNS string) (ctrl.Manager, func()
 
 // leaderWorkspace creates a minimal Running-intent Workspace CR — the same
 // shape the API's K8sApplier writes — in ns against template tplName.
-func leaderWorkspace(t *testing.T, ns, name, tplName string) *workspacesv1alpha1.Workspace {
+func leaderWorkspace(t *testing.T, ns, name, tplName string) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: tplName},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "it", Subject: "sub-" + name},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: tplName},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "it", Subject: "sub-" + name},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := k8sClient.Create(context.Background(), ws); err != nil {
@@ -117,11 +121,11 @@ func leaderWorkspace(t *testing.T, ns, name, tplName string) *workspacesv1alpha1
 func workspaceAdmitted(t *testing.T, ns, name string, timeout time.Duration) {
 	t.Helper()
 	eventually(t, "Admitted=True on "+ns+"/"+name, timeout, func() bool {
-		var ws workspacesv1alpha1.Workspace
+		var ws cdiv1.Workspace
 		if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &ws); err != nil {
 			return false
 		}
-		c := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionAdmitted)
+		c := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionAdmitted)
 		return c != nil && c.Status == metav1.ConditionTrue
 	})
 }

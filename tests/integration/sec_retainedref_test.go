@@ -17,7 +17,7 @@ package integration
 //     check. Fix: keys are bound to the authenticated principal
 //     (scopedIdemKey), the stored op is compared, and SignalWorkspace
 //     performs the owner-scoped lookup before consulting idempotency.
-//   - SEC-I7: a malformed pageToken is a 400, not a 500.
+//   - SEC-I7: a malformed cursor is a 400, not a 500.
 //
 // Run: go test -tags=integration ./tests/integration -run 'TestSEC' -v
 
@@ -69,7 +69,7 @@ func TestSEC01_CreateRejectsBareRef(t *testing.T) {
 		OwnerIssuer:     "https://issuer.test",
 		OwnerSubject:    "mallory",
 		Name:            "loot",
-		Template:        provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:        provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:          provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		RetainedDataRef: rec.ID,
 	}, []byte("evil"))
@@ -271,7 +271,7 @@ func TestSEC21_IdempotencyPrincipalScoped(t *testing.T) {
 			OwnerIssuer:  "https://issuer.test",
 			OwnerSubject: sub,
 			Name:         name,
-			Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+			Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 			Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 			DataPolicy:   "Ephemeral",
 		}
@@ -344,20 +344,22 @@ func TestSEC21_IdempotencyPrincipalScoped(t *testing.T) {
 	}
 }
 
-// TestSECI7_BadPageToken: a malformed cursor is ErrBadCursor so handlers
-// return 400 INVALID_REQUEST instead of 500.
-func TestSECI7_BadPageToken(t *testing.T) {
+// TestSECI7_BadCursorKey: a cursor whose timestamp key does not parse is
+// ErrBadCursor so handlers return 400 INVALID_REQUEST instead of 500.
+func TestSECI7_BadCursorKey(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 	svc := provisioning.NewService(db)
 	rstore := provisioning.NewRetainedStore(db)
 
-	for _, tok := range []string{"!!!", "not-base64!!!", "AAAA"} {
-		if _, _, err := svc.ListWorkspaces(ctx, secTenant, "", "", tok, 10); !errors.Is(err, provisioning.ErrBadCursor) {
-			t.Fatalf("ListWorkspaces pageToken %q: err=%v, want ErrBadCursor", tok, err)
+	for _, key := range []string{"!!!", "", "1696000000"} {
+		ws := provisioning.ListPage{Limit: 10, SortField: "createdAt", AfterKey: key, AfterID: "ws_x"}
+		if _, _, _, err := svc.ListWorkspaces(ctx, secTenant, "", "", ws); !errors.Is(err, provisioning.ErrBadCursor) {
+			t.Fatalf("ListWorkspaces cursor key %q: err=%v, want ErrBadCursor", key, err)
 		}
-		if _, _, err := rstore.ListRetained(ctx, secTenant, retOwner, retOwner, tok, 10); !errors.Is(err, provisioning.ErrBadCursor) {
-			t.Fatalf("ListRetained pageToken %q: err=%v, want ErrBadCursor", tok, err)
+		rd := provisioning.ListPage{Limit: 10, SortField: "retainedAt", AfterKey: key, AfterID: "rd_x"}
+		if _, _, _, err := rstore.ListRetained(ctx, secTenant, retOwner, retOwner, rd); !errors.Is(err, provisioning.ErrBadCursor) {
+			t.Fatalf("ListRetained cursor key %q: err=%v, want ErrBadCursor", key, err)
 		}
 	}
 }

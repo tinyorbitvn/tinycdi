@@ -8,10 +8,8 @@ package broker_test
 // RedeemTicket's re-check). A missing or invalid row revokes the lease at
 // the store on the spot — the gateway renew loop's terminal-error path
 // closes the bound stream within one renew cycle, and a replayed cookie
-// resolves to a dead lease (401) on every replica. Leases that never
-// recorded a portal_session_digest are exempt: there is no session to
-// verify and revoking them would mass-kill sessions still minted by
-// pre-upgrade replicas during a rolling deploy.
+// resolves to a dead lease (401) on every replica. Every lease records a
+// portal_session_digest, so the check always applies.
 
 import (
 	"crypto/sha256"
@@ -258,29 +256,6 @@ func TestLeaseSession_ExpiredSessionRevokes(t *testing.T) {
 	}
 	if state, _ := leaseState(t, db, lease.ID); state != "revoked" {
 		t.Fatalf("lease state=%q, want revoked", state)
-	}
-}
-
-// TestLeaseSession_NullDigestLeaseExempt: a lease that never recorded a
-// portal_session_digest (pre-018 row, or a ticket issued with no session
-// in context) has no session to verify — it keeps renewing on the plain
-// TTL. The documented alternative — revoking on sight — would mass-kill
-// every legacy session during a rolling upgrade.
-func TestLeaseSession_NullDigestLeaseExempt(t *testing.T) {
-	db, b, clock, src := setup(t)
-	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
-	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-
-	lease := leaseFor(t, b, gwA, "ws-1", false) // NULL portal_session_digest
-	for i := 0; i < 3; i++ {
-		clock.Advance(broker.LeaseRenewInterval)
-		src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-		if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); err != nil {
-			t.Fatalf("renew %d of NULL-digest lease = %v, want nil", i, err)
-		}
-	}
-	if state, _ := leaseState(t, db, lease.ID); state != "active" {
-		t.Fatalf("NULL-digest lease state=%q, want active", state)
 	}
 }
 

@@ -5,8 +5,8 @@ import { t } from "../i18n";
 import { phaseLabelKey } from "../workspaces/helpers";
 import {
   fetchQuota,
-  listScopedData,
-  listScopedWorkspaces,
+  scanScopedData,
+  scanScopedWorkspaces,
   type QuotaView,
   type ScopedRetainedData,
   type ScopedWorkspace,
@@ -44,14 +44,10 @@ interface Overview {
 async function loadOverview(api: ApiClient): Promise<Overview> {
   const [quota, ws, data] = await Promise.all([
     fetchQuota(api),
-    listScopedWorkspaces(api, "tenant"),
-    listScopedData(api, "tenant"),
+    scanScopedWorkspaces(api, "tenant"),
+    scanScopedData(api, "tenant"),
   ]);
-  return {
-    quota,
-    workspaces: ws.items,
-    retained: data.items.filter((r) => r.state !== "Purged"),
-  };
+  return { quota, workspaces: ws, retained: data };
 }
 
 export function OverviewPage({ now }: { now?: number }) {
@@ -67,7 +63,7 @@ export function OverviewPage({ now }: { now?: number }) {
         <>
           <Section
             title={t("admin.overview.capacity")}
-            actions={<Link to="/admin/quota">{t("admin.overview.usageByUser")}</Link>}
+            actions={<Link to="/admin/users">{t("admin.overview.usageByUser")}</Link>}
           >
             <QuotaMeters
               configured={o.data.quota.configured}

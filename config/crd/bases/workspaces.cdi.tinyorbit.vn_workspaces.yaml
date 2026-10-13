@@ -27,7 +27,7 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: v1alpha1
+    name: v1
     schema:
       openAPIV3Schema:
         description: Workspace is the Schema for the workspaces API.
@@ -108,9 +108,8 @@ spec:
                 description: |-
                   sessionPolicy is the resolved session data-transfer policy the API
                   recorded at the last create/start intent — the meet of the template's
-                  policy and the tenant ceiling (ADR 0010). Absent on CRs written
-                  before the field existed; pod building then falls back to the
-                  recorded template snapshot's own policy.
+                  policy and the tenant ceiling (ADR 0010). Required: pod building
+                  reads it and nothing else.
                 properties:
                   clipboard:
                     description: |-
@@ -123,8 +122,20 @@ spec:
                     - Receive
                     - Bidirectional
                     type: string
+                  fileTransfer:
+                    description: |-
+                      fileTransfer is the resolved file-transfer direction policy: the
+                      meet of the template's spec.fileTransferPolicy and the tenant's
+                      file-transfer ceiling at intent time.
+                    enum:
+                    - Disabled
+                    - Upload
+                    - Download
+                    - Bidirectional
+                    type: string
                 required:
                 - clipboard
+                - fileTransfer
                 type: object
               templateRef:
                 description: |-
@@ -146,6 +157,7 @@ spec:
             - intentRevision
             - ownerSubject
             - runtimeGeneration
+            - sessionPolicy
             - templateRef
             type: object
             x-kubernetes-validations:
@@ -361,9 +373,8 @@ spec:
                     description: |-
                       sourceRef is the spec.templateRef.name the snapshot was taken from
                       (the catalog base name the create path writes, or the revision object
-                      name a carried re-point writes). Empty on snapshots recorded before
-                      the re-snapshot machinery existed — the recorded object name is the
-                      fallback source for those.
+                      name a carried re-point writes).
+                    minLength: 1
                     type: string
                   spec:
                     description: spec is the recorded template spec.
@@ -390,6 +401,18 @@ spec:
                         enum:
                         - Desktop
                         - Browser
+                        type: string
+                      fileTransferPolicy:
+                        default: Disabled
+                        description: |-
+                          fileTransferPolicy selects file transfer between client device and
+                          workspace home, named from the user's point of view (Upload =
+                          device to workspace, Download = workspace to device).
+                        enum:
+                        - Disabled
+                        - Upload
+                        - Download
+                        - Bidirectional
                         type: string
                       lifecycle:
                         description: |-
@@ -684,6 +707,7 @@ spec:
                 required:
                 - name
                 - revision
+                - sourceRef
                 - spec
                 - specHash
                 - uid

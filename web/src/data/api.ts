@@ -1,17 +1,19 @@
 import { unwrap, type ApiClient } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import type { components } from "../api/generated/schema";
-import { get, listAll, type Scope } from "../app/me";
+import { get, type Scope } from "../app/me";
+import type { ServerPage } from "../design/useServerPage";
+import { scanTemplates } from "../templates/useTemplates";
 
 // Data-area API surface, called through the same openapi-fetch client (CSRF
 // middleware, same-origin credentials). The principal reads and the
-// loader/list plumbing (Me/useLoader/listAll) are shared and live in
-// ../app/me.
+// loader plumbing (Me/useLoader) are shared and live in ../app/me.
 
 export type WorkspaceView = components["schemas"]["WorkspaceView"];
 export type TemplateView = components["schemas"]["TemplateView"];
 export type RetainedDataView = components["schemas"]["RetainedDataView"];
 export type RetainedDataState = components["schemas"]["RetainedDataState"];
+type RuntimeKind = components["schemas"]["RuntimeKind"];
 
 export type { Scope };
 export type ScopedRetainedData = RetainedDataView;
@@ -22,14 +24,26 @@ export interface AttachDataBody {
   desiredState?: "Running" | "Stopped";
 }
 
-// GET /v1/data. `Purged` records are excluded server-side; the filter here
-// keeps the list honest if an old backend still returns them.
-export async function listRetainedData(
+/** Server default order of GET /v1/data: most recently retained first. */
+export const DATA_DEFAULT_SORT = "-retainedAt";
+
+// One page of GET /v1/data under `sort` (`retainedAt` | `name`, the source
+// workspace name; `-` = descending). `Purged` records are excluded
+// server-side.
+export async function listRetainedDataPage(
   api: ApiClient,
   scope: Scope,
-): Promise<{ items: ScopedRetainedData[]; truncated: boolean }> {
-  const page = await listAll<ScopedRetainedData>(api, "/v1/data", { scope });
-  return { ...page, items: page.items.filter((r) => r.state !== "Purged") };
+  cursor?: string,
+  sort: string = DATA_DEFAULT_SORT,
+  limit?: number,
+): Promise<ServerPage<ScopedRetainedData>> {
+  return unwrap(
+    await api.GET("/v1/data", {
+      params: {
+        query: { scope, sort, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+      },
+    }),
+  );
 }
 
 // GET /v1/data/{dataId}: one record, visible to its owner and to a tenant
@@ -54,7 +68,7 @@ export async function attachRetainedData(
   idempotencyKey: string,
 ): Promise<WorkspaceView> {
   return unwrap(
-    await api.POST("/v1/data/{dataId}/attach", {
+    await api.POST("/v1/data/{dataId}:attach", {
       params: {
         path: { dataId },
         header: { "Idempotency-Key": idempotencyKey },
@@ -71,7 +85,7 @@ export async function purgeRetainedData(
   idempotencyKey?: string,
 ): Promise<RetainedDataView> {
   return unwrap(
-    await api.POST("/v1/data/{dataId}/purge", {
+    await api.POST("/v1/data/{dataId}:purge", {
       params: {
         path: { dataId },
         ...(idempotencyKey
@@ -85,11 +99,7 @@ export async function purgeRetainedData(
 
 // Templates eligible for attach are constrained to the disk's runtime
 // (attach returns 422 INVALID_TEMPLATE otherwise).
-export function listTemplates(api: ApiClient, runtime?: string) {
-  return listAll<TemplateView>(api, "/v1/templates", { runtime }).then((p) => ({
-    ...p,
-    items: p.items.filter(
-      (tpl) => tpl.publishedAt && (runtime === undefined || tpl.runtime === runtime),
-    ),
-  }));
+export async function listTemplates(api: ApiClient, runtime?: RuntimeKind): Promise<TemplateView[]> {
+  const items = await scanTemplates(api, runtime ? { runtime } : {});
+  return items.filter((tpl) => tpl.publishedAt);
 }

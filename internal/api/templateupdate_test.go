@@ -46,12 +46,12 @@ func (f *familyCatalog) NewestInFamily(_ context.Context, _, family string) (Tem
 	return TemplateEntry{}, ErrTemplateNotFound
 }
 
-func (f *familyCatalog) List(_ context.Context, _, _, _ string, _ int) ([]TemplateEntry, string, error) {
+func (f *familyCatalog) List(_ context.Context, _, _ string) ([]TemplateEntry, error) {
 	var out []TemplateEntry
 	for _, e := range f.newest {
 		out = append(out, e)
 	}
-	return out, "", nil
+	return out, nil
 }
 
 func familyView(id string, be *fakeWorkspaceBackend, env *testEnv, sess, csrf *http.Cookie, t *testing.T) WorkspaceView {

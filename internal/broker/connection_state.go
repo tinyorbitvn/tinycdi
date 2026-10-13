@@ -100,11 +100,10 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, p
 		LeaseRef:      hex.EncodeToString(sum[:])[:16],
 		StreamEpoch:   uint64(streamEpoch),
 	}
-	// A NULL portal_session_digest (a lease predating the binding) exposes
-	// nothing: bytes.Equal(nil, nil) is true, so the stored digest must be
-	// present before it can match.
+	// Only the portal session that minted the lease sees the owner tab.
+	// An empty caller id names no session and never matches.
 	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch == streamEpoch &&
-		portalSess != nil && bytes.Equal(portalSess, portalSessionDigest(portalSessionID)) {
+		portalSessionID != "" && bytes.Equal(portalSess, portalSessionDigest(portalSessionID)) {
 		st.StreamOwnerTab = *ownerTab
 	}
 	switch {
@@ -120,7 +119,7 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, p
 
 // WithInputHook registers fn to be called with the lease's principal
 // (principal_subject — the "issuer|subject" owner string — plus the lease's
-// bound portal_session_digest, "" for legacy NULL rows) on each recorded
+// bound portal_session_digest) on each recorded
 // "input" activity event. The portal wires this to slide the idle timer of
 // the session the input arrived under (D18, SR-1-F3);
 // connected/disconnect events and rejected reports never invoke it.

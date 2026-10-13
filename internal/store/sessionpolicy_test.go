@@ -33,42 +33,48 @@ func TestSessionPolicy_SetCeiling_CreateReadUpdateDelete(t *testing.T) {
 	s := store.NewSessionPolicyStore(db)
 	ctx := context.Background()
 
-	// Create needs IfMatchCreate (literal "*").
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Disabled")}, "anything"); !errors.Is(err, store.ErrSessionPolicyVersionMismatch) {
-		t.Fatalf("create without *: %v", err)
+	// A conditional update on a missing row matches nothing.
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Disabled")}, "2026-10-13T10:00:00Z", false); !errors.Is(err, store.ErrVersionMismatch) {
+		t.Fatalf("update of a missing row: %v", err)
 	}
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Disabled")}, store.IfMatchCreate); err != nil {
+	v1, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Disabled")}, "", true)
+	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	c, err := s.Ceiling(ctx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.HasRow || c.Clipboard == nil || *c.Clipboard != "Disabled" || c.Version == "" {
-		t.Fatalf("created ceiling: %+v", c)
+	if !c.HasRow || c.Clipboard == nil || *c.Clipboard != "Disabled" || c.Version == "" || c.Version != v1 {
+		t.Fatalf("created ceiling: %+v (create returned %q)", c, v1)
 	}
 
-	// Update needs the reported version; a stale one is 412-able.
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, "stale"); !errors.Is(err, store.ErrSessionPolicyVersionMismatch) {
+	// Update needs the current version; a stale one or a second create is
+	// a mismatch.
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, "stale", false); !errors.Is(err, store.ErrVersionMismatch) {
 		t.Fatalf("stale update: %v", err)
 	}
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, store.IfMatchCreate); !errors.Is(err, store.ErrSessionPolicyVersionMismatch) {
-		t.Fatalf("* is not a bypass on an existing row: %v", err)
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, "", true); !errors.Is(err, store.ErrVersionMismatch) {
+		t.Fatalf("create on an existing row: %v", err)
 	}
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, c.Version); err != nil {
+	v2, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Send")}, c.Version, false)
+	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	c2, err := s.Ceiling(ctx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.Clipboard == nil || *c2.Clipboard != "Send" || c2.Version == c.Version {
-		t.Fatalf("updated ceiling: %+v (want Send, fresh version)", c2)
+	if c2.Clipboard == nil || *c2.Clipboard != "Send" || c2.Version == c.Version || c2.Version != v2 {
+		t.Fatalf("updated ceiling: %+v (want Send, fresh version %q)", c2, v2)
 	}
 
-	// An all-FollowTemplate write deletes the row.
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{}, c2.Version); err != nil {
-		t.Fatalf("delete-on-defaults: %v", err)
+	// An all-FollowTemplate write deletes the row — conditionally.
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{}, c.Version, false); !errors.Is(err, store.ErrVersionMismatch) {
+		t.Fatalf("stale delete-on-defaults: %v", err)
+	}
+	if v, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{}, c2.Version, false); err != nil || v != "" {
+		t.Fatalf("delete-on-defaults: version=%q err=%v", v, err)
 	}
 	c3, err := s.Ceiling(ctx, "tenant-a")
 	if err != nil {
@@ -77,6 +83,10 @@ func TestSessionPolicy_SetCeiling_CreateReadUpdateDelete(t *testing.T) {
 	if c3.HasRow {
 		t.Fatalf("all-FollowTemplate write must delete the row: %+v", c3)
 	}
+	// With no row, an all-defaults create is a no-op.
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{}, "", true); err != nil {
+		t.Fatalf("defaults on a missing row: %v", err)
+	}
 }
 
 func TestSessionPolicy_MultiTenantIsolation(t *testing.T) {
@@ -84,7 +94,7 @@ func TestSessionPolicy_MultiTenantIsolation(t *testing.T) {
 	s := store.NewSessionPolicyStore(db)
 	ctx := context.Background()
 
-	if err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Receive")}, store.IfMatchCreate); err != nil {
+	if _, err := s.SetCeiling(ctx, "tenant-a", store.SessionPolicyWrite{Clipboard: strptr("Receive")}, "", true); err != nil {
 		t.Fatal(err)
 	}
 	c, err := s.Ceiling(ctx, "tenant-b")
@@ -96,7 +106,7 @@ func TestSessionPolicy_MultiTenantIsolation(t *testing.T) {
 	}
 }
 
-// Migration 024: the launch_ticket.session_policy column exists and a row
+// The launch_ticket.session_policy column exists and a row
 // stores a resolved vector verbatim.
 func TestSessionPolicy_LaunchTicketColumn(t *testing.T) {
 	db := newDB(t)
@@ -110,8 +120,8 @@ func TestSessionPolicy_LaunchTicketColumn(t *testing.T) {
 		INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience,
-			 request_id, expires_at, session_policy)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)`,
+			 request_id, expires_at, session_policy, portal_session_digest)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9, sha256('test-portal-session'::bytea))`,
 		[]byte("h"), "ws-1", "tenant-a", "iss|alice", int64(1), "uid-1", "aud",
 		"req-1", `{"clipboard":"Disabled","fileTransfer":{"mode":"Disabled","maxFileBytes":null}}`); err != nil {
 		t.Fatalf("insert ticket with session_policy: %v", err)

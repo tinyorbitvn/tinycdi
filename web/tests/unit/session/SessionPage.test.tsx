@@ -223,7 +223,7 @@ function setupScripted(
     const path = new URL(req.url).pathname;
     if (control.unauthenticated(req.method, path)) {
       return new Response(
-        JSON.stringify({ code: "UNAUTHENTICATED", message: "no session", retryable: false }),
+        JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "no session", retryable: false } }),
         { status: 401, headers: { "content-type": "application/json" } },
       );
     }

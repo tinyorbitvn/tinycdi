@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
@@ -86,10 +85,11 @@ var (
 //     stored result; same key + different body is ErrIdempotencyConflict.
 type RetainedDataStore interface {
 	// ListRetained returns records in tenantID visible to ownerScope (""
-	// = tenant-wide, admin only), paginated by cursor. Each record carries
-	// a fresh PurgeNonce bound to caller (iss|sub), the record id and the
+	// = tenant-wide, admin only), one keyset page of p; nextKey/nextID
+	// locate the last row when another page exists. Each record carries a
+	// fresh PurgeNonce bound to caller (iss|sub), the record id and the
 	// current transition epoch.
-	ListRetained(ctx context.Context, tenantID, caller, ownerScope, cursor string, limit int) ([]RetainedRecord, string, error)
+	ListRetained(ctx context.Context, tenantID, caller, ownerScope string, p provisioning.ListPage) (recs []RetainedRecord, nextKey, nextID string, err error)
 
 	// ReadRetained returns one record visible to ownerScope ("" = tenant-wide,
 	// admin only) with a fresh PurgeNonce bound to caller, exactly as a list
@@ -162,12 +162,6 @@ type retainedDataView struct {
 	ConsumingWorkspaceID   string    `json:"consumingWorkspaceId,omitempty"`
 	RetainedAt             time.Time `json:"retainedAt"`
 	PurgeConfirmationNonce string    `json:"purgeConfirmationNonce"`
-}
-
-// retainedDataList is the paginated list response (openapi RetainedDataList).
-type retainedDataList struct {
-	Items         []retainedDataView `json:"items"`
-	NextPageToken string             `json:"nextPageToken,omitempty"`
 }
 
 func recordToRetainedView(r *RetainedRecord) retainedDataView {
@@ -257,17 +251,20 @@ func (h *DataHandler) WithDirectory(d Directory) *DataHandler {
 // MountDataRoutes registers the retained-data routes: RequireAuthPassive
 // on the reads (the portal polls them), RequireAuth+RequireCSRF on
 // attach/purge writes.
-func MountDataRoutes(mux *http.ServeMux, authn *Authenticator, h *DataHandler) {
+func MountDataRoutes(mux RouteMux, authn *Authenticator, h *DataHandler) {
 	safe := func(h http.Handler) http.Handler { return authn.RequireAuthPassive(h) }
 	// unsafe mounts an audited mutation route (see MountWorkspaceRoutes).
-	unsafe := func(pattern string, next http.Handler) {
-		mux.Handle(pattern, authn.RequireAuth(
-			audited(h.audit, pattern, authn.RequireCSRF(next))))
+	// The :attach/:purge custom methods share one ActionRouter; each verb
+	// keeps its own audited+CSRF chain (see MountWorkspaceRoutes).
+	verb := func(pattern string, next http.HandlerFunc) http.HandlerFunc {
+		return audited(h.audit, pattern, authn.RequireCSRF(next)).ServeHTTP
 	}
 	mux.Handle("GET /v1/data", safe(http.HandlerFunc(h.List)))
 	mux.Handle("GET /v1/data/{dataId}", safe(http.HandlerFunc(h.Get)))
-	unsafe(routeDataAttach, http.HandlerFunc(h.Attach))
-	unsafe(routeDataPurge, http.HandlerFunc(h.Purge))
+	actions := NewActionRouter()
+	actions.Handle("attach", verb(routeDataAttach, h.Attach))
+	actions.Handle("purge", verb(routeDataPurge, h.Purge))
+	mux.Handle(routeDataActions, authn.RequireAuth(actions))
 }
 
 // principalOrFail resolves the verified principal and gates tenant
@@ -291,21 +288,17 @@ func (h *DataHandler) List(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 200 {
-			writeError(w, r, CodeInvalidRequest, "limit must be 1..200")
-			return
-		}
-		limit = n
+	pg, perr := ParsePage(r, []string{"retainedAt", "name"}, "-retainedAt")
+	if perr != nil {
+		WriteError(w, r, perr)
+		return
 	}
 	scope, ok := listScope(w, r, p)
 	if !ok {
 		return
 	}
-	recs, next, err := h.data.ListRetained(r.Context(), p.TenantID,
-		p.Owner(), scope, r.URL.Query().Get("pageToken"), limit)
+	recs, nextKey, nextID, err := h.data.ListRetained(r.Context(), p.TenantID,
+		p.Owner(), scope, toListPage(pg))
 	if err != nil {
 		h.writeDataError(w, r, err)
 		return
@@ -315,7 +308,8 @@ func (h *DataHandler) List(w http.ResponseWriter, r *http.Request) {
 		refs = append(refs, recs[i].Owner)
 	}
 	owners := resolveOwners(r.Context(), h.directory, p.TenantID, refs)
-	out := retainedDataList{Items: make([]retainedDataView, 0, len(recs)), NextPageToken: next}
+	out := Page[retainedDataView]{Items: make([]retainedDataView, 0, len(recs)),
+		NextCursor: nextCursorOf(pg.Sort, nextKey, nextID)}
 	for i := range recs {
 		v := recordToRetainedView(&recs[i])
 		v.Owner = owners[recs[i].Owner]
@@ -347,13 +341,13 @@ func (h *DataHandler) Get(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, v)
 }
 
-// Attach handles POST /v1/data/{dataId}/attach.
+// Attach handles POST /v1/data/{dataId}:attach (an ActionRouter verb).
 func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principalOrFail(w, r)
 	if !ok {
 		return
 	}
-	dataID := r.PathValue("dataId")
+	dataID := ActionID(r)
 	if !retainedIDPattern.MatchString(dataID) {
 		writeError(w, r, CodeInvalidRequest, "bad retained data id")
 		return
@@ -423,13 +417,13 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Purge handles POST /v1/data/{dataId}/purge.
+// Purge handles POST /v1/data/{dataId}:purge (an ActionRouter verb).
 func (h *DataHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principalOrFail(w, r)
 	if !ok {
 		return
 	}
-	dataID := r.PathValue("dataId")
+	dataID := ActionID(r)
 	if !retainedIDPattern.MatchString(dataID) {
 		writeError(w, r, CodeInvalidRequest, "bad retained data id")
 		return
@@ -479,7 +473,7 @@ func (h *DataHandler) writeDataError(w http.ResponseWriter, r *http.Request, err
 	case errors.Is(err, ErrRuntimeMismatch):
 		writeError(w, r, CodeInvalidTemplate, "template runtime does not match the retained disk")
 	case errors.Is(err, provisioning.ErrBadCursor):
-		writeError(w, r, CodeInvalidRequest, "bad pageToken")
+		writeError(w, r, CodeInvalidRequest, "bad cursor")
 	case errors.Is(err, provisioning.ErrNoQuota):
 		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)
 	case provisioning.IsQuotaExceeded(err):

@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 )
 
@@ -43,7 +43,7 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	env := &envtest.Environment{
@@ -110,7 +110,7 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	}
 
 	wsUID := broker.PlatformID("ws_binding01")
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ws-binding01",
 			Namespace: ns.Name,
@@ -119,23 +119,27 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 				"workspaces.cdi.tinyorbit.vn/tenant":        "tenant-a",
 			},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 4,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(context.Background(), ws); err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	ws.Status = workspacesv1alpha1.WorkspaceStatus{
-		Phase:                     workspacesv1alpha1.WorkspacePhaseReady,
+	ws.Status = cdiv1.WorkspaceStatus{
+		Phase:                     cdiv1.WorkspacePhaseReady,
 		ObservedRuntimeGeneration: 4,
 		RuntimeUID:                "rt-uid-4",
-		ServiceRef:                &workspacesv1alpha1.ServiceReference{Name: "ws-binding01", Port: 8443},
+		ServiceRef:                &cdiv1.ServiceReference{Name: "ws-binding01", Port: 8443},
 	}
 	if err := kc.Status().Update(context.Background(), ws); err != nil {
 		t.Fatalf("status update: %v", err)

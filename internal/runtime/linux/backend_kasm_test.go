@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 const testAdapterImage = "ghcr.io/tinyorbitvn/tinycdi-kasm-adapter@sha256:" +
@@ -31,7 +31,7 @@ func ensureKasmPod(t *testing.T, sessionCmd string, opts Options) *corev1.Pod {
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 	tpl.Spec.Linux.SessionCmd = sessionCmd
 	if _, err := New(c, opts).Ensure(context.Background(), ws, tpl); err != nil {
 		t.Fatalf("Ensure: %v", err)
@@ -159,6 +159,17 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	if !shimMounts["/usr/bin/chromium"] {
 		t.Error("the image's primary --no-sandbox wrapper /usr/bin/chromium must be shimmed")
 	}
+	// The catalog's browser-class entry (Google Chrome layout): its Kasm
+	// --no-sandbox wrapper and Google's managed-policy dir are covered.
+	if !shimMounts["/usr/bin/google-chrome"] {
+		t.Error("the google-chrome wrapper path must be shimmed")
+	}
+	if !shimMounts["/usr/bin/google-chrome-stable"] {
+		t.Error("the google-chrome-stable wrapper path must be shimmed")
+	}
+	if !policyMounts["/etc/opt/chrome/policies/managed/zz-tcdi.json"] {
+		t.Error("the google-chrome managed-policy dir must carry zz-tcdi.json")
+	}
 	for _, pp := range AdapterPolicyTargets {
 		if !policyMounts[pp] {
 			t.Errorf("no managed-policy mount at %s", pp)
@@ -167,7 +178,8 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	// The shim must never shadow the real binary it execs — that would loop.
 	for _, wp := range AdapterBrowserWrappers {
 		for _, real := range []string{"/usr/bin/chromium-orig", "/usr/lib/chromium/chromium",
-			"/opt/google/chrome/google-chrome", "/opt/microsoft/msedge/microsoft-edge"} {
+			"/opt/google/chrome/google-chrome", "/opt/google/chrome/chrome",
+			"/opt/microsoft/msedge/microsoft-edge"} {
 			if wp == real {
 				t.Fatalf("wrapper list must not contain the real binary %s", real)
 			}
@@ -229,7 +241,7 @@ func TestKasmAdapterRejectedWithoutImage(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
-	tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+	tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 	_, err := New(c, Options{}).Ensure(context.Background(), ws, tpl)
 	if err == nil {
 		t.Fatal("adapter=kasm without KasmAdapterImage must be rejected")

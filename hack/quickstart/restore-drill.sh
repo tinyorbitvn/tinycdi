@@ -192,7 +192,7 @@ kc -n "$NS_DEPS" exec postgres-0 -- pg_dump -U "$PSQL_DB" -d "$PSQL_DB" --no-own
 # ---- mutate ------------------------------------------------------------------
 log "mutate: stop A, create B, sign out (post-dump changes the dump never saw)"
 csrf=$(csrf_of "$JAR")
-portal "$JAR" POST "/v1/workspaces/$WS_A/stop" -H "X-CSRF-Token: $csrf" \
+portal "$JAR" POST "/v1/workspaces/$WS_A:stop" -H "X-CSRF-Token: $csrf" \
   -H "Idempotency-Key: drill-stop-$RANDOM$RANDOM" -o /dev/null -w '  stop A -> %{http_code}\n'
 WS_B=$(create_ws "drill-b-$(date +%s)" Stopped)
 log "  workspace B: $WS_B (exists only cluster-side after the restore)"

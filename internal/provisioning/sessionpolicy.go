@@ -6,6 +6,7 @@ package provisioning
 import (
 	"context"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -41,20 +42,8 @@ const (
 // built with), and — from v1.3 — on each file-transfer row. Audit reads
 // the record; it never re-derives.
 type SessionPolicy struct {
-	Clipboard    string             `json:"clipboard"`
-	FileTransfer FileTransferPolicy `json:"fileTransfer"`
-}
-
-// FileTransferPolicy is the resolved file-transfer channel. Inert until
-// T11 (v1.3): no WorkspaceTemplate fileTransferPolicy leg exists yet, so
-// the template side reads Disabled — today's posture — and Mode resolves
-// Disabled under every ceiling. The shape ships now so the recorded
-// vector is stable when the channel goes live.
-type FileTransferPolicy struct {
-	Mode string `json:"mode"`
-	// MaxFileBytes bounds a single transferred file; nil is the platform
-	// default bound (chosen with T11).
-	MaxFileBytes *int64 `json:"maxFileBytes"`
+	Clipboard    string                   `json:"clipboard"`
+	FileTransfer cdiv1.FileTransferPolicy `json:"fileTransfer"`
 }
 
 // meet resolves the shared direction lattice: Disabled is bottom,
@@ -98,22 +87,16 @@ func meet(template, ceiling, dirA, dirB string) string {
 // on every channel: the upgrade default, and the only state "no row"
 // may resolve to.
 func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling) SessionPolicy {
-	var clipCeil, fileCeil string
+	var clipCeil string
 	if c.Clipboard != nil {
 		clipCeil = *c.Clipboard
 	}
-	if c.FileTransfer != nil {
-		fileCeil = *c.FileTransfer
-	}
 	return SessionPolicy{
 		Clipboard: meet(tpl.ClipboardPolicy, clipCeil, ClipboardSend, ClipboardReceive),
-		FileTransfer: FileTransferPolicy{
-			// No WorkspaceTemplate fileTransferPolicy exists yet (T11):
-			// the template leg is Disabled — today's posture — so the
-			// channel resolves Disabled under every ceiling.
-			Mode:         meet(PolicyDisabled, fileCeil, FileTransferUpload, FileTransferDownload),
-			MaxFileBytes: c.FileMaxBytes,
-		},
+		// The catalog entry carries no fileTransferPolicy leg yet (F4/T11
+		// wires it): the template side is Disabled — today's posture —
+		// so the channel resolves Disabled under every ceiling.
+		FileTransfer: cdiv1.FileTransferDisabled,
 	}
 }
 

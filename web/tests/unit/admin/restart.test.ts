@@ -49,13 +49,13 @@ describe("restartWorkspace sequencing", () => {
 
     expect(result.desiredState).toBe("Running");
     expect(steps).toEqual(["stopping", "waiting", "starting"]);
-    const stops = requests(api, "POST", `/v1/workspaces/${WS}/stop`);
-    const starts = requests(api, "POST", `/v1/workspaces/${WS}/start`);
+    const stops = requests(api, "POST", `/v1/workspaces/${WS}:stop`);
+    const starts = requests(api, "POST", `/v1/workspaces/${WS}:start`);
     expect(stops).toHaveLength(1);
     expect(starts).toHaveLength(1);
     const idx = api.state.requests.map((r) => `${r.method} ${r.path}`);
-    expect(idx.indexOf(`POST /v1/workspaces/${WS}/stop`)).toBeLessThan(
-      idx.indexOf(`POST /v1/workspaces/${WS}/start`),
+    expect(idx.indexOf(`POST /v1/workspaces/${WS}:stop`)).toBeLessThan(
+      idx.indexOf(`POST /v1/workspaces/${WS}:start`),
     );
   });
 
@@ -73,7 +73,7 @@ describe("restartWorkspace sequencing", () => {
     });
     expect(result.desiredState).toBe("Running");
     expect(polls).toBe(1);
-    expect(requests(api, "POST", `/v1/workspaces/${WS}/start`)).toHaveLength(1);
+    expect(requests(api, "POST", `/v1/workspaces/${WS}:start`)).toHaveLength(1);
   });
 
   it("times out without sending start when Stopped never arrives", async () => {
@@ -87,7 +87,7 @@ describe("restartWorkspace sequencing", () => {
         timeoutMs: 120_000,
       }),
     ).rejects.toBeInstanceOf(RestartTimeoutError);
-    expect(requests(api, "POST", `/v1/workspaces/${WS}/start`)).toHaveLength(0);
+    expect(requests(api, "POST", `/v1/workspaces/${WS}:start`)).toHaveLength(0);
   });
 
   it("aborts when the workspace is deleted mid-wait", async () => {
@@ -99,7 +99,7 @@ describe("restartWorkspace sequencing", () => {
         sleep: async () => {},
       }),
     ).rejects.toBeInstanceOf(RestartAbortedError);
-    expect(requests(api, "POST", `/v1/workspaces/${WS}/start`)).toHaveLength(0);
+    expect(requests(api, "POST", `/v1/workspaces/${WS}:start`)).toHaveLength(0);
   });
 
   it("propagates the API error when start is refused", async () => {
@@ -109,6 +109,6 @@ describe("restartWorkspace sequencing", () => {
     await expect(
       restartWorkspace(client, WS, { fetch: async () => view("Stopped"), sleep: async () => {} }),
     ).rejects.toMatchObject({ code: "INVALID_STATE" });
-    expect(requests(api, "POST", `/v1/workspaces/${WS}/start`)).toHaveLength(1);
+    expect(requests(api, "POST", `/v1/workspaces/${WS}:start`)).toHaveLength(1);
   });
 });

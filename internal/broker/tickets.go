@@ -74,7 +74,7 @@ const (
 	DefaultGatewayAudience = "session.example.dev"
 
 	// PhaseReady is the Workspace phase that permits issuing tickets
-	// (mirrors api/v1alpha1.WorkspacePhaseReady — kept as a string so the
+	// (mirrors api/v1.WorkspacePhaseReady — kept as a string so the
 	// broker does not depend on the CRD types for its core contract).
 	PhaseReady = "Ready"
 )
@@ -220,8 +220,8 @@ type Broker struct {
 	// log emits the one-line records for those revocations; nil disables.
 	log *slog.Logger
 	// inputHook is invoked with the lease's principal and bound portal
-	// session digest ("" for legacy NULL rows) on each recorded "input"
-	// activity event (D18); nil disables it.
+	// session digest on each recorded "input" activity event (D18); nil
+	// disables it.
 	inputHook func(ctx context.Context, principal, sessionDigest string)
 
 	synthOnce  sync.Once
@@ -310,6 +310,17 @@ func requestID(ctx context.Context) string {
 	return "req-" + base64.RawURLEncoding.EncodeToString(raw[:])
 }
 
+// portalSessionDigest is SHA-256 of the issuing portal session's id,
+// stored on the ticket and copied onto the lease at redemption — the
+// session id itself never reaches the database (same convention as the
+// gateway session_digest). The id scopes streamOwnerTab reads: only the
+// portal session that minted the lease may see the stream's owner tab —
+// never a second session of the same user (R-V3c).
+func portalSessionDigest(portalSessionID string) []byte {
+	sum := sha256.Sum256([]byte(portalSessionID))
+	return sum[:]
+}
+
 // IssueTicket mints a 60 s, single-use opaque ticket for workspaceUID bound to
 // (workspaceUID, runtimeGeneration, runtimeUID, gateway audience) of the
 // current incarnation. Fails with ErrNotFound/ErrDenied when the principal may
@@ -325,21 +336,12 @@ func requestID(ctx context.Context) string {
 // is recorded verbatim as JSON on session_policy — the audit record of
 // which policy applied. A zero-value policy records NULLs — a ticket
 // with no policy appends nothing.
-// portalSessionDigest is SHA-256 of the issuing portal session's id,
-// stored on the ticket and copied onto the lease at redemption — the
-// session id itself never reaches the database (same convention as the
-// gateway session_digest). The id scopes streamOwnerTab reads: only the
-// portal session that minted the lease may see the stream's owner tab —
-// never a second session of the same user (R-V3c).
-func portalSessionDigest(portalSessionID string) []byte {
-	if portalSessionID == "" {
-		return nil
-	}
-	sum := sha256.Sum256([]byte(portalSessionID))
-	return sum[:]
-}
-
+// Every ticket is bound to a portal session: an empty portalSessionID is
+// refused with an UNAUTHENTICATED *api.Error before any lookup.
 func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, policy provisioning.SessionPolicy, portalSessionID string) (Ticket, error) {
+	if portalSessionID == "" {
+		return Ticket{}, api.NewError(api.CodeUnauthenticated, "portal session required")
+	}
 	now := b.now()
 
 	// Ownership check against the authoritative workspace row: cross-tenant
@@ -511,21 +513,19 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		// Epoch + absolute expiry + idle window mirror SessionStore's
 		// liveness rule (idle needs WithSessionIdle, FIX-IDLE/SR-1-F2); a
 		// restored dump or a rotated epoch fails closed.
-		if portalSession != nil {
-			var alive bool
-			livePred, liveArgs := b.portalSessionLiveSQL(2)
-			args := append([]any{portalSession}, liveArgs...)
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (
-					SELECT 1 FROM sessions s
-					WHERE s.id = encode($1, 'hex')
-					  AND `+livePred+`)`,
-				args...).Scan(&alive); err != nil {
-				return fmt.Errorf("broker: portal session check: %w", err)
-			}
-			if !alive {
-				return ErrRevoked
-			}
+		var alive bool
+		livePred, liveArgs := b.portalSessionLiveSQL(2)
+		args := append([]any{portalSession}, liveArgs...)
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (
+				SELECT 1 FROM sessions s
+				WHERE s.id = encode($1, 'hex')
+				  AND `+livePred+`)`,
+			args...).Scan(&alive); err != nil {
+			return fmt.Errorf("broker: portal session check: %w", err)
+		}
+		if !alive {
+			return ErrRevoked
 		}
 
 		// Claim the single active lease for this workspace. The FOR UPDATE

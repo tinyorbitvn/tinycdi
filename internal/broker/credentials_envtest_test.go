@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -41,7 +41,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	env := &envtest.Environment{
@@ -68,7 +68,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	// The CR the applier would have created: the workspace-uid label holds
 	// the platform id; metadata.uid is apiserver-assigned and never equal.
 	wsUID := provisioning.PlatformID("ws_cred01")
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ws-cred01",
 			Namespace: ns.Name,
@@ -77,13 +77,17 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 				provisioning.LabelTenant:       "tenant-a",
 			},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, ws); err != nil {
@@ -129,11 +133,11 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	}
 
 	// What the operator reports once Ensure converged.
-	ws.Status = workspacesv1alpha1.WorkspaceStatus{
-		Phase:                     workspacesv1alpha1.WorkspacePhaseReady,
+	ws.Status = cdiv1.WorkspaceStatus{
+		Phase:                     cdiv1.WorkspacePhaseReady,
 		ObservedRuntimeGeneration: 1,
 		RuntimeUID:                "rt-uid-1",
-		ServiceRef:                &workspacesv1alpha1.ServiceReference{Name: svc.Name, Port: 8443},
+		ServiceRef:                &cdiv1.ServiceReference{Name: svc.Name, Port: 8443},
 	}
 	if err := kc.Status().Update(ctx, ws); err != nil {
 		t.Fatalf("status update: %v", err)
@@ -163,6 +167,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 
 	db := newDB(t)
 	seedWorkspace(t, db, "tenant-a", "https://idp.example|alice", string(wsUID))
+	seedPortalSession(t, db, testPortalSession)
 	b := broker.New(db, src, broker.WithCredentialSource(
 		broker.NewK8sCredentialSource(kc, provisioning.TenantNamespaces{"tenant-a": ns.Name})))
 
@@ -185,7 +190,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 
 	alice := api.Principal{Issuer: "https://idp.example", Subject: "alice", TenantID: "tenant-a"}
 	gw := broker.GatewayIdentity{ID: "gw-1", Audience: broker.DefaultGatewayAudience}
-	tk, err := b.IssueTicket(ctx, alice, wsUID, false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, wsUID, false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}

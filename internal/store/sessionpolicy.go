@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // SessionPolicyCeiling is the tenant_session_policy row: the tenant
@@ -25,9 +24,9 @@ type SessionPolicyCeiling struct {
 	Clipboard    *string
 	FileTransfer *string
 	FileMaxBytes *int64
-	// Version is the row's change token — its updated_at, formatted
-	// RFC3339Nano: it changes on every write and is empty when no row
-	// exists. PUT echoes it in If-Match (optimistic concurrency).
+	// Version is the row's change token (FormatVersion of updated_at):
+	// it changes on every write and is empty when no row exists. The API
+	// derives the resource's ETag from it.
 	Version string
 }
 
@@ -45,12 +44,6 @@ type SessionPolicyWrite struct {
 func (w SessionPolicyWrite) Defaults() bool {
 	return w.Clipboard == nil && w.FileTransfer == nil && w.FileMaxBytes == nil
 }
-
-// ErrSessionPolicyVersionMismatch is returned by
-// SessionPolicyStore.SetCeiling when the If-Match version does not name
-// the current row — the ceiling changed between the client's read and
-// its write — or when the precondition names no row ("*") and one exists.
-var ErrSessionPolicyVersionMismatch = errors.New("session policy version mismatch")
 
 // SessionPolicyStore is the Postgres seam behind
 // /v1/admin/tenants/{tenant}/session-policy and the session-policy
@@ -84,7 +77,7 @@ func ceilingFrom(ctx context.Context, q policyQuerier, tenantID string) (Session
 		return SessionPolicyCeiling{}, err
 	}
 	c.HasRow = true
-	c.Version = updatedAt.UTC().Format(time.RFC3339Nano)
+	c.Version = FormatVersion(updatedAt)
 	return c, nil
 }
 
@@ -100,96 +93,82 @@ func (s *SessionPolicyStore) CeilingTx(ctx context.Context, tx Tx, tenantID stri
 	return ceilingFrom(ctx, tx, tenantID)
 }
 
-// SetCeiling writes the ceiling under optimistic concurrency — the same
-// If-Match discipline as the quota store (adminQuotaStore.SetLimits):
-// ifMatch must name the row's current version (Ceiling.Version) or be
-// IfMatchCreate ("*") when no row exists; a stale or wrong precondition
-// answers ErrSessionPolicyVersionMismatch. The check and the write are a
-// single statement, so they cannot be raced. An all-defaults write
-// deletes the row — "no row" and "all-defaults row" are the same state,
-// and the store keeps exactly one representation of it.
-func (s *SessionPolicyStore) SetCeiling(ctx context.Context, tenantID string, w SessionPolicyWrite, ifMatch string) error {
-	return s.db.WithTx(ctx, func(tx Tx) error {
+// SetCeiling writes the ceiling conditionally and returns the row's new
+// version ("" when the write deleted the row). create expects no row: the
+// write inserts only when none exists. Otherwise expectedVersion must name
+// the row's current version; the check rides in the UPDATE/DELETE itself,
+// so it cannot be raced. Every miss is ErrVersionMismatch. An all-defaults
+// write deletes the row — "no row" and "all-defaults row" are the same
+// state, and the store keeps exactly one representation of it; under
+// create it is a no-op that still refuses a row someone else created.
+func (s *SessionPolicyStore) SetCeiling(ctx context.Context, tenantID string, w SessionPolicyWrite, expectedVersion string, create bool) (string, error) {
+	var version string
+	err := s.db.WithTx(ctx, func(tx Tx) error {
 		if w.Defaults() {
-			// Conditional delete: remove whatever row exists and compare
-			// its version to If-Match inside the same transaction — a
-			// mismatch rolls the delete back, so the statement is
-			// race-free by construction. Nothing deleted is a match only
-			// for "*" (the caller believes there is no row).
-			var deletedAt *time.Time
-			err := tx.QueryRow(ctx, `
-				DELETE FROM tenant_session_policy WHERE tenant_id = $1
-				RETURNING updated_at`, tenantID).Scan(&deletedAt)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-				if ifMatch != IfMatchCreate {
-					return ErrSessionPolicyVersionMismatch
+			if create {
+				var exists bool
+				if err := tx.QueryRow(ctx, `
+					SELECT EXISTS (SELECT 1 FROM tenant_session_policy WHERE tenant_id = $1)`,
+					tenantID).Scan(&exists); err != nil {
+					return err
+				}
+				if exists {
+					return ErrVersionMismatch
 				}
 				return nil
-			case err != nil:
+			}
+			since, ok := parseVersion(expectedVersion)
+			if !ok {
+				return ErrVersionMismatch
+			}
+			tag, err := tx.Exec(ctx, `
+				DELETE FROM tenant_session_policy WHERE tenant_id = $1 AND updated_at = $2`,
+				tenantID, since)
+			if err != nil {
 				return err
 			}
-			if !deletedAt.UTC().Equal(mustParseVersion(ifMatch)) {
-				return ErrSessionPolicyVersionMismatch
+			if tag.RowsAffected() == 0 {
+				return ErrVersionMismatch
 			}
 			return nil
 		}
 
-		var tag pgconn.CommandTag
-		var err error
-		if ifMatch == IfMatchCreate {
-			tag, err = tx.Exec(ctx, `
+		var row pgx.Row
+		if create {
+			row = tx.QueryRow(ctx, `
 				INSERT INTO tenant_session_policy
-					(tenant_id, clipboard, file_transfer, file_max_bytes)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (tenant_id) DO NOTHING`,
+					(tenant_id, clipboard, file_transfer, file_max_bytes, updated_at)
+				VALUES ($1, $2, $3, $4, clock_timestamp())
+				ON CONFLICT (tenant_id) DO NOTHING
+				RETURNING updated_at`,
 				tenantID, w.Clipboard, w.FileTransfer, w.FileMaxBytes)
 		} else {
-			since, perr := parseVersion(ifMatch)
-			if perr != nil {
-				return ErrSessionPolicyVersionMismatch
+			since, ok := parseVersion(expectedVersion)
+			if !ok {
+				return ErrVersionMismatch
 			}
-			tag, err = tx.Exec(ctx, `
+			row = tx.QueryRow(ctx, `
 				UPDATE tenant_session_policy SET
 					clipboard      = $2,
 					file_transfer  = $3,
 					file_max_bytes = $4,
 					updated_at     = clock_timestamp()
-				WHERE tenant_id = $1 AND updated_at = $5`,
+				WHERE tenant_id = $1 AND updated_at = $5
+				RETURNING updated_at`,
 				tenantID, w.Clipboard, w.FileTransfer, w.FileMaxBytes, since)
 		}
-		if err != nil {
+		var updatedAt time.Time
+		if err := row.Scan(&updatedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrVersionMismatch
+			}
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return ErrSessionPolicyVersionMismatch
-		}
+		version = FormatVersion(updatedAt)
 		return nil
 	})
-}
-
-// IfMatchCreate is the If-Match value a client sends to create a row for
-// a tenant that has none. It is the only accepted precondition on a
-// missing row — an existing row requires its exact current version, so a
-// bare "*" can never skip the concurrency check. Mirrors api.IfMatchCreate
-// (the constant lives here so the store needs no api import).
-const IfMatchCreate = "*"
-
-// parseVersion reads the If-Match change token: the row's updated_at
-// formatted RFC3339Nano. Anything else can never equal a row's
-// updated_at — refuse it as a precondition failure rather than letting
-// Postgres's cast error out.
-func parseVersion(ifMatch string) (time.Time, error) {
-	return time.Parse(time.RFC3339Nano, ifMatch)
-}
-
-// mustParseVersion parses like parseVersion; an unparseable token yields
-// the zero time, which can never equal a row's updated_at — so the delete
-// path treats it as a precondition failure, not a crash.
-func mustParseVersion(ifMatch string) time.Time {
-	since, err := parseVersion(ifMatch)
 	if err != nil {
-		return time.Time{}
+		return "", err
 	}
-	return since
+	return version, nil
 }

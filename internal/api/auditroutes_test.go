@@ -112,7 +112,9 @@ func normalizePath(path string) string {
 	segs := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, seg := range segs {
 		if strings.HasPrefix(seg, "{") {
-			segs[i] = "{}"
+			// Keep a :verb suffix: {workspaceId}:start -> {}:start.
+			_, suffix, _ := strings.Cut(seg, "}")
+			segs[i] = "{}" + suffix
 		}
 	}
 	return "/" + strings.Join(segs, "/")
@@ -164,6 +166,21 @@ type coverageFixtures struct {
 	env      *testEnv
 	backend  *fakeWorkspaceBackend
 	retained *fakeRetainedStore
+	// mux records every pattern the Mount* functions register.
+	mux *recordingMux
+}
+
+// recordingMux is the RouteMux the coverage env mounts through: it
+// registers on a real ServeMux and remembers each pattern, so a test can
+// compare the mounted route set with the published contract.
+type recordingMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *recordingMux) Handle(pattern string, h http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, h)
 }
 
 func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
@@ -200,14 +217,15 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
 	}}, tenants, d).WithLogger(logger).WithAuditSink(sink)
 
-	mux := http.NewServeMux()
 	// env.login drives the /auth/* flow; everything below mirrors the
-	// appMux mount block — keep in sync with it.
-	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
-	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	// appMux mount block — keep in sync with it. The direct registrations
+	// go to the inner ServeMux; only the Mount* calls are recorded.
+	mux := &recordingMux{ServeMux: http.NewServeMux()}
+	mux.ServeMux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.ServeMux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
 	noop := func(h http.Handler) http.Handler { return h }
-	mux.Handle("GET /v1/login", noop(http.HandlerFunc(a.LoginHandler)))
-	mux.Handle("GET /v1/auth/callback", noop(http.HandlerFunc(a.CallbackHandler)))
+	mux.ServeMux.Handle("GET /v1/login", noop(http.HandlerFunc(a.LoginHandler)))
+	mux.ServeMux.Handle("GET /v1/auth/callback", noop(http.HandlerFunc(a.CallbackHandler)))
 	MountLogoutRoute(mux, a)
 	MountRevokeAllRoute(mux, a, noop)
 	MountSessionTouchRoute(mux, a, noop)
@@ -217,9 +235,9 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountConnectionRoutes(mux, a, connH)
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
-	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, newFakeDirectory(), tenants))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, newFakeDirectory(), tenants, nil).WithAuditSink(sink))
-	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(&fakeUserLimitSource{overrides: map[string]int64{}}, newFakeDirectory(), tenants).WithAuditSink(sink))
+	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
+	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
@@ -229,7 +247,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		RequireTrustedOrigin(a.SessionCookieName(), nil)(mux))))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
-	return &coverageFixtures{env: env, backend: be, retained: fs}
+	return &coverageFixtures{env: env, backend: be, retained: fs, mux: mux}
 }
 
 // requiredMutatingOps is the coverage domain: every openapi operation a
@@ -297,11 +315,11 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 				`{"name":"coverage-ws","templateRef":"tpl_linuxdesktop"}`,
 				map[string]string{"Idempotency-Key": "key-cov-create"}).Body.Close()
 		}},
-		{"POST /v1/workspaces/{}/start", auditActionWorkspaceStart, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsStoppedID+"/start", "", nil).Body.Close()
+		{"POST /v1/workspaces/{}:start", auditActionWorkspaceStart, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsStoppedID+":start", "", nil).Body.Close()
 		}},
-		{"POST /v1/workspaces/{}/stop", auditActionWorkspaceStop, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/stop", "", nil).Body.Close()
+		{"POST /v1/workspaces/{}:stop", auditActionWorkspaceStop, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+":stop", "", nil).Body.Close()
 		}},
 		{"POST /v1/workspaces/{}/connections", auditActionConnectionCreate, func() {
 			doReq(t, env, sess, csrf, http.MethodPost,
@@ -310,15 +328,15 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"DELETE /v1/workspaces/{}", auditActionWorkspaceDelete, func() {
 			doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+wsID, "", nil).Body.Close()
 		}},
-		{"POST /v1/data/{}/attach", auditActionDataAttach, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+		{"POST /v1/data/{}:attach", auditActionDataAttach, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 				`{"name":"restored","templateRef":"tpl_linuxdesktop"}`,
 				map[string]string{"Idempotency-Key": "key-cov-attach"}).Body.Close()
 		}},
-		{"POST /v1/data/{}/purge", auditActionDataPurge, func() {
+		{"POST /v1/data/{}:purge", auditActionDataPurge, func() {
 			got := decodeBody[retainedDataView](t,
 				doReq(t, env, sess, csrf, http.MethodGet, "/v1/data/"+rec2.ID, "", nil))
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec2.ID+"/purge",
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec2.ID+":purge",
 				`{"confirmationNonce":"`+got.PurgeConfirmationNonce+`"}`, nil).Body.Close()
 		}},
 		{"GET /v1/admin/tenants/{}/quota", auditActionAdminQuotaGet, func() {
@@ -331,13 +349,20 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"GET /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/admin/tenants/tenant-a/user-limits", "", nil).Body.Close()
 		}},
-		{"PUT /v1/admin/tenants/{}/user-limits", auditActionAdminUserLimitSet, func() {
-			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits",
-				`{"ownerRef":"iss|sub","limit":3}`, nil).Body.Close()
+		{"PUT /v1/admin/tenants/{}/user-limits/{}", auditActionAdminUserLimitSet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPut, userLimitPath("iss|sub"),
+				`{"limit":3}`, map[string]string{"If-Match": "*"}).Body.Close()
+		}},
+		{"DELETE /v1/admin/tenants/{}/user-limits/{}", auditActionAdminUserLimitClear, func() {
+			doReq(t, env, sessA, csrfA, http.MethodDelete, userLimitPath("iss|gone"),
+				"", map[string]string{"If-Match": `"stale"`}).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, userLimitDefaultPath, "", nil).Body.Close()
 		}},
 		{"PUT /v1/admin/tenants/{}/user-limits/default", auditActionAdminUserLimitDefaultSet, func() {
-			doReq(t, env, sessA, csrfA, http.MethodPut, "/v1/admin/tenants/tenant-a/user-limits/default",
-				`{"limit":3}`, nil).Body.Close()
+			doReq(t, env, sessA, csrfA, http.MethodPut, userLimitDefaultPath,
+				`{"limit":3}`, map[string]string{"If-Match": "*"}).Body.Close()
 		}},
 		{"GET /v1/admin/tenants/{}/session-policy", auditActionAdminSessionPolicyGet, func() {
 			doReq(t, env, sessA, csrfA, http.MethodGet, adminSessionPolicyPath, "", nil).Body.Close()
@@ -532,10 +557,10 @@ func TestAudit_WorkspaceStopOwner(t *testing.T) {
 	}
 	sess, csrf := login(t, env, "user-a")
 
-	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/stop", "", nil)
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+":stop", "", nil)
 	r.Body.Close()
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("stop: status=%d, want 200", r.StatusCode)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf("stop: status=%d, want 202", r.StatusCode)
 	}
 	e := requireEvent(t, sink, auditActionWorkspaceStop)
 	if e.Outcome != observability.OutcomeSuccess || e.TargetUID != wsID || e.Details["role"] != "" {
@@ -543,7 +568,7 @@ func TestAudit_WorkspaceStopOwner(t *testing.T) {
 	}
 
 	// A workspace that does not exist for this caller: failure + code.
-	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/ws_00000000000000000000000099/stop", "", nil)
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/ws_00000000000000000000000099:stop", "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("foreign stop: status=%d, want 404", r.StatusCode)
@@ -594,7 +619,7 @@ func TestAudit_CSRFDenied(t *testing.T) {
 	sess, _ := login(t, env, "user-a")
 
 	r := doReq(t, env, sess, &http.Cookie{Name: "csrf", Value: "forged"},
-		http.MethodPost, "/v1/workspaces/ws_00000000000000000000000002/stop", "", nil)
+		http.MethodPost, "/v1/workspaces/ws_00000000000000000000000002:stop", "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("bad CSRF: status=%d, want 403", r.StatusCode)
@@ -617,7 +642,7 @@ func TestAudit_DataAttachPurge(t *testing.T) {
 
 	// Owner attach.
 	sess, csrf := login(t, env, "user-a")
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"restored","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-audit-attach"})
 	if r.StatusCode != http.StatusCreated {
@@ -640,7 +665,7 @@ func TestAudit_DataAttachPurge(t *testing.T) {
 	// Read first to mint the caller-bound purge nonce.
 	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodGet, "/v1/data/"+rec2.ID, "", nil)
 	got := decodeBody[retainedDataView](t, r)
-	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodPost, "/v1/data/"+rec2.ID+"/purge",
+	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodPost, "/v1/data/"+rec2.ID+":purge",
 		`{"confirmationNonce":"`+got.PurgeConfirmationNonce+`"}`, nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusAccepted {
@@ -744,12 +769,14 @@ func TestAudit_SinkFailureStillSucceeds(t *testing.T) {
 		slog.New(slog.NewTextHandler(&logBuf, nil)),
 		func(string) { failures++ })
 	mux := http.NewServeMux()
-	mux.Handle(routeWorkspaceStart, audited(sink, routeWorkspaceStart,
+	actions := NewActionRouter()
+	actions.Handle("start", audited(sink, routeWorkspaceStart,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
-		})))
+		})).ServeHTTP)
+	mux.Handle(routeWorkspaceActions, actions)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_1/start", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_1:start", nil))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status=%d, want 204 — audit failure must not fail the request", rec.Code)
 	}

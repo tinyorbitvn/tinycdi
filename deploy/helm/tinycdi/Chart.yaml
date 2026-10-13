@@ -7,8 +7,8 @@ description: |-
   workspaces.cdi.tinyorbit.vn CRDs under crds/, and references pre-created
   Secrets by name — it never carries secret values.
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 1.0.0
+appVersion: "1.0.0"
 kubeVersion: ">=1.30.0-0"
 keywords:
   - vdi

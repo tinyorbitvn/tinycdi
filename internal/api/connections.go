@@ -104,7 +104,7 @@ func (h *ConnectionHandler) WithAuditSink(s observability.AuditSink) *Connection
 
 // MountConnectionRoutes registers the connections route with authn + CSRF
 // inside the dedicated audit wrapper (see MountWorkspaceRoutes).
-func MountConnectionRoutes(mux *http.ServeMux, authn *Authenticator, h *ConnectionHandler) {
+func MountConnectionRoutes(mux RouteMux, authn *Authenticator, h *ConnectionHandler) {
 	mux.Handle(routeConnectionCreate,
 		authn.RequireAuth(audited(h.audit, routeConnectionCreate,
 			authn.RequireCSRF(http.HandlerFunc(h.Create)))))
@@ -134,6 +134,13 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	p, ok := PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, r, CodeUnauthenticated, "authentication required")
+		return
+	}
+	// Every ticket — and the lease it redeems into — is bound to the portal
+	// session that requested it; a principal without one cannot connect.
+	sess, ok := SessionFromContext(r.Context())
+	if !ok || sess == nil || sess.ID == "" {
+		writeError(w, r, CodeUnauthenticated, "portal session required")
 		return
 	}
 	if _, ok := h.tenants.Namespace(p.TenantID); !ok {
@@ -175,11 +182,7 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if h.clipboard != nil {
 		policy, _ = h.clipboard(r.Context(), p, id)
 	}
-	var sessionID string
-	if sess, ok := SessionFromContext(r.Context()); ok && sess != nil {
-		sessionID = sess.ID
-	}
-	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sessionID)
+	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sess.ID)
 	if apiErr != nil {
 		WriteError(w, r, apiErr)
 		return

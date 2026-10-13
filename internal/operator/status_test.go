@@ -16,17 +16,17 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 func TestMarkFinalizerStepBlockedSanitizesError(t *testing.T) {
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	err := errors.New("dial tcp 10.0.0.5:5432: pq: password authentication failed for user \"tcdi\"")
 	MarkFinalizerStepBlocked(ws, StepRevokeLeases, err, time.Now())
 
 	var cond *metav1.Condition
 	for i := range ws.Status.Conditions {
-		if ws.Status.Conditions[i].Type == workspacesv1alpha1.ConditionDegraded {
+		if ws.Status.Conditions[i].Type == cdiv1.ConditionDegraded {
 			cond = &ws.Status.Conditions[i]
 		}
 	}
@@ -47,11 +47,11 @@ func TestMarkFinalizerStepBlockedSanitizesError(t *testing.T) {
 
 // A nil error still marks the step blocked (reason-only, no message body).
 func TestMarkFinalizerStepBlockedNilError(t *testing.T) {
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	MarkFinalizerStepBlocked(ws, StepRetention, nil, time.Now())
 	var cond *metav1.Condition
 	for i := range ws.Status.Conditions {
-		if ws.Status.Conditions[i].Type == workspacesv1alpha1.ConditionDegraded {
+		if ws.Status.Conditions[i].Type == cdiv1.ConditionDegraded {
 			cond = &ws.Status.Conditions[i]
 		}
 	}

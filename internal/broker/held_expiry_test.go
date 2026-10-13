@@ -26,7 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -176,47 +176,51 @@ func TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced(t *testing.T) {
 	// The template the pod was built under — strict lifecycle caps, and
 	// (after the pod is seeded) an out-of-policy seccomp annotation that
 	// lands the workspace on the content-invalid hold.
-	tpl := &workspacesv1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "fam-held", Namespace: ns,
 			Labels:      map[string]string{provisioning.LabelCatalogName: "fam-held"},
 			Annotations: map[string]string{linux.AnnotationSeccompProfile: "localhost/browser-sandbox"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-10-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux: &workspacesv1alpha1.LinuxRuntimeSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
+			Revision: "2026-10-a", Runtime: cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "tcdi/linux-desktop@sha256:" + fmt.Sprintf("%064x", 9),
 			},
-			Resources: workspacesv1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"),
 				Storage: resource.MustParse("1Gi"),
 			},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacesv1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacesv1alpha1.ClipboardDisabled,
-			Lifecycle: workspacesv1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 90 * time.Second},
 				DisconnectTimeout: metav1.Duration{Duration: time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 2 * time.Hour},
-				DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+				DataPolicy:        cdiv1.DataPolicyEphemeral,
 			},
 		},
 	}
 	if err := kc.Create(ctx, tpl); err != nil {
 		t.Fatal(err)
 	}
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ws-held-op", Namespace: ns,
 			Labels: map[string]string{provisioning.LabelWorkspaceUID: "ws_heldop"},
 		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "fam-held"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "fam-held"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://idp.example", Subject: "alice"},
+			DesiredState:      cdiv1.DesiredStateRunning,
+			DataPolicy:        cdiv1.DataPolicyEphemeral,
 			RuntimeGeneration: 1, IntentRevision: 1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, ws); err != nil {
@@ -241,7 +245,7 @@ func TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced(t *testing.T) {
 	if err := kc.Status().Update(ctx, pod); err != nil {
 		t.Fatalf("mark pod serving: %v", err)
 	}
-	live := &workspacesv1alpha1.WorkspaceTemplate{}
+	live := &cdiv1.WorkspaceTemplate{}
 	if err := kc.Get(ctx, client.ObjectKey{Namespace: ns, Name: "fam-held"}, live); err != nil {
 		t.Fatal(err)
 	}
@@ -254,14 +258,14 @@ func TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced(t *testing.T) {
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &workspacesv1alpha1.Workspace{}
+	got := &cdiv1.Workspace{}
 	if err := kc.Get(ctx, client.ObjectKeyFromObject(ws), got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+	if got.Status.Phase != cdiv1.WorkspacePhaseReady {
 		t.Fatalf("held workspace with a live pod: phase=%q, want Ready", got.Status.Phase)
 	}
-	cond := meta.FindStatusCondition(got.Status.Conditions, workspacesv1alpha1.ConditionDegraded)
+	cond := meta.FindStatusCondition(got.Status.Conditions, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue ||
 		cond.Reason != operator.ReasonTemplateInvalid {
 		t.Fatalf("want Degraded/TemplateInvalid, got %+v", got.Status.Conditions)

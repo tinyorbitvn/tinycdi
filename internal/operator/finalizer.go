@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	tcdiruntime "github.com/tinyorbitvn/tinycdi/internal/runtime"
 )
@@ -108,7 +108,7 @@ type StreamDrainer interface {
 // volumes. It must be idempotent: partial progress (e.g. one of two PVCs
 // marked retained) is retried on the next run.
 type RetentionHandler interface {
-	ApplyRetention(ctx context.Context, ws *workspacesv1alpha1.Workspace) error
+	ApplyRetention(ctx context.Context, ws *cdiv1.Workspace) error
 }
 
 // stepHook is the package-internal seam used to observe and fault-inject
@@ -182,7 +182,7 @@ func (f *Finalizer) hook() stepHook {
 // helpers, and the next Run resumes at that step. Run on a workspace whose
 // finalizer-progress annotation shows earlier steps completed does not
 // re-execute them.
-func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (done bool, err error) {
+func (f *Finalizer) Run(ctx context.Context, ws *cdiv1.Workspace) (done bool, err error) {
 	now := f.now()
 	prog, err := finalizerProgress(ws)
 	if err != nil {
@@ -202,7 +202,7 @@ func (f *Finalizer) Run(ctx context.Context, ws *workspacesv1alpha1.Workspace) (
 			uid = provisioning.PlatformID(ws.UID)
 		} else {
 			if uerr := f.updateStatus(ctx, ws, func() {
-				SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
+				SetWorkspaceCondition(ws, cdiv1.ConditionDegraded,
 					metav1.ConditionTrue, ReasonMissingWorkspaceID,
 					"CR lacks the platform workspace id label; teardown held until it is restored", now)
 			}); uerr != nil {
@@ -289,7 +289,7 @@ func teardownStepReason(step FinalizerStep) string {
 // annotations untouched skips the main update, and one that changes
 // nothing at all (a repeated drain stamp) writes nothing — each write
 // would only bump resourceVersion and self-trigger a reconcile.
-func (f *Finalizer) updateStatus(ctx context.Context, ws *workspacesv1alpha1.Workspace, stamp func()) error {
+func (f *Finalizer) updateStatus(ctx context.Context, ws *cdiv1.Workspace, stamp func()) error {
 	conditions := slices.Clone(ws.Status.Conditions)
 	annotations := maps.Clone(ws.Annotations)
 	stamp()
@@ -310,14 +310,14 @@ func (f *Finalizer) updateStatus(ctx context.Context, ws *workspacesv1alpha1.Wor
 // progress display only, so it is best effort: a failed write never blocks
 // or fails the teardown (the next step's mark, or the final delete, makes
 // it right). Re-running the same step (a drain requeue) writes nothing.
-func (f *Finalizer) markStep(ctx context.Context, ws *workspacesv1alpha1.Workspace, step FinalizerStep) {
+func (f *Finalizer) markStep(ctx context.Context, ws *cdiv1.Workspace, step FinalizerStep) {
 	reason := teardownStepReason(step)
-	if cur := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionRuntimeReady); cur != nil &&
+	if cur := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionRuntimeReady); cur != nil &&
 		cur.Status == metav1.ConditionFalse && cur.Reason == reason {
 		return
 	}
 	_ = f.updateStatus(ctx, ws, func() {
-		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionRuntimeReady,
+		SetWorkspaceConditionParams(ws, cdiv1.ConditionRuntimeReady,
 			metav1.ConditionFalse, reason, "teardown step "+string(step)+" in progress",
 			map[string]string{"step": string(step)}, f.now())
 	})
@@ -339,7 +339,7 @@ func (f *Finalizer) blockConnects(ctx context.Context, uid provisioning.Platform
 	return f.Connects.BlockConnects(ctx, uid)
 }
 
-func (f *Finalizer) revokeLeases(ctx context.Context, ws *workspacesv1alpha1.Workspace, uid provisioning.PlatformID) error {
+func (f *Finalizer) revokeLeases(ctx context.Context, ws *cdiv1.Workspace, uid provisioning.PlatformID) error {
 	if f.Leases == nil {
 		return fmt.Errorf("finalizer: lease revoker unavailable (broker seam)")
 	}
@@ -353,7 +353,7 @@ func (f *Finalizer) revokeLeases(ctx context.Context, ws *workspacesv1alpha1.Wor
 	return err
 }
 
-func (f *Finalizer) applyRetention(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (f *Finalizer) applyRetention(ctx context.Context, ws *cdiv1.Workspace) error {
 	if f.Retention == nil {
 		return fmt.Errorf("finalizer: retention handler unavailable (CSI seam)")
 	}
@@ -365,7 +365,7 @@ func (f *Finalizer) applyRetention(ctx context.Context, ws *workspacesv1alpha1.W
 // streams closed or the persisted drain deadline expired — and (false, nil)
 // while still inside the window. The drain anchor is persisted before the
 // first gateway call so a restart never extends the budget.
-func (f *Finalizer) runDrain(ctx context.Context, ws *workspacesv1alpha1.Workspace, prog *FinalizerProgress, uid provisioning.PlatformID, now time.Time) (bool, error) {
+func (f *Finalizer) runDrain(ctx context.Context, ws *cdiv1.Workspace, prog *FinalizerProgress, uid provisioning.PlatformID, now time.Time) (bool, error) {
 	if f.Drainer == nil {
 		return false, fmt.Errorf("finalizer: stream drainer unavailable (broker seam)")
 	}
@@ -391,7 +391,7 @@ func (f *Finalizer) runDrain(ctx context.Context, ws *workspacesv1alpha1.Workspa
 		// Budget exhausted: proceed without the gateway; fail-closed
 		// streams die with the runtime anyway.
 		if err := f.updateStatus(ctx, ws, func() {
-			SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+			SetWorkspaceConditionParams(ws, cdiv1.ConditionDegraded,
 				metav1.ConditionTrue, ReasonDrainTimedOut,
 				"gateway streams did not close inside the drain budget; continuing teardown",
 				drainParams, now)
@@ -401,7 +401,7 @@ func (f *Finalizer) runDrain(ctx context.Context, ws *workspacesv1alpha1.Workspa
 		return true, nil
 	}
 	if err := f.updateStatus(ctx, ws, func() {
-		SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+		SetWorkspaceConditionParams(ws, cdiv1.ConditionDegraded,
 			metav1.ConditionTrue, ReasonStreamDraining,
 			"waiting for gateway streams to close", drainParams, now)
 	}); err != nil {
@@ -412,7 +412,7 @@ func (f *Finalizer) runDrain(ctx context.Context, ws *workspacesv1alpha1.Workspa
 
 // persistProgress writes the checkpoint annotation and updates the object.
 // Steps are idempotent, so a failed write simply re-runs the last step.
-func (f *Finalizer) persistProgress(ctx context.Context, ws *workspacesv1alpha1.Workspace, prog *FinalizerProgress) error {
+func (f *Finalizer) persistProgress(ctx context.Context, ws *cdiv1.Workspace, prog *FinalizerProgress) error {
 	raw, err := json.Marshal(prog)
 	if err != nil {
 		return err
@@ -421,7 +421,7 @@ func (f *Finalizer) persistProgress(ctx context.Context, ws *workspacesv1alpha1.
 	return f.Client.Update(ctx, ws)
 }
 
-func finalizerProgress(ws *workspacesv1alpha1.Workspace) (*FinalizerProgress, error) {
+func finalizerProgress(ws *cdiv1.Workspace) (*FinalizerProgress, error) {
 	raw := ws.Annotations[AnnotationFinalizerProgress]
 	if raw == "" {
 		return &FinalizerProgress{}, nil
@@ -465,6 +465,6 @@ type pvcRetention struct {
 	client client.Client
 }
 
-func (h pvcRetention) ApplyRetention(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (h pvcRetention) ApplyRetention(ctx context.Context, ws *cdiv1.Workspace) error {
 	return (&RetentionApplier{Client: h.client, Inventory: NewRetentionInventory(h.client)}).ApplyRetention(ctx, ws)
 }

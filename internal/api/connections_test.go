@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
@@ -146,10 +147,8 @@ func TestCreateConnection_ResolvedPolicyRidesTicket(t *testing.T) {
 	env := newConnectionEnv(t, fi, func(h *ConnectionHandler) {
 		h.WithClipboardSource(func(_ context.Context, _ Principal, _ string) (provisioning.SessionPolicy, error) {
 			return provisioning.SessionPolicy{
-				Clipboard: provisioning.PolicyDisabled,
-				FileTransfer: provisioning.FileTransferPolicy{
-					Mode: provisioning.PolicyDisabled,
-				},
+				Clipboard:    provisioning.PolicyDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
 			}, nil
 		})
 	})
@@ -168,16 +167,13 @@ func TestCreateConnection_ResolvedPolicyRidesTicket(t *testing.T) {
 	var view struct {
 		SessionPolicy struct {
 			Clipboard    string `json:"clipboard"`
-			FileTransfer struct {
-				Mode         string `json:"mode"`
-				MaxFileBytes *int64 `json:"maxFileBytes"`
-			} `json:"fileTransfer"`
+			FileTransfer string `json:"fileTransfer"`
 		} `json:"sessionPolicy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&view); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if view.SessionPolicy.Clipboard != "Disabled" || view.SessionPolicy.FileTransfer.Mode != "Disabled" {
+	if view.SessionPolicy.Clipboard != "Disabled" || view.SessionPolicy.FileTransfer != "Disabled" {
 		t.Fatalf("response sessionPolicy = %+v, want Disabled/Disabled", view.SessionPolicy)
 	}
 }
@@ -234,10 +230,13 @@ func TestCreateConnection_InvalidBodyGenericMessage(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 400", r.StatusCode, b)
 	}
 	b, _ := io.ReadAll(r.Body)
-	var e Error
-	if err := json.Unmarshal(b, &e); err != nil {
+	var wrap struct {
+		Error Error `json:"error"`
+	}
+	if err := json.Unmarshal(b, &wrap); err != nil {
 		t.Fatalf("error body not JSON: %q", b)
 	}
+	e := wrap.Error
 	if e.Code != CodeInvalidRequest || e.Message != "invalid request body" {
 		t.Fatalf("code=%q message=%q, want INVALID_REQUEST + generic message", e.Code, e.Message)
 	}
@@ -285,10 +284,7 @@ func TestCreateConnection_ConnectionInUse(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("status=%d, want 409", r.StatusCode)
 	}
-	var e Error
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	e := decodeErr(t, r)
 	if e.Code != CodeConnectionInUse {
 		t.Fatalf("code=%q, want CONNECTION_IN_USE", e.Code)
 	}
@@ -315,10 +311,7 @@ func TestCreateConnection_NotFoundAndBadID(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("bad-id status=%d, want 409", r.StatusCode)
 	}
-	var e Error
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	e := decodeErr(t, r)
 	if e.Code != CodeInvalidState {
 		t.Fatalf("bad-id code=%q, want INVALID_STATE", e.Code)
 	}
@@ -395,4 +388,36 @@ func TestLaunchURL_PerWorkspaceHost(t *testing.T) {
 	if len(hosts) != 2 {
 		t.Fatalf("two workspaces share a launch host: %v", hosts)
 	}
+}
+
+// TestConnectionCreate_RequiresPortalSession: a principal without a portal
+// session (no session in the request context) is refused with 401 before the
+// issuer runs — every ticket and lease is bound to a portal session.
+func TestConnectionCreate_RequiresPortalSession(t *testing.T) {
+	issuer := &fakeIssuer{}
+	d, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
+	h := NewConnectionHandler(issuer, defaultTenants(), d)
+	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_00000000000000000000000001/connections", strings.NewReader(`{}`))
+	req.SetPathValue("id", "ws_00000000000000000000000001")
+	req = req.WithContext(withPrincipalNoSession(req.Context()))
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(CodeUnauthenticated)) {
+		t.Fatalf("body %s lacks %s", rec.Body.String(), CodeUnauthenticated)
+	}
+	if issuer.calls != 0 {
+		t.Fatalf("IssueTicket called %d times, want 0", issuer.calls)
+	}
+}
+
+// withPrincipalNoSession sets a verified principal but no portal session, so
+// SessionFromContext reports (nil, false).
+func withPrincipalNoSession(ctx context.Context) context.Context {
+	return WithPrincipal(ctx, Principal{Issuer: "https://idp.test", Subject: "alice", TenantID: "tenant-a"})
 }

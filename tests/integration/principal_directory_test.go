@@ -4,32 +4,10 @@ package integration
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
-
-// TestMigration012_Idempotent: the principal-directory migration applies
-// cleanly on top of itself (fresh DB already ran it via Migrate; running
-// the file's SQL again must succeed).
-func TestMigration012_Idempotent(t *testing.T) {
-	db := newDB(t)
-	defer db.Close()
-	sql, err := os.ReadFile(repoPath("internal/store/migrations/012_principal_directory.sql"))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	for i := 0; i < 2; i++ {
-		if _, err := db.Pool().Exec(context.Background(), string(sql)); err != nil {
-			t.Fatalf("apply %d: %v", i+1, err)
-		}
-	}
-	// The full runner is idempotent too.
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-}
 
 // TestDirectory_UpsertOnLogin: Remember upserts on (tenant, owner_ref) —
 // a second login with a changed display name updates the row in place.

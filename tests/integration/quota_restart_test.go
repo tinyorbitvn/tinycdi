@@ -50,7 +50,7 @@ func createStopped(t *testing.T, svc *provisioning.Service, rec *provisioning.Re
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-quota",
 		Name:         name,
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Stopped",
 		DataPolicy:   "Ephemeral",
@@ -66,7 +66,7 @@ func createStopped(t *testing.T, svc *provisioning.Service, rec *provisioning.Re
 }
 
 // TestStartReacquiresQuota covers defect F7: POST
-// /v1/workspaces/{id}/start on a stopped workspace must re-acquire the
+// /v1/workspaces/{id}:start on a stopped workspace must re-acquire the
 // running-quota reservation that Stop + proven runtime absence released,
 // in the same transaction as the start intent.
 //
@@ -95,7 +95,7 @@ func TestStartReacquiresQuota(t *testing.T) {
 	// A running occupies the single slot.
 	reqA := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-quota", Name: "f7-a",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Ephemeral",
 	}
@@ -221,7 +221,7 @@ func TestStartOnRunningIsIdempotent(t *testing.T) {
 
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-quota", Name: "f7-noop",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Ephemeral",
 	}
@@ -250,5 +250,5 @@ func TestStartOnRunningIsIdempotent(t *testing.T) {
 }
 
 // The handler-level mapping (QuotaExceededError -> 409 QUOTA_EXHAUSTED on
-// POST /v1/workspaces/{id}/start) is covered in internal/api
+// POST /v1/workspaces/{id}:start) is covered in internal/api
 // (workspaces_handlers_test.go: TestStartQuotaExhaustedMapping).

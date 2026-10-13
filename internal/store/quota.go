@@ -34,10 +34,9 @@ type OwnerUsage struct {
 type QuotaReport struct {
 	HasLimits bool
 	Limits    QuotaAmounts // Workspaces is always 0: there is no count limit
-	// Version is the limits row's change token — its updated_at, formatted
-	// RFC3339Nano: it changes on every update and is empty when no row
-	// exists. Admin writes compare it under If-Match for optimistic
-	// concurrency.
+	// Version is the limits row's change token (FormatVersion of
+	// updated_at): it changes on every update and is empty when no row
+	// exists. The admin API derives the quota's ETag from it.
 	Version string
 	Usage   QuotaAmounts
 	Owners  []OwnerUsage // ordered by owner reference
@@ -45,11 +44,17 @@ type QuotaReport struct {
 	// running-workspace limit; nil means no default (unlimited unless an
 	// override applies).
 	DefaultUserLimit *int64
+	// DefaultUserLimitVersion is the default row's change token; empty
+	// when no default row exists.
+	DefaultUserLimitVersion string
 	// UserLimits maps owner reference to the stored per-principal
 	// running-workspace override; an owner's effective limit is
 	// UserLimits[owner] when present, else DefaultUserLimit, else
 	// unlimited.
 	UserLimits map[string]int64
+	// UserLimitVersions maps owner reference to its override row's change
+	// token; it has exactly the keys of UserLimits.
+	UserLimitVersions map[string]string
 }
 
 // QuotaReader reads quota reports (GET /v1/quota).
@@ -76,7 +81,7 @@ func (q *QuotaReader) Report(ctx context.Context, tenantID string) (QuotaReport,
 		return rep, fmt.Errorf("quota limits: %w", err)
 	default:
 		rep.HasLimits = true
-		rep.Version = updatedAt.UTC().Format(time.RFC3339Nano)
+		rep.Version = FormatVersion(updatedAt)
 	}
 
 	// A deleted workspace whose reservation is still held (release awaits
@@ -117,30 +122,35 @@ func (q *QuotaReader) Report(ctx context.Context, tenantID string) (QuotaReport,
 	// Per-principal running limits live outside the limits row (the
 	// tenant stays tenant-scoped): the default row plus every override.
 	var def int64
+	var defAt time.Time
 	switch err := q.db.Pool().QueryRow(ctx, `
-		SELECT max_running FROM tenant_user_limit_default WHERE tenant_id = $1`,
-		tenantID).Scan(&def); {
+		SELECT max_running, updated_at FROM tenant_user_limit_default WHERE tenant_id = $1`,
+		tenantID).Scan(&def, &defAt); {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return rep, fmt.Errorf("user limit default: %w", err)
 	default:
 		rep.DefaultUserLimit = &def
+		rep.DefaultUserLimitVersion = FormatVersion(defAt)
 	}
 	lrows, err := q.db.Pool().Query(ctx, `
-		SELECT owner_subject, max_running FROM user_session_limit
+		SELECT owner_subject, max_running, updated_at FROM user_session_limit
 		WHERE tenant_id = $1 ORDER BY owner_subject`, tenantID)
 	if err != nil {
 		return rep, fmt.Errorf("user limits: %w", err)
 	}
 	defer lrows.Close()
 	rep.UserLimits = map[string]int64{}
+	rep.UserLimitVersions = map[string]string{}
 	for lrows.Next() {
 		var owner string
 		var max int64
-		if err := lrows.Scan(&owner, &max); err != nil {
+		var at time.Time
+		if err := lrows.Scan(&owner, &max, &at); err != nil {
 			return rep, fmt.Errorf("user limits: %w", err)
 		}
 		rep.UserLimits[owner] = max
+		rep.UserLimitVersions[owner] = FormatVersion(at)
 	}
 	return rep, lrows.Err()
 }

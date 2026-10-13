@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -28,7 +28,7 @@ func retainedApplyScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacev1alpha1.AddToScheme(s); err != nil {
+	if err := cdiv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -88,7 +88,7 @@ func TestRetainedApplierSameRevisionTwice(t *testing.T) {
 	if err := provisioning.NewOutbox(db).MarkDispatched(ctx, create.WorkspaceUID, create.Revision); err != nil {
 		t.Fatalf("ack create: %v", err)
 	}
-	cr := &workspacev1alpha1.Workspace{}
+	cr := &cdiv1.Workspace{}
 	if err := kc.Get(ctx, client.ObjectKey{Namespace: "ns-it", Name: provisioning.WorkspaceCRName(create.WorkspaceUID)}, cr); err != nil {
 		t.Fatalf("consuming CR: %v", err)
 	}

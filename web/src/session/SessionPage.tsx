@@ -3,7 +3,9 @@ import { t, formatTime } from "../i18n";
 import { formatDuration } from "../templates/format";
 import { phaseLabelKey } from "../workspaces/helpers";
 import { useApi } from "../api/context";
-import { newIdempotencyKey, unwrap } from "../api/client";
+import { unwrap } from "../api/client";
+import { startWorkspace as postStart } from "../workspaces/api";
+import { scanTemplates } from "../templates/useTemplates";
 import { isPortalApiError } from "../api/errors";
 import { LifecycleProgress } from "../progress/LifecycleProgress";
 import { opPollMs, startInFlight, withJitter } from "../progress/derive";
@@ -747,14 +749,7 @@ export function SessionPage({
   // INVALID_STATE race the reload re-derives the real position.
   const startWorkspace = useCallback(async () => {
     try {
-      const ws = unwrap(
-        await api.POST("/v1/workspaces/{workspaceId}/start", {
-          params: {
-            path: { workspaceId },
-            header: { "Idempotency-Key": newIdempotencyKey() },
-          },
-        }),
-      );
+      const ws = await postStart(api, workspaceId);
       if (!mounted.current) return;
       setWorkspace(ws);
       const blocker = connectBlocker(ws);
@@ -1399,8 +1394,8 @@ async function loadTemplate(
   ws: WorkspaceView,
 ): Promise<TemplateView | null> {
   try {
-    const list = unwrap(await api.GET("/v1/templates", {}));
-    return list.items.find((tpl) => tpl.id === ws.template.id) ?? null;
+    const all = await scanTemplates(api);
+    return all.find((tpl) => tpl.id === ws.template.id) ?? null;
   } catch {
     return null; // notices are best-effort
   }

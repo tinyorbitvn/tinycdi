@@ -4,20 +4,21 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
-## Upgrading from v0.5.1 to v1.0.0
+## Upgrading from a pre-1.0 release to v1.0.0
 
-v1.0.0 carries **no CRD change and no database migration** over v0.5.1 —
-the upgrade is the chart plus the pinned images, nothing else. There is
-no `crds/` step: the `workspaces` and `workspacetemplates` schemas are
-unchanged from v0.5.1 (and Helm never upgrades `crds/` anyway). Follow
-the general "Procedure" below, skipping the CRD step: pin the new image
-digests (`images.{backend,frontend,operator}.digest`, plus the
-runtime-train digests per [images.md](../images.md)), render and diff,
-then `helm upgrade`. Sessions keep running under the same rules.
+There is **no upgrade from a pre-1.0 release**. v1.0.0 ships the CRDs at
+`v1` only (no `v1alpha1`, no conversion) and the database migrations are
+squashed into `0001_baseline`. Reinstall instead of upgrading:
 
-Rollback is the same as for any chart-only step: `helm rollback`, or
-re-pin the previous digests and `helm upgrade` — nothing schema-side
-moves, so the outgoing release reads the same objects it wrote.
+1. Uninstall the old release and delete its CRDs
+   (`workspaces` and `workspacetemplates`) and its database.
+2. Install v1.0.0 from scratch with a fresh database
+   ([install.md](install.md)).
+
+The backend refuses to start against a database whose `schema_migrations`
+holds a version or name that this build does not embed (every pre-1.0
+database does), so an in-place `helm upgrade` fails closed rather than
+running on the old schema.
 
 ## Upgrading from v0.5.0 to v0.5.1 — `status.templateSnapshot`
 
@@ -360,22 +361,6 @@ downgrade is a **restore**: bring back the previous chart release
 - **The CRDs stay.** Do not "un-apply" the v0.3 CRDs — the wider CEL
   rule and the new optional field harm nothing under v0.2, and a
   `kubectl replace` of the older schema can prune stored data.
-
-### CI gate — this procedure runs automatically
-
-The `upgrade` job in `.github/workflows/ci.yml` exercises exactly this
-path on every relevant change: `hack/quickstart/upgrade-test.sh`
-installs the published previous release's chart and its cosign-verified images on the
-quickstart kind plumbing, seeds quota/running/stopped/retained state
-plus a live portal session, applies the CRDs and `helm upgrade`s to the
-working tree's chart and locally built images, and
-`hack/quickstart/smoke/upgrade.spec.ts` asserts the session reconnects
-inside its lease without a new launch ticket, migrations reach the
-newest file, and every seeded row survives. It is gated (not required)
-on `deploy/helm/`, `internal/store/migrations/`, `config/crd/`,
-`hack/quickstart/`, `build/` and the workflow itself; it runs locally
-too (`hack/quickstart/upgrade-test.sh` against any Docker daemon,
-`down.sh` removes everything).
 
 ## Upgrading from v0.1 to v0.2
 
@@ -819,8 +804,9 @@ templates:
       experience: Desktop    # was: Browser
 ```
 
-`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
-pin — lag 4), so a Browser template pinned to it only has option B. If no
+The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
+155 pin — lag 1) but the allowlist ships empty, so a Browser template
+pinned to it needs option A (allowlist the ref) or option B. If no
 cataloged browser image meets the gate the allowlist stays empty — see
 `docs/kasm-images.md`.
 

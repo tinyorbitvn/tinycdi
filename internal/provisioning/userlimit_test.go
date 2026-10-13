@@ -21,15 +21,22 @@ import (
 )
 
 // ulSetDefault/ulSetOverride write a limit row; nil clears it. They go
-// through the real Postgres store so the tests cover the write path too.
+// through the real Postgres store so the tests cover the write path too:
+// each reads the row's current version first and writes conditionally on
+// it (create when there is no row).
 func ulSetDefault(t *testing.T, db *store.DB, tenant string, n *int64) {
 	t.Helper()
+	ctx := context.Background()
+	rep, err := store.NewQuotaReader(db).Report(ctx, tenant)
+	if err != nil {
+		t.Fatalf("read default user limit: %v", err)
+	}
 	s := store.NewUserLimitStore(db)
-	var err error
+	create := rep.DefaultUserLimit == nil
 	if n == nil {
-		err = s.ClearDefault(context.Background(), tenant)
+		_, err = s.ClearDefault(ctx, tenant, rep.DefaultUserLimitVersion, create)
 	} else {
-		err = s.SetDefault(context.Background(), tenant, *n)
+		_, err = s.SetDefault(ctx, tenant, *n, rep.DefaultUserLimitVersion, create)
 	}
 	if err != nil {
 		t.Fatalf("set default user limit: %v", err)
@@ -38,12 +45,17 @@ func ulSetDefault(t *testing.T, db *store.DB, tenant string, n *int64) {
 
 func ulSetOverride(t *testing.T, db *store.DB, tenant, owner string, n *int64) {
 	t.Helper()
+	ctx := context.Background()
+	rep, err := store.NewQuotaReader(db).Report(ctx, tenant)
+	if err != nil {
+		t.Fatalf("read user limit override: %v", err)
+	}
 	s := store.NewUserLimitStore(db)
-	var err error
+	ver, exists := rep.UserLimitVersions[owner]
 	if n == nil {
-		err = s.ClearOverride(context.Background(), tenant, owner)
+		_, err = s.ClearOverride(ctx, tenant, owner, ver, !exists)
 	} else {
-		err = s.SetOverride(context.Background(), tenant, owner, *n)
+		_, err = s.SetOverride(ctx, tenant, owner, *n, ver, !exists)
 	}
 	if err != nil {
 		t.Fatalf("set user limit override: %v", err)

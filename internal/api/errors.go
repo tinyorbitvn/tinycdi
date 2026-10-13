@@ -30,6 +30,7 @@ const (
 	CodeQuotaExhausted       ErrorCode = "QUOTA_EXHAUSTED"         // 409
 	CodeQuotaNotConfigured   ErrorCode = "QUOTA_NOT_CONFIGURED"    // 409
 	CodeQuotaManagedByConfig ErrorCode = "QUOTA_MANAGED_BY_CONFIG" // 409
+	CodePreconditionRequired ErrorCode = "PRECONDITION_REQUIRED"   // 428
 	CodePreconditionFailed   ErrorCode = "PRECONDITION_FAILED"     // 412
 	CodeConnectionInUse      ErrorCode = "CONNECTION_IN_USE"       // 409
 	CodeImageStale           ErrorCode = "IMAGE_STALE"             // 409
@@ -57,6 +58,7 @@ var AllErrorCodes = []ErrorCode{
 	CodeQuotaExhausted,
 	CodeQuotaNotConfigured,
 	CodeQuotaManagedByConfig,
+	CodePreconditionRequired,
 	CodePreconditionFailed,
 	CodeConnectionInUse,
 	CodeImageStale,
@@ -80,6 +82,8 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity
+	case CodePreconditionRequired:
+		return http.StatusPreconditionRequired
 	case CodePreconditionFailed:
 		return http.StatusPreconditionFailed
 	case CodeRateLimited:
@@ -183,7 +187,9 @@ func WriteError(w http.ResponseWriter, r *http.Request, e *Error) {
 	e.RequestID = RequestIDFromContext(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Code.HTTPStatus())
-	_ = json.NewEncoder(w).Encode(e)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error *Error `json:"error"`
+	}{e})
 }
 
 // writeQuotaExceeded maps a quota refusal onto QUOTA_EXHAUSTED. A

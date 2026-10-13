@@ -429,7 +429,6 @@ Install-time invariants. Rendering FAILS when violated:
   "TCDI_REQUIRED_GROUPS" "oidc.requiredGroups"
   "TCDI_TENANT_ADMIN_GROUPS" "oidc.tenantAdminGroups"
   "TCDI_CONTROL_TOKEN" "backend.controlToken.existingSecret"
-  "TCDI_GW_CONTROL_TOKEN" "backend.controlToken.existingSecret"
   "TCDI_CONTROL_TOKEN_FILE" "backend.controlToken.existingSecret"
   "TCDI_TRUSTED_PROXIES" "backend.trustedProxies"
   "TCDI_UPSTREAM_CA" "backend.upstreamCA.existingSecret"

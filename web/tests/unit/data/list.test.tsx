@@ -45,6 +45,8 @@ describe("data list", () => {
     renderWithApi(<DataListPage />, api);
 
     const table = await screen.findByRole("table", { name: /retained/i });
+    // The table renders while the first page is still loading: wait for rows.
+    await waitFor(() => expect(within(table).getAllByRole("row").length).toBeGreaterThan(4));
     for (const state of ["Retained", "Attaching", "Attached", "Purging"]) {
       const row = within(table)
         .getAllByRole("row")
@@ -61,6 +63,7 @@ describe("data list", () => {
     renderWithApi(<DataListPage />, api);
 
     const table = await screen.findByRole("table", { name: /retained/i });
+    await waitFor(() => expect(within(table).getAllByRole("row").length).toBeGreaterThan(4));
     const rows = within(table).getAllByRole("row").slice(1); // skip header
 
     // RETAINED_DISK (the default seed) is also Retained; assert per record.

@@ -28,7 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	tcdiruntime "github.com/tinyorbitvn/tinycdi/internal/runtime"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
@@ -48,7 +48,7 @@ func (f *flakyBackend) set(ensure, stop error) {
 	f.ensureErr, f.stopErr = ensure, stop
 }
 
-func (f *flakyBackend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Workspace, tpl *workspacesv1alpha1.WorkspaceTemplate) (tcdiruntime.Observation, error) {
+func (f *flakyBackend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (tcdiruntime.Observation, error) {
 	f.mu.Lock()
 	err := f.ensureErr
 	f.mu.Unlock()
@@ -58,7 +58,7 @@ func (f *flakyBackend) Ensure(ctx context.Context, ws *workspacesv1alpha1.Worksp
 	return f.Backend.Ensure(ctx, ws, tpl)
 }
 
-func (f *flakyBackend) Stop(ctx context.Context, ws *workspacesv1alpha1.Workspace) error {
+func (f *flakyBackend) Stop(ctx context.Context, ws *cdiv1.Workspace) error {
 	f.mu.Lock()
 	err := f.stopErr
 	f.mu.Unlock()
@@ -100,17 +100,17 @@ func TestProgress_BackendError(t *testing.T) {
 			t.Fatal("reconcile swallowed the backend error; controller-runtime must retry")
 		}
 		got := getWorkspace(t, c, key)
-		rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady)
+		rc := condition(got, cdiv1.ConditionRuntimeReady)
 		if rc == nil || rc.Status != metav1.ConditionFalse || rc.Reason != ReasonBackendError {
 			t.Fatalf("RuntimeReady = %+v, want False/%s", rc, ReasonBackendError)
 		}
 		if strings.Contains(rc.Message, "10.1.2.3") || strings.Contains(rc.Message, "quota") {
 			t.Fatalf("condition message leaks the raw error: %q", rc.Message)
 		}
-		if d := condition(got, workspacesv1alpha1.ConditionDegraded); d != nil && d.Status == metav1.ConditionTrue {
+		if d := condition(got, cdiv1.ConditionDegraded); d != nil && d.Status == metav1.ConditionTrue {
 			t.Fatalf("a retrying backend error must not mark Degraded: %+v", d)
 		}
-		if got.Status.Phase == workspacesv1alpha1.WorkspacePhaseReady || got.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed {
+		if got.Status.Phase == cdiv1.WorkspacePhaseReady || got.Status.Phase == cdiv1.WorkspacePhaseFailed {
 			t.Fatalf("phase = %q; a backend error must not change the lifecycle phase", got.Status.Phase)
 		}
 
@@ -118,7 +118,7 @@ func TestProgress_BackendError(t *testing.T) {
 		be.set(nil, nil)
 		reconcile(t, r, key)
 		got = getWorkspace(t, c, key)
-		if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc == nil || rc.Reason == ReasonBackendError {
+		if rc := condition(got, cdiv1.ConditionRuntimeReady); rc == nil || rc.Reason == ReasonBackendError {
 			t.Fatalf("RuntimeReady still %+v after the backend recovered", rc)
 		}
 	})
@@ -133,7 +133,7 @@ func TestProgress_BackendError(t *testing.T) {
 		reconcile(t, r, key)
 
 		cur := getWorkspace(t, c, key)
-		cur.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+		cur.Spec.DesiredState = cdiv1.DesiredStateStopped
 		cur.Spec.IntentRevision = 2
 		if err := c.Update(context.Background(), cur); err != nil {
 			t.Fatalf("stop intent: %v", err)
@@ -143,7 +143,7 @@ func TestProgress_BackendError(t *testing.T) {
 			t.Fatal("stop failure swallowed")
 		}
 		got := getWorkspace(t, c, key)
-		if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc == nil ||
+		if rc := condition(got, cdiv1.ConditionRuntimeReady); rc == nil ||
 			rc.Status != metav1.ConditionFalse || rc.Reason != ReasonBackendError {
 			t.Fatalf("RuntimeReady = %+v, want False/%s", rc, ReasonBackendError)
 		}
@@ -157,7 +157,7 @@ func TestProgress_BackendError(t *testing.T) {
 		reconcile(t, r, key)
 		markPodReady(t, c, thePod(t, c, ns, ws.UID))
 		reconcile(t, r, key)
-		if p := getWorkspace(t, c, key).Status.Phase; p != workspacesv1alpha1.WorkspacePhaseReady {
+		if p := getWorkspace(t, c, key).Status.Phase; p != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("phase = %q, want Ready", p)
 		}
 		be.set(errors.New(secret), nil)
@@ -165,7 +165,7 @@ func TestProgress_BackendError(t *testing.T) {
 			t.Fatal("error swallowed")
 		}
 		got := getWorkspace(t, c, key)
-		if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc == nil || rc.Status != metav1.ConditionTrue {
+		if rc := condition(got, cdiv1.ConditionRuntimeReady); rc == nil || rc.Status != metav1.ConditionTrue {
 			t.Fatalf("RuntimeReady = %+v; a Ready workspace's runtime is still up", rc)
 		}
 	})
@@ -180,7 +180,7 @@ func TestProgress_BackendError(t *testing.T) {
 			t.Fatal("conflict swallowed")
 		}
 		got := getWorkspace(t, c, key)
-		if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc != nil && rc.Reason == ReasonBackendError {
+		if rc := condition(got, cdiv1.ConditionRuntimeReady); rc != nil && rc.Reason == ReasonBackendError {
 			t.Fatalf("a conflict was reported as BackendError: %+v", rc)
 		}
 	})
@@ -198,7 +198,7 @@ func TestProgress_FailedKeepsStalledStep(t *testing.T) {
 		}
 	}()
 	ns := newNamespace(t, c)
-	newTemplate(t, c, ns, "tpl-g4", func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, "tpl-g4", func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Spec.BootDeadline = metav1.Duration{Duration: 300 * time.Millisecond}
 	})
 	ws := newWorkspace(t, c, ns, "ws-g4", "tpl-g4", nil)
@@ -220,10 +220,10 @@ func TestProgress_FailedKeepsStalledStep(t *testing.T) {
 	now = now.Add(time.Second) // past the 300 ms boot deadline
 	reconcile(t, r, key)
 	got := getWorkspace(t, c, key)
-	if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseFailed {
+	if got.Status.Phase != cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
 	}
-	if cc := condition(got, workspacesv1alpha1.ConditionConnectionReady); cc == nil || cc.Reason != "ImagePullBackOff" {
+	if cc := condition(got, cdiv1.ConditionConnectionReady); cc == nil || cc.Reason != "ImagePullBackOff" {
 		t.Fatalf("ConnectionReady at failure = %+v, want reason ImagePullBackOff", cc)
 	}
 
@@ -233,16 +233,16 @@ func TestProgress_FailedKeepsStalledStep(t *testing.T) {
 	reconcile(t, r, key)
 	reconcile(t, r, key)
 	got = getWorkspace(t, c, key)
-	if d := condition(got, workspacesv1alpha1.ConditionDegraded); d == nil || d.Reason != ReasonFailedCleanup {
+	if d := condition(got, cdiv1.ConditionDegraded); d == nil || d.Reason != ReasonFailedCleanup {
 		t.Fatalf("Degraded = %+v, want reason %s", d, ReasonFailedCleanup)
 	}
-	for _, typ := range []string{workspacesv1alpha1.ConditionRuntimeReady, workspacesv1alpha1.ConditionConnectionReady} {
+	for _, typ := range []string{cdiv1.ConditionRuntimeReady, cdiv1.ConditionConnectionReady} {
 		cc := condition(got, typ)
 		if cc == nil || cc.Status != metav1.ConditionFalse || cc.Reason == "Provisioning" {
 			t.Fatalf("%s after cleanup = %+v; the stalled step was overwritten", typ, cc)
 		}
 	}
-	if cc := condition(got, workspacesv1alpha1.ConditionConnectionReady); cc.Reason != "ImagePullBackOff" {
+	if cc := condition(got, cdiv1.ConditionConnectionReady); cc.Reason != "ImagePullBackOff" {
 		t.Fatalf("ConnectionReady after cleanup = %q, want ImagePullBackOff", cc.Reason)
 	}
 
@@ -255,10 +255,10 @@ func TestProgress_FailedKeepsStalledStep(t *testing.T) {
 	}
 	reconcile(t, r, key)
 	got = getWorkspace(t, c, key)
-	if got.Status.Phase == workspacesv1alpha1.WorkspacePhaseFailed {
+	if got.Status.Phase == cdiv1.WorkspacePhaseFailed {
 		t.Fatalf("phase = %q after a new intent", got.Status.Phase)
 	}
-	if cc := condition(got, workspacesv1alpha1.ConditionConnectionReady); cc == nil || cc.Reason == "ImagePullBackOff" {
+	if cc := condition(got, cdiv1.ConditionConnectionReady); cc == nil || cc.Reason == "ImagePullBackOff" {
 		t.Fatalf("ConnectionReady = %+v; a new attempt must not inherit the old stalled step", cc)
 	}
 }
@@ -274,13 +274,13 @@ type probeSeams struct {
 }
 
 func (p *probeSeams) probe(step FinalizerStep) error {
-	got := &workspacesv1alpha1.Workspace{}
+	got := &cdiv1.Workspace{}
 	if err := p.c.Get(context.Background(), p.key, got); err != nil {
 		p.t.Errorf("probe get: %v", err)
 		return nil
 	}
 	reason := ""
-	if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc != nil && rc.Status == metav1.ConditionFalse {
+	if rc := condition(got, cdiv1.ConditionRuntimeReady); rc != nil && rc.Status == metav1.ConditionFalse {
 		reason = rc.Reason
 	}
 	p.mu.Lock()
@@ -299,7 +299,7 @@ func (p *probeSeams) RevokeAllForWorkspace(context.Context, provisioning.Platfor
 func (p *probeSeams) DrainStatus(context.Context, provisioning.PlatformID) (int, bool, error) {
 	return 0, true, p.probe(StepDrainStreams)
 }
-func (p *probeSeams) ApplyRetention(context.Context, *workspacesv1alpha1.Workspace) error {
+func (p *probeSeams) ApplyRetention(context.Context, *cdiv1.Workspace) error {
 	return p.probe(StepRetention)
 }
 
@@ -435,7 +435,7 @@ func TestProgress_TeardownCompletesWhenEveryStatusWriteConflicts(t *testing.T) {
 	if failing.attempts.Load() < int64(len(FinalizerOrder)) {
 		t.Fatalf("only %d status writes attempted; the marks were not exercised", failing.attempts.Load())
 	}
-	if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+	if err := c.Get(context.Background(), key, &cdiv1.Workspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("workspace still present after teardown with failing status writes: %v", err)
 	}
 }
@@ -517,7 +517,7 @@ func TestProgress_TeardownStatusWritesDoNotLoop(t *testing.T) {
 			t.Errorf("step %s ran %d times, want exactly 1", step, n)
 		}
 	}
-	if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+	if err := c.Get(context.Background(), key, &cdiv1.Workspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("workspace still present after the drain finished: %v", err)
 	}
 	// Bounded: one mark per step plus the drain's own condition writes.
@@ -558,8 +558,8 @@ func TestProgress_WaitingForDisk(t *testing.T) {
 	if err := c.Create(ctx, retained); err != nil {
 		t.Fatal(err)
 	}
-	ws := newWorkspace(t, c, ns, "ws-wfd", "tpl-wfd", func(w *workspacesv1alpha1.Workspace) {
-		w.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	ws := newWorkspace(t, c, ns, "ws-wfd", "tpl-wfd", func(w *cdiv1.Workspace) {
+		w.Spec.DataPolicy = cdiv1.DataPolicyRetain
 		w.Annotations = map[string]string{
 			linux.AnnotationRetainedPVC:     retained.Name,
 			linux.AnnotationRetainedPVCUID:  string(retained.UID),
@@ -573,14 +573,14 @@ func TestProgress_WaitingForDisk(t *testing.T) {
 		t.Fatalf("reconcile = %v, want the not-yet-claimed error returned for retry", err)
 	}
 	got := getWorkspace(t, c, key)
-	sc := condition(got, workspacesv1alpha1.ConditionStorageReady)
+	sc := condition(got, cdiv1.ConditionStorageReady)
 	if sc == nil || sc.Status != metav1.ConditionFalse || sc.Reason != ReasonWaitingForDisk {
 		t.Fatalf("StorageReady = %+v, want False/%s", sc, ReasonWaitingForDisk)
 	}
-	if rc := condition(got, workspacesv1alpha1.ConditionRuntimeReady); rc != nil && rc.Reason == ReasonBackendError {
+	if rc := condition(got, cdiv1.ConditionRuntimeReady); rc != nil && rc.Reason == ReasonBackendError {
 		t.Fatalf("the claim wait was reported as BackendError: %+v", rc)
 	}
-	if d := condition(got, workspacesv1alpha1.ConditionDegraded); d != nil && d.Status == metav1.ConditionTrue {
+	if d := condition(got, cdiv1.ConditionDegraded); d != nil && d.Status == metav1.ConditionTrue {
 		t.Fatalf("the claim wait must not mark Degraded: %+v", d)
 	}
 	if pods, svcs, _, _ := countChildren(t, c, ns, ws.UID); pods+svcs != 0 {
@@ -601,7 +601,7 @@ func TestProgress_WaitingForDisk(t *testing.T) {
 	}
 	reconcile(t, r, key)
 	got = getWorkspace(t, c, key)
-	if sc := condition(got, workspacesv1alpha1.ConditionStorageReady); sc == nil || sc.Reason == ReasonWaitingForDisk {
+	if sc := condition(got, cdiv1.ConditionStorageReady); sc == nil || sc.Reason == ReasonWaitingForDisk {
 		t.Fatalf("StorageReady = %+v after the claim was handed over", sc)
 	}
 	if pods, _, _, _ := countChildren(t, c, ns, ws.UID); pods != 1 {

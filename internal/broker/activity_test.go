@@ -32,9 +32,10 @@ func seedLease(t *testing.T, db *store.DB, leaseID, wsUID, tenantID, subj string
 	_, err := db.Pool().Exec(context.Background(), `
 		INSERT INTO connection_lease
 			(id, workspace_id, tenant_id, principal_subject, runtime_generation,
-			 runtime_uid, fencing_version, gateway_id, state, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9)`,
-		leaseID, wsUID, tenantID, subj, gen, rtUID, fencing, gwID, expiresAt)
+			 runtime_uid, fencing_version, gateway_id, state, expires_at,
+			 portal_session_digest)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,sha256(convert_to($10,'UTF8')))`,
+		leaseID, wsUID, tenantID, subj, gen, rtUID, fencing, gwID, expiresAt, testPortalSession)
 	if err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}

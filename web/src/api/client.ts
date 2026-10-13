@@ -1,6 +1,6 @@
 import createClient, { type Client, type Middleware } from "openapi-fetch";
 import type { paths } from "./generated/schema";
-import { PortalApiError, type ErrorDetails } from "./errors";
+import { PortalApiError, errorBodyOf, type ErrorDetails } from "./errors";
 
 export type ApiClient = Client<paths>;
 
@@ -34,8 +34,8 @@ function csrfMiddleware(fetchImpl: typeof fetch, baseUrl: string): Middleware {
       if (!retry) return response; // already retried, or a safe method
       let code: string | undefined;
       try {
-        const body = (await response.clone().json()) as Record<string, unknown>;
-        code = typeof body?.code === "string" ? body.code : undefined;
+        const body = errorBodyOf(await response.clone().json());
+        code = typeof body.code === "string" ? body.code : undefined;
       } catch {
         return response;
       }
@@ -78,8 +78,6 @@ export function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
 
-// openapi-fetch resolves with { data, error, response }; unwrap to data or
-// throw a PortalApiError carrying the stable error code.
 // Retry-After carries seconds or an HTTP date; anything else is ignored.
 function retryAfterMs(response: Response): number | undefined {
   const raw = response.headers.get("retry-after");
@@ -90,16 +88,17 @@ function retryAfterMs(response: Response): number | undefined {
   return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
 }
 
+// openapi-fetch resolves with { data, error, response }; unwrap to data or
+// throw a PortalApiError carrying the envelope's stable error code.
 export function unwrap<T>(result: {
   data?: T;
   error?: unknown;
   response: Response;
 }): T {
   if (result.error !== undefined || !result.response.ok) {
-    const body =
-      typeof result.error === "object" && result.error !== null
-        ? (result.error as Record<string, unknown>)
-        : {};
+    // Every error response is the envelope {"error": {code, message,
+    // retryable, requestId, details?}}; anything else carries no code.
+    const body = errorBodyOf(result.error);
     throw new PortalApiError(
       result.response.status,
       {

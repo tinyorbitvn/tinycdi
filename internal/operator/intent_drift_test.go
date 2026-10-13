@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
@@ -40,9 +40,9 @@ func drainEvents(rec *record.FakeRecorder) []string {
 	}
 }
 
-func intentBehindCond(t *testing.T, ws *workspacesv1alpha1.Workspace) *metav1.Condition {
+func intentBehindCond(t *testing.T, ws *cdiv1.Workspace) *metav1.Condition {
 	t.Helper()
-	return condition(ws, workspacesv1alpha1.ConditionIntentBehind)
+	return condition(ws, cdiv1.ConditionIntentBehind)
 }
 
 func TestIntentBehindDrift(t *testing.T) {
@@ -56,8 +56,8 @@ func TestIntentBehindDrift(t *testing.T) {
 	t.Run("marker stamps condition+event once, realign clears", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-drift", nil)
-		ws := newWorkspace(t, c, ns, "ws-drift", "tpl-drift", func(ws *workspacesv1alpha1.Workspace) {
-			ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+		ws := newWorkspace(t, c, ns, "ws-drift", "tpl-drift", func(ws *cdiv1.Workspace) {
+			ws.Spec.DesiredState = cdiv1.DesiredStateStopped
 			ws.Spec.RuntimeGeneration = 0
 		})
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
@@ -146,8 +146,8 @@ func TestIntentBehindDrift(t *testing.T) {
 	t.Run("spec trailing the applied record drifts without a marker", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-behind", nil)
-		ws := newWorkspace(t, c, ns, "ws-behind", "tpl-behind", func(ws *workspacesv1alpha1.Workspace) {
-			ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+		ws := newWorkspace(t, c, ns, "ws-behind", "tpl-behind", func(ws *cdiv1.Workspace) {
+			ws.Spec.DesiredState = cdiv1.DesiredStateStopped
 			ws.Spec.RuntimeGeneration = 0
 		})
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}

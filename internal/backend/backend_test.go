@@ -12,10 +12,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -359,7 +361,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	me := api.NewMeHandler(sdom.String())
 	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
 	data := api.NewDataHandler(nil, nil, tenants)
-	quota := api.NewQuotaHandler(fakeQuotaSource{}, nil, tenants)
+	quota := api.NewQuotaHandler(fakeQuotaSource{}, tenants)
 	pass := func(h http.Handler) http.Handler { return h }
 	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, nil, pass, pass, pass)
 	b := &Backend{log: testLog(), metrics: m}
@@ -1193,9 +1195,11 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	portalSum := sha256.Sum256([]byte("portal-1"))
+	seedSession(t, db, hex.EncodeToString(portalSum[:]))
 	tick, err := brk.IssueTicket(ctx,
 		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
-		"ws-shared-1", false, provisioning.SessionPolicy{}, "")
+		"ws-shared-1", false, provisioning.SessionPolicy{}, "portal-1")
 	if err != nil {
 		t.Fatalf("issue ticket: %v", err)
 	}

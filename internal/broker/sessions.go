@@ -111,10 +111,10 @@ func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d Sessi
 // it first makes "the session is gone" visible to redemption as early as
 // possible, and the store still owns the ordering either way.
 func (b *Broker) RevokePortalSession(ctx context.Context, portalSessionID string) (int, error) {
-	d := portalSessionDigest(portalSessionID)
-	if d == nil {
+	if portalSessionID == "" {
 		return 0, nil
 	}
+	d := portalSessionDigest(portalSessionID)
 	now := b.now()
 	n := 0
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
@@ -206,9 +206,8 @@ type PrincipalRevocation struct {
 // revokes the principal's outstanding launch tickets, deletes all their
 // session rows for the tenant (the caller's own session included — revoke
 // everywhere means everywhere), and revokes every active connection lease
-// the principal holds in the tenant, including leases minted before
-// portal_session_digest existed: the predicate is the principal, not the
-// digest. Each gateway replica's renew loop sees the leases die within one
+// the principal holds in the tenant: the predicate is the principal, not
+// the digest. Each gateway replica's renew loop sees the leases die within one
 // renew cycle, and a replayed workspace cookie from any revoked session
 // resolves to a dead lease on any replica.
 //

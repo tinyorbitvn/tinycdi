@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -43,33 +43,33 @@ const (
 // data-policy default.
 func v32Revision(t *testing.T, ns, name, revision, image string) {
 	t.Helper()
-	tpl := &workspacev1alpha1.WorkspaceTemplate{
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 			Labels:    map[string]string{provisioning.LabelCatalogName: "upd32home"},
 		},
-		Spec: workspacev1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   revision,
-			Runtime:    workspacev1alpha1.RuntimeLinuxContainer,
-			Experience: workspacev1alpha1.ExperienceDesktop,
-			Linux: &workspacev1alpha1.LinuxRuntimeSpec{
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: image,
 			},
-			Resources: workspacev1alpha1.ResourceProfile{
+			Resources: cdiv1.ResourceProfile{
 				CPU:     resource.MustParse("500m"),
 				Memory:  resource.MustParse("512Mi"),
 				Storage: resource.MustParse("5Gi"),
 			},
 			BootDeadline:    metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile:  workspacev1alpha1.NetworkProfileIsolated,
-			ClipboardPolicy: workspacev1alpha1.ClipboardDisabled,
-			Lifecycle: workspacev1alpha1.LifecycleDefaults{
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			Lifecycle: cdiv1.LifecycleDefaults{
 				IdleTimeout:       metav1.Duration{Duration: 30 * time.Minute},
 				DisconnectTimeout: metav1.Duration{Duration: 10 * time.Minute},
 				MaxDuration:       metav1.Duration{Duration: 8 * time.Hour},
-				DataPolicy:        workspacev1alpha1.DataPolicyRetain,
-				ImageUpdate:       workspacev1alpha1.ImageUpdateOnStart,
+				DataPolicy:        cdiv1.DataPolicyRetain,
+				ImageUpdate:       cdiv1.ImageUpdateOnStart,
 			},
 		},
 	}
@@ -111,6 +111,7 @@ func TestUpdate_RetainedHomeSurvives(t *testing.T) {
 		Template: provisioning.TemplateInfo{
 			ID: "tpl_upd32home-aaaa1111", Name: "upd32home", Revision: 1,
 			RevisionLabel: "2026-10-a", Runtime: "LinuxContainer", Experience: "Desktop",
+			ClipboardPolicy: provisioning.PolicyDisabled,
 		},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 5 << 30},
 		DesiredState: "Running", DataPolicy: "Retain",

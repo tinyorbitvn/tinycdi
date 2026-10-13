@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
@@ -67,7 +67,7 @@ type IntentBehindMark struct {
 // strictly-behind revision, or an equal revision describing different
 // intent fields — means the stream the row serves diverged from what the
 // CR already applied.
-func intentFenceDrifted(ws *workspacev1alpha1.Workspace, in Intent) bool {
+func intentFenceDrifted(ws *cdiv1.Workspace, in Intent) bool {
 	rev := int64(in.Revision)
 	if rev != ws.Spec.IntentRevision {
 		return rev < ws.Spec.IntentRevision
@@ -79,7 +79,7 @@ func intentFenceDrifted(ws *workspacev1alpha1.Workspace, in Intent) bool {
 // markIntentBehind records the drift marker on the CR, writing only when
 // the recorded pair changed (each dropped intent is a real stream event,
 // not a poll). The intent itself is still dropped — fencing is unchanged.
-func (a *K8sApplier) markIntentBehind(ctx context.Context, ws *workspacev1alpha1.Workspace, in Intent) error {
+func (a *K8sApplier) markIntentBehind(ctx context.Context, ws *cdiv1.Workspace, in Intent) error {
 	raw, err := json.Marshal(IntentBehindMark{
 		RowRevision: int64(in.Revision),
 		CRRevision:  ws.Spec.IntentRevision,
@@ -97,7 +97,7 @@ func (a *K8sApplier) markIntentBehind(ctx context.Context, ws *workspacev1alpha1
 // clearIntentBehind removes the drift marker; called on every forward
 // apply so the first intent the CR adopts again realigns the marker with
 // the stream.
-func clearIntentBehind(ws *workspacev1alpha1.Workspace) {
+func clearIntentBehind(ws *cdiv1.Workspace) {
 	delete(ws.Annotations, AnnotationIntentBehind)
 }
 
@@ -176,7 +176,7 @@ func (a *K8sApplier) Apply(ctx context.Context, in Intent) error {
 }
 
 func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in Intent) error {
-	ws := &workspacev1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      key.Name,
 			Namespace: key.Namespace,
@@ -188,14 +188,14 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 				AnnotationRequestID: in.RequestID,
 			},
 		},
-		Spec: workspacev1alpha1.WorkspaceSpec{
-			TemplateRef: workspacev1alpha1.TemplateReference{Name: in.Spec.TemplateName},
-			OwnerSubject: workspacev1alpha1.OwnerSubject{
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef: cdiv1.TemplateReference{Name: in.Spec.TemplateName},
+			OwnerSubject: cdiv1.OwnerSubject{
 				Issuer:  in.Spec.OwnerIssuer,
 				Subject: in.Spec.OwnerSubject,
 			},
-			DesiredState:      workspacev1alpha1.DesiredState(in.DesiredState),
-			DataPolicy:        workspacev1alpha1.DataPolicy(in.Spec.DataPolicy),
+			DesiredState:      cdiv1.DesiredState(in.DesiredState),
+			DataPolicy:        cdiv1.DataPolicy(in.Spec.DataPolicy),
 			RuntimeGeneration: in.RuntimeGeneration,
 			IntentRevision:    int64(in.Revision),
 			SessionPolicy:     sessionPolicySpec(in.Spec.SessionPolicy),
@@ -213,7 +213,7 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 		return nil
 	case apierrors.IsAlreadyExists(err):
 		// Replay: converge only if this is the same request.
-		var existing workspacev1alpha1.Workspace
+		var existing cdiv1.Workspace
 		if err := a.client.Get(ctx, key, &existing); err != nil {
 			return err
 		}
@@ -234,7 +234,7 @@ func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in I
 // Stopped — and refreshes the image-built-at annotation to match.
 func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in Intent) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var ws workspacev1alpha1.Workspace
+		var ws cdiv1.Workspace
 		err := a.client.Get(ctx, key, &ws)
 		if apierrors.IsNotFound(err) {
 			// Nothing to signal (e.g. delete raced ahead and closed the
@@ -254,7 +254,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 			return nil
 		}
 		if in.Kind == IntentStart && in.Spec.TemplateName != "" {
-			if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped {
+			if ws.Spec.DesiredState != cdiv1.DesiredStateStopped {
 				// CEL forbids the move while the CR is wanted Running —
 				// refuse (retry) rather than drop it silently: the row is
 				// already on the carried revision, so a quiet no-op would
@@ -283,7 +283,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 			// tightened ceiling lands on the pod's next boot (ADR 0010 §3).
 			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
 		}
-		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
+		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)
 		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
 		}
@@ -294,7 +294,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 }
 
 // setCRAnnotation sets a single annotation on a Workspace CR.
-func setCRAnnotation(ws *workspacev1alpha1.Workspace, key, value string) {
+func setCRAnnotation(ws *cdiv1.Workspace, key, value string) {
 	if ws.Annotations == nil {
 		ws.Annotations = map[string]string{}
 	}
@@ -302,20 +302,26 @@ func setCRAnnotation(ws *workspacev1alpha1.Workspace, key, value string) {
 }
 
 // sessionPolicySpec maps the intent's resolved session policy onto the
-// Workspace CR's spec.sessionPolicy — nil when the intent carries none or
-// the resolved clipboard is empty (the field is a CEL enum; an empty
-// value would reject the CR).
-func sessionPolicySpec(sp *SessionPolicy) *workspacev1alpha1.SessionPolicySpec {
-	if sp == nil || sp.Clipboard == "" {
-		return nil
+// Workspace CR's spec.sessionPolicy — the required field the operator
+// reads at pod build. A nil intent policy maps to a zero spec: the field
+// is required, so admission rejects a CR stamped by an intent that
+// skipped resolution instead of silently running unpoliced.
+func sessionPolicySpec(sp *SessionPolicy) cdiv1.SessionPolicySpec {
+	if sp == nil {
+		return cdiv1.SessionPolicySpec{FileTransfer: cdiv1.FileTransferDisabled}
 	}
-	return &workspacev1alpha1.SessionPolicySpec{
-		Clipboard: workspacev1alpha1.ClipboardPolicy(sp.Clipboard),
+	ft := sp.FileTransfer
+	if ft == "" {
+		ft = cdiv1.FileTransferDisabled
+	}
+	return cdiv1.SessionPolicySpec{
+		Clipboard:    cdiv1.ClipboardPolicy(sp.Clipboard),
+		FileTransfer: ft,
 	}
 }
 
 func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in Intent) error {
-	var ws workspacev1alpha1.Workspace
+	var ws cdiv1.Workspace
 	err := a.client.Get(ctx, key, &ws)
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -336,7 +342,7 @@ func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in I
 // when the CR is behind (e.g. create applied but not fully persisted, or a
 // retry after partial failure), move the fencing numbers forward. A CR
 // already at or beyond the intent revision is left untouched.
-func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Workspace, in Intent) error {
+func (a *K8sApplier) patchForward(ctx context.Context, ws *cdiv1.Workspace, in Intent) error {
 	if int64(in.Revision) <= ws.Spec.IntentRevision {
 		if intentFenceDrifted(ws, in) {
 			return a.markIntentBehind(ctx, ws, in)
@@ -353,7 +359,7 @@ func (a *K8sApplier) patchForward(ctx context.Context, ws *workspacev1alpha1.Wor
 			}
 			return nil
 		}
-		ws.Spec.DesiredState = workspacev1alpha1.DesiredState(in.DesiredState)
+		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)
 		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
 			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
 		}
@@ -393,9 +399,9 @@ type TemplateCatalogEntry struct {
 	// The remaining security-relevant dimensions a family re-point must
 	// not silently change: the E2 compatibility guard (revisionIncompatible)
 	// compares them verbatim and refuses the move when any differs.
-	Adapter   string                           // spec.linux.adapter; "" for non-Linux runtimes
-	HostUsers *bool                            // spec.linux.hostUsers
-	Placement *workspacev1alpha1.PlacementSpec // spec.placement
+	Adapter   string               // spec.linux.adapter; "" for non-Linux runtimes
+	HostUsers *bool                // spec.linux.hostUsers
+	Placement *cdiv1.PlacementSpec // spec.placement
 	// SeccompProfile/AppArmorProfile carry the raw confinement annotation
 	// values the backend honors (empty when the template declares none).
 	SeccompProfile  string
@@ -470,7 +476,7 @@ func TemplateCRName(id string) (name string, ok bool) {
 // catalogName returns the logical template name: the catalog-name label
 // when published as an immutable revision, otherwise the object name
 // itself (admin-published singletons).
-func catalogName(t *workspacev1alpha1.WorkspaceTemplate) string {
+func catalogName(t *cdiv1.WorkspaceTemplate) string {
 	if n := t.Labels[LabelCatalogName]; n != "" {
 		return n
 	}
@@ -479,8 +485,8 @@ func catalogName(t *workspacev1alpha1.WorkspaceTemplate) string {
 
 // latestRevision picks the newest revision: latest creationTimestamp,
 // tie-broken by name for determinism.
-func latestRevision(items []workspacev1alpha1.WorkspaceTemplate) *workspacev1alpha1.WorkspaceTemplate {
-	var best *workspacev1alpha1.WorkspaceTemplate
+func latestRevision(items []cdiv1.WorkspaceTemplate) *cdiv1.WorkspaceTemplate {
+	var best *cdiv1.WorkspaceTemplate
 	for i := range items {
 		t := &items[i]
 		if best == nil ||
@@ -539,7 +545,7 @@ func (c *K8sTemplateCatalog) NewestInFamily(ctx context.Context, tenantID, famil
 	if !ok {
 		return TemplateCatalogEntry{}, fmt.Errorf("no namespace for tenant %q", tenantID)
 	}
-	var list workspacev1alpha1.WorkspaceTemplateList
+	var list cdiv1.WorkspaceTemplateList
 	if err := c.client.List(ctx, &list, client.InNamespace(ns),
 		client.MatchingLabels{LabelCatalogName: family}); err != nil {
 		return TemplateCatalogEntry{}, err
@@ -548,7 +554,7 @@ func (c *K8sTemplateCatalog) NewestInFamily(ctx context.Context, tenantID, famil
 	if latest == nil {
 		// No labeled revisions: the family may be an unlabeled
 		// admin-published singleton whose object name IS the family.
-		var tpl workspacev1alpha1.WorkspaceTemplate
+		var tpl cdiv1.WorkspaceTemplate
 		err := c.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: family}, &tpl)
 		switch {
 		case apierrors.IsNotFound(err):
@@ -569,11 +575,11 @@ func (c *K8sTemplateCatalog) List(ctx context.Context, tenantID, runtimeFilter s
 	if !ok {
 		return nil, fmt.Errorf("no namespace for tenant %q", tenantID)
 	}
-	var list workspacev1alpha1.WorkspaceTemplateList
+	var list cdiv1.WorkspaceTemplateList
 	if err := c.client.List(ctx, &list, client.InNamespace(ns)); err != nil {
 		return nil, err
 	}
-	byCatalog := map[string][]workspacev1alpha1.WorkspaceTemplate{}
+	byCatalog := map[string][]cdiv1.WorkspaceTemplate{}
 	order := []string{}
 	for i := range list.Items {
 		t := &list.Items[i]
@@ -594,7 +600,7 @@ func (c *K8sTemplateCatalog) List(ctx context.Context, tenantID, runtimeFilter s
 	return out, nil
 }
 
-func templateEntry(t *workspacev1alpha1.WorkspaceTemplate) TemplateCatalogEntry {
+func templateEntry(t *cdiv1.WorkspaceTemplate) TemplateCatalogEntry {
 	var rev int64
 	fmt.Sscanf(t.Spec.Revision, "%d", &rev)
 	e := TemplateCatalogEntry{

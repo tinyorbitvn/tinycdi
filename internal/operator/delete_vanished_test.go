@@ -11,7 +11,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // staleReadClient serves Workspace reads from a frozen copy, like an
@@ -19,11 +19,11 @@ import (
 // the real apiserver.
 type staleReadClient struct {
 	client.Client
-	stale *workspacesv1alpha1.Workspace
+	stale *cdiv1.Workspace
 }
 
 func (c *staleReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if ws, ok := obj.(*workspacesv1alpha1.Workspace); ok && key.Name == c.stale.Name && key.Namespace == c.stale.Namespace {
+	if ws, ok := obj.(*cdiv1.Workspace); ok && key.Name == c.stale.Name && key.Namespace == c.stale.Namespace {
 		c.stale.DeepCopyInto(ws)
 		return nil
 	}
@@ -51,7 +51,7 @@ func TestReconcile_DeletedWorkspaceVanishesUnderReconcile(t *testing.T) {
 
 	// First reconcile completes teardown and removes the finalizer.
 	reconcile(t, r, key)
-	if err := c.Get(context.Background(), key, &workspacesv1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+	if err := c.Get(context.Background(), key, &cdiv1.Workspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("workspace still present after teardown: %v", err)
 	}
 

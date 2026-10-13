@@ -245,9 +245,9 @@ func TestDefaultsRenderWithoutDevComponents(t *testing.T) {
 		t.Fatalf("expected exactly 3 Deployments by default, got %d", len(deps))
 	}
 	for _, want := range []struct{ dep, img string }{
-		{"backend", "ghcr.io/tinyorbitvn/tinycdi-backend:0.2.0"},
-		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:0.2.0"},
-		{"frontend", "ghcr.io/tinyorbitvn/tinycdi-frontend:0.2.0"},
+		{"backend", "ghcr.io/tinyorbitvn/tinycdi-backend:1.0.0"},
+		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:1.0.0"},
+		{"frontend", "ghcr.io/tinyorbitvn/tinycdi-frontend:1.0.0"},
 	} {
 		d := deployment(docs, want.dep)
 		if d == nil {
@@ -274,13 +274,22 @@ func TestSchemaRejectsBadValues(t *testing.T) {
 	}
 }
 
-// TestLegacyNodeSelectorRejected: the v0.1 templates[].nodeSelector field
-// is gone (E14) — a values file still carrying it fails the render
-// (values.schema.json's additionalProperties or the template's fail).
-func TestLegacyNodeSelectorRejected(t *testing.T) {
-	out := renderBad(t, "legacy-nodeselector-values.yaml")
-	if !strings.Contains(out, "nodeSelector") {
-		t.Errorf("render failure should name the removed field, got: %s", out)
+// TestChartVersion1: the chart is 1.0 — image tags default to
+// appVersion, so both fields are pinned here.
+func TestChartVersion1(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("tinycdi", "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ch struct {
+		Version    string `yaml:"version"`
+		AppVersion string `yaml:"appVersion"`
+	}
+	if err := yaml.Unmarshal(data, &ch); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Version != "1.0.0" || ch.AppVersion != "1.0.0" {
+		t.Fatalf("Chart.yaml version=%q appVersion=%q, want 1.0.0/\"1.0.0\"", ch.Version, ch.AppVersion)
 	}
 }
 
@@ -391,10 +400,10 @@ func TestImageRegistryOverride(t *testing.T) {
 	for _, name := range []string{"backend", "operator", "frontend"} {
 		depImg[name] = firstContainerImage(deployment(docs, name))
 	}
-	if depImg["backend"] != "registry.example.com/tinyorbitvn/tinycdi-backend:0.2.0" {
+	if depImg["backend"] != "registry.example.com/tinyorbitvn/tinycdi-backend:1.0.0" {
 		t.Errorf("global registry override failed: backend image %q", depImg["backend"])
 	}
-	if depImg["frontend"] != "frontend-mirror.example.net/tinyorbitvn/tinycdi-frontend:0.2.0" {
+	if depImg["frontend"] != "frontend-mirror.example.net/tinyorbitvn/tinycdi-frontend:1.0.0" {
 		t.Errorf("per-image registry must win over global: frontend image %q", depImg["frontend"])
 	}
 }
@@ -3683,5 +3692,22 @@ tests:
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("promtool test rules failed: %v\n%s", err, out)
+	}
+}
+
+// TestChartCRDsMatchGenerated: the chart's crds/ directory must equal the
+// generated config/crd/bases byte for byte — drift means a CRD change was
+// made without `make sync-chart-crds`.
+func TestChartCRDsMatchGenerated(t *testing.T) {
+	gen, _ := filepath.Glob("../../config/crd/bases/*.yaml")
+	if len(gen) == 0 {
+		t.Fatal("no generated CRDs")
+	}
+	for _, g := range gen {
+		want, _ := os.ReadFile(g)
+		got, err := os.ReadFile(filepath.Join("tinycdi/crds", filepath.Base(g)))
+		if err != nil || !bytes.Equal(want, got) {
+			t.Fatalf("%s differs from chart copy; run make sync-chart-crds", filepath.Base(g))
+		}
 	}
 }

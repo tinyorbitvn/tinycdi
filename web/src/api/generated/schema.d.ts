@@ -184,8 +184,10 @@ export interface paths {
         /**
          * List workspaces visible to the caller
          * @description Returns workspaces owned by the caller; tenant administrators see all
-         *     workspaces in their tenant. Results are ordered by creation time
-         *     (ascending) and paginated with an opaque cursor.
+         *     workspaces in their tenant. Keyset-paged on `(sort field, id)`:
+         *     `sort` accepts `createdAt` and `name` (`-` prefix for descending) and
+         *     defaults to `-createdAt` (newest first). A page never repeats or skips
+         *     a row when workspaces are created concurrently.
          */
         get: operations["listWorkspaces"];
         put?: never;
@@ -200,7 +202,7 @@ export interface paths {
          *     `Stopped`; pass `Running` to provision immediately.
          *
          *     `retainedDataRef` optionally attaches a retained disk owned by the
-         *     caller (equivalent to `POST /v1/data/{id}/attach`); the retained record
+         *     caller (equivalent to `POST /v1/data/{id}:attach`); the retained record
          *     must be in state `Retained` and is claimed exclusively.
          *
          *     A template whose runtime image is older than `-image-block-after`
@@ -248,7 +250,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{workspaceId}/start": {
+    "/v1/workspaces/{workspaceId}:start": {
         parameters: {
             query?: never;
             header?: never;
@@ -279,7 +281,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{workspaceId}/stop": {
+    "/v1/workspaces/{workspaceId}:stop": {
         parameters: {
             query?: never;
             header?: never;
@@ -318,6 +320,10 @@ export interface paths {
          *     never contains node names, image references or other platform
          *     internals. Visibility is exactly the workspace read's: a foreign or
          *     unknown id is a `404`.
+         *
+         *     Keyset-paged on `(lastTimestamp, id)`. The order is fixed: `sort`
+         *     accepts only `-time` (the default); anything else is
+         *     `400 INVALID_REQUEST`.
          */
         get: operations["listWorkspaceEvents"];
         put?: never;
@@ -416,7 +422,8 @@ export interface paths {
          * List the workspace template catalog
          * @description Returns templates published to the caller's tenant. Template revisions
          *     are immutable; the `revision` field identifies the exact content the
-         *     workspace will run.
+         *     workspace will run. Keyset-paged on `(name, id)`: `sort` accepts
+         *     `name` (`-name` for descending) and defaults to `name`.
          */
         get: operations["listTemplates"];
         put?: never;
@@ -436,10 +443,11 @@ export interface paths {
         };
         /**
          * Tenant quota and usage snapshot
-         * @description Returns the tenant's configured quota limits and current usage in
+         * @description Returns the caller's tenant quota limits and current usage in
          *     display units (CPU in millicores, memory in MiB, storage in GiB),
-         *     plus a per-user usage breakdown. Tenant administrators see every
-         *     user in `users`; other principals see only their own row.
+         *     plus the caller's own effective per-user running-workspace limit.
+         *     Per-user rows are the paged admin collection
+         *     `GET /v1/admin/tenants/{tenant}/user-limits`.
          */
         get: operations["getQuota"];
         put?: never;
@@ -461,11 +469,13 @@ export interface paths {
          * Tenant quota limits, usage and management source
          * @description Administrator view of one tenant's quota: the configured limits and
          *     current usage in display units (CPU in millicores, memory in MiB,
-         *     storage in GiB), the per-user breakdown, and `source`, which names
-         *     the layer owning the limits row. Usage counts held reservations —
-         *     including disk-only holds a stopped Retain workspace keeps — plus
-         *     active workspaces, exactly what admission counts. Requires the
-         *     tenant-admin role on the named tenant.
+         *     storage in GiB), and `source`, which names the layer owning the
+         *     limits row. Usage counts held reservations — including disk-only
+         *     holds a stopped Retain workspace keeps — plus active workspaces,
+         *     exactly what admission counts. The `ETag` header carries the limits
+         *     row's strong entity tag; it is absent while the tenant has no row
+         *     (PUT then creates it with `If-Match: *`). Requires the tenant-admin
+         *     role on the named tenant.
          */
         get: operations["getAdminTenantQuota"];
         /**
@@ -477,11 +487,9 @@ export interface paths {
          *     held reservations stay, new ones are refused — a lowered limit
          *     therefore takes effect without forcing a release. Requires the
          *     tenant-admin role on the named tenant, the `X-CSRF-Token` header
-         *     and an `If-Match` precondition: the `version` returned by GET
-         *     (optimistic concurrency — a stale version answers
-         *     `412 PRECONDITION_FAILED`), or the literal `*` when the tenant has
-         *     no quota row yet. `If-Match: *` is not a bypass on an existing row —
-         *     it too answers 412.
+         *     and `If-Match`: the `ETag` of the last read, or `*` when the tenant
+         *     has no quota row yet (`*` on an existing row is `412`). The
+         *     response carries the new `ETag`.
          */
         put: operations["putAdminTenantQuota"];
         post?: never;
@@ -499,35 +507,59 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Per-user running-workspace limits
-         * @description Administrator view of one tenant's per-principal running-workspace
-         *     limits: the tenant-wide `default` (`null` = unlimited) and one row
-         *     per principal who has usage or a stored override. Each row carries
-         *     the stored `limit` (`null` = inherit the default), the resolved
-         *     `effective` limit (`null` = unlimited) and the `running` workspaces
-         *     the principal currently holds — the same held reservations
-         *     admission counts. Requires the tenant-admin role on the named
-         *     tenant.
+         * Per-user running-workspace limits (paged)
+         * @description Administrator collection of one tenant's per-principal
+         *     running-workspace limits: one item per principal who has usage or a
+         *     stored override. Each item carries the stored `limit` (`null` =
+         *     inherit the tenant default), the resolved `effective` limit (`null`
+         *     = unlimited), the `running` workspaces the principal currently
+         *     holds — the same held reservations admission counts — and, when an
+         *     override row exists, that row's own `etag` for
+         *     `PUT`/`DELETE .../user-limits/{ownerRef}`. Sort: `ownerRef`
+         *     (default). Requires the tenant-admin role on the named tenant.
          */
-        get: operations["getAdminUserLimits"];
+        get: operations["listAdminUserLimits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/user-limits/{ownerRef}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
         /**
-         * Set or clear a user's running-workspace limit
-         * @description Sets (integer `limit`) or clears (`limit: null`) one principal's
-         *     running-workspace override. An override wins over the tenant
-         *     default; clearing restores the default. `ownerRef` is the
-         *     `issuer|sub` pair `GET` reports; a limit on a principal with no
-         *     usage is accepted and applies at their next launch. Enforcement is
+         * Set a user's running-workspace limit
+         * @description Writes one principal's running-workspace override. An override wins
+         *     over the tenant default; a limit on a principal with no usage is
+         *     accepted and applies at their next launch. Enforcement is
          *     race-free: the check runs inside the same transaction and row lock
          *     as the tenant quota reservation, and a refused launch answers
          *     `409 QUOTA_EXHAUSTED` with `details.reason: UserLimitReached`.
          *     Limits below current usage are accepted: running workspaces keep
-         *     running, new ones are refused. Every write is audited. Requires
-         *     the tenant-admin role on the named tenant and the `X-CSRF-Token`
-         *     header.
+         *     running, new ones are refused. Requires the tenant-admin role on
+         *     the named tenant, the `X-CSRF-Token` header and `If-Match`: the
+         *     item's `etag`, or `*` to create an override that does not exist
+         *     yet. Every write is audited.
          */
         put: operations["putAdminUserLimit"];
         post?: never;
-        delete?: never;
+        /**
+         * Remove a user's running-workspace limit
+         * @description Removes one principal's override; the tenant default (or unlimited)
+         *     applies again. Requires the tenant-admin role on the named tenant,
+         *     the `X-CSRF-Token` header and `If-Match` carrying the item's
+         *     current `etag` (`*` is `412`: the override exists). A principal
+         *     without an override answers `404`. Every write is audited.
+         */
+        delete: operations["deleteAdminUserLimit"];
         options?: never;
         head?: never;
         patch?: never;
@@ -540,14 +572,22 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * The tenant's default user limit
+         * @description The tenant-wide fallback running-workspace limit applied to every
+         *     principal without an override (`limit: null` = unlimited). The
+         *     `ETag` header carries the default row's strong entity tag; it is
+         *     absent while no default is set. Requires the tenant-admin role on
+         *     the named tenant.
+         */
+        get: operations["getAdminUserLimitDefault"];
         /**
          * Set or clear the tenant's default user limit
          * @description Sets (integer `limit`) or clears (`limit: null`) the tenant-wide
-         *     fallback running-workspace limit applied to every principal
-         *     without an override. Clearing restores unlimited — the upgrade
-         *     default. Every write is audited. Requires the tenant-admin role on
-         *     the named tenant and the `X-CSRF-Token` header.
+         *     fallback running-workspace limit. Clearing restores unlimited.
+         *     Requires the tenant-admin role on the named tenant, the
+         *     `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
+         *     or `*` when no default is set. Every write is audited.
          */
         put: operations["putAdminUserLimitDefault"];
         post?: never;
@@ -572,10 +612,11 @@ export interface paths {
          *     `FollowTemplate` means the channel is not narrowed and the
          *     template's policy applies unchanged. A tenant with no
          *     session-policy row resolves `FollowTemplate` everywhere
-         *     (`source: FollowTemplate`) — the upgrade default. The ceiling can
-         *     only narrow, never widen: the effective policy a user gets is the
-         *     meet of the template's policy and this ceiling. Requires the
-         *     tenant-admin role on the named tenant.
+         *     (`source: FollowTemplate`). The ceiling can only narrow, never
+         *     widen: the effective policy a user gets is the meet of the
+         *     template's policy and this ceiling. The `ETag` header carries the
+         *     row's strong entity tag; it is absent while no row exists.
+         *     Requires the tenant-admin role on the named tenant.
          */
         get: operations["getAdminSessionPolicy"];
         /**
@@ -585,9 +626,10 @@ export interface paths {
          *     own policy for that channel, and a PUT whose every channel is
          *     `FollowTemplate` deletes the row — "no row" and "all-defaults
          *     row" are the same state, and the store keeps exactly one
-         *     representation of it. `fileTransfer` is inert in this version
-         *     (the channel ships in v1.3): only its defaults are accepted — a
-         *     non-default `fileTransfer.mode` or any `maxFileBytes` answers
+         *     representation of it; after it `If-Match: *` is valid again.
+         *     `fileTransfer` is inert in this version (the channel ships in
+         *     v1.3): only its defaults are accepted — a non-default
+         *     `fileTransfer.mode` or any `maxFileBytes` answers
          *     `400 INVALID_REQUEST`.
          *
          *     Tightening takes effect on two clocks (ADR 0010 §3): the next
@@ -595,11 +637,9 @@ export interface paths {
          *     immediately, while a running workspace's server-side clipboard
          *     enforcement follows at its next start — pod specs are immutable.
          *     Requires the tenant-admin role on the named tenant, the
-         *     `X-CSRF-Token` header and an `If-Match` precondition: the
-         *     `version` returned by GET (a stale version answers
-         *     `412 PRECONDITION_FAILED`), or the literal `*` when the tenant
-         *     has no row yet. `If-Match: *` is not a bypass on an existing row —
-         *     it too answers 412. Every write is audited.
+         *     `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
+         *     or `*` when the tenant has no row (`*` on an existing row is
+         *     `412`). Every write is audited.
          */
         put: operations["putAdminSessionPolicy"];
         post?: never;
@@ -620,7 +660,10 @@ export interface paths {
          * List retained data disks visible to the caller
          * @description Returns retained-disk records owned by the caller (tenant
          *     administrators see the tenant scope). Each record carries a fresh
-         *     `purgeConfirmationNonce` required by `POST /v1/data/{dataId}/purge`.
+         *     `purgeConfirmationNonce` required by `POST /v1/data/{dataId}:purge`.
+         *     Keyset-paged on `(sort field, id)`: `sort` accepts `retainedAt` and
+         *     `name` (the source workspace name; `-` prefix for descending) and
+         *     defaults to `-retainedAt` (newest first).
          */
         get: operations["listRetainedData"];
         put?: never;
@@ -654,7 +697,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/data/{dataId}/attach": {
+    "/v1/data/{dataId}:attach": {
         parameters: {
             query?: never;
             header?: never;
@@ -688,7 +731,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/data/{dataId}/purge": {
+    "/v1/data/{dataId}:purge": {
         parameters: {
             query?: never;
             header?: never;
@@ -740,7 +783,8 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. A refusal by a per-principal running limit carries `details.reason: UserLimitReached` with `details.params.limit`/`details.params.current`. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried. A `UserLimitReached` refusal can likewise carry `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
-         *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale quota version; reload the resource and retry |
+         *     | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
+         *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
          *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -750,9 +794,16 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
-        /** @description Uniform error body returned for every 4xx/5xx response. */
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        /**
+         * @description Uniform error envelope returned for every 4xx/5xx response — the body
+         *     is the single key `error` carrying an `ErrorBody`.
+         */
         Error: {
+            error: components["schemas"]["ErrorBody"];
+        };
+        /** @description Uniform error object inside the `error` envelope. */
+        ErrorBody: {
             code: components["schemas"]["ErrorCode"];
             /**
              * @description Human-readable detail; not part of the contract.
@@ -999,9 +1050,10 @@ export interface components {
             /** Format: date-time */
             lastTimestamp?: string;
         };
-        WorkspaceEventList: {
+        WorkspaceEventPage: {
             /** @description Events, newest first. */
             items: components["schemas"]["WorkspaceEvent"][];
+            nextCursor?: components["schemas"]["NextCursor"];
             /**
              * @description True when the observed-state informer cannot prove freshness.
              *     Condition events then show last-known state and never claim the
@@ -1026,20 +1078,6 @@ export interface components {
             /** @description Storage in GiB. */
             storageGib: number;
         };
-        /** @description One tenant member's usage share. */
-        UserUsage: {
-            /** @description Bare OIDC subject of the user. */
-            subject: string;
-            /** @description Name from the principal directory; falls back to `subject`. */
-            displayName: string;
-            usage: components["schemas"]["QuotaAmounts"];
-            /**
-             * @description The user's effective per-principal running-workspace limit —
-             *     their stored override when set, else the tenant default.
-             *     Absent when the user is unlimited.
-             */
-            limit?: number;
-        };
         /**
          * @description Tenant quota snapshot. `configured` is false when the tenant has no
          *     quota row: new workspaces are then refused, so the absence of
@@ -1047,9 +1085,7 @@ export interface components {
          *     state. `userLimits` is present only when the caller has an
          *     effective per-principal running-workspace limit; inside it only
          *     `runningWorkspaces` is meaningful (the other dimensions stay zero —
-         *     per-user limits cover the running count only). `users` lists every
-         *     tenant member for tenant administrators and only the caller for
-         *     regular users.
+         *     per-user limits cover the running count only).
          */
         QuotaView: {
             tenant: string;
@@ -1062,7 +1098,6 @@ export interface components {
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
             userLimits?: components["schemas"]["QuotaAmounts"];
-            users: components["schemas"]["UserUsage"][];
         };
         /**
          * @description Which layer owns the tenant's limits row. `config`: the tenant is
@@ -1098,9 +1133,8 @@ export interface components {
          *     `source`, which names the layer owning the limits row. `limits` is
          *     absent when the tenant has no quota row (`configured: false`,
          *     `source: none` — or `config` while a declared row is still pending
-         *     the startup upsert). `users` lists every owner with usage.
-         *     `version` is the opaque change token of the limits row — PUT echoes
-         *     it in `If-Match`; it is absent when no row exists.
+         *     the startup upsert). The row's version travels as the `ETag`
+         *     response header.
          */
         AdminQuotaView: {
             tenant: string;
@@ -1111,36 +1145,25 @@ export interface components {
              */
             configured: boolean;
             source: components["schemas"]["QuotaSource"];
-            /**
-             * @description Opaque change token of the limits row — it changes on every
-             *     write and PUT echoes it verbatim in `If-Match`. Absent when the
-             *     tenant has no quota row — PUT then uses `If-Match: *`.
-             */
-            version?: string;
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
-            users: components["schemas"]["UserUsage"][];
         };
         /**
-         * @description Per-principal running-workspace limits for one tenant: the
-         *     tenant-wide `default` (`null` = unlimited — the upgrade default)
-         *     and one row per principal who has usage or a stored override.
-         *     Limits cap concurrent running workspaces — a workspace counts
-         *     while its reservation holds a running slot (from the start/create
-         *     intent until the runtime is proven gone); stopped Retain
-         *     workspaces' disk-only holds and retained disks never count.
+         * @description One page of per-principal running-workspace limits, ordered by
+         *     `ownerRef`. Limits cap concurrent running workspaces — a workspace
+         *     counts while its reservation holds a running slot (from the
+         *     start/create intent until the runtime is proven gone); stopped
+         *     Retain workspaces' disk-only holds and retained disks never count.
          */
-        AdminUserLimitsView: {
-            tenant: string;
-            /** @description Tenant-wide fallback limit; `null` = unlimited. */
-            default: number | null;
-            users: components["schemas"]["AdminUserLimitEntry"][];
+        AdminUserLimitPage: {
+            items: components["schemas"]["AdminUserLimitEntry"][];
+            nextCursor?: components["schemas"]["NextCursor"];
         };
         /** @description One principal's per-user limit row. */
         AdminUserLimitEntry: {
             /**
              * @description The `issuer|sub` owner reference admission enforces on — the
-             *     value `PUT` writes back.
+             *     `{ownerRef}` of the item's `PUT`/`DELETE` path.
              */
             ownerRef: string;
             /** @description Bare OIDC subject of the user. */
@@ -1153,17 +1176,20 @@ export interface components {
             effective: number | null;
             /** @description Running workspaces the principal currently holds. */
             running: number;
+            /**
+             * @description Strong entity tag of the principal's override row, sent as
+             *     `If-Match` on `PUT`/`DELETE`. Absent while the principal has no
+             *     override — `PUT` then creates it with `If-Match: *`.
+             */
+            etag?: string;
         };
         /**
-         * @description Write one principal's running-workspace override. `limit` sets it;
-         *     `null` (or absent) clears the override so the tenant default (or
-         *     unlimited) applies again.
+         * @description Write one principal's running-workspace override. An override is
+         *     removed with `DELETE`, so `limit` is required.
          */
         SetUserLimitRequest: {
-            /** @description The `issuer|sub` owner reference of the principal. */
-            ownerRef: string;
-            /** @description Maximum concurrent running workspaces; `null` clears the override. */
-            limit?: number | null;
+            /** @description Maximum concurrent running workspaces. */
+            limit: number;
         };
         /**
          * @description Write the tenant-wide fallback running-workspace limit. `limit`
@@ -1172,6 +1198,16 @@ export interface components {
         SetUserLimitDefaultRequest: {
             /** @description Maximum concurrent running workspaces per principal; `null` clears the default. */
             limit?: number | null;
+        };
+        /**
+         * @description The tenant-wide fallback running-workspace limit applied to every
+         *     principal without an override. Its version travels as the `ETag`
+         *     response header.
+         */
+        AdminUserLimitDefault: {
+            tenant: string;
+            /** @description Tenant-wide fallback limit; `null` = unlimited. */
+            limit: number | null;
         };
         /**
          * @description A tenant's clipboard ceiling over every workspace template's
@@ -1214,21 +1250,14 @@ export interface components {
          * @description The tenant's session data-transfer ceiling (ADR 0010): one value
          *     per channel, `FollowTemplate` where the channel is not narrowed.
          *     The effective policy a user gets is the meet of the template's
-         *     policy and this ceiling — it can only narrow, never widen.
-         *     `version` is the opaque change token PUT echoes in `If-Match`;
-         *     it is absent when no row exists.
+         *     policy and this ceiling — it can only narrow, never widen. The
+         *     row's version travels as the `ETag` response header.
          */
         AdminSessionPolicyView: {
             tenant: string;
             clipboard: components["schemas"]["ClipboardCeiling"];
             fileTransfer: components["schemas"]["FileTransferCeiling"];
             source: components["schemas"]["AdminSessionPolicySource"];
-            /**
-             * @description Opaque change token of the ceiling row — it changes on every
-             *     write and PUT echoes it verbatim in `If-Match`. Absent when
-             *     the tenant has no row — PUT then uses `If-Match: *`.
-             */
-            version?: string;
         };
         /**
          * @description Write the tenant's session data-transfer ceiling. `clipboard` is
@@ -1254,15 +1283,13 @@ export interface components {
              */
             clipboard: "Disabled" | "Send" | "Receive" | "Bidirectional";
             /**
-             * @description The resolved file-transfer policy. Inert until v1.3 — `mode`
-             *     always resolves `Disabled` while no template leg exists.
+             * @description The resolved file-transfer direction policy — the same enum
+             *     WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
+             *     v1.3 — always resolves `Disabled` while no template leg is
+             *     wired into the catalog entry.
+             * @enum {string}
              */
-            fileTransfer: {
-                /** @enum {string} */
-                mode: "Disabled" | "Upload" | "Download" | "Bidirectional";
-                /** @description Per-file bound; `null` = platform default. */
-                maxFileBytes: number | null;
-            };
+            fileTransfer: "Disabled" | "Upload" | "Download" | "Bidirectional";
         };
         /**
          * @description Create intent. There is no owner field — ownership comes from the
@@ -1291,10 +1318,14 @@ export interface components {
              */
             retainedDataRef?: string;
         };
-        WorkspaceList: {
+        /**
+         * @description Opaque cursor for the next page (pass it as `cursor` with the same
+         *     `sort`); absent on the last page.
+         */
+        NextCursor: string;
+        WorkspacePage: {
             items: components["schemas"]["WorkspaceView"][];
-            /** @description Cursor for the next page; absent when the list is exhausted. */
-            nextPageToken?: string;
+            nextCursor?: components["schemas"]["NextCursor"];
         };
         /**
          * @description Answer of `GET /v1/session`: exactly one key. Never carries identity,
@@ -1532,9 +1563,9 @@ export interface components {
                 [key: string]: string;
             };
         };
-        TemplateList: {
+        TemplatePage: {
             items: components["schemas"]["TemplateView"][];
-            nextPageToken?: string;
+            nextCursor?: components["schemas"]["NextCursor"];
         };
         /**
          * @description `Retained → Attaching → Attached` and `Retained → Purging → Purged`.
@@ -1567,14 +1598,14 @@ export interface components {
             /**
              * @description Short-lived, single-use nonce bound to this record, the caller's
              *     principal and the current record state. Echo it in
-             *     `POST /v1/data/{id}/purge` to confirm destruction; a fresh nonce is
+             *     `POST /v1/data/{id}:purge` to confirm destruction; a fresh nonce is
              *     issued on every read.
              */
             purgeConfirmationNonce: string;
         };
-        RetainedDataList: {
+        RetainedDataPage: {
             items: components["schemas"]["RetainedDataView"][];
-            nextPageToken?: string;
+            nextCursor?: components["schemas"]["NextCursor"];
         };
         /**
          * @description Attach intent — equivalent to `POST /v1/workspaces` with
@@ -1670,10 +1701,23 @@ export interface components {
             };
         };
         /**
+         * @description Missing precondition — `PRECONDITION_REQUIRED`: the mutation requires
+         *     an `If-Match` header carrying the resource's current `ETag` (or `*`
+         *     when the resource does not exist yet).
+         */
+        PreconditionRequired: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
          * @description Optimistic-concurrency failure — `PRECONDITION_FAILED`: the
          *     `If-Match` value does not name the current state of the resource
-         *     (a concurrent write landed first). Reload and retry with the fresh
-         *     version.
+         *     (a concurrent write landed first), or `*` was sent for a resource
+         *     that already exists. Reload and retry with the fresh version.
          */
         PreconditionFailed: {
             headers: {
@@ -1728,6 +1772,12 @@ export interface components {
          */
         Tenant: string;
         /**
+         * @description The principal's `issuer|sub` owner reference, as the user-limits
+         *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+         *     the issuer → `%2F`).
+         */
+        OwnerRef: string;
+        /**
          * @description Client-generated unique key (recommended: UUIDv4/ULID). Same key + same
          *     request body replays the recorded result; same key + different body
          *     returns `409 IDEMPOTENCY_CONFLICT`. Scoped to the principal; retained
@@ -1739,10 +1789,27 @@ export interface components {
          *     naturally idempotent without it.
          */
         IdempotencyKeyOptional: string;
-        /** @description Maximum items per page (default 50, max 200). */
+        /** @description Maximum items per page (default 50, max 500). */
         PageLimit: number;
-        /** @description Opaque cursor from a previous response's `nextPageToken`. */
-        PageToken: string;
+        /**
+         * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+         *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+         */
+        Cursor: string;
+        /**
+         * @description Allowlisted sort field; a `-` prefix means descending (for example
+         *     `-createdAt`). The accepted fields and the default are documented per
+         *     operation; anything else is `INVALID_REQUEST`.
+         */
+        Sort: string;
+        /**
+         * @description Strong entity tag of the resource's current version, as returned in
+         *     the `ETag` header or body of the last read/write. Missing → `428
+         *     PRECONDITION_REQUIRED`; stale or malformed → `412
+         *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+         *     exist yet (create-or-replace semantics).
+         */
+        IfMatch: string;
         /**
          * @description `mine` restricts the list to the caller's own rows (also for tenant
          *     administrators); `tenant` widens it to the whole tenant and requires
@@ -1752,7 +1819,14 @@ export interface components {
         ListScope: "mine" | "tenant";
     };
     requestBodies: never;
-    headers: never;
+    headers: {
+        /**
+         * @description Strong entity tag of the returned resource's current version — a
+         *     quoted string clients echo verbatim in `If-Match` on the next
+         *     mutation.
+         */
+        ETag: string;
+    };
     pathItems: never;
 }
 export type $defs = Record<string, never>;
@@ -1896,10 +1970,19 @@ export interface operations {
     listWorkspaces: {
         parameters: {
             query?: {
-                /** @description Maximum items per page (default 50, max 200). */
+                /** @description Maximum items per page (default 50, max 500). */
                 limit?: components["parameters"]["PageLimit"];
-                /** @description Opaque cursor from a previous response's `nextPageToken`. */
-                pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
                 /**
                  * @description `mine` restricts the list to the caller's own rows (also for tenant
                  *     administrators); `tenant` widens it to the whole tenant and requires
@@ -1922,7 +2005,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WorkspaceList"];
+                    "application/json": components["schemas"]["WorkspacePage"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2059,7 +2142,7 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Start accepted; workspace view after the intent was recorded. */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2095,7 +2178,7 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Stop accepted; workspace view after the intent was recorded. */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2114,7 +2197,21 @@ export interface operations {
     };
     listWorkspaceEvents: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
             header?: never;
             path: {
                 /** @description Server-generated workspace identifier. */
@@ -2130,7 +2227,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WorkspaceEventList"];
+                    "application/json": components["schemas"]["WorkspaceEventPage"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2211,10 +2308,19 @@ export interface operations {
             query?: {
                 /** @description Filter by runtime kind. */
                 runtime?: components["schemas"]["RuntimeKind"];
-                /** @description Maximum items per page (default 50, max 200). */
+                /** @description Maximum items per page (default 50, max 500). */
                 limit?: components["parameters"]["PageLimit"];
-                /** @description Opaque cursor from a previous response's `nextPageToken`. */
-                pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
             };
             header?: never;
             path?: never;
@@ -2228,7 +2334,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TemplateList"];
+                    "application/json": components["schemas"]["TemplatePage"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2282,6 +2388,7 @@ export interface operations {
             /** @description Quota snapshot for the named tenant. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -2300,14 +2407,13 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Change token from the GET response's `version`, or `*` to create
-                 *     a row for a tenant that has none. The value is the opaque
-                 *     RFC3339Nano change-token from the last read, sent verbatim
-                 *     without quotes — it is not an RFC 7232 entity-tag; a quoted or
-                 *     otherwise unparseable token is treated as stale and answers
-                 *     `412 PRECONDITION_FAILED`.
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
                  */
-                "If-Match": string;
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 /**
@@ -2328,6 +2434,7 @@ export interface operations {
             /** @description The updated quota snapshot. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -2339,12 +2446,164 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
             412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
         };
     };
-    getAdminUserLimits: {
+    listAdminUserLimits: {
+        parameters: {
+            query?: {
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of per-user limits for the named tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserLimitPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    putAdminUserLimit: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
+                 */
+                "If-Match": components["parameters"]["IfMatch"];
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetUserLimitRequest"];
+            };
+        };
+        responses: {
+            /** @description The principal's updated limit row. */
+            200: {
+                headers: {
+                    ETag: components["headers"]["ETag"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserLimitEntry"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteAdminUserLimit: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
+                 */
+                "If-Match": components["parameters"]["IfMatch"];
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The override was removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminUserLimitDefault: {
         parameters: {
             query?: never;
             header?: never;
@@ -2360,52 +2619,16 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Per-user limits for the named tenant. */
+            /** @description The tenant default. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AdminUserLimitsView"];
+                    "application/json": components["schemas"]["AdminUserLimitDefault"];
                 };
             };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            429: components["responses"]["RateLimited"];
-            500: components["responses"]["InternalError"];
-            503: components["responses"]["Unavailable"];
-        };
-    };
-    putAdminUserLimit: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /**
-                 * @description Tenant identifier. Callers may only administer their own tenant —
-                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
-                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
-                 */
-                tenant: components["parameters"]["Tenant"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SetUserLimitRequest"];
-            };
-        };
-        responses: {
-            /** @description The updated per-user limits view. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AdminUserLimitsView"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
@@ -2416,7 +2639,16 @@ export interface operations {
     putAdminUserLimitDefault: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /**
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
+                 */
+                "If-Match": components["parameters"]["IfMatch"];
+            };
             path: {
                 /**
                  * @description Tenant identifier. Callers may only administer their own tenant —
@@ -2433,18 +2665,21 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated per-user limits view. */
+            /** @description The updated tenant default. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AdminUserLimitsView"];
+                    "application/json": components["schemas"]["AdminUserLimitDefault"];
                 };
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -2469,6 +2704,7 @@ export interface operations {
             /** @description Session policy ceiling for the named tenant. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -2487,14 +2723,13 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Change token from the GET response's `version`, or `*` to
-                 *     create a row for a tenant that has none. The value is the
-                 *     opaque RFC3339Nano change-token from the last read, sent
-                 *     verbatim without quotes — it is not an RFC 7232 entity-tag;
-                 *     a quoted or otherwise unparseable token is treated as stale
-                 *     and answers `412 PRECONDITION_FAILED`.
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
                  */
-                "If-Match": string;
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 /**
@@ -2512,9 +2747,10 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated session policy ceiling. */
+            /** @description The updated session policy ceiling; `ETag` is absent after a delete. */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -2525,6 +2761,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -2533,10 +2770,19 @@ export interface operations {
     listRetainedData: {
         parameters: {
             query?: {
-                /** @description Maximum items per page (default 50, max 200). */
+                /** @description Maximum items per page (default 50, max 500). */
                 limit?: components["parameters"]["PageLimit"];
-                /** @description Opaque cursor from a previous response's `nextPageToken`. */
-                pageToken?: components["parameters"]["PageToken"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
                 /**
                  * @description `mine` restricts the list to the caller's own rows (also for tenant
                  *     administrators); `tenant` widens it to the whole tenant and requires
@@ -2557,7 +2803,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RetainedDataList"];
+                    "application/json": components["schemas"]["RetainedDataPage"];
                 };
             };
             400: components["responses"]["BadRequest"];

@@ -42,7 +42,7 @@ test("list -> attach -> new workspace", async ({ page, request }) => {
   const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
   const attachReq = reqs.requests.find(
     (r: { method: string; path: string }) =>
-      r.method === "POST" && r.path === `/v1/data/${RETAINED_ID}/attach`,
+      r.method === "POST" && r.path === `/v1/data/${RETAINED_ID}:attach`,
   );
   expect(attachReq).toBeTruthy();
   expect(attachReq.headers["idempotency-key"]).toBeTruthy();

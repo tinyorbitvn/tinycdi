@@ -10,11 +10,11 @@ export default {
   "common.toast.notifications": "Notifications",
 
   "common.pagination.label": "{name} pages",
-  "common.pagination.previous": "Previous",
-  "common.pagination.next": "Next",
-  "common.pagination.page": "Page {n}",
-  "common.pagination.status": "Showing {from}–{to} of {total}",
-  "common.pagination.rowsPerPage": "Rows per page",
+  "common.pagination.loadedMore": "Showing the first {n}",
+  "common.filter.partial": "Searching the {n} rows loaded so far. Load more to search further.",
+  "common.pagination.loadedAll": "Showing all {n}",
+  "common.pagination.loadMore": "Load more",
+  "common.collectionTooLarge": "This view needs more than {n} records, which is more than the portal reads at once.",
 
   "errors.banner.fallback": "ERROR",
   "errors.banner.requestId": "(request {id})",

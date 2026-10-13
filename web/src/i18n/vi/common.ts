@@ -12,11 +12,11 @@ export default {
   "common.toast.notifications": "Thông báo",
 
   "common.pagination.label": "Phân trang {name}",
-  "common.pagination.previous": "Trước",
-  "common.pagination.next": "Sau",
-  "common.pagination.page": "Trang {n}",
-  "common.pagination.status": "Hiển thị {from}–{to} trên {total}",
-  "common.pagination.rowsPerPage": "Số hàng mỗi trang",
+  "common.pagination.loadedMore": "Đang hiển thị {n} mục đầu tiên",
+  "common.filter.partial": "Đang tìm trong {n} mục đã tải. Hãy tải thêm để tìm tiếp.",
+  "common.pagination.loadedAll": "Đang hiển thị tất cả {n} mục",
+  "common.pagination.loadMore": "Tải thêm",
+  "common.collectionTooLarge": "Chế độ xem này cần hơn {n} bản ghi, vượt quá số lượng cổng thông tin đọc một lần.",
 
   "errors.banner.fallback": "LỖI",
   "errors.banner.requestId": "(mã yêu cầu {id})",

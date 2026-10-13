@@ -15,14 +15,14 @@ resources:
   domain: cdi.tinyorbit.vn
   group: workspaces
   kind: Workspace
-  path: github.com/tinyorbitvn/tinycdi/api/v1alpha1
-  version: v1alpha1
+  path: github.com/tinyorbitvn/tinycdi/api/v1
+  version: v1
 - api:
     crdVersion: v1
     namespaced: true
   domain: cdi.tinyorbit.vn
   group: workspaces
   kind: WorkspaceTemplate
-  path: github.com/tinyorbitvn/tinycdi/api/v1alpha1
-  version: v1alpha1
+  path: github.com/tinyorbitvn/tinycdi/api/v1
+  version: v1
 version: "3"

@@ -14,7 +14,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -24,12 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -44,7 +41,7 @@ var (
 // label.
 func familyRevision(t *testing.T, c client.Client, ns, name, revision, image string) {
 	t.Helper()
-	newTemplate(t, c, ns, name, func(tpl *workspacesv1alpha1.WorkspaceTemplate) {
+	newTemplate(t, c, ns, name, func(tpl *cdiv1.WorkspaceTemplate) {
 		tpl.Labels = map[string]string{provisioning.LabelCatalogName: "fam32"}
 		tpl.Spec.Revision = revision
 		tpl.Spec.Linux.Image = image
@@ -85,7 +82,7 @@ func reconcileUntilPod(t *testing.T, r *WorkspaceReconciler, c client.Client,
 }
 
 // snapshotOf parses the recorded template-snapshot annotation.
-func snapshotOf(t *testing.T, ws *workspacesv1alpha1.Workspace) templateSnapshot {
+func snapshotOf(t *testing.T, ws *cdiv1.Workspace) templateSnapshot {
 	t.Helper()
 	var s templateSnapshot
 	raw := ws.Annotations[AnnotationTemplateSnapshot]
@@ -103,7 +100,7 @@ func snapshotOf(t *testing.T, ws *workspacesv1alpha1.Workspace) templateSnapshot
 // runtimeGeneration and the revision in a single Update — the only shape the
 // templateRef CEL rule admits (the old spec must have been Stopped).
 func writeSpec(t *testing.T, c client.Client, key types.NamespacedName,
-	mutate func(*workspacesv1alpha1.Workspace)) {
+	mutate func(*cdiv1.Workspace)) {
 	t.Helper()
 	ws := getWorkspace(t, c, key)
 	mutate(ws)
@@ -143,14 +140,14 @@ func TestSnapshot_RewrittenOnNewGeneration(t *testing.T) {
 
 	// Stop (revision forward only), then the re-pointing start the applier
 	// writes: templateRef -> B, Running, generation 2, revision 3.
-	writeSpec(t, c, key, func(ws *workspacesv1alpha1.Workspace) {
-		ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+	writeSpec(t, c, key, func(ws *cdiv1.Workspace) {
+		ws.Spec.DesiredState = cdiv1.DesiredStateStopped
 		ws.Spec.IntentRevision = 2
 	})
 	reconcile(t, r, key)
-	writeSpec(t, c, key, func(ws *workspacesv1alpha1.Workspace) {
+	writeSpec(t, c, key, func(ws *cdiv1.Workspace) {
 		ws.Spec.TemplateRef.Name = "fam32-bbbb2222"
-		ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateRunning
+		ws.Spec.DesiredState = cdiv1.DesiredStateRunning
 		ws.Spec.RuntimeGeneration = 2
 		ws.Spec.IntentRevision = 3
 	})
@@ -161,7 +158,7 @@ func TestSnapshot_RewrittenOnNewGeneration(t *testing.T) {
 	}
 	got := getWorkspace(t, c, key)
 	snap := snapshotOf(t, got)
-	tplB := &workspacesv1alpha1.WorkspaceTemplate{}
+	tplB := &cdiv1.WorkspaceTemplate{}
 	if err := c.Get(context.Background(),
 		client.ObjectKey{Namespace: ns, Name: "fam32-bbbb2222"}, tplB); err != nil {
 		t.Fatalf("get revision B: %v", err)
@@ -219,11 +216,11 @@ func TestSnapshot_UnchangedWithinGeneration(t *testing.T) {
 	}
 }
 
-// TestSnapshot_KeptWhenStartKeepsFamilyRef: a Stopped -> Running start that
-// carries no re-point (the family reference is unchanged — a pinned or
-// guard-skipped start) must NOT re-resolve the family to its newer member:
+// TestSnapshot_KeptWhenStartKeepsRef: a Stopped -> Running start that
+// carries no re-point (the reference is unchanged — a pinned or
+// guard-skipped start) must NOT drift to the family's newer member:
 // the snapshot stays on the recorded revision and the pod keeps its image.
-func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
+func TestSnapshot_KeptWhenStartKeepsRef(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
 		if err := env.Stop(); err != nil {
@@ -233,9 +230,9 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 	ns := newNamespace(t, c)
 	familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 
-	// The create path writes the catalog (family) name, not the resolved
-	// revision object — the resolver records revision A under it.
-	ws := newWorkspace(t, c, ns, "ws-familyref", "fam32", nil)
+	// The create path stamps the resolved revision object name — the
+	// workspace was admitted on fam32-aaaa1111.
+	ws := newWorkspace(t, c, ns, "ws-familyref", "fam32-aaaa1111", nil)
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
 	r := newReconciler(c)
 
@@ -244,20 +241,20 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 		t.Fatalf("generation-1 pod image = %s, want revision A %s", got, resnapImageA)
 	}
 	if snap := snapshotOf(t, getWorkspace(t, c, key)); snap.Name != "fam32-aaaa1111" ||
-		snap.SourceRef != "fam32" {
-		t.Fatalf("recorded snapshot = %+v, want fam32-aaaa1111 from ref fam32", snap)
+		snap.SourceRef != "fam32-aaaa1111" {
+		t.Fatalf("recorded snapshot = %+v, want fam32-aaaa1111", snap)
 	}
 
 	// Revision B publishes, then the workspace stops and starts WITHOUT a
 	// re-point (e.g. recorded revision pinned, or the guard refused).
 	familyRevision(t, c, ns, "fam32-bbbb2222", "2026-10-b", resnapImageB)
-	writeSpec(t, c, key, func(ws *workspacesv1alpha1.Workspace) {
-		ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateStopped
+	writeSpec(t, c, key, func(ws *cdiv1.Workspace) {
+		ws.Spec.DesiredState = cdiv1.DesiredStateStopped
 		ws.Spec.IntentRevision = 2
 	})
 	reconcile(t, r, key)
-	writeSpec(t, c, key, func(ws *workspacesv1alpha1.Workspace) {
-		ws.Spec.DesiredState = workspacesv1alpha1.DesiredStateRunning
+	writeSpec(t, c, key, func(ws *cdiv1.Workspace) {
+		ws.Spec.DesiredState = cdiv1.DesiredStateRunning
 		ws.Spec.RuntimeGeneration = 2
 		ws.Spec.IntentRevision = 3
 	})
@@ -267,7 +264,7 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 			got, resnapImageA)
 	}
 	snap := snapshotOf(t, getWorkspace(t, c, key))
-	if snap.Name != "fam32-aaaa1111" || snap.SourceRef != "fam32" || snap.RuntimeGeneration != 1 {
+	if snap.Name != "fam32-aaaa1111" || snap.SourceRef != "fam32-aaaa1111" || snap.RuntimeGeneration != 1 {
 		t.Fatalf("snapshot = %+v, want the recorded revision A untouched", snap)
 	}
 }
@@ -290,8 +287,8 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	// seedRunning builds the workspace's pod from tpl through the real
 	// backend — stamped with the template's identity + hash the way a
 	// post-change operator builds it — and optionally marks it scheduled.
-	seedRunning := func(t *testing.T, ns string, ws *workspacesv1alpha1.Workspace,
-		tpl *workspacesv1alpha1.WorkspaceTemplate, nodeName string) *corev1.Pod {
+	seedRunning := func(t *testing.T, ns string, ws *cdiv1.Workspace,
+		tpl *cdiv1.WorkspaceTemplate, nodeName string) *corev1.Pod {
 		t.Helper()
 		b := linux.New(c, linux.Options{})
 		if _, err := b.Ensure(context.Background(), ws, tpl); err != nil {
@@ -336,7 +333,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		}
 		return pod
 	}
-	seedAnnotation := func(t *testing.T, ws *workspacesv1alpha1.Workspace, ann string) {
+	seedAnnotation := func(t *testing.T, ws *cdiv1.Workspace, ann string) {
 		t.Helper()
 		cur := getWorkspace(t, c, client.ObjectKeyFromObject(ws))
 		if cur.Annotations == nil {
@@ -350,7 +347,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	assertPodHeldGone := func(t *testing.T, key types.NamespacedName, pod *corev1.Pod) {
 		t.Helper()
 		got := getWorkspace(t, c, key)
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue ||
 			cond.Reason != ReasonTemplateRevisionGone {
 			t.Fatalf("want Degraded/TemplateRevisionGone, got %+v", got.Status.Conditions)
@@ -359,7 +356,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		// with the Degraded condition carrying the hold — the broker's
 		// running projection keeps the workspace under lifecycle
 		// enforcement and ticket issuance keeps working.
-		if got.Status.Phase != workspacesv1alpha1.WorkspacePhaseReady {
+		if got.Status.Phase != cdiv1.WorkspacePhaseReady {
 			t.Fatalf("held workspace with a live pod: phase=%q, want Ready", got.Status.Phase)
 		}
 		if got.Status.RuntimeUID != string(pod.UID) {
@@ -382,7 +379,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adopt", "fam32", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
-		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
@@ -418,7 +415,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptf", "fam32", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
-		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
@@ -428,7 +425,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		// placement + attacker image) claiming the honest revision.
 		forged := forgedSpec("attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 3))
 		forged.Revision = "2026-10-a"
-		forged.Placement = &workspacesv1alpha1.PlacementSpec{
+		forged.Placement = &cdiv1.PlacementSpec{
 			NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
 		}
 		fraw, _ := json.Marshal(forged)
@@ -472,7 +469,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptg", "fam32", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
-		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
@@ -492,16 +489,16 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	t.Run("pre-stamp pod adopts resolved revision, pod untouched", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
-		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32", nil)
+		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32-aaaa1111", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
-		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
 		}
 		// A v0.5.0 pod carries no identity stamps; its annotation — even
-		// an honest legacy-shaped one — is never a source. The resolved
-		// candidate is the live revision; the pod provably matches it.
+		// an honest legacy-shaped one — is never a source. The candidate
+		// is the live object templateRef names; the pod provably matches it.
 		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
@@ -533,9 +530,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	t.Run("pre-stamp pod rotated revision holds degraded", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
-		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32", nil)
+		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32-bbbb2222", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
-		live := &workspacesv1alpha1.WorkspaceTemplate{}
+		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
@@ -548,9 +545,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		if err := c.Update(context.Background(), pod); err != nil {
 			t.Fatalf("unstamp pod: %v", err)
 		}
-		// The pod was built from fam32-aaaa1111; a fresh revision object
-		// with different pod content now resolves the family — the pod
-		// disproves the candidate.
+		// The pod was built from fam32-aaaa1111 but templateRef was
+		// re-pointed at fam32-bbbb2222 — different pod content, so the pod
+		// disproves the resolved candidate.
 		familyRevision(t, c, ns, "fam32-bbbb2222", "2026-10-b", resnapImageB)
 		r := newReconciler(c)
 		reconcile(t, r, key)
@@ -574,21 +571,21 @@ func TestForgedSnapshotStillRejected(t *testing.T) {
 
 	t.Run("moved ref re-snapshots over the forgery", func(t *testing.T) {
 		s := snapScheme(t)
-		live := &workspacesv1alpha1.WorkspaceTemplate{
+		live := &cdiv1.WorkspaceTemplate{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "tpl-live", Namespace: "tinycdi-tenant-a",
 				UID: types.UID("dddddddd-0000-0000-0000-0000000000aa"),
 			},
-			Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-				Revision: "2026-10-b", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-				Experience: workspacesv1alpha1.ExperienceDesktop,
-				Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: resnapImageB},
-				Resources: workspacesv1alpha1.ResourceProfile{
+			Spec: cdiv1.WorkspaceTemplateSpec{
+				Revision: "2026-10-b", Runtime: cdiv1.RuntimeLinuxContainer,
+				Experience: cdiv1.ExperienceDesktop,
+				Linux:      &cdiv1.LinuxRuntimeSpec{Image: resnapImageB},
+				Resources: cdiv1.ResourceProfile{
 					CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
 					Storage: resource.MustParse("5Gi"),
 				},
 				BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-				NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
+				NetworkProfile: cdiv1.NetworkProfileIsolated,
 			},
 		}
 		// Forged record: valid hash over an attacker spec, but it claims a
@@ -622,7 +619,7 @@ func TestForgedSnapshotStillRejected(t *testing.T) {
 			t.Fatalf("pod image = %s, want the resolved template's %s (forged spec never converged)",
 				got, resnapImageB)
 		}
-		got := &workspacesv1alpha1.Workspace{}
+		got := &cdiv1.Workspace{}
 		if err := c.Get(context.Background(), key, got); err != nil {
 			t.Fatal(err)
 		}
@@ -633,197 +630,6 @@ func TestForgedSnapshotStillRejected(t *testing.T) {
 		}
 		if snap.SpecHash != want.SpecHash || snap.Name != "tpl-live" {
 			t.Fatalf("snapshot after re-snapshot = %+v, want honest record of tpl-live", snap)
-		}
-	})
-}
-
-// legacySnapshotAnnotation renders the annotation exactly as a pre-V3.2
-// operator recorded it: sourceRef/runtimeGeneration omitted.
-func legacySnapshotAnnotation(t *testing.T, tpl *workspacesv1alpha1.WorkspaceTemplate) string {
-	t.Helper()
-	s, err := snapshotTemplate(tpl)
-	if err != nil {
-		t.Fatalf("snapshotTemplate: %v", err)
-	}
-	raw, err := json.Marshal(s)
-	if err != nil {
-		t.Fatalf("marshal snapshot: %v", err)
-	}
-	return string(raw)
-}
-
-// legacyWorkspace seeds a Running workspace carrying a pre-V3.2 snapshot
-// (no sourceRef) of the recorded revision object — in status, as the
-// upgrade-adoption path records it, and in the mirrored annotation.
-func legacyWorkspace(ref, ann string, uid types.UID) *workspacesv1alpha1.Workspace {
-	var snap templateSnapshot
-	if err := json.Unmarshal([]byte(ann), &snap); err != nil {
-		panic(err)
-	}
-	return &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "ws-legacy", Namespace: "tinycdi-tenant-a", UID: uid,
-			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_legacy"},
-			Annotations: map[string]string{AnnotationTemplateSnapshot: ann},
-		},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: ref},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:      workspacesv1alpha1.DesiredStateRunning,
-			DataPolicy:        workspacesv1alpha1.DataPolicyEphemeral,
-			RuntimeGeneration: 1,
-			IntentRevision:    1,
-		},
-		Status: workspacesv1alpha1.WorkspaceStatus{TemplateSnapshot: &snap},
-	}
-}
-
-// recordedRevision builds the revision-A object a legacy snapshot would have
-// been taken from — catalog-name labeled fam32.
-func recordedRevision(uid types.UID) *workspacesv1alpha1.WorkspaceTemplate {
-	return &workspacesv1alpha1.WorkspaceTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "fam32-aaaa1111", Namespace: "tinycdi-tenant-a", UID: uid,
-			Labels: map[string]string{provisioning.LabelCatalogName: "fam32"},
-		},
-		Spec: workspacesv1alpha1.WorkspaceTemplateSpec{
-			Revision: "2026-10-a", Runtime: workspacesv1alpha1.RuntimeLinuxContainer,
-			Experience: workspacesv1alpha1.ExperienceDesktop,
-			Linux:      &workspacesv1alpha1.LinuxRuntimeSpec{Image: resnapImageA},
-			Resources: workspacesv1alpha1.ResourceProfile{
-				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"),
-				Storage: resource.MustParse("5Gi"),
-			},
-			BootDeadline:   metav1.Duration{Duration: 5 * time.Minute},
-			NetworkProfile: workspacesv1alpha1.NetworkProfileIsolated,
-		},
-	}
-}
-
-// TestSnapshot_LegacySourceRefFallback (review PR #56): the SourceRef==""
-// branch of snapshotStale — a pre-V3.2 snapshot has no recorded source, so
-// the reference is compared against the recorded object name extended by
-// its catalog-name label.
-func TestSnapshot_LegacySourceRefFallback(t *testing.T) {
-	newest := func() *workspacesv1alpha1.WorkspaceTemplate {
-		b := recordedRevision(types.UID("uid-b"))
-		b.Name = "fam32-bbbb2222"
-		b.Spec.Revision = "2026-10-b"
-		b.Spec.Linux.Image = resnapImageB
-		return b
-	}
-	reconciled := func(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace) *workspacesv1alpha1.Workspace {
-		t.Helper()
-		r := &WorkspaceReconciler{Client: c, Scheme: snapScheme(t), Backend: linux.New(c, linux.Options{})}
-		key := client.ObjectKeyFromObject(ws)
-		reconcile(t, r, key)
-		reconcile(t, r, key)
-		got := &workspacesv1alpha1.Workspace{}
-		if err := c.Get(context.Background(), key, got); err != nil {
-			t.Fatal(err)
-		}
-		return got
-	}
-	podImage := func(t *testing.T, c client.Client, ws *workspacesv1alpha1.Workspace) string {
-		t.Helper()
-		pod := &corev1.Pod{}
-		if err := c.Get(context.Background(), client.ObjectKey{
-			Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err != nil {
-			t.Fatalf("pod: %v", err)
-		}
-		return pod.Spec.Containers[0].Image
-	}
-
-	// The reference names the recorded revision object itself: not stale.
-	t.Run("ref is the recorded object name", func(t *testing.T) {
-		s := snapScheme(t)
-		rec := recordedRevision(types.UID("uid-a"))
-		ann := legacySnapshotAnnotation(t, rec)
-		ws := legacyWorkspace("fam32-aaaa1111", ann, types.UID("ws-legacy-a"))
-		c := fake.NewClientBuilder().WithScheme(s).
-			WithObjects(ws, rec).WithStatusSubresource(ws).Build()
-		got := reconciled(t, c, ws)
-		if got.Annotations[AnnotationTemplateSnapshot] != ann {
-			t.Fatal("snapshot rewritten although the reference still names the recorded object")
-		}
-		if img := podImage(t, c, ws); img != resnapImageA {
-			t.Fatalf("pod image = %s, want recorded revision A %s", img, resnapImageA)
-		}
-	})
-
-	// The reference holds the family (catalog) name and the recorded object
-	// still exists to prove membership: keep the snapshot — a pinned or
-	// guard-skipped start must not re-resolve the family.
-	t.Run("family ref + live recorded object keeps", func(t *testing.T) {
-		s := snapScheme(t)
-		rec := recordedRevision(types.UID("uid-a"))
-		ann := legacySnapshotAnnotation(t, rec)
-		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-b"))
-		c := fake.NewClientBuilder().WithScheme(s).
-			WithObjects(ws, rec, newest()).WithStatusSubresource(ws).Build()
-		got := reconciled(t, c, ws)
-		if got.Annotations[AnnotationTemplateSnapshot] != ann {
-			t.Fatal("snapshot rewritten although the family reference is unchanged")
-		}
-		if img := podImage(t, c, ws); img != resnapImageA {
-			t.Fatalf("pod image = %s, want recorded revision A %s", img, resnapImageA)
-		}
-	})
-
-	// The recorded object is gone (chart upgrade deleted it): the family
-	// reference re-resolves to the newest published revision — the V3.1
-	// adopt-newest contract.
-	t.Run("family ref + deleted recorded object adopts newest", func(t *testing.T) {
-		s := snapScheme(t)
-		ann := legacySnapshotAnnotation(t, recordedRevision(types.UID("uid-a")))
-		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-c"))
-		c := fake.NewClientBuilder().WithScheme(s).
-			WithObjects(ws, newest()).WithStatusSubresource(ws).Build()
-		got := reconciled(t, c, ws)
-		snap := snapshotOf(t, got)
-		if snap.Name != "fam32-bbbb2222" || snap.SourceRef != "fam32" || snap.RuntimeGeneration != 1 {
-			t.Fatalf("snapshot = %+v, want re-recorded fam32-bbbb2222", snap)
-		}
-		if img := podImage(t, c, ws); img != resnapImageB {
-			t.Fatalf("pod image = %s, want adopted newest revision B %s", img, resnapImageB)
-		}
-	})
-
-	// A transient read error on the recorded object is not a NotFound: the
-	// reconcile must retry with the recorded snapshot untouched — never a
-	// silent adopt-newest.
-	t.Run("recorded object read error requeues, snapshot kept", func(t *testing.T) {
-		s := snapScheme(t)
-		rec := recordedRevision(types.UID("uid-a"))
-		ann := legacySnapshotAnnotation(t, rec)
-		ws := legacyWorkspace("fam32", ann, types.UID("ws-legacy-d"))
-		boom := errors.New("apiserver unavailable")
-		c := fake.NewClientBuilder().WithScheme(s).
-			WithObjects(ws, rec, newest()).WithStatusSubresource(ws).
-			WithInterceptorFuncs(interceptor.Funcs{
-				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, ok := obj.(*workspacesv1alpha1.WorkspaceTemplate); ok {
-						return boom
-					}
-					return cl.Get(ctx, key, obj, opts...)
-				},
-			}).Build()
-		r := &WorkspaceReconciler{Client: c, Scheme: s, Backend: linux.New(c, linux.Options{})}
-		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)})
-		if !errors.Is(err, boom) {
-			t.Fatalf("reconcile err = %v, want the catalog read error propagated (retry, no silent re-point)", err)
-		}
-		got := &workspacesv1alpha1.Workspace{}
-		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
-			t.Fatal(err)
-		}
-		if got.Annotations[AnnotationTemplateSnapshot] != ann {
-			t.Fatal("snapshot rewritten on a transient catalog error")
-		}
-		pod := &corev1.Pod{}
-		if err := c.Get(context.Background(), client.ObjectKey{
-			Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err == nil {
-			t.Fatalf("pod created while the catalog read was failing: %s", pod.Spec.Containers[0].Image)
 		}
 	})
 }

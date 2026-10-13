@@ -47,6 +47,10 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./api/...;./cmd/...;./internal/..." output:crd:artifacts:config=config/crd/bases
 
+.PHONY: sync-chart-crds
+sync-chart-crds: manifests ## Copy generated CRDs into the Helm chart.
+	cp config/crd/bases/*.yaml deploy/helm/tinycdi/crds/
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./api/...;./cmd/...;./internal/..."

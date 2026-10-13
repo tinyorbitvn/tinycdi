@@ -29,8 +29,17 @@ export type {
   SortDirection,
   UseTableSortResult,
 } from "./Table";
-export { Pagination, usePagination } from "./Pagination";
-export type { PaginationProps, UsePaginationOptions, UsePaginationResult } from "./Pagination";
+export { Pagination } from "./Pagination";
+export type { PaginationProps } from "./Pagination";
+export { useServerPage, useServerTable, serverSortParam, scanCollection, SCAN_PAGE_LIMIT, SCAN_MAX_PAGES, CollectionTooLargeError } from "./useServerPage";
+export type {
+  ServerPage,
+  FetchServerPage,
+  ServerPageResult,
+  ServerTableResult,
+  UseServerPageOptions,
+  UseServerTableOptions,
+} from "./useServerPage";
 export { Tabs } from "./Tabs";
 export type { TabsProps, TabItem } from "./Tabs";
 export { Dialog, Drawer, ConfirmDialog } from "./Dialog";

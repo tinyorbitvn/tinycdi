@@ -14,7 +14,6 @@ export default {
   "data.list.col.retainedAt": "Retained at",
   "data.list.col.actions": "Actions",
   "data.list.sizeGib": "{n} GiB",
-  "data.list.truncated": "Showing the first {n} records — the list was truncated.",
   "data.list.empty.title": "No retained disks",
   "data.list.empty.description":
     "Disks appear here when a workspace with dataPolicy Retain is deleted.",

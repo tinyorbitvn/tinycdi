@@ -60,7 +60,7 @@ func TestScopeTenant_ForbiddenForUser(t *testing.T) {
 
 	for _, path := range []string{"/v1/workspaces?scope=tenant", "/v1/data?scope=tenant"} {
 		r := doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
-		body := decodeBody[Error](t, r)
+		body := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s: status=%d, want 403", path, r.StatusCode)
 		}
@@ -113,7 +113,7 @@ func TestScopeTenant_CrossTenantNeverLeaks(t *testing.T) {
 	})
 
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?scope=tenant", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("workspaces status=%d", r.StatusCode)
 	}
@@ -127,7 +127,7 @@ func TestScopeTenant_CrossTenantNeverLeaks(t *testing.T) {
 	}
 
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/data?scope=tenant", "", nil)
-	dl := decodeBody[retainedDataList](t, r)
+	dl := decodeBody[Page[retainedDataView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("data status=%d", r.StatusCode)
 	}
@@ -167,7 +167,7 @@ func TestScopeMine_RestrictsAdmin(t *testing.T) {
 	r.Body.Close()
 
 	r = doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/workspaces?scope=mine", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", r.StatusCode)
 	}
@@ -181,7 +181,7 @@ func TestScopeMine_RestrictsAdmin(t *testing.T) {
 	}
 
 	r = doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/workspaces?scope=bogus", "", nil)
-	decodeBody[Error](t, r)
+	decodeErr(t, r)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad scope: status=%d, want 400", r.StatusCode)
 	}

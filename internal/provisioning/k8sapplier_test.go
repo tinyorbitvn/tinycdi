@@ -12,14 +12,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
 func newFakeK8sApplier(t *testing.T, objs ...client.Object) (client.Client, *provisioning.K8sApplier) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
@@ -27,9 +27,9 @@ func newFakeK8sApplier(t *testing.T, objs ...client.Object) (client.Client, *pro
 	return c, applier
 }
 
-func getWorkspace(t *testing.T, c client.Client, ns, name string) *workspacev1alpha1.Workspace {
+func getWorkspace(t *testing.T, c client.Client, ns, name string) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacev1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, ws); err != nil {
 		t.Fatalf("get workspace %s/%s: %v", ns, name, err)
 	}
@@ -72,7 +72,7 @@ func TestK8sApplierCreateIdempotent(t *testing.T) {
 	if ws.Spec.IntentRevision != 1 || ws.Spec.RuntimeGeneration != 1 {
 		t.Fatalf("spec = %+v, want intentRevision=1 runtimeGeneration=1", ws.Spec)
 	}
-	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateRunning {
+	if ws.Spec.DesiredState != cdiv1.DesiredStateRunning {
 		t.Fatalf("desiredState = %q", ws.Spec.DesiredState)
 	}
 	if ws.Spec.OwnerSubject.Subject != "user-1" || ws.Spec.TemplateRef.Name != "tmpl-linux" {
@@ -108,7 +108,7 @@ func TestK8sApplierLifecycle(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 	ws := getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+	if ws.Spec.DesiredState != cdiv1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
 		t.Fatalf("after stop spec = %+v", ws.Spec)
 	}
 
@@ -118,7 +118,7 @@ func TestK8sApplierLifecycle(t *testing.T) {
 		t.Fatalf("stale replay should be a no-op, got %v", err)
 	}
 	ws = getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+	if ws.Spec.DesiredState != cdiv1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
 		t.Fatalf("stale create rewound spec: %+v", ws.Spec)
 	}
 
@@ -138,7 +138,7 @@ func TestK8sApplierLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: "ns-a", Name: name}, &workspacev1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "ns-a", Name: name}, &cdiv1.Workspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("CR still present after delete: %v", err)
 	}
 	// delete is idempotent
@@ -167,8 +167,9 @@ func TestK8sApplierSessionPolicy(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	ws := getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.SessionPolicy == nil || ws.Spec.SessionPolicy.Clipboard != workspacev1alpha1.ClipboardDisabled {
-		t.Fatalf("create spec.sessionPolicy = %+v, want Disabled", ws.Spec.SessionPolicy)
+	if ws.Spec.SessionPolicy.Clipboard != cdiv1.ClipboardDisabled ||
+		ws.Spec.SessionPolicy.FileTransfer != cdiv1.FileTransferDisabled {
+		t.Fatalf("create spec.sessionPolicy = %+v, want Disabled/Disabled", ws.Spec.SessionPolicy)
 	}
 
 	// The next start carries the re-resolved policy: a tightened ceiling
@@ -189,8 +190,9 @@ func TestK8sApplierSessionPolicy(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	ws = getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.SessionPolicy == nil || ws.Spec.SessionPolicy.Clipboard != workspacev1alpha1.ClipboardSend {
-		t.Fatalf("start spec.sessionPolicy = %+v, want Send", ws.Spec.SessionPolicy)
+	if ws.Spec.SessionPolicy.Clipboard != cdiv1.ClipboardSend ||
+		ws.Spec.SessionPolicy.FileTransfer != cdiv1.FileTransferDisabled {
+		t.Fatalf("start spec.sessionPolicy = %+v, want Send/Disabled", ws.Spec.SessionPolicy)
 	}
 }
 
@@ -206,20 +208,20 @@ func TestK8sApplierUnknownTenant(t *testing.T) {
 // catalogTmpl builds a minimal WorkspaceTemplate revision object as the
 // chart publishes it: immutable spec, hash-suffixed name, catalog-name
 // label.
-func catalogTmpl(name, catalog, rev string, created time.Time) *workspacev1alpha1.WorkspaceTemplate {
+func catalogTmpl(name, catalog, rev string, created time.Time) *cdiv1.WorkspaceTemplate {
 	lbls := map[string]string{}
 	if catalog != "" {
 		lbls[provisioning.LabelCatalogName] = catalog
 	}
-	return &workspacev1alpha1.WorkspaceTemplate{
+	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "ns-a", Labels: lbls,
 			CreationTimestamp: metav1.NewTime(created),
 		},
-		Spec: workspacev1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   rev,
-			Runtime:    workspacev1alpha1.RuntimeLinuxContainer,
-			Experience: workspacev1alpha1.ExperienceDesktop,
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
 		},
 	}
 }
@@ -237,7 +239,7 @@ func TestTemplateCatalogImmutableRevisions(t *testing.T) {
 	solo := catalogTmpl("admintpl", "", "1", t0)
 
 	scheme := runtime.NewScheme()
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
@@ -352,7 +354,7 @@ func TestK8sApplierSameRevisionTwice(t *testing.T) {
 	if err := applier.Apply(ctx, del); err != nil {
 		t.Fatalf("re-apply delete: %v", err)
 	}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: "ns-a", Name: name}, &workspacev1alpha1.Workspace{}); !apierrors.IsNotFound(err) {
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "ns-a", Name: name}, &cdiv1.Workspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("CR present after delete replay: %v", err)
 	}
 }
@@ -406,7 +408,7 @@ func TestK8sApplierIntentDrift(t *testing.T) {
 		t.Fatalf("marker = %q", got)
 	}
 	ws := getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+	if ws.Spec.DesiredState != cdiv1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
 		t.Fatalf("stale intent rewound spec: %+v", ws.Spec)
 	}
 
@@ -444,7 +446,7 @@ func TestK8sApplierIntentDrift(t *testing.T) {
 		t.Fatal("diverged same-revision intent left no marker")
 	}
 	ws = getWorkspace(t, c, "ns-a", name)
-	if ws.Spec.DesiredState != workspacev1alpha1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
+	if ws.Spec.DesiredState != cdiv1.DesiredStateStopped || ws.Spec.IntentRevision != 2 {
 		t.Fatalf("diverged intent rewrote spec: %+v", ws.Spec)
 	}
 

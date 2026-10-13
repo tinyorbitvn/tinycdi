@@ -19,11 +19,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 )
 
-func conditionParamsOf(t *testing.T, ws *workspacesv1alpha1.Workspace) map[string]map[string]string {
+func conditionParamsOf(t *testing.T, ws *cdiv1.Workspace) map[string]map[string]string {
 	t.Helper()
 	raw := ws.Annotations[provisioning.AnnotationConditionParams]
 	if raw == "" {
@@ -40,10 +40,10 @@ func conditionParamsOf(t *testing.T, ws *workspacesv1alpha1.Workspace) map[strin
 // "<type>.<reason>"; a param-less rewrite of the same type clears them,
 // and the annotation itself disappears once empty.
 func TestSetWorkspaceConditionParams_Lifecycle(t *testing.T) {
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	now := time.Now()
 
-	SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionDegraded,
+	SetWorkspaceConditionParams(ws, cdiv1.ConditionDegraded,
 		metav1.ConditionTrue, ReasonCleanupRetry, "teardown step cleanup blocked; retrying",
 		map[string]string{"step": string(StepCleanup)}, now)
 
@@ -53,10 +53,10 @@ func TestSetWorkspaceConditionParams_Lifecycle(t *testing.T) {
 	}
 
 	// A different type's entry survives a rewrite of Degraded.
-	SetWorkspaceConditionParams(ws, workspacesv1alpha1.ConditionRuntimeReady,
+	SetWorkspaceConditionParams(ws, cdiv1.ConditionRuntimeReady,
 		metav1.ConditionFalse, "DrainingStreams", "teardown step drain-streams in progress",
 		map[string]string{"step": string(StepDrainStreams)}, now)
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionDegraded,
+	SetWorkspaceCondition(ws, cdiv1.ConditionDegraded,
 		metav1.ConditionFalse, ReasonNominal, "", now)
 	got = conditionParamsOf(t, ws)
 	if _, ok := got["Degraded.CleanupRetry"]; ok {
@@ -67,7 +67,7 @@ func TestSetWorkspaceConditionParams_Lifecycle(t *testing.T) {
 	}
 
 	// Clearing the last entry removes the annotation entirely.
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
+	SetWorkspaceCondition(ws, cdiv1.ConditionRuntimeReady,
 		metav1.ConditionTrue, ReasonReady, "", now)
 	if raw := ws.Annotations[provisioning.AnnotationConditionParams]; raw != "" {
 		t.Fatalf("empty params left annotation behind: %q", raw)
@@ -76,10 +76,10 @@ func TestSetWorkspaceConditionParams_Lifecycle(t *testing.T) {
 
 // The blocked-step marker params the step its message names.
 func TestMarkFinalizerStepBlocked_Params(t *testing.T) {
-	ws := &workspacesv1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	MarkFinalizerStepBlocked(ws, StepRevokeLeases, nil, time.Now())
 
-	cond := findCondition(ws, workspacesv1alpha1.ConditionDegraded)
+	cond := findCondition(ws, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Reason != ReasonCleanupRetry {
 		t.Fatalf("cond = %+v, want Degraded/CleanupRetry", cond)
 	}
@@ -93,7 +93,7 @@ func TestMarkFinalizerStepBlocked_Params(t *testing.T) {
 // embeds, and a reconcile-style param-less write clears it.
 func TestMarkStep_Params(t *testing.T) {
 	s := snapScheme(t)
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "ws-a"},
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ws).WithStatusSubresource(ws).Build()
@@ -101,7 +101,7 @@ func TestMarkStep_Params(t *testing.T) {
 
 	f.markStep(context.Background(), ws, StepDrainStreams)
 
-	cond := findCondition(ws, workspacesv1alpha1.ConditionRuntimeReady)
+	cond := findCondition(ws, cdiv1.ConditionRuntimeReady)
 	if cond == nil || cond.Reason != "DrainingStreams" {
 		t.Fatalf("cond = %+v, want RuntimeReady/DrainingStreams", cond)
 	}
@@ -110,7 +110,7 @@ func TestMarkStep_Params(t *testing.T) {
 		t.Fatalf("params = %v, want step=%s", got, StepDrainStreams)
 	}
 
-	SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
+	SetWorkspaceCondition(ws, cdiv1.ConditionRuntimeReady,
 		metav1.ConditionFalse, ReasonStopped, "runtime stopped by intent", time.Now())
 	if m := conditionParamsOf(t, ws); m != nil {
 		t.Fatalf("param-less rewrite kept params: %v", m)
@@ -122,7 +122,7 @@ func TestMarkStep_Params(t *testing.T) {
 // API's "<type>.<reason>" lookup matches.
 func TestRunDrain_Params(t *testing.T) {
 	s := snapScheme(t)
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "tenant-a", Name: "ws-a",
 			Labels: map[string]string{provisioning.LabelWorkspaceUID: "ws_a"},
@@ -169,7 +169,7 @@ func TestRunDrain_Params(t *testing.T) {
 // main-object and subresource updates separately.
 func TestRunDrain_RepeatStampWritesNothing(t *testing.T) {
 	s := snapScheme(t)
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "tenant-a", Name: "ws-a",
 			Labels: map[string]string{provisioning.LabelWorkspaceUID: "ws_a"},
@@ -217,7 +217,7 @@ func TestRunDrain_RepeatStampWritesNothing(t *testing.T) {
 // annotation did not change so only the status subresource write remains.
 func TestUpdateStatus_ConditionOnlySkipsMainUpdate(t *testing.T) {
 	s := snapScheme(t)
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "ws-a"},
 	}
 	var mainUpdates, statusUpdates int
@@ -237,7 +237,7 @@ func TestUpdateStatus_ConditionOnlySkipsMainUpdate(t *testing.T) {
 	now := time.Now()
 
 	err := f.updateStatus(context.Background(), ws, func() {
-		SetWorkspaceCondition(ws, workspacesv1alpha1.ConditionRuntimeReady,
+		SetWorkspaceCondition(ws, cdiv1.ConditionRuntimeReady,
 			metav1.ConditionFalse, ReasonStopped, "runtime stopped by intent", now)
 	})
 	if err != nil {
@@ -255,7 +255,7 @@ func (pendingDrainer) DrainStatus(context.Context, provisioning.PlatformID) (int
 	return 3, false, nil
 }
 
-func findCondition(ws *workspacesv1alpha1.Workspace, typ string) *metav1.Condition {
+func findCondition(ws *cdiv1.Workspace, typ string) *metav1.Condition {
 	for i := range ws.Status.Conditions {
 		if ws.Status.Conditions[i].Type == typ {
 			return &ws.Status.Conditions[i]

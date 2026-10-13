@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
@@ -207,7 +207,7 @@ func TestQuotaConcurrentRequests(t *testing.T) {
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-1",
 		Name:         "w1",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Stopped",
 		DataPolicy:   "Ephemeral",
@@ -312,7 +312,7 @@ func TestOutboxCrashRecovery(t *testing.T) {
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-2",
 		Name:         "w2",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Stopped",
 		DataPolicy:   "Ephemeral",
@@ -444,7 +444,7 @@ func TestIntentRevisionOrdering(t *testing.T) {
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-3",
 		Name:         "w3",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Stopped",
 		DataPolicy:   "Ephemeral",
@@ -632,10 +632,6 @@ func (a *pgSessionAdapter) Peek(ctx context.Context, id string) (*api.Session, e
 	}, nil
 }
 
-func (a *pgSessionAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
-	return a.s.TouchPrincipal(ctx, principal)
-}
-
 func (a *pgSessionAdapter) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
 	return a.s.TouchSessionDigest(ctx, digestHex)
 }
@@ -793,12 +789,12 @@ func (staticCatalog) Resolve(_ context.Context, tenantID, id string) (api.Templa
 	}, nil
 }
 
-func (staticCatalog) List(_ context.Context, tenantID, _, _ string, _ int) ([]api.TemplateEntry, string, error) {
+func (staticCatalog) List(_ context.Context, tenantID, _ string) ([]api.TemplateEntry, error) {
 	e, err := staticCatalog{}.Resolve(context.Background(), tenantID, "tpl_linuxdesktop")
 	if err != nil {
-		return nil, "", nil
+		return nil, nil
 	}
-	return []api.TemplateEntry{e}, "", nil
+	return []api.TemplateEntry{e}, nil
 }
 
 // httpEnv is the full public API stack over real Postgres: PG session store,
@@ -1036,7 +1032,7 @@ func TestAPIEndToEnd(t *testing.T) {
 	crName := provisioning.WorkspaceCRName(provisioning.PlatformID(created.ID))
 	eventually(t, "workspace CR exists", 15*time.Second, func() bool {
 		return k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "ns-e2e", Name: crName},
-			&workspacev1alpha1.Workspace{}) == nil
+			&cdiv1.Workspace{}) == nil
 	})
 
 	// Idempotent replay: same key + same body -> same stored result.
@@ -1075,7 +1071,7 @@ func TestAPIEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 || strings.Contains(body, created.ID) {
 		t.Fatalf("B list leaked A's workspace: %s", body)
 	}
-	resp, _ = env.do(t, sessB, csrfB, http.MethodPost, "/v1/workspaces/"+created.ID+"/stop", "", nil)
+	resp, _ = env.do(t, sessB, csrfB, http.MethodPost, "/v1/workspaces/"+created.ID+":stop", "", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("B stop A's ws: status=%d want 404", resp.StatusCode)
 	}
@@ -1106,7 +1102,7 @@ func TestOutboxCrashRecoveryEnvtest(t *testing.T) {
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-crash",
 		Name:         "crash-ws",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running",
 		DataPolicy:   "Ephemeral",
@@ -1186,7 +1182,7 @@ func TestOutboxCrashRecoveryEnvtest(t *testing.T) {
 	}
 
 	// The CR carries the fencing numbers and request ID label.
-	var cr workspacev1alpha1.Workspace
+	var cr cdiv1.Workspace
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "ns-crash", Name: provisioning.WorkspaceCRName(provisioning.PlatformID(resB.ID))}, &cr); err != nil {
 		t.Fatal(err)
 	}

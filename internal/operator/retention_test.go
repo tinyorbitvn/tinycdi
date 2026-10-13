@@ -32,14 +32,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
 // newHomePVC creates the workspace's persistent home volume object the way
 // the linux backend names/labels it.
-func newHomePVC(t *testing.T, c client.Client, ns string, ws *workspacesv1alpha1.Workspace) *corev1.PersistentVolumeClaim {
+func newHomePVC(t *testing.T, c client.Client, ns string, ws *cdiv1.Workspace) *corev1.PersistentVolumeClaim {
 	t.Helper()
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -73,10 +73,10 @@ func getPVC(t *testing.T, c client.Client, ns, name string) *corev1.PersistentVo
 	return pvc
 }
 
-func retainWorkspace(t *testing.T, c client.Client, ns, name, tpl string) *workspacesv1alpha1.Workspace {
+func retainWorkspace(t *testing.T, c client.Client, ns, name, tpl string) *cdiv1.Workspace {
 	t.Helper()
-	return newWorkspace(t, c, ns, name, tpl, func(ws *workspacesv1alpha1.Workspace) {
-		ws.Spec.DataPolicy = workspacesv1alpha1.DataPolicyRetain
+	return newWorkspace(t, c, ns, name, tpl, func(ws *cdiv1.Workspace) {
+		ws.Spec.DataPolicy = cdiv1.DataPolicyRetain
 		ws.Labels = map[string]string{provisioning.LabelTenant: "tenant-a"}
 	})
 }

@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -135,10 +135,10 @@ func runtimeGeneration(t *testing.T, db *store.DB, wsID string) int64 {
 
 // applyPending drains the workspace's outbox into a fake-client-backed
 // K8sApplier and returns the resulting Workspace CR.
-func applyPending(t *testing.T, db *store.DB, wsID string) *workspacev1alpha1.Workspace {
+func applyPending(t *testing.T, db *store.DB, wsID string) *cdiv1.Workspace {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -148,7 +148,7 @@ func applyPending(t *testing.T, db *store.DB, wsID string) *workspacev1alpha1.Wo
 			t.Fatalf("apply rev %d (%s): %v", in.Revision, in.Kind, err)
 		}
 	}
-	ws := &workspacev1alpha1.Workspace{}
+	ws := &cdiv1.Workspace{}
 	if err := c.Get(context.Background(),
 		client.ObjectKey{Namespace: "ns-fam", Name: provisioning.WorkspaceCRName(provisioning.PlatformID(wsID))}, ws); err != nil {
 		t.Fatalf("get CR: %v", err)
@@ -220,8 +220,8 @@ func TestStart_PinnedStays(t *testing.T) {
 		t.Fatalf("pinned start must not carry a template re-point, got %+v", start.Spec)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged family ref linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 
@@ -394,8 +394,8 @@ func TestUpdate_SkippedWhenStorageSmaller(t *testing.T) {
 			kind, reason, provisioning.SkipReasonStorageSmaller)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 
@@ -424,8 +424,8 @@ func TestUpdate_SkippedWhenDataPolicyDiffers(t *testing.T) {
 			kind, reason, provisioning.SkipReasonDataPolicyChanged)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 
@@ -449,7 +449,7 @@ func TestUpdate_SkippedReasonMatrix(t *testing.T) {
 			e.HostUsers = &hu
 		}, provisioning.SkipReasonHostUsersChanged},
 		{"placement-changed", func(e *provisioning.TemplateCatalogEntry) {
-			e.Placement = &workspacev1alpha1.PlacementSpec{NodeSelector: map[string]string{"workload": "runtime"}}
+			e.Placement = &cdiv1.PlacementSpec{NodeSelector: map[string]string{"workload": "runtime"}}
 		}, provisioning.SkipReasonPlacementChanged},
 		{"seccomp-profile-changed", func(e *provisioning.TemplateCatalogEntry) {
 			e.SeccompProfile = "localhost/profiles/chromium-userns.json"
@@ -490,26 +490,26 @@ func TestUpdate_SkippedReasonMatrix(t *testing.T) {
 // family in ns-fam — the shape templateEntry reads every E2 guard
 // dimension from.
 func famRevision(family, suffix, revLabel string, created time.Time,
-	mutate func(*workspacev1alpha1.WorkspaceTemplate)) *workspacev1alpha1.WorkspaceTemplate {
-	tpl := &workspacev1alpha1.WorkspaceTemplate{
+	mutate func(*cdiv1.WorkspaceTemplate)) *cdiv1.WorkspaceTemplate {
+	tpl := &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              family + "-" + suffix,
 			Namespace:         "ns-fam",
 			Labels:            map[string]string{provisioning.LabelCatalogName: family},
 			CreationTimestamp: metav1.NewTime(created),
 		},
-		Spec: workspacev1alpha1.WorkspaceTemplateSpec{
+		Spec: cdiv1.WorkspaceTemplateSpec{
 			Revision:   revLabel,
-			Runtime:    workspacev1alpha1.RuntimeLinuxContainer,
-			Experience: workspacev1alpha1.ExperienceDesktop,
-			Linux: &workspacev1alpha1.LinuxRuntimeSpec{
+			Runtime:    cdiv1.RuntimeLinuxContainer,
+			Experience: cdiv1.ExperienceDesktop,
+			Linux: &cdiv1.LinuxRuntimeSpec{
 				Image: "registry.example/tcdi/linux-desktop@sha256:" +
 					"0000000000000000000000000000000000000000000000000000000000000000",
 			},
-			ClipboardPolicy: workspacev1alpha1.ClipboardDisabled,
-			NetworkProfile:  workspacev1alpha1.NetworkProfileIsolated,
-			Lifecycle: workspacev1alpha1.LifecycleDefaults{
-				ImageUpdate: workspacev1alpha1.ImageUpdateOnStart,
+			ClipboardPolicy: cdiv1.ClipboardDisabled,
+			NetworkProfile:  cdiv1.NetworkProfileIsolated,
+			Lifecycle: cdiv1.LifecycleDefaults{
+				ImageUpdate: cdiv1.ImageUpdateOnStart,
 			},
 		},
 	}
@@ -532,33 +532,33 @@ func TestUpdate_SkippedOnSecurityFieldDrift(t *testing.T) {
 	base := time.Now().Add(-2 * time.Hour)
 	for i, tc := range []struct {
 		name   string
-		mutate func(*workspacev1alpha1.WorkspaceTemplate)
+		mutate func(*cdiv1.WorkspaceTemplate)
 		want   string
 	}{
 		{"image-only", nil, ""},
-		{"network-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
-			tpl.Spec.NetworkProfile = workspacev1alpha1.NetworkProfileInternetOnly
+		{"network-profile", func(tpl *cdiv1.WorkspaceTemplate) {
+			tpl.Spec.NetworkProfile = cdiv1.NetworkProfileInternetOnly
 		}, provisioning.SkipReasonNetworkProfileChanged},
-		{"clipboard-policy", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
-			tpl.Spec.ClipboardPolicy = workspacev1alpha1.ClipboardBidirectional
+		{"clipboard-policy", func(tpl *cdiv1.WorkspaceTemplate) {
+			tpl.Spec.ClipboardPolicy = cdiv1.ClipboardBidirectional
 		}, provisioning.SkipReasonClipboardPolicyChanged},
-		{"adapter", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
-			tpl.Spec.Linux.Adapter = workspacev1alpha1.AdapterKasm
+		{"adapter", func(tpl *cdiv1.WorkspaceTemplate) {
+			tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 		}, provisioning.SkipReasonAdapterChanged},
-		{"host-users", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+		{"host-users", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.Linux.HostUsers = &hostUsers
 		}, provisioning.SkipReasonHostUsersChanged},
-		{"placement", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
-			tpl.Spec.Placement = &workspacev1alpha1.PlacementSpec{
+		{"placement", func(tpl *cdiv1.WorkspaceTemplate) {
+			tpl.Spec.Placement = &cdiv1.PlacementSpec{
 				NodeSelector: map[string]string{"workload": "runtime"},
 			}
 		}, provisioning.SkipReasonPlacementChanged},
-		{"seccomp-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+		{"seccomp-profile", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Annotations = map[string]string{
 				linux.AnnotationSeccompProfile: "localhost/profiles/chromium-userns.json",
 			}
 		}, provisioning.SkipReasonSeccompProfileChanged},
-		{"apparmor-profile", func(tpl *workspacev1alpha1.WorkspaceTemplate) {
+		{"apparmor-profile", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Annotations = map[string]string{
 				linux.AnnotationAppArmorProfile: "localhost/tinycdi-browser",
 			}
@@ -566,7 +566,7 @@ func TestUpdate_SkippedOnSecurityFieldDrift(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
-			if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+			if err := cdiv1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
 			revA := famRevision("linuxdesk", "aaaa1111", "2026-10-a", base, nil)
@@ -602,11 +602,11 @@ func TestCatalogNewestInFamily(t *testing.T) {
 	t0 := time.Now().Add(-time.Hour)
 	old := catalogTmpl("linuxdesk1-aaaa0000", "linuxdesk1", "w6a-1", t0)
 	cur := catalogTmpl("linuxdesk1-bbbb1111", "linuxdesk1", "w6a-2", t0.Add(30*time.Minute))
-	cur.Spec.Lifecycle.ImageUpdate = workspacev1alpha1.ImageUpdatePinned
+	cur.Spec.Lifecycle.ImageUpdate = cdiv1.ImageUpdatePinned
 	solo := catalogTmpl("admintpl", "", "1", t0)
 
 	scheme := runtime.NewScheme()
-	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
@@ -619,7 +619,7 @@ func TestCatalogNewestInFamily(t *testing.T) {
 		t.Fatalf("newest in family: %v", err)
 	}
 	if e.ID != "tpl_linuxdesk1-bbbb1111" || e.RevisionLabel != "w6a-2" ||
-		e.ImageUpdate != string(workspacev1alpha1.ImageUpdatePinned) {
+		e.ImageUpdate != string(cdiv1.ImageUpdatePinned) {
 		t.Fatalf("newest = %+v, want revision bbbb1111 pinned", e)
 	}
 	e, err = cat.NewestInFamily(ctx, "tenant-a", "admintpl")

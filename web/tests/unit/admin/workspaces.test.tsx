@@ -152,7 +152,7 @@ describe("workspaces: admin actions", () => {
     await screen.findByText("Start requested for linus-desktop (Linus Pauling).");
     expect(
       api.state.requests.some(
-        (r) => r.method === "POST" && r.path === `/v1/workspaces/${SEED_WORKSPACE_IDS.linusStopped}/start`,
+        (r) => r.method === "POST" && r.path === `/v1/workspaces/${SEED_WORKSPACE_IDS.linusStopped}:start`,
       ),
     ).toBe(true);
     expect(api.state.workspaces.get(SEED_WORKSPACE_IDS.linusStopped)?.desiredState).toBe("Running");

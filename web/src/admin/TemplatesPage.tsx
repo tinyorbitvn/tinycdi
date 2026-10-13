@@ -1,7 +1,8 @@
-import { Badge, Button, Pagination, Table, usePagination, useTableSort } from "../design";
+import { useCallback, useMemo } from "react";
+import { Badge, Button, Pagination, Table, useServerTable } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
-import type { ApiClient } from "../api/client";
+import { useApi } from "../api/context";
 import { t } from "../i18n";
 import {
   clipboardPolicyLabel,
@@ -11,8 +12,8 @@ import {
   runtimeLabel,
 } from "../templates/format";
 import {
-  listScopedWorkspaces,
-  listTemplates,
+  scanScopedWorkspaces,
+  listTemplatePageAdmin,
   type AdminTemplateView,
   type ScopedWorkspace,
   templateFamily,
@@ -53,29 +54,25 @@ function formatEngines(engines: Record<string, string> | undefined): string {
 // Joins the catalog with the tenant's workspaces so admins can see which
 // templates are actually used before retiring one. Workspaces pin a template
 // revision; the join is on the family, which survives a revision bump.
+// Rows keep the server's template order.
 export function catalogRows(
-  templates: AdminTemplateView[],
-  workspaces: ScopedWorkspace[],
+  templates: readonly AdminTemplateView[],
+  workspaces: readonly ScopedWorkspace[],
 ): CatalogRow[] {
-  return templates
-    .map((template) => {
-      const users = workspaces.filter((w) => templateFamily(w.template) === templateFamily(template) && w.phase !== "Terminating");
-      return {
-        template,
-        inUse: users.length,
-        running: users.filter((w) => w.desiredState === "Running").length,
-      };
-    })
-    .sort((a, b) => b.inUse - a.inUse || a.template.name.localeCompare(b.template.name));
+  return templates.map((template) => {
+    const users = workspaces.filter(
+      (w) => templateFamily(w.template) === templateFamily(template) && w.phase !== "Terminating",
+    );
+    return {
+      template,
+      inUse: users.length,
+      running: users.filter((w) => w.desiredState === "Running").length,
+    };
+  });
 }
 
-async function loadCatalog(api: ApiClient): Promise<CatalogRow[]> {
-  const [templates, workspaces] = await Promise.all([
-    listTemplates(api),
-    listScopedWorkspaces(api, "tenant"),
-  ]);
-  return catalogRows(templates.items, workspaces.items);
-}
+// GET /v1/templates sorts on `name` only.
+const TEMPLATE_SORT_FIELDS = { name: "name" } as const;
 
 const columns: Column<CatalogRow>[] = [
   {
@@ -83,7 +80,6 @@ const columns: Column<CatalogRow>[] = [
     header: t("admin.templates.column.template"),
     rowHeader: true,
     sortable: true,
-    compare: (a, b) => a.template.name.localeCompare(b.template.name),
     render: ({ template: tpl }) => (
       <span className="tc-admin-cell-stack">
         <span>
@@ -96,9 +92,6 @@ const columns: Column<CatalogRow>[] = [
   {
     key: "kind",
     header: t("admin.templates.column.kind"),
-    sortable: true,
-    compare: (a, b) => experienceLabel(a.template.experience).localeCompare(experienceLabel(b.template.experience)),
-    tiebreak: (a, b) => a.template.name.localeCompare(b.template.name),
     render: ({ template: tpl }) => (
       <span className="tc-admin-cell-stack">
         <span>{experienceLabel(tpl.experience)}</span>
@@ -170,9 +163,6 @@ const columns: Column<CatalogRow>[] = [
     key: "usage",
     header: t("admin.templates.column.usage"),
     align: "end",
-    sortable: true,
-    compare: (a, b) => a.inUse - b.inUse,
-    tiebreak: (a, b) => a.template.name.localeCompare(b.template.name),
     render: (r) => (
       <span aria-label={t("admin.templates.usageLabel", { inUse: r.inUse, running: r.running })}>
         {r.inUse} <span className="tc-admin-muted">{t("admin.templates.usage.running", { n: r.running })}</span>
@@ -183,42 +173,56 @@ const columns: Column<CatalogRow>[] = [
     key: "published",
     header: t("admin.templates.column.published"),
     hideOnMobile: true,
-    sortable: true,
-    compare: (a, b) => a.template.publishedAt.localeCompare(b.template.publishedAt),
     render: ({ template: tpl }) => <time dateTime={tpl.publishedAt}>{formatDateTime(tpl.publishedAt)}</time>,
   },
 ];
 
 export function TemplatesPage() {
-  const catalog = useLoader(loadCatalog, "catalog");
-  // catalogRows' in-use-descending order is the default sort.
-  const sort = useTableSort(columns, catalog.data ?? [], {
-    key: "usage",
-    direction: "descending",
+  const api = useApi();
+  // The in-use counts need every tenant workspace; the catalog rows page.
+  const workspaces = useLoader((a) => scanScopedWorkspaces(a, "tenant"), "catalog-workspaces");
+  const load = useCallback(
+    (cursor?: string, sort?: string) => listTemplatePageAdmin(api, cursor, sort),
+    [api],
+  );
+  const list = useServerTable(load, {
+    fields: TEMPLATE_SORT_FIELDS,
+    initial: { key: "name", direction: "ascending" },
   });
-  const paged = usePagination(sort.sortedRows);
+  const rows = useMemo(() => catalogRows(list.items, workspaces.data ?? []), [list.items, workspaces.data]);
+  const reload = () => {
+    list.refresh();
+    workspaces.reload();
+  };
   return (
     <AdminLayout
       title={t("admin.templates.title")}
       description={t("admin.templates.description")}
       actions={
-        <Button icon={<IconRefresh />} onClick={catalog.reload} loading={catalog.loading && !!catalog.data}>
+        <Button icon={<IconRefresh />} onClick={reload} loading={list.loading && list.loaded}>
           {t("admin.action.refresh")}
         </Button>
       }
     >
-      <ApiErrorAlert error={catalog.error} onRetry={catalog.reload} />
+      <ApiErrorAlert error={list.error} onRetry={list.refresh} />
+      <ApiErrorAlert error={workspaces.error} onRetry={workspaces.reload} />
       <Table
         caption={t("admin.templates.caption")}
         columns={columns}
-        rows={paged.pageRows}
+        rows={rows}
         rowKey={(r) => r.template.id}
-        sort={sort.sort}
-        onSortChange={sort.onSortChange}
-        loading={catalog.loading && !catalog.data}
+        sort={list.tableSort}
+        onSortChange={list.onSortChange}
+        loading={!list.loaded && !list.error}
         empty={t("admin.templates.empty")}
       />
-      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.templates.caption") })} />
+      <Pagination
+        loaded={list.items.length}
+        hasNext={list.hasNext}
+        loading={list.loading}
+        onLoadMore={list.next}
+        label={t("common.pagination.label", { name: t("admin.templates.caption") })}
+      />
     </AdminLayout>
   );
 }

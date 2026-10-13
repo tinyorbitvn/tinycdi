@@ -417,11 +417,13 @@ func workspacesGet(t *testing.T, r *replica, sessionID string) (status int, code
 	}
 	defer drainBody(resp)
 	var v struct {
-		Code string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(body, &v)
-	return resp.StatusCode, v.Code, took
+	return resp.StatusCode, v.Error.Code, took
 }
 
 // TestPGOutage_ShortKeepsStreams (E6): a 10 s outage is inside the 30 s

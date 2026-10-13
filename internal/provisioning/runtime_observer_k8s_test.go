@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
@@ -37,14 +37,14 @@ func observerScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacev1alpha1.AddToScheme(s); err != nil {
+	if err := cdiv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
-func obsCR(name, ns, platformUID, crUID string) *workspacev1alpha1.Workspace {
-	return &workspacev1alpha1.Workspace{
+func obsCR(name, ns, platformUID, crUID string) *cdiv1.Workspace {
+	return &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -54,12 +54,16 @@ func obsCR(name, ns, platformUID, crUID string) *workspacev1alpha1.Workspace {
 				provisioning.LabelTenant:       "tenant-a",
 			},
 		},
-		Spec: workspacev1alpha1.WorkspaceSpec{
-			TemplateRef:    workspacev1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:   workspacev1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:   workspacev1alpha1.DesiredStateStopped,
-			DataPolicy:     workspacev1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:    cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:   cdiv1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:   cdiv1.DesiredStateStopped,
+			DataPolicy:     cdiv1.DataPolicyEphemeral,
 			IntentRevision: 1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 }
@@ -233,7 +237,7 @@ func TestRecovery_SettleWithRealObserver(t *testing.T) {
 
 	// The workspace CR + a running-runtime pod (label = CR UID).
 	crName := provisioning.WorkspaceCRName(uid)
-	cr := &workspacev1alpha1.Workspace{
+	cr := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      crName,
 			Namespace: ns.Name,
@@ -242,12 +246,16 @@ func TestRecovery_SettleWithRealObserver(t *testing.T) {
 				provisioning.LabelTenant:       "tenant-a",
 			},
 		},
-		Spec: workspacev1alpha1.WorkspaceSpec{
-			TemplateRef:    workspacev1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:   workspacev1alpha1.OwnerSubject{Issuer: "i", Subject: "s"},
-			DesiredState:   workspacev1alpha1.DesiredStateStopped,
-			DataPolicy:     workspacev1alpha1.DataPolicyEphemeral,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:    cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:   cdiv1.OwnerSubject{Issuer: "i", Subject: "s"},
+			DesiredState:   cdiv1.DesiredStateStopped,
+			DataPolicy:     cdiv1.DataPolicyEphemeral,
 			IntentRevision: 1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := kc.Create(ctx, cr); err != nil {

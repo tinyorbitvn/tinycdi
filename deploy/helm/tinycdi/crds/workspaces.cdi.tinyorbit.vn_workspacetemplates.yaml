@@ -27,7 +27,7 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: v1alpha1
+    name: v1
     schema:
       openAPIV3Schema:
         description: WorkspaceTemplate is the Schema for the workspacetemplates API.
@@ -74,6 +74,18 @@ spec:
                 enum:
                 - Desktop
                 - Browser
+                type: string
+              fileTransferPolicy:
+                default: Disabled
+                description: |-
+                  fileTransferPolicy selects file transfer between client device and
+                  workspace home, named from the user's point of view (Upload =
+                  device to workspace, Download = workspace to device).
+                enum:
+                - Disabled
+                - Upload
+                - Download
+                - Bidirectional
                 type: string
               lifecycle:
                 description: |-

@@ -18,15 +18,15 @@ printer, smartcard) that must not exist in a locked-down runtime.
 > `tinycdi-browser` image, which tracks the Debian chromium-security pin.
 > Kasm images exist for the apps/desktops that have no native equivalent.
 >
-> **Browser allowlist currently empty.** No cataloged `kasmweb/*` browser
-> image is within 2 majors of the native pin today: `kasmweb/chromium`
-> carries Chromium 150 vs the native 154 (lag 4). Seeded `adapter: kasm`
-> templates with `experience: Browser` need their image on
-> `kasmAdapter.browserAllowlist`, which ships empty — the render refuses
-> anything else. The image stays cataloged for non-browser templates
-> (class `desktop`). Upstream `kasmweb/chrome` rolling-weekly builds a
-> Google-built engine at major 154 (lag 0) and is a candidate to refill
-> the allowlist once it clears the onboarding checklist below.
+> **Browser allowlist currently empty.** The cataloged `kasmweb/chrome`
+> (1.19.0-rolling-weekly) bundles Google Chrome 154 vs the native pin's
+> 155 (lag 1), so it is a `browser`-class entry. Seeded `adapter: kasm`
+> templates with `experience: Browser` still need their image on
+> `kasmAdapter.browserAllowlist`, which ships empty until the adapter
+> contract test (onboarding checklist below, step 5) has been run against
+> that digest — the render refuses anything else. `kasmweb/chromium`
+> bundles Chromium 150 (lag 5 vs the 155 pin), below even the desktop
+> budget, and is no longer cataloged.
 
 The adapter is a ~200-line shim delivered **into** the pod, not into the
 image:
@@ -190,9 +190,9 @@ its template merges**:
    and the installed engine must meet the declared floor. This is a
    blocking CI gate and stays blocking — the lag is the accepted
    residual risk of the preview, not a target to grow. The cataloged
-   `kasmweb/chromium` carries Chromium 150 vs the native pin's 154 —
-   inside the non-browser budget (class `desktop`), outside the browser
-   gate; a stale digest (e.g. the Oct-2025 pin, Chromium 139) is
+   `kasmweb/chrome` carries Chrome 154 vs the native pin's 155 — inside
+   the browser budget (class `browser`); `kasmweb/chromium` (Chromium
+   150, lag 5) fails both budgets and is not cataloged; a stale digest (e.g. the Oct-2025 pin, Chromium 139) is
    rejected outright.
 5. **Contract test.** Run the adapter contract suite against the image:
    `TCDI_IT_KASM_IMAGE=<repo>@sha256:<digest> go test -tags=integration
@@ -258,8 +258,9 @@ its template merges**:
   catalog entry (floor ≥ pin−2). Non-Browser kasm templates ignore the
   list (their images stay under the ≤4 desktop budget). Today the list
   is empty — see the preview note above.
-- `ci/example-values.yaml` seeds `kasm-chromium` as a **Desktop**
-  experience (the image is desktop-class under E13); it is also the
+- `ci/example-values.yaml` seeds `kasm-chromium` (image
+  `kasmweb/chrome`, browser-class but not allowlisted) as a **Desktop**
+  experience; it is also the
   reference for the Localhost profile annotations a Chromium-family
   kasm image needs.
 

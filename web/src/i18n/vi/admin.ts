@@ -53,16 +53,12 @@ export default {
   "admin.quota.loading": "Đang tải hạn mức",
   "admin.quota.limits.title": "Giới hạn tenant",
   "admin.quota.limits.description": "Mức dùng hiện tại so với giới hạn của tenant {tenant}.",
-  "admin.quota.users.title": "Mức dùng theo người dùng",
-  "admin.quota.users.caption": "Mức dùng theo người dùng",
-  "admin.quota.users.empty": "Chưa ghi nhận mức dùng nào.",
   "admin.quota.column.user": "Người dùng",
   "admin.quota.amount.workspaces": "Workspace",
   "admin.quota.amount.runningWorkspaces": "Workspace đang chạy",
   "admin.quota.amount.cpuMillicores": "CPU",
   "admin.quota.amount.memoryMib": "Bộ nhớ",
   "admin.quota.amount.storageGib": "Lưu trữ",
-  "admin.quota.atLimit": "đã đạt giới hạn",
   "admin.quota.meter": "{used} / {limit} ({pct}%)",
   "admin.quota.notConfigured":
     "Chưa cấu hình hạn mức. Workspace mới bị từ chối cho tới khi tenant có hạn mức.",
@@ -150,8 +146,6 @@ export default {
   "admin.workspaces.filter.placeholder": "Tên, chủ sở hữu, template hoặc ID",
   "admin.workspaces.phase.label": "Trạng thái",
   "admin.workspaces.phase.all": "Mọi trạng thái",
-  "admin.workspaces.truncated":
-    "Đang hiển thị {n} workspace đầu tiên; thu hẹp bộ lọc trạng thái để xem phần còn lại.",
   "admin.workspaces.empty.filtered": "Không có workspace nào khớp bộ lọc.",
   "admin.workspaces.empty.all": "Chưa có workspace nào trong tenant này.",
   "admin.workspaces.column.workspace": "Workspace",
@@ -241,7 +235,6 @@ export default {
   "admin.userDetail.limits.title": "Giới hạn workspace đang chạy",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
-  "admin.userDetail.field.usage": "Mức dùng",
   "admin.userDetail.workspaces.title": "Workspace",
   "admin.userDetail.workspaces.caption": "Workspace của người dùng",
   "admin.userDetail.workspaces.empty": "Người dùng này không có workspace nào.",
@@ -297,6 +290,8 @@ export default {
   "admin.errors.quotaNotConfigured": "Tenant của bạn chưa được cấu hình hạn mức. Nhờ quản trị viên thiết lập.",
   "admin.errors.quotaManagedByConfig":
     "Hạn mức của tenant này do cấu hình nền tảng quản lý và không thể thay đổi ở đây.",
+  "admin.errors.preconditionRequired":
+    "Thay đổi này được gửi mà không kèm phiên bản gốc. Hãy tải lại trang rồi lưu lại.",
   "admin.errors.preconditionFailed":
     "Có người khác vừa thay đổi các hạn mức này. Giá trị hiện tại đã được tải lại — hãy kiểm tra rồi lưu lại.",
   "admin.errors.idempotencyConflict":

@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"reflect"
 
-	workspacev1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 // TemplateLookup is the catalog read surface the start path consults to
@@ -111,7 +111,7 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		return nil, "", "", rec.Template.ImageBuiltAt, false, nil
 	}
 	if cur != nil {
-		if workspacev1alpha1.ImageUpdatePolicy(cur.ImageUpdate) == workspacev1alpha1.ImageUpdatePinned {
+		if cdiv1.ImageUpdatePolicy(cur.ImageUpdate) == cdiv1.ImageUpdatePinned {
 			// Pinned: the workspace can never move — the stale-image
 			// refusal must say an admin must publish a fresh image.
 			return nil, "", "", cur.ImageBuiltAt, true, nil

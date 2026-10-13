@@ -37,9 +37,9 @@ runtime:
 templates:
   - name: kasm-chromium
     namespace: tinycdi-tenant-a
-    # kasmweb/chromium is a desktop-class catalog entry — Chromium 150 vs
-    # the native 154 pin, outside the ≤2 browser gate (E13).
-    image: kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0
+    # kasmweb/chrome is a catalog entry that is not on
+    # kasmAdapter.browserAllowlist (empty by default) — E13.
+    image: kasmweb/chrome@sha256:4999d22efdde2ae7e432c6eb969685e578498c83491e6ef8a0853adc1324003b
     spec:
       revision: "2026-10-a"
       runtime: LinuxContainer

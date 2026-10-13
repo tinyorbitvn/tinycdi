@@ -28,20 +28,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
 // seccompReconcile runs one reconcile over the seeded objects and returns
 // the stored workspace.
-func seccompReconcile(t *testing.T, objs ...client.Object) (client.Client, *workspacesv1alpha1.Workspace) {
+func seccompReconcile(t *testing.T, objs ...client.Object) (client.Client, *cdiv1.Workspace) {
 	t.Helper()
 	s := snapScheme(t)
-	var ws *workspacesv1alpha1.Workspace
+	var ws *cdiv1.Workspace
 	b := fake.NewClientBuilder().WithScheme(s)
 	for _, o := range objs {
 		b = b.WithObjects(o)
-		if w, ok := o.(*workspacesv1alpha1.Workspace); ok {
+		if w, ok := o.(*cdiv1.Workspace); ok {
 			b = b.WithStatusSubresource(w)
 			ws = w
 		}
@@ -53,7 +53,7 @@ func seccompReconcile(t *testing.T, objs ...client.Object) (client.Client, *work
 		ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ws)}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &workspacesv1alpha1.Workspace{}
+	got := &cdiv1.Workspace{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
 		t.Fatal(err)
 	}
@@ -62,14 +62,14 @@ func seccompReconcile(t *testing.T, objs ...client.Object) (client.Client, *work
 
 // assertHeldNoPod: the workspace holds Degraded with the expected reason
 // and no pod was ever built.
-func assertHeldNoPod(t *testing.T, c client.Client, ws, got *workspacesv1alpha1.Workspace, reason string) {
+func assertHeldNoPod(t *testing.T, c client.Client, ws, got *cdiv1.Workspace, reason string) {
 	t.Helper()
 	pod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{
 		Namespace: ws.Namespace, Name: linux.PodName(ws.UID)}, pod); err == nil {
 		t.Fatalf("held workspace produced a pod: %s", pod.Name)
 	}
-	cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+	cond := condition(got, cdiv1.ConditionDegraded)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reason {
 		t.Fatalf("want Degraded=True reason=%s, got %+v", reason, got.Status.Conditions)
 	}
@@ -155,8 +155,8 @@ func TestTemplateValidLocalhostSeccompAnnotation(t *testing.T) {
 func TestAdoptHold_ReasonPerFailureClass(t *testing.T) {
 	s := snapScheme(t)
 
-	reconcile := func(c client.Client, ws *workspacesv1alpha1.Workspace,
-		rec *record.FakeRecorder) *workspacesv1alpha1.Workspace {
+	reconcile := func(c client.Client, ws *cdiv1.Workspace,
+		rec *record.FakeRecorder) *cdiv1.Workspace {
 		t.Helper()
 		r := &WorkspaceReconciler{Client: c, Scheme: s,
 			Backend: linux.New(c, linux.Options{}), Recorder: rec}
@@ -166,20 +166,20 @@ func TestAdoptHold_ReasonPerFailureClass(t *testing.T) {
 				t.Fatalf("reconcile: %v", err)
 			}
 		}
-		got := &workspacesv1alpha1.Workspace{}
+		got := &cdiv1.Workspace{}
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ws), got); err != nil {
 			t.Fatal(err)
 		}
 		return got
 	}
-	assertHeld := func(got *workspacesv1alpha1.Workspace, reason string) {
+	assertHeld := func(got *cdiv1.Workspace, reason string) {
 		t.Helper()
-		cond := condition(got, workspacesv1alpha1.ConditionDegraded)
+		cond := condition(got, cdiv1.ConditionDegraded)
 		if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reason {
 			t.Fatalf("want Degraded=True reason=%s, got %+v", reason, got.Status.Conditions)
 		}
 	}
-	assertPodUntouched := func(c client.Client, ws *workspacesv1alpha1.Workspace) {
+	assertPodUntouched := func(c client.Client, ws *cdiv1.Workspace) {
 		t.Helper()
 		pod := &corev1.Pod{}
 		if err := c.Get(context.Background(), client.ObjectKey{

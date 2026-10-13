@@ -198,8 +198,8 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 		t.Errorf("spec.linux.adapter = %v, want kasm", linux["adapter"])
 	}
 	if img, _ := linux["image"].(string); img !=
-		"kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0" {
-		t.Errorf("spec.linux.image = %q, want the cataloged digest-pinned kasmweb/chromium ref", img)
+		"kasmweb/chrome@sha256:4999d22efdde2ae7e432c6eb969685e578498c83491e6ef8a0853adc1324003b" {
+		t.Errorf("spec.linux.image = %q, want the cataloged digest-pinned kasmweb/chrome ref", img)
 	}
 	if _, ok := linux["sessionCmd"]; ok {
 		t.Errorf("spec.linux.sessionCmd = %v, want unset — the desktop seed runs the image's own session", linux["sessionCmd"])
@@ -218,11 +218,11 @@ func TestKasmTemplateRendersVerbatim(t *testing.T) {
 // TestKasmBrowserTemplateNeedsFreshEngine: E13 — a seeded adapter=kasm
 // template with experience=Browser must draw its image from
 // kasmAdapter.browserAllowlist (the chart-side binding to the catalog's
-// ≤2-major browser engine gate). A desktop-class catalog entry —
-// kasmweb/chromium lags the native pin by 4 majors — is outside the
-// allowlist and fails the render; allowlisting the ref renders it.
+// ≤2-major browser engine gate). A catalog entry that is not on the
+// allowlist (kasmweb/chrome ships unlisted — the allowlist defaults to
+// empty) fails the render; allowlisting the ref renders it.
 func TestKasmBrowserTemplateNeedsFreshEngine(t *testing.T) {
-	const ref = "kasmweb/chromium@sha256:c50132c99d265b78e0cbc091a8fade0e8e814f5928d634db36bd8c1649bb41f0"
+	const ref = "kasmweb/chrome@sha256:4999d22efdde2ae7e432c6eb969685e578498c83491e6ef8a0853adc1324003b"
 	out := renderBad(t, "kasm-browser-not-allowlisted-values.yaml")
 	if !strings.Contains(out, "kasmAdapter.browserAllowlist") {
 		t.Fatalf("expected render to fail naming kasmAdapter.browserAllowlist, got: %s", out)

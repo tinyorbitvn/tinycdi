@@ -407,15 +407,25 @@ func TestRuntimeAppArmorRequireDefaultFlag(t *testing.T) {
 }
 
 // --runtime-clusteronly-egress: empty stays nil (the backend keeps the
-// any-namespace default); a set value must be a strict JSON object —
-// unknown keys, malformed JSON, an all-empty object and a bad port
-// protocol all fail so a typo can never silently widen the rule.
+// restricted tenant-namespace default); the literal "unrestricted" opts
+// back into any-pod-any-namespace egress; any other value must be a
+// strict JSON object — unknown keys, malformed JSON, an all-empty object
+// and a bad port protocol all fail so a typo can never silently widen
+// the rule.
 func TestParseClusterOnlyEgress(t *testing.T) {
 	if got, err := parseClusterOnlyEgress(""); err != nil || got != nil {
 		t.Fatalf("empty flag = %+v, %v; want nil, nil", got, err)
 	}
 
-	got, err := parseClusterOnlyEgress(`{"namespaceSelector":{"matchLabels":{"workspaces.cdi.tinyorbit.vn/tenant":"a"}}}`)
+	got, err := parseClusterOnlyEgress("unrestricted")
+	if err != nil || got == nil || !got.Unrestricted {
+		t.Fatalf(`"unrestricted" = %+v, %v; want {Unrestricted: true}`, got, err)
+	}
+	if got.NamespaceSelector != nil || got.PodSelector != nil || len(got.Ports) != 0 {
+		t.Fatalf(`"unrestricted" must not set selectors/ports, got %+v`, got)
+	}
+
+	got, err = parseClusterOnlyEgress(`{"namespaceSelector":{"matchLabels":{"workspaces.cdi.tinyorbit.vn/tenant":"a"}}}`)
 	if err != nil {
 		t.Fatalf("valid namespaceSelector rejected: %v", err)
 	}

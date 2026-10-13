@@ -197,11 +197,6 @@ type SessionStore interface {
 	// passive endpoints use so polling never extends the idle window (P4).
 	// Expired or unknown IDs return ErrSessionNotFound.
 	Peek(ctx context.Context, id string) (*Session, error)
-	// TouchPrincipal slides last_seen_at for the principal's sessions that
-	// are still inside the idle window and before their absolute expiry
-	// (D18). principal is the "issuer|subject" owner string. Returns the
-	// number of sessions touched.
-	TouchPrincipal(ctx context.Context, principal string) (int64, error)
 	// TouchSessionDigest slides last_seen_at for exactly one session — the
 	// row keyed by digestHex (hex of SHA-256(session id), the form a lease
 	// records) — while it is still inside the idle window and before its
@@ -283,30 +278,8 @@ func (s *InMemorySessionStore) Peek(_ context.Context, id string) (*Session, err
 	return &cp, nil
 }
 
-// TouchPrincipal slides last_seen_at for the principal's live sessions —
-// those still inside the idle window and before their absolute expiry
-// (D18). principal is the "issuer|subject" owner string.
-func (s *InMemorySessionStore) TouchPrincipal(_ context.Context, principal string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var n int64
-	now := s.now()
-	for key, sess := range s.sessions {
-		if sess.Principal.Owner() != principal {
-			continue
-		}
-		if s.peekLocked(key, now) == nil {
-			continue // expired sessions stay dead — input never revives them
-		}
-		sess.LastSeenAt = now
-		n++
-	}
-	return n, nil
-}
-
 // TouchSessionDigest slides last_seen_at for the single session the
-// digestHex row key names (SR-1-F3) — same liveness guards as
-// TouchPrincipal, so an expired session is never revived.
+// digestHex row key names (SR-1-F3); an expired session is never revived.
 func (s *InMemorySessionStore) TouchSessionDigest(_ context.Context, digestHex string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -906,22 +879,22 @@ func (a *Authenticator) loginCookie(value string, maxAge int) *http.Cookie {
 }
 
 // inputTouchMinInterval bounds how often desktop input writes to the session
-// store: one slide per principal per minute is enough against a 30-minute
+// store: one slide per session per minute is enough against a 30-minute
 // idle window, and the bound keeps a busy stream from turning into a write
 // flood.
 const inputTouchMinInterval = time.Minute
 
-// inputThrottleMaxEntries bounds the per-principal throttle map. Every
-// distinct principal that produces desktop input adds an entry; the LRU keeps
-// the backend's memory flat however many principals pass through. An evicted
-// principal at worst gets one extra (idempotent) idle touch.
+// inputThrottleMaxEntries bounds the per-session throttle map. Every
+// distinct session that produces desktop input adds an entry; the LRU keeps
+// the backend's memory flat however many sessions pass through. An evicted
+// session at worst gets one extra (idempotent) idle touch.
 const inputThrottleMaxEntries = 10_000
 
 // InputHook returns the broker input hook (broker.WithInputHook): each
 // recorded "input" event slides the portal idle timer of the session the
 // input arrived under — the lease's bound portal_session_digest — throttled
-// to one store write per key per minute (SR-1-F3). A legacy lease carrying
-// no digest falls back to the principal-wide touch. Input never revives a
+// to one store write per session per minute (SR-1-F3). Every lease carries
+// that digest; an empty digest touches nothing. Input never revives a
 // session that already expired; the store's WHERE clauses exclude sessions
 // outside the idle window (D18).
 func (a *Authenticator) InputHook() func(ctx context.Context, principal, sessionDigest string) {
@@ -930,18 +903,18 @@ func (a *Authenticator) InputHook() func(ctx context.Context, principal, session
 }
 
 // newInputHook builds the throttled hook over an LRU of at most max
-// keys — a session digest when the lease names one, else the principal —
-// so a multi-session principal throttles per session, not per identity;
-// size reports the current entry count (tests).
+// session-digest keys, so a multi-session principal throttles per session,
+// not per identity; size reports the current entry count (tests). The
+// principal argument is part of the broker hook contract and unused here.
 func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, principal, sessionDigest string), size func() int) {
 	var mu sync.Mutex
 	order := list.New() // front = most recently seen; elements are *throttleEntry
 	byKey := map[string]*list.Element{}
-	hook = func(ctx context.Context, principal, sessionDigest string) {
-		key := "p:" + principal
-		if sessionDigest != "" {
-			key = "s:" + sessionDigest
+	hook = func(ctx context.Context, _, sessionDigest string) {
+		if sessionDigest == "" {
+			return
 		}
+		key := "s:" + sessionDigest
 		now := a.now()
 		mu.Lock()
 		if el, ok := byKey[key]; ok {
@@ -961,13 +934,7 @@ func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, pr
 			}
 		}
 		mu.Unlock()
-		var err error
-		if sessionDigest != "" {
-			_, err = a.sessions.TouchSessionDigest(ctx, sessionDigest)
-		} else {
-			_, err = a.sessions.TouchPrincipal(ctx, principal)
-		}
-		if err != nil {
+		if _, err := a.sessions.TouchSessionDigest(ctx, sessionDigest); err != nil {
 			a.log.Warn("session idle touch failed", "err", err)
 		}
 	}
@@ -979,9 +946,8 @@ func (a *Authenticator) newInputHook(max int) (hook func(ctx context.Context, pr
 	return hook, size
 }
 
-// throttleEntry is one LRU element: when this key's session(s) were last
-// touched — "s:"+digest keys a single bound session, "p:"+principal the
-// legacy principal-wide touch.
+// throttleEntry is one LRU element: when the bound session keyed
+// "s:"+digest was last touched.
 type throttleEntry struct {
 	key string
 	at  time.Time

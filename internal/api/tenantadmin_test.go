@@ -66,7 +66,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 		fs:  newFakeRetainedStore(),
 		qs:  &fakeQuotaSource{},
 		aqs: &fakeAdminQuotaSource{},
-		uls: &fakeUserLimitSource{overrides: map[string]int64{}},
+		uls: newFakeUserLimitSource(),
 		sps: &fakeSessionPolicySource{},
 	}
 	mux := http.NewServeMux()
@@ -75,8 +75,8 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountWorkspaceRoutes(mux, a, NewWorkspaceHandler(fx.be, defaultCatalog(), defaultTenants()), nil)
 	MountDataRoutes(mux, a, NewDataHandler(fx.fs, defaultCatalog(), defaultTenants()))
-	MountQuotaRoutes(mux, a, NewQuotaHandler(fx.qs, nil, defaultTenants()))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, nil, defaultTenants(), nil))
+	MountQuotaRoutes(mux, a, NewQuotaHandler(fx.qs, defaultTenants()))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, defaultTenants(), nil))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(fx.uls, nil, defaultTenants()))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(fx.sps, defaultTenants()))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
@@ -298,7 +298,7 @@ func TestWorkspaceForeignGet_CustomAdminGroups(t *testing.T) {
 		t.Fatalf("member GET foreign workspace: status=%d, want 200", r.StatusCode)
 	}
 	r = doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/workspaces", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if len(wl.Items) != 1 {
 		t.Fatalf("member natural scope listed %d workspaces, want 1 (tenant-wide)", len(wl.Items))
 	}
@@ -328,14 +328,14 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("non-member GET foreign record: status=%d, want 404", r.StatusCode)
 	}
-	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+attachRec.ID+"/attach",
+	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+attachRec.ID+":attach",
 		`{"name":"c-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-2"})
 	r.Body.Close()
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("non-member attach foreign record: status=%d, want 404", r.StatusCode)
 	}
-	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+purgeRec.ID+"/purge",
+	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+purgeRec.ID+":purge",
 		`{"confirmationNonce":"nonce-anything"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-3"})
 	r.Body.Close()
@@ -354,7 +354,7 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if rec.Owner.Subject != "user-b" {
 		t.Fatalf("record owner = %q, want user-b", rec.Owner.Subject)
 	}
-	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+attachRec.ID+"/attach",
+	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+attachRec.ID+":attach",
 		`{"name":"a-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-4"})
 	r.Body.Close()
@@ -367,40 +367,12 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("member GET purge record: status=%d, want 200", r.StatusCode)
 	}
-	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+purgeRec.ID+"/purge",
+	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+purgeRec.ID+":purge",
 		`{"confirmationNonce":"`+rec.PurgeConfirmationNonce+`"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-5"})
 	r.Body.Close()
 	if r.StatusCode != http.StatusAccepted {
 		t.Fatalf("member purge foreign record: status=%d, want 202", r.StatusCode)
-	}
-}
-
-// TestQuotaView_CustomAdminGroups: the /v1/quota users[] view honours the
-// configured group — the member sees every owner's row, the non-member
-// only their own.
-func TestQuotaView_CustomAdminGroups(t *testing.T) {
-	env, fx := newAdminGroupEnv(t, []string{testCustomAdminGroup})
-	fx.qs.report = quotaFixture(env.issuer.URL())
-
-	sessA, _ := loginGroups(t, env, "admin-a", testCustomAdminGroup)
-	r := env.authedGet(t, sessA, "/v1/quota")
-	qv := decodeBody[quotaViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("member quota view: status=%d, want 200", r.StatusCode)
-	}
-	if len(qv.Users) != 2 {
-		t.Fatalf("member users[] = %d rows, want 2 (tenant-wide)", len(qv.Users))
-	}
-
-	sessU, _ := loginGroups(t, env, "user-a", TenantAdminGroup)
-	r = env.authedGet(t, sessU, "/v1/quota")
-	qv = decodeBody[quotaViewJSON](t, r)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("non-member quota view: status=%d, want 200", r.StatusCode)
-	}
-	if len(qv.Users) != 1 || qv.Users[0].Subject != "user-a" {
-		t.Fatalf("non-member users[] = %+v, want only the caller's own row", qv.Users)
 	}
 }
 

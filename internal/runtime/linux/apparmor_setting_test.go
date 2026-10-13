@@ -15,14 +15,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
 
 func aaBuild(t *testing.T, annotations map[string]string, kasm bool, opts Options) *corev1.Pod {
 	t.Helper()
 	tpl := testTemplate(annotations)
 	if kasm {
-		tpl.Spec.Linux.Adapter = workspacesv1alpha1.AdapterKasm
+		tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 		opts.KasmAdapterImage = testAdapterImage
 	}
 	aa, err := resolveAppArmorProfile(tpl.Annotations)

@@ -32,8 +32,9 @@ func seedLease(t *testing.T, db *store.DB, wsUID, leaseID, state string,
 		INSERT INTO connection_lease
 			(id, workspace_id, tenant_id, principal_subject, runtime_generation,
 			 runtime_uid, fencing_version, gateway_id, state, created_at,
-			 expires_at, last_renewed_at, closed_at)
-		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 1, 'gw-1', $3, $4, $5, $4, $6)`,
+			 expires_at, last_renewed_at, closed_at, portal_session_digest)
+		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 1, 'gw-1', $3, $4, $5, $4, $6,
+			sha256('test-portal-session'::bytea))`,
 		leaseID, wsUID, state, createdAt, expiresAt, closedAt)
 	if err != nil {
 		t.Fatalf("seed lease %s: %v", leaseID, err)
@@ -51,8 +52,9 @@ func seedTicket(t *testing.T, db *store.DB, wsUID string, i int,
 		INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience, request_id,
-			 created_at, expires_at, consumed_at, revoked_at)
-		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 'aud', $3, $4, $5, $6, $7)`,
+			 created_at, expires_at, consumed_at, revoked_at, portal_session_digest)
+		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 'aud', $3, $4, $5, $6, $7,
+			sha256('test-portal-session'::bytea))`,
 		hash[:], wsUID, fmt.Sprintf("req-t%d", i), createdAt, expiresAt, consumedAt, revokedAt)
 	if err != nil {
 		t.Fatalf("seed ticket %d: %v", i, err)

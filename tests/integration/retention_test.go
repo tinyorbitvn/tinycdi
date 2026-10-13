@@ -36,7 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	workspacesv1alpha1 "github.com/tinyorbitvn/tinycdi/api/v1alpha1"
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/operator"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -60,6 +60,7 @@ func attachReq() api.AttachRequest {
 		Template: provisioning.TemplateInfo{
 			ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1,
 			Runtime: "LinuxContainer", Experience: "Desktop",
+			ClipboardPolicy: provisioning.PolicyDisabled,
 		},
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30,
@@ -114,17 +115,21 @@ func newRetainedPVC(t *testing.T, ns string, wsUID types.UID, wsName string, ret
 	return pvc
 }
 
-func newRetainedWorkspace(t *testing.T, ns, name string, policy workspacesv1alpha1.DataPolicy) *workspacesv1alpha1.Workspace {
+func newRetainedWorkspace(t *testing.T, ns, name string, policy cdiv1.DataPolicy) *cdiv1.Workspace {
 	t.Helper()
-	ws := &workspacesv1alpha1.Workspace{
+	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: workspacesv1alpha1.WorkspaceSpec{
-			TemplateRef:       workspacesv1alpha1.TemplateReference{Name: "tpl"},
-			OwnerSubject:      workspacesv1alpha1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
-			DesiredState:      workspacesv1alpha1.DesiredStateStopped,
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef:       cdiv1.TemplateReference{Name: "tpl"},
+			OwnerSubject:      cdiv1.OwnerSubject{Issuer: "https://issuer.test", Subject: "sub-1"},
+			DesiredState:      cdiv1.DesiredStateStopped,
 			DataPolicy:        policy,
 			RuntimeGeneration: 1,
 			IntentRevision:    1,
+			SessionPolicy: cdiv1.SessionPolicySpec{
+				Clipboard:    cdiv1.ClipboardDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
+			},
 		},
 	}
 	if err := k8sClient.Create(context.Background(), ws); err != nil {
@@ -164,7 +169,7 @@ func TestRetention_DeleteRetainToInventory(t *testing.T) {
 	ctx := context.Background()
 	ns := newRetainedNamespace(t)
 
-	ws := newRetainedWorkspace(t, ns, "ws-retain", workspacesv1alpha1.DataPolicyRetain)
+	ws := newRetainedWorkspace(t, ns, "ws-retain", cdiv1.DataPolicyRetain)
 	pvc := newRetainedPVC(t, ns, ws.UID, ws.Name, false)
 
 	inv := operator.NewRetentionInventory(k8sClient)
@@ -199,7 +204,7 @@ func TestRetention_DeleteRetainToInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportRetained: %v", err)
 	}
-	recs, _, err := rstore.ListRetained(ctx, "tenant-it", retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, "tenant-it", retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil {
 		t.Fatalf("ListRetained: %v", err)
 	}
@@ -220,7 +225,7 @@ func TestRetention_AttachPurgeRace(t *testing.T) {
 	})
 
 	purgeNonce := func(t *testing.T, id string) string {
-		recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+		recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 		if err != nil {
 			t.Fatalf("list for nonce: %v", err)
 		}
@@ -289,7 +294,7 @@ func TestRetention_AttachPurgeRace(t *testing.T) {
 		if winners != 1 {
 			t.Fatalf("race produced %d winners (attach=%v purge=%v), want exactly 1", winners, attachErr, purgeErr)
 		}
-		recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, "", "", 50)
+		recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, "", provisioning.ListPage{Limit: 50, SortField: "retainedAt"})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -404,7 +409,7 @@ func TestRetention_IdempotentRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import2: %v", err)
 	}
-	recs, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	var nonce string
 	for _, r := range recs {
 		if r.ID == rec2.ID {
@@ -416,7 +421,7 @@ func TestRetention_IdempotentRetries(t *testing.T) {
 		t.Fatalf("purge: %v", err)
 	}
 	// Fresh nonce, retry: naturally idempotent.
-	recs, _, _ = rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ = rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	for _, r := range recs {
 		if r.ID == rec2.ID {
 			nonce = r.PurgeNonce
@@ -454,7 +459,7 @@ func TestRetention_Unauthorized(t *testing.T) {
 		t.Fatalf("foreign purge: err=%v, want ErrRetainedNotFound", err)
 	}
 	// The owner's own record is untouched.
-	recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil || len(recs) != 1 || recs[0].State != api.RetainedStateRetained {
 		t.Fatalf("record after foreign attempts = %+v err=%v", recs, err)
 	}
@@ -477,7 +482,7 @@ func TestRetention_QuotaHeldUntilDeletion(t *testing.T) {
 	src, err := svc.CreateWorkspace(ctx, tenant, "key-src", provisioning.CreateRequest{
 		OwnerIssuer: "https://issuer.test", OwnerSubject: "sub-1",
 		Name:       "src-ws",
-		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:     provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		DataPolicy: "Retain",
 	}, []byte("create-src"))
@@ -497,7 +502,7 @@ func TestRetention_QuotaHeldUntilDeletion(t *testing.T) {
 		t.Fatalf("retained disk not counted: held disk=%d", used.DiskBytes)
 	}
 
-	recs, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	var nonce string
 	for _, r := range recs {
 		if r.ID == rec.ID {
@@ -537,7 +542,7 @@ func TestRetention_AttachMovesQuota(t *testing.T) {
 	src, err := svc.CreateWorkspace(ctx, tenant, "key-src", provisioning.CreateRequest{
 		OwnerIssuer: "https://issuer.test", OwnerSubject: "sub-1",
 		Name:       "src-ws",
-		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:     provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		DataPolicy: "Retain",
 	}, []byte("create-src"))
@@ -630,7 +635,7 @@ func TestRetention_AttachDeletedMidway(t *testing.T) {
 	if err := rstore.ReturnToRetained(ctx, rec.ID, ws.ID); err != nil {
 		t.Fatalf("ReturnToRetained: %v", err)
 	}
-	recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

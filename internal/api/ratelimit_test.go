@@ -4,7 +4,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,10 +45,7 @@ func TestLogin_RateLimited(t *testing.T) {
 	if last.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("request 11 = %d, want 429", last.StatusCode)
 	}
-	var body Error
-	if err := json.NewDecoder(last.Body).Decode(&body); err != nil {
-		t.Fatalf("decode 429 body: %v", err)
-	}
+	body := decodeErr(t, last)
 	if body.Code != CodeRateLimited {
 		t.Fatalf("code = %q, want RATE_LIMITED", body.Code)
 	}
