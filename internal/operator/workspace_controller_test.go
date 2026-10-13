@@ -512,7 +512,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		}
 	})
 
-	t.Run("pod replacement keeps generation and changes runtimeUID", func(t *testing.T) {
+	t.Run("a lost pod is RuntimeLost; the next generation rebuilds from the recorded snapshot", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-repl", nil)
 		ws := newWorkspace(t, c, ns, "ws-repl", "tpl-repl", nil)
@@ -541,6 +541,21 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			t.Fatalf("delete pod: %v", err)
 		}
 		reconcile(t, r, key)
+		wsNow = getWorkspace(t, c, key)
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed || degradedReasonOf(wsNow) != cdiv1.FailureRuntimeLost {
+			t.Fatalf("phase=%q reason=%q, want Failed/RuntimeLost", wsNow.Status.Phase, degradedReasonOf(wsNow))
+		}
+		if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 0 {
+			t.Fatalf("a lost pod was rebuilt inside its generation (%d pods)", pods)
+		}
+
+		// What the applier writes for RestartWorkspace's start intent.
+		wsNow.Spec.RuntimeGeneration = 2
+		wsNow.Spec.IntentRevision = 2
+		if err := c.Update(context.Background(), wsNow); err != nil {
+			t.Fatalf("new generation: %v", err)
+		}
+		reconcile(t, r, key)
 		pod2 := thePod(t, c, ns, ws.UID)
 		if pod2.UID == pod1.UID {
 			t.Fatalf("pod was not actually recreated")
@@ -551,9 +566,8 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		if wsNow.Status.RuntimeUID == uid1 || wsNow.Status.RuntimeUID != string(pod2.UID) {
 			t.Fatalf("runtimeUID=%q want new %q", wsNow.Status.RuntimeUID, pod2.UID)
 		}
-		if wsNow.Status.ObservedRuntimeGeneration != 1 {
-			t.Fatalf("observedRuntimeGeneration=%d moved, want 1",
-				wsNow.Status.ObservedRuntimeGeneration)
+		if wsNow.Status.ObservedRuntimeGeneration != 2 {
+			t.Fatalf("observedRuntimeGeneration=%d, want 2", wsNow.Status.ObservedRuntimeGeneration)
 		}
 	})
 

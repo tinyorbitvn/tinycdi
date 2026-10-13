@@ -295,6 +295,11 @@ func retainedClaimMissing(ws *cdiv1.Workspace) bool {
 // step instead of a backend error and retries.
 var ErrRetainedNotClaimed = errors.New("linux backend: retained claim not yet claimed by this workspace")
 
+// ErrHomeVolumeLost reports that a Retain workspace whose home was already
+// provisioned has no home PVC: building a fresh one would silently start
+// the user on an empty home.
+var ErrHomeVolumeLost = errors.New("linux backend: home volume lost")
+
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
@@ -530,6 +535,7 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 		}
 		obs.RuntimeReady = podReady(pod)
 		obs.Reason = podReason(pod)
+		obs.Message = waitingMessage(pod)
 	}
 
 	svc := &corev1.Service{}
@@ -763,6 +769,11 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, err
+	}
+	// The home was provisioned for an earlier incarnation; its absence is
+	// data loss, not a first boot.
+	if ws.Status.ObservedRuntimeGeneration > 0 {
+		return nil, ErrHomeVolumeLost
 	}
 	l := labels(ws)
 	l[LabelDataRole] = string(cdiv1.DataRoleHome)
@@ -1631,6 +1642,18 @@ func podReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// waitingMessage returns the first waiting container's message.
+func waitingMessage(pod *corev1.Pod) string {
+	for _, list := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range list {
+			if w := cs.State.Waiting; w != nil && w.Message != "" {
+				return w.Message
+			}
+		}
+	}
+	return ""
 }
 
 // podReason derives the machine-readable observation reason from pod state:

@@ -37,6 +37,7 @@ import (
 	"maps"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -94,7 +95,7 @@ const (
 	// ReasonTemplateRejected — the backend refused the snapshot's requested
 	// runtime configuration (e.g. an out-of-policy apparmor-profile
 	// annotation value); no runtime children are created.
-	ReasonTemplateRejected = "TemplateRejected"
+	ReasonTemplateRejected = cdiv1.FailureTemplateRejected
 	// ReasonTemplateInvalid — the workspace's template is unusable as a
 	// convergence source: status.templateSnapshot is absent or failed
 	// verification AND no valid live template resolves under
@@ -120,7 +121,7 @@ const (
 	ReasonStopped              = "Stopped"
 	ReasonTerminating          = "Terminating"
 	ReasonNameConflict         = "NameConflict"
-	ReasonBootDeadlineExceeded = "BootDeadlineExceeded"
+	ReasonBootDeadlineExceeded = cdiv1.FailureBootDeadlineExceeded
 	ReasonBackendError         = "BackendError"
 	ReasonNominal              = "Nominal"
 
@@ -400,6 +401,25 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Wo
 		return r.reconcileFailed(ctx, ws, applied)
 	}
 
+	// --- runtime lost (F1) ---------------------------------------------------
+	// A Ready incarnation of the applied generation whose pod is gone,
+	// terminating or failed is not rebuilt inside the same generation: it
+	// goes Failed/RuntimeLost and waits for :start, which mints a new
+	// generation and revokes the old one's leases and tickets.
+	if ws.Status.Phase == cdiv1.WorkspacePhaseReady && ws.Status.RuntimeUID != "" &&
+		ws.Status.ObservedRuntimeGeneration == applied.RuntimeGeneration {
+		obs, err := r.Backend.Observe(ctx, ws)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if runtimeLost(ws, obs) {
+			logf.FromContext(ctx).Info("runtime lost; waiting for an explicit start",
+				"runtimeUID", ws.Status.RuntimeUID, "observed", obs.RuntimeUID, "reason", obs.Reason)
+			return ctrl.Result{}, r.writeStatus(ctx, ws, applied, obs, cdiv1.WorkspacePhaseFailed,
+				errors.New(cdiv1.FailureRuntimeLost), nil)
+		}
+	}
+
 	// --- template snapshot --------------------------------------------------
 	// status.templateSnapshot is the ONLY source trusted for pod building:
 	// it is writable solely through the workspaces/status subresource,
@@ -517,9 +537,19 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Wo
 		r.recordStepStatus(ctx, ws, cdiv1.ConditionStorageReady, ReasonWaitingForDisk,
 			waitingForDiskMessage, berr, true)
 		return ctrl.Result{}, berr
+	case errors.Is(berr, linux.ErrHomeVolumeLost):
+		statusErr = errors.New(cdiv1.FailureHomeVolumeLost)
+		obs, _ = r.Backend.Observe(ctx, ws)
+	case admissionImageDenied(berr):
+		logf.FromContext(ctx).Info("runtime image refused by admission policy", "error", berr)
+		statusErr = errors.New(cdiv1.FailureImagePolicyDenied)
+		obs, _ = r.Backend.Observe(ctx, ws)
 	default:
 		r.recordBackendError(ctx, ws, berr, true)
 		return ctrl.Result{}, berr
+	}
+	if statusErr == nil && imagePolicyDenied(obs) {
+		statusErr = errors.New(cdiv1.FailureImagePolicyDenied)
 	}
 
 	// --- phase ---------------------------------------------------------------
@@ -530,6 +560,8 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Wo
 	}
 	deadline := anchor.Add(snap.Spec.BootDeadline.Duration)
 	switch {
+	case statusErr != nil && cdiv1.FailureUnrecoverable(statusErr.Error()):
+		phase = cdiv1.WorkspacePhaseFailed
 	case obs.StorageReady && obs.RuntimeReady && obs.ConnectionReady:
 		phase = cdiv1.WorkspacePhaseReady
 	case !r.now().Before(deadline):
@@ -643,8 +675,11 @@ func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *cdiv1.Wor
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	reason := degradedReasonOf(ws)
+	if reason == "" {
+		reason = ReasonBootDeadlineExceeded
+	}
 	res := ctrl.Result{}
-	statusErr := errors.New(ReasonBootDeadlineExceeded)
 	if remaining := r.failedCleanupRemaining(ws); remaining > 0 {
 		res.RequeueAfter = remaining
 	} else {
@@ -652,9 +687,62 @@ func (r *WorkspaceReconciler) reconcileFailed(ctx context.Context, ws *cdiv1.Wor
 			logf.FromContext(ctx).Error(err, "failed-incarnation cleanup; will retry")
 			return ctrl.Result{}, err
 		}
-		statusErr = errors.New(ReasonFailedCleanup)
+		// An unrecoverable reason is the operator-facing truth and must
+		// survive cleanup; a recoverable one reports the teardown.
+		if !cdiv1.FailureUnrecoverable(reason) {
+			reason = ReasonFailedCleanup
+		}
 	}
-	return res, r.writeStatus(ctx, ws, applied, obs, cdiv1.WorkspacePhaseFailed, statusErr, nil)
+	return res, r.writeStatus(ctx, ws, applied, obs, cdiv1.WorkspacePhaseFailed, errors.New(reason), nil)
+}
+
+// degradedReasonOf returns the reason of a True Degraded condition, or "".
+func degradedReasonOf(ws *cdiv1.Workspace) string {
+	for _, c := range ws.Status.Conditions {
+		if c.Type == cdiv1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+// runtimeLost reports whether the observed runtime is no longer the Ready
+// incarnation status recorded.
+func runtimeLost(ws *cdiv1.Workspace, obs tcdiruntime.Observation) bool {
+	switch {
+	case obs.RuntimeUID == "", obs.RuntimeUID != ws.Status.RuntimeUID:
+		return true
+	case obs.Reason == "Terminating", obs.Reason == "PodFailed", obs.Reason == "PodExited":
+		return true
+	}
+	return false
+}
+
+// imageDeniedPattern matches a node-level image policy refusal (for example
+// CRI-O's "Running image ... is rejected by policy"). A bare "denied" or
+// "unauthorized" is deliberately NOT enough: "pull access denied, repository
+// does not exist or may require authorization" is a typo or a missing pull
+// secret, which the normal boot deadline reports and an administrator fixes
+// in place.
+var imageDeniedPattern = regexp.MustCompile(`(?i)\bpolicy\b`)
+
+// imagePolicyDenied classifies a pull failure the node's image policy
+// refused (as opposed to a registry or network error, which is retried).
+func imagePolicyDenied(obs tcdiruntime.Observation) bool {
+	return (obs.Reason == "ErrImagePull" || obs.Reason == "ImagePullBackOff") && imageDeniedPattern.MatchString(obs.Message)
+}
+
+// admissionImageDenied classifies a pod-create refusal by an admission
+// webhook or ValidatingAdmissionPolicy that names the image (an image
+// signature verifier, a registry allowlist). Quota and PodSecurity refusals
+// are different conditions and keep their retry path.
+func admissionImageDenied(err error) bool {
+	if !apierrors.IsForbidden(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "image") &&
+		(strings.Contains(msg, "admission webhook") || strings.Contains(msg, "validatingadmissionpolicy"))
 }
 
 // expireRunning applies an out-of-band stop to the live generation: the

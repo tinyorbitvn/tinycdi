@@ -38,7 +38,22 @@ start the workspace rather than build an empty disk.
 Once `phase` is `Failed` the three step conditions are frozen: the reason on
 `ConnectionReady` is the step that stalled (for example `ImagePullBackOff`),
 and it stays after the five-minute cleanup of the failed incarnation.
-`RuntimeReady` reads `BootDeadlineExceeded`. A new start unfreezes them.
+`Degraded` carries the failure reason:
+
+| Reason | Meaning | Start |
+|---|---|---|
+| `BootDeadlineExceeded` | The desktop did not become ready within the template's boot deadline. `RuntimeReady` reads the same reason. | Recovers: a new runtime generation on the same home. |
+| `FailedCleanup` | The failed desktop was removed after five minutes. | Recovers. |
+| `RuntimeLost` | A running desktop's pod was deleted, evicted or failed. It is not rebuilt automatically. | Recovers. Old sessions are revoked. |
+| `ImagePolicyDenied` | A node image policy or an admission policy refused the image. A registry error (typo, missing pull secret) is not this reason; it ends as `BootDeadlineExceeded`. | Refused (409 `INVALID_STATE`, `details.reason`). |
+| `HomeVolumeLost` | A Retain workspace's home disk is gone after it had been used. The platform never starts it on an empty disk. | Refused. |
+| `TemplateRejected` | The runtime refused the template's configuration. | Refused. |
+
+Recovery mints a new runtime generation: the pod is rebuilt on the same home
+volume, and leases and launch tickets of the failed generation are revoked
+in the same transaction. A refused reason stays until the cause is fixed;
+then stop and start the workspace (a start after a stop always begins a
+fresh generation), or delete it.
 
 ## Stopping
 
