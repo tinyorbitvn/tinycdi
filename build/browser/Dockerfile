@@ -21,7 +21,7 @@ FROM ${BASE_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 # apt pins per docs/compatibility.md (browser pins) and the locked
 # firefox-esr deb.
-ARG CHROMIUM_APT_VERSION=154.0.8037.92-1~deb12u1
+ARG CHROMIUM_APT_VERSION=155.0.8059.39-1~deb12u1
 ARG FIREFOX_ESR_APT_VERSION=153.4.0esr-1~deb12u1
 
 USER root
