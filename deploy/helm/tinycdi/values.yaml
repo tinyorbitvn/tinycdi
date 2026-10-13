@@ -853,9 +853,9 @@ templates: []
   #     bootDeadline: 5m
   #     # Isolated denies all egress except cluster DNS — DNS resolution
   #     # stays allowed by design (a deliberate unidirectional channel).
-  #     # ClusterOnly egress narrows via runtime.networkProfiles above;
-  #     # its unrestricted default flips in a future minor release
-  #     # (planned v1.3).
+  #     # ClusterOnly egress is restricted to managed tenant namespaces
+  #     # by default; runtime.networkProfiles.clusterOnly narrows it via
+  #     # selectors, and unrestricted: true opts out to any-pod egress.
   #     networkProfile: Isolated
   #     # Clipboard redirection between the user's device and the
   #     # workspace, named from the user's point of view (normative
