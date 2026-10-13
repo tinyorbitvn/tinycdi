@@ -247,6 +247,8 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days={{ .Values.backend.retention.terminalRowDays }}
+            # Audit retention (ADR 0011): the leader's daily prune.
+            - -audit-retention-days={{ .Values.backend.retention.auditDays }}
             {{- with .Values.backend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

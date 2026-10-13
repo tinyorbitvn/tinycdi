@@ -369,6 +369,9 @@ backend:
   # bound. Rendered as -terminal-retention-days=<n>.
   retention:
     terminalRowDays: 30
+    # Days audit_event rows are kept (ADR 0011); a daily leader task prunes
+    # older rows. 1..3650. Rendered as -audit-retention-days=<n>.
+    auditDays: 90
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
   # Service, never on the public Service (SEC-33).
   # networkPolicy.prometheusPeers must be set when enabled.

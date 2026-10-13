@@ -640,3 +640,19 @@ func TestParseFlags_UnknownEnvNamesIgnored(t *testing.T) {
 		t.Fatalf("an undocumented env name must not satisfy -login-key-file, got %v", err)
 	}
 }
+
+func TestParseFlags_AuditRetentionDays(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil || cfg.AuditRetentionDays != 90 {
+		t.Fatalf("default = %d, %v; want 90", cfg.AuditRetentionDays, err)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_AUDIT_RETENTION_DAYS": "30"}))
+	if err != nil || cfg.AuditRetentionDays != 30 {
+		t.Fatalf("env = %d, %v; want 30", cfg.AuditRetentionDays, err)
+	}
+	for _, bad := range []string{"0", "-1", "3651"} {
+		if _, err := ParseFlags(withArg(mergedArgs(), "-audit-retention-days", bad), noEnv); err == nil {
+			t.Fatalf("-audit-retention-days=%s accepted", bad)
+		}
+	}
+}

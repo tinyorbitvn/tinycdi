@@ -69,3 +69,39 @@ func terminalRetentionSweepLoop(db *store.DB, days int, m *observability.Metrics
 		}
 	}
 }
+
+const (
+	auditRetentionInterval = 24 * time.Hour
+	auditRetentionBatch    = 1000
+)
+
+// auditRetentionLoop is the leader singleton that prunes audit_event rows
+// older than days, once at election and then daily (ADR 0011).
+func auditRetentionLoop(db *store.DB, days int, m *observability.Metrics, log *slog.Logger) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		prune := func() {
+			n, err := db.PruneAudit(ctx, time.Now().Add(-time.Duration(days)*24*time.Hour), auditRetentionBatch)
+			switch {
+			case err != nil && errors.Is(err, context.Canceled):
+			case err != nil:
+				log.Error("audit retention prune failed", "err", err)
+			default:
+				log.Info("audit retention prune", "rows_pruned", n)
+				if m != nil {
+					m.AddRetentionRowsPruned("audit_event", float64(n))
+				}
+			}
+		}
+		prune()
+		ticker := time.NewTicker(auditRetentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}
+}

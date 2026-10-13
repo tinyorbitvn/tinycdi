@@ -178,9 +178,13 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// session.revoke records, the dedicated events the mutating API routes
 	// emit, and the config-driven quota apply below. The guard turns a
 	// failing sink into a counted metric + rate-limited warning instead of
-	// silent audit loss (the write never fails the request).
-	appAudit := observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log,
-		metrics.IncAuditWriteError)
+	// silent audit loss (the write never fails the request). The durable
+	// wrapper also persists every audited() route event to audit_event,
+	// failing the request closed when that insert fails (ADR 0011); plain
+	// WriteAudit callers stay stdout-only.
+	appAudit := api.NewDurableAuditSink(
+		observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log, metrics.IncAuditWriteError),
+		store.NewAuditStore(db))
 	if len(quotas) > 0 {
 		// Declared quotas: written by the singleton leader only, so replicas
 		// starting together do not race (FX-R17).
@@ -428,6 +432,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		b.singletons = append(b.singletons,
 			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
 	}
+
+	// Audit retention (ADR 0011): the leader prunes audit_event rows older
+	// than -audit-retention-days at election and then daily. Always on: the
+	// config range check never lets it be disabled.
+	b.singletons = append(b.singletons, auditRetentionLoop(db, cfg.AuditRetentionDays, metrics, log))
 
 	// The loops registered above are read-modify-write without a claim, so
 	// only the replica holding the Postgres leader lock runs them.

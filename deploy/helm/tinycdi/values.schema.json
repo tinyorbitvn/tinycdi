@@ -203,7 +203,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "terminalRowDays": {"type": "integer", "minimum": 0}
+            "terminalRowDays": {"type": "integer", "minimum": 0},
+            "auditDays": {"type": "integer", "minimum": 1, "maximum": 3650}
           }
         },
         "service": {

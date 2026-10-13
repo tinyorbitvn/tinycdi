@@ -125,6 +125,7 @@ type Config struct {
 	// sweep deletes older rows. 0 disables the sweep — the tables then
 	// grow without bound (SR-4-F5).
 	TerminalRetentionDays int
+	AuditRetentionDays    int // days an audit_event row is kept before the leader's daily prune (ADR 0011); 1..3650
 	ImageStaleAfter       time.Duration
 	ImageBlockAfter       time.Duration // 0 disables the stale-image admission block (E3)
 	LoginRate             int           // per-client requests/min on the login-family routes; 0 disables
@@ -283,6 +284,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"retained-inventory PVC->record sync interval; <=0 disables (env TCDI_RETAINED_SYNC_INTERVAL)")
 	fs.IntVar(&c.TerminalRetentionDays, "terminal-retention-days", envInt(getenv, "TCDI_TERMINAL_RETENTION_DAYS", 30),
 		"days a terminal connection_lease/launch_ticket row is kept before the leader's hourly sweep deletes it; 0 disables (env TCDI_TERMINAL_RETENTION_DAYS)")
+	fs.IntVar(&c.AuditRetentionDays, "audit-retention-days", envInt(getenv, "TCDI_AUDIT_RETENTION_DAYS", 90),
+		"days audit_event rows are kept; a daily leader task prunes older rows (env TCDI_AUDIT_RETENTION_DAYS)")
 	fs.DurationVar(&c.RecoveryInterval, "recovery-interval", envDur(getenv, "TCDI_RECOVERY_INTERVAL", 30*time.Second),
 		"quota/intent recovery pass interval; one pass runs at every leader acquisition, then every interval; "+
 			"<=0 runs the single startup pass only. Quota settlement is event-driven (Workspace informer) with "+
@@ -422,6 +425,9 @@ func (c *Config) validate() error {
 	}
 	if c.TerminalRetentionDays < 0 {
 		return errors.New("-terminal-retention-days must be >= 0 (0 disables the retention sweep)")
+	}
+	if c.AuditRetentionDays < 1 || c.AuditRetentionDays > 3650 {
+		return errors.New("-audit-retention-days must be 1..3650")
 	}
 	if c.RateLimitReplicas < 1 {
 		return errors.New("-rate-limit-replicas must be >= 1")

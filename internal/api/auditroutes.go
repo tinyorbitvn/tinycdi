@@ -5,9 +5,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
 // Domain audit actions emitted to the AuditSink next to the per-request
@@ -82,6 +85,11 @@ const (
 // actionTarget is the auditedRoute.targetKey of the :verb routes: the
 // target is the id the ActionRouter split off, not the raw {ref}.
 const actionTarget = "ref"
+
+// auditPersistTimeout bounds one audit_event insert or amend; it runs on a
+// context detached from the client, so a stalled store cannot hold the
+// handler goroutine forever.
+const auditPersistTimeout = 5 * time.Second
 
 // auditedRoute binds a route pattern to its audit action and the path-value
 // key that names the target; "" means the handler fills the target on the
@@ -181,6 +189,11 @@ func auditSetDetail(ctx context.Context, key, value string) {
 // unwinding to net/http's per-connection recovery unchanged.
 // An unregistered pattern panics at mount time: every audited route must
 // have a table entry (the coverage test enforces the reverse direction).
+// With a durable sink (DurableAuditSink) the event is also persisted: inside
+// the mutation's transaction through a store.TxHook, else before the
+// buffered response is released; a failed insert answers 500 INTERNAL and
+// nothing the handler wrote reaches the client (ADR 0011). A sink without
+// persistence (and session.touch) keeps the pass-through status recorder.
 func audited(sink observability.AuditSink, pattern string, next http.Handler) http.Handler {
 	rt, ok := auditedRoutes[pattern]
 	if !ok {
@@ -199,22 +212,21 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 		default:
 			ra.target = r.PathValue(rt.targetKey)
 		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRouteAudit, ra))
-		rec := &statusRecorder{ResponseWriter: w}
-		completed := false
-		defer func() {
+		ctx := context.WithValue(r.Context(), ctxKeyRouteAudit, ra)
+		durable, _ := sink.(durableAudit)
+		if durable != nil && !durable.Persists(rt.action) {
+			durable = nil
+		}
+		event := func(status int, completed bool) observability.AuditEvent {
 			var actor, tenant string
-			if p, ok := PrincipalFromContext(r.Context()); ok {
+			if p, ok := PrincipalFromContext(ctx); ok {
 				actor = observability.ActorRef(p.Issuer, p.Subject)
 				tenant = p.TenantID
 				if p.IsTenantAdmin() {
-					// Mark the elevated role explicitly: on shared endpoints the
-					// record must distinguish an admin acting tenant-wide from
-					// an owner acting on their own resource.
-					auditSetDetail(r.Context(), "role", TenantAdminGroup)
+					auditSetDetail(ctx, "role", TenantAdminGroup)
 				}
 			}
-			outcome := outcomeFor(statusOrOK(rec.status))
+			outcome := outcomeFor(statusOrOK(status))
 			errCode := ra.errCode
 			if !completed {
 				outcome = observability.OutcomeFailure
@@ -226,19 +238,81 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			if ra.action != "" {
 				action = ra.action
 			}
-			_ = sink.WriteAudit(r.Context(), observability.AuditEvent{
-				Actor:     actorOrAnonymous(actor),
-				Action:    action,
-				TargetUID: ra.target,
-				Tenant:    tenant,
-				RequestID: RequestIDFromContext(r.Context()),
-				Outcome:   outcome,
-				ErrorCode: errCode,
-				Details:   ra.details,
-			})
+			return observability.AuditEvent{
+				Actor: actorOrAnonymous(actor), Action: action, TargetUID: ra.target, Tenant: tenant,
+				RequestID: RequestIDFromContext(ctx), Outcome: outcome, ErrorCode: errCode, Details: ra.details,
+			}
+		}
+		var hook *auditTxHook // nil for reads and non-persisted routes
+		if durable != nil && r.Method != http.MethodGet {
+			hook = &auditTxHook{sink: durable, build: func() observability.AuditEvent { return event(http.StatusOK, true) }}
+			ctx = store.ContextWithTxHook(ctx, hook)
+		}
+		r = r.WithContext(ctx)
+
+		// persist stores or amends the row for the final event e. It runs on a
+		// context detached from the client connection: a hung-up client must
+		// not turn a committed mutation into a lost or stale audit row.
+		persist := func(e observability.AuditEvent) error {
+			pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditPersistTimeout)
+			defer cancel()
+			if id := hook.committedID(); id != 0 {
+				// The row committed with the mutation; the amend records the
+				// final target and outcome. A failed amend leaves the
+				// committed row as inserted.
+				_ = durable.AmendAudit(pctx, id, e)
+				return nil
+			}
+			_, err := durable.PersistAudit(pctx, nil, e)
+			return err
+		}
+
+		var rw http.ResponseWriter
+		var buf *bufferedResponse
+		var rec *statusRecorder
+		if durable != nil {
+			buf = newBufferedResponse(w)
+			rw = buf
+		} else {
+			rec = &statusRecorder{ResponseWriter: w}
+			rw = rec
+		}
+		completed := false
+		defer func() {
+			if completed {
+				return
+			}
+			e := event(0, false)
+			if durable != nil {
+				_ = persist(e)
+			}
+			_ = sink.WriteAudit(ctx, e)
 		}()
-		next.ServeHTTP(rec, r)
+		next.ServeHTTP(rw, r)
 		completed = true
+		var status int
+		if buf != nil {
+			status = buf.status
+		} else {
+			status = rec.status
+		}
+		e := event(status, true)
+		var persistErr error
+		if durable != nil {
+			persistErr = persist(e)
+			if persistErr != nil {
+				e.Outcome, e.ErrorCode = observability.OutcomeFailure, string(CodeInternal)
+			}
+		}
+		_ = sink.WriteAudit(ctx, e) // stdout is written even when the store is down
+		if persistErr != nil {
+			buf.discardForError()
+			WriteError(w, r, NewError(CodeInternal, "audit record could not be stored"))
+			return
+		}
+		if buf != nil {
+			buf.flush()
+		}
 	})
 }
 
@@ -266,6 +340,32 @@ func (s lateAuditSink) WriteAudit(ctx context.Context, e observability.AuditEven
 		return inner.WriteAudit(ctx, e)
 	}
 	return nil
+}
+
+func (s lateAuditSink) durable() durableAudit {
+	d, _ := s.get().(durableAudit)
+	return d
+}
+
+func (s lateAuditSink) Persists(action string) bool {
+	d := s.durable()
+	return d != nil && d.Persists(action)
+}
+
+func (s lateAuditSink) PersistAudit(ctx context.Context, tx store.Tx, e observability.AuditEvent) (int64, error) {
+	d := s.durable()
+	if d == nil {
+		return 0, errors.New("audit: no durable sink attached")
+	}
+	return d.PersistAudit(ctx, tx, e)
+}
+
+func (s lateAuditSink) AmendAudit(ctx context.Context, id int64, e observability.AuditEvent) error {
+	d := s.durable()
+	if d == nil {
+		return errors.New("audit: no durable sink attached")
+	}
+	return d.AmendAudit(ctx, id, e)
 }
 
 // MountRevokeAllRoute registers POST /v1/me/sessions:revoke-all audited

@@ -108,10 +108,10 @@ var (
 	internalMTLSListeners = map[string]struct{}{
 		"internal": {},
 	}
-	// retentionTables are the session-layer tables the terminal-row
-	// retention sweep prunes (SR-4-F5).
+	// retentionTables are the tables the retention sweeps prune: the
+	// session-layer terminal rows (SR-4-F5) and audit_event (ADR 0011).
 	retentionTables = map[string]struct{}{
-		"connection_lease": {}, "launch_ticket": {},
+		"connection_lease": {}, "launch_ticket": {}, "audit_event": {},
 	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route

@@ -1806,6 +1806,8 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days=30
+            # Audit retention (ADR 0011): the leader's daily prune.
+            - -audit-retention-days=90
           env:
             - name: TCDI_DATABASE_URL
               valueFrom:
