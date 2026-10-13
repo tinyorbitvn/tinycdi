@@ -215,7 +215,7 @@ async function createWorkspaceOnTemplate(
       return workspaceIdFromUrl(page);
     }
     expect(
-      body?.details?.reason === "release_pending" && Date.now() < deadline,
+      body?.error?.details?.reason === "release_pending" && Date.now() < deadline,
       `workspace create refused (${resp.status()}): ${JSON.stringify(body)}`,
     ).toBeTruthy();
     await page.waitForTimeout(5_000);
@@ -500,9 +500,9 @@ test("attach a retained disk: the file written before delete is there after", as
     ]);
     if (resp.ok()) break;
     const body = (await resp.json().catch(() => null)) as {
-      details?: { reason?: string };
+      error?: { details?: { reason?: string } };
     } | null;
-    if (resp.status() !== 409 || body?.details?.reason !== "release_pending") {
+    if (resp.status() !== 409 || body?.error?.details?.reason !== "release_pending") {
       throw new Error(`attach failed: HTTP ${resp.status()} ${JSON.stringify(body)}`);
     }
     if (Date.now() > attachDeadline) {
