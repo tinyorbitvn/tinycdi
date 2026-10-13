@@ -763,9 +763,29 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, adminSessionPolicyHandler, loginLimit, sessionLimit, callbackLimit)
+	mux := appMux(authn, appRoutes{
+		ws: wsHandler, tpl: tplHandler, conn: connHandler, me: meHandler, connStatus: connStatusHandler,
+		data: dataHandler, quota: quotaHandler, adminQuota: adminQuotaHandler,
+		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
+	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
+}
+
+// appRoutes carries every API handler appMux mounts. The first seven are
+// mounted unconditionally, as before; a nil admin* field skips that
+// resource's mount (unit tests mount a subset).
+type appRoutes struct {
+	ws                 *api.WorkspaceHandler
+	tpl                *api.TemplateHandler
+	conn               *api.ConnectionHandler
+	me                 *api.MeHandler
+	connStatus         *api.ConnectionStatusHandler
+	data               *api.DataHandler
+	quota              *api.QuotaHandler
+	adminQuota         *api.AdminQuotaHandler
+	adminUserLimits    *api.AdminUserLimitsHandler
+	adminSessionPolicy *api.AdminSessionPolicyHandler
 }
 
 // appMux assembles the public API route table. The session surface
@@ -774,10 +794,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // the anonymous login start on the plain client-IP key, sessionLimit the
 // session-cookie-aware probe and callbackLimit the OIDC callback
 // (E7, FX-R30).
-func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
-	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
-	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
-	adminUserLimits *api.AdminUserLimitsHandler, adminSessionPolicy *api.AdminSessionPolicyHandler,
+func appMux(authn *api.Authenticator, h appRoutes,
 	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
@@ -786,20 +803,20 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	api.MountRevokeAllRoute(mux, authn, sessionLimit)
 	api.MountSessionTouchRoute(mux, authn, sessionLimit)
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
-	api.MountMeRoutes(mux, authn, me)
-	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
-	api.MountConnectionRoutes(mux, authn, conn)
-	api.MountConnectionStatusRoutes(mux, authn, connStatus)
-	api.MountDataRoutes(mux, authn, data)
-	api.MountQuotaRoutes(mux, authn, quota)
-	if adminQuota != nil {
-		api.MountAdminQuotaRoutes(mux, authn, adminQuota)
+	api.MountMeRoutes(mux, authn, h.me)
+	api.MountWorkspaceRoutes(mux, authn, h.ws, h.tpl)
+	api.MountConnectionRoutes(mux, authn, h.conn)
+	api.MountConnectionStatusRoutes(mux, authn, h.connStatus)
+	api.MountDataRoutes(mux, authn, h.data)
+	api.MountQuotaRoutes(mux, authn, h.quota)
+	if h.adminQuota != nil {
+		api.MountAdminQuotaRoutes(mux, authn, h.adminQuota)
 	}
-	if adminUserLimits != nil {
-		api.MountAdminUserLimitRoutes(mux, authn, adminUserLimits)
+	if h.adminUserLimits != nil {
+		api.MountAdminUserLimitRoutes(mux, authn, h.adminUserLimits)
 	}
-	if adminSessionPolicy != nil {
-		api.MountAdminSessionPolicyRoutes(mux, authn, adminSessionPolicy)
+	if h.adminSessionPolicy != nil {
+		api.MountAdminSessionPolicyRoutes(mux, authn, h.adminSessionPolicy)
 	}
 	return mux
 }
