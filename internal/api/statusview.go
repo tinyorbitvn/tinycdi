@@ -69,6 +69,16 @@ type ObservedStatus struct {
 	// ImageBuiltAt is the raw image-built-at annotation the Workspace CR
 	// carries (copied from its template at create time); empty when absent.
 	ImageBuiltAt string
+	// RuntimeGeneration is the CR's spec.runtimeGeneration — the generation
+	// a restart is fenced on.
+	RuntimeGeneration int64
+	// IntentSettled reports that the operator has applied the CR's latest
+	// spec.intentRevision (status.lastAppliedIntentRevision equals it), so
+	// Phase and FailureReason describe the current generation. Between the
+	// applier bumping the spec and the operator reconciling, the CR still
+	// reads the PREVIOUS generation's Failed status; a second recovery
+	// during that window would bump the generation again.
+	IntentSettled bool
 }
 
 // StatusView supplies observed Workspace CR status keyed by the platform
@@ -165,6 +175,8 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	ws := &list.Items[0]
 	obs.Found = true
 	obs.Phase = string(ws.Status.Phase)
+	obs.RuntimeGeneration = ws.Spec.RuntimeGeneration
+	obs.IntentSettled = ws.Status.LastAppliedIntentRevision == ws.Spec.IntentRevision
 	obs.Conditions = projectConditions(ws.Status.Conditions, ws.Annotations)
 	obs.FailureReason = failureReasonOf(ws.Status.Conditions)
 	obs.ImageBuiltAt = ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]

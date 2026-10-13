@@ -273,6 +273,17 @@ export interface paths {
          *     resolved image is older than `-image-block-after` is refused with
          *     `409 IMAGE_STALE` (E3); `imageUpdate: Pinned` workspaces on a stale
          *     image are refused the same way.
+         *
+         *     A `Failed` workspace that is wanted `Running` is recovered by `:start`
+         *     when its failure reason is recoverable (`BootDeadlineExceeded`,
+         *     `FailedCleanup`, `RuntimeLost`): the platform mints a new runtime
+         *     generation, revokes the failed generation's leases and launch tickets,
+         *     and rebuilds the runtime on the same home volume. Repeating the call
+         *     before the new generation is observed does not mint another one.
+         *     A workspace that failed with `ImagePolicyDenied`, `HomeVolumeLost` or
+         *     `TemplateRejected` is refused with `409 INVALID_STATE` and
+         *     `details.reason` set to that reason; stop and start it again after
+         *     the cause is fixed, or delete it.
          */
         post: operations["startWorkspace"];
         delete?: never;
@@ -989,10 +1000,12 @@ export interface components {
                  *     quota; `params` carries `limit` and `current`, and the
                  *     response may also carry `retryable: true` + `Retry-After`
                  *     when the caller's own teardown-pending holds cover the
-                 *     shortfall.
+                 *     shortfall. On `:start` of a Failed workspace: the
+                 *     unrecoverable failure reason (`ImagePolicyDenied`,
+                 *     `HomeVolumeLost`, `TemplateRejected`).
                  * @enum {string}
                  */
-                reason?: "release_pending" | "UserLimitReached";
+                reason?: "release_pending" | "UserLimitReached" | "ImagePolicyDenied" | "HomeVolumeLost" | "TemplateRejected";
                 /**
                  * @description `IMAGE_STALE` only: the template whose runtime image is
                  *     over `-image-block-after` — the message names it too.

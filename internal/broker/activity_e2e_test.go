@@ -485,3 +485,86 @@ func TestRevokeWorkspaceLeases_GenerationBounded(t *testing.T) {
 		t.Fatalf("revoke unknown workspace = %d,%v want 0,nil", n, err)
 	}
 }
+
+// TestRevokeGenerationTx_RollsBackWithCallersTx: the revocation lives and dies
+// with the caller's transaction, so a failed restart leaves the old
+// generation connected.
+func TestRevokeGenerationTx_RollsBackWithCallersTx(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	markRunning(t, db, "ws-1", 3)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 3, "rt-3", clock.Now()))
+	seedLease(t, db, "lease-g3", "ws-1", "tenant-a", alice.Owner(),
+		3, "rt-3", 1, gwA.ID, clock.Now().Add(broker.LeaseTTL))
+
+	boom := errors.New("caller failed after revoking")
+	err := db.WithTx(ctx, func(tx store.Tx) error {
+		if n, err := b.RevokeGenerationTx(ctx, tx, "ws-1", 3, clock.Now()); err != nil || n != 1 {
+			t.Fatalf("revoke in tx = %d, %v; want 1, nil", n, err)
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("WithTx = %v, want the caller's error", err)
+	}
+	var state string
+	var fences int
+	if err := db.Pool().QueryRow(ctx, `SELECT state FROM connection_lease WHERE id='lease-g3'`).Scan(&state); err != nil || state != "active" {
+		t.Fatalf("lease state = %q (err %v), want active after rollback", state, err)
+	}
+	if err := db.Pool().QueryRow(ctx, `SELECT count(*) FROM workspace_revocation WHERE workspace_id='ws-1'`).Scan(&fences); err != nil || fences != 0 {
+		t.Fatalf("workspace_revocation rows = %d (err %v), want 0 after rollback", fences, err)
+	}
+}
+
+// TestRestartWorkspace_FencesOldGenerationEndToEnd: provisioning's
+// RestartWorkspace with the broker as revoker kills the previous generation's
+// lease and outstanding ticket in its own transaction (F1), while the new
+// generation connects normally.
+func TestRestartWorkspace_FencesOldGenerationEndToEnd(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	markRunning(t, db, "ws-1", 3)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 3, "rt-3", clock.Now()))
+	seedLease(t, db, "lease-g3", "ws-1", "tenant-a", alice.Owner(),
+		3, "rt-3", 1, gwA.ID, clock.Now().Add(broker.LeaseTTL))
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", true, provisioning.SessionPolicy{}, testPortalSession)
+	if err != nil {
+		t.Fatalf("issue under generation 3: %v", err)
+	}
+
+	svc := provisioning.NewService(db).WithGenerationRevoker(
+		func(ctx context.Context, tx store.Tx, ws string, gen int64) error {
+			_, err := b.RevokeGenerationTx(ctx, tx, broker.PlatformID(ws), uint64(gen), clock.Now())
+			return err
+		})
+	if _, err := svc.RestartWorkspace(ctx, "tenant-a", alice.Owner(), alice.Owner(), "ws-1", "key-restart-1", 3, []byte("{}")); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	var state string
+	if err := db.Pool().QueryRow(ctx, `SELECT state FROM connection_lease WHERE id='lease-g3'`).Scan(&state); err != nil || state != "revoked" {
+		t.Fatalf("old lease state = %q (err %v), want revoked", state, err)
+	}
+	fence := broker.Fence{WorkspaceUID: "ws-1", RuntimeGeneration: 3, RuntimeUID: "rt-3", FencingVersion: 1}
+	if _, err := b.RenewLease(ctx, gwA, "lease-g3", fence); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("renew of the old lease = %v, want ErrRevoked", err)
+	}
+	if _, err := b.RedeemTicket(ctx, gwA, tk.Token); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("redeem of the old ticket = %v, want ErrRevoked", err)
+	}
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession); !errors.Is(err, broker.ErrDenied) {
+		t.Fatalf("issue for the old generation = %v, want ErrDenied", err)
+	}
+
+	// The restarted generation (the DB row now says 4) connects.
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 4, "rt-4", clock.Now()))
+	tk4, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
+	if err != nil {
+		t.Fatalf("issue for generation 4: %v", err)
+	}
+	lease, err := b.RedeemTicket(ctx, gwA, tk4.Token)
+	if err != nil || lease.RuntimeGeneration != 4 {
+		t.Fatalf("redeem for generation 4 = %+v, %v", lease, err)
+	}
+}

@@ -38,6 +38,7 @@ describe("reason mapping", () => {
       "Nominal", "RetainedClaimMissing", "IdleTimeout", "DisconnectTimeout",
       "MaxDuration", "StreamDraining", "DrainTimedOut", "RetentionPending",
       "CleanupRetry", "FailedCleanup", "MissingWorkspaceID",
+      "RuntimeLost", "ImagePolicyDenied", "HomeVolumeLost",
       "BlockingConnects", "RevokingLeases", "DrainingStreams",
       "StoppingRuntime", "ApplyingRetention", "CleaningUp", "Unschedulable",
       "PreparingPod", "PullingImage", "ContainerCreating", "PodInitializing",

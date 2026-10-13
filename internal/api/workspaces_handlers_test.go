@@ -29,6 +29,11 @@ type fakeWorkspaceBackend struct {
 	attachErr error
 	gotCreate []provisioning.CreateRequest
 	gotAttach []fakeAttachCall
+	// restartCalls records each RestartWorkspace's fromGeneration;
+	// signalCalls counts SignalWorkspace calls (F1 routing pins).
+	restartCalls []int64
+	signalCalls  int
+	restartErr   error
 }
 
 // fakeAttachCall records one AttachRetained invocation so tests can pin
@@ -170,6 +175,7 @@ func fakeKeysetPage[T any](rows []T, p provisioning.ListPage, key, id func(T) st
 func (f *fakeWorkspaceBackend) SignalWorkspace(_ context.Context, tenantID, _, ownerScope, id, _ string, kind provisioning.IntentKind, _ []byte) (provisioning.WorkspaceRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.signalCalls++
 	if f.signalErr != nil {
 		return provisioning.WorkspaceRecord{}, f.signalErr
 	}
@@ -187,6 +193,22 @@ func (f *fakeWorkspaceBackend) SignalWorkspace(_ context.Context, tenantID, _, o
 	case provisioning.IntentDelete:
 		rec.Phase = "Terminating"
 	}
+	f.recs[id] = rec
+	return rec, nil
+}
+
+func (f *fakeWorkspaceBackend) RestartWorkspace(_ context.Context, tenantID, _, ownerScope, id, _ string, fromGeneration int64, _ []byte) (provisioning.WorkspaceRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec, ok := f.recs[id]
+	if !ok || rec.TenantID != tenantID || (ownerScope != "" && rec.Owner != ownerScope) {
+		return provisioning.WorkspaceRecord{}, provisioning.ErrWorkspaceNotFound
+	}
+	if f.restartErr != nil {
+		return provisioning.WorkspaceRecord{}, f.restartErr
+	}
+	f.restartCalls = append(f.restartCalls, fromGeneration)
+	rec.Phase = "Provisioning"
 	f.recs[id] = rec
 	return rec, nil
 }

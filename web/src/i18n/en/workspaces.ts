@@ -112,6 +112,7 @@ export default {
   "workspaces.detail.stale.bodyUnknown":
     "The runtime image is older than the freshness window (build date unknown). The workspace still runs; ask an administrator about a refresh.",
   "workspaces.detail.update.title": "Update available",
+  "workspaces.detail.failed.unrecoverable": "Starting again would fail the same way. Ask your administrator to fix the cause, or delete this workspace.",
   "workspaces.detail.update.body":
     "Starts on the updated image — a newer revision of this template is published.",
   "workspaces.detail.events.title": "Events",
@@ -222,6 +223,9 @@ export default {
     "The retention step hasn't finished; teardown waits.",
   "workspaces.reason.cleanupRetry": "Teardown step {step} is blocked; retrying.",
   "workspaces.reason.failedCleanup": "The failed incarnation is being torn down.",
+  "workspaces.reason.runtimeLost": "The desktop stopped unexpectedly (its container was removed or failed). Start it again to recover; your home folder is kept.",
+  "workspaces.reason.imagePolicyDenied": "The desktop image was refused by a cluster policy.",
+  "workspaces.reason.homeVolumeLost": "The home disk of this workspace no longer exists.",
   "workspaces.reason.missingWorkspaceID":
     "The workspace record is missing its platform ID; teardown is held.",
   "workspaces.reason.intentBehind":

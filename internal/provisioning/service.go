@@ -28,7 +28,10 @@ type Service struct {
 	// (-image-block-after): a start whose resolved revision's image is
 	// older fails with *ImageStaleError. <=0 disables the block.
 	blockAfter time.Duration
-	log        *slog.Logger
+	// revokeGeneration fences the previous runtime generation inside the
+	// RestartWorkspace transaction (F1); nil refuses a restart.
+	revokeGeneration GenerationRevoker
+	log              *slog.Logger
 }
 
 // NewService wraps db.
@@ -584,6 +587,101 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				if err := markDeleted(ctx, tx, PlatformID(wsID)); err != nil {
 					return err
 				}
+			}
+		}
+		out, err := getWorkspaceTx(ctx, tx, tenantID, "", wsID)
+		if err != nil {
+			return err
+		}
+		res = *out
+		if idemKey != "" {
+			return CompleteIdempotent(ctx, tx, tenantID, scopedKey, res)
+		}
+		return nil
+	})
+	return res, err
+}
+
+// GenerationRevoker fences a runtime generation inside the caller's
+// transaction (broker.RevokeGenerationTx in production).
+type GenerationRevoker func(ctx context.Context, tx store.Tx, workspaceID string, generation int64) error
+
+// ErrNotRunning refuses a restart of a workspace whose desired state is
+// not Running (a stopped workspace uses a plain start).
+var ErrNotRunning = errors.New("workspace is not running")
+
+// WithGenerationRevoker installs the revoker RestartWorkspace calls.
+func (s *Service) WithGenerationRevoker(r GenerationRevoker) *Service {
+	s.revokeGeneration = r
+	return s
+}
+
+// RestartWorkspace mints a new runtime generation for a workspace that is
+// wanted Running but whose current incarnation is lost or failed (F1), or
+// whose session policy must be re-applied (F3). In one transaction it:
+// bumps runtime_generation, revokes the previous generation's leases and
+// tickets, re-stamps the resolved session policy, and appends a start
+// intent; the applier moves spec.runtimeGeneration and the operator
+// replaces the pod on the same home volume.
+//
+// fromGeneration is the generation the caller observed. When the row has
+// already moved past it (a concurrent restart won), the call is a no-op
+// returning the current record — a double-click bumps once. The running
+// quota reservation is kept, because the workspace never stopped holding it.
+// The template is not re-pointed, because a restart is not an upgrade.
+func (s *Service) RestartWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, fromGeneration int64, bodyHash []byte) (res WorkspaceRecord, err error) {
+	if s.revokeGeneration == nil {
+		return res, errors.New("restart: no generation revoker configured")
+	}
+	err = s.db.WithTx(ctx, func(tx store.Tx) error {
+		rec, err := getWorkspaceTx(ctx, tx, tenantID, ownerScope, wsID, "FOR UPDATE")
+		if err != nil {
+			return err
+		}
+		scopedKey := ""
+		if idemKey != "" {
+			scopedKey = scopedIdemKey(caller, idemKey)
+			idem, replayed, err := BeginIdempotent(ctx, tx, tenantID, scopedKey, string(IntentStart)+":"+wsID, bodyHash)
+			if err != nil {
+				return err
+			}
+			if replayed {
+				if err := json.Unmarshal(idem.Result, &res); err != nil {
+					return fmt.Errorf("restart: stored result %w", err)
+				}
+				res.Replayed = true
+				return nil
+			}
+		}
+		if rec.isDeleted() {
+			return ErrWorkspaceClosed
+		}
+		if rec.DesiredState != "Running" {
+			return ErrNotRunning
+		}
+		var gen int64
+		if err := tx.QueryRow(ctx, `SELECT runtime_generation FROM workspaces WHERE id = $1`, wsID).Scan(&gen); err != nil {
+			return fmt.Errorf("restart: read generation %w", err)
+		}
+		if gen == fromGeneration {
+			if err := CheckImageBlock(rec.Template.ImageBuiltAt, s.blockAfter, time.Now(), rec.Template.Name, true); err != nil {
+				return err
+			}
+			sp, err := s.startSessionPolicy(ctx, tx, tenantID, rec)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE workspaces SET runtime_generation = runtime_generation + 1,
+					phase = 'Provisioning', updated_at = now()
+				WHERE id = $1 AND tenant_id = $2`, wsID, tenantID); err != nil {
+				return fmt.Errorf("restart: bump generation %w", err)
+			}
+			if err := s.revokeGeneration(ctx, tx, wsID, gen); err != nil {
+				return err
+			}
+			if _, err := appendIntent(ctx, tx, PlatformID(wsID), IntentStart, &IntentSpec{SessionPolicy: sp}); err != nil {
+				return err
 			}
 		}
 		out, err := getWorkspaceTx(ctx, tx, tenantID, "", wsID)

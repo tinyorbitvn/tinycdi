@@ -43,6 +43,7 @@ import {
   type WorkspacePhase,
 } from "./api";
 import { formatAge, formatDateTime, ownerLabel } from "./format";
+import { UNRECOVERABLE_FAILURES } from "../workspaces/reasons";
 import { useMeLoaded } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
@@ -57,12 +58,14 @@ const PHASES: WorkspacePhase[] = [
   "Terminating",
 ];
 
-// Start is offered for the two terminal phases the API accepts; restart is
+// Start is offered for the two terminal phases the API accepts (Failed only
+// when a new generation can fix its reason — F1); restart is
 // stop -> wait Stopped -> start and only makes sense while the runtime is
 // (or is becoming) active. Stop/delete follow the same phase gates the
 // API re-checks (it answers INVALID_STATE on a race).
 export function canStart(ws: ScopedWorkspace): boolean {
-  return ws.phase === "Stopped" || ws.phase === "Failed";
+  if (ws.phase === "Failed") return !UNRECOVERABLE_FAILURES.has(ws.failureReason ?? "");
+  return ws.phase === "Stopped";
 }
 
 export function canStop(ws: ScopedWorkspace): boolean {

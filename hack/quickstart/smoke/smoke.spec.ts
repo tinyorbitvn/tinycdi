@@ -812,3 +812,44 @@ test("admin overview: a live session, a running workspace and a measured boot ar
   await userCtx.close();
   await adminCtx.close();
 });
+
+async function connectionStatus(page: Page, id: string): Promise<{ leaseActive: boolean; leaseRef?: string }> {
+  return page.evaluate(async (wid) => {
+    const r = await fetch(`/v1/workspaces/${encodeURIComponent(wid)}/connection`);
+    return (await r.json()) as { leaseActive: boolean; leaseRef?: string };
+  }, id);
+}
+
+async function failureReason(page: Page, id: string): Promise<string> {
+  return page.evaluate(async (wid) => {
+    const r = await fetch(`/v1/workspaces/${encodeURIComponent(wid)}`);
+    return ((await r.json()) as { failureReason?: string }).failureReason ?? "";
+  }, id);
+}
+
+test("a deleted runtime pod is recovered by Start on the same home, and a new session connects", async ({ page }) => {
+  const stamp = Date.now().toString(36);
+  const token = `recover-${stamp}`;
+  const file = `${HOME_DIR}/recover.txt`;
+  await login(page);
+  const id = await createBrowserWorkspace(page, `rc-${stamp}`, "Retain");
+  await connectSessionFrame(page, id);
+  inHome(id, 'printf %s "$1" > "$2" && sync', token, file);
+  const before = await connectionStatus(page, id);
+  expect(before.leaseActive, "lease while connected").toBe(true);
+
+  kubectl("delete", "pod", runtimePod(id), "--wait=false");
+  await page.goto(`/workspaces/${encodeURIComponent(id)}`);
+  await waitPhase(page, id, "Failed", 3 * 60_000);
+  expect(await failureReason(page, id)).toBe("RuntimeLost");
+  const retry = page.getByRole("button", { name: "Retry start" });
+  await expect(retry).toBeVisible({ timeout: 60_000 });
+  await retry.click();
+  await waitPhase(page, id, "Ready", 10 * 60_000);
+
+  expect(inHome(id, 'cat "$1"', file), "home file survives recovery").toBe(token);
+  await connectSessionFrame(page, id);
+  const after = await connectionStatus(page, id);
+  expect(after.leaseActive, "a new session is connected").toBe(true);
+  expect(after.leaseRef, "the new generation holds a different lease").not.toBe(before.leaseRef);
+});

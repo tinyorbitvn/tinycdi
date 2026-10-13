@@ -115,6 +115,7 @@ export default {
   "workspaces.detail.stale.bodyUnknown":
     "Image runtime đã quá hạn mức độ mới (không rõ ngày dựng). Workspace vẫn chạy; hỏi quản trị viên về việc làm mới.",
   "workspaces.detail.update.title": "Có bản cập nhật",
+  "workspaces.detail.failed.unrecoverable": "Khởi động lại sẽ lỗi tương tự. Hãy nhờ quản trị viên khắc phục nguyên nhân, hoặc xoá workspace này.",
   "workspaces.detail.update.body":
     "Khởi động sẽ dùng image đã cập nhật — một revision mới hơn của template này đã được phát hành.",
   "workspaces.detail.events.title": "Sự kiện",
@@ -222,6 +223,9 @@ export default {
     "Bước giữ lại chưa xong; việc gỡ bỏ phải chờ.",
   "workspaces.reason.cleanupRetry": "Bước gỡ bỏ {step} bị chặn; đang thử lại.",
   "workspaces.reason.failedCleanup": "Incarnation lỗi đang được gỡ bỏ.",
+  "workspaces.reason.runtimeLost": "Desktop dừng bất ngờ (container bị xoá hoặc lỗi). Hãy khởi động lại để khôi phục; thư mục home vẫn được giữ.",
+  "workspaces.reason.imagePolicyDenied": "Image của desktop bị chính sách của cụm từ chối.",
+  "workspaces.reason.homeVolumeLost": "Ổ đĩa home của workspace này không còn tồn tại.",
   "workspaces.reason.missingWorkspaceID":
     "Bản ghi workspace thiếu ID nền tảng; việc gỡ bỏ bị giữ lại.",
   "workspaces.reason.intentBehind":

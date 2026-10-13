@@ -414,6 +414,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		// renew or rehydrate a lease — the stream dies inside one renew
 		// cycle instead of outliving the session it was minted under.
 		broker.WithSessionIdle(cfg.SessionIdle))
+	// F1: a recovery start revokes the failed generation's leases and
+	// tickets in the same transaction that mints the next generation.
+	svc.WithGenerationRevoker(func(ctx context.Context, tx store.Tx, ws string, gen int64) error {
+		_, err := brk.RevokeGenerationTx(ctx, tx, broker.PlatformID(ws), uint64(gen), time.Now())
+		return err
+	})
 
 	// Expiry planner (design §8): periodically evaluate running workspaces
 	// against recorded session activity and emit generation-fenced stop
