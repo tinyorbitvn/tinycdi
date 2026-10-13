@@ -41,7 +41,7 @@ func TestCreate_BlockedWhenStale(t *testing.T) {
 	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
 		`{"name":"stale-box","templateRef":"tpl_staleimg"}`,
 		map[string]string{"Idempotency-Key": "key-block-0001"})
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("status=%d, want 409", r.StatusCode)
 	}
@@ -147,7 +147,7 @@ func TestStart_BlockedMapsToImageStale(t *testing.T) {
 
 	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/ws_stalepin1/start", "",
 		map[string]string{"Idempotency-Key": "key-start-0001"})
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusConflict || e.Code != CodeImageStale {
 		t.Fatalf("status=%d code=%q, want 409 IMAGE_STALE", r.StatusCode, e.Code)
 	}

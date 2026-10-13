@@ -298,7 +298,7 @@ paths:
       tags: [workspaces]
       parameters:
         - $ref: "#/components/parameters/PageLimit"
-        - $ref: "#/components/parameters/PageToken"
+        - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/ListScope"
         - name: phase
           in: query
@@ -697,7 +697,7 @@ paths:
           schema:
             $ref: "#/components/schemas/RuntimeKind"
         - $ref: "#/components/parameters/PageLimit"
-        - $ref: "#/components/parameters/PageToken"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Page of templates.
@@ -1067,7 +1067,7 @@ paths:
       tags: [data]
       parameters:
         - $ref: "#/components/parameters/PageLimit"
-        - $ref: "#/components/parameters/PageToken"
+        - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/ListScope"
       responses:
         "200":
@@ -1315,17 +1315,41 @@ components:
       name: limit
       in: query
       required: false
-      description: Maximum items per page (default 50, max 200).
+      description: Maximum items per page (default 50, max 500).
       schema:
         type: integer
         minimum: 1
-        maximum: 200
+        maximum: 500
         default: 50
-    PageToken:
-      name: pageToken
+    Cursor:
+      name: cursor
       in: query
       required: false
-      description: Opaque cursor from a previous response's `nextPageToken`.
+      description: |
+        Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+        minted under a different `sort` is rejected as `INVALID_REQUEST`.
+      schema:
+        type: string
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        Allowlisted sort field; a `-` prefix means descending (for example
+        `-createdAt`). The accepted fields and the default are documented per
+        operation; anything else is `INVALID_REQUEST`.
+      schema:
+        type: string
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: |
+        Strong entity tag of the resource's current version, as returned in
+        the `ETag` header or body of the last read/write. Missing → `428
+        PRECONDITION_REQUIRED`; stale or malformed → `412
+        PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+        exist yet (create-or-replace semantics).
       schema:
         type: string
     ListScope:
@@ -1340,6 +1364,15 @@ components:
       schema:
         type: string
         enum: [mine, tenant]
+
+  headers:
+    ETag:
+      description: |
+        Strong entity tag of the returned resource's current version — a
+        quoted string clients echo verbatim in `If-Match` on the next
+        mutation.
+      schema:
+        type: string
 
   responses:
     BadRequest:
@@ -1395,12 +1428,21 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    PreconditionRequired:
+      description: |
+        Missing precondition — `PRECONDITION_REQUIRED`: the mutation requires
+        an `If-Match` header carrying the resource's current `ETag` (or `*`
+        when the resource does not exist yet).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     PreconditionFailed:
       description: |
         Optimistic-concurrency failure — `PRECONDITION_FAILED`: the
         `If-Match` value does not name the current state of the resource
-        (a concurrent write landed first). Reload and retry with the fresh
-        version.
+        (a concurrent write landed first), or `*` was sent for a resource
+        that already exists. Reload and retry with the fresh version.
       content:
         application/json:
           schema:
@@ -1452,7 +1494,8 @@ components:
         | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. A refusal by a per-principal running limit carries `details.reason: UserLimitReached` with `details.params.limit`/`details.params.current`. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried. A `UserLimitReached` refusal can likewise carry `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
         | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
         | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
-        | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale quota version; reload the resource and retry |
+        | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
+        | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
         | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
         | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
         | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
@@ -1472,6 +1515,7 @@ components:
         - QUOTA_EXHAUSTED
         - QUOTA_NOT_CONFIGURED
         - QUOTA_MANAGED_BY_CONFIG
+        - PRECONDITION_REQUIRED
         - PRECONDITION_FAILED
         - CONNECTION_IN_USE
         - IMAGE_STALE
@@ -1482,8 +1526,19 @@ components:
     Error:
       type: object
       additionalProperties: false
+      required: [error]
+      description: |
+        Uniform error envelope returned for every 4xx/5xx response — the body
+        is the single key `error` carrying an `ErrorBody`.
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+
+    ErrorBody:
+      type: object
+      additionalProperties: false
       required: [code, message, retryable, requestId]
-      description: Uniform error body returned for every 4xx/5xx response.
+      description: Uniform error object inside the `error` envelope.
       properties:
         code:
           $ref: "#/components/schemas/ErrorCode"

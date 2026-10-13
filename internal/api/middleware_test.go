@@ -104,9 +104,7 @@ func TestRequestIDPresentOnEveryResponse(t *testing.T) {
 	// Error response (401) must still carry X-Request-Id.
 	r := env.authedGet(t, nil, "/v1/me")
 	rid := r.Header.Get(RequestIDHeader)
-	var body Error
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	r.Body.Close()
+	body := decodeErr(t, r)
 	if rid == "" {
 		t.Fatal("error response missing X-Request-Id")
 	}
@@ -421,13 +419,15 @@ func TestRequireAuth_SessionStoreErrors(t *testing.T) {
 					t.Fatalf("passive=%v status=%d, want %d", passive, rec.Code, tc.wantStatus)
 				}
 				var body struct {
-					Code string `json:"code"`
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
 				}
 				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 					t.Fatalf("error body: %v", err)
 				}
-				if body.Code != string(tc.wantCode) {
-					t.Fatalf("passive=%v code=%q, want %s", passive, body.Code, tc.wantCode)
+				if body.Error.Code != string(tc.wantCode) {
+					t.Fatalf("passive=%v code=%q, want %s", passive, body.Error.Code, tc.wantCode)
 				}
 			}
 		})

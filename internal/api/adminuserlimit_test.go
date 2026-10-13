@@ -170,7 +170,7 @@ func TestAdminUserLimits_Authz(t *testing.T) {
 		{http.MethodPut, userLimitsPath + "/default", `{"limit":3}`},
 	} {
 		r := doReq(t, env, sess, csrf, tc.method, tc.path, tc.body, nil)
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("user %s %s: status=%d code=%q, want 403 FORBIDDEN", tc.method, tc.path, r.StatusCode, e.Code)
 		}
@@ -184,7 +184,7 @@ func TestAdminUserLimits_Authz(t *testing.T) {
 		{http.MethodPut, "/v1/admin/tenants/tenant-b/user-limits/default", `{"limit":3}`},
 	} {
 		r := doReq(t, env, sessA, csrfA, tc.method, tc.path, tc.body, nil)
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("cross-tenant %s %s: status=%d code=%q, want 403 FORBIDDEN", tc.method, tc.path, r.StatusCode, e.Code)
 		}
@@ -336,7 +336,7 @@ func TestAdminUserLimits_Validation(t *testing.T) {
 		"trailing doc":     {userLimitsPath + "/default", `{"limit":1} {}`},
 	} {
 		r := doReq(t, env, sess, csrf, http.MethodPut, tc.path, tc.body, nil)
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 			t.Fatalf("%s: status=%d code=%q, want 400 INVALID_REQUEST", name, r.StatusCode, e.Code)
 		}
@@ -484,7 +484,7 @@ func TestAdminUserLimits_StoreErrors(t *testing.T) {
 	src.setErr = fmt.Errorf("dial postgres: %w", context.DeadlineExceeded)
 	r := doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath,
 		`{"ownerRef":"`+me+`","limit":2}`, nil)
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	r.Body.Close()
 	if r.StatusCode != http.StatusServiceUnavailable || e.Code != CodeUnavailable {
 		t.Fatalf("transient store error: status=%d code=%q, want 503 UNAVAILABLE", r.StatusCode, e.Code)
@@ -492,7 +492,7 @@ func TestAdminUserLimits_StoreErrors(t *testing.T) {
 
 	src.setErr = errors.New("pg: check constraint violated")
 	r = doReq(t, env, sess, csrf, http.MethodPut, userLimitsPath+"/default", `{"limit":3}`, nil)
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	r.Body.Close()
 	if r.StatusCode != http.StatusInternalServerError || e.Code != CodeInternal {
 		t.Fatalf("permanent store error: status=%d code=%q, want 500 INTERNAL", r.StatusCode, e.Code)

@@ -11,6 +11,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// decodeErr decodes a response body in the {"error": {...}} envelope and
+// returns the inner Error.
+func decodeErr(t *testing.T, r *http.Response) Error {
+	t.Helper()
+	defer r.Body.Close()
+	var v struct {
+		Error Error `json:"error"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	return v.Error
+}
+
 // TestErrorCodesMatchOpenAPI is the drift guard: the ErrorCode enum in
 // openapi.yaml and the Go constants in errors.go must be identical sets.
 func TestErrorCodesMatchOpenAPI(t *testing.T) {
@@ -53,32 +67,37 @@ func TestErrorCodesMatchOpenAPI(t *testing.T) {
 	}
 }
 
-// TestErrorJSONShape pins the serialized contract: exactly the keys the spec
-// promises, with the spec's casing.
-func TestErrorJSONShape(t *testing.T) {
-	e := NewError(CodeQuotaExhausted, "running quota exhausted")
-	e.RequestID = "req_1"
-	raw, err := json.Marshal(e)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+// TestErrorJSONShape_Envelope pins the serialized contract: the body is the
+// single-key envelope {"error": {...}} with the spec's casing inside.
+func TestErrorJSONShape_Envelope(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	WriteError(rec, req, NewError(CodeNotFound, "nope"))
+	var body struct {
+		Error struct {
+			Code, Message, RequestID string
+			Retryable                bool
+		} `json:"error"`
 	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]any{
-		"code":      "QUOTA_EXHAUSTED",
-		"message":   "running quota exhausted",
-		"retryable": false,
-		"requestId": "req_1",
+	if body.Error.Code != "NOT_FOUND" || body.Error.Message != "nope" {
+		t.Fatalf("%s", rec.Body.String())
 	}
-	if len(m) != len(want) {
-		t.Fatalf("error body keys = %v, want exactly %v", m, want)
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(rec.Body.Bytes(), &raw)
+	if len(raw) != 1 {
+		t.Fatalf("top-level keys = %d, want only \"error\"", len(raw))
 	}
-	for k, v := range want {
-		if m[k] != v {
-			t.Fatalf("error body[%q] = %v, want %v", k, m[k], v)
-		}
+}
+
+func TestPreconditionRequiredStatus(t *testing.T) {
+	if CodePreconditionRequired.HTTPStatus() != http.StatusPreconditionRequired {
+		t.Fatal("428 expected")
+	}
+	if CodePreconditionRequired.Retryable() {
+		t.Fatal("not retryable")
 	}
 }
 
@@ -97,6 +116,7 @@ func TestErrorCodeTableCoverage(t *testing.T) {
 		CodeQuotaExhausted:       http.StatusConflict,
 		CodeQuotaNotConfigured:   http.StatusConflict,
 		CodeQuotaManagedByConfig: http.StatusConflict,
+		CodePreconditionRequired: http.StatusPreconditionRequired,
 		CodePreconditionFailed:   http.StatusPreconditionFailed,
 		CodeConnectionInUse:      http.StatusConflict,
 		CodeImageStale:           http.StatusConflict,
@@ -140,11 +160,13 @@ func TestWriteError(t *testing.T) {
 	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
 	}
-	var got Error
+	var got struct {
+		Error Error `json:"error"`
+	}
 	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got.Code != CodeNotFound || got.RequestID != "req_9" || got.Retryable {
+	if got.Error.Code != CodeNotFound || got.Error.RequestID != "req_9" || got.Error.Retryable {
 		t.Fatalf("body = %+v, want code=NOT_FOUND requestId=req_9 retryable=false", got)
 	}
 }

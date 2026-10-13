@@ -130,7 +130,7 @@ func TestAdminSessionPolicy_Authz(t *testing.T) {
 		}
 		r := doReq(t, env, sess, csrf, m, adminSessionPolicyPath, body,
 			map[string]string{"If-Match": "*"})
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("user %s: status=%d code=%q, want 403 FORBIDDEN", m, r.StatusCode, e.Code)
 		}
@@ -144,7 +144,7 @@ func TestAdminSessionPolicy_Authz(t *testing.T) {
 		}
 		r := doReq(t, env, sessA, csrfA, m, "/v1/admin/tenants/tenant-b/session-policy", body,
 			map[string]string{"If-Match": "*"})
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("cross-tenant %s: status=%d code=%q, want 403 FORBIDDEN", m, r.StatusCode, e.Code)
 		}
@@ -173,7 +173,7 @@ func TestAdminSessionPolicy_CSRF(t *testing.T) {
 
 	r := doReq(t, env, sess, &http.Cookie{Value: "wrong-token"}, http.MethodPut,
 		adminSessionPolicyPath, `{"clipboard":"Disabled"}`, map[string]string{"If-Match": "*"})
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusForbidden || e.Code != CodeCSRFFailed {
 		t.Fatalf("status=%d code=%q, want 403 CSRF_FAILED", r.StatusCode, e.Code)
 	}
@@ -217,7 +217,7 @@ func TestAdminSessionPolicy_PutValidation(t *testing.T) {
 	} {
 		r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath, body,
 			map[string]string{"If-Match": "*"})
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 			t.Fatalf("%s: status=%d code=%q, want 400 INVALID_REQUEST", name, r.StatusCode, e.Code)
 		}
@@ -225,7 +225,7 @@ func TestAdminSessionPolicy_PutValidation(t *testing.T) {
 	// Missing If-Match is a 400, not a write.
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
 		`{"clipboard":"Disabled"}`, nil)
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 		t.Fatalf("no If-Match: status=%d code=%q, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
 	}
@@ -247,7 +247,7 @@ func TestAdminSessionPolicy_IfMatch(t *testing.T) {
 	}
 
 	r := put(`{"clipboard":"Disabled"}`, map[string]string{"If-Match": "v1"})
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("version on missing row: status=%d code=%q, want 412", r.StatusCode, e.Code)
 	}
@@ -263,12 +263,12 @@ func TestAdminSessionPolicy_IfMatch(t *testing.T) {
 
 	// Stale version 412s; the live version writes.
 	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": "*"})
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("* on existing row: status=%d code=%q, want 412", r.StatusCode, e.Code)
 	}
 	r = put(`{"clipboard":"Send"}`, map[string]string{"If-Match": "v0"})
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("stale version: status=%d code=%q, want 412", r.StatusCode, e.Code)
 	}

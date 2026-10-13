@@ -230,10 +230,13 @@ func TestCreateConnection_InvalidBodyGenericMessage(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 400", r.StatusCode, b)
 	}
 	b, _ := io.ReadAll(r.Body)
-	var e Error
-	if err := json.Unmarshal(b, &e); err != nil {
+	var wrap struct {
+		Error Error `json:"error"`
+	}
+	if err := json.Unmarshal(b, &wrap); err != nil {
 		t.Fatalf("error body not JSON: %q", b)
 	}
+	e := wrap.Error
 	if e.Code != CodeInvalidRequest || e.Message != "invalid request body" {
 		t.Fatalf("code=%q message=%q, want INVALID_REQUEST + generic message", e.Code, e.Message)
 	}
@@ -281,10 +284,7 @@ func TestCreateConnection_ConnectionInUse(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("status=%d, want 409", r.StatusCode)
 	}
-	var e Error
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	e := decodeErr(t, r)
 	if e.Code != CodeConnectionInUse {
 		t.Fatalf("code=%q, want CONNECTION_IN_USE", e.Code)
 	}
@@ -311,10 +311,7 @@ func TestCreateConnection_NotFoundAndBadID(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("bad-id status=%d, want 409", r.StatusCode)
 	}
-	var e Error
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	e := decodeErr(t, r)
 	if e.Code != CodeInvalidState {
 		t.Fatalf("bad-id code=%q, want INVALID_STATE", e.Code)
 	}

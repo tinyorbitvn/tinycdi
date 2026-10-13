@@ -157,7 +157,7 @@ func TestAdminQuota_Authz(t *testing.T) {
 			body = adminQuotaBody
 		}
 		r := doReq(t, env, sess, csrf, m, adminQuotaPath, body, nil)
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("user %s: status=%d code=%q, want 403 FORBIDDEN", m, r.StatusCode, e.Code)
 		}
@@ -171,7 +171,7 @@ func TestAdminQuota_Authz(t *testing.T) {
 			body = adminQuotaBody
 		}
 		r := doReq(t, env, sessA, csrfA, m, "/v1/admin/tenants/tenant-b/quota", body, nil)
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusForbidden || e.Code != CodeForbidden {
 			t.Fatalf("cross-tenant %s: status=%d code=%q, want 403 FORBIDDEN", m, r.StatusCode, e.Code)
 		}
@@ -256,7 +256,7 @@ func TestAdminQuota_PutValidation(t *testing.T) {
 	} {
 		r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, body,
 			map[string]string{"If-Match": IfMatchCreate})
-		e := decodeBody[Error](t, r)
+		e := decodeErr(t, r)
 		if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 			t.Fatalf("%s: status=%d code=%q, want 400 INVALID_REQUEST", name, r.StatusCode, e.Code)
 		}
@@ -274,7 +274,7 @@ func TestAdminQuota_ManagedByConfig(t *testing.T) {
 	sess, csrf := loginAdmin(t, env, "admin-a")
 
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody, nil)
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusConflict || e.Code != CodeQuotaManagedByConfig {
 		t.Fatalf("status=%d code=%q, want 409 QUOTA_MANAGED_BY_CONFIG", r.StatusCode, e.Code)
 	}
@@ -356,14 +356,14 @@ func TestAdminQuota_IfMatch(t *testing.T) {
 
 	// No If-Match at all: 400 INVALID_REQUEST, never a store write.
 	r := put(nil)
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 		t.Fatalf("missing If-Match: status=%d code=%q, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
 	}
 
 	// "*" only creates; on an existing row it must not skip the check.
 	r = put(map[string]string{"If-Match": IfMatchCreate})
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("If-Match * on existing row: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
 	}
@@ -373,7 +373,7 @@ func TestAdminQuota_IfMatch(t *testing.T) {
 
 	// A stale version is refused; the row keeps its values.
 	r = put(map[string]string{"If-Match": "v999"})
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("stale version: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
 	}
@@ -395,7 +395,7 @@ func TestAdminQuota_IfMatch(t *testing.T) {
 		t.Fatalf("version after write = %q, want a changed token (was %q)", v.Version, v1)
 	}
 	r = put(map[string]string{"If-Match": v1})
-	e = decodeBody[Error](t, r)
+	e = decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("replayed version: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
 	}
@@ -411,7 +411,7 @@ func TestAdminQuota_IfMatchCreate(t *testing.T) {
 
 	r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
 		map[string]string{"If-Match": "v1"})
-	e := decodeBody[Error](t, r)
+	e := decodeErr(t, r)
 	if r.StatusCode != http.StatusPreconditionFailed || e.Code != CodePreconditionFailed {
 		t.Fatalf("version on missing row: status=%d code=%q, want 412 PRECONDITION_FAILED", r.StatusCode, e.Code)
 	}

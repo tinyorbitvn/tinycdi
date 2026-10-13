@@ -15,7 +15,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -382,12 +381,7 @@ func listData(t *testing.T, env *testEnv, sess, csrf *http.Cookie) retainedDataL
 
 func errBody(t *testing.T, r *http.Response) Error {
 	t.Helper()
-	defer r.Body.Close()
-	var e Error
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	return e
+	return decodeErr(t, r)
 }
 
 // TestListRetainedData_OwnerScope: an owner sees only their own retained

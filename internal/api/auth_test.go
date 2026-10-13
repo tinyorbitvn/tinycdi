@@ -242,11 +242,7 @@ func (e *testEnv) authedGet(t *testing.T, session *http.Cookie, path string) *ht
 
 func decodeError(t *testing.T, resp *http.Response) (code string) {
 	t.Helper()
-	var body Error
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	return string(body.Code)
+	return string(decodeErr(t, resp).Code)
 }
 
 func TestOIDCLoginFlowSucceeds(t *testing.T) {
@@ -720,8 +716,7 @@ func TestUnauthenticatedRequestRejected(t *testing.T) {
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", r.StatusCode)
 	}
-	var body Error
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	body := decodeErr(t, r)
 	if body.Code != CodeUnauthenticated || body.RequestID == "" {
 		t.Fatalf("error body malformed: %+v", body)
 	}

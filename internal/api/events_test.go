@@ -117,7 +117,7 @@ func TestEvents_NotOwner(t *testing.T) {
 	sessB, csrfB := login(t, env, "user-b")
 	r = doReq(t, env, sessB, csrfB, http.MethodGet,
 		"/v1/workspaces/"+created.ID+"/events", "", nil)
-	body := decodeBody[Error](t, r)
+	body := decodeErr(t, r)
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("status=%d, want 404", r.StatusCode)
 	}
