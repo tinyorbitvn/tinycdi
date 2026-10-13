@@ -241,27 +241,29 @@ export default {
   "admin.data.column.age": "Age",
   "admin.data.action.purgeLabel": "Purge {id}",
 
-  // Users page: principals known to the tenant (quota usage or a per-user
-  // limit row) plus per-user drill-down.
+  // Users page: everyone who has signed in to the tenant (the
+  // principal directory) plus per-user drill-down.
   "admin.users.title": "Users",
-  "admin.users.description": "Every principal with usage or a limit in this tenant.",
-  "admin.users.note":
-    "This list shows users who have used the tenant — quota usage or a per-user limit — not a full tenant directory.",
+  "admin.users.description": "Everyone who has signed in to this tenant.",
   "admin.users.loading": "Loading users",
   "admin.users.caption": "Tenant users",
   "admin.users.filter.label": "Filter",
   "admin.users.filter.placeholder": "Name or subject",
-  "admin.users.empty.all": "No users recorded yet.",
+  "admin.users.empty.all": "No one has signed in to this tenant yet.",
   "admin.users.empty.filtered": "No users match the filter.",
   "admin.users.column.disks": "Disks",
+  "admin.users.column.lastSeen": "Last seen",
+  "admin.users.column.workspaces": "Workspaces",
   "admin.userDetail.titleFallback": "User detail",
   "admin.userDetail.notFound.title": "User not found",
   "admin.userDetail.notFound.body":
-    "This principal has no usage or limit in the tenant — or the list changed since it was loaded.",
+    "This user has not signed in to this tenant.",
   "admin.userDetail.notFound.back": "Back to users",
   "admin.userDetail.limits.title": "Running-workspace limit",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.email": "Email",
+  "admin.userDetail.field.lastSeen": "Last seen",
   "admin.userDetail.workspaces.title": "Workspaces",
   "admin.userDetail.workspaces.caption": "The user's workspaces",
   "admin.userDetail.workspaces.empty": "This user has no workspaces.",

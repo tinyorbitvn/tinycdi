@@ -101,8 +101,29 @@ export async function listAdminUserLimitPage(
   );
 }
 
-export function scanAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitEntry[]> {
-  return scanCollection((cursor, sort) => listAdminUserLimitPage(api, tenant, cursor, sort, SCAN_PAGE_LIMIT));
+export type AdminTenantUser = components["schemas"]["AdminTenantUser"];
+
+// GET .../users: everyone who signed in to the tenant (the principal
+// directory). `sort` is ownerRef | displayName | lastSeen, `-` = descending.
+export async function listAdminUserPage(
+  api: ApiClient,
+  tenant: string,
+  cursor?: string,
+  sort?: string,
+  limit?: number,
+): Promise<ServerPage<AdminTenantUser>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/users", {
+      params: {
+        path: { tenant },
+        query: { ...(sort ? { sort } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+      },
+    }),
+  );
+}
+
+export async function getAdminUser(api: ApiClient, tenant: string, ownerRef: string): Promise<AdminTenantUser> {
+  return unwrap(await api.GET("/v1/admin/tenants/{tenant}/users/{ownerRef}", { params: { path: { tenant, ownerRef } } }));
 }
 
 // Sets one principal's override. `etag` is the entry's tag; an entry

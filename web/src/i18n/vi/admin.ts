@@ -240,27 +240,29 @@ export default {
   "admin.data.column.age": "Tuổi",
   "admin.data.action.purgeLabel": "Xoá vĩnh viễn {id}",
 
-  // Users page: principals known to the tenant (quota usage or a per-user
-  // limit row) plus per-user drill-down.
+  // Users page: everyone who has signed in to the tenant (the
+  // principal directory) plus per-user drill-down.
   "admin.users.title": "Người dùng",
-  "admin.users.description": "Mọi principal có mức dùng hoặc giới hạn trong tenant này.",
-  "admin.users.note":
-    "Danh sách này hiển thị những người dùng đã sử dụng tenant — mức dùng hạn mức hoặc giới hạn theo người dùng — không phải toàn bộ thư mục tenant.",
+  "admin.users.description": "Mọi người đã đăng nhập vào tenant này.",
   "admin.users.loading": "Đang tải người dùng",
   "admin.users.caption": "Người dùng tenant",
   "admin.users.filter.label": "Lọc",
   "admin.users.filter.placeholder": "Tên hoặc subject",
-  "admin.users.empty.all": "Chưa ghi nhận người dùng nào.",
+  "admin.users.empty.all": "Chưa có ai đăng nhập vào tenant này.",
   "admin.users.empty.filtered": "Không có người dùng nào khớp bộ lọc.",
   "admin.users.column.disks": "Đĩa",
+  "admin.users.column.lastSeen": "Hoạt động gần nhất",
+  "admin.users.column.workspaces": "Workspace",
   "admin.userDetail.titleFallback": "Chi tiết người dùng",
   "admin.userDetail.notFound.title": "Không tìm thấy người dùng",
   "admin.userDetail.notFound.body":
-    "Principal này không có mức dùng hoặc giới hạn trong tenant — hoặc danh sách đã thay đổi từ khi tải.",
+    "Người dùng này chưa đăng nhập vào tenant này.",
   "admin.userDetail.notFound.back": "Về danh sách người dùng",
   "admin.userDetail.limits.title": "Giới hạn workspace đang chạy",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.email": "Email",
+  "admin.userDetail.field.lastSeen": "Hoạt động gần nhất",
   "admin.userDetail.workspaces.title": "Workspace",
   "admin.userDetail.workspaces.caption": "Workspace của người dùng",
   "admin.userDetail.workspaces.empty": "Người dùng này không có workspace nào.",

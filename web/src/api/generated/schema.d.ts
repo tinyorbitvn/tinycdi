@@ -674,6 +674,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant user directory (paged)
+         * @description Everyone who has signed in to the tenant (the principal
+         *     directory), not only principals with usage or a stored limit —
+         *     one item per directory row, carrying the last-seen instant, the
+         *     active-workspace count and the principal's per-user limit entry.
+         *     Requires the tenant-admin role on the named tenant. Sort:
+         *     `ownerRef` (default), `displayName`, `lastSeen`; a `-` prefix
+         *     descends.
+         */
+        get: operations["listAdminTenantUsers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/users/{ownerRef}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One tenant directory entry
+         * @description One principal's directory row: everyone who has signed in to the
+         *     tenant (the principal directory), not only principals with usage
+         *     or a stored limit. A principal who never signed in answers `404`.
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminTenantUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -1317,6 +1366,21 @@ export interface components {
         };
         AdminAuditPage: {
             items: components["schemas"]["AdminAuditEntry"][];
+            nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminTenantUser: {
+            ownerRef: string;
+            subject: string;
+            displayName: string;
+            email: string;
+            /** Format: date-time */
+            lastSeenAt: string;
+            /** Format: int64 */
+            workspaces: number;
+            limits: components["schemas"]["AdminUserLimitEntry"];
+        };
+        AdminTenantUserPage: {
+            items: components["schemas"]["AdminTenantUser"][];
             nextCursor?: components["schemas"]["NextCursor"];
         };
         /**
@@ -2877,6 +2941,93 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminTenantUsers: {
+        parameters: {
+            query?: {
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the tenant's user directory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTenantUserPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminTenantUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The principal's directory entry. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTenantUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

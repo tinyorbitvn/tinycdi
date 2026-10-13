@@ -8,7 +8,7 @@ import { SessionPolicyPage } from "./SessionPolicyPage";
 import { TemplatesPage } from "./TemplatesPage";
 import { WorkspacesAdminPage } from "./WorkspacesAdminPage";
 import { DataAdminPage } from "./DataAdminPage";
-import { UserDetailPage, UsersAdminPage } from "./UsersAdminPage";
+import { UserDetailPage, UsersAdminPage, ownerRefFromParam } from "./UsersAdminPage";
 import { AuditPage } from "./AuditPage";
 import "./admin.css";
 
@@ -66,10 +66,10 @@ export const routes: AppRoute[] = [
     render: () => <UsersAdminPage />,
   },
   {
-    path: "/admin/users/:subject",
+    path: "/admin/users/:ownerRef",
     title: t("admin.route.user"),
     requires: "tenant-admin",
-    render: (p) => <UserDetailPage subject={p.subject!} />,
+    render: (p) => <UserDetailPage ownerRef={ownerRefFromParam(p.ownerRef!) ?? ""} />,
   },
   {
     path: "/admin/audit",

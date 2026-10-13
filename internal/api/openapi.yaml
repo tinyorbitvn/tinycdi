@@ -1237,6 +1237,79 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/users:
+    get:
+      operationId: listAdminTenantUsers
+      summary: Tenant user directory (paged)
+      description: |
+        Everyone who has signed in to the tenant (the principal
+        directory), not only principals with usage or a stored limit —
+        one item per directory row, carrying the last-seen instant, the
+        active-workspace count and the principal's per-user limit entry.
+        Requires the tenant-admin role on the named tenant. Sort:
+        `ownerRef` (default), `displayName`, `lastSeen`; a `-` prefix
+        descends.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200":
+          description: One page of the tenant's user directory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminTenantUserPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/admin/tenants/{tenant}/users/{ownerRef}:
+    get:
+      operationId: getAdminTenantUser
+      summary: One tenant directory entry
+      description: |
+        One principal's directory row: everyone who has signed in to the
+        tenant (the principal directory), not only principals with usage
+        or a stored limit. A principal who never signed in answers `404`.
+        Requires the tenant-admin role on the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/OwnerRef"
+      responses:
+        "200":
+          description: The principal's directory entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminTenantUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -2383,6 +2456,26 @@ components:
       required: [items]
       properties:
         items: {type: array, items: {$ref: '#/components/schemas/AdminAuditEntry'}}
+        nextCursor: {$ref: '#/components/schemas/NextCursor'}
+
+    AdminTenantUser:
+      type: object
+      additionalProperties: false
+      required: [ownerRef, subject, displayName, email, lastSeenAt, workspaces, limits]
+      properties:
+        ownerRef: {type: string}
+        subject: {type: string}
+        displayName: {type: string}
+        email: {type: string}
+        lastSeenAt: {type: string, format: date-time}
+        workspaces: {type: integer, format: int64, minimum: 0}
+        limits: {$ref: '#/components/schemas/AdminUserLimitEntry'}
+    AdminTenantUserPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminTenantUser'}}
         nextCursor: {$ref: '#/components/schemas/NextCursor'}
 
     ResolvedSessionPolicy:

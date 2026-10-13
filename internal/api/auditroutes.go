@@ -47,6 +47,9 @@ const (
 	auditActionAdminSessionPolicyClear = "admin.session_policy.clear"
 
 	auditActionAdminAuditGet = "admin.audit.get"
+
+	auditActionAdminUserList = "admin.user.list"
+	auditActionAdminUserGet  = "admin.user.get"
 )
 
 // Audited route patterns — shared between mux.Handle and auditedRoutes so a
@@ -71,6 +74,9 @@ const (
 	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
 
 	routeAdminAuditGet = "GET /v1/admin/tenants/{tenant}/audit"
+
+	routeAdminUsersList = "GET /v1/admin/tenants/{tenant}/users"
+	routeAdminUserGet   = "GET /v1/admin/tenants/{tenant}/users/{ownerRef}"
 )
 
 // :verb custom methods. ServeMux cannot match the verb labels (the verb
@@ -134,6 +140,8 @@ var auditedRoutes = map[string]auditedRoute{
 	routeAdminSessionPolicyGet: {auditActionAdminSessionPolicyGet, "tenant"},
 	routeAdminSessionPolicyPut: {auditActionAdminSessionPolicySet, "tenant"},
 	routeAdminAuditGet:         {auditActionAdminAuditGet, "tenant"},
+	routeAdminUsersList:        {auditActionAdminUserList, "tenant"},
+	routeAdminUserGet:          {auditActionAdminUserGet, "tenant"},
 }
 
 // routeAudit is the request-scoped record the audited wrapper places in the

@@ -129,6 +129,8 @@ test("a regular user is redirected away from /admin/users and tenant reads stay 
   // Every read behind the Users page is refused server-side for non-admins.
   const limits = await page.request.get("/v1/admin/tenants/acme/user-limits");
   expect(limits.status()).toBe(403);
+  const dir = await page.request.get("/v1/admin/tenants/acme/users");
+  expect(dir.status()).toBe(403);
   const quota = await page.request.get("/v1/admin/tenants/acme/quota");
   expect(quota.status()).toBe(403);
   const ws = await page.request.get("/v1/workspaces?scope=tenant");
@@ -143,20 +145,22 @@ test("a tenant admin opens a user's detail and edits their running limit", async
   await login(page, "/admin/users");
   await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
 
-  // The paged per-user limits collection lists every principal with usage or a limit.
+  // The paged user directory lists everyone who signed in.
   const table = page.getByRole("table", { name: "Tenant users" });
   await expect(table.getByRole("row", { name: /Grace Hopper/ })).toBeVisible();
   await expect(table.getByRole("row", { name: /Linus Pauling/ })).toBeVisible();
+  await expect(table.getByRole("row", { name: /Margaret Hamilton/ })).toBeVisible();
 
   // Search narrows the list.
   await page.getByLabel("Filter").fill("grace");
   await expect(table.getByRole("row", { name: /Linus Pauling/ })).toHaveCount(0);
   await page.getByLabel("Filter").fill("");
 
-  // Row -> user detail page.
+  // Row -> user detail page (the segment is the base64url owner reference).
   await table.getByRole("link", { name: "Grace Hopper" }).click();
-  await page.waitForURL(/\/admin\/users\/user-01J4ZDGRC$/);
+  await page.waitForURL("**/admin/users/" + Buffer.from("https://idp.invalid|user-01J4ZDGRC").toString("base64url"));
   await expect(page.getByRole("heading", { name: "Grace Hopper" })).toBeVisible();
+  await expect(page.getByText("Last seen", { exact: true })).toBeVisible();
 
   // Her workspaces and retained disk — and nobody else's.
   const wsTable = page.getByRole("table", { name: "The user's workspaces" });
@@ -191,6 +195,18 @@ test("a tenant admin opens a user's detail and edits their running limit", async
     name: /Grace Hopper/,
   });
   await expect(graceRow.getByRole("cell").nth(2)).toHaveText("3");
+});
+
+test("a signed-in user with no workspaces has a detail page", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin/users");
+
+  await page.getByRole("link", { name: "Margaret Hamilton" }).click();
+  await expect(page.getByRole("heading", { name: "Margaret Hamilton" })).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "The user's workspaces" }),
+  ).toContainText("This user has no workspaces.");
+  await expect(page.getByText("Last seen", { exact: true })).toBeVisible();
 });
 
 test("a tenant admin starts another user's stopped workspace", async ({ page, request }) => {

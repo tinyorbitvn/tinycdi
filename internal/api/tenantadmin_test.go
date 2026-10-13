@@ -38,6 +38,7 @@ type adminGroupFixtures struct {
 	uls *fakeUserLimitSource
 	sps *fakeSessionPolicySource
 	aud *fakeAuditSource
+	ud  *fakeUserDirectory
 }
 
 // newAdminGroupEnv mounts every admin-gated surface (/v1/me, /v1/workspaces,
@@ -70,6 +71,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 		uls: newFakeUserLimitSource(),
 		sps: &fakeSessionPolicySource{},
 		aud: &fakeAuditSource{},
+		ud:  &fakeUserDirectory{users: directoryUsers()},
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
@@ -82,6 +84,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(fx.uls, nil, defaultTenants()))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(fx.sps, defaultTenants()))
 	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(fx.aud, defaultTenants()))
+	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(fx.ud, fx.uls, defaultTenants()))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
@@ -293,6 +296,27 @@ func TestAdminAudit_CustomAdminGroups(t *testing.T) {
 
 	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
 	r = doReq(t, env, sess, csrf, http.MethodGet, adminAuditPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
+	}
+}
+
+// TestAdminUsers_CustomAdminGroups: the user-directory admin gate honours
+// the configured group — same tenantAdminPrincipal path as quota and
+// user limits.
+func TestAdminUsers_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	r := doReq(t, env, sess, csrf, http.MethodGet, adminUsersPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("member GET: status=%d, want 200", r.StatusCode)
+	}
+
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	r = doReq(t, env, sess, csrf, http.MethodGet, adminUsersPath, "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)

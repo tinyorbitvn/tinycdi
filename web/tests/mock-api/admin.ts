@@ -59,6 +59,12 @@ export const OTHER_USERS: Owner[] = [
   { subject: "user-01J4ZDGRC", displayName: "Grace Hopper" },
   { subject: "user-01J4ZDLIN", displayName: "Linus Pauling" },
 ]
+// Principals who signed in but hold no workspace, disk or override — the
+// user directory lists them, the user-limits collection does not.
+export const SIGNED_IN_ONLY: Owner[] = [
+  { subject: "user-01J4ZDMGH", displayName: "Margaret Hamilton" },
+  { subject: "user-01J4ZDKJN", displayName: "Katherine Johnson" },
+]
 
 export interface AuditRow {
   id: string;
@@ -578,6 +584,62 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  // GET /v1/admin/tenants/{tenant}/users[/{ownerRef}] — the tenant's
+  // principal directory: everyone who signed in, whether or not they hold
+  // a workspace, disk or limit override. lastSeenAt is a fixed instant per
+  // principal (staggered by an hour) so the lastSeen order is stable.
+  function directoryUsers() {
+    const principals = [t.me, ...OTHER_USERS, ...SIGNED_IN_ONLY];
+    const perUser = quotaBody().perUser;
+    return principals.map((p, i) => {
+      const ownerRef = ownerRefOf(p.subject);
+      let workspaces = 0;
+      for (const id of state.workspaces.keys()) {
+        if (t.ownerOf(id).subject === p.subject) workspaces += 1;
+      }
+      return {
+        ownerRef,
+        subject: p.subject,
+        displayName: p.displayName,
+        email: p.subject === t.me.subject ? (t.me.email ?? "") : "",
+        lastSeenAt: new Date(Date.UTC(2026, 9, 13, 9, 0) - i * 3_600_000).toISOString(),
+        workspaces,
+        limits: entryOf({
+          ownerRef,
+          subject: p.subject,
+          displayName: p.displayName,
+          running: perUser.get(p.subject)?.usage.runningWorkspaces ?? 0,
+        }),
+      };
+    });
+  }
+
+  function adminUsers(req: MockRequest, tenant: string, ownerRef: string | undefined): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const rows = directoryUsers();
+    if (ownerRef === undefined) {
+      return paginate(
+        req,
+        rows,
+        {
+          ownerRef: byString((u) => u.ownerRef),
+          displayName: byString((u) => u.displayName),
+          lastSeen: byString((u) => u.lastSeenAt),
+        },
+        "ownerRef",
+        (u) => u.ownerRef,
+      );
+    }
+    const row = rows.find((u) => u.ownerRef === ownerRef);
+    if (!row) return err(404, "NOT_FOUND", "user has not signed in to this tenant", false);
+    return ok(200, row);
+  }
+
   // GET/PUT /v1/admin/tenants/{tenant}/session-policy — tenant-admin of
   // the named tenant only. No row resolves FollowTemplate everywhere
   // (source FollowTemplate); a PUT whose every channel is
@@ -678,6 +740,8 @@ export function adminArea(ctx: MockContext): MockArea {
     if (mQuota) return adminQuota(req, mQuota[1]);
     const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(?:\/([^/]+))?$/);
     if (mUL) return adminUserLimits(req, mUL[1], mUL[2]);
+    const mU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users(?:\/([^/]+))?$/);
+    if (mU) return adminUsers(req, mU[1], mU[2] === undefined ? undefined : decodeURIComponent(mU[2]));
     const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
     if (mSP) return adminSessionPolicy(req, mSP[1]);
     const mAU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/audit$/);

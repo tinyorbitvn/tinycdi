@@ -34,7 +34,7 @@ const ROUTES = [
   "/admin/data",
   "/admin/users",
   "/admin/audit",
-  "/admin/users/user-01J4ZDGRC",
+  "/admin/users/aHR0cHM6Ly9pZHAuaW52YWxpZHx1c2VyLTAxSjRaREdSQw",
   "/data",
   "/data/rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A",
 ] as const;
