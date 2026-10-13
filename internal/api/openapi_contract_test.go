@@ -530,6 +530,19 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 	ws.DesiredState = "Running"
 	fx.backend.recs[wsID] = ws
 	fx.backend.mu.Unlock()
+	cr2 := doReq(t, env, sess, csrf, "POST", "/v1/workspaces",
+		`{"name":"contract-del","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-contract-create2"})
+	if cr2.StatusCode >= 300 {
+		cr2.Body.Close()
+		t.Fatalf("create second fixture workspace: status=%d", cr2.StatusCode)
+	}
+	delID := decodeBody[WorkspaceView](t, cr2).ID
+	fx.backend.mu.Lock()
+	wsDel := fx.backend.recs[delID]
+	wsDel.DesiredState = "Running"
+	fx.backend.recs[delID] = wsDel
+	fx.backend.mu.Unlock()
 	rec := seedRetained(fx.retained, "rd_contract0001", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
 	sessA, csrfA := loginAdmin(t, env, "admin-a")
 	anon := func(method, path string) *http.Response {
@@ -581,6 +594,28 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		}},
 		{"GET", "/v1/workspaces/{workspaceId}", func() *http.Response {
 			return doReq(t, env, sess, csrf, "GET", "/v1/workspaces/"+unknownWS, "", nil)
+		}},
+		// 400: malformed id, and a missing Idempotency-Key.
+		{"GET", "/v1/workspaces/{workspaceId}", func() *http.Response {
+			return doReq(t, env, sess, csrf, "GET", "/v1/workspaces/not-an-id", "", nil)
+		}},
+		{"DELETE", "/v1/workspaces/{workspaceId}", func() *http.Response {
+			return doReq(t, env, sess, csrf, "DELETE", "/v1/workspaces/not-an-id", "", nil)
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}:stop", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+":stop", "", map[string]string{"Idempotency-Key": "key-contract-stop"})
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}:stop", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/not-an-id:stop", "", map[string]string{"Idempotency-Key": "key-contract-stop"})
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}:start", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+":start", "", map[string]string{"Idempotency-Key": "key-contract-start"})
+		}},
+		{"DELETE", "/v1/workspaces/{workspaceId}", func() *http.Response {
+			return doReq(t, env, sess, csrf, "DELETE", "/v1/workspaces/"+delID, "", nil)
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}:start", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+":start", "", nil)
 		}},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/"+rec.ID, "", nil) }},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/rd_unknown", "", nil) }},

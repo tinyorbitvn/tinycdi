@@ -208,6 +208,11 @@ export function UsersAdminPage() {
         density="compact"
         empty={filter ? t("admin.users.empty.filtered") : t("admin.users.empty.all")}
       />
+      {filter && list.hasNext ? (
+        <p className="tc-admin-muted" role="status">
+          {t("common.filter.partial", { n: list.items.length })}
+        </p>
+      ) : null}
       <Pagination
         loaded={list.items.length}
         hasNext={list.hasNext}

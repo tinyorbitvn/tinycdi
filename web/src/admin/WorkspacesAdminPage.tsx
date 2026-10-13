@@ -403,6 +403,11 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           filter || phase ? t("admin.workspaces.empty.filtered") : t("admin.workspaces.empty.all")
         }
       />
+      {filter && list.hasNext ? (
+        <p className="tc-admin-muted" role="status">
+          {t("common.filter.partial", { n: list.items.length })}
+        </p>
+      ) : null}
       <Pagination
         loaded={list.items.length}
         hasNext={list.hasNext}

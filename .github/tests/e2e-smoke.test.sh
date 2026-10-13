@@ -89,7 +89,7 @@ while [ $# -gt 0 ]; do
 done
 state() { [ -f "$SD/state" ] && cat "$SD/state" || echo out; }
 auth() { [ "$jar" = 1 ] && [ "$(state)" = in ]; }
-code=404; rbody='{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}'
+code=404; rbody='{"error":{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}}'
 redir=""; sec=0
 case "$url" in
   https://portal.example.test/) code=200; sec=1 ;;
@@ -111,10 +111,10 @@ case "$url" in
     if auth; then
       code=200
       rbody='{"subject":"u1","displayName":"Stub","tenant":"tenant-a","roles":["user"],"csrfToken":"csrf-stub","sessionDomain":"session.example.test"}'
-    else code=401; rbody='{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}'; fi ;;
+    else code=401; rbody='{"error":{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}}'; fi ;;
   https://portal.example.test/v1/templates)
     if auth; then code=200; rbody='{"items":[{"id":"tpl_stub001","name":"browser"}]}'
-    else code=401; rbody='{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}'; fi ;;
+    else code=401; rbody='{"error":{"code":"UNAUTHENTICATED","message":"x","retryable":false,"requestId":"req_stub"}}'; fi ;;
   https://portal.example.test/v1/metrics) code=404 ;;
   https://portal.example.test/v1/quota)
     code=200
@@ -130,21 +130,21 @@ case "$url" in
       rbody="{\"id\":\"$id\",\"phase\":\"Ready\",\"desiredState\":\"Running\"}"
     else
       code=409
-      rbody='{"code":"QUOTA_EXHAUSTED","message":"x","retryable":false,"requestId":"req_stub"'
+      rbody='{"error":{"code":"QUOTA_EXHAUSTED","message":"x","retryable":false,"requestId":"req_stub"'
       [ -z "${STUB_REASON:-}" ] || rbody+=",\"details\":{\"reason\":\"$STUB_REASON\"}"
-      rbody+='}'
+      rbody+='}}'
     fi ;;
-  https://portal.example.test/v1/workspaces/*/stop)
-    echo Stopped >"$SD/phase"; code=200; rbody='{"phase":"Stopped"}' ;;
-  https://portal.example.test/v1/workspaces/*/start)
-    echo Ready >"$SD/phase"; code=200; rbody='{"phase":"Ready"}' ;;
+  https://portal.example.test/v1/workspaces/*:stop)
+    echo Stopped >"$SD/phase"; code=202; rbody='{"phase":"Stopped"}' ;;
+  https://portal.example.test/v1/workspaces/*:start)
+    echo Ready >"$SD/phase"; code=202; rbody='{"phase":"Ready"}' ;;
   https://portal.example.test/v1/workspaces/ws_*)
     id="${url##*/v1/workspaces/}"
     if [ "$method" = DELETE ]; then
       echo "$id" >>"$SD/deleted"
       code=202; rbody='{"phase":"Terminating"}'
     elif grep -qx "$id" "$SD/deleted" 2>/dev/null; then
-      code=404; rbody='{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}'
+      code=404; rbody='{"error":{"code":"NOT_FOUND","message":"x","retryable":false,"requestId":"req_stub"}}'
     else
       code=200; phase="$(cat "$SD/phase" 2>/dev/null || echo Ready)"
       rbody="{\"id\":\"$id\",\"phase\":\"$phase\",\"desiredState\":\"Running\"}"

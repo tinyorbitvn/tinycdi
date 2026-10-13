@@ -4,20 +4,21 @@ Companion to install.md §Upgrade. Covers moving a Helm release from one
 release candidate to the next, the ordering that keeps running sessions
 alive, and what "rollback" does and does not mean.
 
-## Upgrading from v0.5.1 to v1.0.0
+## Upgrading from a pre-1.0 release to v1.0.0
 
-v1.0.0 carries **no CRD change and no database migration** over v0.5.1 —
-the upgrade is the chart plus the pinned images, nothing else. There is
-no `crds/` step: the `workspaces` and `workspacetemplates` schemas are
-unchanged from v0.5.1 (and Helm never upgrades `crds/` anyway). Follow
-the general "Procedure" below, skipping the CRD step: pin the new image
-digests (`images.{backend,frontend,operator}.digest`, plus the
-runtime-train digests per [images.md](../images.md)), render and diff,
-then `helm upgrade`. Sessions keep running under the same rules.
+There is **no upgrade from a pre-1.0 release**. v1.0.0 ships the CRDs at
+`v1` only (no `v1alpha1`, no conversion) and the database migrations are
+squashed into `0001_baseline`. Reinstall instead of upgrading:
 
-Rollback is the same as for any chart-only step: `helm rollback`, or
-re-pin the previous digests and `helm upgrade` — nothing schema-side
-moves, so the outgoing release reads the same objects it wrote.
+1. Uninstall the old release and delete its CRDs
+   (`workspaces` and `workspacetemplates`) and its database.
+2. Install v1.0.0 from scratch with a fresh database
+   ([install.md](install.md)).
+
+The backend refuses to start against a database whose `schema_migrations`
+holds a version or name that this build does not embed (every pre-1.0
+database does), so an in-place `helm upgrade` fails closed rather than
+running on the old schema.
 
 ## Upgrading from v0.5.0 to v0.5.1 — `status.templateSnapshot`
 

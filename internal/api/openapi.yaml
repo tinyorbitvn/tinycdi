@@ -401,6 +401,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -439,6 +441,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -485,6 +489,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -523,6 +529,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

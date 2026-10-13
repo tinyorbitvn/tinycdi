@@ -52,6 +52,11 @@ the apiserver NetworkPolicy peers.
 
 ## Upgrade
 
+There is no upgrade from a pre-1.0 release: the CRDs are `v1` only and the
+database schema is a fresh `0001_baseline`, so you uninstall the old
+release, remove its CRDs and database, and reinstall. The backend refuses
+to start on a pre-1.0 database. Later releases upgrade with:
+
 ```bash
 helm upgrade tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
 ```
@@ -209,7 +214,7 @@ the value to set instead:
 | `TCDI_WATCH_NAMESPACES` | `managedNamespaces` |
 | `TCDI_REQUIRED_GROUPS` | `oidc.requiredGroups` |
 | `TCDI_TENANT_ADMIN_GROUPS` | `oidc.tenantAdminGroups` |
-| `TCDI_CONTROL_TOKEN` / `TCDI_GW_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
+| `TCDI_CONTROL_TOKEN` / `TCDI_CONTROL_TOKEN_FILE` | `backend.controlToken.existingSecret` |
 | `TCDI_TRUSTED_PROXIES` | `backend.trustedProxies` |
 | `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
 | `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |

@@ -13,6 +13,7 @@ export default {
 
   "common.pagination.label": "Phân trang {name}",
   "common.pagination.loadedMore": "Đang hiển thị {n} mục đầu tiên",
+  "common.filter.partial": "Đang tìm trong {n} mục đã tải. Hãy tải thêm để tìm tiếp.",
   "common.pagination.loadedAll": "Đang hiển thị tất cả {n} mục",
   "common.pagination.loadMore": "Tải thêm",
   "common.collectionTooLarge": "Chế độ xem này cần hơn {n} bản ghi, vượt quá số lượng cổng thông tin đọc một lần.",

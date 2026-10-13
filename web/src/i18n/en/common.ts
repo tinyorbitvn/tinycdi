@@ -11,6 +11,7 @@ export default {
 
   "common.pagination.label": "{name} pages",
   "common.pagination.loadedMore": "Showing the first {n}",
+  "common.filter.partial": "Searching the {n} rows loaded so far. Load more to search further.",
   "common.pagination.loadedAll": "Showing all {n}",
   "common.pagination.loadMore": "Load more",
   "common.collectionTooLarge": "This view needs more than {n} records, which is more than the portal reads at once.",
