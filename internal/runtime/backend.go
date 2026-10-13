@@ -30,8 +30,9 @@ type Observation struct {
 	// endpoint answering inside the runtime).
 	RuntimeReady bool
 
-	// ConnectionReady reports the streaming endpoint is reachable on the
-	// internal Service.
+	// ConnectionReady reports the streaming endpoint is reachable: the
+	// runtime is ready and the internal Service routes to this
+	// incarnation's pod.
 	ConnectionReady bool
 
 	// ServiceRef is the internal Service fronting this incarnation. Nil

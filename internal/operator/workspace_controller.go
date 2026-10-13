@@ -153,6 +153,11 @@ const (
 	// converging; pod watches trigger sooner, this also drives the boot
 	// deadline clock.
 	requeueNotReady = 3 * time.Second
+	// requeueEndpointWait is the poll interval while only the ready
+	// EndpointSlice endpoint is missing; the endpointslice controller
+	// trails the kubelet by well under a second and no slice watch is
+	// registered.
+	requeueEndpointWait = time.Second
 	// requeueRetry is the interval for non-error soft retries (e.g. missing
 	// template).
 	requeueRetry = 10 * time.Second
@@ -234,6 +239,7 @@ func (r *WorkspaceReconciler) newFinalizer() *Finalizer {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WorkspaceReconciler) now() time.Time {
@@ -590,6 +596,9 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Wo
 	if phase != cdiv1.WorkspacePhaseReady &&
 		phase != cdiv1.WorkspacePhaseFailed {
 		res.RequeueAfter = requeueNotReady
+		if obs.RuntimeReady && !obs.ConnectionReady {
+			res.RequeueAfter = requeueEndpointWait
+		}
 	}
 	return res, r.writeStatus(ctx, ws, applied, obs, phase, statusErr, snap)
 }

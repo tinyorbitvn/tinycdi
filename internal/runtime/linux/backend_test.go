@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -392,4 +393,67 @@ func TestClusterOnlyEgress_UnrestrictedOptIn(t *testing.T) {
 	if len(rule.To) != 2 {
 		t.Fatalf("%+v", rule)
 	} // any pod, any namespace (pod peers only)
+}
+
+func TestObserve_ConnectionReadyNeedsReadyEndpointOfThisPod(t *testing.T) {
+	cases := []struct {
+		name  string
+		slice func(pod *corev1.Pod, svc string) *discoveryv1.EndpointSlice
+		want  bool
+	}{
+		{"no slice yet", func(*corev1.Pod, string) *discoveryv1.EndpointSlice { return nil }, false},
+		{"slice for this pod, not ready", func(p *corev1.Pod, svc string) *discoveryv1.EndpointSlice {
+			s := ReadyEndpointSlice(p, svc)
+			s.Endpoints[0].Conditions.Ready = ptr(false)
+			return s
+		}, false},
+		{"slice for an old pod uid", func(p *corev1.Pod, svc string) *discoveryv1.EndpointSlice {
+			s := ReadyEndpointSlice(p, svc)
+			s.Endpoints[0].TargetRef.UID = "old-pod-uid"
+			return s
+		}, false},
+		{"ready slice for this pod", ReadyEndpointSlice, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			ws := testWorkspace()
+			kc := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
+			b := New(kc, Options{})
+			if _, err := b.Ensure(ctx, ws, testTemplate(nil)); err != nil {
+				t.Fatalf("Ensure: %v", err)
+			}
+			pod := &corev1.Pod{}
+			if err := kc.Get(ctx, client.ObjectKey{Name: PodName(ws.UID), Namespace: ws.Namespace}, pod); err != nil {
+				t.Fatalf("pod: %v", err)
+			}
+			pod.UID = types.UID("pod-uid-1")
+			if err := kc.Update(ctx, pod); err != nil {
+				t.Fatalf("stamp pod uid: %v", err)
+			}
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			if err := kc.Status().Update(ctx, pod); err != nil {
+				t.Fatalf("mark pod ready: %v", err)
+			}
+			if s := c.slice(pod, ServiceName(ws.UID)); s != nil {
+				if err := kc.Create(ctx, s); err != nil {
+					t.Fatalf("create slice: %v", err)
+				}
+			}
+			obs, err := b.Observe(ctx, ws)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !obs.RuntimeReady {
+				t.Fatalf("RuntimeReady = false, want true (the pod is Ready)")
+			}
+			if obs.ConnectionReady != c.want {
+				t.Errorf("ConnectionReady = %v, want %v (reason %q)", obs.ConnectionReady, c.want, obs.Reason)
+			}
+			if !c.want && obs.Reason != "WaitingForEndpoint" {
+				t.Errorf("reason %q, want WaitingForEndpoint", obs.Reason)
+			}
+		})
+	}
 }

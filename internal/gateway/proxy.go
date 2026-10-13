@@ -182,6 +182,9 @@ type Config struct {
 	// transport yields the conn to the hijacked stream and applies no
 	// deadline to it.
 	UpstreamResponseHeaderTimeout time.Duration
+	// UpstreamDialBudget is the total retry budget for refused upstream
+	// connects (default UpstreamDialBudget); injectable for tests.
+	UpstreamDialBudget time.Duration
 	// SessionLookupLimiter bounds session-directory lookups for cookies
 	// this replica has never seen — the only proxy-path request that
 	// spends Postgres reads before auth. It is keyed by the plain client
@@ -275,6 +278,9 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.UpstreamResponseHeaderTimeout <= 0 {
 		cfg.UpstreamResponseHeaderTimeout = UpstreamHeaderTimeout
+	}
+	if cfg.UpstreamDialBudget <= 0 {
+		cfg.UpstreamDialBudget = UpstreamDialBudget
 	}
 	if cfg.UnattachedSessionTTL <= 0 {
 		cfg.UnattachedSessionTTL = UnattachedSessionTTL
@@ -883,6 +889,7 @@ func (g *Gateway) ensureTarget(ctx context.Context, s *session) error {
 			ServerName: t.TLSServerName,
 			MinVersion: tls.VersionTLS12,
 		},
+		DialContext:           dialWithRetry(g.cfg.UpstreamDialBudget),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: g.cfg.UpstreamResponseHeaderTimeout,
 		ExpectContinueTimeout: 1 * time.Second,

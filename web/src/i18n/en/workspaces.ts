@@ -242,6 +242,7 @@ export default {
   "workspaces.reason.containerCreating": "Creating the container.",
   "workspaces.reason.podInitializing": "An init container is running.",
   "workspaces.reason.notReady": "The container is up; the readiness check hasn't passed.",
+  "workspaces.reason.waitingForEndpoint": "The desktop is up; the cluster is routing connections to it.",
   "workspaces.reason.imagePull": "The runtime image couldn't be downloaded.",
   "workspaces.reason.crashLoopBackOff": "The container keeps restarting.",
   "workspaces.reason.createContainerConfigError": "The container config is invalid.",

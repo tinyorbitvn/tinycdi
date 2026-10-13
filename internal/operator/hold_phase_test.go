@@ -51,6 +51,7 @@ func servingPod(t *testing.T, c client.Client, pod *corev1.Pod, uid types.UID) {
 	if err := c.Status().Update(context.Background(), pod); err != nil {
 		t.Fatalf("mark pod serving: %v", err)
 	}
+	publishReadyEndpoint(t, c, pod)
 }
 
 // assertHeldReady asserts the with-pod hold shape: phase Ready — the

@@ -42,6 +42,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -547,10 +548,18 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 	default:
 		obs.ServiceRef = &cdiv1.ServiceReference{Name: svc.Name, Port: streamingPort}
 	}
-	// ConnectionReady: the streaming endpoint answers when the runtime is
-	// ready and the fronting Service exists (endpoints are populated by the
-	// control plane from the same Ready signal).
-	obs.ConnectionReady = obs.RuntimeReady && obs.ServiceRef != nil
+	// ConnectionReady: the runtime is ready, the fronting Service exists and
+	// its EndpointSlices already route to THIS pod (F2).
+	if obs.RuntimeReady && obs.ServiceRef != nil {
+		ready, err := b.endpointReady(ctx, ws.Namespace, ServiceName(uid), types.UID(obs.RuntimeUID))
+		if err != nil {
+			return obs, err
+		}
+		obs.ConnectionReady = ready
+		if !ready {
+			obs.Reason = "WaitingForEndpoint"
+		}
+	}
 
 	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -569,6 +578,50 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 		obs.StorageReady = true
 	}
 	return obs, nil
+}
+
+// endpointReady reports whether the Service's EndpointSlices carry a ready
+// endpoint that targets podUID. The kubelet's readiness probe already
+// proved the stream port answers inside the pod (healthcheck.sh curls
+// 127.0.0.1:8443 with the runtime credential); this proves the Service
+// route the gateway dials has caught up with that pod (F2).
+func (b *Backend) endpointReady(ctx context.Context, ns, service string, podUID types.UID) (bool, error) {
+	if podUID == "" {
+		return false, nil
+	}
+	var slices discoveryv1.EndpointSliceList
+	if err := b.client.List(ctx, &slices, client.InNamespace(ns),
+		client.MatchingLabels{discoveryv1.LabelServiceName: service}); err != nil {
+		return false, err
+	}
+	for _, s := range slices.Items {
+		for _, ep := range s.Endpoints {
+			if ep.TargetRef != nil && ep.TargetRef.UID == podUID &&
+				ep.Conditions.Ready != nil && *ep.Conditions.Ready {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ReadyEndpointSlice is the EndpointSlice the endpointslice controller
+// publishes for a ready pod behind service. Tests use it where no
+// controller runs (fake clients, envtest).
+func ReadyEndpointSlice(pod *corev1.Pod, service string) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: service + "-ready", Namespace: pod.Namespace,
+			Labels: map[string]string{discoveryv1.LabelServiceName: service},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses:  []string{"10.0.0.1"},
+			Conditions: discoveryv1.EndpointConditions{Ready: ptr(true)},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace, UID: pod.UID},
+		}},
+		Ports: []discoveryv1.EndpointPort{{Port: ptr(streamingPort)}},
+	}
 }
 
 // Stop terminates the current incarnation but keeps data allowed by

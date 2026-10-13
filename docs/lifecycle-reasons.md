@@ -23,6 +23,7 @@ reason) while it is `False`.
 | `ImagePullBackOff`, `ErrImagePull` | an image (including an init container's) cannot be pulled |
 | `CrashLoopBackOff`, `CreateContainerConfigError`, `PodFailed` | the container does not start |
 | `NotReady` | the container runs; the runtime's readiness check has not passed |
+| `WaitingForEndpoint` | `ConnectionReady` only: the desktop answers inside its pod (`RuntimeReady` is `True`), and the cluster has not yet routed the workspace Service to it (seconds) |
 | `BackendError` | the platform could not complete a runtime step (cluster quota, admission, API-server error); it retries with backoff and the boot deadline still applies |
 | `BootDeadlineExceeded` | the start did not finish within the template's `bootDeadline`; `phase` is `Failed` |
 

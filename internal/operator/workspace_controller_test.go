@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -205,9 +206,9 @@ func countChildren(t *testing.T, c client.Client, ns string, uid types.UID) (pod
 		listOwned(t, c, ns, uid, &networkingv1.NetworkPolicyList{}, "netpols")
 }
 
-// markPodReady simulates the kubelet: Pod scheduled + Ready condition true
+// markPodReadyOnly simulates the kubelet alone: Pod scheduled + Ready
 // (readinessProbe exec of the runtime healthcheck passing).
-func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
+func markPodReadyOnly(t *testing.T, c client.Client, pod *corev1.Pod) {
 	t.Helper()
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.Conditions = []corev1.PodCondition{
@@ -217,6 +218,26 @@ func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
 	if err := c.Status().Update(context.Background(), pod); err != nil {
 		t.Fatalf("mark pod ready: %v", err)
 	}
+}
+
+// publishReadyEndpoint simulates the endpointslice controller: a recreated
+// pod reuses the slice name with a new pod UID, so the old slice is replaced.
+func publishReadyEndpoint(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
+	ctx := context.Background()
+	slice := linux.ReadyEndpointSlice(pod, linux.ServiceName(types.UID(pod.Labels[linux.LabelWorkspaceUID])))
+	_ = c.Delete(ctx, &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: slice.Name, Namespace: slice.Namespace}})
+	if err := c.Create(ctx, slice); err != nil {
+		t.Fatalf("publish endpoint slice: %v", err)
+	}
+}
+
+// markPodReady is what the cluster does for a healthy pod: kubelet Ready,
+// then the slice that routes the Service to it.
+func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
+	markPodReadyOnly(t, c, pod)
+	publishReadyEndpoint(t, c, pod)
 }
 
 func thePod(t *testing.T, c client.Client, ns string, uid types.UID) *corev1.Pod {

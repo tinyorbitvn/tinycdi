@@ -92,6 +92,7 @@ const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   ContainerCreating: "workspaces.reason.containerCreating",
   PodInitializing: "workspaces.reason.podInitializing",
   NotReady: "workspaces.reason.notReady",
+  WaitingForEndpoint: "workspaces.reason.waitingForEndpoint",
   ImagePullBackOff: "workspaces.reason.imagePull",
   ErrImagePull: "workspaces.reason.imagePull",
   CrashLoopBackOff: "workspaces.reason.crashLoopBackOff",

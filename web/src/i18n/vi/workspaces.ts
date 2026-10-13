@@ -242,6 +242,7 @@ export default {
   "workspaces.reason.containerCreating": "Đang tạo container.",
   "workspaces.reason.podInitializing": "Một init container đang chạy.",
   "workspaces.reason.notReady": "Container đã chạy; kiểm tra sẵn sàng chưa qua.",
+  "workspaces.reason.waitingForEndpoint": "Desktop đã chạy; cụm đang định tuyến kết nối tới nó.",
   "workspaces.reason.imagePull": "Không tải được image runtime.",
   "workspaces.reason.crashLoopBackOff": "Container liên tục khởi động lại.",
   "workspaces.reason.createContainerConfigError": "Cấu hình container không hợp lệ.",

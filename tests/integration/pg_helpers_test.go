@@ -19,6 +19,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -68,6 +69,9 @@ func TestMain(m *testing.M) {
 			panic(err)
 		}
 		if err := corev1.AddToScheme(scheme); err != nil {
+			panic(err)
+		}
+		if err := discoveryv1.AddToScheme(scheme); err != nil {
 			panic(err)
 		}
 		env := &envtest.Environment{
