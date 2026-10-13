@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -29,7 +30,7 @@ func TestResolveSessionPolicy_NoRowIsFollowTemplate(t *testing.T) {
 	if got.Clipboard != provisioning.PolicyBidirectional {
 		t.Fatalf("no ceiling row must resolve the template's own policy, got %+v", got)
 	}
-	if got.FileTransfer.Mode != provisioning.PolicyDisabled {
+	if got.FileTransfer != cdiv1.FileTransferDisabled {
 		t.Fatalf("fileTransfer resolves Disabled until T11: %+v", got.FileTransfer)
 	}
 }

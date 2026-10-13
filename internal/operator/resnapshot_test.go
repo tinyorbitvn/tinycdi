@@ -216,11 +216,11 @@ func TestSnapshot_UnchangedWithinGeneration(t *testing.T) {
 	}
 }
 
-// TestSnapshot_KeptWhenStartKeepsFamilyRef: a Stopped -> Running start that
-// carries no re-point (the family reference is unchanged — a pinned or
-// guard-skipped start) must NOT re-resolve the family to its newer member:
+// TestSnapshot_KeptWhenStartKeepsRef: a Stopped -> Running start that
+// carries no re-point (the reference is unchanged — a pinned or
+// guard-skipped start) must NOT drift to the family's newer member:
 // the snapshot stays on the recorded revision and the pod keeps its image.
-func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
+func TestSnapshot_KeptWhenStartKeepsRef(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
 		if err := env.Stop(); err != nil {
@@ -230,9 +230,9 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 	ns := newNamespace(t, c)
 	familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 
-	// The create path writes the catalog (family) name, not the resolved
-	// revision object — the resolver records revision A under it.
-	ws := newWorkspace(t, c, ns, "ws-familyref", "fam32", nil)
+	// The create path stamps the resolved revision object name — the
+	// workspace was admitted on fam32-aaaa1111.
+	ws := newWorkspace(t, c, ns, "ws-familyref", "fam32-aaaa1111", nil)
 	key := types.NamespacedName{Name: ws.Name, Namespace: ns}
 	r := newReconciler(c)
 
@@ -241,8 +241,8 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 		t.Fatalf("generation-1 pod image = %s, want revision A %s", got, resnapImageA)
 	}
 	if snap := snapshotOf(t, getWorkspace(t, c, key)); snap.Name != "fam32-aaaa1111" ||
-		snap.SourceRef != "fam32" {
-		t.Fatalf("recorded snapshot = %+v, want fam32-aaaa1111 from ref fam32", snap)
+		snap.SourceRef != "fam32-aaaa1111" {
+		t.Fatalf("recorded snapshot = %+v, want fam32-aaaa1111", snap)
 	}
 
 	// Revision B publishes, then the workspace stops and starts WITHOUT a
@@ -264,7 +264,7 @@ func TestSnapshot_KeptWhenStartKeepsFamilyRef(t *testing.T) {
 			got, resnapImageA)
 	}
 	snap := snapshotOf(t, getWorkspace(t, c, key))
-	if snap.Name != "fam32-aaaa1111" || snap.SourceRef != "fam32" || snap.RuntimeGeneration != 1 {
+	if snap.Name != "fam32-aaaa1111" || snap.SourceRef != "fam32-aaaa1111" || snap.RuntimeGeneration != 1 {
 		t.Fatalf("snapshot = %+v, want the recorded revision A untouched", snap)
 	}
 }
@@ -489,7 +489,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	t.Run("pre-stamp pod adopts resolved revision, pod untouched", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
-		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32", nil)
+		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32-aaaa1111", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
 		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
@@ -497,8 +497,8 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A v0.5.0 pod carries no identity stamps; its annotation — even
-		// an honest legacy-shaped one — is never a source. The resolved
-		// candidate is the live revision; the pod provably matches it.
+		// an honest legacy-shaped one — is never a source. The candidate
+		// is the live object templateRef names; the pod provably matches it.
 		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
@@ -530,7 +530,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 	t.Run("pre-stamp pod rotated revision holds degraded", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
-		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32", nil)
+		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32-bbbb2222", nil)
 		key := types.NamespacedName{Name: ws.Name, Namespace: ns}
 		live := &cdiv1.WorkspaceTemplate{}
 		if err := c.Get(context.Background(),
@@ -545,9 +545,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		if err := c.Update(context.Background(), pod); err != nil {
 			t.Fatalf("unstamp pod: %v", err)
 		}
-		// The pod was built from fam32-aaaa1111; a fresh revision object
-		// with different pod content now resolves the family — the pod
-		// disproves the candidate.
+		// The pod was built from fam32-aaaa1111 but templateRef was
+		// re-pointed at fam32-bbbb2222 — different pod content, so the pod
+		// disproves the resolved candidate.
 		familyRevision(t, c, ns, "fam32-bbbb2222", "2026-10-b", resnapImageB)
 		r := newReconciler(c)
 		reconcile(t, r, key)

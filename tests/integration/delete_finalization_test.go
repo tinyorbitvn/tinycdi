@@ -66,7 +66,7 @@ func (f *finalizationFixture) create(t *testing.T, name, policy string) provisio
 	t.Helper()
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-fx", Name: name,
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: policy,
 	}

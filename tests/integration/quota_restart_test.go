@@ -50,7 +50,7 @@ func createStopped(t *testing.T, svc *provisioning.Service, rec *provisioning.Re
 		OwnerIssuer:  "issuer",
 		OwnerSubject: "sub-quota",
 		Name:         name,
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Stopped",
 		DataPolicy:   "Ephemeral",
@@ -95,7 +95,7 @@ func TestStartReacquiresQuota(t *testing.T) {
 	// A running occupies the single slot.
 	reqA := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-quota", Name: "f7-a",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Ephemeral",
 	}
@@ -221,7 +221,7 @@ func TestStartOnRunningIsIdempotent(t *testing.T) {
 
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-quota", Name: "f7-noop",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Ephemeral",
 	}

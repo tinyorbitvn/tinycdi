@@ -6,6 +6,7 @@ package provisioning
 import (
 	"testing"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -52,9 +53,9 @@ func wantMeet(tpl, ceil string) string {
 	}
 }
 
-// A resolved vector carries the inert file-transfer leg (T11 schema) and,
-// while no template file policy exists, resolves it Disabled regardless
-// of the ceiling row.
+// A resolved vector carries the inert file-transfer channel and, while
+// the catalog entry exposes no fileTransferPolicy leg (F4/T11 wires it),
+// resolves it Disabled regardless of the stored ceiling row.
 func TestSessionPolicyMeetCeiling_FileTransferInert(t *testing.T) {
 	dl := FileTransferDownload
 	max := int64(1024)
@@ -66,10 +67,7 @@ func TestSessionPolicyMeetCeiling_FileTransferInert(t *testing.T) {
 			FileMaxBytes: &max,
 		},
 	)
-	if sp.FileTransfer.Mode != PolicyDisabled {
-		t.Fatalf("fileTransfer resolved %q, want Disabled until T11", sp.FileTransfer.Mode)
-	}
-	if sp.FileTransfer.MaxFileBytes == nil || *sp.FileTransfer.MaxFileBytes != 1024 {
-		t.Fatalf("maxFileBytes must pass through for T11: %+v", sp.FileTransfer.MaxFileBytes)
+	if sp.FileTransfer != cdiv1.FileTransferDisabled {
+		t.Fatalf("fileTransfer resolved %q, want Disabled until F4/T11", sp.FileTransfer)
 	}
 }

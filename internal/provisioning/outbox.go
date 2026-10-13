@@ -36,8 +36,11 @@ func (k IntentKind) Valid() bool {
 // build the Workspace CR. Snapshotted into the intent payload so later
 // catalog or workspace-row changes cannot rewrite history.
 type IntentSpec struct {
-	WorkspaceName   string `json:"workspaceName,omitempty"`
-	TemplateName    string `json:"templateName,omitempty"` // K8s WorkspaceTemplate name
+	WorkspaceName string `json:"workspaceName,omitempty"`
+	// TemplateName is the resolved WorkspaceTemplate OBJECT name the CR's
+	// spec.templateRef carries — the concrete revision admitted, never the
+	// catalog (family) name.
+	TemplateName    string `json:"templateName,omitempty"`
 	OwnerIssuer     string `json:"ownerIssuer,omitempty"`
 	OwnerSubject    string `json:"ownerSubject,omitempty"`
 	DataPolicy      string `json:"dataPolicy,omitempty"`

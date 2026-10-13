@@ -60,6 +60,7 @@ func attachReq() api.AttachRequest {
 		Template: provisioning.TemplateInfo{
 			ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1,
 			Runtime: "LinuxContainer", Experience: "Desktop",
+			ClipboardPolicy: provisioning.PolicyDisabled,
 		},
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30,
@@ -481,7 +482,7 @@ func TestRetention_QuotaHeldUntilDeletion(t *testing.T) {
 	src, err := svc.CreateWorkspace(ctx, tenant, "key-src", provisioning.CreateRequest{
 		OwnerIssuer: "https://issuer.test", OwnerSubject: "sub-1",
 		Name:       "src-ws",
-		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:     provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		DataPolicy: "Retain",
 	}, []byte("create-src"))
@@ -541,7 +542,7 @@ func TestRetention_AttachMovesQuota(t *testing.T) {
 	src, err := svc.CreateWorkspace(ctx, tenant, "key-src", provisioning.CreateRequest{
 		OwnerIssuer: "https://issuer.test", OwnerSubject: "sub-1",
 		Name:       "src-ws",
-		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:   provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:     provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		DataPolicy: "Retain",
 	}, []byte("create-src"))

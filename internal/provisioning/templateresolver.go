@@ -17,8 +17,10 @@ import (
 // workspaces.cdi.tinyorbit.vn/catalog-name label equal to the reference —
 // seeded templates are published as immutable "<name>-<hash8>" objects, so a
 // base-name reference resolves through revision churn. The single
-// implementation of that rule, shared by the API catalog, the broker's
-// running-set projection and the operator's first-admit resolution.
+// implementation of that rule, shared by the API catalog and the broker's
+// running-set projection. The operator does NOT use it: spec.templateRef
+// always names the resolved revision object, and convergence fails closed
+// on any reference that does not Get exactly.
 //
 // The original NotFound error is returned when neither an exact object nor
 // a catalog revision exists so callers keep their own miss handling; every

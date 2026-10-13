@@ -616,7 +616,7 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 		}
 		rev, err := appendIntent(ctx, tx, PlatformID(res.ID), IntentCreate, &IntentSpec{
 			WorkspaceName:   req.Name,
-			TemplateName:    req.Template.Name,
+			TemplateName:    templateRefName(req.Template),
 			OwnerIssuer:     issuer,
 			OwnerSubject:    sub,
 			DataPolicy:      "Retain",

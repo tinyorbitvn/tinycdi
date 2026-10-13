@@ -220,8 +220,8 @@ func TestStart_PinnedStays(t *testing.T) {
 		t.Fatalf("pinned start must not carry a template re-point, got %+v", start.Spec)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged family ref linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 
@@ -394,8 +394,8 @@ func TestUpdate_SkippedWhenStorageSmaller(t *testing.T) {
 			kind, reason, provisioning.SkipReasonStorageSmaller)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 
@@ -424,8 +424,8 @@ func TestUpdate_SkippedWhenDataPolicyDiffers(t *testing.T) {
 			kind, reason, provisioning.SkipReasonDataPolicyChanged)
 	}
 	cr := applyPending(t, db, ws)
-	if cr.Spec.TemplateRef.Name != "linuxdesk" {
-		t.Fatalf("CR templateRef = %q, want unchanged linuxdesk", cr.Spec.TemplateRef.Name)
+	if cr.Spec.TemplateRef.Name != "linuxdesk-aaaa1111" {
+		t.Fatalf("CR templateRef = %q, want unchanged revision linuxdesk-aaaa1111", cr.Spec.TemplateRef.Name)
 	}
 }
 

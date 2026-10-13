@@ -704,13 +704,14 @@ func TestBootDeadlineIncarnationAnchor(t *testing.T) {
 	})
 }
 
-// TestTemplateCatalogFallback covers the F1 follow-through: a Workspace
-// whose spec.templateRef.name is a catalog base name resolves to the
-// newest published immutable revision ("<name>-<hash8>" carrying the
-// workspaces.cdi.tinyorbit.vn/catalog-name label) when no object bears the
-// exact name — e.g. a stopped workspace created before an upgrade that
-// swapped the seeded template objects.
-func TestTemplateCatalogFallback(t *testing.T) {
+// TestTemplateCatalogNameNotResolved pins the removed F1 follow-through:
+// a Workspace whose spec.templateRef.name is a catalog base name does
+// NOT resolve to the newest labeled revision — spec.templateRef names a
+// concrete WorkspaceTemplate object (the admission path stamps the
+// resolved revision name), so a base name is simply a reference to an
+// object that does not exist. The workspace fails closed
+// Degraded/TemplateInvalid and builds no pod.
+func TestTemplateCatalogNameNotResolved(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
 		if err := env.Stop(); err != nil {
@@ -729,16 +730,15 @@ func TestTemplateCatalogFallback(t *testing.T) {
 
 	reconcile(t, r, key)
 	wsNow := getWorkspace(t, c, key)
-	if cond := condition(wsNow, cdiv1.ConditionDegraded); cond != nil &&
-		cond.Status == metav1.ConditionTrue && cond.Reason == ReasonTemplateNotFound {
-		t.Fatalf("base-name templateRef must resolve via catalog-name label, got TemplateNotFound")
+	if cond := condition(wsNow, cdiv1.ConditionDegraded); cond == nil ||
+		cond.Status != metav1.ConditionTrue || cond.Reason != ReasonTemplateInvalid {
+		t.Fatalf("base-name templateRef must hold Degraded/TemplateInvalid, got %+v", wsNow.Status.Conditions)
 	}
-	pod := thePod(t, c, ns, ws.UID)
-	markPodReady(t, c, pod)
-	reconcile(t, r, key)
-	wsNow = getWorkspace(t, c, key)
-	if wsNow.Status.Phase != cdiv1.WorkspacePhaseReady {
-		t.Fatalf("phase=%q want Ready via fallback-resolved template", wsNow.Status.Phase)
+	if wsNow.Status.TemplateSnapshot != nil {
+		t.Fatalf("catalog-name resolution leaked a snapshot into status: %+v", wsNow.Status.TemplateSnapshot)
+	}
+	if got := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); got != 0 {
+		t.Fatalf("unresolvable templateRef built %d pods", got)
 	}
 }
 

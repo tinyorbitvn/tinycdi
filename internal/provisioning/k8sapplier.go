@@ -310,7 +310,7 @@ func sessionPolicySpec(sp *SessionPolicy) cdiv1.SessionPolicySpec {
 	if sp == nil {
 		return cdiv1.SessionPolicySpec{FileTransfer: cdiv1.FileTransferDisabled}
 	}
-	ft := cdiv1.FileTransferPolicy(sp.FileTransfer.Mode)
+	ft := sp.FileTransfer
 	if ft == "" {
 		ft = cdiv1.FileTransferDisabled
 	}

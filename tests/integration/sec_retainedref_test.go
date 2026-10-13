@@ -69,7 +69,7 @@ func TestSEC01_CreateRejectsBareRef(t *testing.T) {
 		OwnerIssuer:     "https://issuer.test",
 		OwnerSubject:    "mallory",
 		Name:            "loot",
-		Template:        provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+		Template:        provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:          provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 		RetainedDataRef: rec.ID,
 	}, []byte("evil"))
@@ -271,7 +271,7 @@ func TestSEC21_IdempotencyPrincipalScoped(t *testing.T) {
 			OwnerIssuer:  "https://issuer.test",
 			OwnerSubject: sub,
 			Name:         name,
-			Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer"},
+			Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linuxdesktop", Revision: 1, Runtime: "LinuxContainer", ClipboardPolicy: provisioning.PolicyDisabled},
 			Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 20 << 30},
 			DataPolicy:   "Ephemeral",
 		}

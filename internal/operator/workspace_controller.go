@@ -920,15 +920,17 @@ func appliedIntent(ws *cdiv1.Workspace) (*AppliedIntent, error) {
 	return a, nil
 }
 
-// resolveTemplate fetches the WorkspaceTemplate named by
-// spec.templateRef.name through the shared by-name resolver: the exact
-// object first, else the newest revision carrying the catalog-name label
-// equal to the reference — the create path records the catalog (family)
-// name, which resolves through immutable revision churn. Nothing else is
-// retried: a reference to a specific revision object that was deleted
-// stays TemplateNotFound.
+// resolveTemplate fetches the WorkspaceTemplate object spec.templateRef
+// names — a concrete revision object. The catalog (family) reference is
+// resolved at admission and the applier stamps THAT revision's name, so
+// the operator never re-derives the family's newest member: a reference
+// naming no live object is TemplateNotFound, not a label lookup. Nothing
+// else is retried: a reference to a specific revision object that was
+// deleted stays TemplateNotFound.
 func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *cdiv1.Workspace) (*cdiv1.WorkspaceTemplate, error) {
-	return provisioning.ResolveTemplateByName(ctx, r.Client, ws.Namespace, ws.Spec.TemplateRef.Name)
+	tpl := &cdiv1.WorkspaceTemplate{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Spec.TemplateRef.Name}, tpl)
+	return tpl, err
 }
 
 // recordedSnapshot returns the operator-recorded template snapshot —
@@ -1043,8 +1045,7 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *cdiv
 	var live *cdiv1.WorkspaceTemplate
 	if ident.Name == "" {
 		// Pre-stamp pod: the only trustworthy candidate is the live
-		// revision spec.templateRef resolves to — a catalog base name
-		// resolves to the newest revision, so a pod built from a
+		// object spec.templateRef names — a pod built from a
 		// rotated-out revision fails the rebuild and holds.
 		live, err = r.resolveTemplate(ctx, ws)
 		switch {
@@ -1201,15 +1202,14 @@ func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *
 // the generation the snapshot was recorded under AND spec.templateRef now
 // names a source other than the one the snapshot was taken from.
 //
-// The reference comparison is against the recorded source ref, not the
-// resolved object name: the create path writes the catalog (family) name
-// into templateRef while the snapshot records the resolved revision object,
-// so a bare name comparison would re-resolve the family to its newest
-// member on every generation — silently overriding a guard/pinned stay the
-// API's start path already decided. Only an actual reference move (the
-// carried re-point of a start intent, or an admin edit made while Stopped)
-// re-takes the snapshot. sourceRef is required, so every recorded snapshot
-// carries it.
+// The reference comparison is against the recorded source ref, not a
+// re-read of the template: the create/start paths stamp the resolved
+// revision object name into templateRef and the snapshot records that
+// same source, so only an actual reference move (the carried re-point of
+// a start intent, or an admin edit made while Stopped) re-takes the
+// snapshot — a start that keeps the reference keeps the recorded
+// revision even when the family published newer. sourceRef is required,
+// so every recorded snapshot carries it.
 func (r *WorkspaceReconciler) snapshotStale(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, snap *templateSnapshot) (bool, error) {
 	if applied.RuntimeGeneration <= snap.RuntimeGeneration {
 		return false, nil

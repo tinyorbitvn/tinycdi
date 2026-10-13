@@ -156,6 +156,20 @@ type TemplateInfo struct {
 	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
 }
 
+// templateRefName is the spec.templateRef value a create intent stamps:
+// the resolved WorkspaceTemplate OBJECT name, not the catalog (family)
+// name. The API resolves the family reference to a concrete revision at
+// admission — req.Template.ID is "tpl_<object name>" — so the operator's
+// exact lookup never re-derives the family's newest member (the legacy
+// catalog-name fallback is gone). The row keeps the family name in
+// Template.Name for the start path's family resolution.
+func templateRefName(t TemplateInfo) string {
+	if name, ok := TemplateCRName(t.ID); ok {
+		return name
+	}
+	return t.Name
+}
+
 // WorkspaceRecord is the API-facing read model of a workspace row.
 type WorkspaceRecord struct {
 	ID              string         `json:"id"`
@@ -277,7 +291,7 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 		}
 		rev, err := appendIntent(ctx, tx, PlatformID(res.ID), IntentCreate, &IntentSpec{
 			WorkspaceName:   req.Name,
-			TemplateName:    req.Template.Name,
+			TemplateName:    templateRefName(req.Template),
 			OwnerIssuer:     req.OwnerIssuer,
 			OwnerSubject:    req.OwnerSubject,
 			DataPolicy:      dataPolicy,

@@ -2164,20 +2164,13 @@ components:
           enum: [Disabled, Send, Receive, Bidirectional]
           description: The resolved clipboard policy.
         fileTransfer:
-          type: object
-          additionalProperties: false
-          required: [mode, maxFileBytes]
+          type: string
+          enum: [Disabled, Upload, Download, Bidirectional]
           description: |
-            The resolved file-transfer policy. Inert until v1.3 — `mode`
-            always resolves `Disabled` while no template leg exists.
-          properties:
-            mode:
-              type: string
-              enum: [Disabled, Upload, Download, Bidirectional]
-            maxFileBytes:
-              type: ["integer", "null"]
-              minimum: 1
-              description: Per-file bound; `null` = platform default.
+            The resolved file-transfer direction policy — the same enum
+            WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
+            v1.3 — always resolves `Disabled` while no template leg is
+            wired into the catalog entry.
 
     CreateWorkspaceRequest:
       type: object

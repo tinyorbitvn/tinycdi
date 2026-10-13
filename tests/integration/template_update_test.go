@@ -111,6 +111,7 @@ func TestUpdate_RetainedHomeSurvives(t *testing.T) {
 		Template: provisioning.TemplateInfo{
 			ID: "tpl_upd32home-aaaa1111", Name: "upd32home", Revision: 1,
 			RevisionLabel: "2026-10-a", Runtime: "LinuxContainer", Experience: "Desktop",
+			ClipboardPolicy: provisioning.PolicyDisabled,
 		},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 5 << 30},
 		DesiredState: "Running", DataPolicy: "Retain",

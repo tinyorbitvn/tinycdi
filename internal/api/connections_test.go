@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
@@ -146,10 +147,8 @@ func TestCreateConnection_ResolvedPolicyRidesTicket(t *testing.T) {
 	env := newConnectionEnv(t, fi, func(h *ConnectionHandler) {
 		h.WithClipboardSource(func(_ context.Context, _ Principal, _ string) (provisioning.SessionPolicy, error) {
 			return provisioning.SessionPolicy{
-				Clipboard: provisioning.PolicyDisabled,
-				FileTransfer: provisioning.FileTransferPolicy{
-					Mode: provisioning.PolicyDisabled,
-				},
+				Clipboard:    provisioning.PolicyDisabled,
+				FileTransfer: cdiv1.FileTransferDisabled,
 			}, nil
 		})
 	})
@@ -168,16 +167,13 @@ func TestCreateConnection_ResolvedPolicyRidesTicket(t *testing.T) {
 	var view struct {
 		SessionPolicy struct {
 			Clipboard    string `json:"clipboard"`
-			FileTransfer struct {
-				Mode         string `json:"mode"`
-				MaxFileBytes *int64 `json:"maxFileBytes"`
-			} `json:"fileTransfer"`
+			FileTransfer string `json:"fileTransfer"`
 		} `json:"sessionPolicy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&view); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if view.SessionPolicy.Clipboard != "Disabled" || view.SessionPolicy.FileTransfer.Mode != "Disabled" {
+	if view.SessionPolicy.Clipboard != "Disabled" || view.SessionPolicy.FileTransfer != "Disabled" {
 		t.Fatalf("response sessionPolicy = %+v, want Disabled/Disabled", view.SessionPolicy)
 	}
 }

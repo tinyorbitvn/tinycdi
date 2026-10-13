@@ -1254,15 +1254,13 @@ export interface components {
              */
             clipboard: "Disabled" | "Send" | "Receive" | "Bidirectional";
             /**
-             * @description The resolved file-transfer policy. Inert until v1.3 — `mode`
-             *     always resolves `Disabled` while no template leg exists.
+             * @description The resolved file-transfer direction policy — the same enum
+             *     WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
+             *     v1.3 — always resolves `Disabled` while no template leg is
+             *     wired into the catalog entry.
+             * @enum {string}
              */
-            fileTransfer: {
-                /** @enum {string} */
-                mode: "Disabled" | "Upload" | "Download" | "Bidirectional";
-                /** @description Per-file bound; `null` = platform default. */
-                maxFileBytes: number | null;
-            };
+            fileTransfer: "Disabled" | "Upload" | "Download" | "Bidirectional";
         };
         /**
          * @description Create intent. There is no owner field — ownership comes from the

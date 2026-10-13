@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -363,10 +364,8 @@ func TestAdminSessionPolicy_Contract(t *testing.T) {
 	})
 
 	resolved := provisioning.SessionPolicy{
-		Clipboard: provisioning.PolicyDisabled,
-		FileTransfer: provisioning.FileTransferPolicy{
-			Mode: provisioning.PolicyDisabled,
-		},
+		Clipboard:    provisioning.PolicyDisabled,
+		FileTransfer: cdiv1.FileTransferDisabled,
 	}
 	requireValid(t, "ResolvedSessionPolicy", resolved)
 	requireValid(t, "LaunchTicket", launchTicketView{

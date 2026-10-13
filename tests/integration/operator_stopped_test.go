@@ -58,7 +58,7 @@ func TestOperatorStoppedRowSelfHeals(t *testing.T) {
 
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-fxr24", Name: "fxr24",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: "linux", Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Retain",
 	}
@@ -190,7 +190,7 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 
 	req := provisioning.CreateRequest{
 		OwnerIssuer: "issuer", OwnerSubject: "sub-fxr24", Name: "fxr24-chain",
-		Template:     provisioning.TemplateInfo{ID: "tpl_linuxdesktop", Name: tplName, Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop"},
+		Template:     provisioning.TemplateInfo{ID: "tpl_" + tplName, Name: tplName, Revision: 1, Runtime: "LinuxContainer", Experience: "Desktop", ClipboardPolicy: provisioning.PolicyDisabled},
 		Vector:       provisioning.ResourceVector{RunningSlots: 1, CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 30},
 		DesiredState: "Running", DataPolicy: "Ephemeral",
 	}

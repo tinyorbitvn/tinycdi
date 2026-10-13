@@ -352,8 +352,8 @@ func unstamp(t *testing.T, c client.Client, pod *corev1.Pod) {
 }
 
 // The pre-stamp candidate match: a pod built before the identity stamps
-// names nothing, so the candidate is the live revision spec.templateRef
-// resolves to. A pod that provably was built from it adopts the live
+// names nothing, so the candidate is the live object spec.templateRef
+// names. A pod that provably was built from it adopts the live
 // object into status — and gets its identity stamps backfilled — with no
 // Degraded and no restart. Scheduled or not.
 func TestAdoptSnapshot_UnstampedPodCandidateMatch(t *testing.T) {
@@ -361,7 +361,7 @@ func TestAdoptSnapshot_UnstampedPodCandidateMatch(t *testing.T) {
 		t.Run(fmt.Sprintf("nodeName=%q", node), func(t *testing.T) {
 			s := snapScheme(t)
 			tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-			ws := adoptWorkspace("fam32", "", types.UID("ws-pre-6"+node))
+			ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-pre-6"+node))
 			c := fake.NewClientBuilder().WithScheme(s).
 				WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
 			pod := seedBuiltPod(t, c, ws, tpl)
@@ -437,7 +437,7 @@ func TestAdoptSnapshot_UnstampedPodCandidateMismatch(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ws := adoptWorkspace("fam32", "", types.UID(fmt.Sprintf("ws-mm-%d", i)))
+			ws := adoptWorkspace("fam32-aaaa1111", "", types.UID(fmt.Sprintf("ws-mm-%d", i)))
 			objs := []client.Object{ws}
 			if tc.liveTpl != nil {
 				objs = append(objs, tc.liveTpl)
@@ -466,7 +466,7 @@ func TestAdoptSnapshot_UnstampedPodCandidateMismatch(t *testing.T) {
 func TestAdoptSnapshot_UnstampedPodRotatedMismatch(t *testing.T) {
 	s := snapScheme(t)
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	ws := adoptWorkspace("fam32", "", types.UID("ws-mm-rot"))
+	ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-mm-rot"))
 	c := fake.NewClientBuilder().WithScheme(s).
 		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
 	pod := seedBuiltPod(t, c, ws, tpl)

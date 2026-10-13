@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/api"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -370,13 +371,9 @@ func TestTicket_SessionPolicyRecorded(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	max := int64(1024)
 	policy := provisioning.SessionPolicy{
-		Clipboard: provisioning.PolicyDisabled,
-		FileTransfer: provisioning.FileTransferPolicy{
-			Mode:         provisioning.PolicyDisabled,
-			MaxFileBytes: &max,
-		},
+		Clipboard:    provisioning.PolicyDisabled,
+		FileTransfer: cdiv1.FileTransferDisabled,
 	}
 	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, policy, testPortalSession); err != nil {
 		t.Fatalf("IssueTicket: %v", err)
@@ -390,7 +387,7 @@ func TestTicket_SessionPolicyRecorded(t *testing.T) {
 	if clipboard == nil || *clipboard != "Disabled" {
 		t.Fatalf("clipboard_policy = %v, want Disabled", clipboard)
 	}
-	want := `{"clipboard":"Disabled","fileTransfer":{"mode":"Disabled","maxFileBytes":1024}}`
+	want := `{"clipboard":"Disabled","fileTransfer":"Disabled"}`
 	if session == nil || *session != want {
 		t.Fatalf("session_policy = %v, want %s", session, want)
 	}
