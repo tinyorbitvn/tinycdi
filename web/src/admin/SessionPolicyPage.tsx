@@ -8,9 +8,10 @@ import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import {
   fetchAdminSessionPolicy,
-  listTemplates,
+  listAllAdminTemplates,
   putAdminSessionPolicy,
   type AdminSessionPolicyView,
+  type Tagged,
   type AdminTemplateView,
   type ClipboardCeiling,
 } from "./api";
@@ -55,7 +56,7 @@ export function meetClipboard(template: string, ceiling: string): string {
 }
 
 interface PolicyData {
-  policy: AdminSessionPolicyView;
+  policy: Tagged<AdminSessionPolicyView>;
   templates: AdminTemplateView[];
 }
 
@@ -63,9 +64,9 @@ async function loadPolicy(api: ApiClient): Promise<PolicyData> {
   const me = await loadMe(api);
   const [policy, templates] = await Promise.all([
     fetchAdminSessionPolicy(api, me.tenant),
-    listTemplates(api),
+    listAllAdminTemplates(api),
   ]);
-  return { policy, templates: templates.items };
+  return { policy, templates };
 }
 
 function SourceNote({ source }: { source: AdminSessionPolicyView["source"] }) {
@@ -92,17 +93,17 @@ export function SessionPolicyContent({
   const [ceiling, setCeiling] = useState<ClipboardCeiling>(policy.clipboard);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
-  // The version the form's selection was read from — sent as If-Match so
-  // a concurrent write 412s instead of being silently overwritten.
-  const versionRef = useRef(policy.version);
+  // The ETag the form's selection was read from — sent as If-Match so a
+  // concurrent write 412s instead of being silently overwritten.
+  const etagRef = useRef(policy.etag);
 
   // The page reloads after every save and on precondition failures: reset
-  // the selection and version to what the server just reported. The error
+  // the selection and ETag to what the server just reported. The error
   // is deliberately NOT cleared here — a 412 needs its "reloaded, review
   // and retry" guidance to stay visible while the new values land.
   useEffect(() => {
     setCeiling(policy.clipboard);
-    versionRef.current = policy.version;
+    etagRef.current = policy.etag;
   }, [policy]);
 
   async function save() {
@@ -113,7 +114,7 @@ export function SessionPolicyContent({
         api,
         policy.tenant,
         { clipboard: ceiling, fileTransfer: { mode: "FollowTemplate", maxFileBytes: null } },
-        versionRef.current,
+        etagRef.current,
       );
       onChanged();
     } catch (e) {

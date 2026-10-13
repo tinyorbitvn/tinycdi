@@ -90,7 +90,7 @@ describe("AuthGate", () => {
       ...base,
       handle: (req: Parameters<typeof base.handle>[0]) =>
         req.path === "/v1/me"
-          ? { status: 401, headers: { "content-type": "application/json" }, body: { code: "UNAUTHENTICATED", message: "expired", retryable: false } }
+          ? { status: 401, headers: { "content-type": "application/json" }, body: { error: { code: "UNAUTHENTICATED", message: "expired", retryable: false } } }
           : base.handle(req),
     };
     const onUnauthenticated = vi.fn();
@@ -112,7 +112,7 @@ describe("AuthGate", () => {
       ...base,
       handle: (req: Parameters<typeof base.handle>[0]) =>
         req.path === "/v1/session" && !meHealthy
-          ? { status: 503, headers: { "content-type": "application/json" }, body: { code: "UNAVAILABLE", message: "down", retryable: true } }
+          ? { status: 503, headers: { "content-type": "application/json" }, body: { error: { code: "UNAVAILABLE", message: "down", retryable: true } } }
           : base.handle(req),
     };
     const onUnauthenticated = vi.fn();
@@ -139,7 +139,7 @@ describe("AuthGate", () => {
       ...base,
       handle: (req: Parameters<typeof base.handle>[0]) =>
         req.path === "/v1/me" && !meHealthy
-          ? { status: 503, headers: { "content-type": "application/json" }, body: { code: "UNAVAILABLE", message: "database restarting", retryable: true } }
+          ? { status: 503, headers: { "content-type": "application/json" }, body: { error: { code: "UNAVAILABLE", message: "database restarting", retryable: true } } }
           : base.handle(req),
     };
     const onUnauthenticated = vi.fn();
@@ -166,7 +166,7 @@ describe("AuthGate", () => {
         ...base,
         handle: (req: Parameters<typeof base.handle>[0]) =>
           req.path === "/v1/me"
-            ? { status, headers: { "content-type": "application/json" }, body: { code: "NOT_FOUND", message: "no route", retryable: false } }
+            ? { status, headers: { "content-type": "application/json" }, body: { error: { code: "NOT_FOUND", message: "no route", retryable: false } } }
             : base.handle(req),
       };
       renderWithApi(

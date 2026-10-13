@@ -10,21 +10,19 @@ import {
   Select,
   Table,
   type Tone,
-  usePagination,
-  useTableSort,
+  useServerTable,
   VisuallyHidden,
 } from "../design";
 import { Link, navigate } from "../lib/router";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
-import { useResource } from "../workspaces/resource";
 import { t, formatDateTime, type MessageKey } from "../i18n";
 import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
 import { PurgeDialog } from "./PurgeDialog";
 import { isTenantAdmin, useMeLoaded } from "../app/me";
 import {
-  listRetainedData,
+  listRetainedDataPage,
   type RetainedDataState,
   type Scope,
   type ScopedRetainedData,
@@ -76,15 +74,14 @@ export const PURGING_POLL_MS = 3_000;
 // Poll only while a row is Purging: the sweep usually lands inside a
 // minute and a Purged record drops out of the list (the API excludes it),
 // so once nothing is Purging the poll stops entirely. Error backoff and
-// the hidden-tab pause come from useResource.
-function purgePollDelay(
-  data: { items: ScopedRetainedData[] } | undefined,
-  override: number | undefined,
-): number | null {
-  return data?.items.some((r) => r.state === "Purging")
-    ? (override ?? PURGING_POLL_MS)
-    : null;
+// the hidden-tab pause come from useServerPage.
+function purgePollDelay(items: readonly ScopedRetainedData[], override: number | undefined): number | null {
+  return items.some((r) => r.state === "Purging") ? (override ?? PURGING_POLL_MS) : null;
 }
+
+// Columns the server sorts on (GET /v1/data `sort`); `name` is the source
+// workspace name. The rest render in server order.
+const DATA_SORT_FIELDS = { source: "name", retainedAt: "retainedAt" } as const;
 
 export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const api = useApi();
@@ -92,8 +89,17 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const admin = isTenantAdmin(me.data);
   const [scope, setScope] = useState<Scope>("mine");
   const effectiveScope: Scope = admin ? scope : "mine";
-  const load = useCallback(() => listRetainedData(api, effectiveScope), [api, effectiveScope]);
-  const list = useResource(load, (data) => purgePollDelay(data, pollIntervalMs));
+  const load = useCallback(
+    (cursor?: string, sort?: string) => listRetainedDataPage(api, effectiveScope, cursor, sort),
+    [api, effectiveScope],
+  );
+  // Newest disk first by default; switching scope restarts the list.
+  const list = useServerTable(load, {
+    fields: DATA_SORT_FIELDS,
+    initial: { key: "retainedAt", direction: "descending" },
+    key: effectiveScope,
+    poll: (items) => purgePollDelay(items, pollIntervalMs),
+  });
 
   const [attaching, setAttaching] = useState<ScopedRetainedData | null>(null);
   const [purging, setPurging] = useState<ScopedRetainedData | null>(null);
@@ -105,16 +111,12 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "id",
         header: t("data.list.col.id"),
         rowHeader: true,
-        sortable: true,
-        compare: (a, b) => a.id.localeCompare(b.id),
         render: (r) => <Link to={`/data/${r.id}`}>{r.id}</Link>,
       },
       {
         key: "source",
         header: t("data.list.col.source"),
         sortable: true,
-        compare: (a, b) => a.sourceWorkspaceName.localeCompare(b.sourceWorkspaceName),
-        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => r.sourceWorkspaceName,
       },
     ];
@@ -122,9 +124,6 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
       cols.push({
         key: "owner",
         header: t("data.list.col.owner"),
-        sortable: true,
-        compare: (a, b) => ownerLabel(a.owner).localeCompare(ownerLabel(b.owner)),
-        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => ownerLabel(r.owner),
       });
     }
@@ -133,26 +132,17 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "runtime",
         header: t("data.list.col.runtime"),
         hideOnMobile: true,
-        sortable: true,
-        compare: (a, b) => runtimeLabel(a.runtime).localeCompare(runtimeLabel(b.runtime)),
-        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => runtimeLabel(r.runtime),
       },
       {
         key: "size",
         header: t("data.list.col.size"),
         align: "end",
-        sortable: true,
-        compare: (a, b) => a.sizeGib - b.sizeGib,
-        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => t("data.list.sizeGib", { n: r.sizeGib }),
       },
       {
         key: "state",
         header: t("data.list.col.state"),
-        sortable: true,
-        compare: (a, b) => a.state.localeCompare(b.state),
-        tiebreak: (a, b) => a.id.localeCompare(b.id),
         render: (r) => <DataStateBadge state={r.state} />,
       },
       {
@@ -160,7 +150,7 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         header: t("data.list.col.retainedAt"),
         hideOnMobile: true,
         sortable: true,
-        compare: (a, b) => a.retainedAt.localeCompare(b.retainedAt),
+        sortStart: "descending",
         render: (r) => formatDateTime(r.retainedAt),
       },
       {
@@ -199,17 +189,8 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
     setNotice(t("data.purge.scheduled"));
     // refresh() re-arms the stopped poll, so the now-Purging row is
     // followed until the sweep drops it from the list.
-    void list.refresh();
+    list.refresh();
   }
-
-  const items = list.data?.items;
-
-  // Newest disk first by default; switching scope resets the page.
-  const sort = useTableSort(columns, items ?? [], {
-    key: "retainedAt",
-    direction: "descending",
-  });
-  const paged = usePagination(sort.sortedRows, { resetKey: effectiveScope });
 
   return (
     <Page
@@ -238,22 +219,19 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         <Alert
           tone="danger"
           title={isPortalApiError(list.error) ? list.error.code : undefined}
-          actions={<Button onClick={() => void list.refresh()}>{t("data.error.retry")}</Button>}
+          actions={<Button onClick={list.refresh}>{t("data.error.retry")}</Button>}
         >
           {list.error instanceof Error ? list.error.message : String(list.error)}
         </Alert>
       ) : null}
-      {list.data?.truncated ? (
-        <Alert tone="warning">{t("data.list.truncated", { n: items?.length ?? 0 })}</Alert>
-      ) : null}
       <Table
         caption={t("data.list.caption")}
         columns={columns}
-        rows={paged.pageRows}
+        rows={list.items}
         rowKey={(r) => r.id}
-        sort={sort.sort}
-        onSortChange={sort.onSortChange}
-        loading={list.loading && !list.data}
+        sort={list.tableSort}
+        onSortChange={list.onSortChange}
+        loading={!list.loaded}
         empty={
           <EmptyState
             title={t("data.list.empty.title")}
@@ -261,7 +239,13 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
           />
         }
       />
-      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("data.list.caption") })} />
+      <Pagination
+        loaded={list.items.length}
+        hasNext={list.hasNext}
+        loading={list.loading}
+        onLoadMore={list.next}
+        label={t("common.pagination.label", { name: t("data.list.caption") })}
+      />
       {attaching ? (
         <AttachDialog
           record={attaching}

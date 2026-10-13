@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { buttonClass, EmptyState, Page, Spinner, StatusPill, Table } from "../design";
+import { buttonClass, EmptyState, Page, Pagination, Spinner, StatusPill, Table, useServerPage } from "../design";
 import type { Column } from "../design/Table";
 import { IconLayoutGrid, IconPlus } from "../design/icons";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { Link } from "../lib/router";
-import { listWorkspaces } from "./api";
+import { listWorkspacePage, WORKSPACE_DEFAULT_SORT } from "./api";
 import type { WorkspaceView } from "./helpers";
 import { desiredLabel, isConnectable, phaseLabelKey, templateRefLabel } from "./helpers";
-import { useResource } from "./resource";
 import { ErrorBanner } from "./ErrorBanner";
 import { dataPolicyLabel } from "../templates/format";
 import { LifecycleProgress } from "../progress/LifecycleProgress";
@@ -21,10 +20,10 @@ const IDLE_MS = 10_000;
  * youngest operation's age (fresh intents poll fastest) — slow when all are
  * settled. Failed is terminal, not busy.
  */
-function pollDelay(items: WorkspaceView[] | undefined): number {
+function pollDelay(items: readonly WorkspaceView[]): number {
   const now = serverNow();
   let best = Infinity;
-  for (const w of items ?? []) {
+  for (const w of items) {
     const m = deriveProgress(w, undefined, now);
     if (m && m.terminal === null) best = Math.min(best, opPollMs(m.startedAtMs, now));
   }
@@ -79,13 +78,20 @@ const COLUMNS: Column<WorkspaceView>[] = [
 
 export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const api = useApi();
-  const load = useCallback(() => listWorkspaces(api), [api]);
-  const list = useResource(load, pollIntervalMs ?? pollDelay);
+  const load = useCallback(
+    (cursor?: string, sort?: string) => listWorkspacePage(api, { scope: "mine" }, cursor, sort),
+    [api],
+  );
+  // Newest first; the poll re-reads every page loaded so far.
+  const list = useServerPage(load, {
+    sort: WORKSPACE_DEFAULT_SORT,
+    poll: (items) => pollIntervalMs ?? pollDelay(items),
+  });
   const [announcement, setAnnouncement] = useState<string | null>(null);
 
   // A row in "Deleting" that disappears is the expected end of a delete —
   // announce it politely rather than letting the row vanish silently.
-  const items = list.data ?? [];
+  const items = list.items;
   const terminating = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     const current = new Map<string, string>();
@@ -112,11 +118,11 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
         </>
       }
     >
-      <ErrorBanner error={list.error} onRetry={() => void list.refresh()} onDismiss={list.clearError} />
+      <ErrorBanner error={list.error} onRetry={list.refresh} onDismiss={list.clearError} />
       <div role="status" className="tc-sr-only">
         {announcement}
       </div>
-      {list.loading && !list.data ? (
+      {!list.loaded && !list.error ? (
         <Spinner label={t("workspaces.list.loading")} />
       ) : items.length === 0 ? (
         <EmptyState
@@ -138,6 +144,13 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
             rowKey={(w) => w.id}
             caption={t("workspaces.list.label")}
             empty={t("workspaces.list.empty")}
+          />
+          <Pagination
+            loaded={items.length}
+            hasNext={list.hasNext}
+            loading={list.loading}
+            onLoadMore={list.next}
+            label={t("common.pagination.label", { name: t("workspaces.list.label") })}
           />
         </>
       )}

@@ -4,9 +4,12 @@
 
 import { randomBytes } from "node:crypto";
 import {
+  byString,
   err,
   ok,
+  paginate,
   sessionLaunchUrl,
+  WORKSPACE_SORTS,
   type MockArea,
   type MockContext,
   type MockRequest,
@@ -112,27 +115,32 @@ export function workspacesArea(ctx: MockContext): MockArea {
     if (path === "/v1/workspaces" && method === "GET") return listWorkspaces(req);
     if (path === "/v1/workspaces" && method === "POST") return createWorkspace(req);
     if (path === "/v1/templates" && method === "GET") return listTemplates(req);
-    const m = path.match(/^\/v1\/workspaces\/([^/]+)(\/start|\/stop|\/connections|\/events)?$/);
+    const m = path.match(/^\/v1\/workspaces\/([^/:]+)(:start|:stop|\/connections|\/events)?$/);
     if (!m) return undefined;
     const ws = state.workspaces.get(m[1]);
     if (!ws) return err(404, "NOT_FOUND", "workspace not found", false);
     const sub = m[2] ?? "";
     if (!sub && method === "GET") return ok(200, ws);
     if (!sub && method === "DELETE") return deleteWorkspace(ws);
-    if (sub === "/start" && method === "POST") return startWorkspace(req, ws);
-    if (sub === "/stop" && method === "POST") return stopWorkspace(ws);
+    if (sub === ":start" && method === "POST") return startWorkspace(req, ws);
+    if (sub === ":stop" && method === "POST") return stopWorkspace(ws);
     if (sub === "/connections" && method === "POST") return createConnection(req, ws);
-    if (sub === "/events" && method === "GET") return ok(200, { items: withEventIds(state.events.get(ws.id) ?? []) });
+    if (sub === "/events" && method === "GET") return listEvents(req, ws);
     return undefined;
   }
 
   function listWorkspaces(req: MockRequest): MockResponse {
     const phase = req.query.get("phase");
-    let items = [...state.workspaces.values()].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt),
-    );
+    let items = [...state.workspaces.values()];
     if (phase) items = items.filter((w) => w.phase === phase);
-    return ok(200, { items });
+    return paginate(req, items, WORKSPACE_SORTS, "-createdAt");
+  }
+
+  // Events page in one fixed order: `sort` accepts only `-time`.
+  function listEvents(req: MockRequest, ws: WorkspaceFixture): MockResponse {
+    const sort = req.query.get("sort");
+    if (sort !== null && sort !== "-time") return err(400, "INVALID_REQUEST", "sort must be -time", false);
+    return ok(200, { items: withEventIds(state.events.get(ws.id) ?? []) });
   }
 
   function createWorkspace(req: MockRequest): MockResponse {
@@ -208,7 +216,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     const idem = ctx.checkIdempotency(req);
     if ("error" in idem) return idem.error;
     if ("replay" in idem) return ok(idem.replay.status, idem.replay.body);
-    if (ws.desiredState === "Running" && ws.phase !== "Terminating") return ok(200, ws);
+    if (ws.desiredState === "Running" && ws.phase !== "Terminating") return ok(202, ws);
     if (ws.phase !== "Stopped" && ws.phase !== "Failed") {
       return err(409, "INVALID_STATE", `cannot start while ${ws.phase}`, true);
     }
@@ -217,8 +225,8 @@ export function workspacesArea(ctx: MockContext): MockArea {
     delete ws.failureReason;
     ws.updatedAt = ctx.nowIso();
     ctx.recordEvent(ws.id, { type: "Normal", reason: "Starting", message: "Start requested" });
-    idem.record(200, ws);
-    return ok(200, ws);
+    idem.record(202, ws);
+    return ok(202, ws);
   }
 
   function stopWorkspace(ws: WorkspaceFixture): MockResponse {
@@ -229,7 +237,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     ws.desiredState = "Stopped";
     ws.updatedAt = ctx.nowIso();
     state.leases.delete(ws.id);
-    return ok(200, ws);
+    return ok(202, ws);
   }
 
   function createConnection(req: MockRequest, ws: WorkspaceFixture): MockResponse {
@@ -279,7 +287,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     const runtime = req.query.get("runtime");
     let items = state.templates;
     if (runtime) items = items.filter((t) => t.runtime === runtime);
-    return ok(200, { items });
+    return paginate(req, items, { name: byString((t) => t.name) }, "name");
   }
 
   function control(req: MockRequest): MockResponse | undefined {

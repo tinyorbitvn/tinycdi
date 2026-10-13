@@ -43,7 +43,7 @@ describe("api client CSRF", () => {
     setCsrfToken("tok-abc");
     const client = createApi(fetchImpl);
 
-    await client.POST("/v1/workspaces/{workspaceId}/stop", {
+    await client.POST("/v1/workspaces/{workspaceId}:stop", {
       params: { path: { workspaceId: WS } },
     });
     await client.GET("/v1/workspaces", {});
@@ -60,7 +60,7 @@ describe("api client CSRF", () => {
     setCsrfToken("tok-abc");
     const client = createApi(fetchImpl);
 
-    await client.POST("/v1/workspaces/{workspaceId}/stop", {
+    await client.POST("/v1/workspaces/{workspaceId}:stop", {
       params: { path: { workspaceId: WS } },
     });
 
@@ -72,17 +72,19 @@ describe("api client CSRF", () => {
       if (new URL(req.url).pathname === "/v1/me") return json(200, ME_BODY);
       if (req.headers.get(CSRF_HEADER) === "tok-new") return json(200, {});
       return json(403, {
-        code: "CSRF_FAILED",
-        message: "bad token",
-        retryable: false,
-        requestId: "req_1",
+        error: {
+          code: "CSRF_FAILED",
+          message: "bad token",
+          retryable: false,
+          requestId: "req_1",
+        },
       });
     });
     setCsrfToken("tok-old");
     const client = createApi(fetchImpl);
 
     unwrap(
-      await client.POST("/v1/workspaces/{workspaceId}/stop", {
+      await client.POST("/v1/workspaces/{workspaceId}:stop", {
         params: { path: { workspaceId: WS } },
       }),
     );
@@ -98,10 +100,12 @@ describe("api client CSRF", () => {
     const { calls, fetchImpl } = recordingFetch((req) => {
       if (new URL(req.url).pathname === "/v1/me") return json(200, ME_BODY);
       return json(403, {
-        code: "CSRF_FAILED",
-        message: "bad token",
-        retryable: false,
-        requestId: "req_1",
+        error: {
+          code: "CSRF_FAILED",
+          message: "bad token",
+          retryable: false,
+          requestId: "req_1",
+        },
       });
     });
     setCsrfToken("tok-old");
@@ -109,7 +113,7 @@ describe("api client CSRF", () => {
 
     await expect(
       client
-        .POST("/v1/workspaces/{workspaceId}/stop", {
+        .POST("/v1/workspaces/{workspaceId}:stop", {
           params: { path: { workspaceId: WS } },
         })
         .then(unwrap),
@@ -119,5 +123,28 @@ describe("api client CSRF", () => {
     const posts = calls.filter((c) => c.method === "POST");
     expect(meCalls).toHaveLength(1);
     expect(posts).toHaveLength(2);
+  });
+});
+
+describe("api client CSRF retry trigger", () => {
+  it("does not retry a 403 whose top-level body (not the envelope) says CSRF_FAILED", async () => {
+    const { calls, fetchImpl } = recordingFetch(() =>
+      json(403, { code: "CSRF_FAILED", message: "flat", retryable: false, requestId: "r" }),
+    );
+    setCsrfToken("tok-old");
+    const client = createApi(fetchImpl);
+    await client.POST("/v1/workspaces/{workspaceId}:stop", { params: { path: { workspaceId: WS } } });
+    expect(calls.filter((c) => new URL(c.url).pathname === "/v1/me")).toHaveLength(0);
+  });
+
+  it("does not retry a FORBIDDEN envelope", async () => {
+    const { calls, fetchImpl } = recordingFetch(() =>
+      json(403, { error: { code: "FORBIDDEN", message: "no", retryable: false, requestId: "r" } }),
+    );
+    setCsrfToken("tok-old");
+    const client = createApi(fetchImpl);
+    await client.POST("/v1/workspaces/{workspaceId}:stop", { params: { path: { workspaceId: WS } } });
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+    expect(calls.filter((c) => new URL(c.url).pathname === "/v1/me")).toHaveLength(0);
   });
 });

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -12,8 +12,7 @@ import {
   Select,
   StatusPill,
   Table,
-  usePagination,
-  useTableSort,
+  useServerTable,
 } from "../design";
 import type { Column } from "../design/Table";
 import type { MenuItem } from "../design";
@@ -33,7 +32,7 @@ import { Link, navigate } from "../lib/router";
 import { t } from "../i18n";
 import { isConnectable, phaseLabelKey, sessionPath } from "../workspaces/helpers";
 import {
-  listScopedWorkspaces,
+  listScopedWorkspacePage,
   restartWorkspace,
   startWorkspace,
   stopWorkspace,
@@ -44,7 +43,7 @@ import {
   type WorkspacePhase,
 } from "./api";
 import { formatAge, formatDateTime, ownerLabel } from "./format";
-import { useLoader, useMeLoaded } from "../app/me";
+import { useMeLoaded } from "../app/me";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 
@@ -97,6 +96,9 @@ export function matchesFilter(ws: ScopedWorkspace, text: string): boolean {
 type Pending = { kind: "start" | "stop" | "restart" | "delete"; ws: ScopedWorkspace };
 
 // Static keys so the unused-key catalog check can grep each one.
+// Columns the server sorts on (GET /v1/workspaces `sort`).
+const WORKSPACE_SORT_FIELDS = { name: "name", age: "createdAt" } as const;
+
 const NOTICE_KEYS = {
   start: "admin.workspaces.notice.start",
   stop: "admin.workspaces.notice.stop",
@@ -119,7 +121,16 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
   const me = useMeLoaded();
   const [phase, setPhase] = useState<WorkspacePhase | "">("");
   const [filter, setFilter] = useState("");
-  const list = useLoader((a) => listScopedWorkspaces(a, "tenant", phase || undefined), `ws:${phase}`);
+  const load = useCallback(
+    (cursor?: string, sort?: string) => listScopedWorkspacePage(api, "tenant", phase || undefined, cursor, sort),
+    [api, phase],
+  );
+  // Newest first (the server default); a phase change restarts the list.
+  const list = useServerTable(load, {
+    fields: WORKSPACE_SORT_FIELDS,
+    initial: { key: "age", direction: "descending" },
+    key: phase,
+  });
   const [pending, setPending] = useState<Pending | null>(null);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -128,10 +139,8 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
   const [notice, setNotice] = useState<string | null>(null);
 
   const viewerSubject = me.data?.subject;
-  const rows = useMemo(
-    () => (list.data?.items ?? []).filter((ws) => matchesFilter(ws, filter)),
-    [list.data, filter],
-  );
+  // The search narrows the rows loaded so far.
+  const rows = useMemo(() => list.items.filter((ws) => matchesFilter(ws, filter)), [list.items, filter]);
 
   function open(kind: Pending["kind"], ws: ScopedWorkspace) {
     setPending({ kind, ws });
@@ -175,7 +184,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
         }),
       );
       setPending(null);
-      list.reload();
+      list.refresh();
     } catch (e) {
       setActionError(e);
     } finally {
@@ -242,7 +251,6 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       header: t("admin.workspaces.column.workspace"),
       rowHeader: true,
       sortable: true,
-      compare: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => (
         <span className="tc-admin-cell-stack">
           <Link to={`/workspaces/${ws.id}`}>{ws.name}</Link>
@@ -253,26 +261,17 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     {
       key: "owner",
       header: t("admin.workspaces.column.owner"),
-      sortable: true,
-      compare: (a, b) => ownerLabel(a.owner).localeCompare(ownerLabel(b.owner)),
-      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => ownerLabel(ws.owner),
     },
     {
       key: "template",
       header: t("admin.workspaces.column.template"),
       hideOnMobile: true,
-      sortable: true,
-      compare: (a, b) => a.template.name.localeCompare(b.template.name),
-      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => `${ws.template.name} ${t("admin.templates.revision", { n: ws.template.revision })}`,
     },
     {
       key: "phase",
       header: t("admin.workspaces.column.phase"),
-      sortable: true,
-      compare: (a, b) => PHASES.indexOf(a.phase) - PHASES.indexOf(b.phase),
-      tiebreak: (a, b) => a.name.localeCompare(b.name),
       render: (ws) => (
         <span className="tc-admin-cell-stack">
           <StatusPill phase={ws.phase} label={t(phaseLabelKey(ws.phase))} />
@@ -288,7 +287,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       align: "end",
       hideOnMobile: true,
       sortable: true,
-      compare: (a, b) => a.createdAt.localeCompare(b.createdAt),
+      sortStart: "descending",
       render: (ws) => (
         <time dateTime={ws.createdAt} title={formatDateTime(ws.createdAt)}>
           {formatAge(ws.createdAt, ts)}
@@ -347,11 +346,6 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
     },
   ];
 
-  // Sort runs over the filtered rows, pagination slices the sorted result;
-  // a filter/phase change brings the view back to page 1.
-  const sort = useTableSort(columns, rows);
-  const paged = usePagination(sort.sortedRows, { resetKey: `${filter}|${phase}` });
-
   const deleteConfirmed = pending?.kind === "delete" && typed === pending.ws.name;
   const actingOn = pending ? ownerLabel(pending.ws.owner) : "";
   const restartProgressKey =
@@ -366,7 +360,7 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
       title={t("admin.workspaces.title")}
       description={t("admin.workspaces.description")}
       actions={
-        <Button icon={<IconRefresh />} onClick={list.reload} loading={list.loading && !!list.data}>
+        <Button icon={<IconRefresh />} onClick={list.refresh} loading={list.loading && list.loaded}>
           {t("admin.action.refresh")}
         </Button>
       }
@@ -396,25 +390,26 @@ export function WorkspacesAdminPage({ now }: { now?: number }) {
           {notice}
         </Alert>
       ) : null}
-      <ApiErrorAlert error={list.error} onRetry={list.reload} />
-      {list.data?.truncated ? (
-        <Alert tone="warning">
-          {t("admin.workspaces.truncated", { n: list.data.items.length })}
-        </Alert>
-      ) : null}
+      <ApiErrorAlert error={list.error} onRetry={list.refresh} />
       <Table
         caption={t("admin.workspaces.caption")}
         columns={columns}
-        rows={paged.pageRows}
+        rows={rows}
         rowKey={(ws) => ws.id}
-        sort={sort.sort}
-        onSortChange={sort.onSortChange}
-        loading={list.loading && !list.data}
+        sort={list.tableSort}
+        onSortChange={list.onSortChange}
+        loading={!list.loaded && !list.error}
         empty={
           filter || phase ? t("admin.workspaces.empty.filtered") : t("admin.workspaces.empty.all")
         }
       />
-      <Pagination {...paged.props} label={t("common.pagination.label", { name: t("admin.workspaces.caption") })} />
+      <Pagination
+        loaded={list.items.length}
+        hasNext={list.hasNext}
+        loading={list.loading}
+        onLoadMore={list.next}
+        label={t("common.pagination.label", { name: t("admin.workspaces.caption") })}
+      />
 
       <ConfirmDialog
         open={pending?.kind === "start"}

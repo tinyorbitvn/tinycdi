@@ -16,11 +16,14 @@ const READY_CONDITIONS = [
   { type: "ConnectionReady", status: "True", reason: "StreamEndpointUp", lastTransitionTime: "2026-09-30T10:02:30Z" },
 ];
 
-// Every route the v0.2 shell renders (D34): workspaces, session view,
-// admin, retained data.
+// Every route the shell renders (D34): workspaces, catalog, session view,
+// admin, retained data. Each is also a smoke test of the page on the /v1
+// API: it must render without an error callout (a contract drift — paths,
+// paging, error envelope — surfaces as a danger alert).
 const ROUTES = [
   "/workspaces",
   "/workspaces/new",
+  "/templates",
   `/workspaces/${SEED_WS}`,
   `/workspaces/${SEED_WS}/session`,
   "/admin",
@@ -32,6 +35,7 @@ const ROUTES = [
   "/admin/users",
   "/admin/users/user-01J4ZDGRC",
   "/data",
+  "/data/rd_01J4Z9W2PFK8G4TQ3M7H1R5N0A",
 ] as const;
 
 const THEMES = ["light", "dark"] as const;
@@ -85,6 +89,7 @@ for (const theme of THEMES) {
       test(`axe: ${route} has no serious/critical violations`, async ({ page }) => {
         await page.goto(route);
         await settle(page);
+        await expect(page.locator(".tc-alert--danger"), `${route} renders without an API error`).toHaveCount(0);
         const results = await new AxeBuilder({ page }).analyze();
         const bad = results.violations.filter(
           (v) => v.impact === "serious" || v.impact === "critical",

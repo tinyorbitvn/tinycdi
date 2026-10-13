@@ -20,10 +20,11 @@ function defaultLine() {
   return screen.getByText("Default per-user limit:").closest("p")!;
 }
 
-function putRequests(api: ReturnType<typeof createMockApi>, suffix = "") {
-  return api.state.requests.filter(
-    (r) => r.method === "PUT" && r.path === `/v1/admin/tenants/${TENANT}/user-limits${suffix}`,
-  );
+const GRACE_REF = "https://idp.invalid|user-01J4ZDGRC";
+const GRACE_PATH = `/v1/admin/tenants/${TENANT}/user-limits/${encodeURIComponent(GRACE_REF)}`;
+
+function writes(api: ReturnType<typeof createMockApi>, method: string, path: string) {
+  return api.state.requests.filter((r) => r.method === method && r.path === path);
 }
 
 describe("quota: per-user limits", () => {
@@ -66,24 +67,21 @@ describe("quota: per-user limits", () => {
     fireEvent.change(within(dialog).getByLabelText("Running workspaces"), { target: { value: "4" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limit" }));
 
-    // The mock applied the write; the refreshed row shows override 4.
-    await waitFor(() => expect(putRequests(api)).toHaveLength(1));
-    expect(JSON.parse(putRequests(api)[0]!.rawBody)).toEqual({
-      ownerRef: "https://idp.invalid|user-01J4ZDGRC",
-      limit: 4,
-    });
+    // No override row yet: the PUT creates it with If-Match: *.
+    await waitFor(() => expect(writes(api, "PUT", GRACE_PATH)).toHaveLength(1));
+    const put = writes(api, "PUT", GRACE_PATH)[0]!;
+    expect(JSON.parse(put.rawBody)).toEqual({ limit: 4 });
+    expect(put.headers["if-match"]).toBe("*");
     await waitFor(() => expect(grace()).toHaveTextContent("4"));
 
-    // Clearing writes limit:null and the row goes back to inherit.
+    // Clearing deletes the override under the row's ETag; the row goes
+    // back to inherit.
     fireEvent.click(within(grace()).getByRole("button", { name: "Set limit" }));
     const dialog2 = await screen.findByRole("dialog", { name: "Running limit — Grace Hopper" });
     fireEvent.change(within(dialog2).getByLabelText("Running workspaces"), { target: { value: "" } });
     fireEvent.click(within(dialog2).getByRole("button", { name: "Save limit" }));
-    await waitFor(() => expect(putRequests(api)).toHaveLength(2));
-    expect(JSON.parse(putRequests(api)[1]!.rawBody)).toEqual({
-      ownerRef: "https://idp.invalid|user-01J4ZDGRC",
-      limit: null,
-    });
+    await waitFor(() => expect(writes(api, "DELETE", GRACE_PATH)).toHaveLength(1));
+    expect(writes(api, "DELETE", GRACE_PATH)[0]!.headers["if-match"]).toMatch(/^"ul-\d+"$/);
     await waitFor(() => expect(within(grace()).getByText("Default")).toBeInTheDocument());
   });
 
@@ -93,13 +91,36 @@ describe("quota: per-user limits", () => {
     renderWithApi(<QuotaPage />, api);
 
     await userLimitsTable();
+    await waitFor(() => expect(defaultLine()).toHaveTextContent("Unlimited"));
     fireEvent.click(screen.getByRole("button", { name: "Set default" }));
     const dialog = await screen.findByRole("dialog", { name: "Default per-user limit" });
     fireEvent.change(within(dialog).getByLabelText("Running workspaces"), { target: { value: "3" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limit" }));
 
-    await waitFor(() => expect(putRequests(api, "/default")).toHaveLength(1));
-    expect(JSON.parse(putRequests(api, "/default")[0]!.rawBody)).toEqual({ limit: 3 });
+    const DEFAULT_PATH = `/v1/admin/tenants/${TENANT}/user-limits/default`;
+    await waitFor(() => expect(writes(api, "PUT", DEFAULT_PATH)).toHaveLength(1));
+    const put = writes(api, "PUT", DEFAULT_PATH)[0]!;
+    expect(JSON.parse(put.rawBody)).toEqual({ limit: 3 });
+    // The If-Match is the ETag the default's GET returned.
+    expect(put.headers["if-match"]).toBe('"uld-1"');
     await waitFor(() => expect(defaultLine()).toHaveTextContent("3"));
+  });
+
+  it("a stale default ETag answers 412: the dialog explains and shows the current value", async () => {
+    const api = setup();
+    renderWithApi(<QuotaPage />, api);
+    await userLimitsTable();
+    await waitFor(() => expect(defaultLine()).toHaveTextContent("Unlimited"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Set default" }));
+    const dialog = await screen.findByRole("dialog", { name: "Default per-user limit" });
+    // Another admin writes the default after this page read it.
+    control(api, "/_control/admin/userlimits", { default: 6 });
+    fireEvent.change(within(dialog).getByLabelText("Running workspaces"), { target: { value: "3" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save limit" }));
+
+    await within(dialog).findByText(/Someone else changed these limits/);
+    await waitFor(() => expect(within(dialog).getByLabelText("Running workspaces")).toHaveValue(6));
+    await waitFor(() => expect(defaultLine()).toHaveTextContent("6"));
   });
 });

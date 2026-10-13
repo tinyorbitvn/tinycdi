@@ -4,8 +4,10 @@ export type ErrorCode = components["schemas"]["ErrorCode"];
 
 // The schema-generated Error.details shape (release_pending reason plus
 // the IMAGE_STALE templateName/ageDays/limitDays/pinned context).
-export type ErrorDetails = NonNullable<components["schemas"]["Error"]["details"]>;
-export type ErrorBody = components["schemas"]["Error"];
+export type ErrorBody = components["schemas"]["ErrorBody"];
+export type ErrorDetails = NonNullable<ErrorBody["details"]>;
+/** The wire envelope every non-2xx response carries: `{"error": ErrorBody}`. */
+export type ErrorEnvelope = components["schemas"]["Error"];
 
 export class PortalApiError extends Error {
   readonly code: ErrorCode;
@@ -54,25 +56,37 @@ export function isReleasePending(e: unknown): boolean {
   );
 }
 
-const KNOWN_CODES: ReadonlySet<string> = new Set([
-  "UNAUTHENTICATED",
-  "CSRF_FAILED",
-  "FORBIDDEN",
-  "NOT_FOUND",
-  "INVALID_REQUEST",
-  "INVALID_TEMPLATE",
-  "INVALID_STATE",
-  "IDEMPOTENCY_CONFLICT",
-  "QUOTA_EXHAUSTED",
-  "QUOTA_NOT_CONFIGURED",
-  "QUOTA_MANAGED_BY_CONFIG",
-  "PRECONDITION_FAILED",
-  "CONNECTION_IN_USE",
-  "IMAGE_STALE",
-  "RATE_LIMITED",
-  "UNAVAILABLE",
-  "INTERNAL",
-]);
+// Keyed by the generated ErrorCode union, so the compiler rejects a missing
+// or extra member: the runtime set cannot drift from the contract.
+const CODE_TABLE: { readonly [K in ErrorCode]: true } = {
+  UNAUTHENTICATED: true,
+  CSRF_FAILED: true,
+  FORBIDDEN: true,
+  NOT_FOUND: true,
+  INVALID_REQUEST: true,
+  INVALID_TEMPLATE: true,
+  INVALID_STATE: true,
+  IDEMPOTENCY_CONFLICT: true,
+  QUOTA_EXHAUSTED: true,
+  QUOTA_NOT_CONFIGURED: true,
+  QUOTA_MANAGED_BY_CONFIG: true,
+  PRECONDITION_REQUIRED: true,
+  PRECONDITION_FAILED: true,
+  CONNECTION_IN_USE: true,
+  IMAGE_STALE: true,
+  RATE_LIMITED: true,
+  UNAVAILABLE: true,
+  INTERNAL: true,
+};
+
+export const KNOWN_CODES: ReadonlySet<string> = new Set(Object.keys(CODE_TABLE));
+
+/** The `error` member of a response body, or {} when the body is not an envelope. */
+export function errorBodyOf(body: unknown): Record<string, unknown> {
+  if (typeof body !== "object" || body === null) return {};
+  const inner = (body as Record<string, unknown>).error;
+  return typeof inner === "object" && inner !== null ? (inner as Record<string, unknown>) : {};
+}
 
 export function isErrorCode(code: string): boolean {
   return KNOWN_CODES.has(code);

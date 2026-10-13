@@ -72,7 +72,7 @@ describe("signOut", () => {
   it("rejects on any other failure and does not navigate", async () => {
     const assign = vi.fn();
     const failing = (async () =>
-      new Response(JSON.stringify({ code: "INTERNAL", message: "boom", retryable: true }), {
+      new Response(JSON.stringify({ error: { code: "INTERNAL", message: "boom", retryable: true } }), {
         status: 500,
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch;
@@ -106,7 +106,7 @@ describe("signOutEverywhere (ADR 0007)", () => {
   it("rejects on failure — the caller stays signed in", async () => {
     const assign = vi.fn();
     const failing = (async () =>
-      new Response(JSON.stringify({ code: "INTERNAL", message: "boom", retryable: true }), {
+      new Response(JSON.stringify({ error: { code: "INTERNAL", message: "boom", retryable: true } }), {
         status: 500,
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch;
@@ -267,7 +267,7 @@ describe("user menu", () => {
     const base = api.handle;
     api.handle = (req) =>
       req.path === "/v1/logout"
-        ? { status: 500, headers: { "content-type": "application/json" }, body: { code: "INTERNAL", message: "boom", retryable: true } }
+        ? { status: 500, headers: { "content-type": "application/json" }, body: { error: { code: "INTERNAL", message: "boom", retryable: true } } }
         : base(req);
     renderShell(api);
     fireEvent.click(await screen.findByRole("button", { name: "Ada Admin" }));
@@ -292,7 +292,7 @@ describe("user menu", () => {
         ? {
             status: 503,
             headers: { "content-type": "application/json", "retry-after": "5" },
-            body: { code: "UNAVAILABLE", message: "could not sign out; retry", retryable: true },
+            body: { error: { code: "UNAVAILABLE", message: "could not sign out; retry", retryable: true } },
           }
         : base(req);
     renderShell(api);

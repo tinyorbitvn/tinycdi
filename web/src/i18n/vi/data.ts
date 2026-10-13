@@ -15,7 +15,6 @@ export default {
   "data.list.col.retainedAt": "Giữ lại lúc",
   "data.list.col.actions": "Thao tác",
   "data.list.sizeGib": "{n} GiB",
-  "data.list.truncated": "Đang hiển thị {n} bản ghi đầu tiên — danh sách đã bị cắt bớt.",
   "data.list.empty.title": "Không có đĩa giữ lại",
   "data.list.empty.description":
     "Đĩa xuất hiện ở đây khi một workspace với chính sách dữ liệu Giữ lại bị xoá.",

@@ -10,11 +10,9 @@ export default {
   "common.toast.notifications": "Notifications",
 
   "common.pagination.label": "{name} pages",
-  "common.pagination.previous": "Previous",
-  "common.pagination.next": "Next",
-  "common.pagination.page": "Page {n}",
-  "common.pagination.status": "Showing {from}–{to} of {total}",
-  "common.pagination.rowsPerPage": "Rows per page",
+  "common.pagination.loadedMore": "Showing the first {n}",
+  "common.pagination.loadedAll": "Showing all {n}",
+  "common.pagination.loadMore": "Load more",
 
   "errors.banner.fallback": "ERROR",
   "errors.banner.requestId": "(request {id})",

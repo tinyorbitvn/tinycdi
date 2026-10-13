@@ -50,7 +50,7 @@ describe("CreateWorkspacePage", () => {
     loginCookies();
     const calls = interceptCreates(api, {
       status: 500,
-      body: { code: "INTERNAL", message: "boom", retryable: true, requestId: "r1" },
+      body: { error: { code: "INTERNAL", message: "boom", retryable: true, requestId: "r1" } },
         });
     renderWithApi(<CreateWorkspacePage />, api);
     await fillForm(TEMPLATE_LINUX.id);
@@ -121,7 +121,7 @@ describe("CreateWorkspacePage", () => {
     loginCookies();
     interceptCreates(api, {
       status: 409,
-      body: { code, message: "server detail", retryable: false, requestId: "r-quota" },
+      body: { error: { code, message: "server detail", retryable: false, requestId: "r-quota" } },
     });
     renderWithApi(<CreateWorkspacePage />, api);
     await fillForm(TEMPLATE_LINUX.id);
@@ -142,13 +142,13 @@ describe("CreateWorkspacePage", () => {
     loginCookies();
     interceptCreates(api, {
       status: 409,
-      body: {
+      body: { error: {
         code: "QUOTA_EXHAUSTED",
         message: "quota exhausted",
         retryable: true,
         requestId: "r-rp",
         details: { reason: "release_pending" },
-      },
+      } },
     });
     renderWithApi(<CreateWorkspacePage />, api);
     await fillForm(TEMPLATE_LINUX.id);
@@ -170,13 +170,13 @@ describe("CreateWorkspacePage", () => {
     loginCookies();
     interceptCreates(api, {
       status: 409,
-      body: {
+      body: { error: {
         code: "QUOTA_EXHAUSTED",
         message: "per-user running-workspace limit reached",
         retryable: false,
         requestId: "r-ul",
         details: { reason: "UserLimitReached", params: { limit: "2", current: "2" } },
-      },
+      } },
     });
     renderWithApi(<CreateWorkspacePage />, api);
     await fillForm(TEMPLATE_LINUX.id);
@@ -228,7 +228,7 @@ describe("CreateWorkspacePage", () => {
     loginCookies();
     interceptCreates(api, {
       status: 409,
-      body: {
+      body: { error: {
         code: "IMAGE_STALE",
         message: 'template "linux-chromium-browser" runtime image is 60 days old (limit 45 days)',
         retryable: false,
@@ -239,7 +239,7 @@ describe("CreateWorkspacePage", () => {
           limitDays: 45,
           pinned,
         },
-      },
+      } },
     });
     renderWithApi(<CreateWorkspacePage />, api);
     await fillForm(TEMPLATE_BROWSER.id);

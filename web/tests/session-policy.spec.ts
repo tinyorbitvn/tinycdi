@@ -74,7 +74,7 @@ test("admin sets a clipboard ceiling and the effective preview updates", async (
   await expect(linuxRow.getByRole("cell", { name: "Both directions" }).first()).toBeVisible();
 });
 
-test("a stale version answers 412 and reloads the current ceiling", async ({
+test("a stale ETag answers 412 and reloads the current ceiling", async ({
   page,
   request,
 }) => {
@@ -88,7 +88,7 @@ test("a stale version answers 412 and reloads the current ceiling", async ({
   await expect(clipboard).toHaveValue("Send");
 
   // Someone else writes the ceiling while this page holds the stale
-  // version: the save must 412 and reload their value, not clobber it.
+  // ETag: the save must 412 and reload their value, not clobber it.
   await clipboard.selectOption("Disabled");
   await request.post(`${MOCK}/_control/admin/session-policy`, {
     data: { clipboard: "Receive" },

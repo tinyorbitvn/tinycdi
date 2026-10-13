@@ -77,18 +77,6 @@ function trim(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
 }
 
-export type UsageLevel = "ok" | "warn" | "full";
-
-// Thresholds for the quota meters: >= 80% warns, >= 100% is exhausted. A
-// zero limit means "nothing allowed", so any usage is full.
-export function usageLevel(used: number, limit: number): UsageLevel {
-  if (limit <= 0) return used > 0 ? "full" : "ok";
-  const ratio = used / limit;
-  if (ratio >= 1) return "full";
-  if (ratio >= 0.8) return "warn";
-  return "ok";
-}
-
 export function usagePercent(used: number, limit: number): number {
   if (limit <= 0) return used > 0 ? 100 : 0;
   return Math.round((used / limit) * 100);

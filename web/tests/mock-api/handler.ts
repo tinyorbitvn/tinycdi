@@ -119,7 +119,7 @@ export function createMockApi(opts: MockOptions & { areas?: readonly MockAreaFac
     const pub = firstMatch((a) => a.public?.(req));
     if (pub) return pub;
 
-    state.requests.push({ method, path, headers: req.headers, rawBody: req.rawBody ?? "" });
+    state.requests.push({ method, path, query: req.query.toString(), headers: req.headers, rawBody: req.rawBody ?? "" });
     const cookies = parseCookies(req.headers.cookie);
     if (!cookies[SESSION_COOKIE]) {
       return err(401, "UNAUTHENTICATED", "no session", false);

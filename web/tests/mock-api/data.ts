@@ -1,10 +1,10 @@
 // Retained-data area of the contract mock: /v1/data (list, attach, purge)
 // and /_control/data/{id}. Ownership comes from the admin area's Tenancy:
-// GET /v1/data honours `?scope=mine|tenant`, pages with an opaque cursor and
+// GET /v1/data honours `?scope=mine|tenant`, pages with `cursor`/`sort` and
 // carries `owner`; other users' records are 404 for non-admins.
 
 import { randomBytes } from "node:crypto";
-import { err, ok, type MockArea, type MockContext, type MockRequest, type MockResponse } from "./core.ts";
+import { DATA_SORTS, err, ok, paginate, type MockArea, type MockContext, type MockRequest, type MockResponse } from "./core.ts";
 import { RETAINED_DISK, makeWorkspace, type RetainedFixture } from "./fixtures.ts";
 import { DEMO_RETAINED } from "./demo.ts";
 import { tenancy } from "./admin.ts";
@@ -28,29 +28,31 @@ export function dataArea(ctx: MockContext): MockArea {
 
   function api(req: MockRequest): MockResponse | undefined {
     if (req.path === "/v1/data" && req.method === "GET") return t.takeFailure(req) ?? listRetained(req);
-    const m = req.path.match(/^\/v1\/data\/([^/]+)(\/attach|\/purge)?$/);
+    const m = req.path.match(/^\/v1\/data\/([^/:]+)(:attach|:purge)?$/);
     if (!m) return undefined;
     const rec = state.retained.get(m[1]);
     if (!rec || !t.visible(rec.id)) return err(404, "NOT_FOUND", "retained data record not found", false);
     if (!m[2] && req.method === "GET") {
       return ok(200, { ...rec, owner: t.ownerOf(rec.id), purgeConfirmationNonce: freshNonce(rec.id) });
     }
-    if (m[2] === "/attach" && req.method === "POST") return attachData(req, rec);
-    if (m[2] === "/purge" && req.method === "POST") return purgeData(req, rec);
+    if (m[2] === ":attach" && req.method === "POST") return attachData(req, rec);
+    if (m[2] === ":purge" && req.method === "POST") return purgeData(req, rec);
     return undefined;
   }
 
   function listRetained(req: MockRequest): MockResponse {
     const scope = t.resolveScope(req);
     if ("status" in scope) return scope;
+    // Purged records are excluded server-side (contract).
     const items = [...state.retained.values()]
+      .filter((r) => r.state !== "Purged")
       .filter((r) => !scope.mine || t.ownerOf(r.id).subject === t.me.subject)
       .map((r) => ({
         ...r,
         owner: t.ownerOf(r.id),
         purgeConfirmationNonce: freshNonce(r.id),
       }));
-    return t.paginate(req, items);
+    return paginate(req, items, DATA_SORTS, "-retainedAt");
   }
 
   function attachData(req: MockRequest, rec: RetainedFixture): MockResponse {

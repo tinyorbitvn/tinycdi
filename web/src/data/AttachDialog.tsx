@@ -38,7 +38,7 @@ export function AttachDialog({
   const [error, setError] = useState<unknown>(null);
   const idemKey = useRef<string | undefined>(undefined);
 
-  const eligible = templates.data?.items ?? [];
+  const eligible = templates.data ?? [];
   const selected = eligible.find((tpl) => tpl.id === templateRef) ?? eligible[0];
 
   useEffect(() => {

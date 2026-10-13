@@ -15,7 +15,6 @@ import type { Column } from "../design/Table";
 import { IconArrowLeft } from "../design/icons";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
-import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
 import { resolveTemplate } from "../templates/family";
@@ -34,7 +33,7 @@ import { getRetainedData, type ScopedRetainedData } from "../data/api";
 import { useBranding } from "../app/shell";
 import { useMeLoaded } from "../app/me";
 import { DEFAULT_BRANDING } from "../app/branding";
-import { getWorkspace, listWorkspaceEvents } from "./api";
+import { getWorkspace, listWorkspaceEvents, startWorkspace, stopWorkspace } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
 import { blockingReason, desiredLabel } from "./helpers";
 import { ReasonText, reasonMessageKey } from "./reasons";
@@ -203,22 +202,8 @@ export function WorkspaceDetailPage({
     setBusy(kind);
     setActionError(null);
     try {
-      if (kind === "start") {
-        unwrap(
-          await api.POST("/v1/workspaces/{workspaceId}/start", {
-            params: {
-              path: { workspaceId: ws.id },
-              header: { "Idempotency-Key": newIdempotencyKey() },
-            },
-          }),
-        );
-      } else {
-        unwrap(
-          await api.POST("/v1/workspaces/{workspaceId}/stop", {
-            params: { path: { workspaceId: ws.id } },
-          }),
-        );
-      }
+      if (kind === "start") await startWorkspace(api, ws.id);
+      else await stopWorkspace(api, ws.id);
       await detail.refresh();
     } catch (e) {
       setActionError(e);

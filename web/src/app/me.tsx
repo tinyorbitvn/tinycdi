@@ -139,11 +139,11 @@ export function useMe(): MeState {
 
 // ---- shared list/loader helpers -------------------------------------------
 // One canonical copy of the data plumbing the admin and data areas used to
-// duplicate (Me/useMe/useLoader/listAll; folded in v0.3). useLoader is the
-// generic "run an api read, keep the latest result" hook; listAll follows
-// page cursors; loadMe/useMeLoaded serve the principal to pages rendered
-// outside MeProvider (unit tests); get is the narrow typed GET escape for
-// the not-yet-generated reads.
+// duplicate (Me/useMe/useLoader; folded in v0.3). useLoader is the generic
+// "run an api read, keep the latest result" hook; loadMe/useMeLoaded serve
+// the principal to pages rendered outside MeProvider (unit tests); get is
+// the narrow typed GET escape for the not-yet-generated reads. Collections
+// page on the server: design/useServerPage.
 
 /** List `scope` filter shared by the workspace/data list endpoints. */
 export type Scope = "mine" | "tenant";
@@ -213,16 +213,6 @@ export function useMeLoaded(): Loaded<Me> {
   return useLoader(loadMe, "me");
 }
 
-// Lists stop following cursors at `maxPages` so a runaway server cannot pin
-// the tab; the views show a "partial" hint when that happens.
-export const MAX_PAGES = 20;
-const PAGE_LIMIT = 200;
-
-interface Page<T> {
-  items: T[];
-  nextPageToken?: string;
-}
-
 type Query = Record<string, string | number | undefined>;
 
 // openapi-fetch's runtime accepts any path; only its typing is bound to the
@@ -237,20 +227,4 @@ interface LooseGet {
 export async function get<T>(api: ApiClient, path: string, query?: Query): Promise<T> {
   const loose = api as unknown as LooseGet;
   return unwrap(await loose.GET(path, query ? { params: { query } } : {})) as T;
-}
-
-export async function listAll<T>(
-  api: ApiClient,
-  path: string,
-  query: Query,
-): Promise<{ items: T[]; truncated: boolean }> {
-  const items: T[] = [];
-  let pageToken: string | undefined;
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await get<Page<T>>(api, path, { ...query, limit: PAGE_LIMIT, pageToken });
-    items.push(...page.items);
-    if (!page.nextPageToken) return { items, truncated: false };
-    pageToken = page.nextPageToken;
-  }
-  return { items, truncated: true };
 }

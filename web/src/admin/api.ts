@@ -1,13 +1,23 @@
-import { newIdempotencyKey, unwrap, type ApiClient } from "../api/client";
+import { unwrap, type ApiClient } from "../api/client";
 import type { components } from "../api/generated/schema";
-import { get, listAll, type Scope } from "../app/me";
-import { getWorkspace } from "../workspaces/api";
+import { get, type Scope } from "../app/me";
+import { ALL_PAGE_LIMIT, fetchAllPages, type ServerPage } from "../design/useServerPage";
+import { getWorkspace, listWorkspacePage, startWorkspace, stopWorkspace } from "../workspaces/api";
+import { listRetainedDataPage } from "../data/api";
+import { listAllTemplates, listTemplatePage } from "../templates/useTemplates";
 export { templateFamily } from "../templates/family";
+export { startWorkspace, stopWorkspace };
 
-// Admin-area API surface: GET /v1/quota, the /v1/admin/tenants/{tenant}/quota
-// pair and the `scope` list filter, called through the same openapi-fetch
-// client (CSRF middleware, same-origin credentials). The principal reads
-// (Me/useLoader/listAll plumbing) are shared and live in ../app/me.
+// Admin-area API surface: GET /v1/quota, the /v1/admin/tenants/{tenant}/*
+// resources and the `scope` list filter, called through the same
+// openapi-fetch client (CSRF middleware, same-origin credentials). The
+// principal reads (Me/useLoader) are shared and live in ../app/me.
+//
+// Mutable admin resources carry a strong ETag (response header, or `etag`
+// on a user-limit item). Every PUT/DELETE echoes the tag it was read with
+// as If-Match, so a concurrent write answers 412 PRECONDITION_FAILED
+// instead of being silently clobbered; `*` creates a resource that does not
+// exist yet.
 
 export type WorkspaceView = components["schemas"]["WorkspaceView"];
 export type WorkspacePhase = components["schemas"]["WorkspacePhase"];
@@ -15,7 +25,6 @@ export type RetainedDataView = components["schemas"]["RetainedDataView"];
 export type Owner = components["schemas"]["Owner"];
 
 export type QuotaAmounts = components["schemas"]["QuotaAmounts"];
-export type UserUsage = components["schemas"]["UserUsage"];
 export type QuotaView = components["schemas"]["QuotaView"];
 export type QuotaSource = components["schemas"]["QuotaSource"];
 export type AdminQuotaLimits = components["schemas"]["AdminQuotaLimits"];
@@ -26,6 +35,18 @@ export type ScopedWorkspace = WorkspaceView;
 export type ScopedRetainedData = RetainedDataView;
 export type AdminTemplateView = components["schemas"]["TemplateView"];
 
+/** A resource read together with the strong ETag its response carried. */
+export type Tagged<T> = T & {
+  /** The `ETag` response header, echoed as If-Match on the next write. */
+  etag?: string;
+};
+
+function tagged<T>(res: { data?: T; error?: unknown; response: Response }): Tagged<T> {
+  const body = unwrap(res);
+  const etag = res.response.headers.get("ETag");
+  return etag ? { ...body, etag } : (body as Tagged<T>);
+}
+
 export function fetchQuota(api: ApiClient): Promise<QuotaView> {
   return get<QuotaView>(api, "/v1/quota");
 }
@@ -33,69 +54,108 @@ export function fetchQuota(api: ApiClient): Promise<QuotaView> {
 // Admin quota management (GET/PUT /v1/admin/tenants/{tenant}/quota): the
 // tenant-admin-only view that also reports which layer owns the limits and
 // writes them back when the platform configuration does not.
-export async function fetchAdminQuota(api: ApiClient, tenant: string): Promise<AdminQuotaView> {
-  return unwrap(
-    await api.GET("/v1/admin/tenants/{tenant}/quota", { params: { path: { tenant } } }),
-  );
+export async function fetchAdminQuota(api: ApiClient, tenant: string): Promise<Tagged<AdminQuotaView>> {
+  return tagged(await api.GET("/v1/admin/tenants/{tenant}/quota", { params: { path: { tenant } } }));
 }
 
-// `version` is the change token the GET returned — sent as If-Match so a
-// concurrent write lands as 412 PRECONDITION_FAILED, not a silent clobber.
-// Pass "*" when the GET reported no row (version absent) to create it.
+// `etag` is the tag the GET returned; absent (no quota row yet) sends "*"
+// to create the row.
 export async function putAdminQuota(
   api: ApiClient,
   tenant: string,
   limits: AdminQuotaLimits,
-  version: string | undefined,
-): Promise<AdminQuotaView> {
-  return unwrap(
+  etag: string | undefined,
+): Promise<Tagged<AdminQuotaView>> {
+  return tagged(
     await api.PUT("/v1/admin/tenants/{tenant}/quota", {
-      params: { path: { tenant }, header: { "If-Match": version ?? "*" } },
+      params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
       body: limits,
     }),
   );
 }
 
-export type AdminUserLimitsView = components["schemas"]["AdminUserLimitsView"];
 export type AdminUserLimitEntry = components["schemas"]["AdminUserLimitEntry"];
-export type SetUserLimitRequest = components["schemas"]["SetUserLimitRequest"];
-export type SetUserLimitDefaultRequest = components["schemas"]["SetUserLimitDefaultRequest"];
+export type AdminUserLimitDefault = components["schemas"]["AdminUserLimitDefault"];
 
-// Per-user running-workspace limits
-// (GET/PUT /v1/admin/tenants/{tenant}/user-limits[...]). Writes are upserts
-// — a `null` limit clears the row back to the tenant default (or
-// unlimited), so no If-Match precondition exists.
-export async function fetchAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitsView> {
-  return unwrap(
-    await api.GET("/v1/admin/tenants/{tenant}/user-limits", { params: { path: { tenant } } }),
-  );
-}
+/** Server default (and only) order of the per-user limits collection. */
+export const USER_LIMIT_DEFAULT_SORT = "ownerRef";
 
-export async function putAdminUserLimit(
+// Per-user running-workspace limits: GET .../user-limits pages one item
+// per principal with usage or an override (each override row carries its
+// own `etag`); PUT/DELETE .../user-limits/{ownerRef} write one override;
+// GET/PUT .../user-limits/default the tenant fallback.
+export async function listAdminUserLimitPage(
   api: ApiClient,
   tenant: string,
-  ownerRef: string,
-  limit: number | null,
-): Promise<AdminUserLimitsView> {
-  const body: SetUserLimitRequest = { ownerRef, limit };
+  cursor?: string,
+  sort: string = USER_LIMIT_DEFAULT_SORT,
+  limit?: number,
+): Promise<ServerPage<AdminUserLimitEntry>> {
   return unwrap(
-    await api.PUT("/v1/admin/tenants/{tenant}/user-limits", {
-      params: { path: { tenant } },
-      body,
+    await api.GET("/v1/admin/tenants/{tenant}/user-limits", {
+      params: {
+        path: { tenant },
+        query: { sort, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+      },
     }),
   );
 }
 
+export function listAllAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitEntry[]> {
+  return fetchAllPages((cursor, sort) => listAdminUserLimitPage(api, tenant, cursor, sort, ALL_PAGE_LIMIT));
+}
+
+// Sets one principal's override. `etag` is the entry's tag; an entry
+// without one has no override row yet, so "*" creates it.
+export async function putAdminUserLimit(
+  api: ApiClient,
+  tenant: string,
+  ownerRef: string,
+  limit: number,
+  etag: string | undefined,
+): Promise<Tagged<AdminUserLimitEntry>> {
+  return tagged(
+    await api.PUT("/v1/admin/tenants/{tenant}/user-limits/{ownerRef}", {
+      params: { path: { tenant, ownerRef }, header: { "If-Match": etag ?? "*" } },
+      body: { limit },
+    }),
+  );
+}
+
+// Removes one principal's override: the tenant default applies again.
+export async function deleteAdminUserLimit(
+  api: ApiClient,
+  tenant: string,
+  ownerRef: string,
+  etag: string,
+): Promise<void> {
+  unwrap(
+    await api.DELETE("/v1/admin/tenants/{tenant}/user-limits/{ownerRef}", {
+      params: { path: { tenant, ownerRef }, header: { "If-Match": etag } },
+    }),
+  );
+}
+
+export async function fetchAdminUserLimitDefault(
+  api: ApiClient,
+  tenant: string,
+): Promise<Tagged<AdminUserLimitDefault>> {
+  return tagged(
+    await api.GET("/v1/admin/tenants/{tenant}/user-limits/default", { params: { path: { tenant } } }),
+  );
+}
+
+// `limit: null` clears the default back to unlimited.
 export async function putAdminUserLimitDefault(
   api: ApiClient,
   tenant: string,
   limit: number | null,
-): Promise<AdminUserLimitsView> {
-  const body: SetUserLimitDefaultRequest = { limit };
-  return unwrap(
+  etag: string | undefined,
+): Promise<Tagged<AdminUserLimitDefault>> {
+  return tagged(
     await api.PUT("/v1/admin/tenants/{tenant}/user-limits/default", {
-      params: { path: { tenant } },
-      body,
+      params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
+      body: { limit },
     }),
   );
 }
@@ -108,14 +168,12 @@ export type AdminSessionPolicySource = components["schemas"]["AdminSessionPolicy
 // Tenant session data-transfer ceiling
 // (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0010): a
 // ceiling narrows every template's own transfer policy, never widens.
-// `version` is the change token the GET returned — sent as If-Match so a
-// concurrent write lands as 412 PRECONDITION_FAILED, not a silent
-// clobber; "*" creates a row for a tenant that has none.
+// No row (no ETag) writes with "*" to create one.
 export async function fetchAdminSessionPolicy(
   api: ApiClient,
   tenant: string,
-): Promise<AdminSessionPolicyView> {
-  return unwrap(
+): Promise<Tagged<AdminSessionPolicyView>> {
+  return tagged(
     await api.GET("/v1/admin/tenants/{tenant}/session-policy", {
       params: { path: { tenant } },
     }),
@@ -126,47 +184,44 @@ export async function putAdminSessionPolicy(
   api: ApiClient,
   tenant: string,
   policy: PutAdminSessionPolicy,
-  version: string | undefined,
-): Promise<AdminSessionPolicyView> {
-  return unwrap(
+  etag: string | undefined,
+): Promise<Tagged<AdminSessionPolicyView>> {
+  return tagged(
     await api.PUT("/v1/admin/tenants/{tenant}/session-policy", {
-      params: { path: { tenant }, header: { "If-Match": version ?? "*" } },
+      params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
       body: policy,
     }),
   );
 }
 
-export function listScopedWorkspaces(api: ApiClient, scope: Scope, phase?: WorkspacePhase) {
-  return listAll<ScopedWorkspace>(api, "/v1/workspaces", { scope, phase });
+// Scoped collections. Tables page through them with useServerTable; the
+// listAll* readers serve views that aggregate across the whole tenant
+// (overview counts, per-template and per-user tallies).
+export function listScopedWorkspacePage(
+  api: ApiClient,
+  scope: Scope,
+  phase: WorkspacePhase | undefined,
+  cursor?: string,
+  sort?: string,
+): Promise<ServerPage<ScopedWorkspace>> {
+  return listWorkspacePage(api, { scope, ...(phase ? { phase } : {}) }, cursor, sort);
 }
 
-export function listScopedData(api: ApiClient, scope: Scope) {
-  return listAll<ScopedRetainedData>(api, "/v1/data", { scope });
+export function listAllScopedWorkspaces(api: ApiClient, scope: Scope): Promise<ScopedWorkspace[]> {
+  return fetchAllPages((cursor, sort) => listWorkspacePage(api, { scope, limit: ALL_PAGE_LIMIT }, cursor, sort));
 }
 
-// Workspace lifecycle intents shared by the tenant workspaces table.
-// `start` contractually requires an Idempotency-Key; `stop` accepts one,
-// which keeps a retried click from double-signalling.
-export async function startWorkspace(api: ApiClient, workspaceId: string): Promise<ScopedWorkspace> {
-  return unwrap(
-    await api.POST("/v1/workspaces/{workspaceId}/start", {
-      params: {
-        path: { workspaceId },
-        header: { "Idempotency-Key": newIdempotencyKey() },
-      },
-    }),
-  );
+export function listScopedDataPage(
+  api: ApiClient,
+  scope: Scope,
+  cursor?: string,
+  sort?: string,
+): Promise<ServerPage<ScopedRetainedData>> {
+  return listRetainedDataPage(api, scope, cursor, sort);
 }
 
-export async function stopWorkspace(api: ApiClient, workspaceId: string): Promise<ScopedWorkspace> {
-  return unwrap(
-    await api.POST("/v1/workspaces/{workspaceId}/stop", {
-      params: {
-        path: { workspaceId },
-        header: { "Idempotency-Key": newIdempotencyKey() },
-      },
-    }),
-  );
+export function listAllScopedData(api: ApiClient, scope: Scope): Promise<ScopedRetainedData[]> {
+  return fetchAllPages((cursor, sort) => listRetainedDataPage(api, scope, cursor, sort, ALL_PAGE_LIMIT));
 }
 
 export type RestartStep = "stopping" | "waiting" | "starting";
@@ -234,6 +289,14 @@ export async function restartWorkspace(
   return startWorkspace(api, workspaceId);
 }
 
-export function listTemplates(api: ApiClient) {
-  return listAll<AdminTemplateView>(api, "/v1/templates", {});
+export function listTemplatePageAdmin(
+  api: ApiClient,
+  cursor?: string,
+  sort?: string,
+): Promise<ServerPage<AdminTemplateView>> {
+  return listTemplatePage(api, {}, cursor, sort);
+}
+
+export function listAllAdminTemplates(api: ApiClient): Promise<AdminTemplateView[]> {
+  return listAllTemplates(api);
 }

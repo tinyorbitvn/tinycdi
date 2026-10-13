@@ -54,16 +54,12 @@ export default {
   "admin.quota.loading": "Loading quota",
   "admin.quota.limits.title": "Tenant limits",
   "admin.quota.limits.description": "Current usage against the limits of tenant {tenant}.",
-  "admin.quota.users.title": "Usage by user",
-  "admin.quota.users.caption": "Usage by user",
-  "admin.quota.users.empty": "No usage recorded.",
   "admin.quota.column.user": "User",
   "admin.quota.amount.workspaces": "Workspaces",
   "admin.quota.amount.runningWorkspaces": "Running workspaces",
   "admin.quota.amount.cpuMillicores": "CPU",
   "admin.quota.amount.memoryMib": "Memory",
   "admin.quota.amount.storageGib": "Storage",
-  "admin.quota.atLimit": "at limit",
   "admin.quota.meter": "{used} of {limit} ({pct}%)",
   "admin.quota.notConfigured":
     "No quota configured. New workspaces are refused until a tenant quota is set.",
@@ -151,8 +147,6 @@ export default {
   "admin.workspaces.filter.placeholder": "Name, owner, template or ID",
   "admin.workspaces.phase.label": "Phase",
   "admin.workspaces.phase.all": "All phases",
-  "admin.workspaces.truncated":
-    "Showing the first {n} workspaces; narrow the phase filter to see the rest.",
   "admin.workspaces.empty.filtered": "No workspaces match the filters.",
   "admin.workspaces.empty.all": "No workspaces in this tenant yet.",
   "admin.workspaces.column.workspace": "Workspace",
@@ -242,7 +236,6 @@ export default {
   "admin.userDetail.limits.title": "Running-workspace limit",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
-  "admin.userDetail.field.usage": "Usage",
   "admin.userDetail.workspaces.title": "Workspaces",
   "admin.userDetail.workspaces.caption": "The user's workspaces",
   "admin.userDetail.workspaces.empty": "This user has no workspaces.",
@@ -297,6 +290,8 @@ export default {
   "admin.errors.quotaNotConfigured": "No quota is configured for your tenant. Ask an administrator to set one.",
   "admin.errors.quotaManagedByConfig":
     "This tenant's quota is managed by the platform configuration and cannot be changed here.",
+  "admin.errors.preconditionRequired":
+    "This change was sent without the version it was based on. Reload the page and save again.",
   "admin.errors.preconditionFailed":
     "Someone else changed these limits. The current values were reloaded — review them and save again.",
   "admin.errors.idempotencyConflict":

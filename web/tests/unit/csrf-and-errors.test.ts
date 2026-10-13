@@ -44,7 +44,7 @@ describe("CSRF token handling", () => {
     const client = createApi(stubFetch(api));
 
     unwrap(
-      await client.POST("/v1/workspaces/{workspaceId}/stop", {
+      await client.POST("/v1/workspaces/{workspaceId}:stop", {
         params: { path: { workspaceId: "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E" } },
       }),
     );
@@ -74,7 +74,7 @@ describe("CSRF token handling", () => {
 
     await expect(
       client
-        .POST("/v1/workspaces/{workspaceId}/stop", {
+        .POST("/v1/workspaces/{workspaceId}:stop", {
           params: { path: { workspaceId: "ws_01J4Z8KQ2M9XNBV3T7YH0R6D5E" } },
         })
         .then(unwrap),
@@ -94,12 +94,12 @@ describe("stable error-code mapping", () => {
   it("keeps known codes verbatim", async () => {
     const fetchImpl = (async () =>
       new Response(
-        JSON.stringify({
+        JSON.stringify({ error: {
           code: "CONNECTION_IN_USE",
           message: "busy",
           retryable: false,
           requestId: "req_x",
-        }),
+        } }),
         { status: 409, headers: { "content-type": "application/json" } },
       )) as typeof fetch;
     const client = createApi(fetchImpl);
@@ -123,12 +123,12 @@ describe("stable error-code mapping", () => {
   it("maps unknown codes to INTERNAL (retryable) per the contract", async () => {
     const fetchImpl = (async () =>
       new Response(
-        JSON.stringify({
+        JSON.stringify({ error: {
           code: "SOME_FUTURE_CODE",
           message: "new server code",
           retryable: false,
           requestId: "req_y",
-        }),
+        } }),
         { status: 500, headers: { "content-type": "application/json" } },
       )) as typeof fetch;
     const client = createApi(fetchImpl);

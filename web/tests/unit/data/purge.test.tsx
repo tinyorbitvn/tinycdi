@@ -51,7 +51,7 @@ describe("data purge", () => {
     await waitFor(() =>
       expect(api.state.retained.get(RETAINED_DISK.id)?.state).toBe("Purging"),
     );
-    const req = api.state.requests.find((r) => r.path.endsWith("/purge"));
+    const req = api.state.requests.find((r) => r.path.endsWith(":purge"));
     expect(JSON.parse(req!.rawBody).confirmationNonce).toMatch(/^nonce-/);
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),

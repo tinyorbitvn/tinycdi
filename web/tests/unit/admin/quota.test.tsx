@@ -96,36 +96,16 @@ describe("quota: overview without a quota", () => {
   });
 });
 
-describe("quota: per-user table", () => {
-  it("renders one row per UserUsage and sorts by every column", async () => {
+describe("quota: per-user section", () => {
+  it("has no per-user usage table: per-user rows come from the paged user-limits collection", async () => {
     const api = setup();
-    seedTenant(api); // adds Grace Hopper's and Linus Pauling's workspaces/disks
+    seedTenant(api);
     renderWithApi(<QuotaPage />, api);
 
     await screen.findByRole("heading", { name: "Quota" });
-    const table = await screen.findByRole("table", { name: "Usage by user" });
-    const rowHeaders = () => within(table).getAllByRole("rowheader");
+    const table = await screen.findByRole("table", { name: "Per-user running limits" });
     await within(table).findByText("Grace Hopper");
-    // Three principals: Ada (self), Grace, Linus.
-    expect(rowHeaders()).toHaveLength(3);
-    const firstUser = () => rowHeaders()[0].textContent;
-    const lastUser = () => rowHeaders()[rowHeaders().length - 1].textContent;
-
-    // Sort by name ascending.
-    fireEvent.click(within(table).getByRole("button", { name: "User" }));
-    expect(firstUser()).toContain("Ada Lovelace");
-    expect(lastUser()).toContain("Linus Pauling");
-
-    // Grace holds the most workspaces, running runtimes and storage, so
-    // descending sort puts her first under every numeric column.
-    for (const label of ["Workspaces", "Running workspaces", "CPU", "Memory", "Storage"]) {
-      fireEvent.click(within(table).getByRole("button", { name: label }));
-      expect(firstUser(), `sorting by ${label}`).toContain("Grace Hopper");
-    }
-
-    // Clicking the active column again flips the direction.
-    fireEvent.click(within(table).getByRole("button", { name: "Storage" }));
-    expect(lastUser()).toContain("Grace Hopper");
+    expect(screen.queryByRole("table", { name: "Usage by user" })).not.toBeInTheDocument();
   });
 });
 

@@ -409,8 +409,8 @@ test("a tenant without quota is refused with the administrator message", async (
       page.getByRole("button", { name: "Create workspace" }).click(),
     ]);
     expect(resp.status(), "create must be refused").toBe(409);
-    const body = (await resp.json().catch(() => null)) as { code?: string } | null;
-    expect(body?.code).toBe("QUOTA_NOT_CONFIGURED");
+    const body = (await resp.json().catch(() => null)) as { error?: { code?: string } } | null;
+    expect(body?.error?.code).toBe("QUOTA_NOT_CONFIGURED");
     // The portal surfaces the API's actionable message, not a generic
     // error (the page also warns about the template's data policy — scope
     // to the quota alert).
@@ -493,7 +493,7 @@ test("attach a retained disk: the file written before delete is there after", as
   for (;;) {
     const [resp] = await Promise.all([
       page.waitForResponse(
-        (r) => r.url().includes("/attach") && r.request().method() === "POST",
+        (r) => r.url().includes(":attach") && r.request().method() === "POST",
         { timeout: 60_000 },
       ),
       attachButton.click(),

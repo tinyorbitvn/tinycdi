@@ -10,10 +10,7 @@ import {
   Meter,
   Section,
   Spinner,
-  Table,
-  useTableSort,
 } from "../design";
-import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import { t } from "../i18n";
 import type { ApiClient } from "../api/client";
@@ -25,14 +22,13 @@ import {
   type AdminQuotaView,
   type QuotaAmounts,
   type QuotaSource,
-  type UserUsage,
+  type Tagged,
 } from "./api";
 import { isPortalApiError } from "../api/errors";
 import {
   QUOTA_KEYS,
   formatQuota,
   quotaLabel,
-  usageLevel,
   usagePercent,
   type QuotaKey,
 } from "./format";
@@ -94,35 +90,6 @@ export function QuotaMeters({
   );
 }
 
-// Shared by the admin Users table, which renders the same used/limit vector.
-export function UsageCell({ k, value, limit }: { k: QuotaKey; value: number; limit: number | undefined }) {
-  if (limit === undefined || isUnlimited(k, limit)) return <>{formatQuota(k, value)}</>;
-  const level = usageLevel(value, limit);
-  return (
-    <span className="tc-admin-usage">
-      <span>
-        {formatQuota(k, value)} <span className="tc-admin-muted">/ {formatQuota(k, limit)}</span>
-      </span>
-      {level === "full" ? (
-        <Badge tone="danger">{t("admin.quota.atLimit")}</Badge>
-      ) : level === "warn" ? (
-        <Badge tone="warning">{usagePercent(value, limit)}%</Badge>
-      ) : null}
-    </span>
-  );
-}
-
-// Sort tail for the usage table: after the chosen column, the heaviest
-// runner surfaces first, then name/subject keep the order deterministic.
-// The tiebreak is not direction-flipped, matching the pre-shared SortHeader.
-function usageTiebreak(a: UserUsage, b: UserUsage): number {
-  return (
-    b.usage.runningWorkspaces - a.usage.runningWorkspaces ||
-    a.displayName.localeCompare(b.displayName) ||
-    a.subject.localeCompare(b.subject)
-  );
-}
-
 // The limits row's owner: config rows are read-only here — only the
 // platform configuration may change them — api/none rows are writable.
 function SourceBadge({ source }: { source: QuotaSource }) {
@@ -178,7 +145,7 @@ export function QuotaEditDialog({
   onClose,
   onSaved,
 }: {
-  quota: AdminQuotaView;
+  quota: Tagged<AdminQuotaView>;
   open: boolean;
   onClose: () => void;
   onSaved: () => void;
@@ -188,9 +155,9 @@ export function QuotaEditDialog({
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [invalid, setInvalid] = useState(false);
-  // The version the dialog's fields were read from — sent as If-Match so a
+  // The ETag the dialog's fields were read from — sent as If-Match so a
   // concurrent write 412s instead of being silently overwritten.
-  const versionRef = useRef(quota.version);
+  const etagRef = useRef(quota.etag);
 
   // The dialog stays mounted while closed, so state must be reset when it
   // reopens or when the quota changed underneath it — otherwise a reopen
@@ -198,7 +165,7 @@ export function QuotaEditDialog({
   useEffect(() => {
     if (!open) return;
     setFields(fieldsOf(quota));
-    versionRef.current = quota.version;
+    etagRef.current = quota.etag;
     setInvalid(false);
     setSaveError(null);
   }, [open, quota]);
@@ -218,7 +185,7 @@ export function QuotaEditDialog({
     setBusy(true);
     setSaveError(null);
     try {
-      await putAdminQuota(api, quota.tenant, limits, versionRef.current);
+      await putAdminQuota(api, quota.tenant, limits, etagRef.current);
       onSaved();
       onClose();
     } catch (e) {
@@ -304,47 +271,11 @@ export function QuotaContent({
   quota,
   onChanged,
 }: {
-  quota: AdminQuotaView;
+  quota: Tagged<AdminQuotaView>;
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const writable = quota.source !== "config";
-
-  const columns: Column<UserUsage>[] = [
-    {
-      key: "user",
-      sortable: true,
-      compare: (a, b) => a.displayName.localeCompare(b.displayName),
-      tiebreak: usageTiebreak,
-      header: t("admin.quota.column.user"),
-      rowHeader: true,
-      render: (u) => (
-        <span className="tc-admin-cell-stack">
-          <span>{u.displayName}</span>
-          <code className="tc-admin-muted">{u.subject}</code>
-        </span>
-      ),
-    },
-    ...QUOTA_KEYS.map(
-      (k): Column<UserUsage> => ({
-        key: k,
-        sortable: true,
-        sortStart: "descending",
-        compare: (a, b) => a.usage[k] - b.usage[k],
-        tiebreak: usageTiebreak,
-        header: quotaLabel(k),
-        align: "end",
-        hideOnMobile: k === "memoryMib" || k === "cpuMillicores",
-        render: (u) => <UsageCell k={k} value={u.usage[k]} limit={quota.limits?.[k]} />,
-      }),
-    ),
-  ];
-
-  // Default order: heaviest users first — running workspaces, then storage.
-  const usageSort = useTableSort(columns, quota.users, {
-    key: "runningWorkspaces",
-    direction: "descending",
-  });
 
   return (
     <>
@@ -369,18 +300,6 @@ export function QuotaContent({
         </p>
         <QuotaMeters configured={quota.configured} limits={quota.limits} usage={quota.usage} />
       </Section>
-      <Section title={t("admin.quota.users.title")}>
-        <Table
-          caption={t("admin.quota.users.caption")}
-          columns={columns}
-          rows={usageSort.sortedRows}
-          rowKey={(u) => u.subject}
-          sort={usageSort.sort}
-          onSortChange={usageSort.onSortChange}
-          density="compact"
-          empty={t("admin.quota.users.empty")}
-        />
-      </Section>
       <UserLimitsSection tenant={quota.tenant} />
       <QuotaEditDialog
         quota={quota}
@@ -392,7 +311,7 @@ export function QuotaContent({
   );
 }
 
-async function loadAdminQuota(api: ApiClient): Promise<AdminQuotaView> {
+async function loadAdminQuota(api: ApiClient): Promise<Tagged<AdminQuotaView>> {
   const me = await loadMe(api);
   return fetchAdminQuota(api, me.tenant);
 }

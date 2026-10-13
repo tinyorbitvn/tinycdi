@@ -11,6 +11,7 @@
 // type-stripping runs these files directly, and vitest imports them unchanged.
 
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import type {
   RetainedFixture,
   TemplateFixture,
@@ -63,7 +64,7 @@ export interface MockState {
   leases: Map<string, string>;
   tickets: Map<string, TicketRecord>;
   quotaExhausted: boolean;
-  requests: { method: string; path: string; headers: Record<string, string>; rawBody: string }[];
+  requests: { method: string; path: string; query: string; headers: Record<string, string>; rawBody: string }[];
   launchRequests: { headers: Record<string, string>; rawBody: string }[];
 }
 
@@ -130,8 +131,82 @@ export function err(status: number, code: string, message: string, retryable: bo
   return {
     status,
     headers: { "content-type": "application/json" },
-    body: { code, message, retryable, requestId: `req_${String(++reqSeq).padStart(4, "0")}` },
+    body: { error: { code, message, retryable, requestId: `req_${String(++reqSeq).padStart(4, "0")}` } },
   };
+}
+
+// Sort comparators by allowlisted field name; `-field` reverses one.
+export type SortFields<T> = Record<string, (a: T, b: T) => number>;
+
+// paginate answers a /v1 list the way the contract pages: `limit` (default
+// 50, max 500), `sort` (allowlisted field, `-` prefix descending, anything
+// else 400) and an opaque `cursor` bound to the sort it was minted under
+// (a cursor from another sort is 400). Rows tie-break on `id`. The cursor
+// is an offset in this mock — the real server is keyset-based.
+export function paginate<T>(
+  req: MockRequest,
+  rows: readonly T[],
+  fields: SortFields<T>,
+  defaultSort: string,
+  idOf: (row: T) => string = (row) => String((row as { id?: string }).id ?? ""),
+): MockResponse {
+  const sort = req.query.get("sort") || defaultSort;
+  const field = sort.startsWith("-") ? sort.slice(1) : sort;
+  const cmp = fields[field];
+  if (!cmp) return err(400, "INVALID_REQUEST", `sort must be one of ${Object.keys(fields).join(", ")}`, false);
+  const dir = sort.startsWith("-") ? -1 : 1;
+  const sorted = [...rows].sort((a, b) => dir * (cmp(a, b) || idOf(a).localeCompare(idOf(b))));
+  const rawLimit = req.query.get("limit");
+  const limit = rawLimit === null ? 50 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    return err(400, "INVALID_REQUEST", "limit must be 1..500", false);
+  }
+  let offset = 0;
+  const cursor = req.query.get("cursor");
+  if (cursor) {
+    const [rawOffset, cursorSort] = Buffer.from(cursor, "base64url").toString().split("@");
+    offset = Number(rawOffset);
+    if (cursorSort !== sort || !Number.isInteger(offset) || offset < 0) {
+      return err(400, "INVALID_REQUEST", "cursor does not match this sort", false);
+    }
+  }
+  const page = sorted.slice(offset, offset + limit);
+  const next =
+    offset + limit < sorted.length ? Buffer.from(`${offset + limit}@${sort}`).toString("base64url") : undefined;
+  return ok(200, next ? { items: page, nextCursor: next } : { items: page });
+}
+
+export const byString =
+  <T>(get: (row: T) => string) =>
+  (a: T, b: T): number =>
+    get(a).localeCompare(get(b));
+
+// GET /v1/workspaces sorts (default `-createdAt`).
+export const WORKSPACE_SORTS: SortFields<{ createdAt: string; name: string }> = {
+  createdAt: byString((w) => w.createdAt),
+  name: byString((w) => w.name),
+};
+
+// GET /v1/data sorts (default `-retainedAt`); `name` is the source
+// workspace name.
+export const DATA_SORTS: SortFields<{ retainedAt: string; sourceWorkspaceName: string }> = {
+  retainedAt: byString((r) => r.retainedAt),
+  name: byString((r) => r.sourceWorkspaceName),
+};
+
+// Strong entity tags: a quoted opaque token, compared byte for byte.
+export function etagOf(tag: string): string {
+  return `"${tag}"`;
+}
+
+// checkIfMatch applies the admin write precondition: missing If-Match →
+// 428 PRECONDITION_REQUIRED; `*` only while the resource does not exist;
+// anything but the current tag → 412 PRECONDITION_FAILED.
+export function checkIfMatch(req: MockRequest, current: string | undefined): MockResponse | undefined {
+  const ifMatch = req.headers["if-match"];
+  if (!ifMatch) return err(428, "PRECONDITION_REQUIRED", "If-Match is required", false);
+  if (ifMatch === "*" ? current === undefined : ifMatch === current) return undefined;
+  return err(412, "PRECONDITION_FAILED", "the resource changed since it was read", false);
 }
 
 export function ok(status: number, body: unknown, headers: Record<string, string | string[]> = {}): MockResponse {

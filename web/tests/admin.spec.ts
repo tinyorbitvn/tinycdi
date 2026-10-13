@@ -67,7 +67,7 @@ test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
   await adminNav.getByRole("tab", { name: "Workspaces" }).focus();
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("heading", { name: "Quota" })).toBeVisible();
-  await expect(page.getByRole("table", { name: "Usage by user" })).toBeVisible();
+  await expect(page.getByRole("table", { name: "Per-user running limits" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Quota" })).toBeFocused();
 
   await adminNav.getByRole("tab", { name: "Session policy" }).click();
@@ -142,7 +142,7 @@ test("a tenant admin opens a user's detail and edits their running limit", async
   await login(page, "/admin/users");
   await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
 
-  // The union table lists every principal the tenant knows.
+  // The paged per-user limits collection lists every principal with usage or a limit.
   const table = page.getByRole("table", { name: "Tenant users" });
   await expect(table.getByRole("row", { name: /Grace Hopper/ })).toBeVisible();
   await expect(table.getByRole("row", { name: /Linus Pauling/ })).toBeVisible();
@@ -170,24 +170,26 @@ test("a tenant admin opens a user's detail and edits their running limit", async
   const dialog = page.getByRole("dialog", { name: "Running limit — Grace Hopper" });
   await dialog.getByLabel("Running workspaces").fill("3");
   await dialog.getByRole("button", { name: "Save limit" }).click();
+  await expect(dialog).toHaveCount(0);
 
   const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
   expect(
     reqs.requests.some(
-      (r: { method: string; path: string; rawBody: string }) =>
+      (r: { method: string; path: string; rawBody: string; headers: Record<string, string> }) =>
         r.method === "PUT" &&
-        r.path === "/v1/admin/tenants/acme/user-limits" &&
+        decodeURIComponent(r.path) === "/v1/admin/tenants/acme/user-limits/https://idp.invalid|user-01J4ZDGRC" &&
+        r.headers["if-match"] === "*" &&
         JSON.parse(r.rawBody).limit === 3,
     ),
   ).toBeTruthy();
 
   // Back on the list, Grace's row reflects the override (effective = 3).
-  // Cell order: running, cpu, memory, storage, override, effective, disks.
+  // Cell order: running, override, effective, disks.
   await page.goto("/admin/users");
   const graceRow = page.getByRole("table", { name: "Tenant users" }).getByRole("row", {
     name: /Grace Hopper/,
   });
-  await expect(graceRow.getByRole("cell").nth(5)).toHaveText("3");
+  await expect(graceRow.getByRole("cell").nth(2)).toHaveText("3");
 });
 
 test("a tenant admin starts another user's stopped workspace", async ({ page, request }) => {
@@ -212,7 +214,7 @@ test("a tenant admin starts another user's stopped workspace", async ({ page, re
   expect(
     reqs.requests.some(
       (r: { method: string; path: string }) =>
-        r.method === "POST" && r.path === `/v1/workspaces/${LINUS_STOPPED}/start`,
+        r.method === "POST" && r.path === `/v1/workspaces/${LINUS_STOPPED}:start`,
     ),
   ).toBeTruthy();
 });
@@ -247,8 +249,8 @@ test("a tenant admin restarts another user's running workspace", async ({ page, 
   // Stop was sent before start, and only once each.
   const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
   const paths = reqs.requests.map((r: { method: string; path: string }) => `${r.method} ${r.path}`);
-  const stopIdx = paths.indexOf(`POST /v1/workspaces/${GRACE_READY}/stop`);
-  const startIdx = paths.indexOf(`POST /v1/workspaces/${GRACE_READY}/start`);
+  const stopIdx = paths.indexOf(`POST /v1/workspaces/${GRACE_READY}:stop`);
+  const startIdx = paths.indexOf(`POST /v1/workspaces/${GRACE_READY}:start`);
   expect(stopIdx).toBeGreaterThanOrEqual(0);
   expect(startIdx).toBeGreaterThan(stopIdx);
 });
