@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -24,6 +25,8 @@ type fakeDurable struct {
 	inTx        int
 	amended     []observability.AuditEvent
 	failPersist error
+	failAmend   error
+	reported    []string // "op action: err" per reportPersistError call
 }
 
 func (f *fakeDurable) WriteAudit(_ context.Context, e observability.AuditEvent) error {
@@ -48,8 +51,16 @@ func (f *fakeDurable) PersistAudit(_ context.Context, tx store.Tx, e observabili
 func (f *fakeDurable) AmendAudit(_ context.Context, _ int64, e observability.AuditEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failAmend != nil {
+		return f.failAmend
+	}
 	f.amended = append(f.amended, e)
 	return nil
+}
+func (f *fakeDurable) reportPersistError(op string, e observability.AuditEvent, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reported = append(f.reported, op+" "+e.Action+": "+err.Error())
 }
 
 func TestAudited_PersistFailureFailsClosed(t *testing.T) {
@@ -77,6 +88,9 @@ func TestAudited_PersistFailureFailsClosed(t *testing.T) {
 	}
 	if len(sink.stdout) != 1 || sink.stdout[0].Outcome != observability.OutcomeFailure || sink.stdout[0].ErrorCode != "INTERNAL" {
 		t.Fatalf("stdout records = %+v, want one failure/INTERNAL record (stdout survives an audit-store outage)", sink.stdout)
+	}
+	if len(sink.reported) != 1 || sink.reported[0] != "insert admin.quota.get: db down" {
+		t.Fatalf("reported = %q, want the failed insert reported once", sink.reported)
 	}
 }
 
@@ -143,6 +157,72 @@ func TestAudited_PanicAfterCommitAmendsFailure(t *testing.T) {
 	}
 }
 
+// TestAudited_AmendFailureIsReported: a committed row whose amend fails
+// keeps the PreCommit (success) snapshot, so the failure must be reported;
+// the mutation already committed, so the handler's answer still goes out.
+func TestAudited_AmendFailureIsReported(t *testing.T) {
+	sink := &fakeDurable{failAmend: errors.New("amend down")}
+	var fakeTx store.Tx = struct{ store.Tx }{}
+	h := audited(sink, routeAdminQuotaSet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hook := store.TxHookFromContext(r.Context())
+		if err := hook.PreCommit(r.Context(), fakeTx); err != nil {
+			t.Fatal(err)
+		}
+		hook.Committed()
+		writeError(w, r, CodeQuotaExhausted, "late refusal")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/admin/tenants/t/quota", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want the handler's 409 (the mutation committed)", rec.Code)
+	}
+	if len(sink.reported) != 1 || sink.reported[0] != "amend admin.quota.set: amend down" {
+		t.Fatalf("reported = %q, want the failed amend reported once", sink.reported)
+	}
+}
+
+// TestAudited_PanicPersistFailureIsReported: the panic path's insert
+// failure is reported, not dropped.
+func TestAudited_PanicPersistFailureIsReported(t *testing.T) {
+	sink := &fakeDurable{failPersist: errors.New("db down")}
+	h := audited(sink, routeAdminQuotaSet, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	func() {
+		defer func() { _ = recover() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPut, "/v1/admin/tenants/t/quota", nil))
+	}()
+	if len(sink.reported) != 1 || sink.reported[0] != "insert admin.quota.set: db down" {
+		t.Fatalf("reported = %q, want the panic-path insert failure reported once", sink.reported)
+	}
+}
+
+// TestDurableAuditSink_ReportsPersistError: the production sink logs the
+// failure at error level with the request id and counts it.
+func TestDurableAuditSink_ReportsPersistError(t *testing.T) {
+	var logBuf bytes.Buffer
+	var counted []string
+	s := NewDurableAuditSink(&plainSink{}, nil, slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		func(action string) { counted = append(counted, action) })
+	s.reportPersistError("amend", observability.AuditEvent{
+		Action: auditActionAdminQuotaSet, RequestID: "req-9", Outcome: observability.OutcomeFailure, ErrorCode: "QUOTA_EXHAUSTED",
+	}, errors.New("amend down"))
+	if len(counted) != 1 || counted[0] != auditActionAdminQuotaSet {
+		t.Fatalf("counted = %v, want one admin.quota.set", counted)
+	}
+	var line map[string]any
+	if err := json.Unmarshal(logBuf.Bytes(), &line); err != nil {
+		t.Fatalf("log line: %v (%s)", err, logBuf.String())
+	}
+	for k, want := range map[string]string{"level": "ERROR", "op": "amend", "action": auditActionAdminQuotaSet,
+		"request_id": "req-9", "outcome": "failure", "error_code": "QUOTA_EXHAUSTED", "error": "amend down"} {
+		if line[k] != want {
+			t.Fatalf("log %s = %v, want %q (%s)", k, line[k], want, logBuf.String())
+		}
+	}
+	NewDurableAuditSink(&plainSink{}, nil, nil, nil).reportPersistError("insert", observability.AuditEvent{}, errors.New("x")) // nil log/onError must not panic
+}
+
 type plainSink struct{ n int }
 
 func (p *plainSink) WriteAudit(context.Context, observability.AuditEvent) error { p.n++; return nil }
@@ -171,6 +251,10 @@ func TestLateAuditSink_ForwardsPersistence(t *testing.T) {
 	}
 	if _, err := d.PersistAudit(context.Background(), nil, observability.AuditEvent{Action: auditActionSessionRevokeAll}); err != nil || len(inner.persisted) != 1 {
 		t.Fatalf("PersistAudit not forwarded: err=%v persisted=%d", err, len(inner.persisted))
+	}
+	d.reportPersistError("amend", observability.AuditEvent{Action: auditActionSessionRevokeAll}, errors.New("x"))
+	if len(inner.reported) != 1 {
+		t.Fatalf("reportPersistError not forwarded: %q", inner.reported)
 	}
 	none := lateAuditSink{func() observability.AuditSink { return &plainSink{} }}
 	if none.Persists(auditActionSessionRevokeAll) {

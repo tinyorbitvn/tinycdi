@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,6 +28,9 @@ type durableAudit interface {
 	Persists(action string) bool
 	PersistAudit(ctx context.Context, tx store.Tx, e observability.AuditEvent) (int64, error)
 	AmendAudit(ctx context.Context, id int64, e observability.AuditEvent) error
+	// reportPersistError signals an insert or amend ("insert"/"amend")
+	// that failed for good, so no audit_event failure goes unnoticed.
+	reportPersistError(op string, e observability.AuditEvent, err error)
 }
 
 // notPersisted are actions that stay stdout-only: session.touch is the
@@ -38,14 +42,22 @@ var notPersisted = map[string]bool{auditActionSessionTouch: true}
 // WriteAudit callers (the authenticator's revoke records, config apply)
 // stay stdout-only.
 type DurableAuditSink struct {
-	stdout observability.AuditSink
-	db     AuditStore
+	stdout  observability.AuditSink
+	db      AuditStore
+	log     *slog.Logger
+	onError func(action string)
 }
 
 // NewDurableAuditSink wires the stdout sink (normally a GuardedSink) and
-// the store.
-func NewDurableAuditSink(stdout observability.AuditSink, db AuditStore) *DurableAuditSink {
-	return &DurableAuditSink{stdout: stdout, db: db}
+// the store. Every failed insert or amend is logged at error level with
+// the request id and passed to onError (the
+// tinycdi_audit_write_errors_total{event} metric in wiring). log defaults
+// to slog.Default(); onError may be nil.
+func NewDurableAuditSink(stdout observability.AuditSink, db AuditStore, log *slog.Logger, onError func(action string)) *DurableAuditSink {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &DurableAuditSink{stdout: stdout, db: db, log: log, onError: onError}
 }
 
 func (s *DurableAuditSink) WriteAudit(ctx context.Context, e observability.AuditEvent) error {
@@ -61,6 +73,18 @@ func (s *DurableAuditSink) PersistAudit(ctx context.Context, tx store.Tx, e obse
 func (s *DurableAuditSink) AmendAudit(ctx context.Context, id int64, e observability.AuditEvent) error {
 	r := auditRecordOf(e)
 	return s.db.AmendAudit(ctx, id, r.TargetID, r.Outcome, r.ErrorCode, r.Details)
+}
+
+// reportPersistError is not rate-limited: during an audit-store outage
+// every affected request already fails closed, one line per request. A
+// failed amend leaves the committed row with its pre-commit snapshot, so
+// the line carries the final outcome the row should have recorded.
+func (s *DurableAuditSink) reportPersistError(op string, e observability.AuditEvent, err error) {
+	if s.onError != nil {
+		s.onError(e.Action)
+	}
+	s.log.Error("audit_event write failed", "op", op, "action", e.Action, "request_id", e.RequestID,
+		"outcome", string(e.Outcome), "error_code", e.ErrorCode, "error", err)
 }
 
 func auditRecordOf(e observability.AuditEvent) store.AuditRecord {

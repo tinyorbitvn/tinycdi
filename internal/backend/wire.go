@@ -181,10 +181,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// silent audit loss (the write never fails the request). The durable
 	// wrapper also persists every audited() route event to audit_event,
 	// failing the request closed when that insert fails (ADR 0011); plain
-	// WriteAudit callers stay stdout-only.
+	// WriteAudit callers stay stdout-only. A failed insert or amend is
+	// logged at error level (with the request id) and counted on the same
+	// metric, so an audit-store outage is never silent either.
 	appAudit := api.NewDurableAuditSink(
 		observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log, metrics.IncAuditWriteError),
-		store.NewAuditStore(db))
+		store.NewAuditStore(db), log, metrics.IncAuditWriteError)
 	if len(quotas) > 0 {
 		// Declared quotas: written by the singleton leader only, so replicas
 		// starting together do not race (FX-R17).

@@ -259,11 +259,17 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			if id := hook.committedID(); id != 0 {
 				// The row committed with the mutation; the amend records the
 				// final target and outcome. A failed amend leaves the
-				// committed row as inserted.
-				_ = durable.AmendAudit(pctx, id, e)
+				// committed row as inserted and is reported, not returned:
+				// the mutation already happened.
+				if err := durable.AmendAudit(pctx, id, e); err != nil {
+					durable.reportPersistError("amend", e, err)
+				}
 				return nil
 			}
 			_, err := durable.PersistAudit(pctx, nil, e)
+			if err != nil {
+				durable.reportPersistError("insert", e, err)
+			}
 			return err
 		}
 
@@ -284,7 +290,7 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			}
 			e := event(0, false)
 			if durable != nil {
-				_ = persist(e)
+				_ = persist(e) // a failure is reported inside persist
 			}
 			_ = sink.WriteAudit(ctx, e)
 		}()
@@ -358,6 +364,12 @@ func (s lateAuditSink) PersistAudit(ctx context.Context, tx store.Tx, e observab
 		return 0, errors.New("audit: no durable sink attached")
 	}
 	return d.PersistAudit(ctx, tx, e)
+}
+
+func (s lateAuditSink) reportPersistError(op string, e observability.AuditEvent, err error) {
+	if d := s.durable(); d != nil {
+		d.reportPersistError(op, e, err)
+	}
 }
 
 func (s lateAuditSink) AmendAudit(ctx context.Context, id int64, e observability.AuditEvent) error {
