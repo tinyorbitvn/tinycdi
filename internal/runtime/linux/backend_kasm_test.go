@@ -164,16 +164,11 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	if !shimMounts["/usr/bin/google-chrome"] {
 		t.Error("the google-chrome wrapper path must be shimmed")
 	}
+	if !shimMounts["/usr/bin/google-chrome-stable"] {
+		t.Error("the google-chrome-stable wrapper path must be shimmed")
+	}
 	if !policyMounts["/etc/opt/chrome/policies/managed/zz-tcdi.json"] {
 		t.Error("the google-chrome managed-policy dir must carry zz-tcdi.json")
-	}
-	// In the chrome layout /usr/bin/google-chrome-stable is a symlink to
-	// the real launcher — a bind mount resolves through it, so listing it
-	// would shadow the very binary the shim execs.
-	for _, wp := range AdapterBrowserWrappers {
-		if wp == "/usr/bin/google-chrome-stable" {
-			t.Error("/usr/bin/google-chrome-stable must not be shimmed (symlink to /opt/google/chrome/google-chrome)")
-		}
 	}
 	for _, pp := range AdapterPolicyTargets {
 		if !policyMounts[pp] {
@@ -183,7 +178,8 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	// The shim must never shadow the real binary it execs — that would loop.
 	for _, wp := range AdapterBrowserWrappers {
 		for _, real := range []string{"/usr/bin/chromium-orig", "/usr/lib/chromium/chromium",
-			"/opt/google/chrome/google-chrome", "/opt/microsoft/msedge/microsoft-edge"} {
+			"/opt/google/chrome/google-chrome", "/opt/google/chrome/chrome",
+			"/opt/microsoft/msedge/microsoft-edge"} {
 			if wp == real {
 				t.Fatalf("wrapper list must not contain the real binary %s", real)
 			}

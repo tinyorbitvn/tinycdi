@@ -27,6 +27,11 @@ real=""
 if [ -f "$BIN_FILE" ]; then
   real="$(head -n1 "$BIN_FILE" 2>/dev/null || true)"
 fi
+# The -ef test also catches the Google Chrome layout's symlink case: the
+# mount over /usr/bin/google-chrome-stable resolves through the symlink
+# and lands on the launcher /opt/google/chrome/google-chrome itself, so a
+# recorded browser-bin pointing there IS this shim — skip to the
+# candidates, where the real ELF (/opt/google/chrome/chrome) is found.
 if [ -z "$real" ] || [ ! -x "$real" ] || [ "$real" -ef "$0" ]; then
   real=""
   for c in \
@@ -34,6 +39,7 @@ if [ -z "$real" ] || [ ! -x "$real" ] || [ "$real" -ef "$0" ]; then
     /usr/lib/chromium/chromium \
     /usr/lib/chromium-browser/chromium-browser \
     /opt/google/chrome/google-chrome \
+    /opt/google/chrome/chrome \
     /opt/microsoft/msedge/microsoft-edge \
     /opt/brave.com/brave/brave-browser \
     /opt/vivaldi/vivaldi \

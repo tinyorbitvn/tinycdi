@@ -183,13 +183,16 @@ var AdapterBrowserWrappers = []string{
 	"/usr/bin/chromium-browser",
 	"/usr/bin/chromium-browser-stable",
 	"/usr/bin/google-chrome",
-	// /usr/bin/google-chrome-stable is deliberately absent: in the Google
-	// Chrome layout it is a symlink to the real launcher
-	// (/opt/google/chrome/google-chrome), and a bind mount resolves
-	// through the symlink — mounting the shim here would shadow the
-	// binary the session runs. Left alone it stays a path into the
-	// sandboxed upstream launcher, which is safe.
-	// "/usr/bin/google-chrome-stable",
+	// In the Google Chrome layout /usr/bin/google-chrome-stable is a
+	// symlink to the launcher script /opt/google/chrome/google-chrome,
+	// and a bind mount resolves through the symlink — the shim therefore
+	// lands on the launcher itself. That is safe because the launcher is
+	// not the real binary: it execs the ELF at /opt/google/chrome/chrome,
+	// which stays untouched and is on the shim's candidate list. On
+	// images where this path is a real Kasm --no-sandbox wrapper file the
+	// mount neutralizes it directly; where it is absent the kubelet
+	// creates the target like any other missing path.
+	"/usr/bin/google-chrome-stable",
 	"/usr/bin/microsoft-edge",
 	"/usr/bin/microsoft-edge-stable",
 	"/usr/bin/brave-browser",
