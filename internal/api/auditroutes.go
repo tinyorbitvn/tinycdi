@@ -51,11 +51,7 @@ const (
 	routeSessionRevokeAll = "POST /v1/me/sessions:revoke-all"
 	routeWorkspaceCreate  = "POST /v1/workspaces"
 	routeWorkspaceDelete  = "DELETE /v1/workspaces/{id}"
-	routeWorkspaceStart   = "POST /v1/workspaces/{id}/start"
-	routeWorkspaceStop    = "POST /v1/workspaces/{id}/stop"
 	routeConnectionCreate = "POST /v1/workspaces/{id}/connections"
-	routeDataAttach       = "POST /v1/data/{dataId}/attach"
-	routeDataPurge        = "POST /v1/data/{dataId}/purge"
 	routeAdminQuotaGet    = "GET /v1/admin/tenants/{tenant}/quota"
 	routeAdminQuotaSet    = "PUT /v1/admin/tenants/{tenant}/quota"
 
@@ -66,6 +62,23 @@ const (
 	routeAdminSessionPolicyGet = "GET /v1/admin/tenants/{tenant}/session-policy"
 	routeAdminSessionPolicyPut = "PUT /v1/admin/tenants/{tenant}/session-policy"
 )
+
+// :verb custom methods. ServeMux cannot match the verb labels (the verb
+// shares the id's segment), so they are audit labels only: the mux pattern
+// is the ActionRouter's routeWorkspaceActions / routeDataActions, and each
+// verb handler is wrapped in audited() under its label.
+const (
+	routeWorkspaceActions = "POST /v1/workspaces/{ref}"
+	routeWorkspaceStart   = "POST /v1/workspaces/{ref}:start"
+	routeWorkspaceStop    = "POST /v1/workspaces/{ref}:stop"
+	routeDataActions      = "POST /v1/data/{ref}"
+	routeDataAttach       = "POST /v1/data/{ref}:attach"
+	routeDataPurge        = "POST /v1/data/{ref}:purge"
+)
+
+// actionTarget is the auditedRoute.targetKey of the :verb routes: the
+// target is the id the ActionRouter split off, not the raw {ref}.
+const actionTarget = "ref"
 
 // auditedRoute binds a route pattern to its audit action and the path-value
 // key that names the target; "" means the handler fills the target on the
@@ -84,11 +97,11 @@ var auditedRoutes = map[string]auditedRoute{
 	routeSessionRevokeAll: {auditActionSessionRevokeAll, ""},
 	routeWorkspaceCreate:  {auditActionWorkspaceCreate, ""},
 	routeWorkspaceDelete:  {auditActionWorkspaceDelete, "id"},
-	routeWorkspaceStart:   {auditActionWorkspaceStart, "id"},
-	routeWorkspaceStop:    {auditActionWorkspaceStop, "id"},
+	routeWorkspaceStart:   {auditActionWorkspaceStart, actionTarget},
+	routeWorkspaceStop:    {auditActionWorkspaceStop, actionTarget},
 	routeConnectionCreate: {auditActionConnectionCreate, "id"},
-	routeDataAttach:       {auditActionDataAttach, "dataId"},
-	routeDataPurge:        {auditActionDataPurge, "dataId"},
+	routeDataAttach:       {auditActionDataAttach, actionTarget},
+	routeDataPurge:        {auditActionDataPurge, actionTarget},
 	routeAdminQuotaGet:    {auditActionAdminQuotaGet, "tenant"},
 	routeAdminQuotaSet:    {auditActionAdminQuotaSet, "tenant"},
 	// The PUTs carry both halves of a set/clear pair: the table action is
@@ -174,7 +187,11 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			return
 		}
 		ra := &routeAudit{}
-		if rt.targetKey != "" {
+		switch rt.targetKey {
+		case "":
+		case actionTarget:
+			ra.target = ActionID(r)
+		default:
 			ra.target = r.PathValue(rt.targetKey)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRouteAudit, ra))

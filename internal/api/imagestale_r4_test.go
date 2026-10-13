@@ -117,7 +117,7 @@ func TestList_NoTemplateGets(t *testing.T) {
 		}
 	}
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?limit=200", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK || len(list.Items) != 200 {
 		t.Fatalf("status=%d items=%d, want 200/200", r.StatusCode, len(list.Items))
 	}
@@ -191,7 +191,7 @@ func TestList_AtMostOneLookupPerTemplate(t *testing.T) {
 	oldWorkspaces(be, env, 150, "tpl_one", "tpl_two", "tpl_gone")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?limit=200", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	if r.StatusCode != http.StatusOK || len(list.Items) != 150 {
 		t.Fatalf("status=%d items=%d, want 200/150", r.StatusCode, len(list.Items))
 	}
@@ -249,7 +249,7 @@ func TestTemplateFamily_StableAcrossRevisions(t *testing.T) {
 	owner := env.issuer.URL() + "|" + env.issuer.Subject
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/templates", "", nil)
-	list := decodeBody[templateList](t, r)
+	list := decodeBody[Page[templateView]](t, r)
 	if len(list.Items) != 2 {
 		t.Fatalf("got %d templates, want 2", len(list.Items))
 	}
@@ -271,7 +271,7 @@ func TestTemplateFamily_StableAcrossRevisions(t *testing.T) {
 		}
 	}
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if len(wl.Items) != 2 {
 		t.Fatalf("got %d workspaces, want 2", len(wl.Items))
 	}

@@ -66,7 +66,7 @@ func createStopped(t *testing.T, svc *provisioning.Service, rec *provisioning.Re
 }
 
 // TestStartReacquiresQuota covers defect F7: POST
-// /v1/workspaces/{id}/start on a stopped workspace must re-acquire the
+// /v1/workspaces/{id}:start on a stopped workspace must re-acquire the
 // running-quota reservation that Stop + proven runtime absence released,
 // in the same transaction as the start intent.
 //
@@ -250,5 +250,5 @@ func TestStartOnRunningIsIdempotent(t *testing.T) {
 }
 
 // The handler-level mapping (QuotaExceededError -> 409 QUOTA_EXHAUSTED on
-// POST /v1/workspaces/{id}/start) is covered in internal/api
+// POST /v1/workspaces/{id}:start) is covered in internal/api
 // (workspaces_handlers_test.go: TestStartQuotaExhaustedMapping).

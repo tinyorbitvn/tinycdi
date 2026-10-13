@@ -16,9 +16,9 @@ import (
 // with a different request body than the one originally stored.
 var ErrIdempotencyConflict = errors.New("idempotency key replayed with a different request body")
 
-// ErrBadCursor is returned when a page token fails to decode — a client
+// ErrBadCursor is returned when a cursor position fails to decode — a client
 // error (400), never an internal one.
-var ErrBadCursor = errors.New("bad page token")
+var ErrBadCursor = errors.New("bad cursor")
 
 // scopedIdemKey binds a caller-supplied idempotency key to the
 // authenticated principal: the stored key is <sha256(actor)[:16]>|<key>,

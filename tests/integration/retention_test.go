@@ -204,7 +204,7 @@ func TestRetention_DeleteRetainToInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportRetained: %v", err)
 	}
-	recs, _, err := rstore.ListRetained(ctx, "tenant-it", retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, "tenant-it", retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil {
 		t.Fatalf("ListRetained: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestRetention_AttachPurgeRace(t *testing.T) {
 	})
 
 	purgeNonce := func(t *testing.T, id string) string {
-		recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+		recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 		if err != nil {
 			t.Fatalf("list for nonce: %v", err)
 		}
@@ -294,7 +294,7 @@ func TestRetention_AttachPurgeRace(t *testing.T) {
 		if winners != 1 {
 			t.Fatalf("race produced %d winners (attach=%v purge=%v), want exactly 1", winners, attachErr, purgeErr)
 		}
-		recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, "", "", 50)
+		recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, "", provisioning.ListPage{Limit: 50, SortField: "retainedAt"})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -409,7 +409,7 @@ func TestRetention_IdempotentRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import2: %v", err)
 	}
-	recs, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	var nonce string
 	for _, r := range recs {
 		if r.ID == rec2.ID {
@@ -421,7 +421,7 @@ func TestRetention_IdempotentRetries(t *testing.T) {
 		t.Fatalf("purge: %v", err)
 	}
 	// Fresh nonce, retry: naturally idempotent.
-	recs, _, _ = rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ = rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	for _, r := range recs {
 		if r.ID == rec2.ID {
 			nonce = r.PurgeNonce
@@ -459,7 +459,7 @@ func TestRetention_Unauthorized(t *testing.T) {
 		t.Fatalf("foreign purge: err=%v, want ErrRetainedNotFound", err)
 	}
 	// The owner's own record is untouched.
-	recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil || len(recs) != 1 || recs[0].State != api.RetainedStateRetained {
 		t.Fatalf("record after foreign attempts = %+v err=%v", recs, err)
 	}
@@ -502,7 +502,7 @@ func TestRetention_QuotaHeldUntilDeletion(t *testing.T) {
 		t.Fatalf("retained disk not counted: held disk=%d", used.DiskBytes)
 	}
 
-	recs, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, _ := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	var nonce string
 	for _, r := range recs {
 		if r.ID == rec.ID {
@@ -635,7 +635,7 @@ func TestRetention_AttachDeletedMidway(t *testing.T) {
 	if err := rstore.ReturnToRetained(ctx, rec.ID, ws.ID); err != nil {
 		t.Fatalf("ReturnToRetained: %v", err)
 	}
-	recs, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, "", 10)
+	recs, _, _, err := rstore.ListRetained(ctx, tenant, retOwner, retOwner, provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

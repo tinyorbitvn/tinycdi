@@ -298,7 +298,7 @@ func TestWorkspaceForeignGet_CustomAdminGroups(t *testing.T) {
 		t.Fatalf("member GET foreign workspace: status=%d, want 200", r.StatusCode)
 	}
 	r = doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/workspaces", "", nil)
-	wl := decodeBody[WorkspaceList](t, r)
+	wl := decodeBody[Page[WorkspaceView]](t, r)
 	if len(wl.Items) != 1 {
 		t.Fatalf("member natural scope listed %d workspaces, want 1 (tenant-wide)", len(wl.Items))
 	}
@@ -328,14 +328,14 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("non-member GET foreign record: status=%d, want 404", r.StatusCode)
 	}
-	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+attachRec.ID+"/attach",
+	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+attachRec.ID+":attach",
 		`{"name":"c-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-2"})
 	r.Body.Close()
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("non-member attach foreign record: status=%d, want 404", r.StatusCode)
 	}
-	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+purgeRec.ID+"/purge",
+	r = doReq(t, env, sessC, csrfC, http.MethodPost, "/v1/data/"+purgeRec.ID+":purge",
 		`{"confirmationNonce":"nonce-anything"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-3"})
 	r.Body.Close()
@@ -354,7 +354,7 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if rec.Owner.Subject != "user-b" {
 		t.Fatalf("record owner = %q, want user-b", rec.Owner.Subject)
 	}
-	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+attachRec.ID+"/attach",
+	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+attachRec.ID+":attach",
 		`{"name":"a-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-4"})
 	r.Body.Close()
@@ -367,7 +367,7 @@ func TestDataForeignRecord_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("member GET purge record: status=%d, want 200", r.StatusCode)
 	}
-	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+purgeRec.ID+"/purge",
+	r = doReq(t, env, sessA, csrfA, http.MethodPost, "/v1/data/"+purgeRec.ID+":purge",
 		`{"confirmationNonce":"`+rec.PurgeConfirmationNonce+`"}`,
 		map[string]string{"Idempotency-Key": "key-admingrp-5"})
 	r.Body.Close()

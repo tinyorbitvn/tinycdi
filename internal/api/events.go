@@ -9,7 +9,6 @@ import (
 	"maps"
 	"net/http"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -77,9 +76,9 @@ type WorkspaceEvent struct {
 	LastTimestamp  *time.Time        `json:"lastTimestamp,omitempty"`
 }
 
-// WorkspaceEventList is the events response, newest first.
-type WorkspaceEventList struct {
-	Items []WorkspaceEvent `json:"items"`
+// WorkspaceEventPage is the events response: one page, newest first.
+type WorkspaceEventPage struct {
+	Page[WorkspaceEvent]
 	// Stale is true when the observed-state informer cannot prove freshness:
 	// condition events then show last-known state and never claim readiness.
 	Stale bool `json:"stale,omitempty"`
@@ -272,6 +271,14 @@ func (h *WorkspaceHandler) Events(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeInvalidRequest, "bad workspace id")
 		return
 	}
+	pg, perr := ParsePage(r, []string{"time"}, "-time")
+	if perr == nil && !pg.Sort.Desc {
+		perr = NewError(CodeInvalidRequest, "events are served newest first only (sort=-time)")
+	}
+	if perr != nil {
+		WriteError(w, r, perr)
+		return
+	}
 	rec, err := h.backend.GetWorkspace(r.Context(), p.TenantID, ownerScope(p), id)
 	if err != nil {
 		h.writeBackendError(w, r, err)
@@ -283,7 +290,7 @@ func (h *WorkspaceHandler) Events(w http.ResponseWriter, r *http.Request) {
 			obs = o
 		}
 	}
-	out := WorkspaceEventList{Items: []WorkspaceEvent{}}
+	out := WorkspaceEventPage{Page: Page[WorkspaceEvent]{Items: []WorkspaceEvent{}}}
 	// The API's own lifecycle: recorded intents, plus the create timestamp
 	// as a floor when the log is unavailable.
 	intents, err := h.intentLogHistory(r.Context(), p.TenantID, id)
@@ -337,17 +344,21 @@ func (h *WorkspaceHandler) Events(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Items = append(out.Items, ev)
 	}
-	sort.SliceStable(out.Items, func(i, j int) bool {
-		var a, b time.Time
-		if out.Items[i].LastTimestamp != nil {
-			a = *out.Items[i].LastTimestamp
-		}
-		if out.Items[j].LastTimestamp != nil {
-			b = *out.Items[j].LastTimestamp
-		}
-		return a.After(b)
-	})
+	// Ordered by (lastTimestamp, id) descending; an event without a
+	// timestamp sorts as the zero time, i.e. last.
+	out.Page = pageInMemory(out.Items, pg, eventTimeKey,
+		func(e WorkspaceEvent) string { return e.ID })
 	respondJSON(w, out)
+}
+
+// eventTimeKey renders an event's lastTimestamp so that string order is
+// time order (fixed width, UTC).
+func eventTimeKey(e WorkspaceEvent) string {
+	var t time.Time
+	if e.LastTimestamp != nil {
+		t = *e.LastTimestamp
+	}
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 // intentLogHistory reads the intent log when wired; err is nil when the

@@ -99,7 +99,7 @@ func TestOpenAPIContract_TemplateView(t *testing.T) {
 	for _, clip := range []string{"Disabled", "Send", "Receive", "Bidirectional"} {
 		t.Run("clipboard="+clip, func(t *testing.T) {
 			requireValid(t, "TemplateView", contractTemplate(clip))
-			requireValid(t, "TemplateList", templateList{Items: []templateView{contractTemplate(clip)}})
+			requireValid(t, "TemplatePage", Page[templateView]{Items: []templateView{contractTemplate(clip)}, NextCursor: "c1"})
 		})
 	}
 	t.Run("clipboard=unknown is rejected", func(t *testing.T) {
@@ -151,7 +151,7 @@ func TestOpenAPIContract_WorkspaceView(t *testing.T) {
 		ImageStale:      &stale,
 	}
 	requireValid(t, "WorkspaceView", view)
-	requireValid(t, "WorkspaceList", WorkspaceList{Items: []WorkspaceView{view}})
+	requireValid(t, "WorkspacePage", Page[WorkspaceView]{Items: []WorkspaceView{view}, NextCursor: "c1"})
 }
 
 func TestOpenAPIContract_QuotaView(t *testing.T) {
@@ -202,15 +202,15 @@ func TestOpenAPIContract_ConnectionStatus(t *testing.T) {
 	})
 }
 
-func TestOpenAPIContract_WorkspaceEventList(t *testing.T) {
+func TestOpenAPIContract_WorkspaceEventPage(t *testing.T) {
 	ts := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
 	items := []WorkspaceEvent{{
 		ID: "StartRequested.4", Type: "Normal", Reason: "StartRequested",
 		Message: "Starting the workspace was requested.", Count: 1, FirstTimestamp: &ts, LastTimestamp: &ts,
 		Params: map[string]string{"revision": "4"},
 	}}
-	requireValid(t, "WorkspaceEventList", WorkspaceEventList{Items: items})
-	requireValid(t, "WorkspaceEventList", WorkspaceEventList{Items: items, Stale: true})
+	requireValid(t, "WorkspaceEventPage", WorkspaceEventPage{Page: Page[WorkspaceEvent]{Items: items}})
+	requireValid(t, "WorkspaceEventPage", WorkspaceEventPage{Page: Page[WorkspaceEvent]{Items: items, NextCursor: "c1"}, Stale: true})
 }
 
 // GET /v1/data/{dataId} answers with the same record GET /v1/data lists.
@@ -226,7 +226,7 @@ func TestOpenAPIContract_RetainedDataView(t *testing.T) {
 		PurgeConfirmationNonce: "nonce",
 	}
 	requireValid(t, "RetainedDataView", view)
-	requireValid(t, "RetainedDataList", retainedDataList{Items: []retainedDataView{view}})
+	requireValid(t, "RetainedDataPage", Page[retainedDataView]{Items: []retainedDataView{view}, NextCursor: "c1"})
 }
 
 func TestOpenAPIContract_GetRetainedDataPath(t *testing.T) {

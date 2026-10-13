@@ -966,16 +966,16 @@ func (a catalogAdapter) Resolve(ctx context.Context, tenantID, id string) (api.T
 	return catalogEntry(*e), nil
 }
 
-func (a catalogAdapter) List(ctx context.Context, tenantID, runtimeFilter, _ string, _ int) ([]api.TemplateEntry, string, error) {
+func (a catalogAdapter) List(ctx context.Context, tenantID, runtimeFilter string) ([]api.TemplateEntry, error) {
 	list, err := a.c.List(ctx, tenantID, runtimeFilter)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	out := make([]api.TemplateEntry, 0, len(list))
 	for _, e := range list {
 		out = append(out, catalogEntry(e))
 	}
-	return out, "", nil
+	return out, nil
 }
 
 // NewestInFamily implements api.FamilyCatalog for the updateAvailable

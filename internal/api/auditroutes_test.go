@@ -112,7 +112,9 @@ func normalizePath(path string) string {
 	segs := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, seg := range segs {
 		if strings.HasPrefix(seg, "{") {
-			segs[i] = "{}"
+			// Keep a :verb suffix: {workspaceId}:start -> {}:start.
+			_, suffix, _ := strings.Cut(seg, "}")
+			segs[i] = "{}" + suffix
 		}
 	}
 	return "/" + strings.Join(segs, "/")
@@ -297,11 +299,11 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 				`{"name":"coverage-ws","templateRef":"tpl_linuxdesktop"}`,
 				map[string]string{"Idempotency-Key": "key-cov-create"}).Body.Close()
 		}},
-		{"POST /v1/workspaces/{}/start", auditActionWorkspaceStart, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsStoppedID+"/start", "", nil).Body.Close()
+		{"POST /v1/workspaces/{}:start", auditActionWorkspaceStart, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsStoppedID+":start", "", nil).Body.Close()
 		}},
-		{"POST /v1/workspaces/{}/stop", auditActionWorkspaceStop, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/stop", "", nil).Body.Close()
+		{"POST /v1/workspaces/{}:stop", auditActionWorkspaceStop, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+":stop", "", nil).Body.Close()
 		}},
 		{"POST /v1/workspaces/{}/connections", auditActionConnectionCreate, func() {
 			doReq(t, env, sess, csrf, http.MethodPost,
@@ -310,15 +312,15 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		{"DELETE /v1/workspaces/{}", auditActionWorkspaceDelete, func() {
 			doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+wsID, "", nil).Body.Close()
 		}},
-		{"POST /v1/data/{}/attach", auditActionDataAttach, func() {
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+		{"POST /v1/data/{}:attach", auditActionDataAttach, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 				`{"name":"restored","templateRef":"tpl_linuxdesktop"}`,
 				map[string]string{"Idempotency-Key": "key-cov-attach"}).Body.Close()
 		}},
-		{"POST /v1/data/{}/purge", auditActionDataPurge, func() {
+		{"POST /v1/data/{}:purge", auditActionDataPurge, func() {
 			got := decodeBody[retainedDataView](t,
 				doReq(t, env, sess, csrf, http.MethodGet, "/v1/data/"+rec2.ID, "", nil))
-			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec2.ID+"/purge",
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec2.ID+":purge",
 				`{"confirmationNonce":"`+got.PurgeConfirmationNonce+`"}`, nil).Body.Close()
 		}},
 		{"GET /v1/admin/tenants/{}/quota", auditActionAdminQuotaGet, func() {
@@ -532,10 +534,10 @@ func TestAudit_WorkspaceStopOwner(t *testing.T) {
 	}
 	sess, csrf := login(t, env, "user-a")
 
-	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/stop", "", nil)
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+":stop", "", nil)
 	r.Body.Close()
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("stop: status=%d, want 200", r.StatusCode)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf("stop: status=%d, want 202", r.StatusCode)
 	}
 	e := requireEvent(t, sink, auditActionWorkspaceStop)
 	if e.Outcome != observability.OutcomeSuccess || e.TargetUID != wsID || e.Details["role"] != "" {
@@ -543,7 +545,7 @@ func TestAudit_WorkspaceStopOwner(t *testing.T) {
 	}
 
 	// A workspace that does not exist for this caller: failure + code.
-	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/ws_00000000000000000000000099/stop", "", nil)
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/ws_00000000000000000000000099:stop", "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("foreign stop: status=%d, want 404", r.StatusCode)
@@ -594,7 +596,7 @@ func TestAudit_CSRFDenied(t *testing.T) {
 	sess, _ := login(t, env, "user-a")
 
 	r := doReq(t, env, sess, &http.Cookie{Name: "csrf", Value: "forged"},
-		http.MethodPost, "/v1/workspaces/ws_00000000000000000000000002/stop", "", nil)
+		http.MethodPost, "/v1/workspaces/ws_00000000000000000000000002:stop", "", nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("bad CSRF: status=%d, want 403", r.StatusCode)
@@ -617,7 +619,7 @@ func TestAudit_DataAttachPurge(t *testing.T) {
 
 	// Owner attach.
 	sess, csrf := login(t, env, "user-a")
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"restored","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-audit-attach"})
 	if r.StatusCode != http.StatusCreated {
@@ -640,7 +642,7 @@ func TestAudit_DataAttachPurge(t *testing.T) {
 	// Read first to mint the caller-bound purge nonce.
 	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodGet, "/v1/data/"+rec2.ID, "", nil)
 	got := decodeBody[retainedDataView](t, r)
-	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodPost, "/v1/data/"+rec2.ID+"/purge",
+	r = doDataReq(t, env2, sessAdm, csrfAdm, http.MethodPost, "/v1/data/"+rec2.ID+":purge",
 		`{"confirmationNonce":"`+got.PurgeConfirmationNonce+`"}`, nil)
 	r.Body.Close()
 	if r.StatusCode != http.StatusAccepted {
@@ -744,12 +746,14 @@ func TestAudit_SinkFailureStillSucceeds(t *testing.T) {
 		slog.New(slog.NewTextHandler(&logBuf, nil)),
 		func(string) { failures++ })
 	mux := http.NewServeMux()
-	mux.Handle(routeWorkspaceStart, audited(sink, routeWorkspaceStart,
+	actions := NewActionRouter()
+	actions.Handle("start", audited(sink, routeWorkspaceStart,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
-		})))
+		})).ServeHTTP)
+	mux.Handle(routeWorkspaceActions, actions)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_1/start", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_1:start", nil))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status=%d, want 204 — audit failure must not fail the request", rec.Code)
 	}

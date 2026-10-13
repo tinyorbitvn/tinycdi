@@ -789,12 +789,12 @@ func (staticCatalog) Resolve(_ context.Context, tenantID, id string) (api.Templa
 	}, nil
 }
 
-func (staticCatalog) List(_ context.Context, tenantID, _, _ string, _ int) ([]api.TemplateEntry, string, error) {
+func (staticCatalog) List(_ context.Context, tenantID, _ string) ([]api.TemplateEntry, error) {
 	e, err := staticCatalog{}.Resolve(context.Background(), tenantID, "tpl_linuxdesktop")
 	if err != nil {
-		return nil, "", nil
+		return nil, nil
 	}
-	return []api.TemplateEntry{e}, "", nil
+	return []api.TemplateEntry{e}, nil
 }
 
 // httpEnv is the full public API stack over real Postgres: PG session store,
@@ -1071,7 +1071,7 @@ func TestAPIEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 || strings.Contains(body, created.ID) {
 		t.Fatalf("B list leaked A's workspace: %s", body)
 	}
-	resp, _ = env.do(t, sessB, csrfB, http.MethodPost, "/v1/workspaces/"+created.ID+"/stop", "", nil)
+	resp, _ = env.do(t, sessB, csrfB, http.MethodPost, "/v1/workspaces/"+created.ID+":stop", "", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("B stop A's ws: status=%d want 404", resp.StatusCode)
 	}

@@ -3,13 +3,11 @@ package provisioning
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -340,38 +338,34 @@ const visibleWorkspaceSQL = `(workspaces.state = 'active' OR EXISTS (
 	SELECT 1 FROM quota_reservation qr
 	WHERE qr.workspace_id = workspaces.id AND qr.state = 'held' AND ` + holdsComputeSQL + `))`
 
-// ListWorkspaces returns workspaces for tenantID scoped to ownerScope (or
-// all tenant workspaces when ownerScope is ""), ordered by creation time,
-// paginated by an opaque cursor. Deleted workspaces whose runtime is proven
-// gone are omitted (visibleWorkspaceSQL).
-func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase, cursor string, limit int) ([]WorkspaceRecord, string, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+// ListWorkspaces returns one page of workspaces for tenantID scoped to
+// ownerScope (or all tenant workspaces when ownerScope is ""), ordered by
+// (p.SortField, id) — createdAt or name — and positioned by the keyset
+// p.AfterKey/p.AfterID. nextKey/nextID locate the last returned row and are
+// set only when another page exists. Deleted workspaces whose runtime is
+// proven gone are omitted (visibleWorkspaceSQL).
+func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase string, p ListPage) ([]WorkspaceRecord, string, string, error) {
+	col, ok := workspaceSortColumns[p.SortField]
+	if !ok {
+		return nil, "", "", fmt.Errorf("list workspaces: unsupported sort field %q", p.SortField)
 	}
-	var rows []WorkspaceRecord
-	var next string
-
 	conds := []string{"tenant_id = $1", visibleWorkspaceSQL}
 	args := []any{tenantID}
-	n := 2
 	if ownerScope != "" {
-		conds = append(conds, fmt.Sprintf("owner_subject = $%d", n))
 		args = append(args, ownerScope)
-		n++
+		conds = append(conds, fmt.Sprintf("owner_subject = $%d", len(args)))
 	}
 	if phase != "" {
-		conds = append(conds, fmt.Sprintf("phase = $%d", n))
 		args = append(args, phase)
-		n++
+		conds = append(conds, fmt.Sprintf("phase = $%d", len(args)))
 	}
-	if cursor != "" {
-		ts, id, err := decodeCursor(cursor)
-		if err != nil {
-			return nil, "", fmt.Errorf("%w: %v", ErrBadCursor, err)
-		}
-		conds = append(conds, fmt.Sprintf("(created_at, id) > ($%d, $%d)", n, n+1))
-		args = append(args, ts, id)
-		n += 2
+	ks, err := p.keyset(col, len(args)+1)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if ks.where != "" {
+		conds = append(conds, ks.where)
+		args = append(args, ks.args...)
 	}
 	q := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
 		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
@@ -380,29 +374,44 @@ func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phas
 		COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
 		COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
 		COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0)
-		FROM workspaces WHERE ` + strings.Join(conds, " AND ") +
-		fmt.Sprintf(` ORDER BY created_at, id LIMIT %d`, limit+1)
+		FROM workspaces WHERE ` + strings.Join(conds, " AND ") + ks.orderLimit
 	r, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	defer r.Close()
+	var rows []WorkspaceRecord
 	for r.Next() {
 		rec, err := scanWorkspace(r)
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 		rows = append(rows, *rec)
 	}
 	if err := r.Err(); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	if len(rows) > limit {
-		last := rows[limit-1]
-		next = encodeCursor(last.CreatedAt, last.ID)
-		rows = rows[:limit]
+	var nextKey, nextID string
+	if len(rows) > ks.limit {
+		rows = rows[:ks.limit]
+		last := &rows[ks.limit-1]
+		nextKey, nextID = workspaceSortKey(last, p.SortField), last.ID
 	}
-	return rows, next, nil
+	return rows, nextKey, nextID, nil
+}
+
+// workspaceSortColumns maps the public sort fields onto columns; client
+// input never reaches the SQL text.
+var workspaceSortColumns = map[string]sortColumn{
+	"createdAt": {name: "created_at", timestamp: true},
+	"name":      {name: "name"},
+}
+
+func workspaceSortKey(rec *WorkspaceRecord, field string) string {
+	if field == "name" {
+		return rec.Name
+	}
+	return formatSortTime(rec.CreatedAt)
 }
 
 // AttachRetained delegates to the retained store so the workspace create
@@ -726,25 +735,68 @@ func getWorkspace(ctx context.Context, q querier, tenantID, ownerScope, id strin
 	return rec, nil
 }
 
-func encodeCursor(t time.Time, id string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(t.UnixNano(), 36) + "|" + id))
+// ListPage is one keyset page request: Limit rows ordered by (SortField,
+// id), descending when Desc, strictly after (AfterKey, AfterID) when
+// AfterID is set. AfterKey is the sort column's value as the list's
+// sort-key function rendered it (RFC 3339 with nanoseconds for timestamps).
+type ListPage struct {
+	Limit     int
+	SortField string
+	Desc      bool
+	AfterKey  string
+	AfterID   string
 }
 
-func decodeCursor(s string) (time.Time, string, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	ts, id, ok := strings.Cut(string(raw), "|")
-	if !ok {
-		return time.Time{}, "", errors.New("malformed cursor")
-	}
-	n, err := strconv.ParseInt(ts, 36, 64)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	return time.Unix(0, n), id, nil
+// Page size bounds: the default for an unset Limit, and the ceiling
+// whatever the caller asked for.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 500
+)
+
+// sortColumn is one allowlisted ORDER BY column.
+type sortColumn struct {
+	name      string
+	timestamp bool
 }
+
+// keysetQuery is the SQL a ListPage contributes: the position predicate
+// (with its args, numbered from the caller's next placeholder) and the
+// ORDER BY ... LIMIT tail fetching one extra row to detect a next page.
+type keysetQuery struct {
+	where      string
+	args       []any
+	orderLimit string
+	limit      int
+}
+
+func (p ListPage) keyset(col sortColumn, next int) (keysetQuery, error) {
+	k := keysetQuery{limit: min(p.Limit, maxListLimit)}
+	if k.limit <= 0 {
+		k.limit = defaultListLimit
+	}
+	dir, cmp := "", ">"
+	if p.Desc {
+		dir, cmp = " DESC", "<"
+	}
+	if p.AfterID != "" {
+		var key any = p.AfterKey
+		if col.timestamp {
+			t, err := time.Parse(time.RFC3339Nano, p.AfterKey)
+			if err != nil {
+				return k, fmt.Errorf("%w: %v", ErrBadCursor, err)
+			}
+			key = t
+		}
+		k.where = fmt.Sprintf("(%s, id) %s ($%d, $%d)", col.name, cmp, next, next+1)
+		k.args = []any{key, p.AfterID}
+	}
+	k.orderLimit = fmt.Sprintf(" ORDER BY %s%s, id%s LIMIT %d", col.name, dir, dir, k.limit+1)
+	return k, nil
+}
+
+// formatSortTime renders a timestamp sort key losslessly.
+func formatSortTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // isUniqueViolation reports a Postgres 23505 without pulling in pgconn.
 func isUniqueViolation(err error) bool {

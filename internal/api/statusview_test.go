@@ -543,7 +543,7 @@ func TestWorkspaceList_ProjectsPhases(t *testing.T) {
 	sv.set(b.ID, ObservedStatus{Fresh: true, Found: false, ObservedAt: time.Now()})
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	r.Body.Close()
 	if len(list.Items) != 2 {
 		t.Fatalf("list items=%d, want 2", len(list.Items))
@@ -884,7 +884,7 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 
 	// List endpoint shows projected phases for both.
 	r := doReq(t, apiEnv, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
-	list := decodeBody[WorkspaceList](t, r)
+	list := decodeBody[Page[WorkspaceView]](t, r)
 	r.Body.Close()
 	phases := map[string]string{}
 	for _, it := range list.Items {

@@ -347,16 +347,16 @@ else
   fail "workspace-ready: not Ready after ${READY_TIMEOUT}s"
 fi
 
-c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID/stop" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-stop1")"
-[ "$c" = "200" ] || fail "workspace-stop: POST stop -> $c $(err_code)"
+c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID:stop" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-stop1")"
+[ "$c" = "202" ] || fail "workspace-stop: POST stop -> $c $(err_code)"
 if wait_phase "$WS1_ID" Stopped "$DELETE_TIMEOUT"; then
   pass "workspace-stop"
 else
   fail "workspace-stop: not Stopped after ${DELETE_TIMEOUT}s"
 fi
 
-c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID/start" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-start1")"
-[ "$c" = "200" ] || fail "workspace-start: POST start -> $c $(err_code)"
+c="$(api "$JAR" POST "/v1/workspaces/$WS1_ID:start" -H "X-CSRF-Token: $CSRF" -H "Idempotency-Key: $NAME_PREFIX-$STAMP-start1")"
+[ "$c" = "202" ] || fail "workspace-start: POST start -> $c $(err_code)"
 if wait_phase "$WS1_ID" Ready "$READY_TIMEOUT"; then
   pass "workspace-start"
 elif [ "$?" = 2 ]; then

@@ -359,64 +359,78 @@ func returnDiskQuota(ctx context.Context, tx store.Tx, tenantID, workspaceID str
 // Store operations
 // ---------------------------------------------------------------------------
 
-// ListRetained returns the records in tenantID visible to ownerScope
-// ("" = tenant-wide, admin only), paginated by cursor. Each record carries
-// a fresh PurgeNonce bound to caller (iss|sub), the record id and the
-// current transition epoch.
-func (s *RetainedStore) ListRetained(ctx context.Context, tenantID, caller, ownerScope, cursor string, limit int) ([]RetainedRecord, string, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+// ListRetained returns one page of the records in tenantID visible to
+// ownerScope ("" = tenant-wide, admin only), ordered by (p.SortField, id) —
+// retainedAt or name (the source workspace name) — and positioned by the
+// keyset p.AfterKey/p.AfterID; nextKey/nextID are set only when another
+// page exists. Each record carries a fresh PurgeNonce bound to caller
+// (iss|sub), the record id and the current transition epoch.
+func (s *RetainedStore) ListRetained(ctx context.Context, tenantID, caller, ownerScope string, p ListPage) ([]RetainedRecord, string, string, error) {
+	col, ok := retainedSortColumns[p.SortField]
+	if !ok {
+		return nil, "", "", fmt.Errorf("list retained: unsupported sort field %q", p.SortField)
 	}
 	conds := []string{"tenant_id = $1", "state <> 'Purged'"}
 	args := []any{tenantID}
-	n := 2
 	if ownerScope != "" {
-		conds = append(conds, fmt.Sprintf("owner_subject = $%d", n))
 		args = append(args, ownerScope)
-		n++
+		conds = append(conds, fmt.Sprintf("owner_subject = $%d", len(args)))
 	}
-	if cursor != "" {
-		ts, id, err := decodeCursor(cursor)
-		if err != nil {
-			return nil, "", fmt.Errorf("%w: %v", ErrBadCursor, err)
-		}
-		conds = append(conds, fmt.Sprintf("(retained_at, id) > ($%d, $%d)", n, n+1))
-		args = append(args, ts, id)
-		n += 2
+	ks, err := p.keyset(col, len(args)+1)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if ks.where != "" {
+		conds = append(conds, ks.where)
+		args = append(args, ks.args...)
 	}
 	q := `SELECT ` + retainedCols + ` FROM retained_data WHERE ` +
-		strings.Join(conds, " AND ") +
-		fmt.Sprintf(` ORDER BY retained_at, id LIMIT %d`, limit+1)
+		strings.Join(conds, " AND ") + ks.orderLimit
 	rows, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	defer rows.Close()
 	var recs []RetainedRecord
 	for rows.Next() {
 		rec, err := scanRetained(rows)
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 		recs = append(recs, *rec)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	var next string
-	if len(recs) > limit {
-		next = encodeCursor(recs[limit-1].RetainedAt, recs[limit-1].ID)
-		recs = recs[:limit]
+	var nextKey, nextID string
+	if len(recs) > ks.limit {
+		recs = recs[:ks.limit]
+		last := &recs[ks.limit-1]
+		nextKey, nextID = retainedSortKey(last, p.SortField), last.ID
 	}
 	key, err := s.nonceKey(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	now := time.Now().UTC()
 	for i := range recs {
 		recs[i].PurgeNonce = mintPurgeNonce(key, caller, &recs[i], now)
 	}
-	return recs, next, nil
+	return recs, nextKey, nextID, nil
+}
+
+// retainedSortColumns maps the public sort fields onto columns; client
+// input never reaches the SQL text.
+var retainedSortColumns = map[string]sortColumn{
+	"retainedAt": {name: "retained_at", timestamp: true},
+	"name":       {name: "source_workspace_name"},
+}
+
+func retainedSortKey(rec *RetainedRecord, field string) string {
+	if field == "name" {
+		return rec.SourceWorkspaceName
+	}
+	return formatSortTime(rec.RetainedAt)
 }
 
 // ReadRetained returns one record visible to ownerScope ("" = tenant-wide,

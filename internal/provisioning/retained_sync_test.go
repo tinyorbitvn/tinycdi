@@ -87,7 +87,7 @@ func TestRetainedSync_ImportsUnregisteredPVC(t *testing.T) {
 		t.Fatalf("SyncOnce: %v", err)
 	}
 
-	recs, _, err := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", "", 10)
+	recs, _, _, err := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if err != nil {
 		t.Fatalf("list retained: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRetainedSync_ImportsUnregisteredPVC(t *testing.T) {
 	if _, err := sync.SyncOnce(ctx); err != nil {
 		t.Fatalf("second SyncOnce: %v", err)
 	}
-	recs, _, _ = provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", "", 10)
+	recs, _, _, _ = provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if len(recs) != 1 {
 		t.Fatalf("second sweep duplicated the record: %d rows", len(recs))
 	}
@@ -186,7 +186,7 @@ func TestRetainedSync_DisplayName(t *testing.T) {
 	if _, err := sync.SyncOnce(ctx); err != nil {
 		t.Fatalf("SyncOnce: %v", err)
 	}
-	recs, _, _ := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", "", 10)
+	recs, _, _, _ := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-it", "iss|sub-1", "", provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if len(recs) != 1 || recs[0].SourceWorkspaceName != "my-desktop" {
 		t.Fatalf("source name = %+v, want my-desktop", recs)
 	}
@@ -207,7 +207,7 @@ func TestRetainedSync_TenantFallback(t *testing.T) {
 	if _, err := sync.SyncOnce(ctx); err != nil {
 		t.Fatalf("SyncOnce: %v", err)
 	}
-	recs, _, _ := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-fb", "iss|sub-1", "", "", 10)
+	recs, _, _, _ := provisioning.NewRetainedStore(db).ListRetained(ctx, "tenant-fb", "iss|sub-1", "", provisioning.ListPage{Limit: 10, SortField: "retainedAt"})
 	if len(recs) != 1 {
 		t.Fatalf("expected the record in tenant-fb, got %d", len(recs))
 	}

@@ -90,7 +90,8 @@ func (f *finalizationFixture) del(t *testing.T, id string) provisioning.Workspac
 
 func (f *finalizationFixture) listed(t *testing.T, id string) bool {
 	t.Helper()
-	recs, _, err := f.svc.ListWorkspaces(context.Background(), f.tenant, f.owner, "", "", 200)
+	recs, _, _, err := f.svc.ListWorkspaces(context.Background(), f.tenant, f.owner, "",
+		provisioning.ListPage{Limit: 200, SortField: "createdAt"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

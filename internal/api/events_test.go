@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestEvents_Curated(t *testing.T) {
 
 	r = doReq(t, env, sess, csrf, http.MethodGet,
 		"/v1/workspaces/"+created.ID+"/events", "", nil)
-	list := decodeBody[WorkspaceEventList](t, r)
+	list := decodeBody[WorkspaceEventPage](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
@@ -127,7 +128,7 @@ func TestEvents_NotOwner(t *testing.T) {
 }
 
 // TestEvents_NewestFirst: the list is ordered newest first (OpenAPI
-// WorkspaceEventList contract).
+// WorkspaceEventPage contract).
 func TestEvents_NewestFirst(t *testing.T) {
 	be := newFakeBackend()
 	base := time.Now().Add(-time.Hour)
@@ -149,7 +150,7 @@ func TestEvents_NewestFirst(t *testing.T) {
 
 	r = doReq(t, env, sess, csrf, http.MethodGet,
 		"/v1/workspaces/"+created.ID+"/events", "", nil)
-	list := decodeBody[WorkspaceEventList](t, r)
+	list := decodeBody[WorkspaceEventPage](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
@@ -180,10 +181,10 @@ func eventsFixture(t *testing.T, env *testEnv, key string) (WorkspaceView, *http
 	return created, sess, csrf
 }
 
-func getEvents(t *testing.T, env *testEnv, sess, csrf *http.Cookie, id string) WorkspaceEventList {
+func getEvents(t *testing.T, env *testEnv, sess, csrf *http.Cookie, id string) WorkspaceEventPage {
 	t.Helper()
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/"+id+"/events", "", nil)
-	list := decodeBody[WorkspaceEventList](t, r)
+	list := decodeBody[WorkspaceEventPage](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("events status=%d, want 200", r.StatusCode)
 	}
@@ -484,5 +485,59 @@ func TestEvents_ConditionParams(t *testing.T) {
 	}
 	if ev.Params["step"] != "cleanup" {
 		t.Fatalf("operator params not forwarded: %v", ev.Params)
+	}
+}
+
+// TestEvents_Paged: limit=2 walks every event newest first via nextCursor
+// with no duplicate and no gap.
+func TestEvents_Paged(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	il := &fakeIntentLog{recs: []IntentRecord{
+		{Kind: "create", Revision: 1, At: base},
+		{Kind: "start", Revision: 2, At: base.Add(10 * time.Minute)},
+		{Kind: "stop", Revision: 3, At: base.Add(20 * time.Minute)},
+		{Kind: "start", Revision: 4, At: base.Add(30 * time.Minute)},
+		{Kind: "stop", Revision: 5, At: base.Add(40 * time.Minute)},
+	}}
+	env := newEventsEnv(t, newFakeBackend(), &fakeStatusView{}, il)
+	created, sess, csrf := eventsFixture(t, env, "key-evt-paged01")
+	all := getEvents(t, env, sess, csrf, created.ID)
+	if len(all.Items) < 5 {
+		t.Fatalf("events len=%d, want >=5", len(all.Items))
+	}
+
+	var got []string
+	q := "limit=2"
+	for pages := 0; ; pages++ {
+		if pages > len(all.Items) {
+			t.Fatal("paging did not terminate")
+		}
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/"+created.ID+"/events?"+q, "", nil)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d body=%+v", r.StatusCode, decodeErr(t, r))
+		}
+		p := decodeBody[Page[WorkspaceEvent]](t, r)
+		if len(p.Items) > 2 {
+			t.Fatalf("limit=2 returned %d items", len(p.Items))
+		}
+		for _, it := range p.Items {
+			got = append(got, it.ID)
+		}
+		if p.NextCursor == "" {
+			break
+		}
+		q = "limit=2&cursor=" + url.QueryEscape(p.NextCursor)
+	}
+	var want []string
+	for _, e := range all.Items {
+		want = append(want, e.ID)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("paged walk=%v, want the unpaged order %v", got, want)
+	}
+
+	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces/"+created.ID+"/events?sort=time", "", nil)
+	if e := decodeErr(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+		t.Fatalf("sort=time: status=%d code=%s, want 400 (only -time is served)", r.StatusCode, e.Code)
 	}
 }

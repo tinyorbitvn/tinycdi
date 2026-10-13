@@ -54,7 +54,7 @@ func TestOwner_DisplayName(t *testing.T) {
 		SourceWorkspaceName: "a-desktop",
 	})
 	r = doReq(t, env, sess, csrf, http.MethodGet, "/v1/data", "", nil)
-	dl := decodeBody[retainedDataList](t, r)
+	dl := decodeBody[Page[retainedDataView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("data status=%d", r.StatusCode)
 	}

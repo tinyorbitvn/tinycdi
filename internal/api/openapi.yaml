@@ -44,7 +44,7 @@ info:
     ## Idempotency
 
     Mutating operations that allocate resources (`POST /v1/workspaces`,
-    `POST /v1/workspaces/{id}/start`, `POST /v1/data/{id}/attach`) require an
+    `POST /v1/workspaces/{id}:start`, `POST /v1/data/{id}:attach`) require an
     `Idempotency-Key` header. Retrying with the same key and an identical
     request body returns the originally recorded result; the same key with a
     different body returns `409 IDEMPOTENCY_CONFLICT`. Keys are scoped to the
@@ -293,12 +293,15 @@ paths:
       summary: List workspaces visible to the caller
       description: |
         Returns workspaces owned by the caller; tenant administrators see all
-        workspaces in their tenant. Results are ordered by creation time
-        (ascending) and paginated with an opaque cursor.
+        workspaces in their tenant. Keyset-paged on `(sort field, id)`:
+        `sort` accepts `createdAt` and `name` (`-` prefix for descending) and
+        defaults to `-createdAt` (newest first). A page never repeats or skips
+        a row when workspaces are created concurrently.
       tags: [workspaces]
       parameters:
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
         - $ref: "#/components/parameters/ListScope"
         - name: phase
           in: query
@@ -312,7 +315,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkspaceList"
+                $ref: "#/components/schemas/WorkspacePage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -338,7 +341,7 @@ paths:
         `Stopped`; pass `Running` to provision immediately.
 
         `retainedDataRef` optionally attaches a retained disk owned by the
-        caller (equivalent to `POST /v1/data/{id}/attach`); the retained record
+        caller (equivalent to `POST /v1/data/{id}:attach`); the retained record
         must be in state `Retained` and is claimed exclusively.
 
         A template whose runtime image is older than `-image-block-after`
@@ -451,7 +454,7 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
-  /v1/workspaces/{workspaceId}/start:
+  /v1/workspaces/{workspaceId}:start:
     post:
       operationId: startWorkspace
       summary: Start a workspace
@@ -476,7 +479,7 @@ paths:
         - $ref: "#/components/parameters/WorkspaceId"
         - $ref: "#/components/parameters/IdempotencyKeyRequired"
       responses:
-        "200":
+        "202":
           description: Start accepted; workspace view after the intent was recorded.
           content:
             application/json:
@@ -497,7 +500,7 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
-  /v1/workspaces/{workspaceId}/stop:
+  /v1/workspaces/{workspaceId}:stop:
     post:
       operationId: stopWorkspace
       summary: Stop a workspace
@@ -514,7 +517,7 @@ paths:
         - $ref: "#/components/parameters/WorkspaceId"
         - $ref: "#/components/parameters/IdempotencyKeyOptional"
       responses:
-        "200":
+        "202":
           description: Stop accepted; workspace view after the intent was recorded.
           content:
             application/json:
@@ -547,16 +550,23 @@ paths:
         never contains node names, image references or other platform
         internals. Visibility is exactly the workspace read's: a foreign or
         unknown id is a `404`.
+
+        Keyset-paged on `(lastTimestamp, id)`. The order is fixed: `sort`
+        accepts only `-time` (the default); anything else is
+        `400 INVALID_REQUEST`.
       tags: [workspaces]
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
       responses:
         "200":
           description: Workspace events, newest first.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkspaceEventList"
+                $ref: "#/components/schemas/WorkspaceEventPage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -687,7 +697,8 @@ paths:
       description: |
         Returns templates published to the caller's tenant. Template revisions
         are immutable; the `revision` field identifies the exact content the
-        workspace will run.
+        workspace will run. Keyset-paged on `(name, id)`: `sort` accepts
+        `name` (`-name` for descending) and defaults to `name`.
       tags: [templates]
       parameters:
         - name: runtime
@@ -698,13 +709,14 @@ paths:
             $ref: "#/components/schemas/RuntimeKind"
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
       responses:
         "200":
           description: Page of templates.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TemplateList"
+                $ref: "#/components/schemas/TemplatePage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1063,11 +1075,15 @@ paths:
       description: |
         Returns retained-disk records owned by the caller (tenant
         administrators see the tenant scope). Each record carries a fresh
-        `purgeConfirmationNonce` required by `POST /v1/data/{dataId}/purge`.
+        `purgeConfirmationNonce` required by `POST /v1/data/{dataId}:purge`.
+        Keyset-paged on `(sort field, id)`: `sort` accepts `retainedAt` and
+        `name` (the source workspace name; `-` prefix for descending) and
+        defaults to `-retainedAt` (newest first).
       tags: [data]
       parameters:
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Sort"
         - $ref: "#/components/parameters/ListScope"
       responses:
         "200":
@@ -1075,7 +1091,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RetainedDataList"
+                $ref: "#/components/schemas/RetainedDataPage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1123,7 +1139,7 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
-  /v1/data/{dataId}/attach:
+  /v1/data/{dataId}:attach:
     post:
       operationId: attachRetainedData
       summary: Attach a retained disk to a new workspace
@@ -1182,7 +1198,7 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
-  /v1/data/{dataId}/purge:
+  /v1/data/{dataId}:purge:
     post:
       operationId: purgeRetainedData
       summary: Irreversibly destroy a retained disk
@@ -1855,7 +1871,7 @@ components:
           type: string
           format: date-time
 
-    WorkspaceEventList:
+    WorkspaceEventPage:
       type: object
       additionalProperties: false
       required: [items]
@@ -1865,6 +1881,8 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceEvent"
           description: Events, newest first.
+        nextCursor:
+          $ref: "#/components/schemas/NextCursor"
         stale:
           type: boolean
           description: |
@@ -2262,7 +2280,13 @@ components:
             `Retained` and owned by the caller; mutually exclusive claims are
             enforced server-side.
 
-    WorkspaceList:
+    NextCursor:
+      type: string
+      description: |
+        Opaque cursor for the next page (pass it as `cursor` with the same
+        `sort`); absent on the last page.
+
+    WorkspacePage:
       type: object
       additionalProperties: false
       required: [items]
@@ -2271,9 +2295,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WorkspaceView"
-        nextPageToken:
-          type: string
-          description: Cursor for the next page; absent when the list is exhausted.
+        nextCursor:
+          $ref: "#/components/schemas/NextCursor"
 
     SessionProbe:
       type: object
@@ -2577,7 +2600,7 @@ components:
             "firefox": "153.4.0esr"}`. Absent when the template declares
             none.
 
-    TemplateList:
+    TemplatePage:
       type: object
       additionalProperties: false
       required: [items]
@@ -2586,8 +2609,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TemplateView"
-        nextPageToken:
-          type: string
+        nextCursor:
+          $ref: "#/components/schemas/NextCursor"
 
     RetainedDataState:
       type: string
@@ -2642,10 +2665,10 @@ components:
           description: |
             Short-lived, single-use nonce bound to this record, the caller's
             principal and the current record state. Echo it in
-            `POST /v1/data/{id}/purge` to confirm destruction; a fresh nonce is
+            `POST /v1/data/{id}:purge` to confirm destruction; a fresh nonce is
             issued on every read.
 
-    RetainedDataList:
+    RetainedDataPage:
       type: object
       additionalProperties: false
       required: [items]
@@ -2654,8 +2677,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RetainedDataView"
-        nextPageToken:
-          type: string
+        nextCursor:
+          $ref: "#/components/schemas/NextCursor"
 
     AttachDataRequest:
       type: object

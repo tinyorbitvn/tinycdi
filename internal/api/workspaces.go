@@ -110,7 +110,9 @@ var ErrTemplateNotFound = errors.New("template not found")
 // TemplateCatalog resolves and lists templates for a tenant.
 type TemplateCatalog interface {
 	Resolve(ctx context.Context, tenantID, templateID string) (TemplateEntry, error)
-	List(ctx context.Context, tenantID, runtimeFilter, cursor string, limit int) ([]TemplateEntry, string, error)
+	// List returns the tenant's whole catalog (optionally one runtime);
+	// the handler sorts and pages it.
+	List(ctx context.Context, tenantID, runtimeFilter string) ([]TemplateEntry, error)
 }
 
 // FamilyCatalog is the optional catalog surface a TemplateCatalog may add
@@ -125,10 +127,10 @@ type FamilyCatalog interface {
 type workspaceBackend interface {
 	CreateWorkspace(ctx context.Context, tenantID, idemKey string, req provisioning.CreateRequest, bodyHash []byte) (provisioning.WorkspaceRecord, error)
 	// AttachRetained serves creates carrying retainedDataRef — the same
-	// owner-scoped, claimed transition as POST /v1/data/{id}/attach.
+	// owner-scoped, claimed transition as POST /v1/data/{id}:attach.
 	AttachRetained(ctx context.Context, tenantID, caller, ownerScope, dataID, idemKey string, req provisioning.AttachRequest, bodyHash []byte) (provisioning.WorkspaceRecord, error)
 	GetWorkspace(ctx context.Context, tenantID, ownerScope, id string) (provisioning.WorkspaceRecord, error)
-	ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase, cursor string, limit int) ([]provisioning.WorkspaceRecord, string, error)
+	ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase string, p provisioning.ListPage) ([]provisioning.WorkspaceRecord, string, string, error)
 	SignalWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, kind provisioning.IntentKind, bodyHash []byte) (provisioning.WorkspaceRecord, error)
 }
 
@@ -234,8 +236,12 @@ func MountWorkspaceRoutes(mux *http.ServeMux, authn *Authenticator, h *Workspace
 	mux.Handle("GET /v1/workspaces/{id}", safe(http.HandlerFunc(h.Get)))
 	mux.Handle("GET /v1/workspaces/{id}/events", safe(http.HandlerFunc(h.Events)))
 	unsafe(routeWorkspaceDelete, http.HandlerFunc(h.Delete))
-	unsafe(routeWorkspaceStart, http.HandlerFunc(h.Start))
-	unsafe(routeWorkspaceStop, http.HandlerFunc(h.Stop))
+	// Custom methods: one ActionRouter owns POST /v1/workspaces/{ref} and
+	// dispatches {id}:{verb}; each verb keeps its own audited+CSRF chain.
+	actions := NewActionRouter()
+	actions.Handle("start", audited(h.audit, routeWorkspaceStart, authn.RequireCSRF(http.HandlerFunc(h.Start))).ServeHTTP)
+	actions.Handle("stop", audited(h.audit, routeWorkspaceStop, authn.RequireCSRF(http.HandlerFunc(h.Stop))).ServeHTTP)
+	mux.Handle(routeWorkspaceActions, authn.RequireAuth(actions))
 	if th != nil {
 		mux.Handle("GET /v1/templates", safe(http.HandlerFunc(th.List)))
 	}
@@ -292,10 +298,22 @@ type WorkspaceView struct {
 	UpdateAvailable bool `json:"updateAvailable"`
 }
 
-// WorkspaceList is the paginated list response.
-type WorkspaceList struct {
-	Items         []WorkspaceView `json:"items"`
-	NextPageToken string          `json:"nextPageToken,omitempty"`
+// toListPage maps a parsed page request onto the store's keyset request.
+func toListPage(p PageRequest) provisioning.ListPage {
+	lp := provisioning.ListPage{Limit: p.Limit, SortField: p.Sort.Field, Desc: p.Sort.Desc}
+	if p.After != nil {
+		lp.AfterKey, lp.AfterID = p.After.Key, p.After.ID
+	}
+	return lp
+}
+
+// nextCursorOf mints the response cursor; "" (last page) when the store
+// returned no next position.
+func nextCursorOf(sort SortSpec, key, id string) string {
+	if id == "" {
+		return ""
+	}
+	return NextCursor(sort, key, id)
 }
 
 func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
@@ -406,29 +424,24 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	limit := 50
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 200 {
-			writeError(w, r, CodeInvalidRequest, "limit must be 1..200")
-			return
-		}
-		limit = n
+	pg, perr := ParsePage(r, []string{"createdAt", "name"}, "-createdAt")
+	if perr != nil {
+		WriteError(w, r, perr)
+		return
 	}
 	scope, ok := listScope(w, r, p)
 	if !ok {
 		return
 	}
-	phase := q.Get("phase")
-	recs, next, err := h.backend.ListWorkspaces(r.Context(), p.TenantID,
-		scope, phase, q.Get("pageToken"), limit)
+	recs, nextKey, nextID, err := h.backend.ListWorkspaces(r.Context(), p.TenantID,
+		scope, r.URL.Query().Get("phase"), toListPage(pg))
 	if err != nil {
 		h.writeBackendError(w, r, err)
 		return
 	}
 	owners := h.resolveOwnerRefs(r.Context(), p.TenantID, recs)
-	out := WorkspaceList{Items: make([]WorkspaceView, 0, len(recs)), NextPageToken: next}
+	out := Page[WorkspaceView]{Items: make([]WorkspaceView, 0, len(recs)),
+		NextCursor: nextCursorOf(pg.Sort, nextKey, nextID)}
 	ctx := withImageAgeMemo(withUpdateCheckMemo(r.Context()))
 	for i := range recs {
 		v := h.viewWithStatus(ctx, &recs[i])
@@ -588,13 +601,12 @@ func (h *WorkspaceHandler) Get(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, v)
 }
 
-// signal shares the start/stop/delete path.
-func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, kind provisioning.IntentKind, keyRequired bool) {
+// signal shares the start/stop/delete path; id is the target workspace.
+func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, id string, kind provisioning.IntentKind, keyRequired bool) {
 	p, ok := h.principalOrFail(w, r)
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
 	if !workspaceIDPattern.MatchString(id) {
 		writeError(w, r, CodeInvalidRequest, "bad workspace id")
 		return
@@ -628,30 +640,27 @@ func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, kind p
 		h.writeBackendError(w, r, err)
 		return
 	}
-	status := http.StatusOK
-	if kind == provisioning.IntentDelete {
-		status = http.StatusAccepted
-	}
+	// Every signal is accepted for asynchronous reconciliation.
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusAccepted)
 	v := h.viewWithStatus(r.Context(), &rec)
 	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Start handles POST /v1/workspaces/{id}/start.
+// Start handles POST /v1/workspaces/{id}:start (an ActionRouter verb).
 func (h *WorkspaceHandler) Start(w http.ResponseWriter, r *http.Request) {
-	h.signal(w, r, provisioning.IntentStart, true)
+	h.signal(w, r, ActionID(r), provisioning.IntentStart, true)
 }
 
-// Stop handles POST /v1/workspaces/{id}/stop.
+// Stop handles POST /v1/workspaces/{id}:stop (an ActionRouter verb).
 func (h *WorkspaceHandler) Stop(w http.ResponseWriter, r *http.Request) {
-	h.signal(w, r, provisioning.IntentStop, false)
+	h.signal(w, r, ActionID(r), provisioning.IntentStop, false)
 }
 
 // Delete handles DELETE /v1/workspaces/{id}.
 func (h *WorkspaceHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	h.signal(w, r, provisioning.IntentDelete, false)
+	h.signal(w, r, r.PathValue("id"), provisioning.IntentDelete, false)
 }
 
 // writeBackendError maps provisioning errors onto the stable error model.
@@ -666,7 +675,7 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, provisioning.ErrRuntimeMismatch):
 		writeError(w, r, CodeInvalidTemplate, "template runtime does not match the retained disk")
 	case errors.Is(err, provisioning.ErrBadCursor):
-		writeError(w, r, CodeInvalidRequest, "bad pageToken")
+		writeError(w, r, CodeInvalidRequest, "bad cursor")
 	case errors.Is(err, provisioning.ErrWorkspaceClosed),
 		errors.Is(err, provisioning.ErrInvalidState):
 		writeError(w, r, CodeInvalidState, err.Error())

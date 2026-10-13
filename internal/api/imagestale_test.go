@@ -31,14 +31,14 @@ func (c staleCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 	return e, nil
 }
 
-func (c staleCatalog) List(_ context.Context, tenantID, _, _ string, _ int) ([]TemplateEntry, string, error) {
+func (c staleCatalog) List(_ context.Context, tenantID, _ string) ([]TemplateEntry, error) {
 	var out []TemplateEntry
 	for k, e := range c.entries {
 		if strings.HasPrefix(k, tenantID+"/") {
 			out = append(out, e)
 		}
 	}
-	return out, "", nil
+	return out, nil
 }
 
 // newStaleEnv mounts the workspace/template routes with handlers the test
@@ -110,7 +110,7 @@ func TestImageStale_Threshold(t *testing.T) {
 	sess, csrf := login(t, env, "user-a")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/templates", "", nil)
-	list := decodeBody[templateList](t, r)
+	list := decodeBody[Page[templateView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", r.StatusCode)
 	}
@@ -150,7 +150,7 @@ func TestImageStale_MalformedAnnotation(t *testing.T) {
 	sess, csrf := login(t, env, "user-a")
 
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/templates", "", nil)
-	list := decodeBody[templateList](t, r)
+	list := decodeBody[Page[templateView]](t, r)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200 (malformed annotation must not fail the request)", r.StatusCode)
 	}

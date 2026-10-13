@@ -1,7 +1,7 @@
 package api
 
 // Contract tests — the /v1/data retained-disk surface
-// (design §5, openapi /v1/data + /attach + /purge). The handlers and the
+// (design §5, openapi /v1/data + :attach + :purge). The handlers and the
 // Postgres store were compile-only stubs when written, so every contract test
 // fails on missing behaviour (500 INTERNAL from the stub handlers), never
 // on a compile error.
@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -96,11 +97,11 @@ func (f *fakeRetainedStore) lookupLocked(tenantID, ownerScope, id string) (*Reta
 	return r, nil
 }
 
-func (f *fakeRetainedStore) ListRetained(_ context.Context, tenantID, caller, ownerScope, _ string, _ int) ([]RetainedRecord, string, error) {
+func (f *fakeRetainedStore) ListRetained(_ context.Context, tenantID, caller, ownerScope string, p provisioning.ListPage) ([]RetainedRecord, string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
-		return nil, "", f.listErr
+		return nil, "", "", f.listErr
 	}
 	var out []RetainedRecord
 	for _, id := range f.order {
@@ -111,11 +112,18 @@ func (f *fakeRetainedStore) ListRetained(_ context.Context, tenantID, caller, ow
 		if ownerScope != "" && r.Owner != ownerScope {
 			continue
 		}
-		cp := *r
-		cp.PurgeNonce = f.mintNonceLocked(caller, r)
-		out = append(out, cp)
+		out = append(out, *r)
 	}
-	return out, "", nil
+	recs, key, id := fakeKeysetPage(out, p, func(r RetainedRecord) string {
+		if p.SortField == "name" {
+			return r.SourceWorkspaceName
+		}
+		return fakeSortTime(r.RetainedAt)
+	}, func(r RetainedRecord) string { return r.ID })
+	for i := range recs {
+		recs[i].PurgeNonce = f.mintNonceLocked(caller, f.recs[recs[i].ID])
+	}
+	return recs, key, id, nil
 }
 
 func (f *fakeRetainedStore) ReadRetained(_ context.Context, tenantID, caller, ownerScope, id string) (RetainedRecord, error) {
@@ -370,13 +378,13 @@ func doDataReq(t *testing.T, env *testEnv, sess, csrf *http.Cookie, method, path
 }
 
 // listData performs GET /v1/data and decodes the retained list.
-func listData(t *testing.T, env *testEnv, sess, csrf *http.Cookie) retainedDataList {
+func listData(t *testing.T, env *testEnv, sess, csrf *http.Cookie) Page[retainedDataView] {
 	t.Helper()
 	r := doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data", "", nil)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("GET /v1/data: status=%d", r.StatusCode)
 	}
-	return decodeBody[retainedDataList](t, r)
+	return decodeBody[Page[retainedDataView]](t, r)
 }
 
 func errBody(t *testing.T, r *http.Response) Error {
@@ -421,7 +429,7 @@ func TestAttachRetained_CreatesWorkspace(t *testing.T) {
 
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"restored-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0001"})
 	if r.StatusCode != http.StatusCreated {
@@ -446,7 +454,7 @@ func TestAttachRetained_RequiresIdempotencyKey(t *testing.T) {
 
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"restored-desktop","templateRef":"tpl_linuxdesktop"}`, nil)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("attach without Idempotency-Key: status=%d, want 400", r.StatusCode)
@@ -466,7 +474,7 @@ func TestAttachRetained_ForeignRecord(t *testing.T) {
 
 	sess, csrf := login(t, env, "user-b")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"stolen-desktop","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0003"})
 	if r.StatusCode != http.StatusNotFound {
@@ -487,7 +495,7 @@ func TestAttachRetained_TenantAdmin(t *testing.T) {
 	env.issuer.Groups = []string{TenantAdminGroup}
 	sess, csrf := login(t, env, "admin-1")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"admin-restore","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0004"})
 	if r.StatusCode != http.StatusCreated {
@@ -505,7 +513,7 @@ func TestAttachRetained_NotRetained(t *testing.T) {
 	rec.ConsumingWorkspaceID = "ws_alreadythere001"
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"second-home","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0005"})
 	if r.StatusCode != http.StatusConflict {
@@ -524,7 +532,7 @@ func TestAttachRetained_RuntimeMismatch(t *testing.T) {
 	rec := seedRetained(fs, "rd_attach0006", "tenant-a", envOwner(env, "user-a"), "WindowsVM")
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"wrong-runtime","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0006"})
 	if r.StatusCode != http.StatusUnprocessableEntity {
@@ -544,7 +552,7 @@ func TestAttachRetained_QuotaExhausted(t *testing.T) {
 	fs.quotaErr = &provisioning.QuotaExceededError{TenantID: "tenant-a", Dimension: "runningSlots"}
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"no-headroom","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0007"})
 	if r.StatusCode != http.StatusConflict {
@@ -572,7 +580,7 @@ func TestAttachRetained_QuotaReleasePending(t *testing.T) {
 	}
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"pending-release","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0023"})
 	if r.StatusCode != http.StatusConflict {
@@ -600,7 +608,7 @@ func TestAttachRetained_QuotaNotConfigured(t *testing.T) {
 	fs.quotaErr = provisioning.ErrNoQuota
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"no-quota","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0017"})
 	if r.StatusCode != http.StatusConflict {
@@ -622,12 +630,12 @@ func TestAttachRetained_IdempotentReplay(t *testing.T) {
 	body := `{"name":"restored-desktop","templateRef":"tpl_linuxdesktop"}`
 	hdrs := map[string]string{"Idempotency-Key": "key-attach-0008"}
 
-	r1 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach", body, hdrs)
+	r1 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach", body, hdrs)
 	if r1.StatusCode != http.StatusCreated {
 		t.Fatalf("first attach: status=%d", r1.StatusCode)
 	}
 	ws1 := decodeBody[WorkspaceView](t, r1)
-	r2 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach", body, hdrs)
+	r2 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach", body, hdrs)
 	if r2.StatusCode != http.StatusCreated {
 		t.Fatalf("replayed attach: status=%d, want 201 with stored result", r2.StatusCode)
 	}
@@ -635,7 +643,7 @@ func TestAttachRetained_IdempotentReplay(t *testing.T) {
 	if ws1.ID != ws2.ID {
 		t.Fatalf("idempotent replay minted %s then %s", ws1.ID, ws2.ID)
 	}
-	r3 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r3 := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"different-name","templateRef":"tpl_linuxdesktop"}`, hdrs)
 	if r3.StatusCode != http.StatusConflict {
 		t.Fatalf("conflicting replay: status=%d, want 409", r3.StatusCode)
@@ -665,7 +673,7 @@ func TestPurgeRetained_Accepted(t *testing.T) {
 	if nonce == "" {
 		t.Fatal("list did not issue a purgeConfirmationNonce")
 	}
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"`+nonce+`"}`, nil)
 	if r.StatusCode != http.StatusAccepted {
 		t.Fatalf("purge: status=%d body=%+v", r.StatusCode, errBody(t, r))
@@ -686,7 +694,7 @@ func TestPurgeRetained_MissingOrBadNonce(t *testing.T) {
 	sess, csrf := login(t, env, "user-a")
 
 	for _, body := range []string{`{}`, `{"confirmationNonce":"short"}`, `{"confirmationNonce":"forged-nonce-value"}`} {
-		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge", body, nil)
+		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge", body, nil)
 		if r.StatusCode != http.StatusBadRequest {
 			t.Fatalf("purge %s: status=%d, want 400", body, r.StatusCode)
 		}
@@ -711,14 +719,14 @@ func TestPurgeRetained_NonceSingleUse(t *testing.T) {
 
 	list := listData(t, env, sess, csrf)
 	nonce := list.Items[0].PurgeConfirmationNonce
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"`+nonce+`"}`, nil)
 	if r.StatusCode != http.StatusAccepted {
 		t.Fatalf("first purge: status=%d", r.StatusCode)
 	}
 
 	// Replaying the consumed nonce is a 400, not a second purge.
-	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"`+nonce+`"}`, nil)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("consumed nonce replay: status=%d, want 400", r.StatusCode)
@@ -728,7 +736,7 @@ func TestPurgeRetained_NonceSingleUse(t *testing.T) {
 	// Purging and the operation is naturally idempotent.
 	list = listData(t, env, sess, csrf)
 	fresh := list.Items[0].PurgeConfirmationNonce
-	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"`+fresh+`"}`, nil)
 	if r.StatusCode != http.StatusAccepted {
 		t.Fatalf("fresh-nonce replay: status=%d, want 202", r.StatusCode)
@@ -747,7 +755,7 @@ func TestPurgeRetained_ForeignRecord(t *testing.T) {
 
 	sess, csrf := login(t, env, "user-b")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"some-nonce-value"}`, nil)
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("foreign purge: status=%d, want 404", r.StatusCode)
@@ -764,7 +772,7 @@ func TestPurgeRetained_AttachedRecord(t *testing.T) {
 	sess, csrf := login(t, env, "user-a")
 
 	// Move the record through attach so it is no longer Retained.
-	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach",
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
 		`{"name":"consumer","templateRef":"tpl_linuxdesktop"}`,
 		map[string]string{"Idempotency-Key": "key-attach-0009"})
 	if r.StatusCode != http.StatusCreated {
@@ -777,7 +785,7 @@ func TestPurgeRetained_AttachedRecord(t *testing.T) {
 			nonce = it.PurgeConfirmationNonce
 		}
 	}
-	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge",
+	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge",
 		`{"confirmationNonce":"`+nonce+`"}`, nil)
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("purge on Attaching record: status=%d, want 409", r.StatusCode)
@@ -795,8 +803,8 @@ func TestData_Unauthenticated(t *testing.T) {
 
 	for _, spec := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/data"},
-		{http.MethodPost, "/v1/data/rd_aaaaaaaa01/attach"},
-		{http.MethodPost, "/v1/data/rd_aaaaaaaa01/purge"},
+		{http.MethodPost, "/v1/data/rd_aaaaaaaa01:attach"},
+		{http.MethodPost, "/v1/data/rd_aaaaaaaa01:purge"},
 	} {
 		req, _ := http.NewRequest(spec.method, env.server.URL+spec.path, nil)
 		resp, err := noRedirectClient().Do(req)
@@ -819,7 +827,7 @@ func TestData_CSRFRequired(t *testing.T) {
 
 	sess, _ := login(t, env, "user-a")
 
-	for _, path := range []string{"/v1/data/" + rec.ID + "/attach", "/v1/data/" + rec.ID + "/purge"} {
+	for _, path := range []string{"/v1/data/" + rec.ID + ":attach", "/v1/data/" + rec.ID + ":purge"} {
 		req, _ := http.NewRequest(http.MethodPost, env.server.URL+path, nil)
 		req.AddCookie(sess)
 		resp, err := noRedirectClient().Do(req)
@@ -839,7 +847,7 @@ func TestData_BadIDs(t *testing.T) {
 	env := newDataEnv(t, fs)
 	sess, csrf := login(t, env, "user-a")
 
-	for _, path := range []string{"/v1/data/nope/attach", "/v1/data/ws_wrongprefix/attach"} {
+	for _, path := range []string{"/v1/data/nope:attach", "/v1/data/ws_wrongprefix:attach"} {
 		r := doDataReq(t, env, sess, csrf, http.MethodPost, path,
 			`{"name":"x","templateRef":"tpl_linuxdesktop"}`,
 			map[string]string{"Idempotency-Key": "key-badid-00001"})
@@ -870,7 +878,7 @@ func TestDataDecoderErrorNotEchoed(t *testing.T) {
 		`{"name":"x","templateRef":"tpl_linuxdesktop"} {"extra":true}`,
 		`{"name":"x","templateRef":"tpl_linuxdesktop"} trailing`,
 	} {
-		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/attach", body,
+		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach", body,
 			map[string]string{"Idempotency-Key": "key-decode-0001"})
 		if r.StatusCode != http.StatusBadRequest {
 			t.Fatalf("attach body %q: status=%d, want 400", body, r.StatusCode)
@@ -884,7 +892,7 @@ func TestDataDecoderErrorNotEchoed(t *testing.T) {
 		`{"confirmationNonce":`,
 		`{"confirmationNonce":"some-nonce-value"} {}`,
 	} {
-		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+"/purge", body, nil)
+		r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":purge", body, nil)
 		if r.StatusCode != http.StatusBadRequest {
 			t.Fatalf("purge body %q: status=%d, want 400", body, r.StatusCode)
 		}
@@ -894,20 +902,22 @@ func TestDataDecoderErrorNotEchoed(t *testing.T) {
 	}
 }
 
-// TestDataList_BadPageToken: a malformed pageToken maps to 400
-// INVALID_REQUEST rather than a 500 (SEC-I7).
-func TestDataList_BadPageToken(t *testing.T) {
+// TestDataList_BadCursor: a malformed cursor — undecodable, or decodable
+// with a key the store cannot parse — maps to 400 INVALID_REQUEST rather
+// than a 500 (SEC-I7).
+func TestDataList_BadCursor(t *testing.T) {
 	fs := newFakeRetainedStore()
-	fs.listErr = fmt.Errorf("decode: %w", provisioning.ErrBadCursor)
 	env := newDataEnv(t, fs)
 	sess, csrf := login(t, env, "user-a")
 
-	r := doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data?pageToken=%%%bad", "", nil)
-	if r.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad pageToken: status=%d, want 400", r.StatusCode)
+	r := doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data?cursor=%25%25bad", "", nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+		t.Fatalf("undecodable cursor: status=%d code=%s, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
 	}
-	if e := errBody(t, r); e.Code != CodeInvalidRequest {
-		t.Fatalf("code=%s, want INVALID_REQUEST", e.Code)
+	fs.listErr = fmt.Errorf("decode: %w", provisioning.ErrBadCursor)
+	r = doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data", "", nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+		t.Fatalf("bad cursor key: status=%d code=%s, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
 	}
 }
 
@@ -953,5 +963,93 @@ func TestGetRetainedData_Scope(t *testing.T) {
 	r = doDataReq(t, env, sessA, csrfA, http.MethodGet, "/v1/data/not-an-id", "", nil)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("malformed id: status=%d, want 400", r.StatusCode)
+	}
+}
+
+// TestDataActions_VerbPaths: attach/purge are :verb custom methods; the old
+// subpaths are gone and CSRF still guards the action.
+func TestDataActions_VerbPaths(t *testing.T) {
+	fs := newFakeRetainedStore()
+	env := newDataEnv(t, fs)
+	att := seedRetained(fs, "rd_verbatt0001", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	pur := seedRetained(fs, "rd_verbpur0001", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	sess, csrf := login(t, env, "user-a")
+	nonce := func() string {
+		return decodeBody[retainedDataView](t,
+			doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data/"+pur.ID, "", nil)).PurgeConfirmationNonce
+	}
+	attachBody := `{"name":"restored","templateRef":"tpl_linuxdesktop"}`
+	attachHdrs := map[string]string{"Idempotency-Key": "key-verb-attach1"}
+
+	// Old subpaths and missing CSRF first: neither may change state.
+	for _, p := range []string{"/v1/data/" + att.ID + "/attach", "/v1/data/" + pur.ID + "/purge"} {
+		r := doDataReq(t, env, sess, csrf, http.MethodPost, p, attachBody, attachHdrs)
+		r.Body.Close()
+		if r.StatusCode != http.StatusNotFound {
+			t.Fatalf("old subpath %s: status=%d, want 404", p, r.StatusCode)
+		}
+	}
+	noCSRF := &http.Cookie{Name: csrf.Name}
+	r := doDataReq(t, env, sess, noCSRF, http.MethodPost, "/v1/data/"+att.ID+":attach", attachBody, attachHdrs)
+	if e := errBody(t, r); r.StatusCode != http.StatusForbidden || e.Code != CodeCSRFFailed {
+		t.Fatalf(":attach without CSRF: status=%d code=%s, want 403 CSRF_FAILED", r.StatusCode, e.Code)
+	}
+	r = doDataReq(t, env, sess, noCSRF, http.MethodPost, "/v1/data/"+pur.ID+":purge",
+		`{"confirmationNonce":"`+nonce()+`"}`, nil)
+	if e := errBody(t, r); r.StatusCode != http.StatusForbidden || e.Code != CodeCSRFFailed {
+		t.Fatalf(":purge without CSRF: status=%d code=%s, want 403 CSRF_FAILED", r.StatusCode, e.Code)
+	}
+
+	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+att.ID+":attach", attachBody, attachHdrs)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf(":attach status=%d body=%+v, want 201", r.StatusCode, errBody(t, r))
+	}
+	if ws := decodeBody[WorkspaceView](t, r); ws.RetainedDataRef != att.ID {
+		t.Fatalf(":attach view=%+v, want retainedDataRef=%s", ws, att.ID)
+	}
+	r = doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+pur.ID+":purge",
+		`{"confirmationNonce":"`+nonce()+`"}`, nil)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf(":purge status=%d body=%+v, want 202", r.StatusCode, errBody(t, r))
+	}
+	if v := decodeBody[retainedDataView](t, r); v.State != "Purging" {
+		t.Fatalf(":purge state=%s, want Purging", v.State)
+	}
+}
+
+// TestDataList_Paged: limit=1 walks every visible record via nextCursor,
+// newest retainedAt first by default.
+func TestDataList_Paged(t *testing.T) {
+	fs := newFakeRetainedStore()
+	env := newDataEnv(t, fs)
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for i, id := range []string{"rd_page000001", "rd_page000002", "rd_page000003"} {
+		rec := seedRetained(fs, id, "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+		fs.mu.Lock()
+		fs.recs[rec.ID].RetainedAt = base.Add(time.Duration(i) * time.Hour)
+		fs.mu.Unlock()
+	}
+	sess, csrf := login(t, env, "user-a")
+	var got []string
+	q := "limit=1"
+	for pages := 0; ; pages++ {
+		if pages > 4 {
+			t.Fatal("paging did not terminate")
+		}
+		r := doDataReq(t, env, sess, csrf, http.MethodGet, "/v1/data?"+q, "", nil)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d body=%+v", r.StatusCode, errBody(t, r))
+		}
+		p := decodeBody[Page[retainedDataView]](t, r)
+		for _, it := range p.Items {
+			got = append(got, it.ID)
+		}
+		if p.NextCursor == "" {
+			break
+		}
+		q = "limit=1&cursor=" + url.QueryEscape(p.NextCursor)
+	}
+	if fmt.Sprint(got) != "[rd_page000003 rd_page000002 rd_page000001]" {
+		t.Fatalf("walk=%v, want newest retainedAt first", got)
 	}
 }

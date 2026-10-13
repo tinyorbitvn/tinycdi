@@ -3,7 +3,6 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -112,11 +111,6 @@ type templateView struct {
 	ImageEngines map[string]string `json:"imageEngines,omitempty"`
 }
 
-type templateList struct {
-	Items         []templateView `json:"items"`
-	NextPageToken string         `json:"nextPageToken,omitempty"`
-}
-
 // List handles GET /v1/templates.
 func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 	p, ok := PrincipalFromContext(r.Context())
@@ -128,23 +122,23 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeForbidden, "tenant is not provisioned")
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 200 {
-			writeError(w, r, CodeInvalidRequest, "limit must be 1..200")
-			return
-		}
-		limit = n
+	pg, perr := ParsePage(r, []string{"name"}, "name")
+	if perr != nil {
+		WriteError(w, r, perr)
+		return
 	}
-	entries, next, err := h.catalog.List(r.Context(), p.TenantID,
-		r.URL.Query().Get("runtime"), r.URL.Query().Get("pageToken"), limit)
+	// The catalog is held in memory (the operator's informer cache), so the
+	// handler pages it itself in (name, id) order.
+	entries, err := h.catalog.List(r.Context(), p.TenantID, r.URL.Query().Get("runtime"))
 	if err != nil {
 		writeError(w, r, CodeInternal, "internal error")
 		return
 	}
-	out := templateList{Items: make([]templateView, 0, len(entries)), NextPageToken: next}
-	for _, e := range entries {
+	page := pageInMemory(entries, pg,
+		func(e TemplateEntry) string { return e.Name },
+		func(e TemplateEntry) string { return e.ID })
+	out := Page[templateView]{Items: make([]templateView, 0, len(page.Items)), NextCursor: page.NextCursor}
+	for _, e := range page.Items {
 		builtAt, stale := imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(), "template", e.ID)
 		var blocked *bool
 		if builtAt != nil {
