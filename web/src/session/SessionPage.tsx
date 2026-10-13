@@ -50,6 +50,13 @@ import {
   type SessionStatus,
 } from "./state";
 import { useConnectionWatch, type ConnectionStatus, type WatchEvent } from "./useConnectionWatch";
+import {
+  COLD_CONFIRM_MS,
+  nextColdStep,
+  startCold,
+  streamConfirmed,
+  type ColdAttempt,
+} from "./coldConnect";
 import "./session.css";
 
 type WorkspaceView = components["schemas"]["WorkspaceView"];
@@ -91,6 +98,11 @@ export interface SessionPageProps {
   inFrameRetryMs?: number;
   /** First re-navigation's jitter delay; defaults to random. Tests. */
   reNavJitterMs?: number;
+  /**
+   * How long after the frame loads the stream must show on /connection
+   * before a fresh ticket is minted (F2). Injectable for tests.
+   */
+  coldConfirmMs?: number;
   /** Navigates to the portal login (401). Injectable for tests. */
   onSignIn?: () => void;
 }
@@ -108,6 +120,7 @@ export function SessionPage({
   resumeTimeoutMs = 10_000,
   inFrameRetryMs,
   reNavJitterMs,
+  coldConfirmMs = COLD_CONFIRM_MS,
   onSignIn = defaultLoginRedirect,
 }: SessionPageProps) {
   const api = useApi();
@@ -151,6 +164,11 @@ export function SessionPage({
   const owned = useRef(seen.current !== null);
   const lastMode = useRef<LaunchMode>("frame");
   const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // F2 cold first connect: the attempt in flight, its confirm/relaunch
+  // timer, and whether the next launch is the cold window's own re-mint.
+  const cold = useRef<ColdAttempt | null>(null);
+  const coldTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const coldRelaunch = useRef(false);
   // Resume: the deadline for the confirmation poll and the poll itself.
   const resumeDeadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const resumePoll = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -221,6 +239,8 @@ export function SessionPage({
     seen.current = null;
     pending.current = null;
     owned.current = false;
+    cold.current = null;
+    clearTimeout(coldTimer.current);
     clearSessionOwned(workspaceId);
   }, [workspaceId]);
 
@@ -349,6 +369,9 @@ export function SessionPage({
 
   const launch = useCallback(
     async (mode: LaunchMode, takeover: boolean) => {
+      const fromCold = coldRelaunch.current;
+      coldRelaunch.current = false;
+      if (!fromCold) cold.current = null;
       if (inflight.current) return;
       inflight.current = true;
       lastMode.current = mode;
@@ -386,6 +409,7 @@ export function SessionPage({
         pending.current = { leaseRef: "", minEpoch: -1 };
         armed.current = true;
         submitLaunch(ticket, frameName, workspaceId, sessionDomain);
+        if (cold.current === null) cold.current = startCold(Date.now());
         dispatch({ type: "ticket" });
         armLoadTimer();
       } catch (e) {
@@ -546,6 +570,55 @@ export function SessionPage({
     }
   }, [api, workspaceId]);
 
+  // F2: after the frame loads, the stream must show up on /connection
+  // within coldConfirmMs; otherwise mint a fresh ticket (tickets are
+  // single-use) with backoff, inside COLD_BUDGET_MS. A confirmed stream, a
+  // watch recovery, or any later user-driven launch ends the cold window.
+  const checkCold = useCallback(async () => {
+    const attempt = cold.current;
+    if (!attempt || !mounted.current) return;
+    let confirmed = false;
+    try {
+      confirmed = streamConfirmed(await fetchConnection());
+    } catch (e) {
+      if (isUnauthenticated(e)) {
+        cold.current = null;
+        dispatch({ type: "signed-out" });
+        return;
+      }
+    }
+    // Ended, replaced or handed to the watch while the poll was in flight.
+    if (!mounted.current || cold.current !== attempt) return;
+    if (confirmed) {
+      cold.current = null;
+      return;
+    }
+    const step = nextColdStep(attempt, Date.now(), coldConfirmMs);
+    if (step.kind === "give-up") {
+      cold.current = null;
+      setRecovering(false);
+      dispatch({ type: "offline", reason: "exhausted" }); // Reconnect / open in a new tab
+      void checkEnded();
+      return;
+    }
+    attempt.relaunches++;
+    coldTimer.current = setTimeout(() => {
+      if (!mounted.current || cold.current !== attempt) return;
+      coldRelaunch.current = true;
+      setFrameKey((k) => k + 1);
+      void launch("frame", true);
+    }, step.delayMs);
+  }, [fetchConnection, launch, checkEnded, coldConfirmMs]);
+
+  // The window only lives while a launch is in flight or its desktop is up.
+  useEffect(() => {
+    const s = state.status;
+    if (s !== "requesting" && s !== "connecting" && s !== "connected") {
+      cold.current = null;
+      clearTimeout(coldTimer.current);
+    }
+  }, [state.status]);
+
   // D15: the passive /connection poll is the disconnect signal. Lease still
   // active → reload the frame with bounded backoff; lease gone → relaunch
   // through a fresh ticket, at most MAX_AUTO_RELAUNCH per 5 minutes.
@@ -593,6 +666,8 @@ export function SessionPage({
             // A fresh ticket made a lease we have not observed: same as a
             // launch — mark provisionally so a reload resumes it, and let
             // the first connected report be ours.
+            cold.current = null;
+            clearTimeout(coldTimer.current);
             remember({ leaseRef: "", streamEpoch: -1 });
             pending.current = { leaseRef: "", minEpoch: -1 };
             armed.current = true;
@@ -629,6 +704,8 @@ export function SessionPage({
           case "frame-navigated":
             // Our own reload opens a new stream: not another tab's. The
             // badge says "Reconnecting" until the poll sees it.
+            cold.current = null;
+            clearTimeout(coldTimer.current);
             armPending();
             setRecovering(true);
             break;
@@ -684,6 +761,7 @@ export function SessionPage({
       mounted.current = false;
       clearLoadTimer();
       clearResume();
+      clearTimeout(coldTimer.current);
     };
   }, [loadWorkspace, me]);
 
@@ -855,6 +933,10 @@ export function SessionPage({
     armed.current = false;
     clearLoadTimer();
     dispatch({ type: "frame-loaded" });
+    if (cold.current) {
+      clearTimeout(coldTimer.current);
+      coldTimer.current = setTimeout(() => void checkCold(), coldConfirmMs);
+    }
   }
 
   async function toggleFullscreen() {

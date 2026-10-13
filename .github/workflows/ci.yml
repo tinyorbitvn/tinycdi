@@ -452,7 +452,7 @@ jobs:
     name: quickstart (kind up.sh + portal smoke)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       KIND_VERSION: "0.33.0"
       KIND_BIN_SHA256: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
@@ -524,6 +524,37 @@ jobs:
         run: |
           export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
           npx playwright test
+      - name: cold-connect gate (F2, 20 cold boots, p95 < 20 s)
+        if: steps.gate.outputs.run == 'true'
+        working-directory: hack/quickstart/smoke
+        env:
+          TCDI_QS_COLD_RUNS: "20"
+          TCDI_QS_COLD_P95_MS: "20000"
+        run: |
+          export KUBECONFIG="$HOME/.local/state/tcdi-quickstart/${TCDI_QS_CLUSTER}/kubeconfig"
+          # The spec itself fails when p95 >= TCDI_QS_COLD_P95_MS ...
+          npx playwright test -c playwright.cold-connect.config.ts
+          # ... and this re-checks the recorded report: all 20 runs present, p95 < 20000.
+          jq -e --argjson n "$TCDI_QS_COLD_RUNS" --argjson max "$TCDI_QS_COLD_P95_MS" \
+            '(.runs | length) == $n and .p95Ms < $max' test-results/cold-connect.json
+      - name: cold-connect summary
+        if: always() && steps.gate.outputs.run == 'true'
+        working-directory: hack/quickstart/smoke
+        run: |
+          if [ -f test-results/cold-connect.json ]; then
+            jq -r '"cold-connect: p95 \(.p95Ms) ms, worst \([.runs[].readyToConnectedMs] | max) ms over \(.runs | length) runs;" +
+              " gateway 5xx \([.runs[].upstream5xx] | add); extra ticket mints \([.runs[].connectionPosts - 1] | add)"' \
+              test-results/cold-connect.json | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "cold-connect: no report written" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: upload cold-connect report
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cold-connect
+          path: hack/quickstart/smoke/test-results/cold-connect.json
+          if-no-files-found: ignore
       - name: diagnostics
         if: failure() && steps.gate.outputs.run == 'true'
         run: |
