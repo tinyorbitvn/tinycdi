@@ -1392,6 +1392,40 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/admin/tenants/{tenant}/overview:
+    get:
+      operationId: getAdminOverview
+      summary: Tenant health overview
+      description: |
+        Live desktop sessions (active, unexpired connection leases), Ready
+        workspaces per template, the provisioning p95 over the last 24 hours
+        (request to Ready, from the boot ledger), the Workspaces stuck
+        deleting, and the phase counts. One aggregate query plus the
+        operator's status counts; the answer is cached for 15 seconds per
+        tenant. `fresh: false` means the Kubernetes watch is stale and the
+        Kubernetes-derived counts are empty. Counts only, no identities.
+        Requires the tenant-admin role on the named tenant.
+      tags: [admin]
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: The tenant overview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/data:
     get:
       operationId: listRetainedData
@@ -2588,6 +2622,32 @@ components:
         sessions: {type: integer, minimum: 0}
         tickets: {type: integer, minimum: 0}
         leases: {type: integer, minimum: 0}
+    AdminOverview:
+      type: object
+      additionalProperties: false
+      required: [liveSessions, runningByTemplate, phases, provisioning, stuckFinalizers, fresh, generatedAt]
+      properties:
+        liveSessions: {type: integer, format: int64, minimum: 0}
+        runningByTemplate:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [template, count]
+            properties:
+              template: {type: string}
+              count: {type: integer, minimum: 0}
+        phases: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        provisioning:
+          type: object
+          additionalProperties: false
+          required: [samples]
+          properties:
+            p95Seconds: {type: number, minimum: 0, description: "Absent when no workspace became Ready in the last 24 hours."}
+            samples: {type: integer, format: int64, minimum: 0}
+        stuckFinalizers: {type: integer, minimum: 0}
+        fresh: {type: boolean, description: "False when the Kubernetes watch is stale; Kubernetes counts are then empty."}
+        generatedAt: {type: string, format: date-time}
 
     ResolvedSessionPolicy:
       type: object

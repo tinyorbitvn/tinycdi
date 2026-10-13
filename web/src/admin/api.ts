@@ -380,3 +380,12 @@ export async function listAdminAuditPage(
     }),
   );
 }
+
+export type AdminOverview = components["schemas"]["AdminOverview"];
+
+// GET .../overview (F7): the tenant health aggregate — live sessions, Ready
+// workspaces per template, provisioning p95, stuck deletions — cached
+// server-side for 15 s.
+export async function fetchAdminOverview(api: ApiClient, tenant: string): Promise<AdminOverview> {
+  return unwrap(await api.GET("/v1/admin/tenants/{tenant}/overview", { params: { path: { tenant } } }));
+}

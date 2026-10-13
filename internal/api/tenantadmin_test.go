@@ -86,6 +86,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(&fakeLeaseSource{}, nil, &fakePrincipalRevoker{}, defaultTenants()))
 	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(fx.aud, defaultTenants()))
 	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(fx.ud, fx.uls, defaultTenants()))
+	MountAdminOverviewRoutes(mux, a, NewAdminOverviewHandler(&fakeOverviewDB{calls: map[string]int{}}, fakeCounter{}, defaultTenants()))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
@@ -473,5 +474,22 @@ func TestNoRawTenantAdminMembershipCheck(t *testing.T) {
 				t.Errorf("%s contains %s — resolve the admin role through Principal.IsTenantAdmin", name, pat)
 			}
 		}
+	}
+}
+
+func TestAdminOverview_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+	const path = "/v1/admin/tenants/tenant-a/overview"
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	r := doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("member GET: status=%d, want 200", r.StatusCode)
+	}
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	r = doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
 	}
 }

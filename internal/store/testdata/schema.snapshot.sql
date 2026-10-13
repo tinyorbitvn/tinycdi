@@ -287,6 +287,14 @@ CREATE TABLE public.workspace_activity (
     CONSTRAINT workspace_activity_open_streams_check CHECK ((open_streams >= 0))
 );
 
+CREATE TABLE public.workspace_boot (
+    workspace_id text NOT NULL,
+    runtime_generation bigint NOT NULL,
+    tenant_id text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    ready_at timestamp with time zone
+);
+
 CREATE TABLE public.workspace_revocation (
     workspace_id text NOT NULL,
     runtime_generation bigint NOT NULL,
@@ -392,6 +400,9 @@ ALTER TABLE ONLY public.user_session_limit
 ALTER TABLE ONLY public.workspace_activity
     ADD CONSTRAINT workspace_activity_pkey PRIMARY KEY (workspace_id, runtime_generation);
 
+ALTER TABLE ONLY public.workspace_boot
+    ADD CONSTRAINT workspace_boot_pkey PRIMARY KEY (workspace_id, runtime_generation);
+
 ALTER TABLE ONLY public.workspace_revocation
     ADD CONSTRAINT workspace_revocation_pkey PRIMARY KEY (workspace_id, runtime_generation);
 
@@ -446,6 +457,8 @@ CREATE INDEX sessions_expires_at ON public.sessions USING btree (expires_at) WHE
 CREATE INDEX sessions_issuer_subject ON public.sessions USING btree (issuer, subject);
 
 CREATE INDEX stop_intent_undrained ON public.stop_intent USING btree (workspace_id) WHERE (drained_at IS NULL);
+
+CREATE INDEX workspace_boot_tenant_ready ON public.workspace_boot USING btree (tenant_id, ready_at);
 
 CREATE UNIQUE INDEX workspaces_owner_name ON public.workspaces USING btree (tenant_id, owner_subject, name) WHERE ((state = 'active'::text) AND (name <> ''::text));
 

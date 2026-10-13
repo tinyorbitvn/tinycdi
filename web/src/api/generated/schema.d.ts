@@ -775,6 +775,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/tenants/{tenant}/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant health overview
+         * @description Live desktop sessions (active, unexpired connection leases), Ready
+         *     workspaces per template, the provisioning p95 over the last 24 hours
+         *     (request to Ready, from the boot ledger), the Workspaces stuck
+         *     deleting, and the phase counts. One aggregate query plus the
+         *     operator's status counts; the answer is cached for 15 seconds per
+         *     tenant. `fresh: false` means the Kubernetes watch is stale and the
+         *     Kubernetes-derived counts are empty. Counts only, no identities.
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/data": {
         parameters: {
             query?: never;
@@ -1457,6 +1484,28 @@ export interface components {
             sessions: number;
             tickets: number;
             leases: number;
+        };
+        AdminOverview: {
+            /** Format: int64 */
+            liveSessions: number;
+            runningByTemplate: {
+                template: string;
+                count: number;
+            }[];
+            phases: {
+                [key: string]: number;
+            };
+            provisioning: {
+                /** @description Absent when no workspace became Ready in the last 24 hours. */
+                p95Seconds?: number;
+                /** Format: int64 */
+                samples: number;
+            };
+            stuckFinalizers: number;
+            /** @description False when the Kubernetes watch is stale; Kubernetes counts are then empty. */
+            fresh: boolean;
+            /** Format: date-time */
+            generatedAt: string;
         };
         /**
          * @description The resolved (effective) session data-transfer policy for a
@@ -3189,6 +3238,38 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant overview. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOverview"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];

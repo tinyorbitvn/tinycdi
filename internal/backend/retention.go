@@ -73,6 +73,9 @@ func terminalRetentionSweepLoop(db *store.DB, days int, m *observability.Metrics
 const (
 	auditRetentionInterval = 24 * time.Hour
 	auditRetentionBatch    = 1000
+	// workspaceBootRetention bounds the boot ledger (F7): rows only feed
+	// the overview's 24 h provisioning p95, so a week of history is ample.
+	workspaceBootRetention = 7 * 24 * time.Hour
 )
 
 // auditRetentionLoop is the leader singleton that prunes audit_event rows
@@ -89,6 +92,19 @@ func auditRetentionLoop(db *store.DB, days int, m *observability.Metrics, log *s
 				log.Info("audit retention prune", "rows_pruned", n)
 				if m != nil {
 					m.AddRetentionRowsPruned("audit_event", float64(n))
+				}
+			}
+			bn, berr := db.PruneWorkspaceBoot(ctx, time.Now().Add(-workspaceBootRetention))
+			switch {
+			case berr != nil && errors.Is(berr, context.Canceled):
+			case berr != nil:
+				log.Error("workspace_boot prune failed", "err", berr)
+			default:
+				if bn > 0 {
+					log.Info("workspace_boot prune", "rows_pruned", bn)
+				}
+				if m != nil {
+					m.AddRetentionRowsPruned("workspace_boot", float64(bn))
 				}
 			}
 		}

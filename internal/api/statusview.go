@@ -608,3 +608,50 @@ func (h *WorkspaceHandler) templateImageAge(ctx context.Context, tenantID, templ
 	memo.ages[key] = raw
 	return raw
 }
+
+// StuckFinalizerAfter is how long a Workspace may sit with a deletion
+// timestamp and finalizers before the overview counts it as stuck.
+const StuckFinalizerAfter = 10 * time.Minute
+
+// TenantCounts is the Kubernetes half of the admin overview.
+type TenantCounts struct {
+	Fresh             bool
+	RunningByTemplate map[string]int // spec.templateRef.name -> Ready workspaces
+	Phases            map[string]int
+	StuckFinalizers   int
+}
+
+// TenantCounts aggregates the tenant's Workspace CRs from the informer
+// cache. Fresh is false when the watch is stale; the counts are then
+// empty rather than last-known, because aggregates have no per-object
+// snapshot.
+func (v *K8sStatusView) TenantCounts(ctx context.Context, tenantID string, stuckAfter time.Duration) (TenantCounts, error) {
+	out := TenantCounts{RunningByTemplate: map[string]int{}, Phases: map[string]int{}}
+	v.mu.Lock()
+	synced, last := v.synced, v.lastEvent
+	v.mu.Unlock()
+	now := v.now()
+	if !synced || now.Sub(last) > v.maxStale {
+		return out, nil
+	}
+	var list cdiv1.WorkspaceList
+	if err := v.cache.List(ctx, &list, client.MatchingLabels{provisioning.LabelTenant: tenantID}); err != nil {
+		return out, err
+	}
+	out.Fresh = true
+	for i := range list.Items {
+		ws := &list.Items[i]
+		phase := string(ws.Status.Phase)
+		if phase == "" {
+			phase = string(cdiv1.WorkspacePhasePending)
+		}
+		out.Phases[phase]++
+		if ws.Status.Phase == cdiv1.WorkspacePhaseReady {
+			out.RunningByTemplate[ws.Spec.TemplateRef.Name]++
+		}
+		if ws.DeletionTimestamp != nil && len(ws.Finalizers) > 0 && now.Sub(ws.DeletionTimestamp.Time) > stuckAfter {
+			out.StuckFinalizers++
+		}
+	}
+	return out, nil
+}

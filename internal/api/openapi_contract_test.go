@@ -661,6 +661,12 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		{"POST", "/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all", func() *http.Response {
 			return doReq(t, env, sessA, csrfA, "POST", adminRevokePath("bad"), "", nil)
 		}},
+		{"GET", "/v1/admin/tenants/{tenant}/overview", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", "/v1/admin/tenants/tenant-a/overview", "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/overview", func() *http.Response {
+			return doReq(t, env, sess, csrf, "GET", "/v1/admin/tenants/tenant-a/overview", "", nil)
+		}},
 		// One mutation per admin resource, then its stale precondition.
 		{"PUT", "/v1/admin/tenants/{tenant}/quota", func() *http.Response {
 			return doReq(t, env, sessA, csrfA, "PUT", adminQuotaPath, adminQuotaBody, star)

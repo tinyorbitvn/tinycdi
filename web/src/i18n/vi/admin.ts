@@ -72,6 +72,16 @@ export default {
   "admin.overview.data.title": "Dữ liệu giữ lại",
   "admin.overview.data.disks": "đĩa được giữ lại",
   "admin.overview.data.all": "Xem dữ liệu giữ lại",
+  "admin.overview.health.title": "Tình trạng",
+  "admin.overview.health.liveSessions": "Phiên đang hoạt động",
+  "admin.overview.health.p95": "Thời gian khởi động (p95, 24 giờ)",
+  "admin.overview.health.samples": "Đã đo {n} lần khởi động",
+  "admin.overview.health.noSamples": "Không có lần khởi động nào trong 24 giờ",
+  "admin.overview.health.stuck": "Xoá bị kẹt",
+  "admin.overview.health.running": "Đang chạy theo template",
+  "admin.overview.health.noneRunning": "Không có workspace nào đang chạy",
+  "admin.overview.health.stale":
+    "Trạng thái workspace chưa cập nhật; số liệu Kubernetes bị ẩn cho đến khi kết nối theo dõi phục hồi.",
 
   // Quota page.
   "admin.quota.title": "Hạn mức",

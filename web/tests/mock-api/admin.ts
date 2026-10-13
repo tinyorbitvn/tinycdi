@@ -343,6 +343,7 @@ export function adminArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const t = tenancy(ctx);
   let liveSessions = seedLiveSessions();
+  let overviewFresh = true;
 
   function seed(): void {
     for (const { ws, owner } of seedWorkspaces()) {
@@ -372,6 +373,7 @@ export function adminArea(ctx: MockContext): MockArea {
     t.failNext = new Map();
     t.scopesSeen = [];
     liveSessions = seedLiveSessions();
+    overviewFresh = true;
     if (ctx.demo) seed();
   }
 
@@ -795,8 +797,31 @@ export function adminArea(ctx: MockContext): MockArea {
     return ok(200, { sessions: gone.length > 0 ? 1 : 0, tickets: 0, leases: gone.length });
   }
 
+  // GET /v1/admin/tenants/{tenant}/overview — fixed counts; /_control/admin/overview {fresh} flips the stale flag.
+  function adminOverview(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    return ok(200, {
+      liveSessions: 2,
+      runningByTemplate: overviewFresh
+        ? [{ template: "chrome-r1", count: 2 }, { template: "linux-r3", count: 1 }]
+        : [],
+      phases: overviewFresh ? { Ready: 3, Stopped: 1 } : {},
+      provisioning: { p95Seconds: 12.4, samples: 7 },
+      stuckFinalizers: 1,
+      fresh: overviewFresh,
+      generatedAt: "2026-10-13T09:00:00Z",
+    });
+  }
+
   function api(req: MockRequest): MockResponse | undefined {
     const { method, path } = req;
+    const mOvw = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/overview$/);
+    if (mOvw) return adminOverview(req, mOvw[1]);
     const mSess = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/sessions$/);
     if (mSess) return adminSessions(req, mSess[1]);
     const mRevoke = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users\/([^/]+)\/sessions:revoke-all$/);
@@ -871,6 +896,9 @@ export function adminArea(ctx: MockContext): MockArea {
         }
         t.spVersion += 1;
         return ok(200, sessionPolicyBody());
+      case "/_control/admin/overview":
+        overviewFresh = req.body?.fresh !== false;
+        return ok(200, { fresh: overviewFresh });
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

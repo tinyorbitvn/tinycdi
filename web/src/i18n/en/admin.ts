@@ -73,6 +73,16 @@ export default {
   "admin.overview.data.title": "Retained data",
   "admin.overview.data.disks": "retained disks",
   "admin.overview.data.all": "View retained data",
+  "admin.overview.health.title": "Health",
+  "admin.overview.health.liveSessions": "Live sessions",
+  "admin.overview.health.p95": "Start time (p95, 24 h)",
+  "admin.overview.health.samples": "{n} starts measured",
+  "admin.overview.health.noSamples": "No starts in 24 h",
+  "admin.overview.health.stuck": "Stuck deletions",
+  "admin.overview.health.running": "Running by template",
+  "admin.overview.health.noneRunning": "Nothing running",
+  "admin.overview.health.stale":
+    "Workspace status is out of date; Kubernetes counts are hidden until the watch recovers.",
 
   // Quota page.
   "admin.quota.title": "Quota",

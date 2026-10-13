@@ -368,6 +368,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
+	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
+		return fmt.Errorf("boot recorder: %w", err)
+	}
 	// Template ages for the workspace image-age fallback are read from the
 	// same informer cache (registered before Start so cache sync covers it):
 	// a page of old workspaces never costs API-server GETs.
@@ -744,6 +747,10 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// reuses the principal revoker the self-service route shares.
 	adminSessionsHandler := api.NewAdminSessionsHandler(db, directory, broker.PublicRevoker{B: brk}, tenants).
 		WithAuditSink(appAudit)
+	// F7: the overview marries the Postgres aggregate (live leases, boot
+	// p95) with the informer's phase/template/finalizer counts.
+	adminOverviewHandler := api.NewAdminOverviewHandler(db, statusView, tenants).
+		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
@@ -774,7 +781,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		data: dataHandler, quota: quotaHandler, adminQuota: adminQuotaHandler,
 		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
 		adminAudit: adminAuditHandler, adminUsers: adminUsersHandler,
-		adminSessions: adminSessionsHandler,
+		adminSessions: adminSessionsHandler, adminOverview: adminOverviewHandler,
 	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
@@ -797,6 +804,7 @@ type appRoutes struct {
 	adminAudit         *api.AdminAuditHandler
 	adminUsers         *api.AdminUsersHandler
 	adminSessions      *api.AdminSessionsHandler
+	adminOverview      *api.AdminOverviewHandler
 }
 
 // appMux assembles the public API route table. The session surface
@@ -837,6 +845,9 @@ func appMux(authn *api.Authenticator, h appRoutes,
 	}
 	if h.adminSessions != nil {
 		api.MountAdminSessionRoutes(mux, authn, h.adminSessions)
+	}
+	if h.adminOverview != nil {
+		api.MountAdminOverviewRoutes(mux, authn, h.adminOverview)
 	}
 	return mux
 }

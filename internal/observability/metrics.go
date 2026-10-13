@@ -111,7 +111,7 @@ var (
 	// retentionTables are the tables the retention sweeps prune: the
 	// session-layer terminal rows (SR-4-F5) and audit_event (ADR 0011).
 	retentionTables = map[string]struct{}{
-		"connection_lease": {}, "launch_ticket": {}, "audit_event": {},
+		"connection_lease": {}, "launch_ticket": {}, "audit_event": {}, "workspace_boot": {},
 	}
 	// auditEventActions bounds the {event} label of the audit-write-error
 	// counter to the action names the codebase can emit (the app route
@@ -133,7 +133,8 @@ var (
 		"admin.audit.get": {},
 		"admin.user.list": {}, "admin.user.get": {},
 		"admin.session.list": {}, "admin.session.revoke": {},
-		"launch.redeem": {}, "launch.host_mismatch": {},
+		"admin.overview.get": {},
+		"launch.redeem":      {}, "launch.host_mismatch": {},
 		"session.lookup": {}, "session.stream": {},
 	}
 )

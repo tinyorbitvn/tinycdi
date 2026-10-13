@@ -244,6 +244,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		newFakeDirectory(), &fakePrincipalRevoker{res: RevokeAllResult{Leases: 1}}, tenants).WithAuditSink(sink))
 	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(&fakeAuditSource{rows: auditRows(2)}, tenants).WithAuditSink(sink))
 	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(&fakeUserDirectory{users: directoryUsers()}, newFakeUserLimitSource(), tenants).WithAuditSink(sink))
+	MountAdminOverviewRoutes(mux, a, NewAdminOverviewHandler(&fakeOverviewDB{calls: map[string]int{}}, fakeCounter{}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
 	// trusted-origin gate → mux. The replay requests carry no Origin or
@@ -391,6 +392,9 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 		}},
 		{"POST /v1/admin/tenants/{}/users/{}/sessions:revoke-all", auditActionAdminSessionRevoke, func() {
 			doReq(t, env, sessA, csrfA, http.MethodPost, adminRevokePath("iss|sub"), "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/overview", auditActionAdminOverviewGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/admin/tenants/tenant-a/overview", "", nil).Body.Close()
 		}},
 		{"POST /v1/logout", auditActionSessionLogout, func() {
 			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()

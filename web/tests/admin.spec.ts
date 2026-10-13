@@ -390,3 +390,15 @@ test("admin signs a user out everywhere", async ({ page, request }) => {
     ),
   ).toBeTruthy();
 });
+
+test("overview health cards show the aggregate and the stale notice", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin");
+  const health = page.getByRole("region", { name: "Health" });
+  await expect(health).toContainText("12 s");
+  await expect(health).toContainText("7 starts measured");
+  await expect(health.getByText("chrome-r1 — 2")).toBeVisible();
+  await request.post(`${MOCK}/_control/admin/overview`, { data: { fresh: false } });
+  await page.reload();
+  await expect(page.getByText(/Workspace status is out of date/)).toBeVisible();
+});

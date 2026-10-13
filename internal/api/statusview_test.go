@@ -35,6 +35,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
@@ -1014,5 +1015,68 @@ func TestProjectConditions_IntentBehind(t *testing.T) {
 	}
 	if out[0].Params["crRevision"] != "5" || out[0].Params["rowRevision"] != "3" {
 		t.Fatalf("params = %v, want {crRevision: 5, rowRevision: 3}", out[0].Params)
+	}
+}
+
+// selectorCache is a crcache.Cache whose List reads a fake client, so label
+// selectors are honoured (the package's existing listCache, imagestale_r4_test.go,
+// returns a fixed slice and ignores them). Every other method would nil-panic.
+type selectorCache struct {
+	crcache.Cache
+	c client.Client
+}
+
+func (l selectorCache) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return l.c.List(ctx, list, opts...)
+}
+
+func TestK8sStatusView_TenantCounts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := cdiv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	mk := func(name, tenant, tpl string, phase cdiv1.WorkspacePhase) *cdiv1.Workspace {
+		ws := &cdiv1.Workspace{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "ns-" + tenant,
+			Labels: map[string]string{provisioning.LabelTenant: tenant},
+		}}
+		ws.Spec.TemplateRef.Name = tpl
+		ws.Status.Phase = phase
+		return ws
+	}
+	stuck := mk("stuck", "tenant-a", "chrome-r1", cdiv1.WorkspacePhaseTerminating)
+	old := metav1.NewTime(now.Add(-11 * time.Minute))
+	stuck.DeletionTimestamp, stuck.Finalizers = &old, []string{"workspaces.cdi.tinyorbit.vn/test"}
+	young := mk("young", "tenant-a", "chrome-r1", cdiv1.WorkspacePhaseTerminating)
+	recent := metav1.NewTime(now.Add(-time.Minute))
+	young.DeletionTimestamp, young.Finalizers = &recent, []string{"workspaces.cdi.tinyorbit.vn/test"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		mk("r1", "tenant-a", "chrome-r1", cdiv1.WorkspacePhaseReady),
+		mk("r2", "tenant-a", "chrome-r1", cdiv1.WorkspacePhaseReady),
+		mk("f1", "tenant-a", "chrome-r1", cdiv1.WorkspacePhaseFailed),
+		stuck, young,
+		mk("other", "tenant-b", "other-r1", cdiv1.WorkspacePhaseReady),
+	).Build()
+	clock := now
+	sv := &K8sStatusView{
+		cache: selectorCache{c: c}, now: func() time.Time { return clock },
+		maxStale: 15 * time.Second, lastKnown: map[string]ObservedStatus{},
+	}
+	sv.MarkSynced()
+
+	got, err := sv.TenantCounts(context.Background(), "tenant-a", StuckFinalizerAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Fresh || got.RunningByTemplate["chrome-r1"] != 2 || len(got.RunningByTemplate) != 1 ||
+		got.Phases["Failed"] != 1 || got.Phases["Terminating"] != 2 || got.StuckFinalizers != 1 {
+		t.Fatalf("tenant-a counts = %+v: tenant-b's workspace must not leak, only the 11-minute deletion is stuck", got)
+	}
+
+	clock = clock.Add(16 * time.Second) // the watch went quiet
+	stale, err := sv.TenantCounts(context.Background(), "tenant-a", StuckFinalizerAfter)
+	if err != nil || stale.Fresh || len(stale.RunningByTemplate) != 0 || stale.StuckFinalizers != 0 {
+		t.Fatalf("stale counts = %+v, err %v: want Fresh=false and empty", stale, err)
 	}
 }

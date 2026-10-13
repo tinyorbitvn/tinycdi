@@ -767,3 +767,48 @@ test("admin: the live session is listed from Postgres, Sign out everywhere ends 
   await userCtx.close();
   await adminCtx.close();
 });
+
+test("admin overview: a live session, a running workspace and a measured boot are counted", async ({ browser }) => {
+  const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const userPage = await userCtx.newPage();
+  await login(userPage);
+  const id = await createBrowserWorkspace(userPage, `ovw-${Date.now().toString(36)}`);
+  await connectSessionFrame(userPage, id);
+
+  const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await adminCtx.newPage();
+  await login(page, ADMIN_USER);
+
+  type Overview = {
+    liveSessions: number;
+    runningByTemplate: { template: string; count: number }[];
+    provisioning: { p95Seconds?: number; samples: number };
+    stuckFinalizers: number;
+    fresh: boolean;
+  };
+  const overview = async (): Promise<Overview> => {
+    const r = await page.request.get(`/v1/admin/tenants/${TENANT}/overview`);
+    expect(r.status()).toBe(200);
+    return (await r.json()) as Overview;
+  };
+  await expect
+    .poll(async () => {
+      const o = await overview();
+      return (
+        o.fresh &&
+        o.liveSessions >= 1 &&
+        o.runningByTemplate.reduce((n, t) => n + t.count, 0) >= 1 &&
+        o.provisioning.samples >= 1 &&
+        (o.provisioning.p95Seconds ?? 0) > 0
+      );
+    }, { timeout: 90_000, intervals: [3_000], message: "overview counts the live session, the running workspace and the measured boot" })
+    .toBe(true);
+  expect((await overview()).stuckFinalizers).toBeGreaterThanOrEqual(0);
+
+  // The UI shows the same cards.
+  await page.goto("/admin");
+  await expect(page.getByRole("region", { name: "Health" })).toContainText("Live sessions");
+
+  await userCtx.close();
+  await adminCtx.close();
+});
