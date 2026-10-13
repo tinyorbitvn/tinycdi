@@ -10,7 +10,7 @@ CREATE TABLE public.audit_event (
     request_id text DEFAULT ''::text NOT NULL,
     details jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT audit_event_outcome_check CHECK ((outcome = ANY (ARRAY['success'::text, 'denied'::text, 'error'::text])))
+    CONSTRAINT audit_event_outcome_check CHECK ((outcome = ANY (ARRAY['success'::text, 'denied'::text, 'failure'::text])))
 );
 
 CREATE SEQUENCE public.audit_event_id_seq
@@ -402,6 +402,8 @@ ALTER TABLE ONLY public.workspaces
     ADD CONSTRAINT workspaces_request_id_key UNIQUE (request_id);
 
 CREATE INDEX audit_event_created_idx ON public.audit_event USING btree (created_at);
+
+CREATE INDEX audit_event_tenant_action_idx ON public.audit_event USING btree (tenant, action, created_at DESC, id DESC);
 
 CREATE INDEX audit_event_tenant_created_idx ON public.audit_event USING btree (tenant, created_at DESC, id DESC);
 

@@ -324,7 +324,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
     action       text        NOT NULL,
     target_kind  text        NOT NULL DEFAULT '',
     target_id    text        NOT NULL DEFAULT '',
-    outcome      text        NOT NULL CHECK (outcome IN ('success','denied','error')),
+    outcome      text        NOT NULL CHECK (outcome IN ('success','denied','failure')),
     error_code   text        NOT NULL DEFAULT '',
     request_id   text        NOT NULL DEFAULT '',
     details      jsonb       NOT NULL DEFAULT '{}'::jsonb,
@@ -332,6 +332,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
 );
 CREATE INDEX IF NOT EXISTS audit_event_tenant_created_idx ON audit_event (tenant, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS audit_event_created_idx ON audit_event (created_at);
+CREATE INDEX IF NOT EXISTS audit_event_tenant_action_idx ON audit_event (tenant, action, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS session_file_transfer (
     id                  text        PRIMARY KEY,
