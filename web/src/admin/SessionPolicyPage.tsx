@@ -8,7 +8,7 @@ import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import {
   fetchAdminSessionPolicy,
-  listAllAdminTemplates,
+  scanAdminTemplates,
   putAdminSessionPolicy,
   type AdminSessionPolicyView,
   type Tagged,
@@ -64,7 +64,7 @@ async function loadPolicy(api: ApiClient): Promise<PolicyData> {
   const me = await loadMe(api);
   const [policy, templates] = await Promise.all([
     fetchAdminSessionPolicy(api, me.tenant),
-    listAllAdminTemplates(api),
+    scanAdminTemplates(api),
   ]);
   return { policy, templates };
 }

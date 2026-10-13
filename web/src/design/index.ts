@@ -31,7 +31,7 @@ export type {
 } from "./Table";
 export { Pagination } from "./Pagination";
 export type { PaginationProps } from "./Pagination";
-export { useServerPage, useServerTable, serverSortParam, fetchAllPages, ALL_PAGE_LIMIT } from "./useServerPage";
+export { useServerPage, useServerTable, serverSortParam, scanCollection, SCAN_PAGE_LIMIT, SCAN_MAX_PAGES, CollectionTooLargeError } from "./useServerPage";
 export type {
   ServerPage,
   FetchServerPage,

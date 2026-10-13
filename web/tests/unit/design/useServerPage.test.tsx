@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { useServerPage, type ServerPage } from "../../../src/design/useServerPage";
+import {
+  CollectionTooLargeError,
+  SCAN_MAX_PAGES,
+  scanCollection,
+  useServerPage,
+  type ServerPage,
+} from "../../../src/design/useServerPage";
 
 type Row = { id: string };
 
@@ -142,5 +148,38 @@ describe("design/useServerPage", () => {
     await waitFor(() => expect(result.current.items.map((r) => r.id)).toEqual(["back"]));
     expect(result.current.error).toBeNull();
     expect(result.current.loaded).toBe(true);
+  });
+});
+
+describe("design/scanCollection", () => {
+  it("reads every page until nextCursor is absent", async () => {
+    const fetchPage = vi.fn(async (cursor?: string): Promise<ServerPage<number>> =>
+      cursor === undefined ? { items: [1, 2], nextCursor: "c1" } : { items: [3] },
+    );
+    await expect(scanCollection(fetchPage, "name")).resolves.toEqual([1, 2, 3]);
+    expect(fetchPage).toHaveBeenCalledTimes(2);
+    expect(fetchPage).toHaveBeenLastCalledWith("c1", "name");
+  });
+
+  it("rejects instead of truncating when fresh cursors never run out", async () => {
+    let n = 0;
+    const fetchPage = vi.fn(async (): Promise<ServerPage<number>> => ({ items: [n], nextCursor: `c${++n}` }));
+    await expect(scanCollection(fetchPage)).rejects.toBeInstanceOf(CollectionTooLargeError);
+    expect(fetchPage).toHaveBeenCalledTimes(SCAN_MAX_PAGES);
+  });
+
+  it("returns a collection of exactly SCAN_MAX_PAGES pages", async () => {
+    let n = 0;
+    const fetchPage = vi.fn(async (): Promise<ServerPage<number>> => {
+      n++;
+      return n < SCAN_MAX_PAGES ? { items: [n], nextCursor: `c${n}` } : { items: [n] };
+    });
+    await expect(scanCollection(fetchPage)).resolves.toHaveLength(SCAN_MAX_PAGES);
+  });
+
+  it("rejects when the server repeats a cursor", async () => {
+    const fetchPage = vi.fn(async (): Promise<ServerPage<number>> => ({ items: [1], nextCursor: "same" }));
+    await expect(scanCollection(fetchPage)).rejects.toBeInstanceOf(CollectionTooLargeError);
+    expect(fetchPage).toHaveBeenCalledTimes(2);
   });
 });

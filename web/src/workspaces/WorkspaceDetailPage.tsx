@@ -18,7 +18,7 @@ import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
 import { resolveTemplate } from "../templates/family";
-import { useTemplates } from "../templates/useTemplates";
+import { useTemplateLookup } from "../templates/useTemplates";
 import {
   dataPolicyDescription,
   dataPolicyLabel,
@@ -141,7 +141,7 @@ export function WorkspaceDetailPage({
   pollIntervalMs?: number;
 }) {
   const api = useApi();
-  const templates = useTemplates();
+  const templates = useTemplateLookup();
   const me = useMeLoaded();
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);

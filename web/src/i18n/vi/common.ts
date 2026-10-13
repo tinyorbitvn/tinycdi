@@ -15,6 +15,7 @@ export default {
   "common.pagination.loadedMore": "Đang hiển thị {n} mục đầu tiên",
   "common.pagination.loadedAll": "Đang hiển thị tất cả {n} mục",
   "common.pagination.loadMore": "Tải thêm",
+  "common.collectionTooLarge": "Chế độ xem này cần hơn {n} bản ghi, vượt quá số lượng cổng thông tin đọc một lần.",
 
   "errors.banner.fallback": "LỖI",
   "errors.banner.requestId": "(mã yêu cầu {id})",

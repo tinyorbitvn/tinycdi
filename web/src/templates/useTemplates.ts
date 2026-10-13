@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useApi } from "../api/context";
 import { unwrap, type ApiClient } from "../api/client";
-import { ALL_PAGE_LIMIT, fetchAllPages, type ServerPage } from "../design/useServerPage";
+import { SCAN_PAGE_LIMIT, scanCollection, useServerPage, type ServerPage } from "../design/useServerPage";
 import { useResource } from "../workspaces/resource";
 import type { RuntimeKind, TemplateView } from "./types";
 
@@ -35,14 +35,24 @@ export async function listTemplatePage(
   );
 }
 
-/** Every template matching `query`, read page by page (catalogs, pickers, id lookups). */
-export function listAllTemplates(api: ApiClient, query: Omit<TemplateListQuery, "limit"> = {}): Promise<TemplateView[]> {
-  return fetchAllPages((cursor, sort) => listTemplatePage(api, { ...query, limit: ALL_PAGE_LIMIT }, cursor, sort));
+/**
+ * Every template matching `query`, bounded by SCAN_MAX_PAGES (rejects past
+ * it). For id lookups and pickers only: the API has no GET by id.
+ */
+export function scanTemplates(api: ApiClient, query: Omit<TemplateListQuery, "limit"> = {}): Promise<TemplateView[]> {
+  return scanCollection((cursor, sort) => listTemplatePage(api, { ...query, limit: SCAN_PAGE_LIMIT }, cursor, sort));
 }
 
-/** Published templates visible to the caller (every page; no polling). */
-export function useTemplates() {
+/** Published templates visible to the caller, one server page at a time (catalog). */
+export function useTemplatePages() {
   const api = useApi();
-  const load = useCallback(() => listAllTemplates(api), [api]);
+  const fetchPage = useCallback((cursor?: string, sort?: string) => listTemplatePage(api, {}, cursor, sort), [api]);
+  return useServerPage(fetchPage, { sort: TEMPLATE_DEFAULT_SORT });
+}
+
+/** Templates for a lookup or picker (bounded scan; no polling). */
+export function useTemplateLookup() {
+  const api = useApi();
+  const load = useCallback(() => scanTemplates(api), [api]);
   return useResource(load, null);
 }

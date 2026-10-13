@@ -5,8 +5,8 @@ import { t } from "../i18n";
 import { phaseLabelKey } from "../workspaces/helpers";
 import {
   fetchQuota,
-  listAllScopedData,
-  listAllScopedWorkspaces,
+  scanScopedData,
+  scanScopedWorkspaces,
   type QuotaView,
   type ScopedRetainedData,
   type ScopedWorkspace,
@@ -44,8 +44,8 @@ interface Overview {
 async function loadOverview(api: ApiClient): Promise<Overview> {
   const [quota, ws, data] = await Promise.all([
     fetchQuota(api),
-    listAllScopedWorkspaces(api, "tenant"),
-    listAllScopedData(api, "tenant"),
+    scanScopedWorkspaces(api, "tenant"),
+    scanScopedData(api, "tenant"),
   ]);
   return { quota, workspaces: ws, retained: data };
 }

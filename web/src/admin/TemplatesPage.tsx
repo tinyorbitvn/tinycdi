@@ -12,7 +12,7 @@ import {
   runtimeLabel,
 } from "../templates/format";
 import {
-  listAllScopedWorkspaces,
+  scanScopedWorkspaces,
   listTemplatePageAdmin,
   type AdminTemplateView,
   type ScopedWorkspace,
@@ -180,7 +180,7 @@ const columns: Column<CatalogRow>[] = [
 export function TemplatesPage() {
   const api = useApi();
   // The in-use counts need every tenant workspace; the catalog rows page.
-  const workspaces = useLoader((a) => listAllScopedWorkspaces(a, "tenant"), "catalog-workspaces");
+  const workspaces = useLoader((a) => scanScopedWorkspaces(a, "tenant"), "catalog-workspaces");
   const load = useCallback(
     (cursor?: string, sort?: string) => listTemplatePageAdmin(api, cursor, sort),
     [api],

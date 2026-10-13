@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TableSortState } from "./Table";
+import { t } from "../i18n";
 
 // Server-side paging for /v1 collections: every list takes `cursor` and
 // `sort` and answers {items, nextCursor} (nextCursor absent on the last
@@ -263,25 +264,48 @@ export function serverSortParam(sort: TableSortState, fields: Readonly<Record<st
   return sort.direction === "descending" ? `-${field}` : field;
 }
 
-/** Page size for fetchAllPages callers: the contract maximum, fewest round trips. */
-export const ALL_PAGE_LIMIT = 500;
+/** Page size for scanCollection: the contract maximum, fewest round trips. */
+export const SCAN_PAGE_LIMIT = 500;
 
-// Reads every page of a collection. Only for views that aggregate across
-// the whole collection (counts per owner or per template, a lookup by id) —
-// tables page with useServerPage instead. Stops if the server ever repeats
-// a cursor, so a misbehaving backend cannot loop the tab.
-export async function fetchAllPages<T>(fetchPage: FetchServerPage<T>, sort?: string): Promise<T[]> {
+/**
+ * Hard cap on the pages one scanCollection call reads (SCAN_PAGE_LIMIT rows
+ * each, so 10 000 rows). A scan that still has a next cursor after this many
+ * pages is rejected rather than truncated: an aggregate view must never show
+ * a partial count as a total, and a backend that keeps minting fresh cursors
+ * cannot pin the tab.
+ */
+export const SCAN_MAX_PAGES = 20;
+
+/** A scanCollection call hit SCAN_MAX_PAGES, or the server repeated a cursor. */
+export class CollectionTooLargeError extends Error {
+  readonly pages: number;
+  constructor(pages: number) {
+    super(t("common.collectionTooLarge", { n: pages * SCAN_PAGE_LIMIT }));
+    this.name = "CollectionTooLargeError";
+    this.pages = pages;
+  }
+}
+
+// Reads a whole collection, bounded by SCAN_MAX_PAGES. Only for views that
+// aggregate across the collection because the API has no aggregate or
+// owner/id filter (overview counts, per-template and per-user tallies, a
+// lookup by id); tables and lists page with useServerPage instead. Rejects
+// with CollectionTooLargeError instead of returning a truncated result.
+export async function scanCollection<T>(
+  fetchPage: FetchServerPage<T>,
+  sort?: string,
+  maxPages: number = SCAN_MAX_PAGES,
+): Promise<T[]> {
   const rows: T[] = [];
   const seen = new Set<string>();
   let at: string | undefined;
-  do {
+  for (let pages = 0; ; ) {
     const page = await fetchPage(at, sort);
+    pages++;
     rows.push(...page.items);
     at = page.nextCursor || undefined;
-    if (at !== undefined) {
-      if (seen.has(at)) break;
-      seen.add(at);
-    }
-  } while (at !== undefined);
-  return rows;
+    if (at === undefined) return rows;
+    if (pages >= maxPages || seen.has(at)) throw new CollectionTooLargeError(pages);
+    seen.add(at);
+  }
 }

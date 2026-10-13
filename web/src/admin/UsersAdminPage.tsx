@@ -21,9 +21,9 @@ import type { ApiClient } from "../api/client";
 import { useApi } from "../api/context";
 import {
   listAdminUserLimitPage,
-  listAllAdminUserLimits,
-  listAllScopedData,
-  listAllScopedWorkspaces,
+  scanAdminUserLimits,
+  scanScopedData,
+  scanScopedWorkspaces,
   type AdminUserLimitEntry,
   type ScopedRetainedData,
   type ScopedWorkspace,
@@ -87,7 +87,7 @@ export function userDetailPath(subject: string): string {
 // Per-user disk counts need the whole tenant's retained-data list; the
 // user rows themselves page on the server.
 async function loadDiskCounts(api: ApiClient): Promise<Map<string, number>> {
-  return diskCounts(await listAllScopedData(api, "tenant"));
+  return diskCounts(await scanScopedData(api, "tenant"));
 }
 
 function OverrideCell({ row }: { row: AdminUserRow }) {
@@ -234,8 +234,8 @@ interface UserDetailData {
 async function loadUserDetail(api: ApiClient, subject: string): Promise<UserDetailData> {
   const me = await loadMe(api);
   const [entries, disks] = await Promise.all([
-    listAllAdminUserLimits(api, me.tenant),
-    listAllScopedData(api, "tenant"),
+    scanAdminUserLimits(api, me.tenant),
+    scanScopedData(api, "tenant"),
   ]);
   return {
     tenant: me.tenant,
@@ -246,7 +246,7 @@ async function loadUserDetail(api: ApiClient, subject: string): Promise<UserDeta
 
 export function UserDetailPage({ subject, now }: { subject: string; now?: number }) {
   const u = useLoader((a) => loadUserDetail(a, subject), `admin-user:${subject}`);
-  const ws = useLoader((a) => listAllScopedWorkspaces(a, "tenant"), "admin-user-ws");
+  const ws = useLoader((a) => scanScopedWorkspaces(a, "tenant"), "admin-user-ws");
   const [editing, setEditing] = useState(false);
   const ts = now ?? Date.now();
 

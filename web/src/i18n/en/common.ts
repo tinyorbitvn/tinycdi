@@ -13,6 +13,7 @@ export default {
   "common.pagination.loadedMore": "Showing the first {n}",
   "common.pagination.loadedAll": "Showing all {n}",
   "common.pagination.loadMore": "Load more",
+  "common.collectionTooLarge": "This view needs more than {n} records, which is more than the portal reads at once.",
 
   "errors.banner.fallback": "ERROR",
   "errors.banner.requestId": "(request {id})",

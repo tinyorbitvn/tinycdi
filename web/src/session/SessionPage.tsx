@@ -5,7 +5,7 @@ import { phaseLabelKey } from "../workspaces/helpers";
 import { useApi } from "../api/context";
 import { unwrap } from "../api/client";
 import { startWorkspace as postStart } from "../workspaces/api";
-import { listAllTemplates } from "../templates/useTemplates";
+import { scanTemplates } from "../templates/useTemplates";
 import { isPortalApiError } from "../api/errors";
 import { LifecycleProgress } from "../progress/LifecycleProgress";
 import { opPollMs, startInFlight, withJitter } from "../progress/derive";
@@ -1394,7 +1394,7 @@ async function loadTemplate(
   ws: WorkspaceView,
 ): Promise<TemplateView | null> {
   try {
-    const all = await listAllTemplates(api);
+    const all = await scanTemplates(api);
     return all.find((tpl) => tpl.id === ws.template.id) ?? null;
   } catch {
     return null; // notices are best-effort

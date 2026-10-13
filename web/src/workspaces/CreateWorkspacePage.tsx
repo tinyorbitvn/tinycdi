@@ -6,7 +6,7 @@ import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
 import { navigate, Link } from "../lib/router";
 import { IconArrowLeft } from "../design/icons";
-import { useTemplates } from "../templates/useTemplates";
+import { useTemplateLookup } from "../templates/useTemplates";
 import { dataPolicyLabel, networkProfileLabel, runtimeLabel } from "../templates/format";
 import type { DataPolicy } from "../templates/types";
 import { ErrorBanner } from "./ErrorBanner";
@@ -18,7 +18,7 @@ type PolicyChoice = "" | DataPolicy;
 
 export function CreateWorkspacePage() {
   const api = useApi();
-  const templates = useTemplates();
+  const templates = useTemplateLookup();
   const [name, setName] = useState("");
   const [templateRef, setTemplateRef] = useState(() => {
     // ?template=<id> preselects from the catalog ("Create workspace" cards).

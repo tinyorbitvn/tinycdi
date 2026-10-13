@@ -3,7 +3,7 @@ import { isPortalApiError } from "../api/errors";
 import type { components } from "../api/generated/schema";
 import { get, type Scope } from "../app/me";
 import type { ServerPage } from "../design/useServerPage";
-import { listAllTemplates } from "../templates/useTemplates";
+import { scanTemplates } from "../templates/useTemplates";
 
 // Data-area API surface, called through the same openapi-fetch client (CSRF
 // middleware, same-origin credentials). The principal reads and the
@@ -100,6 +100,6 @@ export async function purgeRetainedData(
 // Templates eligible for attach are constrained to the disk's runtime
 // (attach returns 422 INVALID_TEMPLATE otherwise).
 export async function listTemplates(api: ApiClient, runtime?: RuntimeKind): Promise<TemplateView[]> {
-  const items = await listAllTemplates(api, runtime ? { runtime } : {});
+  const items = await scanTemplates(api, runtime ? { runtime } : {});
   return items.filter((tpl) => tpl.publishedAt);
 }

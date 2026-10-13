@@ -1,10 +1,10 @@
 import { unwrap, type ApiClient } from "../api/client";
 import type { components } from "../api/generated/schema";
 import { get, type Scope } from "../app/me";
-import { ALL_PAGE_LIMIT, fetchAllPages, type ServerPage } from "../design/useServerPage";
+import { SCAN_PAGE_LIMIT, scanCollection, type ServerPage } from "../design/useServerPage";
 import { getWorkspace, listWorkspacePage, startWorkspace, stopWorkspace } from "../workspaces/api";
 import { listRetainedDataPage } from "../data/api";
-import { listAllTemplates, listTemplatePage } from "../templates/useTemplates";
+import { listTemplatePage, scanTemplates } from "../templates/useTemplates";
 export { templateFamily } from "../templates/family";
 export { startWorkspace, stopWorkspace };
 
@@ -101,8 +101,8 @@ export async function listAdminUserLimitPage(
   );
 }
 
-export function listAllAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitEntry[]> {
-  return fetchAllPages((cursor, sort) => listAdminUserLimitPage(api, tenant, cursor, sort, ALL_PAGE_LIMIT));
+export function scanAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitEntry[]> {
+  return scanCollection((cursor, sort) => listAdminUserLimitPage(api, tenant, cursor, sort, SCAN_PAGE_LIMIT));
 }
 
 // Sets one principal's override. `etag` is the entry's tag; an entry
@@ -195,8 +195,9 @@ export async function putAdminSessionPolicy(
 }
 
 // Scoped collections. Tables page through them with useServerTable; the
-// listAll* readers serve views that aggregate across the whole tenant
-// (overview counts, per-template and per-user tallies).
+// scan* readers serve views that aggregate across the whole tenant
+// (overview counts, per-template and per-user tallies), bounded by
+// SCAN_MAX_PAGES: past it they reject instead of returning a partial list.
 export function listScopedWorkspacePage(
   api: ApiClient,
   scope: Scope,
@@ -207,8 +208,8 @@ export function listScopedWorkspacePage(
   return listWorkspacePage(api, { scope, ...(phase ? { phase } : {}) }, cursor, sort);
 }
 
-export function listAllScopedWorkspaces(api: ApiClient, scope: Scope): Promise<ScopedWorkspace[]> {
-  return fetchAllPages((cursor, sort) => listWorkspacePage(api, { scope, limit: ALL_PAGE_LIMIT }, cursor, sort));
+export function scanScopedWorkspaces(api: ApiClient, scope: Scope): Promise<ScopedWorkspace[]> {
+  return scanCollection((cursor, sort) => listWorkspacePage(api, { scope, limit: SCAN_PAGE_LIMIT }, cursor, sort));
 }
 
 export function listScopedDataPage(
@@ -220,8 +221,8 @@ export function listScopedDataPage(
   return listRetainedDataPage(api, scope, cursor, sort);
 }
 
-export function listAllScopedData(api: ApiClient, scope: Scope): Promise<ScopedRetainedData[]> {
-  return fetchAllPages((cursor, sort) => listRetainedDataPage(api, scope, cursor, sort, ALL_PAGE_LIMIT));
+export function scanScopedData(api: ApiClient, scope: Scope): Promise<ScopedRetainedData[]> {
+  return scanCollection((cursor, sort) => listRetainedDataPage(api, scope, cursor, sort, SCAN_PAGE_LIMIT));
 }
 
 export type RestartStep = "stopping" | "waiting" | "starting";
@@ -297,6 +298,6 @@ export function listTemplatePageAdmin(
   return listTemplatePage(api, {}, cursor, sort);
 }
 
-export function listAllAdminTemplates(api: ApiClient): Promise<AdminTemplateView[]> {
-  return listAllTemplates(api);
+export function scanAdminTemplates(api: ApiClient): Promise<AdminTemplateView[]> {
+  return scanTemplates(api);
 }
