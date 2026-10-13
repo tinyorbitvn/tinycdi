@@ -44,8 +44,7 @@ type Lease struct {
 	// PortalSessionDigest is the sessions.id key form (hex of the SHA-256
 	// of the portal session id) the lease was minted under — populated on
 	// every loadLease read so input activity can be credited to exactly
-	// that session (SR-1-F3). "" for pre-migration-018 rows minted before
-	// the binding column existed.
+	// that session (SR-1-F3). Never empty: every lease is bound.
 	PortalSessionDigest string `json:"-"`
 	// ClipboardPolicy is the workspace template's clipboard policy as
 	// recorded on the ticket at issue — populated only on redemption, so
@@ -106,7 +105,6 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		ownerTab   *string
 		ownerEpoch *int64
 		portalSess portalSessionCheck
-		digestHex  *string
 	)
 	livePred, liveArgs := b.portalSessionLiveSQL(2)
 	args := append([]any{leaseID}, liveArgs...)
@@ -116,7 +114,6 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 			l.state, l.expires_at, l.stream_epoch, l.stream_owner_tab, l.stream_owner_epoch,
 			encode(l.portal_session_digest, 'hex'),
 			CASE
-				WHEN l.portal_session_digest IS NULL THEN 'ok'
 				WHEN s.id IS NULL THEN 'absent'
 				WHEN NOT (`+livePred+`) THEN 'invalid'
 				ELSE 'ok'
@@ -127,7 +124,7 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
 			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch,
-			&digestHex, &portalSess)
+			&l.PortalSessionDigest, &portalSess)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, "", "", ErrLeaseInvalid
 	}
@@ -141,9 +138,6 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch >= 0 &&
 		uint64(*ownerEpoch) == l.StreamEpoch {
 		l.StreamOwnerTab = *ownerTab
-	}
-	if digestHex != nil {
-		l.PortalSessionDigest = *digestHex
 	}
 	return l, state, portalSess, nil
 }
@@ -210,15 +204,8 @@ func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID stri
 	// rehydrate it. The check rode the lease read (no extra round trip).
 	// The revoke runs before the gateway-identity check so ANY caller —
 	// renew, attach, claim, resolve, foreign probe — kills the dead row.
-	//
-	// Leases with NULL portal_session_digest are exempt by design: rows
-	// minted before the binding column existed carry no session to verify
-	// against, and revoking them on sight would mass-kill sessions still
-	// being renewed by pre-upgrade replicas during a rolling deploy. They
-	// keep the plain TTL lifecycle — a dying gateway stops renewing and
-	// the lease lapses inside one TTL — and the DR runbook's unconditional
-	// post-restore lease sweep covers them (RevokePortalSession cannot:
-	// it matches on the digest they lack).
+	// Every lease carries a portal_session_digest, so the check always
+	// applies.
 	if portalSess != portalSessionOK {
 		b.revokeDeadSessionLease(ctx, l, portalSess)
 		return Lease{}, ErrRevoked

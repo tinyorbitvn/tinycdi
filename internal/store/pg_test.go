@@ -125,6 +125,14 @@ func ensurePostgres(t *testing.T) {
 // test gets an isolated schema.
 func newDB(t *testing.T) *store.DB {
 	t.Helper()
+	db, _ := newNamedDB(t)
+	return db
+}
+
+// newNamedDB is newDB that also returns the database name inside
+// pgContainer, for tests that inspect it with the container's own tools.
+func newNamedDB(t *testing.T) (*store.DB, string) {
+	t.Helper()
 	ensurePostgres(t)
 	ctx := context.Background()
 
@@ -156,7 +164,7 @@ func newDB(t *testing.T) *store.DB {
 		_, _ = admin.Pool().Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
 		admin.Close()
 	})
-	return db
+	return db, name
 }
 
 // seedWorkspace inserts the workspace row tickets/leases reference.

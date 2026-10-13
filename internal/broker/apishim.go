@@ -55,7 +55,10 @@ func (s PublicRevoker) RevokePrincipalSessions(ctx context.Context, tenantID, is
 // PublicIssueError maps broker domain errors onto the public error model for
 // POST /v1/workspaces/{id}/connections (openapi.yaml createConnection).
 func PublicIssueError(err error) *api.Error {
+	var apiErr *api.Error
 	switch {
+	case errors.As(err, &apiErr):
+		return apiErr
 	case errors.Is(err, ErrNotFound):
 		return api.NewError(api.CodeNotFound, "workspace not found")
 	case errors.Is(err, ErrDenied):

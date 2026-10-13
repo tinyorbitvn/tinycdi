@@ -396,3 +396,35 @@ func TestLaunchURL_PerWorkspaceHost(t *testing.T) {
 		t.Fatalf("two workspaces share a launch host: %v", hosts)
 	}
 }
+
+// TestConnectionCreate_RequiresPortalSession: a principal without a portal
+// session (no session in the request context) is refused with 401 before the
+// issuer runs — every ticket and lease is bound to a portal session.
+func TestConnectionCreate_RequiresPortalSession(t *testing.T) {
+	issuer := &fakeIssuer{}
+	d, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
+	h := NewConnectionHandler(issuer, defaultTenants(), d)
+	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws_00000000000000000000000001/connections", strings.NewReader(`{}`))
+	req.SetPathValue("id", "ws_00000000000000000000000001")
+	req = req.WithContext(withPrincipalNoSession(req.Context()))
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(CodeUnauthenticated)) {
+		t.Fatalf("body %s lacks %s", rec.Body.String(), CodeUnauthenticated)
+	}
+	if issuer.calls != 0 {
+		t.Fatalf("IssueTicket called %d times, want 0", issuer.calls)
+	}
+}
+
+// withPrincipalNoSession sets a verified principal but no portal session, so
+// SessionFromContext reports (nil, false).
+func withPrincipalNoSession(ctx context.Context) context.Context {
+	return WithPrincipal(ctx, Principal{Issuer: "https://idp.test", Subject: "alice", TenantID: "tenant-a"})
+}

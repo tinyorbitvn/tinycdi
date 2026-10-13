@@ -29,7 +29,7 @@ func TestIssueTicket_BindsCurrentIncarnation(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 3, "rt-uid-3", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -58,6 +58,32 @@ func TestIssueTicket_BindsCurrentIncarnation(t *testing.T) {
 	}
 }
 
+// TestIssueTicket_RequiresPortalSession: every ticket binds a portal session;
+// an empty session id is UNAUTHENTICATED, records no row, and the public
+// shim surfaces the same code.
+func TestIssueTicket_RequiresPortalSession(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+
+	_, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != api.CodeUnauthenticated {
+		t.Fatalf("IssueTicket without session = %v, want *api.Error UNAUTHENTICATED", err)
+	}
+	var n int
+	if err := db.Pool().QueryRow(ctx, `SELECT count(*) FROM launch_ticket`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("launch_ticket rows = %d, want 0", n)
+	}
+	_, pubErr := broker.PublicIssuer{B: b}.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	if pubErr == nil || pubErr.Code != api.CodeUnauthenticated {
+		t.Fatalf("PublicIssuer without session = %v, want UNAUTHENTICATED", pubErr)
+	}
+}
+
 // TestIssueTicket_RequiresReady: tickets only issue for a Ready workspace.
 func TestIssueTicket_RequiresReady(t *testing.T) {
 	db, b, clock, src := setup(t)
@@ -66,7 +92,7 @@ func TestIssueTicket_RequiresReady(t *testing.T) {
 	binding.Phase = "Provisioning"
 	src.set(binding)
 
-	_, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if !errors.Is(err, broker.ErrNotReady) {
 		t.Fatalf("IssueTicket on Provisioning = %v, want ErrNotReady", err)
 	}
@@ -81,7 +107,7 @@ func TestIssueTicket_StaleObservedState(t *testing.T) {
 	src.set(binding)
 
 	clock.Advance(broker.MaxBindingAge + time.Second) // observation now stale
-	_, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if !errors.Is(err, broker.ErrFreshness) {
 		t.Fatalf("IssueTicket with stale binding = %v, want ErrFreshness", err)
 	}
@@ -94,7 +120,7 @@ func TestIssueTicket_TenantAndOwnership(t *testing.T) {
 	seedWorkspace(t, db, "tenant-b", bobTenant.Owner(), "ws-other")
 	src.set(readyBinding("ws-other", "tenant-b", bobTenant.Owner(), 1, "rt-1", clock.Now()))
 
-	_, err := b.IssueTicket(ctx, alice, "ws-other", false, provisioning.SessionPolicy{}, "")
+	_, err := b.IssueTicket(ctx, alice, "ws-other", false, provisioning.SessionPolicy{}, testPortalSession)
 	if !errors.Is(err, broker.ErrNotFound) && !errors.Is(err, broker.ErrDenied) {
 		t.Fatalf("IssueTicket cross-tenant = %v, want ErrNotFound or ErrDenied", err)
 	}
@@ -107,7 +133,7 @@ func TestRedeemTicket_ExactlyOnce(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 5, "rt-5", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -137,7 +163,7 @@ func TestRedeemTicket_ConcurrentExactlyOneWins(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -170,7 +196,7 @@ func TestRedeemTicket_ExpiredStillConsumed(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -191,7 +217,7 @@ func TestRedeemTicket_RevokedNeverRedeems(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -210,7 +236,7 @@ func TestRedeemTicket_WrongGatewayAudience(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -241,7 +267,7 @@ func TestRedeemTicket_ExpiredLeaseClosesStreams(t *testing.T) {
 	// keeps the binding inside the freshness budget.
 	clock.Advance(broker.LeaseTTL + time.Second)
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket over expired lease: %v", err)
 	}
@@ -286,14 +312,14 @@ func TestIssueTicket_ConnectionInUse(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk1, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, "")
+	tk1, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket #1: %v", err)
 	}
 	if _, err := b.RedeemTicket(ctx, gwA, tk1.Token); err != nil {
 		t.Fatalf("RedeemTicket #1: %v", err)
 	}
-	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, ""); !errors.Is(err, broker.ErrConnectionInUse) {
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession); !errors.Is(err, broker.ErrConnectionInUse) {
 		t.Fatalf("IssueTicket with live lease = %v, want ErrConnectionInUse", err)
 	}
 }
@@ -308,7 +334,7 @@ func TestTicket_ClipboardPolicyRecordedOnRedeem(t *testing.T) {
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 
-	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{Clipboard: "Bidirectional"}, "")
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{Clipboard: "Bidirectional"}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -322,7 +348,7 @@ func TestTicket_ClipboardPolicyRecordedOnRedeem(t *testing.T) {
 
 	// A ticket issued with no policy records NULL and redeems "".
 	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
-	tk2, err := b.IssueTicket(ctx, alice, "ws-1", true, provisioning.SessionPolicy{}, "")
+	tk2, err := b.IssueTicket(ctx, alice, "ws-1", true, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket #2: %v", err)
 	}
@@ -352,7 +378,7 @@ func TestTicket_SessionPolicyRecorded(t *testing.T) {
 			MaxFileBytes: &max,
 		},
 	}
-	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, policy, ""); err != nil {
+	if _, err := b.IssueTicket(ctx, alice, "ws-1", false, policy, testPortalSession); err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
 	var clipboard, session *string
@@ -372,7 +398,7 @@ func TestTicket_SessionPolicyRecorded(t *testing.T) {
 	// No resolved policy: both columns NULL.
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-2")
 	src.set(readyBinding("ws-2", "tenant-a", alice.Owner(), 1, "rt-2", clock.Now()))
-	if _, err := b.IssueTicket(ctx, alice, "ws-2", false, provisioning.SessionPolicy{}, ""); err != nil {
+	if _, err := b.IssueTicket(ctx, alice, "ws-2", false, provisioning.SessionPolicy{}, testPortalSession); err != nil {
 		t.Fatalf("IssueTicket #2: %v", err)
 	}
 	var c2, s2 *string

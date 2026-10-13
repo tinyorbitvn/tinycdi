@@ -46,8 +46,10 @@ func seedLease(t *testing.T, db *store.DB, id, wsUID string) {
 	_, err := db.Pool().Exec(context.Background(), `
 		INSERT INTO connection_lease
 			(id, workspace_id, tenant_id, principal_subject, runtime_generation,
-			 runtime_uid, fencing_version, gateway_id, state, expires_at)
-		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 1, 'backend', 'active', now() + interval '30 seconds')`,
+			 runtime_uid, fencing_version, gateway_id, state, expires_at,
+			 portal_session_digest)
+		VALUES ($1, $2, 'tenant-a', 'iss|sub', 1, 'rt-1', 1, 'backend', 'active', now() + interval '30 seconds',
+			sha256('test-portal-session'::bytea))`,
 		id, wsUID)
 	if err != nil {
 		t.Fatalf("seed lease: %v", err)
@@ -60,9 +62,11 @@ func seedTicket(t *testing.T, db *store.DB, hash byte, wsUID string) {
 	_, err := db.Pool().Exec(context.Background(), `
 		INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
-			 runtime_generation, runtime_uid, audience, request_id, expires_at)
+			 runtime_generation, runtime_uid, audience, request_id, expires_at,
+			 portal_session_digest)
 		VALUES (decode(md5($1::text), 'hex'),
-			$2, 'tenant-a', 'iss|sub', 1, 'rt-1', 'aud', 'req-t', now() + interval '60 seconds')`,
+			$2, 'tenant-a', 'iss|sub', 1, 'rt-1', 'aud', 'req-t', now() + interval '60 seconds',
+			sha256('test-portal-session'::bytea))`,
 		fmt.Sprintf("t%d", hash), wsUID)
 	if err != nil {
 		t.Fatalf("seed ticket: %v", err)

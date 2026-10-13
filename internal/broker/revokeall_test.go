@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
@@ -66,7 +65,7 @@ func sessionAlive(t *testing.T, db *store.DB, sessionID string) bool {
 // exactly what the principal-scoped revoke matches on.
 func leaseForPrincipal(t *testing.T, b *broker.Broker, gw broker.GatewayIdentity, p api.Principal, wsUID broker.PlatformID, takeover bool) broker.Lease {
 	t.Helper()
-	tk, err := b.IssueTicket(ctx, p, wsUID, takeover, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, p, wsUID, takeover, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}
@@ -84,7 +83,7 @@ var (
 
 // TestRevokePrincipalSessions_RevokesAllInTenant: every session row of the
 // principal in the tenant dies (caller's included), every active lease —
-// digest-bound or pre-digest legacy — is revoked with drain accounting,
+// whichever of its sessions minted it — is revoked with drain accounting,
 // every outstanding ticket can never redeem, and each revoked session's
 // workspace cookie resolves to a dead lease. Other principals and other
 // tenants are untouched.
@@ -100,7 +99,7 @@ func TestRevokePrincipalSessions_RevokesAllInTenant(t *testing.T) {
 	src.set(readyBinding("ws-c", "tenant-a", carol.Owner(), 1, "rt-c", clock.Now()))
 
 	// Two sessions of alice in tenant-a, each holding a live lease and an
-	// outstanding ticket; one legacy lease with no digest binding; alice's
+	// outstanding ticket, plus a second lease under sess-1; alice's
 	// tenant-b session + material and carol's tenant-a lease survive.
 	seedSessionRowFor(t, db, "sess-1", alice.Issuer, alice.Subject, "tenant-a")
 	seedSessionRowFor(t, db, "sess-2", alice.Issuer, alice.Subject, "tenant-a")
@@ -108,7 +107,7 @@ func TestRevokePrincipalSessions_RevokesAllInTenant(t *testing.T) {
 
 	l1 := leaseForSess(t, db, b, gwA, "ws-1", false, "sess-1")
 	l2 := leaseForSess(t, db, b, gwA, "ws-2", false, "sess-2")
-	legacy := leaseFor(t, b, gwA, "ws-3", false) // NULL portal_session_digest
+	l3 := leaseForSess(t, db, b, gwA, "ws-3", false, "sess-1")
 	lCarol := leaseForPrincipal(t, b, gwA, carol, "ws-c", false)
 
 	d1 := digestOf("cookie-1")
@@ -153,7 +152,7 @@ func TestRevokePrincipalSessions_RevokesAllInTenant(t *testing.T) {
 
 	// Every revoked lease fails renew; each session's replayed cookie
 	// resolves to a dead lease (the 401 the workspace host answers).
-	for _, l := range []broker.Lease{l1, l2, legacy} {
+	for _, l := range []broker.Lease{l1, l2, l3} {
 		if _, err := b.RenewLease(ctx, gwA, l.ID, fenceOf(l)); !errors.Is(err, broker.ErrRevoked) {
 			t.Fatalf("renew lease %s = %v, want ErrRevoked", l.ID, err)
 		}
@@ -721,27 +720,6 @@ func TestRevokePrincipalSessions_MultiTicketInversion(t *testing.T) {
 	for _, id := range sessions {
 		if sessionAlive(t, db, id) {
 			t.Fatalf("session %s survived the inversion race", id)
-		}
-	}
-}
-
-// TestMigration023_Idempotent: the principal-scoped revocation indexes
-// land on a fresh database and on re-run.
-func TestMigration023_Idempotent(t *testing.T) {
-	db := newDB(t)
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-	for _, name := range []string{"connection_lease_principal_active", "launch_ticket_principal_outstanding"} {
-		var def string
-		if err := db.Pool().QueryRow(ctx,
-			`SELECT indexdef FROM pg_indexes
-			 WHERE schemaname = 'public' AND indexname = $1`, name).
-			Scan(&def); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				t.Fatalf("index %s missing", name)
-			}
-			t.Fatalf("index %s probe: %v", name, err)
 		}
 	}
 }

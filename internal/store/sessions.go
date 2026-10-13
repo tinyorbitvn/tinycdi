@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -240,49 +239,6 @@ func (s *SessionStore) Peek(ctx context.Context, id string) (*Session, error) {
 	return s.scanSession(ctx, row, key, id)
 }
 
-// TouchPrincipalSQL and TouchPrincipalIdleSQL are the statements behind
-// TouchPrincipal (without / with an idle window), exported so the integration
-// suite can EXPLAIN them: they match on the issuer and subject columns
-// ($1, $2) so migration 013's (issuer, subject) index applies; the idle
-// variant takes the window as $3.
-const (
-	TouchPrincipalSQL = `
-		UPDATE sessions SET last_seen_at = now()
-		WHERE issuer = $1 AND subject = $2
-		  AND epoch = ` + currentEpochSQL + `
-		  AND (expires_at IS NULL OR expires_at > now())`
-	TouchPrincipalIdleSQL = TouchPrincipalSQL + `
-		  AND last_seen_at > now() - $3::interval`
-)
-
-// TouchPrincipal slides last_seen_at for the principal's sessions that are
-// still inside the idle window and before their absolute expiry (D18):
-// desktop input keeps the owning user's portal session alive but can never
-// revive an expired one. principal is the lease's principal_subject —
-// "issuer|subject", the Principal.Owner() string — split at the first '|'
-// (an issuer URL never contains one; a subject may). A principal without a
-// separator matches nothing. Returns the row count actually updated.
-func (s *SessionStore) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
-	issuer, subject, ok := strings.Cut(principal, "|")
-	if !ok {
-		return 0, nil
-	}
-	var (
-		tag pgconn.CommandTag
-		err error
-	)
-	if s.idle > 0 {
-		tag, err = s.db.Pool().Exec(ctx, TouchPrincipalIdleSQL,
-			issuer, subject, fmt.Sprintf("%dms", s.idle.Milliseconds()))
-	} else {
-		tag, err = s.db.Pool().Exec(ctx, TouchPrincipalSQL, issuer, subject)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("session touch: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
 // TouchSessionDigestSQL and TouchSessionDigestIdleSQL are the statements
 // behind TouchSessionDigest (without / with an idle window): they address
 // exactly one session row — $1 is the sessions.id key form (hex of the
@@ -300,10 +256,10 @@ const (
 
 // TouchSessionDigest slides last_seen_at for exactly the session row the
 // digest names — the session the desktop stream's input arrived under
-// (SR-1-F3): input under one session's lease no longer refreshes the
-// principal's other sessions. The guards are identical to TouchPrincipal —
-// live epoch, inside absolute expiry, inside the idle window — so input
-// still can never revive an expired session. Returns the row count
+// (SR-1-F3): input under one session's lease never refreshes the
+// principal's other sessions. The guards — live epoch, inside absolute
+// expiry, inside the idle window — mean input can never revive an expired
+// session. Returns the row count
 // actually updated (0 for an unknown or dead row).
 func (s *SessionStore) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
 	var (
@@ -331,15 +287,9 @@ func (s *SessionStore) Delete(ctx context.Context, id string) error {
 // RotateSessionEpoch installs a fresh session epoch. Every session bound
 // to the previous epoch is rejected on next read — the restore procedure
 // runs this after loading a dump so pre-restore sessions (revoked or not)
-// are unrecoverable. It also creates the epoch infrastructure defensively
-// so it works against dumps taken before migration 009.
+// are unrecoverable.
 func (d *DB) RotateSessionEpoch(ctx context.Context) error {
 	_, err := d.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS platform_meta (
-			key   text PRIMARY KEY,
-			value text NOT NULL
-		);
-		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS epoch text NOT NULL DEFAULT '';
 		INSERT INTO platform_meta (key, value)
 		VALUES ('session_epoch', gen_random_uuid()::text)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`)

@@ -163,6 +163,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 
 	db := newDB(t)
 	seedWorkspace(t, db, "tenant-a", "https://idp.example|alice", string(wsUID))
+	seedPortalSession(t, db, testPortalSession)
 	b := broker.New(db, src, broker.WithCredentialSource(
 		broker.NewK8sCredentialSource(kc, provisioning.TenantNamespaces{"tenant-a": ns.Name})))
 
@@ -185,7 +186,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 
 	alice := api.Principal{Issuer: "https://idp.example", Subject: "alice", TenantID: "tenant-a"}
 	gw := broker.GatewayIdentity{ID: "gw-1", Audience: broker.DefaultGatewayAudience}
-	tk, err := b.IssueTicket(ctx, alice, wsUID, false, provisioning.SessionPolicy{}, "")
+	tk, err := b.IssueTicket(ctx, alice, wsUID, false, provisioning.SessionPolicy{}, testPortalSession)
 	if err != nil {
 		t.Fatalf("IssueTicket: %v", err)
 	}

@@ -942,10 +942,6 @@ func (a sessionStoreAdapter) Peek(ctx context.Context, id string) (*api.Session,
 	return storeSessionToAPI(rec), nil
 }
 
-func (a sessionStoreAdapter) TouchPrincipal(ctx context.Context, principal string) (int64, error) {
-	return a.s.TouchPrincipal(ctx, principal)
-}
-
 func (a sessionStoreAdapter) TouchSessionDigest(ctx context.Context, digestHex string) (int64, error) {
 	return a.s.TouchSessionDigest(ctx, digestHex)
 }

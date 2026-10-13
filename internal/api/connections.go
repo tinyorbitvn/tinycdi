@@ -136,6 +136,13 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, CodeUnauthenticated, "authentication required")
 		return
 	}
+	// Every ticket — and the lease it redeems into — is bound to the portal
+	// session that requested it; a principal without one cannot connect.
+	sess, ok := SessionFromContext(r.Context())
+	if !ok || sess == nil || sess.ID == "" {
+		writeError(w, r, CodeUnauthenticated, "portal session required")
+		return
+	}
 	if _, ok := h.tenants.Namespace(p.TenantID); !ok {
 		writeError(w, r, CodeForbidden, "tenant is not provisioned")
 		return
@@ -175,11 +182,7 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if h.clipboard != nil {
 		policy, _ = h.clipboard(r.Context(), p, id)
 	}
-	var sessionID string
-	if sess, ok := SessionFromContext(r.Context()); ok && sess != nil {
-		sessionID = sess.ID
-	}
-	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sessionID)
+	tk, apiErr := h.issuer.IssueTicket(r.Context(), p, id, req.Takeover, policy, sess.ID)
 	if apiErr != nil {
 		WriteError(w, r, apiErr)
 		return

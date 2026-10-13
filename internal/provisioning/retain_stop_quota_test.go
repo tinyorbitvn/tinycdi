@@ -10,8 +10,6 @@ package provisioning_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -170,21 +168,6 @@ func TestRetainStop_RecoveryIdempotentOnConvertedRow(t *testing.T) {
 	e.want("restart after repeated passes", quotaVec)
 }
 
-// Rows stopped before this fix hold the full vector; the next pass converts
-// them without a hand-written write.
-func TestRetainStop_LegacyHeldRowConverges(t *testing.T) {
-	e := newRetainEnv(t, "Retain")
-	// Legacy shape: Stopped, full vector still held, no restart columns.
-	if _, err := e.db.Pool().Exec(context.Background(),
-		`UPDATE workspaces SET desired_state='Stopped', phase='Stopped' WHERE id=$1`, e.ws); err != nil {
-		t.Fatal(err)
-	}
-	e.recover()
-	e.want("converged", diskOnly)
-	e.signal(provisioning.IntentStart)
-	e.want("restart of a converged legacy row", quotaVec)
-}
-
 // Ephemeral is unchanged: the whole reservation is released, and a restart
 // re-acquires it from the kept vector.
 func TestRetainStop_EphemeralUnchanged(t *testing.T) {
@@ -206,26 +189,4 @@ func TestRetainStop_StartedBeforeConversionKeepsCompute(t *testing.T) {
 		t.Fatalf("SettleQuota on a running workspace: %v", err)
 	}
 	e.want("running again", quotaVec)
-}
-
-// Migration 014 is additive and can be applied a second time.
-func TestMigration014_ApplyTwice(t *testing.T) {
-	db := recoveryDB(t)
-	files, err := filepath.Glob("../store/migrations/014_*.sql")
-	if err != nil || len(files) != 1 {
-		t.Fatalf("migration 014 file: %v err=%v", files, err)
-	}
-	body, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	for i := 0; i < 2; i++ {
-		if _, err := db.Pool().Exec(ctx, string(body)); err != nil {
-			t.Fatalf("apply #%d: %v", i+1, err)
-		}
-	}
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate after replay: %v", err)
-	}
 }

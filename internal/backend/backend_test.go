@@ -12,10 +12,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -1193,9 +1195,11 @@ func TestGatewayIDSharedAcrossInstances(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	portalSum := sha256.Sum256([]byte("portal-1"))
+	seedSession(t, db, hex.EncodeToString(portalSum[:]))
 	tick, err := brk.IssueTicket(ctx,
 		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
-		"ws-shared-1", false, provisioning.SessionPolicy{}, "")
+		"ws-shared-1", false, provisioning.SessionPolicy{}, "portal-1")
 	if err != nil {
 		t.Fatalf("issue ticket: %v", err)
 	}

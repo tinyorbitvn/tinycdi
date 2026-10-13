@@ -177,6 +177,10 @@ func seedWorkspace(t *testing.T, db *store.DB, tenantID, ownerSubject, wsUID str
 	}
 }
 
+// testPortalSession is the portal session id tests issue tickets under
+// when the session itself is not what they exercise; setup seeds its row.
+const testPortalSession = "test-portal-session"
+
 // seedPortalSession inserts the sessions row a ticket's
 // portal_session_digest points at: redemption re-checks that the issuing
 // portal session still exists (S17). The row key is the same digest form
@@ -274,5 +278,6 @@ func setup(t *testing.T) (*store.DB, *broker.Broker, *fakeClock, *fakeBindings) 
 	clock := &fakeClock{now: time.Now()}
 	src := newFakeBindings()
 	b := broker.New(db, src, broker.WithClock(clock))
+	seedPortalSession(t, db, testPortalSession)
 	return db, b, clock, src
 }

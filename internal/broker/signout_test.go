@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -46,11 +44,10 @@ func waitForLockWait(t *testing.T, db *store.DB, queryLike string) {
 }
 
 // TestRevokePortalSession_RevokesBoundLeases: every active lease minted
-// under the session's digest dies; another session's leases and a
-// NULL-digest lease (no portal-session binding recorded) survive.
+// under the session's digest dies; another session's leases survive.
 func TestRevokePortalSession_RevokesBoundLeases(t *testing.T) {
 	db, b, clock, src := setup(t)
-	for _, ws := range []string{"ws-1", "ws-2", "ws-3", "ws-4"} {
+	for _, ws := range []string{"ws-1", "ws-2", "ws-3"} {
 		seedWorkspace(t, db, "tenant-a", alice.Owner(), ws)
 		src.set(readyBinding(broker.PlatformID(ws), "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
 	}
@@ -58,7 +55,6 @@ func TestRevokePortalSession_RevokesBoundLeases(t *testing.T) {
 	mine1 := leaseForSess(t, db, b, gwA, "ws-1", false, "sess-1")
 	mine2 := leaseForSess(t, db, b, gwA, "ws-2", false, "sess-1")
 	other := leaseForSess(t, db, b, gwA, "ws-3", false, "sess-2")
-	legacy := leaseFor(t, b, gwA, "ws-4", false) // NULL portal_session_digest
 
 	d := digestOf("cookie-1")
 	if err := b.BindSession(ctx, gwA, mine1.ID, d); err != nil {
@@ -83,12 +79,9 @@ func TestRevokePortalSession_RevokesBoundLeases(t *testing.T) {
 	if _, err := b.LeaseBySession(ctx, gwA, d); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("LeaseBySession after revoke = %v, want ErrRevoked", err)
 	}
-	// Untouched: the other session's lease and the unbound (legacy) lease.
+	// Untouched: the other session's lease.
 	if _, err := b.RenewLease(ctx, gwA, other.ID, fenceOf(other)); err != nil {
 		t.Fatalf("other session's lease revoked: %v", err)
-	}
-	if _, err := b.RenewLease(ctx, gwA, legacy.ID, fenceOf(legacy)); err != nil {
-		t.Fatalf("NULL-digest lease revoked: %v", err)
 	}
 }
 
@@ -393,26 +386,5 @@ func TestRevokePortalSession_RevokeCommitThenRedeem(t *testing.T) {
 	}
 	if leases != 0 {
 		t.Fatalf("%d lease(s) minted under a revoked session, want 0", leases)
-	}
-}
-
-// TestMigration020_Idempotent: the portal_session_digest indexes land on a
-// fresh database and on re-run.
-func TestMigration020_Idempotent(t *testing.T) {
-	db := newDB(t)
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-	for _, name := range []string{"connection_lease_portal_session", "launch_ticket_portal_session"} {
-		var def string
-		if err := db.Pool().QueryRow(ctx,
-			`SELECT indexdef FROM pg_indexes
-			 WHERE schemaname = 'public' AND indexname = $1`, name).
-			Scan(&def); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				t.Fatalf("index %s missing", name)
-			}
-			t.Fatalf("index %s probe: %v", name, err)
-		}
 	}
 }

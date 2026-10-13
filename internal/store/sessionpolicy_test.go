@@ -96,7 +96,7 @@ func TestSessionPolicy_MultiTenantIsolation(t *testing.T) {
 	}
 }
 
-// Migration 024: the launch_ticket.session_policy column exists and a row
+// The launch_ticket.session_policy column exists and a row
 // stores a resolved vector verbatim.
 func TestSessionPolicy_LaunchTicketColumn(t *testing.T) {
 	db := newDB(t)
@@ -110,8 +110,8 @@ func TestSessionPolicy_LaunchTicketColumn(t *testing.T) {
 		INSERT INTO launch_ticket
 			(ticket_hash, workspace_id, tenant_id, principal_subject,
 			 runtime_generation, runtime_uid, audience,
-			 request_id, expires_at, session_policy)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)`,
+			 request_id, expires_at, session_policy, portal_session_digest)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9, sha256('test-portal-session'::bytea))`,
 		[]byte("h"), "ws-1", "tenant-a", "iss|alice", int64(1), "uid-1", "aud",
 		"req-1", `{"clipboard":"Disabled","fileTransfer":{"mode":"Disabled","maxFileBytes":null}}`); err != nil {
 		t.Fatalf("insert ticket with session_policy: %v", err)

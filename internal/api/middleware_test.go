@@ -378,9 +378,6 @@ type failingSessionStore struct{ err error }
 func (s failingSessionStore) Save(context.Context, *Session) error           { return s.err }
 func (s failingSessionStore) Get(context.Context, string) (*Session, error)  { return nil, s.err }
 func (s failingSessionStore) Peek(context.Context, string) (*Session, error) { return nil, s.err }
-func (s failingSessionStore) TouchPrincipal(context.Context, string) (int64, error) {
-	return 0, s.err
-}
 func (s failingSessionStore) TouchSessionDigest(context.Context, string) (int64, error) {
 	return 0, s.err
 }
