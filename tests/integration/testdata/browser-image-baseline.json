@@ -1,6 +1,6 @@
 {
- "_comment": "Pre-split tcdi/browser image (linux-desktop+browser, V3.25 main 981bf63): the V3.26 split must not grow the browser image. TestLinuxRuntimeBrowserBaseline asserts the package count and image size stay within 2% of this. Refresh in the PR that repins chromium/firefox-esr if the growth is the engines', never to absorb added profile software (docs/images.md).",
- "sizeBytes": 1853356515,
+ "_comment": "Baseline refreshed for chromium 155.0.8059.39-1~deb12u1 (Debian security update); the 2 % limit absorbs patch-level growth only.",
+ "sizeBytes": 1890040137,
  "packages": [
   "adduser",
   "adwaita-icon-theme",
@@ -36,7 +36,10 @@
   "fontconfig",
   "fontconfig-config",
   "fonts-dejavu-core",
+  "fonts-noto-core",
+  "fonts-noto-mono",
   "fonts-urw-base35",
+  "fonts-wqy-microhei",
   "gcc-12-base",
   "gpgv",
   "grep",

@@ -159,6 +159,22 @@ func TestKasmAdapterPodShape(t *testing.T) {
 	if !shimMounts["/usr/bin/chromium"] {
 		t.Error("the image's primary --no-sandbox wrapper /usr/bin/chromium must be shimmed")
 	}
+	// The catalog's browser-class entry (Google Chrome layout): its Kasm
+	// --no-sandbox wrapper and Google's managed-policy dir are covered.
+	if !shimMounts["/usr/bin/google-chrome"] {
+		t.Error("the google-chrome wrapper path must be shimmed")
+	}
+	if !policyMounts["/etc/opt/chrome/policies/managed/zz-tcdi.json"] {
+		t.Error("the google-chrome managed-policy dir must carry zz-tcdi.json")
+	}
+	// In the chrome layout /usr/bin/google-chrome-stable is a symlink to
+	// the real launcher — a bind mount resolves through it, so listing it
+	// would shadow the very binary the shim execs.
+	for _, wp := range AdapterBrowserWrappers {
+		if wp == "/usr/bin/google-chrome-stable" {
+			t.Error("/usr/bin/google-chrome-stable must not be shimmed (symlink to /opt/google/chrome/google-chrome)")
+		}
+	}
 	for _, pp := range AdapterPolicyTargets {
 		if !policyMounts[pp] {
 			t.Errorf("no managed-policy mount at %s", pp)
