@@ -11,8 +11,7 @@
 // select split/test mode (session listener only, remote broker, no DB/OIDC/
 // Kubernetes). Every flag's environment variable is TCDI_<UPPER_SNAKE>;
 // pinned exceptions: TCDI_PORTAL_ORIGINS (repeatable flag), KUBECONFIG,
-// and the env-only secrets TCDI_OIDC_CLIENT_SECRET and TCDI_CONTROL_TOKEN
-// (legacy TCDI_GW_CONTROL_TOKEN still read).
+// and the env-only secrets TCDI_OIDC_CLIENT_SECRET and TCDI_CONTROL_TOKEN.
 package backend
 
 import (
@@ -385,8 +384,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["login-key-file"] {
-		// TCDI_LOGIN_KEY_FILES is a legacy plural still read for compatibility.
-		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", envOr(getenv, "TCDI_LOGIN_KEY_FILES", "")); v != "" {
+		if v := envOr(getenv, "TCDI_LOGIN_KEY_FILE", ""); v != "" {
 			_ = c.LoginKeyFiles.Set(v)
 		}
 	}
@@ -395,9 +393,6 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	if getenv != nil {
 		c.OIDCClientSecret = getenv("TCDI_OIDC_CLIENT_SECRET")
 		c.ControlToken = envOr(getenv, "TCDI_CONTROL_TOKEN", "")
-		if c.ControlToken == "" {
-			c.ControlToken = getenv("TCDI_GW_CONTROL_TOKEN") // legacy name
-		}
 	}
 
 	return c, c.validate()

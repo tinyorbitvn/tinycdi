@@ -619,3 +619,26 @@ func TestParseFlags_SignOut(t *testing.T) {
 		t.Fatalf("flag -oidc-end-session=false: err=%v endSession=%v", err, cfg.OIDCEndSession)
 	}
 }
+
+// The pre-1.0 legacy env names are gone: TCDI_GW_CONTROL_TOKEN no longer
+// fills the control token and the TCDI_LOGIN_KEY_FILES plural no longer
+// fills -login-key-file.
+func TestParseFlags_LegacyEnvNamesIgnored(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), envMap(map[string]string{
+		"TCDI_GW_CONTROL_TOKEN": "legacy-token",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ControlToken != "" {
+		t.Fatalf("TCDI_GW_CONTROL_TOKEN must be ignored, ControlToken = %q", cfg.ControlToken)
+	}
+
+	// The legacy plural env can no longer satisfy the required
+	// -login-key-file input.
+	_, err = ParseFlags(dropArg(mergedArgs(), "-login-key-file"),
+		envMap(map[string]string{"TCDI_LOGIN_KEY_FILES": "/run/secrets/login.key"}))
+	if err == nil || !strings.Contains(err.Error(), "login-key-file") {
+		t.Fatalf("TCDI_LOGIN_KEY_FILES must be ignored, want a -login-key-file error, got %v", err)
+	}
+}

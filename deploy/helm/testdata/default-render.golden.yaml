@@ -1139,7 +1139,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 ---
 # Source: tinycdi/templates/namespaces.yaml
 apiVersion: v1
@@ -1155,7 +1155,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 # The release (platform) namespace itself is labeled by Helm only when
 # Helm creates it; the installer applies the PSS labels (see install.md).
 ---
@@ -1417,7 +1417,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 automountServiceAccountToken: false
 ---
 # Source: tinycdi/templates/serviceaccounts.yaml
@@ -1431,7 +1431,7 @@ metadata:
     app.kubernetes.io/part-of: tinycdi
     app.kubernetes.io/instance: tcdi
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: tinycdi-0.2.0
+    helm.sh/chart: tinycdi-1.0.0
 automountServiceAccountToken: false
 ---
 # Source: tinycdi/templates/rbac.yaml
@@ -1730,7 +1730,7 @@ spec:
             weight: 100
       containers:
         - name: backend
-          image: ghcr.io/tinyorbitvn/tinycdi-backend:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-backend:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - {name: app, containerPort: 8443}
@@ -1934,7 +1934,7 @@ spec:
       
       containers:
         - name: frontend
-          image: ghcr.io/tinyorbitvn/tinycdi-frontend:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-frontend:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - -listen=:8443
@@ -2017,7 +2017,7 @@ spec:
       
       containers:
         - name: operator
-          image: ghcr.io/tinyorbitvn/tinycdi-operator:0.2.0
+          image: ghcr.io/tinyorbitvn/tinycdi-operator:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - --health-probe-bind-address=:8081

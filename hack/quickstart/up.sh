@@ -322,10 +322,9 @@ for pid in "${PREFETCH_PIDS[@]}"; do wait "$pid" || true; done
 
 # TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT records an install-time opt-out of the
 # smoke's mandatory clipboard round-trip: set only when this install pinned
-# a runtime train older than the entrypoint DLP render (upgrade-test.sh
-# does for the previous release). Empty on the default pins — the smoke
-# then runs the round-trip unconditionally and fails loudly on a runtime
-# image without the render.
+# a runtime train older than the entrypoint DLP render. Empty on the
+# default pins — the smoke then runs the round-trip unconditionally and
+# fails loudly on a runtime image without the render.
 cat >"$STATE_DIR/env" <<ENVEOF
 TCDI_QS_PORTAL_URL=https://${PORTAL_HOST}
 TCDI_QS_SESSION_DOMAIN=${SESSION_DOMAIN}
@@ -334,7 +333,7 @@ TCDI_QS_NOQUOTA_USER=${NOQUOTA_USER}
 TCDI_QS_CA_FILE=${T}/local-ca.crt
 KUBECONFIG=${KUBECONFIG}
 ENVEOF
-# The opt-out is a free-text reason (upgrade-test.sh passes a sentence):
+# The opt-out is a free-text reason (a caller passes a sentence):
 # serialize it through qs_env_kv so the file still sources. Then prove the
 # whole file parses before a spec run finds out — the smoke specs source
 # it verbatim with `set -a; . env`. A child bash carries the check: only a

@@ -3,12 +3,15 @@
 
 package chart_test
 
-// Opt-in ClusterOnly egress narrowing (v1.0 chart hardening):
+// ClusterOnly egress (v1.0): restricted is the default — the operator
+// confines ClusterOnly egress to namespaces labelled
+// workspaces.cdi.tinyorbit.vn/tenant when no flag is rendered.
 // runtime.networkProfiles.clusterOnly.egress* renders
-// --runtime-clusteronly-egress on the operator Deployment — and ONLY
-// when at least one of the three values is non-empty, so the default
-// render stays byte-identical (any pod in any namespace on any port).
-// The operator refuses a malformed value at startup
+// --runtime-clusteronly-egress=<json> on the operator Deployment — and
+// ONLY when at least one of the three values is non-empty — while
+// clusterOnly.unrestricted renders the literal
+// --runtime-clusteronly-egress=unrestricted opt-out. The operator refuses
+// a malformed value at startup
 // (cmd/operator TestParseClusterOnlyEgress) and the backend test pins
 // the resulting NetworkPolicy shape.
 
@@ -39,7 +42,10 @@ func clusterOnlyEgressFlag(t *testing.T, docs []doc) (map[string]any, bool) {
 	return nil, false
 }
 
-func TestClusterOnlyEgressDefaultRendersNoFlag(t *testing.T) {
+// TestClusterOnlyEgress_DefaultRendersNoFlagAndNoWarning: restricted is
+// the 1.0 default — no --runtime-clusteronly-egress flag is rendered and
+// the install NOTES carry no ClusterOnly warning.
+func TestClusterOnlyEgress_DefaultRendersNoFlagAndNoWarning(t *testing.T) {
 	minimal := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
 
 	for _, extra := range [][]string{
@@ -47,13 +53,63 @@ func TestClusterOnlyEgressDefaultRendersNoFlag(t *testing.T) {
 		{"--set-json", `runtime.networkProfiles.clusterOnly.egressNamespaceSelector={}`},
 		{"--set-json", `runtime.networkProfiles.clusterOnly.egressPodSelector={}`},
 		{"--set-json", `runtime.networkProfiles.clusterOnly.egressPorts=[]`},
+		{"--set", `runtime.networkProfiles.clusterOnly.unrestricted=false`},
 		{"--set-json", `runtime.networkProfiles.clusterOnly=null`},
 		{"--set-json", `runtime.networkProfiles=null`},
 	} {
 		args := append([]string{"-f", minimal}, extra...)
-		if v, ok := clusterOnlyEgressFlag(t, renderArgs(t, args...)); ok {
-			t.Errorf("args %v: empty selector set must render no flag, got %v", extra, v)
+		for _, a := range firstContainerArgs(deployment(renderArgs(t, args...), "operator")) {
+			if strings.HasPrefix(a, "--runtime-clusteronly-egress=") {
+				t.Errorf("args %v: the restricted default must render no flag, got %q", extra, a)
+			}
 		}
+	}
+
+	if notes := renderNotes(t, "-f", minimal); strings.Contains(notes, "ClusterOnly egress: WARNING") {
+		t.Errorf("default NOTES must not warn about ClusterOnly egress, got:\n%s", notes)
+	}
+}
+
+// TestClusterOnlyEgress_UnrestrictedRendersFlag: unrestricted: true is
+// the explicit opt-out of the restricted default — it renders the literal
+// flag value (not JSON) and the NOTES state the opt-out on one line.
+// Combining it with the narrowing selectors fails the render.
+func TestClusterOnlyEgress_UnrestrictedRendersFlag(t *testing.T) {
+	minimal := filepath.Join("tinycdi", "ci", "minimal-values.yaml")
+
+	docs := renderArgs(t, "-f", minimal,
+		"--set", "runtime.networkProfiles.clusterOnly.unrestricted=true")
+	found := false
+	for _, a := range firstContainerArgs(deployment(docs, "operator")) {
+		if a == "--runtime-clusteronly-egress=unrestricted" {
+			found = true
+		}
+		if strings.HasPrefix(a, "--runtime-clusteronly-egress=") && a != "--runtime-clusteronly-egress=unrestricted" {
+			t.Errorf("unrestricted must render the literal value, got %q", a)
+		}
+	}
+	if !found {
+		t.Fatal("unrestricted=true: no --runtime-clusteronly-egress=unrestricted rendered")
+	}
+
+	notes := renderNotes(t, "-f", minimal,
+		"--set", "runtime.networkProfiles.clusterOnly.unrestricted=true")
+	lines := 0
+	for _, l := range strings.Split(notes, "\n") {
+		if strings.Contains(l, "ClusterOnly egress") {
+			lines++
+		}
+	}
+	if lines != 1 {
+		t.Fatalf("NOTES must state the unrestricted opt-out on exactly one line, got:\n%s", notes)
+	}
+
+	// unrestricted and the narrowing selectors are mutually exclusive.
+	out := renderErrArgs(t, "-f", minimal,
+		"--set", "runtime.networkProfiles.clusterOnly.unrestricted=true",
+		"--set-json", `runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"TCP","port":443}]`)
+	if !strings.Contains(out, "clusterOnly.unrestricted cannot be combined with egress selectors") {
+		t.Fatalf("unrestricted + egress selectors must fail naming the conflict, got: %s", out)
 	}
 }
 
@@ -139,48 +195,3 @@ func TestClusterOnlyEgressSchema(t *testing.T) {
 	}
 }
 
-// TestClusterOnlyEgressDeprecationNotice: while a seeded template uses
-// networkProfile: ClusterOnly and the #148 narrowing values are unset,
-// install NOTES must warn that the default flips to restricted egress in
-// a future minor release (planned v1.3) and name the values to set now.
-// Setting any narrowing value — or seeding no ClusterOnly template —
-// silences it.
-func TestClusterOnlyEgressDeprecationNotice(t *testing.T) {
-	example := filepath.Join("tinycdi", "ci", "example-values.yaml")
-	seedClusterOnly := "--set=templates[0].spec.networkProfile=ClusterOnly"
-
-	notes := renderNotes(t, "-f", example, seedClusterOnly)
-	for _, want := range []string{
-		"WARNING", "planned v1.3",
-		"runtime.networkProfiles.clusterOnly.egressNamespaceSelector",
-		"runtime.networkProfiles.clusterOnly.egressPodSelector",
-		"runtime.networkProfiles.clusterOnly.egressPorts",
-	} {
-		if !strings.Contains(notes, want) {
-			t.Errorf("ClusterOnly seeded with unset narrowing: NOTES must contain %q, got:\n%s", want, notes)
-		}
-	}
-
-	// Any narrowing value set = the restricted posture is already opted in.
-	for _, narrowing := range []string{
-		`runtime.networkProfiles.clusterOnly.egressNamespaceSelector={"matchExpressions":[{"key":"workspaces.cdi.tinyorbit.vn/tenant","operator":"Exists"}]}`,
-		`runtime.networkProfiles.clusterOnly.egressPorts=[{"protocol":"TCP","port":443}]`,
-	} {
-		if notes := renderNotes(t, "-f", example, seedClusterOnly, "--set-json", narrowing); strings.Contains(notes, "ClusterOnly egress") {
-			t.Errorf("narrowing %s: NOTES must not warn, got:\n%s", narrowing, notes)
-		}
-	}
-
-	// example-values seeds Isolated templates only — no ClusterOnly in
-	// use means no warning. Non-ClusterOnly seeded profiles stay silent.
-	if notes := renderNotes(t, "-f", example); strings.Contains(notes, "ClusterOnly egress") {
-		t.Errorf("no ClusterOnly template seeded: NOTES must not warn, got:\n%s", notes)
-	}
-	// InternetOnly needs operator.clusterCIDRs (SEC-02) for the render to
-	// succeed at all.
-	if notes := renderNotes(t, "-f", example,
-		"--set", "templates[0].spec.networkProfile=InternetOnly",
-		"--set", "operator.clusterCIDRs[0]=10.0.0.0/8"); strings.Contains(notes, "ClusterOnly egress") {
-		t.Errorf("InternetOnly template seeded: NOTES must not warn, got:\n%s", notes)
-	}
-}

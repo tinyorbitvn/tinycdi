@@ -279,11 +279,12 @@ func TestPodAutomountServiceAccountTokenFalse(t *testing.T) {
 	}
 }
 
-// The ClusterOnly default is the historical posture: egress to any pod
-// in any namespace on any port — two peers, one selecting every pod in
-// the workspace's own namespace and one every namespace. The rule
-// carries no ports and the DNS rule still leads the egress list.
-func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
+// The ClusterOnly default is RESTRICTED: egress to pods in namespaces
+// labelled workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces) —
+// one peer, no port restriction. The DNS rule still leads the egress
+// list. The unrestricted posture needs the explicit
+// ClusterOnlyEgress.Unrestricted opt-out.
+func TestClusterOnlyEgressDefaultRestricted(t *testing.T) {
 	ws := testWorkspace()
 	tpl := testTemplate(nil)
 	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
@@ -306,6 +307,33 @@ func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
 	if len(rule.Ports) != 0 {
 		t.Fatalf("default ClusterOnly rule must not restrict ports: %+v", rule.Ports)
 	}
+	if len(rule.To) != 1 {
+		t.Fatalf("default ClusterOnly peers = %+v, want the single managed-namespaces peer", rule.To)
+	}
+	peer := rule.To[0]
+	if peer.PodSelector != nil || peer.NamespaceSelector == nil {
+		t.Fatalf("default ClusterOnly peer = %+v, want {namespaceSelector: tenant-label}", peer)
+	}
+	me := peer.NamespaceSelector.MatchExpressions
+	if len(me) != 1 || me[0].Key != "workspaces.cdi.tinyorbit.vn/tenant" ||
+		me[0].Operator != metav1.LabelSelectorOpExists {
+		t.Fatalf("default ClusterOnly namespaceSelector = %+v, want tenant-label Exists", me)
+	}
+}
+
+// The Unrestricted opt-out restores the pre-1.0 posture: two peers, one
+// selecting every pod in the workspace's own namespace and one every
+// namespace.
+func TestClusterOnlyEgressUnrestrictedOptInOnPolicy(t *testing.T) {
+	ws := testWorkspace()
+	tpl := testTemplate(nil)
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
+	np, _ := netPolFor(t, Options{ClusterOnlyEgress: &ClusterOnlyEgress{Unrestricted: true}}, ws, tpl)
+
+	rule := np.Spec.Egress[1]
+	if len(rule.Ports) != 0 {
+		t.Fatalf("unrestricted ClusterOnly rule must not restrict ports: %+v", rule.Ports)
+	}
 	var anyPod, anyNS bool
 	for _, peer := range rule.To {
 		if peer.PodSelector != nil && len(peer.PodSelector.MatchLabels) == 0 &&
@@ -318,7 +346,7 @@ func TestClusterOnlyEgressDefaultUnrestricted(t *testing.T) {
 		}
 	}
 	if !anyPod || !anyNS {
-		t.Fatalf("default ClusterOnly peers = %+v, want {podSelector:{}} + {namespaceSelector:{}}", rule.To)
+		t.Fatalf("unrestricted ClusterOnly peers = %+v, want {podSelector:{}} + {namespaceSelector:{}}", rule.To)
 	}
 }
 
@@ -371,9 +399,9 @@ func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
 	}
 
 	// Drift reconcile: removing the option on a second Ensure rewrites
-	// the stored policy back to the unrestricted shape (and vice versa —
-	// the mechanism is generic, exercised here in the hardening direction
-	// by the second half of this test).
+	// the stored policy back to the restricted default shape (and vice
+	// versa — the mechanism is generic, exercised here in the hardening
+	// direction by the second half of this test).
 	if _, err := New(c, Options{}).Ensure(context.Background(), ws, tpl); err != nil {
 		t.Fatalf("second Ensure: %v", err)
 	}
@@ -382,8 +410,10 @@ func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
 		client.ObjectKey{Name: NetPolName(ws.UID), Namespace: ws.Namespace}, back); err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Spec.Egress[1].To) != 2 {
-		t.Fatalf("stored policy was not reconciled back to the unrestricted peer set: %+v",
+	if len(back.Spec.Egress[1].To) != 1 ||
+		back.Spec.Egress[1].To[0].NamespaceSelector == nil ||
+		len(back.Spec.Egress[1].To[0].NamespaceSelector.MatchExpressions) != 1 {
+		t.Fatalf("stored policy was not reconciled back to the restricted default peer: %+v",
 			back.Spec.Egress[1].To)
 	}
 }

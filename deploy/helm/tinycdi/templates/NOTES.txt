@@ -96,27 +96,10 @@ Node profiles (mode: {{ .Values.nodeProfiles.install.mode | default "install" }}
   retried — gate browser rollouts on DS readiness.
 {{- end }}
 
-{{- $coInUse := false }}
-{{- range .Values.templates }}
-{{- if eq (get (default dict .spec) "networkProfile") "ClusterOnly" }}{{ $coInUse = true }}{{- end }}
-{{- end }}
 {{- $co := (dig "networkProfiles" "clusterOnly" dict (default dict .Values.runtime)) }}
-{{- if and $coInUse (not $co.egressNamespaceSelector) (not $co.egressPodSelector) (not $co.egressPorts) }}
+{{- if $co.unrestricted }}
 
-ClusterOnly egress: WARNING — a seeded template uses networkProfile:
-  ClusterOnly while runtime.networkProfiles.clusterOnly.egress* is unset,
-  so those workspaces may reach ANY pod in ANY namespace on ANY port —
-  confinement rests entirely on destination-side ingress policies.
-  The default flips to restricted egress in a future minor release
-  (planned v1.3). Opt in now:
-    runtime.networkProfiles.clusterOnly.egressNamespaceSelector
-      (e.g. matchExpressions: [{key: workspaces.cdi.tinyorbit.vn/tenant,
-        operator: Exists}] — confines egress to the managed namespaces)
-    runtime.networkProfiles.clusterOnly.egressPodSelector   (optional)
-    runtime.networkProfiles.clusterOnly.egressPorts         (optional)
-  To keep today's unrestricted posture after the release that flips it,
-  pin explicit values then — see the chart README "ClusterOnly egress"
-  and docs/releases/v1.1.0.md "Upgrading".
+ClusterOnly egress: UNRESTRICTED — runtime.networkProfiles.clusterOnly.unrestricted=true opted out of the restricted default; ClusterOnly workspaces can reach any pod in any namespace on any port (confinement rests on destination-side ingress policies).
 {{- end }}
 
 Reminder:

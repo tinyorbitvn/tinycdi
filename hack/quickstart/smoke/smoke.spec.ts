@@ -535,10 +535,10 @@ function podEnv(workspaceId: string): Record<string, string> {
 }
 
 // The one allowed skip of the browser round-trip below: an explicit,
-// named opt-out. hack/quickstart/upgrade-test.sh sets it when it installs
-// a PREVIOUS release — that release's pinned runtime train predates the
-// entrypoint DLP render, so the round-trip cannot run there (up.sh writes
-// it into the install's env file). On the default runtime pins
+// named opt-out. A caller sets it when the install pinned a runtime
+// train older than the entrypoint DLP render, so the round-trip cannot
+// run there (up.sh writes it into the install's env file). On the
+// default runtime pins
 // (runtime-2026.10.12, hack/quickstart/common.sh) the round-trip is
 // MANDATORY — a runtime image without the render fails the check below
 // loudly instead of skipping silently.
@@ -639,9 +639,8 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
     "the running workspace's runtime image lacks the entrypoint clipboard " +
       "render (no tcdi_clipboard_dlp in /opt/tcdi/entrypoint.sh) — the " +
       "default quickstart train runtime-2026.10.12 carries it. On an " +
-      "intentionally older runtime (e.g. the previous-release install in " +
-      "upgrade-test.sh) the only allowed skip is the named opt-out " +
-      "TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=<reason>.",
+      "intentionally older runtime the only allowed skip is the named " +
+      "opt-out TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=<reason>.",
   ).toBe(true);
 
   {

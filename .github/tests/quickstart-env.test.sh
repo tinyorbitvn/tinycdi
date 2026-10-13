@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # quickstart-env.test.sh — regression coverage for the env file up.sh
 # writes at install time and the smoke specs source verbatim
-# (`set -a; . "$STATE_DIR/env"`). upgrade-test.sh sets
-# TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT to a multi-word reason; an unquoted
-# KEY=value line makes the source run the tail words as a command (the
-# upgrade job's exit-127 failure). common.sh's qs_env_kv is the
-# serializer — pin its quoting contract and up.sh's use of it.
+# (`set -a; . "$STATE_DIR/env"`). TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT can
+# carry a multi-word reason; an unquoted KEY=value line makes the source
+# run the tail words as a command (the historical exit-127 failure).
+# common.sh's qs_env_kv is the serializer — pin its quoting contract and
+# up.sh's use of it.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -58,12 +58,7 @@ grep -q "bash -c 'set -ea" "$ROOT/hack/quickstart/up.sh" \
   || bad "up.sh must source-check the generated env file under set -e before finishing"
 ok "up.sh serializes the opt-out and self-checks the env file"
 
-# ---- 4. upgrade-test.sh passes the named opt-out ---------------------------
-grep -q 'TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT=' "$ROOT/hack/quickstart/upgrade-test.sh" \
-  || bad "upgrade-test.sh must set the named clipboard round-trip opt-out for the previous-release install"
-ok "upgrade-test.sh sets the named opt-out"
-
-# ---- 5. lint ----------------------------------------------------------------
+# ---- 4. lint ----------------------------------------------------------------
 bash -n "$ROOT/hack/quickstart/common.sh" || bad "bash -n common.sh"
 bash -n "$ROOT/hack/quickstart/up.sh" || bad "bash -n up.sh"
 command -v shellcheck >/dev/null 2>&1 || bad "shellcheck not installed"

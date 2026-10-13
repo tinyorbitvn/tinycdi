@@ -347,23 +347,30 @@ type Options struct {
 	TopologySpread bool
 
 	// ClusterOnlyEgress (operator --runtime-clusteronly-egress; chart
-	// runtime.networkProfiles.clusterOnly.*) narrows the in-cluster
+	// runtime.networkProfiles.clusterOnly.*) steers the in-cluster
 	// egress rule of NetworkProfileClusterOnly workspaces. Nil keeps
-	// the historical posture — egress to any pod in any namespace on
-	// any port, where confinement rests entirely on destination-side
-	// ingress policies. Set, it admits only pod destinations matching
-	// its selectors, on its ports — it can never widen the rule past
+	// the default posture — egress to pods in namespaces labelled
+	// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces).
+	// Unrestricted restores the pre-1.0 any-pod-any-namespace posture.
+	// Otherwise the set selectors admit only pod destinations matching
+	// them, on the listed ports — it can never widen the rule past
 	// pod peers (external IPs stay denied). DNS egress is unaffected.
 	ClusterOnlyEgress *ClusterOnlyEgress
 }
 
-// ClusterOnlyEgress is the operator-wide narrowing of the
-// NetworkProfileClusterOnly egress rule. Its fields mirror the peer+port
-// parts of one NetworkPolicyEgressRule; a nil selector keeps that axis
-// open within the pod-only destination set. The JSON tags let the
-// --runtime-clusteronly-egress flag value decode straight into the
-// struct.
+// ClusterOnlyEgress steers the operator-wide
+// NetworkProfileClusterOnly egress rule. Its selector/port fields mirror
+// the peer+port parts of one NetworkPolicyEgressRule; a nil selector
+// keeps that axis open within the pod-only destination set. The JSON
+// tags let the --runtime-clusteronly-egress flag value decode straight
+// into the struct; Unrestricted is reachable only via the flag's
+// "unrestricted" literal, never through the JSON form.
 type ClusterOnlyEgress struct {
+	// Unrestricted restores the pre-1.0 posture: egress to any pod in
+	// any namespace on any port, where confinement rests entirely on
+	// destination-side ingress policies.
+	Unrestricted bool `json:"-"`
+
 	// NamespaceSelector picks the destination namespaces; nil means
 	// every namespace (pods only — never external IPs).
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
@@ -1561,15 +1568,29 @@ func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options
 }
 
 // clusterOnlyEgressRule builds the in-cluster egress rule for
-// NetworkProfileClusterOnly. The zero option keeps the historical
-// posture — any pod in any namespace on any port, where confinement
-// rests entirely on destination-side ingress policies. A configured
-// Options.ClusterOnlyEgress narrows the destination set to matching
+// NetworkProfileClusterOnly. The zero option is RESTRICTED: egress is
+// confined to pods in namespaces labelled
+// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces). The
+// Unrestricted opt-out admits any pod in any namespace on any port —
+// confinement then rests entirely on destination-side ingress policies.
+// A configured selector set narrows the destination set to matching
 // pods in matching namespaces and/or the listed ports; it can never
 // widen past pod peers (external IPs stay denied either way).
 func clusterOnlyEgressRule(opts Options) networkingv1.NetworkPolicyEgressRule {
 	co := opts.ClusterOnlyEgress
 	if co == nil {
+		return networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{{
+						Key:      "workspaces.cdi.tinyorbit.vn/tenant",
+						Operator: metav1.LabelSelectorOpExists,
+					}},
+				},
+			}},
+		}
+	}
+	if co.Unrestricted {
 		return networkingv1.NetworkPolicyEgressRule{
 			To: []networkingv1.NetworkPolicyPeer{
 				{PodSelector: &metav1.LabelSelector{}},

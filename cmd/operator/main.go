@@ -104,10 +104,13 @@ func parseKasmAdapterImage(v string) (string, error) {
 	return v, nil
 }
 
-// parseClusterOnlyEgress validates --runtime-clusteronly-egress: a JSON
-// object {namespaceSelector, podSelector, ports} narrowing the
+// parseClusterOnlyEgress validates --runtime-clusteronly-egress: the
+// literal "unrestricted" (the opt-out of the restricted default — any
+// pod in any namespace on any port) or a JSON object
+// {namespaceSelector, podSelector, ports} narrowing the
 // NetworkProfileClusterOnly egress rule. An empty flag keeps the
-// historical any-pod-any-namespace default. Decoding is strict: an
+// restricted default — egress confined to namespaces labelled
+// workspaces.cdi.tinyorbit.vn/tenant. Decoding is strict: an
 // unknown key (a typo like "namespceSelector") must fail startup —
 // silently dropping it would produce a wider rule than asked — and an
 // object with no field set is rejected, since it can only come from a
@@ -117,12 +120,15 @@ func parseClusterOnlyEgress(s string) (*linuxruntime.ClusterOnlyEgress, error) {
 	if s == "" {
 		return nil, nil
 	}
+	if s == "unrestricted" {
+		return &linuxruntime.ClusterOnlyEgress{Unrestricted: true}, nil
+	}
 	var spec linuxruntime.ClusterOnlyEgress
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&spec); err != nil {
-		return nil, fmt.Errorf("--runtime-clusteronly-egress is not a JSON object "+
-			"{namespaceSelector,podSelector,ports}: %w", err)
+		return nil, fmt.Errorf("--runtime-clusteronly-egress must be 'unrestricted' or "+
+			"a JSON object {namespaceSelector,podSelector,ports}: %w", err)
 	}
 	if spec.NamespaceSelector == nil && spec.PodSelector == nil && len(spec.Ports) == 0 {
 		return nil, errors.New("--runtime-clusteronly-egress must set at least one of " +
@@ -426,9 +432,11 @@ func main() {
 			"templates with spec.linux.adapter=kasm (env TCDI_KASM_ADAPTER_IMAGE). "+
 			"Empty rejects kasm templates.")
 	flag.StringVar(&clusterOnlyEgress, "runtime-clusteronly-egress", "",
-		"JSON object narrowing NetworkProfileClusterOnly workspace egress: "+
+		"ClusterOnly egress posture: the literal 'unrestricted' (any pod in any "+
+			"namespace on any port) or a JSON object narrowing it: "+
 			`{"namespaceSelector":{...},"podSelector":{...},"ports":[{"protocol":"TCP","port":443}]}. `+
-			"Empty keeps the default: egress to any pod in any namespace on any port. "+
+			"Empty keeps the restricted default: egress to pods in namespaces "+
+			"labelled workspaces.cdi.tinyorbit.vn/tenant only. "+
 			"The chart renders it from runtime.networkProfiles.clusterOnly.*.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", os.Getenv("POD_NAMESPACE"),
 		"Namespace the session gateway pods run in; per-workspace NetworkPolicies admit "+
