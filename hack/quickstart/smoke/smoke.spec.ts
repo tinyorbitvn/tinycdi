@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { expect, test, type Frame, type Page } from "@playwright/test";
+import { expect, test, type Browser, type Frame, type Page } from "@playwright/test";
 
 // DEV-ONLY credentials of the throwaway Keycloak realm inside the kind
 // cluster (hack/quickstart/realm-export.json, printed by up.sh). The
@@ -188,16 +188,19 @@ function cloneBrowserTemplate(name: string, display: string, policy: string) {
 }
 
 // Creates a workspace on the template whose option label matches
-// `label`, retrying the API's retryable release_pending quota refusal —
-// a just-deleted workspace's compute holds the running slot until the
-// backend's 30 s recovery pass proves the runtime gone (the same
-// refusal the retained-attach smoke retries through).
+// `label`, waiting out the tenant's running quota (runningWorkspaces: 2
+// in hack/quickstart/values.yaml): every 409 QUOTA_EXHAUSTED is retried
+// until the deadline. A just-stopped or just-deleted workspace holds its
+// running slot until the backend's 30 s recovery pass proves the runtime
+// gone (details.reason=release_pending), and an earlier smoke's workspace
+// may still be stopping. Any other refusal fails at once.
 async function createWorkspaceOnTemplate(
   page: Page,
   name: string,
   label: RegExp,
+  dataPolicy?: "Retain" | "Ephemeral",
 ): Promise<string> {
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 4 * 60_000;
   for (;;) {
     await page.goto("/workspaces/new");
     await page.locator('input[name="name"]').fill(name);
@@ -206,6 +209,9 @@ async function createWorkspaceOnTemplate(
     await page
       .locator('select[name="template"]')
       .selectOption((await option.getAttribute("value")) ?? "");
+    if (dataPolicy) {
+      await page.locator('select[name="dataPolicy"]').selectOption(dataPolicy);
+    }
     const [resp] = await Promise.all([
       page.waitForResponse(
         (r) => r.url().endsWith("/v1/workspaces") && r.request().method() === "POST",
@@ -218,11 +224,21 @@ async function createWorkspaceOnTemplate(
       return workspaceIdFromUrl(page);
     }
     expect(
-      body?.error?.details?.reason === "release_pending" && Date.now() < deadline,
+      resp.status() === 409 && body?.error?.code === "QUOTA_EXHAUSTED" && Date.now() < deadline,
       `workspace create refused (${resp.status()}): ${JSON.stringify(body)}`,
     ).toBeTruthy();
     await page.waitForTimeout(5_000);
   }
+}
+
+// Creates a workspace from the seeded Browser template, waiting out the
+// running quota (createWorkspaceOnTemplate).
+async function createBrowserWorkspaceWhenFree(
+  page: Page,
+  name: string,
+  dataPolicy?: "Retain" | "Ephemeral",
+): Promise<string> {
+  return createWorkspaceOnTemplate(page, name, /browser/i, dataPolicy);
 }
 
 async function workspacePhase(page: Page, id: string): Promise<string> {
@@ -251,6 +267,35 @@ async function stopWorkspace(page: Page, workspaceId: string) {
   await expect(stop).toBeVisible();
   await stop.click();
   await waitPhase(page, workspaceId, "Stopped");
+}
+
+// Cleanup for a `finally` block: stops the workspace so the next smoke has
+// a running slot. A cleanup failure is logged, never thrown, so it cannot
+// hide the test's own failure; the next create then waits on the quota
+// and names the refusal if the slot never frees.
+async function stopForCleanup(page: Page, workspaceId: string | undefined) {
+  if (!workspaceId) return;
+  try {
+    await stopWorkspace(page, workspaceId);
+  } catch (err) {
+    console.warn(`cleanup: stopping ${workspaceId} failed: ${String(err)}`);
+  }
+}
+
+// Same as stopForCleanup, signed in as the workspace owner in a fresh
+// context (the admin smoke signs the owner's own context out).
+async function stopForCleanupAsUser(browser: Browser, workspaceId: string | undefined) {
+  if (!workspaceId) return;
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  try {
+    const page = await ctx.newPage();
+    await login(page);
+    await stopForCleanup(page, workspaceId);
+  } catch (err) {
+    console.warn(`cleanup: signing in to stop ${workspaceId} failed: ${String(err)}`);
+  } finally {
+    await ctx.close();
+  }
 }
 
 // Connects to the workspace and returns the KasmVNC session frame once the
@@ -714,103 +759,114 @@ test("clipboard follows the template policy (Bidirectional works, Disabled is bl
 test("admin: the live session is listed from Postgres, Sign out everywhere ends it, the audit row exists", async ({ browser }) => {
   // The user opens a desktop, which mints a live connection lease.
   const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
-  const userPage = await userCtx.newPage();
-  await login(userPage);
-  const name = `adm-${Date.now().toString(36)}`;
-  const id = await createBrowserWorkspace(userPage, name);
-  await connectSessionFrame(userPage, id);
-
   const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
-  const page = await adminCtx.newPage();
-  await login(page, ADMIN_USER);
+  let id: string | undefined;
+  try {
+    const userPage = await userCtx.newPage();
+    await login(userPage);
+    const name = `adm-${Date.now().toString(36)}`;
+    id = await createBrowserWorkspaceWhenFree(userPage, name);
+    await connectSessionFrame(userPage, id);
 
-  type Live = { ownerRef: string; workspaceId: string; leaseRef: string };
-  const listed = async (): Promise<Live[]> => {
-    const r = await page.request.get(`/v1/admin/tenants/${TENANT}/sessions`);
-    expect(r.status()).toBe(200);
-    return ((await r.json()) as { items: Live[] }).items;
-  };
-  await expect
-    .poll(async () => (await listed()).some((s) => s.workspaceId === id), { timeout: 60_000 })
-    .toBe(true);
-  const mine = (await listed()).find((s) => s.workspaceId === id)!;
-  expect(mine.leaseRef).toMatch(/^[0-9a-f]{16}$/);
-  const ownerRef = mine.ownerRef;
+    const page = await adminCtx.newPage();
+    await login(page, ADMIN_USER);
 
-  // F8 (Task 3): the tenant directory lists the signed-in user with a workspace count.
-  const dir = await page.request.get(`/v1/admin/tenants/${TENANT}/users?sort=-lastSeen&limit=500`);
-  expect(dir.status()).toBe(200);
-  const users = ((await dir.json()) as { items: { ownerRef: string; workspaces: number; lastSeenAt: string }[] }).items;
-  const me = users.find((u) => u.ownerRef === ownerRef);
-  expect(me?.workspaces).toBeGreaterThanOrEqual(1);
-  expect(me?.lastSeenAt).toBeTruthy();
-  await page.goto("/admin/users");
-  await expect(page.locator(`a[href="/admin/users/${Buffer.from(ownerRef).toString("base64url")}"]`)).toBeVisible();
+    type Live = { ownerRef: string; workspaceId: string; leaseRef: string };
+    const listed = async (): Promise<Live[]> => {
+      const r = await page.request.get(`/v1/admin/tenants/${TENANT}/sessions`);
+      expect(r.status()).toBe(200);
+      return ((await r.json()) as { items: Live[] }).items;
+    };
+    await expect
+      .poll(async () => (await listed()).some((s) => s.workspaceId === id), { timeout: 60_000 })
+      .toBe(true);
+    const mine = (await listed()).find((s) => s.workspaceId === id)!;
+    expect(mine.leaseRef).toMatch(/^[0-9a-f]{16}$/);
+    const ownerRef = mine.ownerRef;
 
-  // The user detail page shows the session and signs the user out after a confirmation.
-  // Task 3's detail route carries the owner reference as base64url (a dotted issuer would 404 percent-encoded).
-  await page.goto(`/admin/users/${Buffer.from(ownerRef).toString("base64url")}`);
-  const section = page.getByRole("region", { name: "Live sessions" });
-  await expect(section.getByText(name)).toBeVisible();
-  await section.getByRole("button", { name: "Sign out everywhere" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Sign out everywhere" }).click();
-  await expect(section.getByRole("status")).toContainText("Signed out");
+    // F8 (Task 3): the tenant directory lists the signed-in user with a workspace count.
+    const dir = await page.request.get(`/v1/admin/tenants/${TENANT}/users?sort=-lastSeen&limit=500`);
+    expect(dir.status()).toBe(200);
+    const users = ((await dir.json()) as { items: { ownerRef: string; workspaces: number; lastSeenAt: string }[] }).items;
+    const me = users.find((u) => u.ownerRef === ownerRef);
+    expect(me?.workspaces).toBeGreaterThanOrEqual(1);
+    expect(me?.lastSeenAt).toBeTruthy();
+    await page.goto("/admin/users");
+    await expect(page.locator(`a[href="/admin/users/${Buffer.from(ownerRef).toString("base64url")}"]`)).toBeVisible();
 
-  // Effects: the principal has no live lease, their portal session is gone, the audit row is there.
-  await expect.poll(async () => (await listed()).some((s) => s.ownerRef === ownerRef)).toBe(false);
-  expect((await userCtx.request.get("/v1/me")).status()).toBe(401);
-  const audit = await page.request.get(`/v1/admin/tenants/${TENANT}/audit?action=admin.session.revoke`);
-  expect(audit.status()).toBe(200);
-  const rows = ((await audit.json()) as { items: { action: string; outcome: string; details?: Record<string, string> }[] }).items;
-  expect(rows.some((e) => e.outcome === "success" && Number(e.details?.counts?.match(/leases=(\d+)/)?.[1] ?? 0) >= 1)).toBe(true);
+    // The user detail page shows the session and signs the user out after a confirmation.
+    // Task 3's detail route carries the owner reference as base64url (a dotted issuer would 404 percent-encoded).
+    await page.goto(`/admin/users/${Buffer.from(ownerRef).toString("base64url")}`);
+    const section = page.getByRole("region", { name: "Live sessions" });
+    await expect(section.getByText(name)).toBeVisible();
+    await section.getByRole("button", { name: "Sign out everywhere" }).click();
+    await page.getByRole("alertdialog").getByRole("button", { name: "Sign out everywhere" }).click();
+    await expect(section.getByRole("status")).toContainText("Signed out");
 
-  await userCtx.close();
-  await adminCtx.close();
+    // Effects: the principal has no live lease, their portal session is gone, the audit row is there.
+    await expect.poll(async () => (await listed()).some((s) => s.ownerRef === ownerRef)).toBe(false);
+    expect((await userCtx.request.get("/v1/me")).status()).toBe(401);
+    const audit = await page.request.get(`/v1/admin/tenants/${TENANT}/audit?action=admin.session.revoke`);
+    expect(audit.status()).toBe(200);
+    const rows = ((await audit.json()) as { items: { action: string; outcome: string; details?: Record<string, string> }[] }).items;
+    expect(rows.some((e) => e.outcome === "success" && Number(e.details?.counts?.match(/leases=(\d+)/)?.[1] ?? 0) >= 1)).toBe(true);
+  } finally {
+    // Free the running slot. The owner's own context is signed out above,
+    // so the stop signs in again in a fresh one.
+    await userCtx.close();
+    await adminCtx.close();
+    await stopForCleanupAsUser(browser, id);
+  }
 });
 
 test("admin overview: a live session, a running workspace and a measured boot are counted", async ({ browser }) => {
   const userCtx = await browser.newContext({ ignoreHTTPSErrors: true });
-  const userPage = await userCtx.newPage();
-  await login(userPage);
-  const id = await createBrowserWorkspace(userPage, `ovw-${Date.now().toString(36)}`);
-  await connectSessionFrame(userPage, id);
-
   const adminCtx = await browser.newContext({ ignoreHTTPSErrors: true });
-  const page = await adminCtx.newPage();
-  await login(page, ADMIN_USER);
+  const userPage = await userCtx.newPage();
+  let id: string | undefined;
+  try {
+    await login(userPage);
+    id = await createBrowserWorkspaceWhenFree(userPage, `ovw-${Date.now().toString(36)}`);
+    await connectSessionFrame(userPage, id);
 
-  type Overview = {
-    liveSessions: number;
-    runningByTemplate: { template: string; count: number }[];
-    provisioning: { p95Seconds?: number; samples: number };
-    stuckFinalizers: number;
-    fresh: boolean;
-  };
-  const overview = async (): Promise<Overview> => {
-    const r = await page.request.get(`/v1/admin/tenants/${TENANT}/overview`);
-    expect(r.status()).toBe(200);
-    return (await r.json()) as Overview;
-  };
-  await expect
-    .poll(async () => {
-      const o = await overview();
-      return (
-        o.fresh &&
-        o.liveSessions >= 1 &&
-        o.runningByTemplate.reduce((n, t) => n + t.count, 0) >= 1 &&
-        o.provisioning.samples >= 1 &&
-        (o.provisioning.p95Seconds ?? 0) > 0
-      );
-    }, { timeout: 90_000, intervals: [3_000], message: "overview counts the live session, the running workspace and the measured boot" })
-    .toBe(true);
-  expect((await overview()).stuckFinalizers).toBeGreaterThanOrEqual(0);
+    const page = await adminCtx.newPage();
+    await login(page, ADMIN_USER);
 
-  // The UI shows the same cards.
-  await page.goto("/admin");
-  await expect(page.getByRole("region", { name: "Health" })).toContainText("Live sessions");
+    type Overview = {
+      liveSessions: number;
+      runningByTemplate: { template: string; count: number }[];
+      provisioning: { p95Seconds?: number; samples: number };
+      stuckFinalizers: number;
+      fresh: boolean;
+    };
+    const overview = async (): Promise<Overview> => {
+      const r = await page.request.get(`/v1/admin/tenants/${TENANT}/overview`);
+      expect(r.status()).toBe(200);
+      return (await r.json()) as Overview;
+    };
+    await expect
+      .poll(async () => {
+        const o = await overview();
+        return (
+          o.fresh &&
+          o.liveSessions >= 1 &&
+          o.runningByTemplate.reduce((n, t) => n + t.count, 0) >= 1 &&
+          o.provisioning.samples >= 1 &&
+          (o.provisioning.p95Seconds ?? 0) > 0
+        );
+      }, { timeout: 90_000, intervals: [3_000], message: "overview counts the live session, the running workspace and the measured boot" })
+      .toBe(true);
+    expect((await overview()).stuckFinalizers).toBeGreaterThanOrEqual(0);
 
-  await userCtx.close();
-  await adminCtx.close();
+    // The UI shows the same cards.
+    await page.goto("/admin");
+    await expect(page.getByRole("region", { name: "Health" })).toContainText("Live sessions");
+  } finally {
+    // Free the running slot for the next smoke.
+    await stopForCleanup(userPage, id);
+    await userCtx.close();
+    await adminCtx.close();
+  }
 });
 
 async function connectionStatus(page: Page, id: string): Promise<{ leaseActive: boolean; leaseRef?: string }> {
@@ -832,24 +888,29 @@ test("a deleted runtime pod is recovered by Start on the same home, and a new se
   const token = `recover-${stamp}`;
   const file = `${HOME_DIR}/recover.txt`;
   await login(page);
-  const id = await createBrowserWorkspace(page, `rc-${stamp}`, "Retain");
-  await connectSessionFrame(page, id);
-  inHome(id, 'printf %s "$1" > "$2" && sync', token, file);
-  const before = await connectionStatus(page, id);
-  expect(before.leaseActive, "lease while connected").toBe(true);
+  const id = await createBrowserWorkspaceWhenFree(page, `rc-${stamp}`, "Retain");
+  try {
+    await connectSessionFrame(page, id);
+    inHome(id, 'printf %s "$1" > "$2" && sync', token, file);
+    const before = await connectionStatus(page, id);
+    expect(before.leaseActive, "lease while connected").toBe(true);
 
-  kubectl("delete", "pod", runtimePod(id), "--wait=false");
-  await page.goto(`/workspaces/${encodeURIComponent(id)}`);
-  await waitPhase(page, id, "Failed", 3 * 60_000);
-  expect(await failureReason(page, id)).toBe("RuntimeLost");
-  const retry = page.getByRole("button", { name: "Retry start" });
-  await expect(retry).toBeVisible({ timeout: 60_000 });
-  await retry.click();
-  await waitPhase(page, id, "Ready", 10 * 60_000);
+    kubectl("delete", "pod", runtimePod(id), "--wait=false");
+    await page.goto(`/workspaces/${encodeURIComponent(id)}`);
+    await waitPhase(page, id, "Failed", 3 * 60_000);
+    expect(await failureReason(page, id)).toBe("RuntimeLost");
+    const retry = page.getByRole("button", { name: "Retry start" });
+    await expect(retry).toBeVisible({ timeout: 60_000 });
+    await retry.click();
+    await waitPhase(page, id, "Ready", 10 * 60_000);
 
-  expect(inHome(id, 'cat "$1"', file), "home file survives recovery").toBe(token);
-  await connectSessionFrame(page, id);
-  const after = await connectionStatus(page, id);
-  expect(after.leaseActive, "a new session is connected").toBe(true);
-  expect(after.leaseRef, "the new generation holds a different lease").not.toBe(before.leaseRef);
+    expect(inHome(id, 'cat "$1"', file), "home file survives recovery").toBe(token);
+    await connectSessionFrame(page, id);
+    const after = await connectionStatus(page, id);
+    expect(after.leaseActive, "a new session is connected").toBe(true);
+    expect(after.leaseRef, "the new generation holds a different lease").not.toBe(before.leaseRef);
+  } finally {
+    // Leave no running workspace of ours behind either way.
+    await stopForCleanup(page, id);
+  }
 });
