@@ -45,6 +45,11 @@ type BrokerClient interface {
 	// ReportActivity posts one session signal (input/connected/disconnect)
 	// for the lease's bound incarnation; the broker stamps receipt time.
 	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
+	// ClaimTransfer spends a minted transfer grant for the lease (method GET
+	// for a download, PUT for an upload); CompleteTransfer closes it with the
+	// bytes moved.
+	ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
 }
 
 // Contract constants from design §6.

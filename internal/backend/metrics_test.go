@@ -146,6 +146,12 @@ func (stubBrokerClient) RevokeLeaseChanged(context.Context, string) (bool, error
 func (stubBrokerClient) ReportActivity(context.Context, broker.GatewayIdentity, string, broker.Fence, broker.ActivityEvent) error {
 	return errors.New("stub")
 }
+func (stubBrokerClient) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, errors.New("stub")
+}
+func (stubBrokerClient) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return errors.New("stub")
+}
 
 // TestMetrics_NotOnPublicListeners (E8): /metrics is served only on the
 // dedicated metrics listener. On the app listener the route table simply

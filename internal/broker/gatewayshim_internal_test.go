@@ -70,6 +70,18 @@ func (r *recordingSurface) ClaimStream(_ context.Context, gw GatewayIdentity, _ 
 	return 1, r.err
 }
 
+func (r *recordingSurface) ClaimTransfer(_ context.Context, gw GatewayIdentity, _, _, _ string) (TransferGrant, error) {
+	r.gotIDs = append(r.gotIDs, gw)
+	r.calls = append(r.calls, "transfer-claim")
+	return TransferGrant{}, r.err
+}
+
+func (r *recordingSurface) CompleteTransfer(_ context.Context, gw GatewayIdentity, _, _ string, _ int64, _ bool) error {
+	r.gotIDs = append(r.gotIDs, gw)
+	r.calls = append(r.calls, "transfer-complete")
+	return r.err
+}
+
 var pinned = GatewayIdentity{ID: "gateway", Audience: "session.example.test"}
 
 func TestLocalGateway_RequiresIdentity(t *testing.T) {
@@ -114,6 +126,33 @@ func TestLocalGateway_PinsIdentity(t *testing.T) {
 	}
 	if lg.Identity() != pinned {
 		t.Fatalf("Identity()=%+v", lg.Identity())
+	}
+}
+
+func TestLocalGateway_TransferPinsIdentityAndBoundsIDs(t *testing.T) {
+	const tid = "xf_abcdefghijklmnopqrstuvwxyz"
+	rs := &recordingSurface{}
+	lg, _ := NewLocalGateway(rs, pinned, "operator")
+	spoof := GatewayIdentity{ID: "operator", Audience: "evil.example.test"}
+	ctx := context.Background()
+	_, _ = lg.ClaimTransfer(ctx, spoof, "lease-1", tid, "PUT")
+	_ = lg.CompleteTransfer(ctx, spoof, "lease-1", tid, 3, true)
+	if len(rs.gotIDs) != 2 || rs.gotIDs[0] != pinned || rs.gotIDs[1] != pinned {
+		t.Fatalf("transfer calls presented %+v, want the pinned identity", rs.gotIDs)
+	}
+	for _, bad := range []string{"", "xf_bad", "xf_ABCDEFGHIJKLMNOPQRSTUVWXYZ", "xf_abcdefghijklmnopqrstuvwxy1", "../" + tid} {
+		if _, err := lg.ClaimTransfer(ctx, pinned, "lease-1", bad, "GET"); !errors.Is(err, ErrTransferInvalid) {
+			t.Errorf("claim %q err=%v", bad, err)
+		}
+		if err := lg.CompleteTransfer(ctx, pinned, "lease-1", bad, 0, true); !errors.Is(err, ErrTransferInvalid) {
+			t.Errorf("complete %q err=%v", bad, err)
+		}
+	}
+	if _, err := lg.ClaimTransfer(ctx, pinned, "a/b", tid, "GET"); !errors.Is(err, ErrLeaseInvalid) {
+		t.Errorf("bad lease id err=%v", err)
+	}
+	if len(rs.calls) != 2 {
+		t.Fatalf("invalid input reached the broker: %v", rs.calls)
 	}
 }
 

@@ -37,6 +37,14 @@ const spiffePrefix = "spiffe://cdi.tinyorbit.vn/gateway/"
 // mapping; the body still uses the standard api.Error JSON shape.
 const codeRevoked = api.ErrorCode("REVOKED")
 
+// Internal-only codes of the transfer routes: they share their statuses with
+// the lease errors (410, 403, 409), so the gateway tells them apart by code.
+const (
+	codeTransferInvalid = api.ErrorCode("TRANSFER_INVALID")
+	codeTransferDenied  = api.ErrorCode("TRANSFER_DENIED")
+	codeTransferBusy    = api.ErrorCode("TRANSFER_BUSY")
+)
+
 // DefaultOperatorCN is the client-certificate CN identifying the operator
 // on the workspace-scoped endpoints (revoke/drain). Those routes refuse any
 // other identity, and the gateway-scoped routes refuse the operator CN —
@@ -61,6 +69,10 @@ type BrokerAPI interface {
 	// DrainStatus reports gateway-reported open stream count for the
 	// workspace. Operator-only route.
 	DrainStatus(ctx context.Context, workspaceUID broker.PlatformID) (openStreams int, drained bool, err error)
+	// ClaimTransfer spends a minted transfer grant for the calling gateway's
+	// lease; CompleteTransfer closes it with the bytes moved.
+	ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
 }
 
 // Config wires the internal API handler.
@@ -107,6 +119,8 @@ func NewHandler(cfg Config) http.Handler {
 	mux.HandleFunc("GET /internal/v1/broker/leases/{id}/target", s.target)
 	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/revoke", s.revoke)
 	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/activity", s.activity)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/transfers/{tid}/claim", s.claimTransfer)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/transfers/{tid}/complete", s.completeTransfer)
 	mux.HandleFunc("POST /internal/v1/broker/workspaces/{uid}/revoke", s.revokeWorkspace)
 	mux.HandleFunc("GET /internal/v1/broker/workspaces/{uid}/drain", s.drainWorkspace)
 	return api.RequestID(s.identify(s.logRequests(mux)))
@@ -295,10 +309,18 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 // brokerError maps domain errors onto the contract status table:
 // 401 invalid/expired ticket, 403 denied/revoked-ticket, 404 unknown lease,
 // 409 stale binding / connection-in-use, 410 dead lease, 503 stale view.
+// The transfer errors reuse 410/403/409 under their own internal codes
+// (TRANSFER_INVALID, TRANSFER_DENIED, TRANSFER_BUSY).
 func brokerError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, broker.ErrTicketInvalid), errors.Is(err, broker.ErrTicketExpired):
 		writeErr(w, r, http.StatusUnauthorized, api.CodeUnauthenticated, "ticket invalid, used or expired")
+	case errors.Is(err, broker.ErrTransferInvalid):
+		writeErr(w, r, http.StatusGone, codeTransferInvalid, "transfer invalid, used or expired")
+	case errors.Is(err, broker.ErrTransferDenied):
+		writeErr(w, r, http.StatusForbidden, codeTransferDenied, "transfer denied by policy")
+	case errors.Is(err, broker.ErrTransferBusy):
+		writeErr(w, r, http.StatusConflict, codeTransferBusy, "a transfer is already in progress")
 	case errors.Is(err, broker.ErrRevoked):
 		writeErr(w, r, http.StatusGone, codeRevoked, "lease or ticket revoked")
 	case errors.Is(err, broker.ErrDenied):
@@ -485,6 +507,85 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		default:
 			brokerError(w, r, err)
 		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// transferID validates the {tid} path value of the transfer routes.
+func transferID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tid := r.PathValue("tid")
+	if !broker.TransferIDOK(tid) {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad transfer id")
+		return "", false
+	}
+	return tid, true
+}
+
+type claimTransferRequest struct {
+	Method string `json:"method"`
+}
+
+// claimTransfer spends a minted transfer grant for the calling gateway's
+// lease. Errors: 400 bad ids or method, 403 denied (foreign gateway or
+// policy), 409 stale binding or another transfer live, 410 dead lease or
+// invalid grant, 503 stale binding view.
+func (s *server) claimTransfer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id, ok := leaseID(w, r)
+	if !ok {
+		return
+	}
+	tid, ok := transferID(w, r)
+	if !ok {
+		return
+	}
+	var req claimTransferRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodPut {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "method must be GET or PUT")
+		return
+	}
+	grant, err := s.cfg.Broker.ClaimTransfer(r.Context(), gatewayFrom(r.Context()), id, tid, req.Method)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, grant)
+}
+
+type completeTransferRequest struct {
+	Bytes int64 `json:"bytes"`
+	OK    bool  `json:"ok"`
+}
+
+// completeTransfer closes a claimed grant with the bytes moved.
+func (s *server) completeTransfer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id, ok := leaseID(w, r)
+	if !ok {
+		return
+	}
+	tid, ok := transferID(w, r)
+	if !ok {
+		return
+	}
+	var req completeTransferRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Bytes < 0 {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bytes must not be negative")
+		return
+	}
+	if err := s.cfg.Broker.CompleteTransfer(r.Context(), gatewayFrom(r.Context()), id, tid, req.Bytes, req.OK); err != nil {
+		brokerError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

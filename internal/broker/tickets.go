@@ -223,6 +223,9 @@ type Broker struct {
 	// session digest on each recorded "input" activity event (D18); nil
 	// disables it.
 	inputHook func(ctx context.Context, principal, sessionDigest string)
+	// transferPolicy re-resolves the file-transfer policy at claim time;
+	// nil refuses every claim (fail closed).
+	transferPolicy TransferPolicyResolver
 
 	synthOnce  sync.Once
 	synthCreds *synthesizedCredentials

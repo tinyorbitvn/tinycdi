@@ -94,6 +94,13 @@ type fakeBroker struct {
 	// deterministic rendezvous for the attach-vs-reap race test.
 	revokeGate    chan struct{}
 	revokeEntered chan struct{}
+
+	// File transfers: transfers maps a transfer id to the grant ClaimTransfer
+	// returns once (single use); claimErr, when set, refuses every claim;
+	// completed records each CompleteTransfer call in order.
+	transfers map[string]broker.TransferGrant
+	claimErr  error
+	completed []transferDone
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -109,10 +116,44 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		epochs:    map[string]uint64{},
 		ownerTabs: map[string]string{},
 		renewBy:   map[string]int{},
+		transfers: map[string]broker.TransferGrant{},
 		upstream:  httptest.NewTLSServer(http.HandlerFunc(fakeUpstream)),
 	}
 	t.Cleanup(fb.upstream.Close)
 	return fb
+}
+
+type transferDone struct {
+	id    string
+	bytes int64
+	ok    bool
+}
+
+func (f *fakeBroker) ClaimTransfer(_ context.Context, _ broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return broker.TransferGrant{}, f.claimErr
+	}
+	g, ok := f.transfers[transferID]
+	if !ok || (method == http.MethodPut) != (g.Direction == "upload") {
+		return broker.TransferGrant{}, broker.ErrTransferInvalid
+	}
+	delete(f.transfers, transferID) // single use
+	return g, nil
+}
+
+func (f *fakeBroker) CompleteTransfer(_ context.Context, _ broker.GatewayIdentity, _, transferID string, bytesDone int64, ok bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completed = append(f.completed, transferDone{transferID, bytesDone, ok})
+	return nil
+}
+
+func (f *fakeBroker) completions() []transferDone {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]transferDone(nil), f.completed...)
 }
 
 // scriptTicket makes ticket redeemable into a lease for wsUID and resolves
