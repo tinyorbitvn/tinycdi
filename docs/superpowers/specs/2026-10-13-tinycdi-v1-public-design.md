@@ -61,7 +61,7 @@ Out of scope:
 | ID | Item | Source |
 |---|---|---|
 | W0.1 | Squash migrations into one baseline schema | new (no upgrade path) |
-| W0.2 | CRD `cdi.tinyorbit.vn/v1`, `v1alpha1` removed | roadmap "later 1.x" |
+| W0.2 | CRD `workspaces.cdi.tinyorbit.vn/v1`, `v1alpha1` removed | roadmap "later 1.x" |
 | W0.3 | `/v1` API redesign (paging, ETag, error envelope, `:action`) | client-side paging limit; If-Match quirk |
 | W0.4 | Portal on the new API | follows W0.3 |
 | W0.5 | Chart 1.0.0: deprecated values/env removed; `ClusterOnly` restricted by default | SR-2-F8 deferral |
@@ -110,15 +110,17 @@ W0.2–W0.4.
 
 ### W0.2 CRD `v1`
 
-- `api/v1alpha1` → `api/v1` for `Workspace` and `WorkspaceTemplate`. The
+- `api/v1alpha1` → `api/v1` (group `workspaces.cdi.tinyorbit.vn`) for `Workspace` and `WorkspaceTemplate`. The
   operator serves and stores `v1` only.
 - Removed from the schema and code:
-  - the node-selector annotation path;
+  - the chart's leftover legacy `templates[].nodeSelector` rejection (the
+    annotation path itself is already gone from code);
   - the session-policy snapshot fallback (`buildPod` reads `spec.sessionPolicy`
-    only);
-  - the legacy catalog-name label handling (`internal/operator/
-    workspace_controller.go`);
-  - `DeprecatedServiceAccount` handling.
+    only; the backend always writes it);
+  - the legacy catalog-name label fallback in `snapshotStale` and
+    `resolveTemplate` (`internal/operator/workspace_controller.go`).
+- `podSpecBuiltEqual`'s `DeprecatedServiceAccount` normalization stays. It
+  normalizes a Kubernetes core field and is not a TinyCDI legacy path.
 - `spec.sessionPolicy` carries a live `fileTransfer` channel.
   `WorkspaceTemplate` gains `spec.fileTransferPolicy` (default `Disabled`).
 - Regenerate the deepcopy code and `config/crd/bases`. Update the RBAC markers.
@@ -141,10 +143,14 @@ handlers. A new ADR (§6, C3) records these conventions:
   - missing → 428 `precondition_required`;
   - stale → 412 `precondition_failed`;
   - `If-Match: *` is accepted only when the resource does not exist.
-  This replaces the unquoted opaque `version` token.
+  This replaces the unquoted opaque `version` token. Quota, user-limits
+  (which today has no precondition) and session-policy all adopt it.
 - **Errors.** One envelope, `{"error": {"code", "message", "details"}}`. `code`
   is a closed enum shared with the portal.
-- **Actions.** Custom methods use `:verb` paths: `POST
+- **Actions.** Custom methods use `:verb` paths. `net/http.ServeMux` cannot
+  match `{id}:verb` inside one segment, so a small dispatcher in `internal/api`
+  registers `POST /v1/workspaces/{ref}` and splits `ref` on the last `:`.
+  Paths: `POST
   /v1/workspaces/{id}:start`, `:stop`, `/v1/data/{id}:attach`, `:purge`,
   `/v1/admin/tenants/{t}/session-policy:apply`.
 - **Unchanged contracts:** cookies (`__Host-` only), CSRF (`X-CSRF-Token`),
@@ -177,9 +183,15 @@ Tests:
 - Chart version `1.0.0`.
 - Remove every deprecated value. The chart README gets a "removed values" table
   that the public release notes copy.
-- `runtime.networkProfiles.clusterOnly` defaults to restricted egress. Replace
-  `TestClusterOnlyEgressDeprecationNotice` with a test that pins the restricted
-  default.
+- `runtime.networkProfiles.clusterOnly` defaults to restricted egress. With no
+  configured selectors, the operator confines ClusterOnly egress to namespaces
+  labelled `workspaces.cdi.tinyorbit.vn/tenant` (DNS is unaffected; external
+  IPs stay denied). The chart value
+  `runtime.networkProfiles.clusterOnly.unrestricted: true` opts back into
+  any-pod egress. Replace `TestClusterOnlyEgressDeprecationNotice` with a test
+  that pins the restricted default.
+- Remove the CI `upgrade` job together with `hack/quickstart/upgrade-test.sh`
+  and `smoke/upgrade.spec.ts`. There is no previous release to upgrade from.
 - Remove legacy env names from `internal/backend/config.go`
   (`TCDI_GW_CONTROL_TOKEN`, `TCDI_LOGIN_KEY_FILES`) and their chart rendering.
 - Tests: the chart Go tests, helm lint, and the render-guard tests.
