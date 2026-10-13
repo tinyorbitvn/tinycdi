@@ -10,7 +10,7 @@
 // browser-shim/policy subPath mounts, and readOnlyRootFilesystem.
 //
 // Image-bound suite, gated on TCDI_IT_KASM_IMAGE (a digest-pinned
-// kasmweb/* ref, e.g. kasmweb/chromium@sha256:… — unset = skip). The pull
+// kasmweb/* ref, e.g. kasmweb/chrome@sha256:… — unset = skip). The pull
 // is ~1–2 GB compressed / ~4.5 GB uncompressed, so the test first checks
 // for >= 10 GiB of free disk and removes the pulled image on exit when it
 // did the pulling. The adapter image defaults to tcdi/kasm-adapter:it
@@ -19,7 +19,7 @@
 // Containers/volumes are labelled tcdi.it=w15 and prefixed tcdi-it-w15-;
 // everything is removed on exit.
 //
-//	Run:  TCDI_IT_KASM_IMAGE=kasmweb/chromium@sha256:<digest> \
+//	Run:  TCDI_IT_KASM_IMAGE=kasmweb/chrome@sha256:<digest> \
 //	        TCDI_IT_BUILD=1 \
 //	        go test -tags=integration ./tests/integration \
 //	        -run TestKasmAdapterChromium -v

@@ -82,8 +82,9 @@ templates:
       experience: Desktop    # was: Browser
 ```
 
-`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
-pin — lag 4), so a Browser template pinned to it only has option B. See
+The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
+155 pin — lag 1) but the allowlist ships empty, so a Browser template
+pinned to it needs option A (allowlist the ref) or option B. See
 `docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
 gate" and `docs/kasm-images.md`.
 
@@ -669,8 +670,8 @@ binary), and the runtime `image:` as a literal digest-pinned
 from Docker Hub — never mirrored/republished). The digest must be a
 `build/kasm-catalog.txt` entry — CI enforces the catalog (digest pin,
 trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
-ships a complete `kasmweb/chromium` example (a **Desktop**-experience
-seed — the image is desktop-class under E13).
+ships a complete `kasmweb/chrome` example (a **Desktop**-experience
+seed; the image is browser-class but not on the empty allowlist).
 
 ### Node-profile installer (`nodeProfiles.install`) — default OFF
 

@@ -803,8 +803,9 @@ templates:
       experience: Desktop    # was: Browser
 ```
 
-`kasmweb/chromium` is desktop-class today (Chromium 150 vs the native 154
-pin — lag 4), so a Browser template pinned to it only has option B. If no
+The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
+155 pin — lag 1) but the allowlist ships empty, so a Browser template
+pinned to it needs option A (allowlist the ref) or option B. If no
 cataloged browser image meets the gate the allowlist stays empty — see
 `docs/kasm-images.md`.
 
