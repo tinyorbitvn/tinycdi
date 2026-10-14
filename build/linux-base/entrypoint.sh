@@ -11,8 +11,9 @@
 #      (~/.kasmpasswd, ~/.vnc/kasmvnc.yaml): a stale file left on the
 #      persistent home volume must never override the mounted Secret or
 #      the system policy in /etc/kasmvnc/kasmvnc.yaml.
-#   4. Start KasmVNC (:1, HTTPS :8443) and supervise the X server; exit so
-#      the orchestrator restarts us when the display dies.
+#   4. Start KasmVNC (:1, HTTPS on 127.0.0.1:8444 only) and tcdi-xferd, which
+#      owns :8443 and proxies the desktop to it; supervise both and exit so
+#      the orchestrator restarts us when either dies.
 set -euo pipefail
 
 # File-descriptor bound for the whole process tree: Xvnc multiplexes
@@ -164,7 +165,17 @@ kasmvncserver ":$DISPLAY_NUM" \
   -xstartup /opt/tcdi/xstartup.sh \
   -SecurityTypes None >> "$HOME/.vnc/entrypoint.log" 2>&1
 
+# tcdi-xferd owns :8443 (ADR 0010 §5 (i)): it serves /xfer/ against
+# $HOME/transfers and reverse-proxies everything else to KasmVNC, which
+# listens on 127.0.0.1:8444 only. The pod's published contract (one HTTPS
+# port, the Secret's own cert) is unchanged.
+XFERD_BIN="${TCDI_XFERD_BIN:-/usr/local/bin/tcdi-xferd}"
+[ -x "$XFERD_BIN" ] || fail "transfer helper missing: $XFERD_BIN"
+"$XFERD_BIN" >> "$HOME/.vnc/xferd.log" 2>&1 &
+XFERD_PID=$!
+
 shutdown() {
+  kill "$XFERD_PID" 2>/dev/null || true
   kasmvncserver -kill ":$DISPLAY_NUM" >/dev/null 2>&1 || true
   exit 0
 }
@@ -174,9 +185,10 @@ tail -F "$HOME"/.vnc/*.log 2>/dev/null &
 TAILPID=$!
 
 # Supervise Xvnc (the kasmvncserver launcher execs /usr/bin/Xvnc, which also
-# serves the HTTPS/websocket endpoint). On death: wait one healthcheck grace
-# window so Docker records "unhealthy", then exit for restart semantics.
-while pgrep -x Xvnc >/dev/null 2>&1; do sleep 2; done
+# serves the loopback HTTPS/websocket endpoint) and tcdi-xferd. When either
+# dies: wait one healthcheck grace window so Docker records "unhealthy", then
+# exit for restart semantics.
+while pgrep -x Xvnc >/dev/null 2>&1 && kill -0 "$XFERD_PID" 2>/dev/null; do sleep 2; done
 sleep 12
 kill "$TAILPID" 2>/dev/null || true
 shutdown

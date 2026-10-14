@@ -252,7 +252,7 @@ func kasmInit(t *testing.T, adapterVol string) {
 		adapterImage)
 	out := mustExecListVol(t, adapterVol)
 	for _, f := range []string{"entrypoint.sh", "healthcheck.sh", "xstartup.sh",
-		"browser-shim.sh", "chromium-policy.json"} {
+		"browser-shim.sh", "chromium-policy.json", "tcdi-xferd"} {
 		if !strings.Contains(out, f) {
 			t.Fatalf("adapter init did not install %s into the shared volume; contents:\n%s", f, out)
 		}
@@ -445,7 +445,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		v := adapterVol()
 		out := mustExecListVol(t, v)
 		for _, want := range []string{"entrypoint.sh", "healthcheck.sh", "xstartup.sh",
-			"browser-shim.sh", "chromium-policy.json"} {
+			"browser-shim.sh", "chromium-policy.json", "tcdi-xferd"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("adapter volume missing %s:\n%s", want, out)
 			}
@@ -505,13 +505,13 @@ func TestKasmAdapterChromium(t *testing.T) {
 			t.Fatalf("web-root-adjacent dir writable: %s", out)
 		}
 		// KASM-9: KasmVNC 1.4.x cannot disable the UDP transport (it binds
-		// :8443/udp like the native images — the TCP-only NetworkPolicy is
+		// :8444/udp like the native images — the TCP-only NetworkPolicy is
 		// the control). What the contract can assert: no OTHER UDP socket
 		// may be wildcard-bound (client sockets on a specific addr are
 		// normal transient noise).
 		if out := strings.TrimSpace(mustExec(t, c,
-			`awk 'NR>1 {split($2,a,":"); if (a[1] ~ /^0+$/ && a[2] != "20FB") print FILENAME": "$2}' /proc/net/udp /proc/net/udp6 2>/dev/null`)); out != "" {
-			t.Fatalf("unexpected wildcard-bound UDP listeners besides Xvnc :8443: %s", out)
+			`awk 'NR>1 {split($2,a,":"); if (a[1] ~ /^0+$/ && a[2] != "20FC") print FILENAME": "$2}' /proc/net/udp /proc/net/udp6 2>/dev/null`)); out != "" {
+			t.Fatalf("unexpected wildcard-bound UDP listeners besides Xvnc :8444: %s", out)
 		}
 		// Owner-gated management routes stay closed for the write-only user.
 		if out := strings.TrimSpace(mustExec(t, c,
@@ -540,6 +540,14 @@ func TestKasmAdapterChromium(t *testing.T) {
 		// the soft RLIMIT_NOFILE below FD_SETSIZE so a reconnect burst
 		// degrades to EMFILE refusals instead of a select() stack overwrite.
 		assertFdLimitBelowSelectSize(t, c)
+		assertNoSecret(t, c, password)
+	})
+
+	t.Run("TransferHelper", func(t *testing.T) {
+		secret, password := selfSignedSecret(t)
+		c := runKasmContainer(t, runID, "xfer", kasmImage, adapterVol(), secret, "", layout, xferEnv...)
+		waitHealthyTimeout(t, c, kasmRunTimeout)
+		assertXferContract(t, c, secret)
 		assertNoSecret(t, c, password)
 	})
 
@@ -773,7 +781,7 @@ func TestKasmAdapterChromium(t *testing.T) {
 		if strings.TrimSpace(out) != "dir" {
 			t.Fatalf("planted ~/.vnc symlink survived boot: %s", out)
 		}
-		mustExec(t, c2, "grep -q 'websocket_port: 8443' /home/workspace/.vnc/kasmvnc.yaml")
+		mustExec(t, c2, "grep -q 'websocket_port: 8444' /home/workspace/.vnc/kasmvnc.yaml")
 
 		code, err := httpsGet(t, c2, "kasm_user", password)
 		if err != nil || code != http.StatusOK {

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Readiness gate: succeed ONLY when the X display is alive AND the KasmVNC
-# HTTPS endpoint answers on :8443. Either leg failing => not ready.
+# HTTPS endpoint answers on :8443 (through tcdi-xferd, so the probe covers
+# both hops). Either leg failing => not ready.
 # (kasmvncserver itself uses xdpyinfo for the display check.)
 set -u
 

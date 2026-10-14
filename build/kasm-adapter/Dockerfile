@@ -1,7 +1,8 @@
 # Kasm workspace adapter image (tinycdi-kasm-adapter).
 #
 # Delivers the adapter scripts (entrypoint.sh, healthcheck.sh, xstartup.sh)
-# into a shared emptyDir mounted at /opt/tcdi for templates using
+# and the tcdi-xferd transfer helper (static, from cmd/tcdi-xferd) into a
+# shared emptyDir mounted at /opt/tcdi for templates using
 # spec.linux.adapter=kasm — the initContainer for UNMODIFIED kasmweb/*
 # runtime images (docs/kasm-images.md). Static binary, scratch-sized.
 #
@@ -20,9 +21,13 @@ RUN go mod download
 COPY build/kasm-adapter/ ./build/kasm-adapter/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a -o install-adapter ./build/kasm-adapter
+COPY cmd/tcdi-xferd/ ./cmd/tcdi-xferd/
+COPY internal/xferd/ ./internal/xferd/
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o tcdi-xferd ./cmd/tcdi-xferd
 
 FROM ${BASE_IMAGE}
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES.md SOURCE-OFFER /usr/share/doc/tinycdi/
 COPY --from=builder /workspace/install-adapter /install-adapter
+COPY --from=builder /workspace/tcdi-xferd /tcdi-xferd
 USER 65532:65532
 ENTRYPOINT ["/install-adapter"]

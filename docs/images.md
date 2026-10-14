@@ -92,10 +92,35 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
 
 ## Runtime contract
 
-- HTTPS streaming endpoint on container port **8443** (websocket transport
-  only — KasmVNC 1.5.0 has no HTTP tunnel fallback). Auth = HTTP Basic against
-  a kasmpasswd file holding one write-only (`w`, non-owner) user; owner-gated
-  `/api/*` management routes therefore deny every request.
+- HTTPS streaming endpoint on container port **8443**, served by
+  `tcdi-xferd` (`/usr/local/bin/tcdi-xferd`, a static Go helper built from
+  `cmd/tcdi-xferd`) with the Secret's own certificate. It reverse-proxies the
+  desktop to KasmVNC, which listens on **`127.0.0.1:8444` only** (TLS, the
+  same staged certificate, pinned by the helper). Websocket transport only —
+  KasmVNC 1.5.0 has no HTTP tunnel fallback. Auth = HTTP Basic against a
+  kasmpasswd file holding one write-only (`w`, non-owner) user; owner-gated
+  `/api/*` management routes therefore deny every request. The helper answers
+  a desktop request without Basic credentials with its own `401` and never
+  forwards it, so anonymous probes cannot trip KasmVNC's loopback
+  brute-force blacklist; it passes the gateway's `X-Forwarded-*`,
+  `Forwarded` and `X-Real-Ip` headers through unchanged.
+- **File transfer** (ADR 0010 §5 (i)) on the same port:
+  `GET /xfer/files/{name}` returns the file's bytes with `Content-Length`;
+  `PUT /xfer/files/{name}` writes the request body and returns
+  `{"bytes":n}`. Both require the header `X-Tcdi-Xfer-Token` carrying the
+  Secret file `xfer-token` (compared in constant time, stripped before any
+  request reaches KasmVNC, never logged). `{name}` is one file name in the
+  transfer folder **`$HOME/transfers`** (no `/`, `\`, `;`, `%`, `..`, NUL or
+  control characters); the helper opens it through `os.Root`, refuses a
+  `transfers` path that is a symlink, writes uploads to a temp file and
+  renames them into place. The local policy floor comes from the
+  operator-rendered env `TCDI_XFER_POLICY`
+  (`Disabled|Upload|Download|Bidirectional`; unset or unknown refuses every
+  transfer) and `TCDI_XFER_MAX_BYTES` (hard cap; `0` or unset refuses).
+  Errors: `400` bad name, `401` bad credential, `403` direction refused by
+  the policy floor, `404` no such file, `409` the name is not a regular
+  file, `413` over the cap, `503` transfer folder unusable. The entrypoint
+  supervises the helper next to Xvnc: if either dies the container exits.
 - `HEALTHCHECK` (`/opt/tcdi/healthcheck.sh`) succeeds only while **both** the
   X display (`xdpyinfo -display :1`) and the endpoint answer. If the display
   dies the container goes unhealthy, then exits for restart semantics. The
@@ -116,6 +141,7 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   | `password` | yes | KasmVNC Basic-auth password |
   | `username` | no | default `kasm_user` |
   | `tls.crt` / `tls.key` | yes | endpoint TLS material |
+  | `xfer-token` | yes | transfer credential; read by `tcdi-xferd` only (it exits at start without it) |
 
   One trailing line ending (`\n` or `\r\n`) on `password`/`username` is
   ignored — the value itself is used verbatim; an empty `password` is
@@ -290,6 +316,14 @@ correct coverage, not native typography). Proper Noto CJK therefore
 needs a baseline re-issue by decision; the baseline cannot absorb added
 software under its own rule.
 
+**Transfer helper (added 2026-10-14, F4).** `linux-base` ships the static
+`tcdi-xferd` helper (`/usr/local/bin/tcdi-xferd`, built with
+`-trimpath -ldflags="-s -w"`): one 6.95 MB layer, which `browser` and
+`linux-desktop` inherit; no other package or software change. Measured on
+the containerd `.Size` metric `TestLinuxRuntimeBrowserBaseline` uses, the
+browser image is 1,899,976,992 bytes against the 1,890,040,137 baseline
+(+0.53 %, inside the 2 % headroom), so the baseline is untouched.
+
 Under use (measured on the new desktop): opening a terminal, Thunar and
 Firefox (three tabs) bursts to ~2 CPU for ~40 s while Firefox starts, then
 settles at 20–40 mCPU and a **555 MiB working set** (peak 888 MiB including
@@ -337,7 +371,11 @@ What the base fixes, and what a derived image must keep:
   it). Replace the file; do not change the entrypoint.
 - **Leave `ENTRYPOINT`, `HEALTHCHECK` and the `USER` alone.** The operator
   depends on `/opt/tcdi/entrypoint.sh` (secrets as files, TLS and kasmpasswd
-  staged on `/run/tcdi`, endpoint on 8443) and `/opt/tcdi/healthcheck.sh`.
+  staged on `/run/tcdi`, `tcdi-xferd` on 8443 in front of KasmVNC on
+  `127.0.0.1:8444`) and `/opt/tcdi/healthcheck.sh`. An image built `FROM`
+  the base inherits the transfer helper and its contract; one that replaces
+  the entrypoint must start `/usr/local/bin/tcdi-xferd` itself and keep
+  KasmVNC on loopback.
 - **Write only to** `$HOME`, `/tmp`, `/run/tcdi` and `/dev/shm`; point
   `XDG_RUNTIME_DIR` at a directory under `/run/tcdi` (as the desktop profile
   does) so the image also runs on a read-only root.
@@ -381,6 +419,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
 head -c 24 /dev/urandom | base64 > "$SECRETS_DIR/password"
 printf 'kasm_user\n' > "$SECRETS_DIR/username"
+head -c 32 /dev/urandom | base64 > "$SECRETS_DIR/xfer-token"
 docker volume create ws-home
 docker run -d --name ws -p 127.0.0.1:0:8443 \
   -v "$SECRETS_DIR:/run/secrets/tcdi:ro" \
@@ -413,7 +452,11 @@ before changing anything under `build/linux-*`/`build/browser`.
   the base image), display-death → not-ready, Chromium sandbox engaged (nested
   userns + seccomp filter, uid 1000), restart keeping `/home/workspace` while
   losing rootfs scratch, stale in-home credential/config not overriding the
-  mounted Secret, bounded shm, no secret in logs/env.
+  mounted Secret, bounded shm, no secret in logs/env, and the transfer
+  helper contract (`TransferHelper`: credential required, upload/download
+  round trip on the home volume, jail and cap refusals with no leftovers,
+  KasmVNC on `127.0.0.1:8444` only, no credential in the logs; the kasm
+  adapter suite runs the same assertions per catalog entry).
 - `TestLinuxRuntimeDesktop` — the desktop experience on a read-only root: the
   session starts, the panel and desktop windows exist (read off the window
   manager's client list with `xprop`), the panel's launchers open a terminal,

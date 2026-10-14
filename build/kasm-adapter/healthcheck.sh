@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Readiness gate for the kasm-adapter runtime: succeed ONLY when the X
-# display is alive AND the KasmVNC HTTPS endpoint answers on :8443.
+# display is alive AND the KasmVNC HTTPS endpoint answers on :8443 (through
+# tcdi-xferd, so the probe covers both hops).
 set -u
 
 DISPLAY_NUM="${TCDI_DISPLAY:-1}"

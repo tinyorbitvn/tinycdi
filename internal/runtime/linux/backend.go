@@ -788,13 +788,21 @@ func generateCredentials(uid CRUID) (map[string][]byte, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
+	// The transfer credential (ADR 0010 §5) is separate from the KasmVNC
+	// password: only tcdi-xferd reads it, and the gateway injects it as
+	// X-Tcdi-Xfer-Token on the transfer leg.
+	tok := make([]byte, 32)
+	if _, err := rand.Read(tok); err != nil {
+		return nil, err
+	}
 	// Secret files are newline-terminated: kasmvncpasswd reads its password
 	// via getpass(), which requires a '\n' before EOF.
 	return map[string][]byte{
-		"username": []byte("kasm_user\n"),
-		"password": []byte(base64.RawURLEncoding.EncodeToString(raw) + "\n"),
-		"tls.crt":  pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		"tls.key":  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		"username":   []byte("kasm_user\n"),
+		"password":   []byte(base64.RawURLEncoding.EncodeToString(raw) + "\n"),
+		"tls.crt":    pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		"tls.key":    pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		"xfer-token": []byte(base64.RawURLEncoding.EncodeToString(tok) + "\n"),
 	}, nil
 }
 

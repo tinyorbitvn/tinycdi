@@ -340,7 +340,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			types.NamespacedName{Name: linux.SecretName(ws.UID), Namespace: ns}, sec); err != nil {
 			t.Fatalf("runtime secret: %v", err)
 		}
-		for _, k := range []string{"username", "password", "tls.crt", "tls.key"} {
+		for _, k := range []string{"username", "password", "tls.crt", "tls.key", "xfer-token"} {
 			if len(sec.Data[k]) == 0 {
 				t.Fatalf("secret missing key %q", k)
 			}

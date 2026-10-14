@@ -3,9 +3,10 @@
 
 // Command install-adapter is the tinycdi-kasm-adapter init image's entrypoint:
 // it writes the kasm-adapter scripts (entrypoint.sh, healthcheck.sh,
-// xstartup.sh) into a shared volume mounted at $TCDI_ADAPTER_DIR
-// (default /opt/tcdi), which the runtime pod's desktop container then mounts
-// read-only. The kasmweb/* image itself is never modified — the operator
+// xstartup.sh) and the tcdi-xferd transfer helper binary (from
+// $TCDI_XFERD_SRC, default /tcdi-xferd) into a shared volume mounted at
+// $TCDI_ADAPTER_DIR (default /opt/tcdi), which the runtime pod's desktop
+// container then mounts read-only. The kasmweb/* image itself is never modified — the operator
 // injects the adapter with initContainer semantics (docs/kasm-images.md).
 package main
 
@@ -56,7 +57,18 @@ func main() {
 			fatal("write %s: %v", p, err)
 		}
 	}
-	fmt.Printf("install-adapter: wrote %d adapter scripts to %s\n", len(scripts), dir)
+	src := os.Getenv("TCDI_XFERD_SRC")
+	if src == "" {
+		src = "/tcdi-xferd"
+	}
+	bin, err := os.ReadFile(src)
+	if err != nil {
+		fatal("read %s: %v", src, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tcdi-xferd"), bin, 0o755); err != nil {
+		fatal("write tcdi-xferd: %v", err)
+	}
+	fmt.Printf("install-adapter: wrote %d adapter files to %s\n", len(scripts)+1, dir)
 }
 
 func fatal(format string, args ...any) {

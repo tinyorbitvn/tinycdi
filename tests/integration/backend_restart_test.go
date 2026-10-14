@@ -543,9 +543,10 @@ func (f *restartFixture) seedWorkspace(t *testing.T, upPort int32) {
 			Namespace: restartNamespace,
 		},
 		StringData: map[string]string{
-			"username": "kasm_user",
-			"password": "it-upstream-secret",
-			"tls.crt":  string(f.upCertPEM),
+			"username":   "kasm_user",
+			"password":   "it-upstream-secret",
+			"tls.crt":    string(f.upCertPEM),
+			"xfer-token": "xt-test",
 		},
 	}
 	if err := k8sClient.Create(ctx, sec); err != nil {

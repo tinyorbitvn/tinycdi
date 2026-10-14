@@ -147,7 +147,7 @@ func requireImage(t *testing.T, image, imageDir string) {
 }
 
 // selfSignedSecret builds a secret dir holding password/username/tls.crt/
-// tls.key - the same file layout the pod Secret volume presents.
+// tls.key/xfer-token - the same file layout the pod Secret volume presents.
 func selfSignedSecret(t *testing.T) (dir, password string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -184,6 +184,7 @@ func selfSignedSecret(t *testing.T) (dir, password string) {
 	password = base64.RawURLEncoding.EncodeToString(raw)
 	writeFile(t, filepath.Join(dir, "password"), []byte(password+"\n"))
 	writeFile(t, filepath.Join(dir, "username"), []byte("kasm_user\n"))
+	writeFile(t, filepath.Join(dir, "xfer-token"), []byte("xt-"+password+"\n"))
 	// A pod Secret volume is root-owned 0755/0644 (defaultMode): the
 	// runtime uid can traverse and read it no matter which uid launched
 	// the container. Mirror that — the test user's uid differs across
@@ -193,7 +194,7 @@ func selfSignedSecret(t *testing.T) (dir, password string) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"tls.crt", "tls.key", "password", "username"} {
+	for _, f := range []string{"tls.crt", "tls.key", "password", "username", "xfer-token"} {
 		if err := os.Chmod(filepath.Join(dir, f), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -433,6 +434,68 @@ func assertNoSecret(t *testing.T, name, password string) {
 	}
 }
 
+// xferEnv is the pod env the operator renders from the resolved transfer
+// policy (TCDI_XFER_POLICY / TCDI_XFER_MAX_BYTES); the image tests set it by
+// hand. 1 MiB keeps the over-cap probe cheap.
+var xferEnv = []string{"-e", "TCDI_XFER_POLICY=Bidirectional", "-e", "TCDI_XFER_MAX_BYTES=1048576"}
+
+// assertXferContract drives the in-pod transfer helper through the published
+// :8443 port (ADR 0010 §5 (i)): credential required, upload/download round
+// trip on the home volume, jail refusals, hard cap with no leftovers, and
+// KasmVNC reachable only on loopback :8444. secretDir is the host directory
+// mounted at /run/secrets/tcdi.
+func assertXferContract(t *testing.T, c, secretDir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(secretDir, "xfer-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSpace(string(raw))
+	const base = "https://127.0.0.1:8443/xfer/files/"
+	hdr := `-H "X-Tcdi-Xfer-Token: $(cat /run/secrets/tcdi/xfer-token)"`
+	code := func(args string) string {
+		return strings.TrimSpace(mustExec(t, c, "curl -sk --path-as-is -o /dev/null -w '%{http_code}' "+args+" || true"))
+	}
+	if got := code("-X PUT --data-binary hello " + base + "a.txt"); got != "401" {
+		t.Fatalf("upload without the credential: %s, want 401", got)
+	}
+	if got := code(`-X PUT --data-binary hello -H "X-Tcdi-Xfer-Token: wrong" ` + base + "a.txt"); got != "401" {
+		t.Fatalf("upload with a wrong credential: %s, want 401", got)
+	}
+	if out := strings.TrimSpace(mustExec(t, c, "curl -sk -X PUT --data-binary hello "+hdr+" "+base+"a.txt")); out != `{"bytes":5}` {
+		t.Fatalf("upload = %q, want {\"bytes\":5}", out)
+	}
+	if out := mustExec(t, c, "curl -sk "+hdr+" "+base+"a.txt"); out != "hello" {
+		t.Fatalf("download = %q, want hello", out)
+	}
+	mustExec(t, c, "grep -qx hello /home/workspace/transfers/a.txt")
+	for _, name := range []string{"..%2Fsecret", "%2E%2E", "a%2Fb"} {
+		if got := code("-X PUT --data-binary x " + hdr + " " + base + name); got != "400" {
+			t.Fatalf("jail escape %q: %s, want 400", name, got)
+		}
+	}
+	if got := code(hdr + " " + base + "missing.bin"); got != "404" {
+		t.Fatalf("missing file: %s, want 404", got)
+	}
+	if got := strings.TrimSpace(mustExec(t, c, "head -c 1048577 /dev/zero | curl -sk -o /dev/null -w '%{http_code}' -X PUT --data-binary @- "+hdr+" "+base+"big.bin || true")); got != "413" {
+		t.Fatalf("over-cap upload: %s, want 413", got)
+	}
+	if out := strings.TrimSpace(mustExec(t, c, "ls -A /home/workspace/transfers")); out != "a.txt" {
+		t.Fatalf("transfer folder after refusals = %q, want only a.txt (no temp or escaped files)", out)
+	}
+	// KasmVNC is loopback-only on :8444 (20FC); nothing but the helper
+	// listens beyond loopback on 8443 (20FB).
+	if out := strings.TrimSpace(mustExec(t, c, `awk 'NR>1 && $4=="0A" {split($2,a,":"); if (a[2]=="20FC" && a[1]!="0100007F") print $2}' /proc/net/tcp`)); out != "" {
+		t.Fatalf("KasmVNC listens beyond loopback: %s", out)
+	}
+	if out := strings.TrimSpace(mustExec(t, c, `awk 'NR>1 && $4=="0A" && $2=="0100007F:20FC" {print "up"}' /proc/net/tcp`)); out != "up" {
+		t.Fatalf("KasmVNC is not listening on 127.0.0.1:8444")
+	}
+	if strings.Contains(dockerCombined("logs", c), token) {
+		t.Fatalf("transfer credential leaked into the logs of %s", c)
+	}
+}
+
 func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 	if _, err := os.Stat(seccompFile); err != nil {
 		t.Fatalf("runtime seccomp profile missing: %s", seccompFile)
@@ -511,6 +574,14 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("base image ships profile software: %q", out)
 		}
+		assertNoSecret(t, c, password)
+	})
+
+	t.Run("TransferHelper", func(t *testing.T) {
+		secret, password := selfSignedSecret(t)
+		c := runContainer(t, runID, "xfer", baseImage, secret, "", xferEnv...)
+		waitHealthy(t, c)
+		assertXferContract(t, c, secret)
 		assertNoSecret(t, c, password)
 	})
 
@@ -644,9 +715,17 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		}
 		assertNoSecret(t, c, password)
 
-		// Control: the marker this test looks for is real. Eight anonymous
-		// requests (what the old probe sent) DO get loopback blacklisted.
+		// Anonymous requests to :8443 are answered by tcdi-xferd and never
+		// reach KasmVNC (plan ruling 24), so they cannot trip its blacklist.
 		mustExec(t, c, `for i in 1 2 3 4 5 6 7 8; do curl -sk -o /dev/null https://127.0.0.1:8443/; done; true`)
+		if log = mustExec(t, c, "cat /home/workspace/.vnc/*.log"); strings.Contains(log, "blacklisted") {
+			t.Fatalf("eight anonymous :8443 requests reached KasmVNC and tripped its blacklist:\n%s", log)
+		}
+
+		// Control: the marker this test looks for is real. Eight anonymous
+		// requests (what the old probe sent) straight to the loopback
+		// KasmVNC upstream DO get loopback blacklisted.
+		mustExec(t, c, `for i in 1 2 3 4 5 6 7 8; do curl -sk -o /dev/null https://127.0.0.1:8444/; done; true`)
 		log = mustExec(t, c, "cat /home/workspace/.vnc/*.log")
 		if !strings.Contains(log, "blacklisted") {
 			t.Fatalf("control failed: anonymous requests did not trigger the lockout, so this test proves nothing:\n%s", log)

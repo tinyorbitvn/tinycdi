@@ -177,6 +177,7 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 			TLSCA:         []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"),
 			Username:      "kasm_user",
 			Password:      "s3cret",
+			XferToken:     "xt-test",
 		},
 		lastBody: map[string]json.RawMessage{},
 	}
@@ -230,6 +231,7 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 				"caPEM":         f.target.TLSCA,
 				"username":      f.target.Username,
 				"password":      f.target.Password,
+				"xferToken":     f.target.XferToken,
 				"protocol":      f.target.Protocol,
 			})
 		case len(r.URL.Path) > 7 && r.URL.Path[len(r.URL.Path)-7:] == "/revoke":
@@ -450,6 +452,9 @@ func TestResolveTarget_HappyPath(t *testing.T) {
 	}
 	if tgt.Username != "kasm_user" || tgt.Password != "s3cret" {
 		t.Fatal("credentials not decoded")
+	}
+	if tgt.XferToken != "xt-test" {
+		t.Fatalf("transfer credential not decoded: %q", tgt.XferToken)
 	}
 }
 

@@ -169,6 +169,7 @@ type targetJSON struct {
 	TLSCA         []byte `json:"tlsCA"`
 	Username      string `json:"username"`
 	Password      string `json:"password"`
+	XferToken     string `json:"xferToken"`
 	Protocol      string `json:"protocol"`
 }
 
@@ -195,6 +196,7 @@ func (t targetJSON) target() (broker.Target, error) {
 		TLSCA:         t.caPEM(),
 		Username:      t.Username,
 		Password:      t.Password,
+		XferToken:     t.XferToken,
 	}, nil
 }
 

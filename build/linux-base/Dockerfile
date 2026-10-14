@@ -4,7 +4,8 @@
 # Profiles build FROM this image: build/browser (kiosk: openbox + Chromium
 # + Firefox ESR) and build/linux-desktop (XFCE4 desktop). A custom desktop
 # image does the same (docs/images.md, "Build a custom desktop image").
-# Contents: KasmVNC (X server + HTTPS/websocket endpoint), X utilities,
+# Contents: KasmVNC (X server + HTTPS/websocket endpoint), the tcdi-xferd
+# transfer helper (static, built from cmd/tcdi-xferd), X utilities,
 # D-Bus, fonts (DejaVu, Noto and WenQuanYi, trimmed to the faces below),
 # the entrypoint/healthcheck, the system KasmVNC policy, the non-root
 # workspace user and the setuid/setgid strip. No window manager,
@@ -15,8 +16,9 @@
 #   - KasmVNC: upstream 1.5.0 .deb verified by sha256
 #
 # Contract (see docs/images.md; unchanged by the base/profile split):
-#   - HTTPS streaming endpoint on :8443 inside the container (websocket
-#     transport only; KasmVNC 1.5.0 has no HTTP tunnel fallback).
+#   - HTTPS streaming endpoint on :8443 inside the container, served by
+#     tcdi-xferd, which proxies the desktop to KasmVNC on 127.0.0.1:8444
+#     (websocket transport only; KasmVNC 1.5.0 has no HTTP tunnel fallback).
 #   - HEALTHCHECK passes only while the X display AND the endpoint answer.
 #   - Credentials arrive as mounted Secret files under /run/secrets/tcdi
 #     (never env, never logged); runtime credential material lives on the
@@ -25,6 +27,16 @@
 #   - The session is /opt/tcdi/xstartup.sh; a profile replaces it. The
 #     base default only paints a plain root window and idles, so a profile
 #     that forgets its xstartup is visibly empty rather than broken.
+ARG BUILD_IMAGE=docker.io/library/golang:1.26@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89
+FROM ${BUILD_IMAGE} AS xferd
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/tcdi-xferd/ ./cmd/tcdi-xferd/
+COPY internal/xferd/ ./internal/xferd/
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/tcdi-xferd ./cmd/tcdi-xferd
+
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 ARG KASMVNC_VERSION=1.5.0
@@ -82,6 +94,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES.md SOURCE-OFFER /usr/share/doc/tinycdi/
+COPY --from=xferd /out/tcdi-xferd /usr/local/bin/tcdi-xferd
 COPY build/linux-base/kasmvnc.yaml /etc/kasmvnc/kasmvnc.yaml
 COPY build/linux-base/entrypoint.sh build/linux-base/healthcheck.sh build/linux-base/xstartup.sh /opt/tcdi/
 RUN chmod 755 /opt/tcdi/entrypoint.sh /opt/tcdi/healthcheck.sh /opt/tcdi/xstartup.sh \

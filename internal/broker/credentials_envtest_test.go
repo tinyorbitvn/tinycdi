@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,9 +107,10 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Data: map[string][]byte{
-			"username": []byte("kasm_user\n"),
-			"password": []byte("s3cret-pw\n"),
-			"tls.crt":  tlsCA,
+			"username":   []byte("kasm_user\n"),
+			"password":   []byte("s3cret-pw\n"),
+			"tls.crt":    tlsCA,
+			"xfer-token": []byte("xt-test\n"),
 		},
 	}
 	if err := kc.Create(ctx, sec); err != nil {
@@ -168,8 +170,8 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	db := newDB(t)
 	seedWorkspace(t, db, "tenant-a", "https://idp.example|alice", string(wsUID))
 	seedPortalSession(t, db, testPortalSession)
-	b := broker.New(db, src, broker.WithCredentialSource(
-		broker.NewK8sCredentialSource(kc, provisioning.TenantNamespaces{"tenant-a": ns.Name})))
+	credSrc := broker.NewK8sCredentialSource(kc, provisioning.TenantNamespaces{"tenant-a": ns.Name})
+	b := broker.New(db, src, broker.WithCredentialSource(credSrc))
 
 	// The informer must project the CR UID alongside the platform id.
 	var binding broker.RuntimeBinding
@@ -215,5 +217,18 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	}
 	if !bytes.Equal(target.TLSCA, tlsCA) {
 		t.Fatal("target TLSCA does not match the runtime Secret's tls.crt")
+	}
+	if target.XferToken != "xt-test" {
+		t.Fatalf("target XferToken = %q, want the operator Secret's xfer-token", target.XferToken)
+	}
+
+	// A Secret without the transfer credential is incomplete, exactly like
+	// one without a password: there is no fallback (plan ruling 25).
+	delete(sec.Data, "xfer-token")
+	if err := kc.Update(ctx, sec); err != nil {
+		t.Fatalf("drop xfer-token: %v", err)
+	}
+	if _, err := credSrc.RuntimeCredential(ctx, wsUID, binding); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("RuntimeCredential without xfer-token: err = %v, want incomplete", err)
 	}
 }

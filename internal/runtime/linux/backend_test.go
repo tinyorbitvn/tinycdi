@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -455,5 +456,23 @@ func TestObserve_ConnectionReadyNeedsReadyEndpointOfThisPod(t *testing.T) {
 				t.Errorf("reason %q, want WaitingForEndpoint", obs.Reason)
 			}
 		})
+	}
+}
+
+func TestEnsureSecret_CarriesXferTokenAndNeverRotatesIt(t *testing.T) {
+	ws := testWorkspace()
+	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).WithObjects(ws).Build()
+	b := New(c, defaultPlacementOptions())
+	sec, err := b.ensureSecret(context.Background(), ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.TrimSpace(string(sec.Data["xfer-token"]))
+	if len(tok) != 43 || tok == strings.TrimSpace(string(sec.Data["password"])) {
+		t.Fatalf("xfer-token = %q; want 32 random bytes, base64url, distinct from the password", tok)
+	}
+	again, err := b.ensureSecret(context.Background(), ws)
+	if err != nil || string(again.Data["xfer-token"]) != string(sec.Data["xfer-token"]) {
+		t.Fatalf("xfer-token rotated on the second reconcile (%v)", err)
 	}
 }
