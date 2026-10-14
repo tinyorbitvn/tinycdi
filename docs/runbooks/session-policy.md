@@ -94,6 +94,18 @@ the audit log (`/admin/audit`, actions `file.transfer.upload` and
 the phase, path, byte count and outcome. A file moves only once: each grant is
 single use and expires after 2 minutes.
 
+**Who can transfer.** Only the workspace owner can start a transfer; a
+tenant administrator gets `404` on another user's workspace. The folder
+is flat and there is no listing: a transfer names one file. A second
+transfer on the same workspace is refused while one is streaming.
+
+**Trust model.** The workspace user can read the `xfer-token` key and can
+interfere with `tcdi-xferd`, because both run as the same user in the same
+container; the checks that hold are the owner-only grant, the broker's
+claim and the gateway's byte cap, so a tampered helper can mishandle only
+that workspace's own files within the allowed direction and size. See
+[ADR 0009](../adr/0009-session-data-transfer-policy.md) for the design.
+
 ## When does a change take effect?
 
 Two clocks, by design:

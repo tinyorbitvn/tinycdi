@@ -9,7 +9,7 @@ Domain audit events go to a stdout JSONL stream
 to read that stream back, and the sink drops write failures by design.
 Administrators need a durable store they can query — one that fails
 closed, so a mutation cannot succeed unrecorded. The operator procedure
-is `docs/runbooks/audit.md`.
+is [`docs/runbooks/audit.md`](../runbooks/audit.md).
 
 ## Decision
 

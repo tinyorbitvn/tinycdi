@@ -57,13 +57,7 @@ surfaced.
      park-until-PVC ordering intact: the operator only adopts
      `spec.intentRevision` greater than the recorded applied revision, so
      a restored `applied-intent` would override the Stopped park and boot
-     the workspace before its data is in place. (Older releases also
-     latched terminal `Failed/BootDeadlineExceeded` here — the restored
-     `appliedAt` put the boot deadline in the past; current releases
-     anchor the deadline to the runtime incarnation's first observation,
-     so a stale
-     `appliedAt` can no longer fail a converging workspace. The strip is
-     still correct for the intent fencing.) Keep `template-snapshot` —
+     the workspace before its data is in place. Keep `template-snapshot` —
      the annotation mirrors `status.templateSnapshot`, the immutable
      image pin the workspace was admitted under (a CR export carries
      both; keep them consistent).
@@ -98,7 +92,7 @@ surfaced.
      retained inventory are owner-scoped.
 3. **Restore the API DB.** Replay migrations if the target schema is
    older (`store.Migrate` is idempotent, versioned via
-   `schema_migrations`). On a live target release, scale `api` to 0
+   `schema_migrations`). On a live target release, scale `backend` to 0
    first, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`, load the
    dump, then scale back — `pg_dump --no-owner` output loads cleanly
    this way (verified in the drill).
@@ -116,7 +110,7 @@ surfaced.
    answers `invalid_ticket` — and every restored lease binds a
    `runtimeUID` that no longer exists, so it can never attach a stream.
    **Sessions die too.** Every session row binds to
-   `platform_meta.session_epoch` (migration 009). The restore procedure
+   `platform_meta.session_epoch`. The restore procedure
    rotates the epoch after loading the dump
    (`INSERT ... ON CONFLICT DO UPDATE`, same
    statement as `store.DB.RotateSessionEpoch`), so every restored session
@@ -138,10 +132,10 @@ surfaced.
    `retained_data` rows for disk bytes. The drill observed the api recovery
    loop releasing `held` reservations for restored workspaces while
    their runtimes did not yet exist — let a sweep complete before
-   re-driving intents, or expect released-until-next-acquire. (Fixed —
-   `Start` re-acquires the released reservation in the
+   re-driving intents, or expect released-until-next-acquire.
+   (`Start` re-acquires the released reservation in the
    same transaction as the start intent and fails `QUOTA_EXHAUSTED` when
-   there is no headroom, so a stop/start cycle can no longer exceed the
+   there is no headroom, so a stop/start cycle cannot exceed the
    running quota.)
 
 ## Post-restore invariants to verify

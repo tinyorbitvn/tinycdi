@@ -144,7 +144,7 @@ order with no double runtimes).
 Tier 3 above covers Postgres **loss** (data recovery). A Postgres
 **outage** — restart, failover, network cut — is an availability event,
 not a DR event: no data is lost and the platform heals itself when the
-database returns. Fail-closed behaviour was measured in the v0.3 outage
+database returns. Fail-closed behaviour was measured in an outage
 drill (`tests/integration/postgres_outage_test.go`, `docker stop`/`start`
 of the Postgres container — all connections severed at once, the
 shared-fate failover shape):
@@ -221,9 +221,8 @@ Steps 1–3 are the parts that differ from backup-restore.md.
    carries a `post-restore` subcommand so the kill-steps cannot be skipped
    or partially applied by hand. `-apply` performs, in order:
 
-   - `session_epoch` rotation (F5/S17): every restored session row is
-     rejected on its next read, revoked or not — the defensive DDL keeps
-     this working against dumps taken before migration 009;
+   - `session_epoch` rotation (S17): every restored session row is
+     rejected on its next read, revoked or not;
    - `connection_lease` revoke: resurrected leases carry live
      `session_digest` bindings — the old gateway cookie rehydrates to them
      with no portal-session check;
@@ -381,7 +380,7 @@ Steps 1–3 are the parts that differ from backup-restore.md.
 - **One benign wedge if step 5 is skipped:** intents on a diverged
   workspace are dropped until its `intent_revision` passes the CR's
   applied revision — a user-visible "button does nothing", not a security
-  hole. The wedge is no longer silent: each wedged workspace carries
+  hole. The wedge is visible: each wedged workspace carries
   `IntentBehind=True` on its conditions and gets one `IntentBehind`
   Warning event, so `kubectl get workspaces -A` (condition column /
   `describe`) enumerates what is left.
@@ -449,7 +448,7 @@ backup-restore.md:
   `runtime-cleanup` finalizer during a wholesale namespace teardown
   (as the drill did).
 
-A second drill (v0.5, kind quickstart — `hack/quickstart`) exercised the
+A second drill (kind quickstart — `hack/quickstart`) exercised the
 **live-cluster** path: `pg_dump` while a portal session held a running
 workspace with an active lease, then sign-out (S17 revoke) + a workspace
 stop + a new workspace, then the dump loaded back over the running
