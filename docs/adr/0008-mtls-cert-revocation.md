@@ -5,332 +5,126 @@ Status: Accepted
 ## Context
 
 The internal broker API (ADR 0003) is served from the backend's
-`-internal-listen` (`:9443`) over mTLS: `VerifyClientCertIfGiven` against
-the mounted client-CA bundle, TLS 1.3, with the client identity mapping
-to either the gateway CN or the operator CN
-(`internal/broker/httpapi/server.go` `ServerTLSConfig`/`identify`). Two
-client populations exist: the operator (`opclient`, workspace
-revoke/drain) and, in split mode, the session gateway (`brokerclient`,
-redeem/renew/target/revoke/activity).
+`-internal-listen` (`:9443`) over mTLS — `VerifyClientCertIfGiven`
+against the mounted client-CA bundle, TLS 1.3, the client identity
+mapping to either the gateway CN or the operator CN — and a single
+compromised client certificate must be distrusted without rotating its
+CA (SR-3-F5).
 
 Certs, the server keypair and the client-CA bundle already hot-reload
-(`tlsreload.Reloader`/`CAPool`, `hotReloadClientCAs`; threat-model S15
-held at v1.0): rotating the CA or a leaf takes effect without a restart.
-What does not exist is any way to distrust **one** certificate while its
-CA keeps being trusted — no CRL, no OCSP, no serial blocklist. Revoking
-a single compromised operator or gateway cert today means rotating the
-client-CA bundle, which drops every client of the listener at once
-(SR-3-F5, accepted residual, owner `maintainers`, target v1.1).
-
-The reviewer offered three shapes: (i) a serial blocklist, (ii) a CRL,
-(iii) shorter certificate lifetimes.
+(`tlsreload.Reloader`/`CAPool`, `hotReloadClientCAs`): rotating the CA
+or a leaf takes effect without a restart. But CA rotation drops every
+client of the listener at once, so it is the wrong tool for one stolen
+or lost operator or gateway certificate.
 
 ## Decision
 
-Adopt **(i) + (iii)**: a per-serial blocklist enforced at the TLS
-handshake of every internal mTLS server, plus documented shorter
-certificate lifetimes. Reject **(ii) CRL** — rationale below.
-
-### (i) Serial blocklist
-
-#### Blocklist format
-
-A plain-text file, one revoked certificate per line:
+`-internal-revoked-list` (env `TCDI_INTERNAL_REVOKED_LIST`,
+`internal/backend/config.go:350`) names a plain-text file of revoked
+certificates, one per line:
 
 ```
-# one entry per line; blank lines and lines whose first
-# non-whitespace character is '#' are ignored. No trailing comments.
+# blank lines and lines whose first non-whitespace character is '#'
+# are ignored; no trailing comments.
 <SERIAL-HEX> <ISSUER-DN>
 4f8b2c1a09d3e4f5 CN=tinycdi-internal-ca
 ```
 
-- `SERIAL-HEX` — hex of the certificate's serial number, exactly as
-  `openssl x509 -noout -serial` prints it after `serial=`: colons are
-  stripped, case-insensitive, no `0x` prefix, leading-zero octets
-  optional (entries compare as big integers — `serial.Text(16)` — so
-  `04ab` and `4ab` denote the same serial).
-- `ISSUER-DN` — the rest of the line, trimmed. Compared byte-for-byte
-  against the presented leaf's `cert.Issuer.String()` (Go `pkix.Name`
-  RFC 2253 form). For the chart-issued self-signed CA this is exactly
-  `CN=tinycdi-internal-ca`; `openssl x509 -noout -issuer -nameopt
-  RFC2253` prints the same string after `issuer=` for ordinary DN
-  shapes. The issuer half makes the match an (issuer, serial) pair —
-  serial numbers are only unique per issuer, and the client-CA bundle
-  may legitimately carry several CAs during a rotation.
-- Parsing is **atomic**: any malformed line rejects the whole file. A
-  partially applied blocklist is worse than a stale one.
-- Bounds: files larger than 1 MiB or carrying more than 8192 entries
-  are invalid (a blocklist is small by nature; the bound stops a
-  bad push from stalling the handshake path).
+- `SERIAL-HEX` — hex of the certificate's serial number as
+  `openssl x509 -noout -serial` prints it after `serial=`: colons
+  stripped, case-insensitive, no `0x` prefix; entries compare as big
+  integers, so leading-zero octets are optional.
+- `ISSUER-DN` — the rest of the line, trimmed, compared byte-for-byte
+  against the presented leaf's `cert.Issuer.String()` (RFC 2253); for
+  the chart-issued CA this is exactly `CN=tinycdi-internal-ca`. The
+  issuer half makes the match an (issuer, serial) pair — serial numbers
+  are unique only per issuer, and the client-CA bundle may carry
+  several CAs during a rotation.
+- Parsing is atomic — any malformed line rejects the whole file — and
+  bounded (1 MiB, 8192 entries).
 
-#### File path and reload mechanism
+The backend polls the file and swaps the parsed list in exactly like
+the client-CA pool: `tlsreload.Blocklist` mirrors `CAPool`, reloading on
+a content-hash poll rather than fsnotify because Kubernetes Secret
+volumes update by `..data` symlink swap, which silently defeats watch
+registrations. A bad file at boot fails startup — a configured
+revocation control never starts silently disabled — and a bad reload
+keeps the last-good list (`internal/backend/wire.go:497-519`). An empty
+file is a valid list that revokes nothing; "no file" is the error.
 
-- New backend flag `-internal-revoked-list` (env
-  `TCDI_INTERNAL_REVOKED_LIST`), empty by default → feature off and the
-  wire is byte-identical to today.
-- The chart mounts it from a Secret (values below); the pods keep
-  consuming plain secret volumes, same as the TLS material.
-- **Reload: poll, not fsnotify.** A `tlsreload.Blocklist` mirrors
-  `CAPool` exactly: re-read on a 30 s interval, swap on content-hash
-  change. fsnotify was considered and rejected — Kubernetes Secret
-  volumes update by `..data` symlink swap, which invalidates watch
-  registrations and leaves a silent stale list (a fail-open window the
-  operator cannot observe); hash-polling has no missed-event mode,
-  matches the mechanism already proven for cert/CA reload (E5/S15), and
-  makes staleness explicit (poll interval + the kubelet's Secret sync,
-  ~90 s worst case).
-- Failure modes, mirroring `CAPool`:
-  - **Boot**: flag set + file unreadable/invalid → startup fails
-    (`NewBlocklist` errors like `NewCAPool`). A configured revocation
-    control never starts silently disabled — that is the fail-open
-    case this design exists to remove.
-  - **Reload**: unreadable or invalid file → keep the last-good list,
-    increment
-    `tinycdi_internal_mtls_revocation_reload_errors_total`, ERROR log
-    `tlsreload: revocation list reload failed, keeping previous list`
-    (Error level, exactly as `CAPool.reload` logs it — the reload paths
-    share one convention; the WARN line below is a different event —
-    a refused handshake, matching `rejectAuth`'s warn-line class).
-    Never fail open silently, never crash-loop.
-- The empty list is a valid list: an operator can shrink the file to
-  zero entries deliberately. "No file" and "empty file" are different
-  states — the former is an error, the latter revokes nothing.
+Enforcement is `tls.Config.VerifyConnection` on the server side,
+installed by `installRevocation`
+(`internal/backend/listeners.go:120`) inside the per-handshake config
+clone `hotReloadClientCAs` already builds: a verified peer leaf whose
+(issuer, serial) is listed aborts the handshake with a TLS alert — a
+revoked certificate dies before any HTTP request exists, so the 401
+model for absent certs is unchanged. `Blocklist` additionally keeps a
+live-connection registry (`Track`/`Drop`,
+`internal/tlsreload/blocklist.go:74-90`): a reload that adds an entry
+closes the live connections already using that serial, because a
+keep-alive caller could otherwise hold a revoked connection open
+indefinitely (`http.Server` has no max connection lifetime). With the
+flag unset no hook is installed and the handshake path is
+byte-identical.
 
-#### Enforcement point
+Chart: `backend.tls.internal.revokedSerials.existingSecret` names the
+Secret holding the blocklist file and `.key` the key within it (default
+`revoked-serials.txt`); the render mounts it read-only at
+`/etc/internal-revoked/` and appends the flag
+(`deploy/helm/tinycdi/values.yaml:298-306`). Metrics:
+`tinycdi_internal_mtls_revoked_serial_total{listener="internal"}`
+counts aborted handshakes, `tinycdi_internal_mtls_revocation_entries`
+gauges the loaded entries and
+`tinycdi_internal_mtls_revocation_reload_errors_total` counts
+kept-last-good reloads (`internal/observability/metrics.go`); a
+rate-limited WARN `internal_mtls_revoked_cert` names the peer, serial
+and issuer of each refusal.
 
-`tls.Config.VerifyConnection` on the server side — installed inside
-`hotReloadClientCAs` (`internal/backend/listeners.go`), which already
-builds the per-handshake cloned config with the current `ClientCAs`
-pool. The clone additionally consults `Blocklist.Current()`: if the
-verified peer leaf's (issuer, serial) is listed, the callback returns an
-error and the handshake aborts with a TLS alert.
+Certificate lifetimes bound the un-revocable window: cert-manager
+`certManager.duration` (default `2160h`, 90 days) and
+`certManager.renewBefore` (`360h`)
+(`deploy/helm/tinycdi/values.yaml:542-543`). An operator may shorten
+them; the blocklist covers a stolen key until its certificate expires.
 
-- Coverage is **structural**: every internal mTLS server built through
-  `hotReloadClientCAs` inherits the check. Today that is exactly the
-  `-internal-listen` `:9443` listener — the metrics listener is
-  plaintext scrape-only, the app/session listeners verify no client
-  certs, and the operator's `:9443` admission webhook serves the
-  Kubernetes apiserver (TLS but not this mTLS hop). Any future internal
-  mTLS server gets the control by construction rather than by
-  remembering to wire it.
-- A revoked cert therefore gets a **handshake abort**, not the
-  listener's JSON 401 — `VerifyConnection` runs before any HTTP
-  request exists. The client sees a transport error (`bad certificate`
-  alert); `opclient` surfaces it as `TRANSPORT`. Fail-closed, and the
-  401 error model for *absent* certs is unchanged (`PeerCertificates`
-  empty → the check no-ops and the request reaches `identify` → 401).
-- **Established connections are severed too.** `IdleTimeout` 120 s
-  bounds only the *idle tail* of a keep-alive connection — a caller
-  issuing a request more often than every 120 s (the operator's
-  periodic revoke/drain or a gateway's renew loop trivially qualify)
-  keeps a revoked connection alive **indefinitely**; `http.Server` has
-  no max-connection-lifetime. A handshake-only check would therefore
-  leave an unbounded hole, so the design carries a small live-conn
-  registry instead of relying on an operator to roll the pods:
-  - `GetConfigForClient` receives `ClientHelloInfo.Conn` (the
-    `net.Conn`); the clone's `VerifyConnection`, on success, records
-    `conn → (issuer, serial)` in a mutex-guarded registry alongside the
-    blocklist — including on resumed handshakes, which Go runs
-    `VerifyConnection` for too.
-  - The `http.Server`'s `ConnState` hook drops the entry on
-    `StateClosed`/`StateHijacked`.
-  - On a successful blocklist reload the registry walks its entries
-    and `Close()`es every conn whose key is now blocked — a plain conn
-    close, no alert; the peer sees reset/EOF on its next read.
-  Chosen over a runbook "restart the backend" step because it severs
-  exactly the revoked serial's conns within the same ~90 s propagation
-  bound, automatically, on every replica — a rollout severs *all*
-  conns to drop one and adds a manual step that is precisely the kind
-  forgotten mid-incident. Cost: one map entry per conn on a listener
-  whose client population is a handful of platform components, and an
-  O(conns) walk per *changed* reload.
-- **Client side: optional.** `opclient` already routes verification
-  through a `VerifyConnection` (custom chain check against the rotating
-  CA pool) — a server-leaf serial check is one clause inside that
-  callback. `brokerclient` has no `VerifyConnection` today (plain
-  `RootCAs` config); adding one is still small since Go calls it *in
-  addition to* normal verification — the `InsecureSkipVerify` handoff
-  is only needed for the rotating-pool problem, which a serial check
-  does not have. Neither is wired by default: a compromised server cert
-  means the internal CA itself is suspect — rotate the CA, do not
-  blocklist it.
+The operator procedure — read the serial and issuer off the
+certificate, append to the Secret, verify the refused handshake,
+reissue — is
+[docs/runbooks/mtls-cert-revocation.md](../runbooks/mtls-cert-revocation.md).
 
-#### Metrics and logging on a rejected serial
+### Tests
 
-- `tinycdi_internal_mtls_revoked_serial_total{listener="internal"}` —
-  counter, one per rejected handshake; `listener` is a bounded label
-  (`internal` today) so future mTLS servers slot in.
-- `tinycdi_internal_mtls_revocation_entries` — gauge, entries in the
-  currently loaded list (absent/zero when the feature is off).
-- `tinycdi_internal_mtls_revocation_reload_errors_total` — counter,
-  one per failed reload (kept-last-good events).
-- WARN log `internal_mtls_revoked_cert`, rate-limited with the same
-  token-budget shape as `rejectAuth` (1/s sustained, burst 10, keyed
-  `revoked_serial`): fields `peer`, `serial`, `issuer`. The WARN
-  doubles as the forensic source for the exact `ISSUER-DN` string form
-  when an exotic DN does not round-trip through openssl's RFC 2253
-  output. Certificate, key and SAN material are never logged; there is
-  no request path or request id at handshake time (SEC-41 unaffected).
+- `internal/tlsreload` (`blocklist_test.go`): `TestParseBlocklistFormat`,
+  `TestParseBlocklistRejectsWholeFile`, `TestParseBlocklistBounds`,
+  `TestNewBlocklistFailsClosed`, `TestBlocklistReloadKeepsLastGood`,
+  `TestBlocklistReloadSwaps`, `TestBlocklistTrackAndSever`,
+  `TestBlocklistConcurrentTrackAndSwap`.
+- `internal/backend` (`mtls_revocation_test.go`):
+  `TestRevokedSerialHandshakeAborts`, `TestRevokedSerialIssuerPairing`,
+  `TestRevokedListReloadBlocks`, `TestRevokedResumedHandshakeRejected`,
+  `TestRevokedLiveConnSevered`, `TestRevocationOffByteIdentical`,
+  `TestRevocationAbsentCertStill401`, `TestRevokedSerialWarnAndMetric`,
+  `TestRevokedListReloadErrorMetric`, `TestParseFlags_RevokedList`.
+- Chart (`deploy/helm/chart_revocation_test.go`):
+  `TestRevokedSerialsRenderOff`, `TestRevokedSerialsRenderOn`,
+  `TestRevokedSerialsCustomKey`.
 
-### (ii) CRL — rejected
+## Alternatives considered
 
-A real CRL path needs generation, signing, publication, refresh and
-staleness policy end-to-end — none of which exists: cert-manager's
-`ca`/`selfSigned` issuers (what the chart bootstraps) publish **no CRL**
-and set no CRL distribution point on issued certs, so every deployment
-on the shipped chain has nothing to fetch. Standing up a CRL signer +
-distribution endpoint + server-side refresh loop is a new subsystem to
-fix a P3, and its failure modes (stale CRL accepted? fetch outage? —
-the same questions this ADR answers for a file, minus the file's
-simplicity) land strictly worse than the mounted-Secret blocklist,
-which rides the already-proven `tlsreload` path. Revisit only if the
-internal PKI moves to an issuer that publishes CRLs natively.
-
-### (iii) Shorter certificate lifetimes — documented
-
-Rotation already works end-to-end (S15), so lifetime is the exposure
-window when revocation has not been applied. The chart defaults stay
-`certManager.duration: 2160h` / `renewBefore: 360h` — changing shipped
-defaults rewrites issued certs for every existing `certManager.enabled`
-deployment and is a deliberate values-visible change, not something to
-ride invisibly on this fix. The ADR's documented recommendation for the
-internal chain (set explicitly in values or the equivalent on an
-external issuer):
-
-```yaml
-certManager:
-  duration: 168h      # 7d leaf lifetime
-  renewBefore: 24h    # renew a day early; cert-manager requires < duration
-```
-
-That bounds the un-revocable window to a week worst case instead of 90
-days, at ~13 rotations per quarter per cert — cheap against the
-existing hot-reload path, and the blocklist covers the
-compromised-before-expiry residual inside it.
-
-## Chart values (additive)
-
-```yaml
-backend:
-  tls:
-    internal:
-      existingSecret: tinycdi-backend-internal-tls
-      revokedSerials:               # NEW — empty = feature off
-        existingSecret: ""          # Secret carrying the blocklist file
-        key: revoked-serials.txt    # key within the Secret
-```
-
-When `existingSecret` is set the render adds a read-only Secret volume
-mounted at `/etc/internal-revoked/` (the key projected to a fixed
-`revoked-serials.txt` filename, mirroring the `client-ca` projection
-pattern) and appends
-`-internal-revoked-list=/etc/internal-revoked/revoked-serials.txt` to
-the backend args. No existing value is renamed or removed; default
-renders are byte-identical (`TestDefaultRenderUnchangedGolden` keeps
-passing).
-
-## Operator runbook — revoke one certificate
-
-1. **Get serial + issuer** of the cert to revoke (and keep the key +
-   CA for the verify step):
-
-   ```sh
-   kubectl -n <ns> get secret tinycdi-operator-mtls \
-     -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/cert.pem
-   kubectl -n <ns> get secret tinycdi-operator-mtls \
-     -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/key.pem
-   kubectl -n <ns> get secret tinycdi-internal-ca \
-     -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/ca.crt
-   openssl x509 -in /tmp/cert.pem -noout -serial
-   openssl x509 -in /tmp/cert.pem -noout -issuer -nameopt RFC2253
-   ```
-
-   → e.g. `serial=4F:8B:2C:1A`, `issuer=CN=tinycdi-internal-ca`.
-2. **Append** `<serial-hex> <issuer-dn>` to the blocklist file in the
-   `revokedSerials` Secret (`kubectl edit secret`, `kubectl create
-   secret --from-file` over a GitOps-managed file, etc.).
-3. **Wait** for the kubelet Secret sync plus one 30 s poll (~90 s worst
-   case; a rollout restart forces immediate pickup).
-4. **Verify rejected.** `backend.<ns>.svc:9443` only resolves
-   in-cluster; two ways to reach it —
-   - port-forward from any operator workstation and run `s_client`
-     locally (nothing needs to exist inside the image):
-
-     ```sh
-     kubectl -n <ns> port-forward svc/backend 9443:9443 &
-     openssl s_client -connect localhost:9443 \
-       -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.crt
-     ```
-
-   - or run `s_client` inside a throwaway pod in the namespace with
-     the `mtls`/`broker-ca` Secrets mounted (the operator pod's own
-     mounts, before step 5 reissues them).
-
-   → expected: `alert bad certificate` / handshake failure; confirm
-   `tinycdi_internal_mtls_revoked_serial_total` incremented and the
-   `internal_mtls_revoked_cert` WARN line names the serial.
-5. **Reissue** a replacement cert (`cmctl renew <release>-operator-mtls`
-   with cert-manager, or the external issuer's flow); the
-   CAPool/Reloader path picks it up on the next handshake.
-6. **Keep the entry.** The list is append-only for audit; entries are
-   cheap. On a client-CA rotation the whole list becomes moot (issuers
-   change) — reset the Secret then.
-
-## Test plan
-
-- **Unit** (`internal/tlsreload`, `internal/backend`):
-  - blocked serial rejected at the handshake; sibling certs from the
-    same CA still accepted;
-  - same serial under a different issuer does **not** match
-    ((issuer, serial) pairing, CA-rotation overlap);
-  - reload picks up an appended entry without restart;
-  - malformed line / unreadable file / deleted file → keeps last good,
-    reload-error counter increments, ERROR logged, no crash-loop;
-  - flag set + bad file at boot → startup fails;
-  - flag on + **no** client cert → the absent-cert path still answers
-    the listener's 401 (the check no-ops on empty `PeerCertificates` —
-    `VerifyClientCertIfGiven` lets the handshake through);
-  - hex parsing: colons, uppercase, leading-zero octet all normalize;
-  - conn registry: an established conn to a serial that becomes
-    blocked is closed on reload; a conn to a still-trusted serial is
-    untouched;
-  - flag unset → byte-identical behaviour (no `VerifyConnection`
-    installed).
-- **Integration**: extend the existing internal-listener stack
-  (`internal/backend/mtls_reload_test.go` `serveInternalTLS`/`callMTLS`)
-  with a revoked-cert leg; wire one revoked-serial leg into the
-  internal-API drill family that already covers `:9443` auth failures
-  (the SR-3-F3/SR-3-F4 tests).
-- **Chart**: default render unchanged (golden), set-values render adds
-  volume/mount/arg.
-
-## Compatibility
-
-- `/v1` HTTP API untouched — the change is at the TLS layer of the
-  internal listener; no route, body or error-model change (revoked
-  certs die before HTTP exists).
-- Chart values are additive with safe defaults (`""` = off);
-  `certManager.duration`/`renewBefore` defaults unchanged.
-- Existing un-revoked clients see zero behavioural change; the feature
-  only ever shrinks the accepted set when explicitly configured.
-
-## Rollout
-
-Docs only — this ADR is the design. Implement in **v1.1** if this ADR
-is merged before the `v1.1.0-rc.1` cut (implementation then adds the
-flag, `tlsreload.Blocklist`, the `VerifyConnection` hook, metrics, the
-chart values, the tests above, and a `docs/releases/v1.1.0.md` note per
-the versioning contract). If the ADR lands after the cut, the
-implementation waits for **v1.2**; SR-3-F5's accepted residual stands
-unchanged in the interim (rotation remains the revocation mechanism).
+- **A CRL.** Rejected: the chart's cert-manager `ca`/`selfSigned`
+  issuers publish no CRL and set no distribution point, so a CRL needs
+  a new signing and publishing subsystem.
+- **OCSP.** Rejected for the same reason: the shipped PKI runs no
+  responder.
 
 ## Consequences
 
-- `docs/README.md` ADR list gains this entry; threat-model S15's status
-  line points here.
-- One new backend flag + env, one small `tlsreload` type, three metric
-  series, two chart values, one Secret convention.
-- The v1.0 residual narrows from "rotate the CA to revoke one cert" to
-  "revocation takes up to ~90 s to propagate, then severs both new
-  handshakes and established connections on that serial" — documented
-  above.
+- Revocation propagates within one poll interval plus the kubelet
+  Secret sync (~90 s worst case), then severs both new handshakes and
+  established connections on the listed serial.
+- One backend flag + env, one `tlsreload` type, three metric series,
+  two chart values, one Secret convention.
+- Stated limitation: the internal mTLS **clients** — the operator's
+  broker client (`internal/broker/httpapi/opclient/client.go:120-130`)
+  and the gateway's `brokerclient` — verify the server chain but do not
+  check the server leaf's serial against the list. A compromised server
+  certificate means the internal CA itself is suspect: rotate the CA.

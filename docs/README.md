@@ -73,15 +73,14 @@
 - [adr/0007-sign-out-everywhere.md](adr/0007-sign-out-everywhere.md) —
   principal-scoped revocation of all portal sessions, leases and tickets
 - [adr/0008-mtls-cert-revocation.md](adr/0008-mtls-cert-revocation.md) —
-  per-certificate revocation on the internal mTLS API: serial blocklist +
-  shorter lifetimes (SR-3-F5; proposed)
+  per-certificate revocation on the internal mTLS listener: a polled
+  serial blocklist
 - [adr/0009-session-data-transfer-policy.md](adr/0009-session-data-transfer-policy.md) —
-  tenant ceilings over the template clipboard policy plus the v1.3 file
-  transfer design (accepted)
+  tenant ceilings for clipboard and file transfer, and the in-pod
+  transfer helper
 - [adr/0010-audit-store-and-retention.md](adr/0010-audit-store-and-retention.md) —
-  durable `audit_event` store written in the audited mutation's transaction
-  (fail closed), pseudonymous actors, 90-day retention and the tenant-admin
-  viewer (accepted)
+  the durable audit store, written in the mutation's transaction, with
+  pseudonymous actors and 90-day retention
 
 ## Elsewhere in the repo
 

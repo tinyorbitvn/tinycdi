@@ -4,9 +4,12 @@ Status: Accepted
 
 ## Context
 
-Audit events were a stdout JSONL stream only (`observability.JSONSink`
-behind `GuardedSink`). Administrators could not read them in the product,
-and a write failure was swallowed by design.
+Domain audit events go to a stdout JSONL stream
+(`observability.JSONSink` behind `GuardedSink`). The product has no way
+to read that stream back, and the sink drops write failures by design.
+Administrators need a durable store they can query — one that fails
+closed, so a mutation cannot succeed unrecorded. The operator procedure
+is `docs/runbooks/audit.md`.
 
 ## Decision
 
@@ -57,4 +60,6 @@ and a write failure was swallowed by design.
   `(tenant, created_at desc, id desc)` and `(tenant, action, created_at desc, id desc)`.
 - An audit-store outage makes audited routes fail instead of running
   unrecorded. Unaudited reads keep working.
-- Gateway-local events (launch, stream) stay stdout-only.
+- Stdout-only events: the gateway-local launch and stream events,
+  `session.touch` (the portal's activity beat), and the per-request
+  `http.request` record.
