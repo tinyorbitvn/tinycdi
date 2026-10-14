@@ -31,7 +31,7 @@ async function login(page: Page) {
   await page.locator("#username").fill(USER);
   await page.locator("#password").fill(PASSWORD);
   await page.locator("#kc-login").click();
-  await page.getByRole("heading", { name: "Workspaces", exact: true }).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspaces", exact: true })).toBeVisible();
 }
 
 // Creates an Ephemeral browser workspace (no retained disk piles up over
