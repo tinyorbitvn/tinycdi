@@ -94,14 +94,12 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			writeError(w, r, CodeUnauthenticated, "authentication required")
 			return
 		}
-		var sess *Session
-		if slide {
-			sess, err = a.sessions.Get(r.Context(), c.Value)
-		} else {
-			sess, err = a.sessions.Peek(r.Context(), c.Value)
-		}
+		sess, err := a.lookupSession(r, c.Value, slide)
 		if err != nil {
+			var lim *lookupLimitedError
 			switch {
+			case errors.As(err, &lim):
+				writeLookupLimited(w, r, lim)
 			case errors.Is(err, ErrSessionNotFound):
 				writeError(w, r, CodeUnauthenticated, "session missing or expired")
 			case store.IsTransient(err):

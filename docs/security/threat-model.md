@@ -179,7 +179,15 @@ Controls:
   are the client IP, or a digest of the validated session ID or OIDC
   login state when present, so users behind one NAT keep separate buckets
   (`internal/api/ratelimit_key.go`); the callback also has a 10× per-IP
-  ceiling. While the store is healthy the shared window is the exact
+  ceiling. Session-store reads for cookie values are bounded per client
+  on the app listener too: `lookupSession`
+  (`internal/api/session_lookup.go`) spends a token from a local bucket
+  (`-session-lookup-rate`, burst 120) before the read and returns it
+  when the read finds a live session, so only unknown cookies spend the
+  budget; when it is spent, authenticated routes answer `429` and the
+  probe answers signed out, without a store read. Session reads never
+  delete; the leader prunes dead rows (`PruneDeadSessions`). While the
+  store is healthy the shared window is the exact
   bound and each pod's local bucket is a store-protection prefilter; the
   divided per-replica bucket is the floor only while the circuit breaker
   is open. Every store call has a 500 ms deadline; an error opens the

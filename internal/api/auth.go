@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -327,6 +328,10 @@ type Authenticator struct {
 	// nil leaves that endpoint answering 503 — logout is unaffected.
 	principalRevoker PrincipalRevoker
 	auditSink        observability.AuditSink
+	// lookups bounds session-store reads per client for cookie values that
+	// turn out unknown (TM-06); trusted feeds ratelimit.ClientKey.
+	lookups SessionLookupLimiter
+	trusted []netip.Prefix
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
@@ -398,6 +403,7 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 			Scopes:       cfg.Scopes,
 		},
 		sessions:           sessions,
+		lookups:            ratelimit.New(SessionLookupRate, SessionLookupBurst, sessionLookupMaxKeys, nil),
 		endSessionEndpoint: endSession,
 		log:                log,
 		now:                time.Now,

@@ -70,6 +70,43 @@ func terminalRetentionSweepLoop(db *store.DB, days int, m *observability.Metrics
 	}
 }
 
+// deadSessionSweepLoop is the leader-gated singleton that deletes portal
+// session rows no read can resolve (rotated epoch, absolute or idle
+// expiry). Session reads never delete, so this is the only thing that
+// bounds the table; batches of terminalRetentionBatch rows, hourly.
+func deadSessionSweepLoop(db *store.DB, idle time.Duration, log *slog.Logger) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		sweep := func() {
+			var total int64
+			for {
+				n, err := db.PruneDeadSessions(ctx, idle, terminalRetentionBatch)
+				if err != nil {
+					if !errors.Is(err, context.Canceled) {
+						log.Error("dead session sweep failed", "err", err)
+					}
+					return
+				}
+				total += n
+				if n < terminalRetentionBatch {
+					break
+				}
+			}
+			log.Info("dead session sweep", "sessions_pruned", total)
+		}
+		sweep()
+		ticker := time.NewTicker(terminalRetentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweep()
+			}
+		}
+	}
+}
+
 // fileTransferSweepLoop expires unclaimed transfer grants, fails dead
 // claims and prunes finished rows every 30 s (leader only).
 func fileTransferSweepLoop(db *store.DB, log *slog.Logger) func(ctx context.Context) {

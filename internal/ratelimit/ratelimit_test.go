@@ -286,3 +286,36 @@ func TestParseTrustedProxies(t *testing.T) {
 		t.Fatal("bad CIDR accepted")
 	}
 }
+
+// TestLimiter_RefundReturnsOneToken: Refund gives back exactly one token,
+// never above burst, and is a no-op for a key the limiter has not seen.
+func TestLimiter_RefundReturnsOneToken(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := New(60, 2, 100, func() time.Time { return now }) // frozen clock, burst 2
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("token %d refused", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("third token allowed with a frozen clock")
+	}
+	l.Refund("k")
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("refunded token not available")
+	}
+	l.Refund("k")
+	l.Refund("k")
+	l.Refund("k") // capped at burst 2
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("token %d after refunds refused", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("refunds exceeded burst")
+	}
+	l.Refund("never-seen") // must not create a bucket or panic
+	var nilL *Limiter
+	nilL.Refund("k")
+}

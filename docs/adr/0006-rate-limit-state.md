@@ -83,7 +83,7 @@ spread, plus Postgres-outage fail-open and recovery — is pinned by
 |---|---|---|
 | `-login-rate` | 60/min, burst 20 | per-client bound on `/v1/login`, `/v1/auth/callback` and `GET /v1/session` (`internal/backend/config.go:315-316`) |
 | `-launch-rate` | 120/min, burst 40 | per-client bound on `/v1/launch` (`config.go:333-334`) |
-| `-session-lookup-rate` | 300/min, burst 120 | per-client bound on requests carrying a session cookie this replica has never seen — a **local** per-replica bucket only, so a random-cookie spray cannot multiply Postgres reads (`config.go:335-336`, `internal/gateway/proxy.go:84-85`) |
+| `-session-lookup-rate` | 300/min, burst 120 | per-client bound on requests carrying a session cookie that does not resolve: on the app listener (`internal/api/session_lookup.go`, only misses spend) and for cookies the session listener has never seen — a **local** per-replica bucket only, so a random-cookie spray cannot multiply Postgres reads (`internal/backend/config.go`, `internal/gateway/proxy.go`, `internal/api/session_lookup.go`) |
 | `-rate-limit-replicas` | 1 | divisor of the degraded-mode floor — the shared window makes the flags exact aggregates while Postgres is healthy (`config.go:369`) |
 | `-trusted-proxies` | empty | CIDRs of reverse proxies whose forwarding headers set the client key (`config.go:367`) |
 

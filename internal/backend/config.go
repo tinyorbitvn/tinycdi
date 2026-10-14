@@ -163,11 +163,11 @@ type Config struct {
 	// the close-first order.
 	DrainPropagationDelay time.Duration
 	LaunchRate            int // per-client launches/min on /v1/launch; 0 disables
-	// SessionLookupRate is the per-client bound on session-directory
-	// lookups for unseen cookies — the only pre-auth request that spends
-	// Postgres reads. LOCAL per replica (its purpose is keeping the
-	// cookie spray off the store, so there is no shared window); 0
-	// disables.
+	// SessionLookupRate is the per-client bound on session-store lookups
+	// for cookie values that do not resolve — on the app listener (only
+	// misses spend) and for cookies the session listener has never seen.
+	// LOCAL per replica (its purpose is keeping the cookie spray off the
+	// store, so there is no shared window); 0 disables.
 	SessionLookupRate int
 	// SessionStreamCap is the per-workspace bound on live upstream
 	// connections — websocket streams and plain proxied requests alike —
@@ -336,7 +336,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 120),
 		"per-client launches/minute on /v1/launch (burst 40), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 	fs.IntVar(&c.SessionLookupRate, "session-lookup-rate", envInt(getenv, "TCDI_SESSION_LOOKUP_RATE", gateway.SessionLookupRate),
-		"per-client requests/minute carrying a session cookie this replica has never seen (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
+		"per-client requests/minute carrying a session cookie that does not resolve to a live session — on the app listener and for cookies this replica has never seen on the session listener (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
 	fs.IntVar(&c.SessionStreamCap, "session-stream-cap", envInt(getenv, "TCDI_SESSION_STREAM_CAP", gateway.DefaultUpstreamStreamCap),
 		"per-workspace bound on live upstream connections through THIS replica — websocket streams and plain proxied requests alike; over the cap the session origin answers 429 too_many_streams + Retry-After: 1. >= 1 — no unlimited mode; pick a large value when the runtime carries no fd bound (env TCDI_SESSION_STREAM_CAP)")
 	fs.DurationVar(&c.UnattachedSessionTTL, "unattached-session-ttl", envDur(getenv, "TCDI_UNATTACHED_SESSION_TTL", gateway.UnattachedSessionTTL),

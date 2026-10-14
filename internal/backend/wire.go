@@ -450,6 +450,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
 	}
 
+	// Dead portal sessions (rotated epoch, absolute or idle expiry) are
+	// pruned by the leader: session reads never delete, so a forged-cookie
+	// spray cannot turn into write traffic (TM-06).
+	b.singletons = append(b.singletons, deadSessionSweepLoop(db, cfg.SessionIdle, log))
+
 	// Audit retention (ADR 0010): the leader prunes audit_event rows older
 	// than -audit-retention-days at election and then daily. Always on: the
 	// config range check never lets it be disabled.
@@ -817,6 +822,11 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
+	// TM-06: the app listener bounds session-store reads for cookie values
+	// that turn out unknown, per client and per replica, with the session
+	// listener's budget (-session-lookup-rate, burst SessionLookupBurst).
+	authn.WithSessionLookupLimiter(
+		ratelimit.New(cfg.SessionLookupRate, gateway.SessionLookupBurst, rateLimitMaxKeys, nil), trusted)
 	loginLimiter, callbackCeiling := sharedLoginLimiters(cfg, db, b.log, b.rateLimitErrHook(), b.rateLimitDegradedHook())
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())

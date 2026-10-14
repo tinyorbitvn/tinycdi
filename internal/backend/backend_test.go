@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1286,4 +1287,43 @@ func (a internalAdapter) ClaimTransfer(ctx context.Context, gw broker.GatewayIde
 }
 func (a internalAdapter) CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
 	return a.fb.CompleteTransfer(ctx, gw, leaseID, transferID, bytesDone, ok)
+}
+
+// TestAppListener_UnknownCookieSprayRefused (R1-03, wired stack): the
+// production app handler carries the default unknown-cookie bound (burst
+// 120): a forged-cookie spray from one client gets 401 until the budget is
+// spent, then 429 with Retry-After, never an unbounded run of store reads.
+func TestAppListener_UnknownCookieSprayRefused(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	// The limiter refills on the real clock (5 tokens/s at the default
+	// 300/min), so a slow run may see a few extra non-429 answers; allow
+	// refill-sized slack, never an unbounded run.
+	first429, late := -1, 0
+	for i := 0; i < 200; i++ {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/me", nil)
+		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET /v1/me #%d: %v", i, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Fatalf("#%d: 429 without Retry-After", i)
+			}
+			if first429 < 0 {
+				first429 = i
+			}
+		} else if first429 >= 0 {
+			late++
+		}
+	}
+	if first429 < api.SessionLookupBurst || first429 > api.SessionLookupBurst+5 {
+		t.Fatalf("first 429 at request %d, want ~%d (the default burst)", first429, api.SessionLookupBurst)
+	}
+	if late > 5 {
+		t.Fatalf("%d non-429 answers after the budget was spent, want only refill-sized slack", late)
+	}
 }

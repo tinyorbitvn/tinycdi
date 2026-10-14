@@ -116,6 +116,28 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	return false, time.Duration((1-b.tokens)/l.perSec*float64(time.Second) + 0.5)
 }
 
+// Refund returns one token to key's bucket, capped at burst. A caller
+// that spends a token before an operation whose cost turns out to be
+// nothing (a session lookup that found a live session) gives it back, so
+// only the costly outcome is rate limited. Refunding a key the limiter
+// has not seen, or on a disabled limiter, does nothing.
+func (l *Limiter) Refund(key string) {
+	if l == nil || l.perSec <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	el, ok := l.buckets[key]
+	if !ok {
+		return
+	}
+	b := el.Value.(*bucket)
+	b.tokens++
+	if b.tokens > l.burst {
+		b.tokens = l.burst
+	}
+}
+
 // PerReplica divides a configured per-key budget across n backend
 // replicas so the aggregate over an even spread approximates the
 // configured bound: every replica gets rate/n tokens per minute and
