@@ -98,11 +98,15 @@ func (s *UserLimitStore) ClearDefault(ctx context.Context, tenantID, expectedVer
 		tenantID, since)
 }
 
-// write runs a conditional INSERT/UPDATE ... RETURNING updated_at; no row
-// returned means the precondition failed.
+// write runs a conditional INSERT/UPDATE ... RETURNING updated_at in a
+// transaction — so an audited request's TxHook commits the audit row with
+// it — and maps no returned row to a failed precondition.
 func (s *UserLimitStore) write(ctx context.Context, sql string, args ...any) (string, error) {
 	var at time.Time
-	if err := s.db.Pool().QueryRow(ctx, sql, args...).Scan(&at); err != nil {
+	err := s.db.WithTx(ctx, func(tx Tx) error {
+		return tx.QueryRow(ctx, sql, args...).Scan(&at)
+	})
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrVersionMismatch
 		}
@@ -111,17 +115,19 @@ func (s *UserLimitStore) write(ctx context.Context, sql string, args ...any) (st
 	return FormatVersion(at), nil
 }
 
-// delete runs a conditional DELETE; zero rows means the precondition
-// failed.
+// delete runs a conditional DELETE in a transaction (see write); zero rows
+// means the precondition failed.
 func (s *UserLimitStore) delete(ctx context.Context, sql string, args ...any) error {
-	tag, err := s.db.Pool().Exec(ctx, sql, args...)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrVersionMismatch
-	}
-	return nil
+	return s.db.WithTx(ctx, func(tx Tx) error {
+		tag, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrVersionMismatch
+		}
+		return nil
+	})
 }
 
 // expectAbsent answers ErrVersionMismatch when the EXISTS query finds a row.

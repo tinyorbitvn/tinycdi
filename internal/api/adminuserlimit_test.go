@@ -728,3 +728,61 @@ func TestQuota_UserLimitFields(t *testing.T) {
 		t.Fatalf("users=%v, want no per-user array (the admin user-limits list owns it)", v.Users)
 	}
 }
+
+// failingAuditStore is an AuditStore whose writes fail: an audit-store
+// outage during the request.
+type failingAuditStore struct{}
+
+func (failingAuditStore) InsertAudit(context.Context, store.Tx, store.AuditRecord) (int64, error) {
+	return 0, errors.New("audit store down")
+}
+
+func (failingAuditStore) AmendAudit(context.Context, int64, string, string, string, map[string]string) error {
+	return errors.New("audit store down")
+}
+
+// TestAdminUserLimit_AuditFailureRollsBackWrite (R1-23): an admin quota or
+// user-limit write commits only together with its durable audit row — when
+// the audit insert fails, the request answers 5xx and the row is absent.
+func TestAdminUserLimit_AuditFailureRollsBackWrite(t *testing.T) {
+	ctx := context.Background()
+	rows := func(t *testing.T, db *store.DB, table string) int {
+		t.Helper()
+		var n int
+		if err := db.Pool().QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE tenant_id = 'tenant-a'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	sink := func() *DurableAuditSink { return NewDurableAuditSink(&plainSink{}, failingAuditStore{}, nil, nil) }
+
+	t.Run("user-limit default", func(t *testing.T) {
+		db := svNewDB(t)
+		env := newUserLimitsEnv(t, NewAdminUserLimitSource(db), sink())
+		sess, csrf := loginAdmin(t, env, "admin-a")
+		r := doReq(t, env, sess, csrf, http.MethodPut, userLimitDefaultPath, `{"limit":3}`,
+			map[string]string{"If-Match": IfMatchCreate})
+		r.Body.Close()
+		if r.StatusCode < 500 {
+			t.Fatalf("status=%d, want 5xx when the audit insert fails", r.StatusCode)
+		}
+		if n := rows(t, db, "tenant_user_limit_default"); n != 0 {
+			t.Fatalf("tenant_user_limit_default has %d rows after a failed audit, want 0", n)
+		}
+	})
+	t.Run("tenant quota", func(t *testing.T) {
+		db := svNewDB(t)
+		env := newAdminQuotaEnv(t, NewAdminQuotaSource(db), nil,
+			func(h *AdminQuotaHandler) { h.WithAuditSink(sink()) })
+		sess, csrf := loginAdmin(t, env, "admin-a")
+		r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
+			map[string]string{"If-Match": IfMatchCreate})
+		r.Body.Close()
+		if r.StatusCode < 500 {
+			t.Fatalf("status=%d, want 5xx when the audit insert fails", r.StatusCode)
+		}
+		if n := rows(t, db, "tenant_quota"); n != 0 {
+			t.Fatalf("tenant_quota has %d rows after a failed audit, want 0", n)
+		}
+	})
+}

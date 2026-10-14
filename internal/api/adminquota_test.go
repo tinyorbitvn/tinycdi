@@ -535,7 +535,7 @@ func TestAdminQuota_ConcurrentIfMatchOneWins(t *testing.T) {
 
 // TestAdminQuota_Audit: the quota change is captured by the request audit —
 // the http_request record carries the pseudonymous actor, the tenant and
-// the mutating method+path+status.
+// the mutating method+route+status.
 func TestAdminQuota_Audit(t *testing.T) {
 	src := &fakeAdminQuotaSource{}
 	env := newAdminQuotaEnv(t, src, nil)
@@ -549,7 +549,7 @@ func TestAdminQuota_Audit(t *testing.T) {
 	}
 	logs := env.logs.String()
 	if !strings.Contains(logs, `"method":"PUT"`) ||
-		!strings.Contains(logs, `"path":"`+adminQuotaPath+`"`) ||
+		!strings.Contains(logs, `"route":"/v1/admin/tenants/{tenant}/quota"`) ||
 		!strings.Contains(logs, `"status":200`) ||
 		!strings.Contains(logs, `"actor":"oidc:`) ||
 		!strings.Contains(logs, `"tenant":"tenant-a"`) {

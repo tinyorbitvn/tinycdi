@@ -186,7 +186,7 @@ Every record carries:
 | `time` | UTC emission timestamp |
 | `actor` | pseudonymous principal ref — `oidc:` + truncated SHA-256 of `issuer\|subject`, stable per user; `"anonymous"` when unauthenticated; `"gateway:<id>"` for gateway-side events; `"config:tenant-quotas"` for the config-driven quota apply |
 | `action` | the domain action (table below) |
-| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; create actions record the id the call just made (`workspace.create` fills the new `ws_*` once known) |
+| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; create actions record the id the call just made (`workspace.create` fills the new `ws_*` once known); request-controlled values here and in `details` are stored and logged as valid UTF-8 (NUL and invalid bytes become U+FFFD) of at most 256 bytes — a longer value keeps its first 200 bytes followed by `…sha256:` and 16 hex digits of the full value's digest |
 | `tenant` | the verified tenant of the caller |
 | `requestId` | the request's `X-Request-Id` correlation id (`"startup"` for the config apply) |
 | `outcome` | `success`, `failure` or `denied` (401/403) |
@@ -224,7 +224,11 @@ Emitted events:
 Requests refused before authentication (no session → `401` from
 `RequireAuth`) emit no dedicated event by design — the wrapper sits inside
 the authenticator, so those refusals are covered by the per-request
-`http_request` log record that every HTTP call produces.
+`http_request` log record that every HTTP call produces. That record, and
+the matching `http.request` event, names the matched route template in
+`route` (for example `/v1/admin/tenants/{tenant}/users/{ownerRef}`, or
+`unmatched`), never the raw path, so path values such as an owner's
+`issuer|sub` stay out of the log.
 
 Redaction is enforced in the sink, not by convention: detail keys matching
 credentials (`token`, `cookie`, `session`, `authorization`, …) are replaced

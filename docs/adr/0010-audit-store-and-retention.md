@@ -32,7 +32,10 @@ is [`docs/runbooks/audit.md`](../runbooks/audit.md).
   (`owner` or `target`, via `targetActorRef`). No raw subject, email,
   display name, source address, token or cookie is written; detail keys
   that look like credentials are redacted before storage
-  (`observability.RedactDetails`). File-transfer events record the file
+  (`observability.RedactDetails`). Request-controlled values (target id,
+  request id, detail values) are stored as valid UTF-8 of at most 256
+  bytes (`store.SanitizeAuditText`), so no request can fail the insert or
+  grow a row without bound. File-transfer events record the file
   name and byte count, never content. The viewer accepts an `issuer|sub`
   filter and pseudonymizes it server-side, so an administrator can search
   by a known user without the table ever holding the identity. The

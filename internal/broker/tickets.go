@@ -425,17 +425,22 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 			resolved = &s
 		}
 	}
-	if _, err := b.db.Pool().Exec(ctx,
-		`INSERT INTO launch_ticket
-			(ticket_hash, workspace_id, tenant_id, principal_subject,
-			 runtime_generation, runtime_uid, audience, takeover,
-			 request_id, expires_at, clipboard_policy, session_policy,
-			 portal_session_digest)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		ticketHash(token), workspaceUID, tenantID, owner,
-		int64(binding.RuntimeGeneration), binding.RuntimeUID,
-		b.audience, takeover, requestID(ctx), expires, clipboard,
-		resolved, portalSessionDigest(portalSessionID)); err != nil {
+	// In a transaction so the connection route's audit TxHook commits the
+	// audit row with the ticket (ADR 0010).
+	if err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO launch_ticket
+				(ticket_hash, workspace_id, tenant_id, principal_subject,
+				 runtime_generation, runtime_uid, audience, takeover,
+				 request_id, expires_at, clipboard_policy, session_policy,
+				 portal_session_digest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			ticketHash(token), workspaceUID, tenantID, owner,
+			int64(binding.RuntimeGeneration), binding.RuntimeUID,
+			b.audience, takeover, requestID(ctx), expires, clipboard,
+			resolved, portalSessionDigest(portalSessionID))
+		return err
+	}); err != nil {
 		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
 	}
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil

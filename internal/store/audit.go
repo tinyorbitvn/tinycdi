@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -41,10 +45,53 @@ func detailsJSON(d map[string]string) (string, error) {
 	return string(b), nil
 }
 
+// AuditTextMax bounds one request-controlled audit value — a target id,
+// request id or detail value — in bytes.
+const AuditTextMax = 256
+
+// auditTextKeep is how much of an oversized value is kept readable.
+const auditTextKeep = 200
+
+// SanitizeAuditText makes a request-controlled value safe to persist: NUL
+// and invalid UTF-8 become U+FFFD (Postgres text rejects both), and a value
+// longer than AuditTextMax keeps its first auditTextKeep bytes followed by
+// "…sha256:" and 16 hex digits of the raw value's digest — so no request
+// can make the insert fail or grow the row past a fixed size, and distinct
+// long values stay distinct.
+func SanitizeAuditText(s string) string {
+	out := s
+	if !utf8.ValidString(out) {
+		out = strings.ToValidUTF8(out, "\uFFFD")
+	}
+	if strings.IndexByte(out, 0) >= 0 {
+		out = strings.ReplaceAll(out, "\x00", "\uFFFD")
+	}
+	if len(out) <= AuditTextMax {
+		return out
+	}
+	cut := auditTextKeep
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	sum := sha256.Sum256([]byte(s))
+	return out[:cut] + "…sha256:" + hex.EncodeToString(sum[:8])
+}
+
+func sanitizeAuditDetails(d map[string]string) map[string]string {
+	if d == nil {
+		return nil
+	}
+	out := make(map[string]string, len(d))
+	for k, v := range d {
+		out[SanitizeAuditText(k)] = SanitizeAuditText(v)
+	}
+	return out
+}
+
 // InsertAudit writes r through q (the pool, or the audited mutation's
 // transaction) and returns the row id.
 func InsertAudit(ctx context.Context, q RowQuerier, r AuditRecord) (int64, error) {
-	details, err := detailsJSON(r.Details)
+	details, err := detailsJSON(sanitizeAuditDetails(r.Details))
 	if err != nil {
 		return 0, err
 	}
@@ -53,7 +100,7 @@ func InsertAudit(ctx context.Context, q RowQuerier, r AuditRecord) (int64, error
 		INSERT INTO audit_event (tenant, actor_ref, action, target_kind, target_id, outcome, error_code, request_id, details)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
 		RETURNING id`,
-		r.Tenant, r.ActorRef, r.Action, r.TargetKind, r.TargetID, r.Outcome, r.ErrorCode, r.RequestID, details,
+		r.Tenant, r.ActorRef, r.Action, r.TargetKind, SanitizeAuditText(r.TargetID), r.Outcome, r.ErrorCode, SanitizeAuditText(r.RequestID), details,
 	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: insert audit %w", err)
 	}
@@ -64,13 +111,13 @@ func InsertAudit(ctx context.Context, q RowQuerier, r AuditRecord) (int64, error
 // inserted inside the audited mutation's transaction: the handler may refuse
 // after COMMIT, and a create handler learns its target id only afterwards.
 func (d *DB) AmendAudit(ctx context.Context, id int64, targetID, outcome, errorCode string, details map[string]string) error {
-	raw, err := detailsJSON(details)
+	raw, err := detailsJSON(sanitizeAuditDetails(details))
 	if err != nil {
 		return err
 	}
 	if _, err := d.pool.Exec(ctx,
 		`UPDATE audit_event SET target_id = $2, outcome = $3, error_code = $4, details = $5::jsonb WHERE id = $1`,
-		id, targetID, outcome, errorCode, raw); err != nil {
+		id, SanitizeAuditText(targetID), outcome, errorCode, raw); err != nil {
 		return fmt.Errorf("store: amend audit %w", err)
 	}
 	return nil
@@ -110,7 +157,7 @@ func (d *DB) ListAudit(ctx context.Context, f AuditFilter, limit int, after *Aud
 		add("actor_ref = $%d", f.ActorRef)
 	}
 	if f.TargetID != "" {
-		add("target_id = $%d", f.TargetID)
+		add("target_id = $%d", SanitizeAuditText(f.TargetID))
 	}
 	if f.Since != nil {
 		add("created_at >= $%d", *f.Since)

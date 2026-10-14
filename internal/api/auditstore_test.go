@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -97,7 +99,7 @@ func TestAudited_PersistFailureFailsClosed(t *testing.T) {
 func TestAudited_NoTxMutationPersistFailureFailsClosed(t *testing.T) {
 	sink := &fakeDurable{failPersist: errors.New("db down")}
 	h := audited(sink, routeAdminQuotaSet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]string{"quota": "should-not-leak"}) // a K8s-only or single-statement mutation
+		respondJSON(w, map[string]string{"quota": "should-not-leak"}) // a K8s-only mutation (no transaction to share)
 	}))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/admin/tenants/t/quota", nil))
@@ -299,5 +301,42 @@ func TestAuditTargetKind(t *testing.T) {
 		if got := auditTargetKind(action); got != want {
 			t.Errorf("auditTargetKind(%q) = %q, want %q", action, got, want)
 		}
+	}
+}
+
+// TestAudited_TargetSanitizedAndBounded (R1-22): a request-controlled
+// target — 60 KB, NUL, invalid UTF-8 — reaches the durable store as valid
+// UTF-8 within store.AuditTextMax, so the insert cannot fail and the row
+// cannot bloat.
+func TestAudited_TargetSanitizedAndBounded(t *testing.T) {
+	for name, seg := range map[string]string{
+		"long":    strings.Repeat("A", 60000),
+		"nul":     "ws_a%00b",
+		"badutf8": "ws_a%ffb",
+	} {
+		t.Run(name, func(t *testing.T) {
+			sink := &fakeDurable{}
+			mux := http.NewServeMux()
+			mux.Handle(routeWorkspaceDelete, audited(sink, routeWorkspaceDelete,
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					writeError(w, r, CodeInvalidRequest, "invalid workspace id")
+				})))
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/v1/workspaces/"+seg, nil))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want the handler's 400 (the audit row persisted)", rec.Code)
+			}
+			if len(sink.persisted) != 1 {
+				t.Fatalf("persisted %d rows, want 1", len(sink.persisted))
+			}
+			for _, got := range []string{sink.persisted[0].TargetUID, sink.stdout[0].TargetUID} {
+				if len(got) > store.AuditTextMax || !utf8.ValidString(got) || strings.ContainsRune(got, 0) {
+					t.Fatalf("target %q (len %d) is not bounded, valid UTF-8 without NUL", got[:min(len(got), 40)], len(got))
+				}
+			}
+			if name == "long" && (!strings.HasPrefix(sink.persisted[0].TargetUID, "AAAA") || !strings.Contains(sink.persisted[0].TargetUID, "sha256:")) {
+				t.Fatalf("long target = %q, want its prefix plus a sha256 marker", sink.persisted[0].TargetUID)
+			}
+		})
 	}
 }

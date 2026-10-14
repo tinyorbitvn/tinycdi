@@ -233,6 +233,9 @@ func auditSetDetail(ctx context.Context, key, value string) {
 // buffered response is released; a failed insert answers 500 INTERNAL and
 // nothing the handler wrote reaches the client (ADR 0010). A sink without
 // persistence (and session.touch) keeps the pass-through status recorder.
+// The target and detail values are sanitized (store.SanitizeAuditText) so
+// the stdout record and the stored row agree, and no request-controlled
+// value can fail the insert.
 func audited(sink observability.AuditSink, pattern string, next http.Handler) http.Handler {
 	rt, ok := auditedRoutes[pattern]
 	if !ok {
@@ -277,9 +280,16 @@ func audited(sink observability.AuditSink, pattern string, next http.Handler) ht
 			if ra.action != "" {
 				action = ra.action
 			}
+			details := make(map[string]string, len(ra.details))
+			for k, v := range ra.details {
+				details[k] = store.SanitizeAuditText(v)
+			}
+			if len(details) == 0 {
+				details = nil
+			}
 			return observability.AuditEvent{
-				Actor: actorOrAnonymous(actor), Action: action, TargetUID: ra.target, Tenant: tenant,
-				RequestID: RequestIDFromContext(ctx), Outcome: outcome, ErrorCode: errCode, Details: ra.details,
+				Actor: actorOrAnonymous(actor), Action: action, TargetUID: store.SanitizeAuditText(ra.target), Tenant: tenant,
+				RequestID: RequestIDFromContext(ctx), Outcome: outcome, ErrorCode: errCode, Details: details,
 			}
 		}
 		var hook *auditTxHook // nil for reads and non-persisted routes

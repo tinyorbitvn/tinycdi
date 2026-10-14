@@ -58,32 +58,40 @@ func (s *adminQuotaStore) Report(ctx context.Context, tenantID string) (store.Qu
 // no row exists. Writes stamp updated_at with clock_timestamp() — wall-clock
 // per statement, never the transaction's start time — so back-to-back
 // writes in one transaction cannot share a version. No row returned means
-// the precondition failed, whatever the reason.
+// the precondition failed, whatever the reason. The statement runs in
+// DB.WithTx so an audited request's TxHook persists the audit row in the
+// same transaction.
 func (s *adminQuotaStore) SetLimits(ctx context.Context, tenantID string, v provisioning.ResourceVector, expectedVersion string, create bool) (string, error) {
-	var row pgx.Row
-	if create {
-		row = s.db.Pool().QueryRow(ctx, `
-			INSERT INTO tenant_quota (tenant_id, max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes, updated_at)
-			VALUES ($1, $2, $3, $4, $5, clock_timestamp())
-			ON CONFLICT (tenant_id) DO NOTHING
-			RETURNING updated_at`,
-			tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes)
-	} else {
-		since, err := time.Parse(time.RFC3339Nano, expectedVersion)
-		if err != nil {
+	var since time.Time
+	if !create {
+		var err error
+		if since, err = time.Parse(time.RFC3339Nano, expectedVersion); err != nil {
 			return "", store.ErrVersionMismatch
 		}
-		row = s.db.Pool().QueryRow(ctx, `
+	}
+	// One statement, run in a transaction so the audited route's TxHook
+	// inserts the audit row with it: the limit and its record commit or
+	// roll back together (ADR 0010).
+	var at time.Time
+	err := s.db.WithTx(ctx, func(tx store.Tx) error {
+		if create {
+			return tx.QueryRow(ctx, `
+				INSERT INTO tenant_quota (tenant_id, max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes, updated_at)
+				VALUES ($1, $2, $3, $4, $5, clock_timestamp())
+				ON CONFLICT (tenant_id) DO NOTHING
+				RETURNING updated_at`,
+				tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes).Scan(&at)
+		}
+		return tx.QueryRow(ctx, `
 			UPDATE tenant_quota SET
 				max_running_slots = $2, max_cpu_millis = $3,
 				max_memory_bytes  = $4, max_disk_bytes = $5,
 				updated_at        = clock_timestamp()
 			WHERE tenant_id = $1 AND updated_at = $6
 			RETURNING updated_at`,
-			tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes, since)
-	}
-	var at time.Time
-	if err := row.Scan(&at); err != nil {
+			tenantID, v.RunningSlots, v.CPUMillis, v.MemoryBytes, v.DiskBytes, since).Scan(&at)
+	})
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", store.ErrVersionMismatch
 		}

@@ -3,8 +3,10 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
@@ -90,5 +92,41 @@ func TestAudit_AmendAndPrune(t *testing.T) {
 	left, _ := db.ListAudit(ctx, store.AuditFilter{Tenant: "t"}, 10, nil)
 	if len(left) != 1 || left[0].Outcome != "failure" || left[0].ErrorCode != "QUOTA_EXHAUSTED" || left[0].Details["counts"] != "1" || left[0].TargetID != "ws_late" {
 		t.Fatalf("after amend+prune: %+v", left)
+	}
+}
+
+// TestAudit_InsertSanitizedTarget (R1-22): request-controlled audit text
+// with NUL, invalid UTF-8 or 60 KB inserts and amends cleanly, valid and
+// bounded, and the target filter finds the long row by its raw value.
+func TestAudit_InsertSanitizedTarget(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	long := strings.Repeat("A", 60000)
+	for name, raw := range map[string]string{"nul": "a\x00b", "badutf8": "a\xffb", "long": long} {
+		id, err := store.InsertAudit(ctx, db.Pool(), store.AuditRecord{
+			Tenant: "t-san", ActorRef: "oidc:aa", Action: "workspace.delete", TargetKind: "workspace",
+			TargetID: raw, Outcome: "failure", RequestID: raw, Details: map[string]string{"path": raw},
+		})
+		if err != nil {
+			t.Fatalf("%s: insert %v", name, err)
+		}
+		if err := db.AmendAudit(ctx, id, raw, "failure", "INVALID_REQUEST", map[string]string{"path": raw}); err != nil {
+			t.Fatalf("%s: amend %v", name, err)
+		}
+	}
+	rows, err := db.ListAudit(ctx, store.AuditFilter{Tenant: "t-san"}, 10, nil)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows=%d err=%v, want 3", len(rows), err)
+	}
+	for _, r := range rows {
+		for _, v := range []string{r.TargetID, r.RequestID, r.Details["path"]} {
+			if len(v) > 256 || !utf8.ValidString(v) || strings.ContainsRune(v, 0) {
+				t.Fatalf("stored value %q (len %d) not bounded valid UTF-8", v[:min(len(v), 40)], len(v))
+			}
+		}
+	}
+	hit, err := db.ListAudit(ctx, store.AuditFilter{Tenant: "t-san", TargetID: long}, 10, nil)
+	if err != nil || len(hit) != 1 {
+		t.Fatalf("filter by the raw long target: rows=%d err=%v, want 1", len(hit), err)
 	}
 }
