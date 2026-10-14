@@ -8,6 +8,7 @@ import {
   err,
   ok,
   paginate,
+  sessionHostLabel,
   sessionLaunchUrl,
   WORKSPACE_SORTS,
   type MockArea,
@@ -94,8 +95,10 @@ function withEventIds(events: WorkspaceEventFixture[]): (WorkspaceEventFixture &
 
 export function workspacesArea(ctx: MockContext): MockArea {
   const { state } = ctx;
+  const fileTransfer = new Map<string, { policy: string; maxFileBytes: number }>();
 
   function reset(): void {
+    fileTransfer.clear();
     state.templates = [structuredClone(TEMPLATE_LINUX), structuredClone(TEMPLATE_BROWSER)];
     const seed = makeWorkspace();
     state.workspaces.set(seed.id, seed);
@@ -115,7 +118,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     if (path === "/v1/workspaces" && method === "GET") return listWorkspaces(req);
     if (path === "/v1/workspaces" && method === "POST") return createWorkspace(req);
     if (path === "/v1/templates" && method === "GET") return listTemplates(req);
-    const m = path.match(/^\/v1\/workspaces\/([^/:]+)(:start|:stop|\/connections|\/events)?$/);
+    const m = path.match(/^\/v1\/workspaces\/([^/:]+)(:start|:stop|\/connections|\/events|\/file-transfers)?$/);
     if (!m) return undefined;
     const ws = state.workspaces.get(m[1]);
     if (!ws) return err(404, "NOT_FOUND", "workspace not found", false);
@@ -126,6 +129,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
     if (sub === ":stop" && method === "POST") return stopWorkspace(ws);
     if (sub === "/connections" && method === "POST") return createConnection(req, ws);
     if (sub === "/events" && method === "GET") return listEvents(req, ws);
+    if (sub === "/file-transfers" && method === "POST") return mintTransfer(req, ws);
     return undefined;
   }
 
@@ -278,8 +282,39 @@ export function workspacesArea(ctx: MockContext): MockArea {
           tpl?.clipboardPolicy ?? "Bidirectional",
           tenancy(ctx).sessionPolicy?.clipboard ?? "FollowTemplate",
         ),
-        fileTransfer: { mode: "Disabled", maxFileBytes: null },
+        fileTransfer: fileTransfer.get(ws.id)?.policy ?? "Disabled",
+        maxFileBytes: fileTransfer.get(ws.id)?.maxFileBytes ?? 0,
       },
+    });
+  }
+
+  function mintTransfer(req: MockRequest, ws: WorkspaceFixture): MockResponse {
+    const b = (req.body ?? {}) as { direction?: string; path?: string; bytes?: number };
+    const ft = fileTransfer.get(ws.id) ?? { policy: "Disabled", maxFileBytes: 0 };
+    if (!b.path || b.path === "." || b.path === ".." || /[/\\\u0000-\u001f]/.test(b.path)) {
+      return err(400, "INVALID_REQUEST", "path must be a single file name", false);
+    }
+    if (ws.phase !== "Ready") return err(409, "INVALID_STATE", "the workspace must be running to transfer files", false);
+    const allowed =
+      ft.policy === "Bidirectional" || (ft.policy === "Upload" && b.direction === "upload") || (ft.policy === "Download" && b.direction === "download");
+    if (!allowed) {
+      const denied = err(403, "FORBIDDEN", `file ${b.direction} is not allowed for this workspace`, false);
+      (denied.body as { error: { details?: unknown } }).error.details = { reason: "transfer_denied" };
+      return denied;
+    }
+    if (b.direction === "upload" && (b.bytes === undefined || b.bytes < 0 || b.bytes > ft.maxFileBytes)) {
+      return err(400, "INVALID_REQUEST", "bytes is over the transfer limit", false);
+    }
+    const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    const id = "xf_" + Array.from({ length: 26 }, () => alphabet[Math.floor(Math.random() * 32)]).join("");
+    return ok(201, {
+      id,
+      direction: b.direction,
+      path: b.path,
+      declaredBytes: b.direction === "upload" ? b.bytes : 0,
+      maxBytes: ft.maxFileBytes,
+      expiresAt: new Date(ctx.now() + 120_000).toISOString(),
+      contentUrl: `${ctx.sessionOriginUrl.protocol}//${sessionHostLabel(ws.id)}.${ctx.sessionDomain}/v1/transfers/${id}/content`,
     });
   }
 
@@ -299,6 +334,13 @@ export function workspacesArea(ctx: MockContext): MockArea {
     if (p === "/_control/templates/invalidate" && req.method === "POST") {
       state.invalidTemplates.add(String(req.body?.id));
       return ok(200, { invalid: [...state.invalidTemplates] });
+    }
+    // POST /_control/workspaces/fileTransfer {workspaceId, policy, maxFileBytes}
+    // — the resolved file-transfer vector the next ticket records.
+    if (p === "/_control/workspaces/fileTransfer" && req.method === "POST") {
+      const b = (req.body ?? {}) as { workspaceId: string; policy: string; maxFileBytes: number };
+      fileTransfer.set(b.workspaceId, { policy: b.policy, maxFileBytes: b.maxFileBytes });
+      return ok(200, { workspaceId: b.workspaceId, ...fileTransfer.get(b.workspaceId) });
     }
     const wsm = p.match(/^\/_control\/workspaces\/([^/]+)(\/events)?$/);
     if (wsm && req.method === "PUT" && !wsm[2]) {

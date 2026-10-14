@@ -42,6 +42,8 @@ import {
   type SessionEmbedOpts,
   type SessionMarker,
 } from "./launch";
+import { FileTransfer } from "./FileTransfer";
+import type { FileTransferPolicy } from "./transfer";
 import {
   initialSessionState,
   isLive,
@@ -191,11 +193,13 @@ export function SessionPage({
   const [resolvedClipboard, setResolvedClipboard] = useState<ClipboardPolicy | undefined>(
     undefined,
   );
+  const [resolvedTransfer, setResolvedTransfer] = useState<{ policy: FileTransferPolicy; maxFileBytes: number }>({ policy: "Disabled", maxFileBytes: 0 });
   const resolvedClipboardRef = useRef<ClipboardPolicy | undefined>(undefined);
   const noteResolvedPolicy = useCallback((ticket: LaunchTicket) => {
     const clip = ticket.sessionPolicy?.clipboard;
     resolvedClipboardRef.current = clip;
     setResolvedClipboard(clip);
+    setResolvedTransfer({ policy: (ticket.sessionPolicy?.fileTransfer ?? "Disabled") as FileTransferPolicy, maxFileBytes: ticket.sessionPolicy?.maxFileBytes ?? 0 });
   }, []);
   const embedOpts = useCallback(
     (): SessionEmbedOpts => ({
@@ -998,6 +1002,7 @@ export function SessionPage({
           </Button>
         </div>
       </div>
+      {connected && sessionDomain ? <FileTransfer workspaceId={workspaceId} sessionDomain={sessionDomain} policy={resolvedTransfer.policy} maxFileBytes={resolvedTransfer.maxFileBytes} /> : null}
       <div className="tc-session__stage" ref={stageRef} data-status={state.status}>
         <iframe
           key={frameKey}

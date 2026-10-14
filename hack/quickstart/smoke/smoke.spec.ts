@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { expect, test, type Browser, type Frame, type Page } from "@playwright/test";
+import { transferRoundTrip } from "./transfer";
 
 // DEV-ONLY credentials of the throwaway Keycloak realm inside the kind
 // cluster (hack/quickstart/realm-export.json, printed by up.sh). The
@@ -158,7 +159,7 @@ function podClipboard(workspaceId: string) {
 // the non-Disabled case can run on a dedicated catalog entry (the seeded
 // templates are all Disabled). The clone keeps the quickstart-safe spec —
 // Firefox + no Localhost node profiles — verbatim.
-function cloneBrowserTemplate(name: string, display: string, policy: string) {
+function cloneBrowserTemplate(name: string, display: string, policy: string, extraSpec: Record<string, unknown> = {}) {
   const list = JSON.parse(
     kubectl(
       "get", "workspacetemplates",
@@ -180,7 +181,7 @@ function cloneBrowserTemplate(name: string, display: string, policy: string) {
         "workspaces.cdi.tinyorbit.vn/display-name": display,
       },
     },
-    spec: { ...src.spec, revision: `clip-${name}`, clipboardPolicy: policy },
+    spec: { ...src.spec, revision: `clip-${name}`, clipboardPolicy: policy, ...extraSpec },
   };
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-tpl-")), "tpl.json");
   fs.writeFileSync(f, JSON.stringify(clone));
@@ -267,6 +268,16 @@ async function stopWorkspace(page: Page, workspaceId: string) {
   await expect(stop).toBeVisible();
   await stop.click();
   await waitPhase(page, workspaceId, "Stopped");
+}
+
+// Stops every Ready workspace of the signed-in tenant so the next create
+// has a running slot (the create retries through release_pending).
+async function freeRunningSlots(page: Page) {
+  const ids = await page.evaluate(async () => {
+    const r = await fetch("/v1/workspaces?phase=Ready");
+    return r.ok ? (((await r.json()) as { items?: Array<{ id: string }> }).items ?? []).map((w) => w.id) : [];
+  });
+  for (const id of ids) await stopWorkspace(page, id);
 }
 
 // Cleanup for a `finally` block: stops the workspace so the next smoke has
@@ -419,6 +430,7 @@ test("log in, create a browser workspace and see the session frame load", async 
   expect(end?.leaseActive, "lease still live at the end of the hold").toBe(true);
   await expect(status).toHaveText(/Connected/);
   expect(tickets, "no second launch ticket in 120 s").toEqual([]);
+  await expect(page.getByRole("region", { name: "File transfer" })).toHaveCount(0);
 });
 
 // B5.4 (permanent): a fresh install can create workspaces — the seeded
@@ -1011,5 +1023,35 @@ test("admin: session-policy apply restarts a workspace that is looser than the c
     await stopWorkspace(user, id);
     await userCtx.close();
     await adminCtx.close();
+  }
+});
+
+test("file transfer: upload then download through the Transfers folder", async ({ page }) => {
+  const stamp = Date.now().toString(36);
+  const tplName = `xfer-bidi-${stamp}`;
+  // The seeded catalog is all Disabled; the transfer path needs its own entry.
+  cloneBrowserTemplate(tplName, `Transfer ${stamp}`, "Disabled", { fileTransferPolicy: "Bidirectional" });
+  await login(page);
+  await freeRunningSlots(page);
+  const id = await createWorkspaceOnTemplate(page, `xfer-${stamp}`, new RegExp(tplName, "i"));
+  try {
+    // The pod object lands during provisioning: poll until it carries the rendered policy.
+    await expect
+      .poll(
+        () => {
+          try {
+            return podEnv(id)["TCDI_XFER_POLICY"] ?? null;
+          } catch {
+            return null;
+          }
+        },
+        { timeout: 120_000 },
+      )
+      .toBe("Bidirectional");
+    expect(podEnv(id)["TCDI_XFER_MAX_BYTES"], "the platform default bound").toBe("104857600");
+    await connectSessionFrame(page, id);
+    await transferRoundTrip(page, stamp, `${HOME_DIR}/transfers`, (script, ...args) => inHome(id, script, ...args));
+  } finally {
+    await stopWorkspace(page, id);
   }
 });

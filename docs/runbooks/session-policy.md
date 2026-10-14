@@ -1,9 +1,8 @@
-# Runbook — Tenant session policy (clipboard ceiling)
+# Runbook — Tenant session policy (clipboard and file-transfer ceilings)
 
 A tenant's **session policy** is the ceiling over what data may move
-between a user's device and their workspace (ADR 0010). In v1.2 the only
-live channel is the **clipboard**; the `fileTransfer` channel exists in
-the schema for v1.3 and is inert.
+between a user's device and their workspace (ADR 0010). It has two
+channels: the **clipboard** and **file transfer**.
 
 ## What the ceiling does
 
@@ -24,6 +23,11 @@ session-policy row behaves exactly as before (the upgrade default is
 `FollowTemplate` everywhere), and setting every channel back to
 `FollowTemplate` deletes the row.
 
+For file transfer the ceiling values mean: `Upload` is device → workspace,
+`Download` is workspace → device. The effective policy is the meet of the
+template's `spec.fileTransferPolicy` (default `Disabled`) and the ceiling,
+so `Upload ∩ Download = Disabled`, and a ceiling never widens a template.
+
 ## Change the ceiling
 
 **Admin panel:** open **Admin → Session policy**
@@ -34,8 +38,8 @@ ceiling — so the result is visible before and after the save.
 **API:** `GET` then `PUT /v1/admin/tenants/{tenant}/session-policy` —
 tenant-admin only, CSRF header plus `If-Match: <version>` from the GET
 (`If-Match: *` creates the row for a tenant that has none; a stale
-version answers `412 PRECONDITION_FAILED`). `fileTransfer` accepts only
-its defaults in v1.2. Every write is audited
+version answers `412 PRECONDITION_FAILED`). `fileTransfer` is
+`{"mode": …, "maxFileBytes": …}` (see File transfer below). Every write is audited
 (`admin.session_policy.set` / `admin.session_policy.clear`).
 
 ```bash
@@ -44,6 +48,51 @@ curl -X PUT "https://<portal>/v1/admin/tenants/<tenant>/session-policy" \
   -H "Content-Type: application/json" \
   -d '{"clipboard":"Disabled"}'
 ```
+
+## File transfer
+
+File transfer moves one file at a time between the browser and the
+**Transfers** folder of the workspace home (`~/transfers`). The portal
+session page shows an upload control and a download control only for
+the directions the workspace's resolved policy allows; with `Disabled`
+nothing is shown.
+
+**Enable or disable it.**
+
+1. Allow it on the template: set `spec.fileTransferPolicy` to `Upload`,
+   `Download` or `Bidirectional` on the `WorkspaceTemplate` (default
+   `Disabled`; `GET /v1/templates` shows it as `fileTransferPolicy`).
+2. Check the tenant ceiling. With no row, or `fileTransfer.mode:
+   FollowTemplate`, the template's policy applies. To turn file transfer
+   off for the whole tenant, open **Admin → Session policy → File
+   transfer** and choose `Disabled` (or `PUT` `{"fileTransfer":{"mode":
+   "Disabled","maxFileBytes":null}}`). The preview table on that page
+   shows the effective policy per template before you save.
+
+**Size cap.** The per-file limit is the smaller of two values:
+
+- the platform bound, chart value `backend.fileTransfer.maxFileBytes`
+  (backend flag `-file-transfer-max-bytes`, default 104857600 = 100 MiB,
+  allowed 1 to 10737418240);
+- the tenant's `fileTransfer.maxFileBytes` (1 up to the platform bound;
+  `null` means "use the platform bound").
+
+An ingress controller that caps request bodies must allow at least the
+platform bound on the session route (chart README, "Exposure").
+
+**When a change takes effect.** Mint and claim re-resolve the policy for
+every transfer, so a narrower ceiling or a lower cap blocks the next
+transfer immediately, including on running workspaces. The in-pod helper
+enforces the policy and cap it booted with (`TCDI_XFER_POLICY`,
+`TCDI_XFER_MAX_BYTES`), so a **wider** policy or a higher cap reaches a
+running workspace at its next start.
+
+**Verify.** `kubectl -n <tenant-ns> get workspace <name> -o
+jsonpath='{.spec.sessionPolicy}'` shows `fileTransfer` and `maxFileBytes`;
+the audit log (`/admin/audit`, actions `file.transfer.upload` and
+`file.transfer.download`) records every mint, claim and completion with
+the phase, path, byte count and outcome. A file moves only once: each grant is
+single use and expires after 2 minutes.
 
 ## When does a change take effect?
 

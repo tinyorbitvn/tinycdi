@@ -132,6 +132,7 @@ the edge; the frontend never proxies it — `build/frontend/main.go` header,
 Controls:
 
 - **Frontend security headers** — CSP (incl. `frame-src https://*.<sessionDomain>`,
+  `connect-src 'self' https://*.<sessionDomain>`,
   `form-action 'self' https://*.<sessionDomain>`, `frame-ancestors 'none'`),
   COOP `same-origin`, and the rest of the portal policy are pinned by
   `securityHeaders`/`frontendCSP` in `build/frontend/main.go`

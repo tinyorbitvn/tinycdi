@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { createApi, setCsrfToken } from "../../../src/api/client";
 import { ApiProvider } from "../../../src/api/context";
 import { MeProvider, type Me } from "../../../src/app/me";
+import { ToastProvider } from "../../../src/design";
 import { SessionPage } from "../../../src/session/SessionPage";
 import {
   SESSION_FRAME_SANDBOX,
@@ -55,7 +56,9 @@ function setupPage(workspaceOverrides: Parameters<typeof readyWorkspace>[0] = {}
   const utils = render(
     <ApiProvider client={client}>
       <MeProvider load={async () => ME}>
-        <SessionPage workspaceId={ws.id} />
+        <ToastProvider>
+          <SessionPage workspaceId={ws.id} />
+        </ToastProvider>
       </MeProvider>
     </ApiProvider>,
   );
@@ -116,7 +119,9 @@ describe("SessionPage", () => {
     render(
       <ApiProvider client={client}>
         <MeProvider load={async () => ME}>
-          <SessionPage workspaceId={ws.id} />
+          <ToastProvider>
+            <SessionPage workspaceId={ws.id} />
+          </ToastProvider>
         </MeProvider>
       </ApiProvider>,
     );
@@ -244,7 +249,9 @@ function setupScripted(
   const utils = render(
     <ApiProvider client={createApi(wrapped)}>
       <MeProvider load={async () => ME}>
-        <SessionPage workspaceId={ws.id} onSignIn={onSignIn} {...opts.props} />
+        <ToastProvider>
+          <SessionPage workspaceId={ws.id} onSignIn={onSignIn} {...opts.props} />
+        </ToastProvider>
       </MeProvider>
     </ApiProvider>,
   );

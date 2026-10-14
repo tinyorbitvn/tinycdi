@@ -161,14 +161,16 @@ const cspBase = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-a
 // iframe that then stays on that workspace's own host for the stream. So
 // the whole session-domain wildcard must be allowed by both form-action
 // (the POST) and frame-src (the iframe navigation) — https://*.<domain>
-// keeps the configured port when one is set. nil fails closed — frame-src
-// 'none', form-action 'self'.
+// keeps the configured port when one is set. connect-src: the file-transfer
+// content requests (ADR 0010 T11) go to the workspace's own session host;
+// the portal opens no other cross-origin connection. nil fails closed —
+// frame-src 'none', form-action 'self'.
 func frontendCSP(domain *sessionhost.Domain) string {
 	if domain == nil {
-		return cspBase + "; frame-src 'none'; form-action 'self'"
+		return cspBase + "; connect-src 'self'; frame-src 'none'; form-action 'self'"
 	}
 	origin := "https://" + domain.Wildcard()
-	return cspBase + "; frame-src " + origin + "; form-action 'self' " + origin
+	return cspBase + "; connect-src 'self' " + origin + "; frame-src " + origin + "; form-action 'self' " + origin
 }
 
 // securityHeaders pins the browser policy on every frontend response

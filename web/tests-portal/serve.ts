@@ -15,13 +15,16 @@
 // mode's frontend binary. It also rewrites Me.sessionDomain and
 // LaunchTicket.launchUrl onto the active session domain and hands each
 // minted ticket to the fake broker — that is exactly what the real API +
-// broker pair does, the split-mode backend just has no API listener.
+// broker pair does, the split-mode backend just has no API listener. It
+// also registers file-transfer grants and fakes the broker claim/complete
+// and the in-pod helper.
 //
 // Loopback control API (http://127.0.0.1:4176, never on a public name):
 //   POST /mode            {mode: "lax"|"partitioned"}  — active site
 //   POST /backend/restart {mode} — kill + respawn that backend, reply when up
 //   POST /desktop         {topNav?: bool, popup?: bool} — fake upstream page behaviour
 //   POST /broker/reset    — drop every ticket/lease the fake broker holds
+//   GET  /broker/transfers — transfers the fake broker saw completed
 //
 // Requires a Go toolchain, openssl and the Playwright browsers. This
 // process must stay alive for the suite; Playwright kills it after the run
@@ -241,6 +244,7 @@ const tlsOpts = { cert, key };
 // ---------------------------------------------------------------------------
 
 const upstreamBehavior = { topNav: false, popup: false };
+const xferFiles = new Map<string, Buffer>();
 let upstreamRenders = 0;
 
 function desktopPage(): string {
@@ -280,6 +284,34 @@ function desktopPage(): string {
 }
 
 const upstream = https.createServer(tlsOpts, (req, res) => {
+  if (req.url?.startsWith("/xfer/files/")) {
+    if (req.headers["x-tcdi-xfer-token"] !== "xt-e2e" || req.headers.authorization !== undefined || req.headers.cookie !== undefined) {
+      res.writeHead(401);
+      res.end("bad transfer credential");
+      return;
+    }
+    const name = decodeURIComponent(req.url.slice("/xfer/files/".length));
+    if (req.method === "PUT") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const data = Buffer.concat(chunks);
+        xferFiles.set(name, data);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ bytes: data.length }));
+      });
+      return;
+    }
+    const f = xferFiles.get(name);
+    if (!f) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(f.length) });
+    res.end(f);
+    return;
+  }
   if (req.headers.authorization !== UPSTREAM_AUTH) {
     res.writeHead(401, { "content-type": "text/plain" });
     res.end("upstream requires the injected credentials");
@@ -311,18 +343,27 @@ const brokerState = {
   tickets: new Map<string, { workspaceUID: string; used: boolean }>(),
   leases: new Map<string, FakeLease>(),
   revoked: new Set<string>(),
+  transfers: new Map<string, { workspaceUID: string; direction: string; path: string; maxBytes: number; used: boolean }>(),
+  completed: [] as Array<{ id: string; bytes: number; ok: boolean }>,
 };
 
 function brokerReset() {
   brokerState.tickets.clear();
   brokerState.leases.clear();
   brokerState.revoked.clear();
+  brokerState.transfers.clear();
+  brokerState.completed.length = 0;
+  xferFiles.clear();
 }
 
 // The router calls this for every ticket the mock API mints — the real
 // broker learns the same binding when the API creates the lease.
 function brokerRegisterTicket(ticket: string, workspaceUID: string) {
   brokerState.tickets.set(ticket, { workspaceUID, used: false });
+}
+
+function brokerRegisterTransfer(id: string, workspaceUID: string, direction: string, path: string, maxBytes: number) {
+  brokerState.transfers.set(id, { workspaceUID, direction, path, maxBytes, used: false });
 }
 
 function apiErr(res: http.ServerResponse, status: number, code: string, message: string) {
@@ -345,7 +386,7 @@ const broker = https.createServer(
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      let body: { ticket?: string } = {};
+      let body: { ticket?: string; method?: string; bytes?: number; ok?: boolean } = {};
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
       } catch {
@@ -379,6 +420,28 @@ const broker = https.createServer(
         return;
       }
 
+      const XFER_LEASE_RE = /^\/internal\/v1\/broker\/leases\/([^/]+)\/transfers\/([^/]+)\/(claim|complete)$/;
+      const xm = req.url?.match(XFER_LEASE_RE);
+      if (xm) {
+        const lease = brokerState.leases.get(xm[1]);
+        const tr = brokerState.transfers.get(xm[2]);
+        if (xm[3] === "claim") {
+          const wantMethod = tr?.direction === "upload" ? "PUT" : "GET";
+          if (!lease || brokerState.revoked.has(xm[1]) || !tr || tr.used || tr.workspaceUID !== lease.workspaceUID || body.method !== wantMethod) {
+            apiErr(res, 410, "TRANSFER_INVALID", "transfer invalid, used or expired");
+            return;
+          }
+          tr.used = true;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ id: xm[2], workspaceUID: tr.workspaceUID, direction: tr.direction, path: tr.path, maxBytes: tr.maxBytes }));
+          return;
+        }
+        brokerState.completed.push({ id: xm[2], bytes: body.bytes ?? 0, ok: body.ok === true });
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       const m = req.url?.match(LEASES_RE);
       if (!m) {
         apiErr(res, 404, "NOT_FOUND", `no route ${req.method} ${req.url}`);
@@ -406,6 +469,7 @@ const broker = https.createServer(
               caPEM: cert.toString("base64"),
               username: UPSTREAM_USER,
               password: UPSTREAM_PASS,
+              xferToken: "xt-e2e",
               protocol: "kasmvnc",
             }),
           );
@@ -452,6 +516,7 @@ let activeMode: HarnessMode = "lax";
 const sessionDomain = () => SESSION_DOMAINS[activeMode];
 
 const CONN_RE = /^\/v1\/workspaces\/([^/]+)\/connections$/;
+const XFER_RE = /^\/v1\/workspaces\/([^/]+)\/file-transfers$/;
 
 // The contract mock names its portal cookie "tcdi_session"; the real API
 // ships "__Host-tcdi_session" (D17). The edge presents the real name to
@@ -531,8 +596,9 @@ function handleApi(req: http.IncomingMessage, res: http.ServerResponse) {
       },
       (upRes) => {
         const connMatch = req.method === "POST" ? req.url?.match(CONN_RE) : null;
+        const xferMatch = req.method === "POST" ? req.url?.match(XFER_RE) : null;
         const isMe = req.method === "GET" && (req.url === "/v1/me" || req.url?.startsWith("/v1/me?"));
-        if (!connMatch && !isMe) {
+        if (!connMatch && !xferMatch && !isMe) {
           rewriteSetCookie(upRes.headers);
           res.writeHead(upRes.statusCode ?? 502, upRes.headers);
           upRes.pipe(res);
@@ -552,6 +618,15 @@ function handleApi(req: http.IncomingMessage, res: http.ServerResponse) {
                   brokerRegisterTicket(json.ticket, wsId);
                 }
                 json.launchUrl = `https://${workspaceLabel(wsId)}.${sessionDomain()}/v1/launch`;
+              } else if (xferMatch) {
+                // The real API + broker pair: the API mints the row, the broker
+                // later claims it; the contentUrl names the active session site.
+                const wsId = xferMatch[1];
+                brokerRegisterTransfer(
+                  json.id, wsId, json.direction, json.path,
+                  json.direction === "upload" ? Math.min(json.declaredBytes, json.maxBytes) : json.maxBytes,
+                );
+                json.contentUrl = `https://${workspaceLabel(wsId)}.${sessionDomain()}/v1/transfers/${json.id}/content`;
               } else {
                 json.sessionDomain = sessionDomain();
               }
@@ -707,6 +782,7 @@ const control = http.createServer((req, res) => {
       brokerReset();
       return reply(200, { reset: true });
     }
+    if (req.method === "GET" && req.url === "/broker/transfers") return reply(200, { completed: brokerState.completed });
     if (req.method === "POST" && req.url === "/backend/restart") {
       const m = body.mode;
       if (m !== "lax" && m !== "partitioned") return reply(400, { error: "mode must be lax|partitioned" });
