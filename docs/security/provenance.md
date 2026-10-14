@@ -16,13 +16,13 @@ the Helm chart:
 
 1. **Digest-pinned reference** — build jobs push **by digest only**
    (`push-by-digest=true`); `imagetools create` promotes tags (`:sha-<short>`,
-   `:main`, `:X.Y.Z`) only after signing (SUPR-13). The digest lands in the
+   `:main`, `:X.Y.Z`) only after signing. The digest lands in the
    release manifest and in the Helm values a release deploys with
    (`images.*.digest` in `deploy/helm/tinycdi/values.yaml`; seeded
    `templates[]` image refs must be digest-pinned or CRD validation rejects
    them).
 2. **SBOM** — SPDX JSON generated with pinned syft in the **build job**
-   (the scan and promote jobs never consume scan-job outputs — SUPR-2).
+   (the scan and promote jobs never consume scan-job outputs).
    Release assets additionally carry `sbom-<image>.spdx.json` files plus
    dedicated `sbom-chart.spdx.json` (the packaged Helm chart) and
    `sbom-binaries.spdx.json` (the static release binaries).
@@ -47,7 +47,7 @@ cosign attest --yes --type spdxjson \
   ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>
 ```
 
-The signer certificate identity is exact (SUPR-6 — anchored, no regex
+The signer certificate identity is exact (anchored, no regex
 ambiguity):
 
 | Channel | Workflow | Identity |
@@ -103,9 +103,9 @@ cosign verify-blob --bundle <asset>.sigstore.json <asset> \
 
 Deployment-side enforcement (optional, later): a policy check that the
 cluster only runs digests carrying a valid attestation — admission-level
-verification is out of MVP scope; the Helm chart already refuses
+verification is out of scope; the Helm chart already refuses
 non-digest image references in seeded templates and requires a pinned tag
-or digest for the node-profiles installer image, which is the MVP-level
+or digest for the node-profiles installer image, which is the shipped
 guarantee.
 
 ## Digest-addressable does not mean released
@@ -113,7 +113,7 @@ guarantee.
 Build jobs push `type=registry,push-by-digest=true` **before** the scan
 gate runs. When the gate — or any upstream build leg — fails, the same
 workflow run's `cleanup` job deletes exactly the versions that run
-pushed (SR-5-F3): each pushed index, its per-platform and build
+pushed: each pushed index, its per-platform and build
 attestation-manifest children and its referrers, resolved from the
 run's own `image-ref` artifacts by
 `.github/scripts/cleanup-failed-digests.sh`. The deletion is strictly
@@ -127,15 +127,15 @@ gate-failed `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does
 not stay pullable-by-digest and a published release can never be
 cleaned up by a failed run. The window and reachability checks are
 check-then-act — a version could in principle gain a tag or a referrer
-between resolution and deletion, a small TOCTOU residual accepted for
-v1.1.
+between resolution and deletion, a small check-then-act residual, listed
+in the release notes' known limitations.
 
 Even in the window between push and cleanup the residual carries no
 release trust:
 
 - it is **never tagged** — tags (`rt-*`, `:<ver>`, `:latest`, `:main`,
   `:sha-*`) are promoted only by the publish job, after the trivy gate
-  passes and the digest is signed (SUPR-13);
+  passes and the digest is signed;
 - it is **never signed or attested** — `cosign verify` /
   `verify-attestation` against the digest fails, and no signed manifest
   (`runtime-images.json`, the packaged chart's `images.*.digest`, the
@@ -151,7 +151,7 @@ artifact was built by **this repository's workflow** from the recorded
 commit/tag — nothing more. In particular it does **not** prove that a
 second person reviewed the change: the project currently has a single
 maintainer, and the same account can author, merge and approve a publish
-(SR-5-F2, accepted residual — [`review-v1.0.md` §7](review-v1.0.md)).
+(accepted residual).
 
 The durable record is the **environment approval**, not the signature:
 the `release` and `runtime-train` environments each require a reviewer

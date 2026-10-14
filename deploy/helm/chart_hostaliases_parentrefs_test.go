@@ -3,12 +3,12 @@
 
 package chart_test
 
-// CHART-2 (v0.3.2): two additive chart values.
+// CHART-2: two additive chart values.
 //
 //   - backend.hostAliases renders as spec.template.spec.hostAliases on
 //     the backend Deployment (e.g. resolving an in-cluster OIDC issuer
 //     host to a Service ClusterIP when cluster DNS cannot). Empty by
-//     default — the pre-v0.3.2 render is unchanged.
+//     default — the default render is unchanged.
 //   - gatewayApi.portalParentRefs / .sessionParentRefs are per-route
 //     parentRef overrides: a non-empty list REPLACES the shared
 //     gatewayApi.parentRefs for that HTTPRoute (e.g. a wildcard-https
@@ -105,7 +105,7 @@ func TestBackendHostAliasesSchema(t *testing.T) {
 }
 
 // TestHTTPRouteSharedParentRefsUnchanged: the single shared
-// gatewayApi.parentRefs list still parents BOTH routes (pre-v0.3.2
+// gatewayApi.parentRefs list still parents BOTH routes (the default
 // shape, exercised here with --set to prove the file-format path too).
 func TestHTTPRouteSharedParentRefsUnchanged(t *testing.T) {
 	docs := render(t, "gateway-api-values.yaml")

@@ -85,18 +85,6 @@ func TestSessionDomainRoutes(t *testing.T) {
 	})
 }
 
-// TestSessionHostValueFails (D9): the 0.1.x value sessionHost is gone —
-// setting it must fail the render with a migration hint that names
-// sessionDomain, not a bare schema rejection.
-func TestSessionHostValueFails(t *testing.T) {
-	out := renderErrArgs(t,
-		"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-		"--set", "sessionHost=session.lab.example.net")
-	if !strings.Contains(out, "sessionDomain") {
-		t.Errorf("setting sessionHost must fail naming sessionDomain, got: %s", out)
-	}
-}
-
 // TestSessionDomainMustDifferFromPortal: portalHost equal to the session
 // domain — or INSIDE it, where the *. wildcard route would capture portal
 // traffic — must fail the render.

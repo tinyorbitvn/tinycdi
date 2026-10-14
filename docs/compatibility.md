@@ -25,7 +25,7 @@ containerd 2.x, Cilium 1.20, and
 | Playwright harness | @playwright/test 1.63.0, typescript 5.9.3, @types/node 22.20.4; bundles: Chromium 153.0.8010.12 (r1243) + headless shell, Firefox 155.0 (r1543); WebKit declared 26.6 (r2359), intentionally not installed (Safari gated) |
 | nss tools | libnss3-tools 2:3.98-1ubuntu0.2 (certutil) |
 | Node security profile | Localhost seccomp `deploy/node-profiles/seccomp/chromium-userns.json` sha256 `c57199218f6ba2e6616f39392f3043b3e057fdfa082ee90f0798170c5715d76a` + AppArmor `deploy/node-profiles/apparmor/tinycdi-browser` sha256 `4f30e96fc396f57ddabbe8b2ac619f47ac7074865d26bd79e0ae693049a2dd56` — required on every browser-capable worker (see conditions; install: `deploy/node-profiles/README.md`) |
-| Firefox ESR fallback | firefox-esr 153.4.0esr-1~deb12u1 (deb.debian.org/debian-security bookworm-security), deb sha256 `a59e034759615e46d3b4071cd79f42642416865419319c0d2c2a35a559db5430` |
+| Firefox ESR fallback | firefox-esr 153.5.0esr-1~deb12u1 (deb.debian.org/debian-security bookworm-security), deb sha256 `a59e034759615e46d3b4071cd79f42642416865419319c0d2c2a35a559db5430` |
 | Desktop environment (`tcdi/linux-desktop`) | XFCE 4.18 from Debian bookworm main (xfce4-session 4.18.1-1, xfwm4 4.18.0-1, xfce4-panel 4.18.2-1, thunar 4.18.4-1 at the 2026-10-03 build) — installed unpinned like the other apt packages of the runtime base (reproducibility comes from the `debian:bookworm-slim` digest, scan-gated on every build). Firefox ESR in the desktop image is the **same** apt pin as the row above, bumped with it. |
 | Runtime fonts (`tcdi/linux-base`) | fonts-dejavu-core + fonts-noto-core trimmed to the Latin/Greek/Cyrillic faces (Vietnamese covered; the ~260 other-script faces are deleted in the Dockerfile) + fonts-noto-mono (Noto Sans Mono — the only installed mono face covering Vietnamese; DejaVu Sans Mono lacks U+1EA0-1EF9, so `monospace:lang=vi` resolved to proportional DejaVu Sans) + fonts-wqy-microhei (zh/ja/ko) — unpinned like the other runtime-base apt packages. `fonts-noto-cjk` measured over the browser image's +2 % budget (docs/images.md *Budgets*); switching to it needs a baseline re-issue by decision. |
 
@@ -72,7 +72,7 @@ containerd 2.x, Cilium 1.20, and
 6. **Fixture != product** — session-scoped lease is proven; binding to
    (workspaceUID, runtimeGeneration, runtimeUID) is the locked contract.
 
-## `hostUsers: false` — default since v0.2 (D26 / R1)
+## hostUsers: false (default)
 
 Verified 2026-10-02 on the reference environment (Kubernetes
 v1.37.0+rke2r1, worker kernel 6.8.0-139-generic, containerd 2.3.4): all
@@ -82,10 +82,10 @@ with `workspace:workspace` ownership via idmapped mounts), the browser
 image with the Localhost seccomp + AppArmor node profiles (Chromium
 renderers run with a nested user namespace and `Seccomp: 2`), and a
 `kasmweb/chromium` catalog image behind the injected adapter. This is the
-authoritative R1 result: `hostUsers: false` has been the shipped default
-since v0.2 — the chart sets `runtime.hostUsers: false` (the operator's
+reference result: `hostUsers: false` is the shipped default
+— the chart sets `runtime.hostUsers: false` (the operator's
 `--runtime-host-users=false`), and a template's `spec.linux.hostUsers`
-(D24) still overrides it per workspace.
+still overrides it per workspace.
 
 ## Sandboxed runtimes (`runtimeClassName`)
 
@@ -127,7 +127,7 @@ BasicAuth + websocket + RFB exchange the gateway performs.
 Installing a runtime on nodes is outside the chart: the results above
 cover `runtimeClassName` pass-through plus the workload. The reference
 environment still offers only `crun`, `nvidia` and `nvidia-experimental`,
-so the E12 sandboxed-runtime matrix stays advisory — the weekly workflow
+so the sandboxed-runtime matrix stays advisory — the weekly workflow
 keeps it current. Operator guidance until then: the gVisor result is
 usable for the desktop workload but the shipped browser image's Firefox
 aborts under runsc (see the Firefox row); a gVisor-supported browser

@@ -26,7 +26,7 @@ printer, smartcard) that must not exist in a locked-down runtime.
 > contract test (onboarding checklist below, step 5) has been run against
 > that digest — the render refuses anything else. `kasmweb/chromium`
 > bundles Chromium 150 (lag 5 vs the 155 pin), below even the desktop
-> budget, and is no longer cataloged.
+> budget, and is not cataloged.
 
 The adapter is a ~200-line shim delivered **into** the pod, not into the
 image:
@@ -161,8 +161,8 @@ Notable deltas vs the tcdi/* images (all proven on
 The catalog is `build/kasm-catalog.txt` — every `kasmweb/*` image
 referenced anywhere in tracked files (chart ci values, docs, examples)
 must appear there, digest-pinned, with an engine + freshness floor +
-class (`browser` | `desktop`: which template experiences may use it —
-E13, v0.3). `.github/scripts/check-kasm-catalog.sh` enforces that in
+class (`browser` | `desktop`: which template experiences may use it).
+`.github/scripts/check-kasm-catalog.sh` enforces that in
 every PR; the heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy
 gate + engine extraction) and the adapter contract test run in the
 `kasm-contract` ci.yml job — weekly, on dispatch, on main pushes, and on
@@ -185,8 +185,8 @@ its template merges**:
 3. **trivy gate.** `scan-kasm-catalog.sh` scans the digest-pinned image
    with the release-gate flags (`--severity CRITICAL,HIGH
    --ignore-unfixed`) plus the catalog-scoped
-   `build/kasm-catalog.trivyignore` (same SEC-44 expiry rules; dormant-
-   path exceptions only). Images that fail are not catalog entries —
+   `build/kasm-catalog.trivyignore` (the same expiry rules as the root
+   `.trivyignore`; dormant-path exceptions only). Images that fail are not catalog entries —
    e.g. `kasmweb/ubuntu-noble-desktop` carries hundreds of fixable
    HIGH/CRITICAL findings today and is listed **unsupported** in the
    catalog. NOTE: trivy's OS-package view does NOT cover the bundled
@@ -195,7 +195,7 @@ its template merges**:
 4. **Engine freshness floor.** The catalog entry's `min-engine-major`
    must meet the budget for its class, measured against the major of
    `build/browser`'s `CHROMIUM_APT_VERSION`: **browser-class entries pin−2**
-   (E13 — the old pin−4 acceptance ended in v0.3; only such images may
+   (only such images may
    back `experience: Browser` templates or sit on the chart's
    `kasmAdapter.browserAllowlist`), **desktop-class entries pin−4** (~4
    upstream release cycles of tolerated lag on Debian/Ubuntu rebuilds),
@@ -262,8 +262,8 @@ its template merges**:
   digest (the render fails otherwise), and a seeded `adapter: kasm`
   template requires `enabled: true`. See `deploy/helm/tinycdi/README.md`
   ("Kasm workspace images") and `ci/example-values.yaml` for a complete
-  seeded `kasmweb/chromium` template.
-- `kasmAdapter.browserAllowlist` (default `[]`) is the E13 browser gate:
+  seeded `kasmweb/chrome` template.
+- `kasmAdapter.browserAllowlist` (default `[]`) is the browser-class gate:
   a seeded `adapter: kasm` template with `experience: Browser` renders
   only when its `spec.linux.image` is listed, and
   check-kasm-catalog.sh verifies every listed ref is a **browser-class**
@@ -296,17 +296,17 @@ and the control bar hidden (its `initSetting` block; a URL setting wins
 over an `initSetting` default). The portal's session page owns the
 session chrome, so `show_control_bar` stays unset and the gateway launch
 redirect plus every portal-driven frame navigation re-assert the tab-mode
-behaviour it wants (V3.24 decisions, `internal/gateway.DesktopPath` and
+behaviour it wants (`internal/gateway.DesktopPath` and
 `web/src/session/launch.ts`):
 
-- `resize=remote` — the remote screen tracks the frame (FX-R18 fix for
-  the dark regions in a larger iframe).
+- `resize=remote` — the remote screen tracks the frame (a larger iframe
+  otherwise shows dark regions).
 - `enable_webp=true` — same codec offer as a top-level tab.
 - `idle_disconnect=1440` — pushes the client's own idle cut (default
   20 min) past any template lifecycle timeout; idle policy belongs to
   the platform, not to a second, unsynchronized client timer.
 - `reconnect=true` + `reconnect_delay=<500–2000>` — arms the client's
-  own in-frame websocket retry after a clean disconnect (FX-R32): the
+  own in-frame websocket retry after a clean disconnect: the
   cheap reconnect path the portal's connection watch waits for before it
   ever re-navigates the frame. The delay is jittered per document load
   (per redemption on the gateway redirect, per page instance in the
@@ -336,9 +336,9 @@ closed"` under load. The origin is upstream client code: the
 dropped on queue overrun or forwarded for secondary displays
 (`_processRectScreens`/`vid` path) are not always `close()`d. Normal
 render consumption closes its frames, so this is a bounded upstream
-leak — cosmetic console noise and modest GPU memory churn, observed on
-rc.5, not reproduced on rc.6. No 1.5.x fix exists at the time of
-writing; accepted as upstream behaviour (V3.24). If a later client bump
+leak — cosmetic console noise and modest GPU memory churn, observed
+intermittently in testing. No 1.5.x fix exists at the time of
+writing; accepted as upstream behaviour. If a later client bump
 changes the decoder path, re-check the queue-drop and secondary-display
 branches.
 

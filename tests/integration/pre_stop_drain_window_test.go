@@ -18,7 +18,7 @@ import (
 // refusal, not fatal on it.
 func launchTry(t *testing.T, f *restartFixture, r *replica, ticket string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch",
+	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch?tcdi_tab="+restartTab,
 		strings.NewReader(url.Values{"ticket": {ticket}}.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func launchTry(t *testing.T, f *restartFixture, r *replica, ticket string) *http
 // how fast the shed quiets. With NO open streams (nothing else can hold
 // the window), a terminating replica answers every read and refuses only
 // new launches and WebSocket upgrades (503 + Retry-After) — a poll sees
-// zero connection errors inside the window. rc.2 product contract.
+// zero connection errors inside the window.
 func TestTwoReplicas_PreStopDrainServesWholeWindow(t *testing.T) {
 	f := newRestartFixture(t)
 	const window = 1500 * time.Millisecond

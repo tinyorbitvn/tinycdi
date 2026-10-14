@@ -1,4 +1,4 @@
-// S36 assertions for the optional ValidatingAdmissionPolicy guarding the
+// TM-45 assertions for the optional ValidatingAdmissionPolicy guarding the
 // operator-owned workspaces.cdi.tinyorbit.vn/template-snapshot mirror
 // annotation (admissionPolicy.enabled, default OFF).
 //

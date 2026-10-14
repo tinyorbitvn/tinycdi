@@ -7,10 +7,9 @@ package gateway_test
 // header manipulation: a client's Connection token list must never remove
 // the broker-injected Authorization, the rebuilt forwarding chain or
 // Sec-WebSocket-Origin, and the client-supplied forwarding family must
-// never reach the runtime verbatim. On v0.5.0 the injected headers were
-// stamped in the ReverseProxy Director, which runs BEFORE the stdlib
-// hop-by-hop strip — a Connection token list naming them deleted them
-// outright — and only three forwarding headers were rebuilt.
+// never reach the runtime verbatim. The injection runs after the stdlib
+// hop-by-hop strip, so a Connection token list naming those headers
+// cannot delete them.
 
 import (
 	"net/http"
@@ -52,8 +51,7 @@ func (u *headerRecorder) last() http.Header {
 // TestProxy_ConnectionTokensCannotStripInjectedHeaders: a GET whose
 // Connection token list names the gateway-injected headers must still
 // carry them upstream — the tokens are dropped and the injection happens
-// after the hop-by-hop strip. On v0.5.0 the upstream saw an empty
-// Authorization/Forwarded/X-Real-Ip here.
+// after the hop-by-hop strip.
 func TestProxy_ConnectionTokensCannotStripInjectedHeaders(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-conn", testWSUID)
@@ -83,8 +81,7 @@ func TestProxy_ConnectionTokensCannotStripInjectedHeaders(t *testing.T) {
 // TestProxy_UpgradeConnectionTokensCannotStripInjected: on a websocket
 // upgrade a Connection list of "upgrade" plus names of the injected
 // headers must leave Authorization and Sec-WebSocket-Origin intact —
-// KasmVNC requires both on the upgrade request. On v0.5.0 both arrived
-// empty.
+// KasmVNC requires both on the upgrade request.
 func TestProxy_UpgradeConnectionTokensCannotStripInjected(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-ws", testWSUID)
@@ -93,7 +90,7 @@ func TestProxy_UpgradeConnectionTokensCannotStripInjected(t *testing.T) {
 	cookie := launchOK(t, srv, testHost, "tk-ws")
 	fb.pointLeaseAt(t, "tk-ws", up.srv)
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/websockify", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+withTab("/websockify"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +120,7 @@ func TestProxy_UpgradeConnectionTokensCannotStripInjected(t *testing.T) {
 
 // TestProxy_ClientForwardedFamilyStripped: every client-supplied
 // forwarding-family header — X-Forwarded-* variants, X-Original-*,
-// X-Rewrite-Url — must be dropped before the verified rebuild; on v0.5.0
-// all but the three rebuilt names reached the runtime verbatim.
+// X-Rewrite-Url — must be dropped before the verified rebuild.
 func TestProxy_ClientForwardedFamilyStripped(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-xf", testWSUID)

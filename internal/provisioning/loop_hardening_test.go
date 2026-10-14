@@ -7,7 +7,7 @@ package provisioning_test
 //   - bookkeeping after a state change lands on a bounded detached context
 //     even when the pass ctx is cancelled mid-apply (backlog 11);
 //   - a held reservation left with every dimension zero is settled
-//     (releaseDiskQuota in-tx, plus the recovery sweep for stranded rows);
+//     (releaseDiskQuota in-tx);
 //   - the event-driven settle worker drains observed-absence triggers and
 //     the periodic pass still settles when no event ever arrives.
 
@@ -165,55 +165,6 @@ func TestPurge_SettlesEmptyReservation(t *testing.T) {
 	}
 	if v != (provisioning.ResourceVector{}) {
 		t.Fatalf("released row vector = %+v, want zero", v)
-	}
-}
-
-// TestRecovery_SettlesStrandedEmptyRows: held all-zero rows stranded by
-// disk releases that predate the in-transaction settle are swept by the
-// recovery pass — but only on deleted workspaces.
-func TestRecovery_SettlesStrandedEmptyRows(t *testing.T) {
-	db := recoveryDB(t)
-	ctx := context.Background()
-	const tenant = "tenant-strand"
-	if err := db.WithTx(ctx, func(tx store.Tx) error {
-		return provisioning.SetQuota(ctx, tx, tenant, provisioning.ResourceVector{
-			RunningSlots: 5, CPUMillis: 8000, MemoryBytes: 1 << 34, DiskBytes: 1 << 40})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	seedWorkspaceRow(t, db, "ws_strand", tenant, "iss|sub-1", "strand")
-	seedWorkspaceRow(t, db, "ws_live", tenant, "iss|sub-1", "live")
-	if _, err := db.Pool().Exec(ctx,
-		`UPDATE workspaces SET state = 'deleted' WHERE id = 'ws_strand'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Pool().Exec(ctx, `
-		INSERT INTO quota_reservation (workspace_id, tenant_id,
-			running_slots, cpu_millis, memory_bytes, disk_bytes)
-		VALUES ('ws_strand', $1, 0, 0, 0, 0),
-		       ('ws_live', $1, 0, 0, 0, 0)`, tenant); err != nil {
-		t.Fatal(err)
-	}
-
-	actions, err := provisioning.NewRecovery(db, &fakeObserver{}).Recover(ctx, &recordingApplier{})
-	if err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	var settled bool
-	for _, a := range actions {
-		if a.WorkspaceUID == "ws_strand" && a.Kind == provisioning.ActionSettleReservation {
-			settled = true
-		}
-	}
-	if !settled {
-		t.Fatalf("no settle_reservation action for ws_strand in %+v", actions)
-	}
-	if state, _, _, proof := resState(t, db, "ws_strand"); state != "released" ||
-		proof != string(provisioning.ProofQuotaSettled) {
-		t.Fatalf("stranded row = %s proof %q, want released quota_settled", state, proof)
-	}
-	if state, _, _, _ := resState(t, db, "ws_live"); state != "held" {
-		t.Fatalf("live workspace row = %s, want untouched held", state)
 	}
 }
 

@@ -32,7 +32,7 @@ func serveInternalTLS(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool 
 	return serveInternalTLSList(t, srvCert, caPEM, pool, nil, nil, nil)
 }
 
-// serveInternalTLSList is serveInternalTLS plus the ADR 0009 leg: when bl
+// serveInternalTLSList is serveInternalTLS plus the ADR 0008 leg: when bl
 // is non-nil the listener installs the revocation VerifyConnection
 // (installRevocation) and the ConnState drop hook, exactly as bind() does
 // when -internal-revoked-list is set.

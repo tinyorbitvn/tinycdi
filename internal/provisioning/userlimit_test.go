@@ -3,7 +3,7 @@
 
 package provisioning_test
 
-// USER-LIMITS — per-principal running-workspace limits (v0.5): the tenant
+// USER-LIMITS — per-principal running-workspace limits: the tenant
 // default row plus per-owner overrides, enforced inside the reservation
 // transaction under the same tenant_quota row lock that serializes tenant
 // quota — concurrent launches by one user can never overshoot.
@@ -91,7 +91,7 @@ func ulEnv(t *testing.T, tenant string) (*store.DB, *provisioning.Service, func(
 
 // TestUserLimit_DefaultEnforced: the tenant default caps each principal at
 // its running count; other principals are unaffected, and clearing the
-// default restores unlimited — the upgrade default.
+// default restores unlimited.
 func TestUserLimit_DefaultEnforced(t *testing.T) {
 	db, _, create := ulEnv(t, "tenant-ul1")
 	const owner = "iss|sub"

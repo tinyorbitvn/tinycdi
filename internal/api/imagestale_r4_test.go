@@ -126,7 +126,7 @@ func TestList_NoTemplateGets(t *testing.T) {
 	}
 }
 
-// oldWorkspaces seeds n workspace records that predate the create-time image
+// oldWorkspaces seeds n workspace records that carry no create-time image
 // snapshot (no ImageBuiltAt anywhere on them), spread over the given template
 // IDs round-robin.
 func oldWorkspaces(be *fakeWorkspaceBackend, env *testEnv, n int, tplIDs ...string) {
@@ -146,10 +146,10 @@ func oldWorkspaces(be *fakeWorkspaceBackend, env *testEnv, n int, tplIDs ...stri
 	}
 }
 
-// TestImageStale_FallbackForOldWorkspace (R9e): a workspace created before
-// the image-built-at annotation existed (every v0.1 workspace at upgrade
-// time) has no age on its CR or its record; the view falls back to its
-// template's age instead of reporting nothing.
+// TestImageStale_FallbackForOldWorkspace (R9e): a workspace whose template
+// carried no image-built-at annotation at create has no age on its CR or
+// its record; the view falls back to its template's current age instead of
+// reporting nothing.
 func TestImageStale_FallbackForOldWorkspace(t *testing.T) {
 	now := time.Now().UTC()
 	cat := &countingCatalog{staleCatalog: staleCatalog{entries: map[string]TemplateEntry{

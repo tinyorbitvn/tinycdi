@@ -3,7 +3,7 @@
 
 package broker_test
 
-// S17 defence-in-depth: lease renew and attach re-validate the lease's
+// TM-07 defence-in-depth: lease renew and attach re-validate the lease's
 // bound portal session row (epoch + absolute expiry, same semantics as
 // RedeemTicket's re-check). A missing or invalid row revokes the lease at
 // the store on the spot — the gateway renew loop's terminal-error path
@@ -95,7 +95,7 @@ func openStreams(t *testing.T, db *store.DB, wsUID string, gen uint64) (int, boo
 // leaseMissingSeries returns the expected tinycdi_lease_session_missing_total
 // exposition for one reason count.
 func leaseMissingSeries(reason string, n int) string {
-	return `# HELP tinycdi_lease_session_missing_total Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (S17 defence-in-depth), by bounded reason.
+	return `# HELP tinycdi_lease_session_missing_total Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (TM-07 defence-in-depth), by bounded reason.
 # TYPE tinycdi_lease_session_missing_total counter
 tinycdi_lease_session_missing_total{reason="` + reason + `"} ` + strconv.Itoa(n) + "\n"
 }
@@ -103,7 +103,7 @@ tinycdi_lease_session_missing_total{reason="` + reason + `"} ` + strconv.Itoa(n)
 // TestLeaseSession_RenewRevokesWhenSessionDeleted: the bound portal
 // session row is gone (a sign-out whose revoke never landed, or a
 // restored dump without the row) — the next renew revokes the lease in
-// the same store visit, zeroes the stream accounting like S17, and the
+// the same store visit, zeroes the stream accounting like TM-07, and the
 // digest resolves to a dead lease for attach.
 func TestLeaseSession_RenewRevokesWhenSessionDeleted(t *testing.T) {
 	db, _, clock, src := setup(t)
@@ -128,7 +128,7 @@ func TestLeaseSession_RenewRevokesWhenSessionDeleted(t *testing.T) {
 
 	// The next renew (LeaseRenewInterval cadence) is terminal: the lease
 	// is revoked at the store and the gateway's renew loop gets the same
-	// ErrRevoked an S17 revoke produces — the bound stream closes within
+	// ErrRevoked an TM-07 revoke produces — the bound stream closes within
 	// one cycle, no extra round trip.
 	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("renew under dead session = %v, want ErrRevoked", err)
@@ -175,7 +175,7 @@ func TestLeaseSession_AttachDeniedWhenSessionDeleted(t *testing.T) {
 	if _, err := b.LeaseBySession(ctx, gwA, d); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("LeaseBySession under dead session = %v, want ErrRevoked", err)
 	}
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), ""); !errors.Is(err, broker.ErrRevoked) {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), testTab); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("ClaimStream under dead session = %v, want ErrRevoked", err)
 	}
 	if state, _ := leaseState(t, db, lease.ID); state != "revoked" {
@@ -207,7 +207,7 @@ func TestLeaseSession_RenewUnaffectedWhileSessionAlive(t *testing.T) {
 	if got, err := b.LeaseBySession(ctx, gwA, d); err != nil || got.ID != lease.ID {
 		t.Fatalf("attach = (%v, %v), want the same lease", got.ID, err)
 	}
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), ""); err != nil {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), testTab); err != nil {
 		t.Fatalf("claim under live session = %v", err)
 	}
 }
@@ -385,7 +385,7 @@ func TestLeaseSession_IdleDeadSessionRevokesOnRenew(t *testing.T) {
 
 	idleOutPortalSession(t, db, "sess-1")
 
-	// The next renew is terminal — same ErrRevoked the S17 barrier emits.
+	// The next renew is terminal — same ErrRevoked the TM-07 barrier emits.
 	if _, err := b.RenewLease(ctx, gwA, lease.ID, fenceOf(lease)); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("renew under idle-dead session = %v, want ErrRevoked", err)
 	}
@@ -426,7 +426,7 @@ func TestLeaseSession_RedeemRejectsIdleDeadSession(t *testing.T) {
 }
 
 // TestLeaseSession_IdleCheckDisabledWithoutOption: a broker configured
-// without WithSessionIdle keeps the S17 predicate exactly as before —
+// without WithSessionIdle keeps the TM-07 predicate exactly as before —
 // epoch + absolute expiry only — so replicas that never wire the option
 // degrade to the old behaviour rather than revoking on sight.
 func TestLeaseSession_IdleCheckDisabledWithoutOption(t *testing.T) {

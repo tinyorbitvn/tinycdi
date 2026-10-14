@@ -124,8 +124,8 @@ export function createMockApi(opts: MockOptions & { areas?: readonly MockAreaFac
     if (!cookies[SESSION_COOKIE]) {
       return err(401, "UNAUTHENTICATED", "no session", false);
     }
-    // v0.2 (P1/D17): X-CSRF-Token is the synchronizer token /v1/me
-    // publishes, compared directly — there is no tcdi_csrf cookie anymore.
+    // X-CSRF-Token is the synchronizer token /v1/me publishes (P1/D17),
+    // compared directly — the retired tcdi_csrf cookie is never set.
     if (method !== "GET" && method !== "HEAD") {
       if (req.headers[CSRF_HEADER] !== CSRF_TOKEN_VALUE) {
         return err(403, "CSRF_FAILED", "missing or mismatched CSRF token", false);

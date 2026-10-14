@@ -33,7 +33,7 @@ type adminAuditEntry struct {
 	Details    map[string]string `json:"details"`
 }
 
-// AdminAuditHandler serves GET /v1/admin/tenants/{tenant}/audit (ADR 0011).
+// AdminAuditHandler serves GET /v1/admin/tenants/{tenant}/audit (ADR 0010).
 type AdminAuditHandler struct {
 	source  AuditSource
 	tenants TenantResolver

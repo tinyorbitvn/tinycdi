@@ -4,7 +4,7 @@
 package api
 
 // revokeall.go implements POST /v1/me/sessions:revoke-all — "sign out
-// everywhere" (ADR 0007, threat-model S17's principal-scoped sibling): one
+// everywhere" (ADR 0007, threat-model TM-07's principal-scoped sibling): one
 // store transaction destroys every portal session the caller's principal
 // holds in the caller's tenant — the calling session included — together
 // with the session-layer material minted under them (active connection

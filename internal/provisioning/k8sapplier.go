@@ -280,7 +280,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 		}
 		if in.Kind == IntentStart && in.Spec.SessionPolicy != nil {
 			// The resolved policy is re-stamped at every start so a
-			// tightened ceiling lands on the pod's next boot (ADR 0010 §3).
+			// tightened ceiling lands on the pod's next boot (ADR 0009 §3).
 			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
 		}
 		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)
@@ -416,8 +416,8 @@ type TemplateCatalogEntry struct {
 	SeccompProfile  string
 	AppArmorProfile string
 	// ImageUpdate is the revision's lifecycle.imageUpdate policy
-	// (OnStart | Pinned); "" on objects published before the field existed,
-	// which callers must read as the OnStart default.
+	// (OnStart | Pinned); the CRD defaults it to OnStart, and callers test
+	// only for Pinned.
 	ImageUpdate string
 	PublishedAt time.Time
 	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339

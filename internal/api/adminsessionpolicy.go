@@ -93,7 +93,7 @@ type putFileTransferCeiling struct {
 
 // AdminSessionPolicyHandler implements GET and PUT on
 // /v1/admin/tenants/{tenant}/session-policy — the tenant clipboard
-// ceiling of ADR 0010 (T10). Unlike quota there is no config declaration
+// ceiling of ADR 0009 §4. Unlike quota there is no config declaration
 // for session policy: every row is API-managed, so writes are never
 // refused as managed-by-config.
 type AdminSessionPolicyHandler struct {

@@ -144,7 +144,7 @@ order with no double runtimes).
 Tier 3 above covers Postgres **loss** (data recovery). A Postgres
 **outage** — restart, failover, network cut — is an availability event,
 not a DR event: no data is lost and the platform heals itself when the
-database returns. Fail-closed behaviour was measured in the v0.3 outage
+database returns. Fail-closed behaviour was measured in an outage
 drill (`tests/integration/postgres_outage_test.go`, `docker stop`/`start`
 of the Postgres container — all connections severed at once, the
 shared-fate failover shape):
@@ -188,9 +188,9 @@ case and was verified in the kind drill below.
 
 | Restored state | What the dump brings back | Verdict |
 |---|---|---|
-| `sessions` | Rows exactly as of the dump — **including sessions deleted by sign-out after the dump** (S17). The old portal cookie is valid again until the idle/absolute cap. | **Resurrects.** The row is digest-keyed and cryptographically indistinguishable from a live one; nothing marks it "deleted after dump". Fix: rotate `platform_meta.session_epoch` after loading the dump — every restored row fails its next read. Verified in the drill: a signed-out cookie returned `200` after a naive restore, `401` after rotation. |
+| `sessions` | Rows exactly as of the dump — **including sessions deleted by sign-out after the dump** (TM-07). The old portal cookie is valid again until the idle/absolute cap. | **Resurrects.** The row is digest-keyed and cryptographically indistinguishable from a live one; nothing marks it "deleted after dump". Fix: rotate `platform_meta.session_epoch` after loading the dump — every restored row fails its next read. Verified in the drill: a signed-out cookie returned `200` after a naive restore, `401` after rotation. |
 | `connection_lease` | `'active'` leases as of the dump — **including leases revoked after it** — with their `session_digest` bindings. | **Resurrects inside the lease TTL.** `LeaseBySession` resolves cookie digest → `'active'` lease; renew and re-attach never consult the portal session, and the bound `(runtimeUID, runtimeGeneration, fencingVersion)` still matches — the runtime is alive. The drill restored a dump ~15 s old and the signed-out gateway cookie served `200` until `expires_at` lapsed. A restore landing inside the TTL (or a stream renewing inside it) extends this indefinitely — the lease self-heals only by expiry. Fix: revoke every restored lease unconditionally, below. |
-| `launch_ticket` | Unconsumed tickets re-arm; tickets revoked after the dump revive. | Fenced, mostly: redemption re-checks the portal-session digest (S17 second barrier) and fails closed under a rotated epoch, and tickets die at `expires_at` (60 s). Tickets minted without a portal-session digest have no such barrier, and a fast restore lands inside either TTL. Fix: deny every unconsumed ticket unconditionally, below. |
+| `launch_ticket` | Unconsumed tickets re-arm; tickets revoked after the dump revive. | Fenced, mostly: redemption re-checks the portal-session digest (TM-07 second barrier) and fails closed under a rotated epoch, and tickets die at `expires_at` (60 s). Tickets minted without a portal-session digest have no such barrier, and a fast restore lands inside either TTL. Fix: deny every unconsumed ticket unconditionally, below. |
 | Fencing counters (`fencing_version`, `stream_epoch`) | Regress to dump values. | Safe. `fencing_version` is `MAX+1` per workspace inside the restored table — self-consistent; renew/claim re-validate against the live informer binding, so a recreated runtime stays fenced. |
 | `workspaces` rows vs live CRs | Dump-time `desired_state`, `runtime_generation`, `intent_revision`, `phase`; CRs created after the dump have no row at all. | **Diverges — the real cost.** See "Workspace reconciliation" below. |
 | `outbox_intent` | `dispatched_at` regresses; intents applied after the dump are undispatched again. | Safe by fencing: re-delivery hits CRs whose `applied-intent` already names the revision, and the operator drops `intentRevision <= applied.revision`. Pending rows replay by design. |
@@ -221,9 +221,8 @@ Steps 1–3 are the parts that differ from backup-restore.md.
    carries a `post-restore` subcommand so the kill-steps cannot be skipped
    or partially applied by hand. `-apply` performs, in order:
 
-   - `session_epoch` rotation (F5/S17): every restored session row is
-     rejected on its next read, revoked or not — the defensive DDL keeps
-     this working against dumps taken before migration 009;
+   - `session_epoch` rotation (TM-07): every restored session row is
+     rejected on its next read, revoked or not;
    - `connection_lease` revoke: resurrected leases carry live
      `session_digest` bindings — the old gateway cookie rehydrates to them
      with no portal-session check;
@@ -381,7 +380,7 @@ Steps 1–3 are the parts that differ from backup-restore.md.
 - **One benign wedge if step 5 is skipped:** intents on a diverged
   workspace are dropped until its `intent_revision` passes the CR's
   applied revision — a user-visible "button does nothing", not a security
-  hole. The wedge is no longer silent: each wedged workspace carries
+  hole. The wedge is visible: each wedged workspace carries
   `IntentBehind=True` on its conditions and gets one `IntentBehind`
   Warning event, so `kubectl get workspaces -A` (condition column /
   `describe`) enumerates what is left.
@@ -449,9 +448,9 @@ backup-restore.md:
   `runtime-cleanup` finalizer during a wholesale namespace teardown
   (as the drill did).
 
-A second drill (v0.5, kind quickstart — `hack/quickstart`) exercised the
+A second drill (kind quickstart — `hack/quickstart`) exercised the
 **live-cluster** path: `pg_dump` while a portal session held a running
-workspace with an active lease, then sign-out (S17 revoke) + a workspace
+workspace with an active lease, then sign-out (TM-07 revoke) + a workspace
 stop + a new workspace, then the dump loaded back over the running
 release.
 

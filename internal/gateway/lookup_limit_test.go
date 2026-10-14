@@ -29,7 +29,7 @@ import (
 // TestRehydrate_UnknownCookieSprayBounded: hundreds of distinct random
 // cookies from one client must not each reach the session directory —
 // the per-client bound turns the tail into 429s carrying Retry-After
-// while the directory sees only the bounded prefix. Fails on v0.5.0:
+// while the directory sees only the bounded prefix. Without the bound
 // every sprayed cookie lands its lookup and every answer is 401.
 func TestRehydrate_UnknownCookieSprayBounded(t *testing.T) {
 	fb := newFakeBroker(t)

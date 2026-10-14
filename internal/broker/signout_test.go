@@ -1,6 +1,6 @@
 package broker_test
 
-// S17: sign-out revocation. A portal session's session-layer material —
+// TM-07: sign-out revocation. A portal session's session-layer material —
 // active leases minted under its portal_session_digest plus its still
 // outstanding launch tickets — dies at the store so every gateway
 // replica's renew loop closes the bound streams within one renew cycle

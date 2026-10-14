@@ -254,7 +254,7 @@ kasmvncserver ":$DISPLAY_NUM" \
   -websocketPort 8444 -interface 127.0.0.1 \
   -sslOnly >> "$HOME/.vnc/entrypoint.log" 2>&1
 
-# tcdi-xferd owns :8443 (ADR 0010 §5 (i)): it serves /xfer/ against
+# tcdi-xferd owns :8443 (ADR 0009 §5 (i)): it serves /xfer/ against
 # $HOME/transfers and reverse-proxies everything else to KasmVNC, which
 # listens on 127.0.0.1:8444 only. The pod's published contract (one HTTPS
 # port, the Secret's own cert) is unchanged.

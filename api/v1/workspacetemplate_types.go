@@ -68,10 +68,10 @@ type LinuxRuntimeSpec struct {
 	BrowserPolicy *BrowserPolicy `json:"browserPolicy,omitempty"`
 
 	// hostUsers sets the pod's hostUsers field: false runs the runtime in a
-	// user namespace so its root is not node root. Unset leaves the pod
-	// field nil — the operator's default applies when configured. Opt-in in
-	// v0.2; it becomes the default only after the R1 spike proves
-	// KasmVNC + the Chromium sandbox + PVC on RKE2 (design §3.7, D26).
+	// user namespace so its root is not node root. Unset applies the
+	// operator default (`--runtime-host-users`), and leaves the pod field
+	// nil when the operator has none. The chart sets
+	// `runtime.hostUsers: false`.
 	// +optional
 	HostUsers *bool `json:"hostUsers,omitempty"`
 }
@@ -93,8 +93,8 @@ type PlacementSpec struct {
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// runtimeClassName selects the node container runtime handler (e.g.
-	// gvisor). Passed through to pod.spec.runtimeClassName; v0.2 does not
-	// maintain a tested handler matrix (design §3.7).
+	// gvisor). No runtime handler matrix is tested; the value is passed
+	// through unchanged.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`

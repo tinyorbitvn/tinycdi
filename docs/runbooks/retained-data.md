@@ -13,7 +13,7 @@ retained inventory on **Delete** (the finalizer's `retention` step).
   `workspaces.cdi.tinyorbit.vn/data-retained=true` plus annotations carrying
   tenant, owner (`iss|sub`), source workspace and runtime
   (`internal/operator/retention.go`). The `retained_data` table
-  (migration `007`) is the transactional index; it can be rebuilt from PVC
+  is the transactional index; it can be rebuilt from PVC
   metadata after an API DB loss (see `backup-restore.md`).
 - **Dataset identity = PVC UID + source workspace UID.** PVC names are
   reused and must never be trusted as identity.
@@ -89,8 +89,8 @@ POST /v1/data/{rd_id}/purge    (confirmationNonce required)
   principal + state epoch. Replay of a consumed nonce → `400`.
 - Only `Retained` records purge; `Attaching`/`Attached` →
   `409 INVALID_STATE` (delete the consuming workspace first).
-- The nonce MAC key is the single-row `retained_nonce_key` table
-  (migration `008`), shared by all API replicas. Rotating it — deleting
+- The nonce MAC key is the single-row `retained_nonce_key` table,
+  shared by all API replicas. Rotating it — deleting
   the row so a fresh key is generated — invalidates every outstanding
   nonce; users must re-read `GET /v1/data` for fresh ones. That is the
   sanctioned way to abort all pending purge confirmations at once.

@@ -291,41 +291,6 @@ func retainKeepsDataRecord(t *testing.T, order string) {
 	}
 }
 
-// TestDeleteFinalization_StuckRowSelfHeals: rows stranded by the original
-// bug (Retain workspace whose whole reservation was released before the
-// retained record existed, so the retained disk is not counted) are repaired
-// by a plain recovery pass: no manual database action.
-func TestDeleteFinalization_StuckRowSelfHeals(t *testing.T) {
-	f := newFinalizationFixture(t)
-	ctx := context.Background()
-	ws := f.create(t, "fx-stuck", "Retain")
-	crName := provisioning.WorkspaceCRName(provisioning.PlatformID(ws.ID))
-	f.retainedPVC(t, crName)
-	f.del(t, ws.ID)
-	syncer := provisioning.NewRetainedSync(k8sClient, provisioning.TenantNamespaces{f.tenant: f.ns},
-		provisioning.NewRetainedStore(f.db), nil, nil)
-	f.recover(t)
-	if _, err := syncer.SyncOnce(ctx); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	// Recreate the stuck state seen on the cluster: whole reservation
-	// released, retained record present, disk not counted, phase Terminating.
-	if _, err := f.db.Pool().Exec(ctx, `
-		UPDATE quota_reservation SET state = 'released', released_at = now(),
-			release_proof = 'runtime_absent_observed', running_slots = 1, cpu_millis = 500,
-			memory_bytes = 1073741824, disk_bytes = 1073741824
-		WHERE workspace_id = $1`, ws.ID); err != nil {
-		t.Fatalf("seed stuck reservation: %v", err)
-	}
-	if f.listed(t, ws.ID) {
-		t.Fatal("stuck row is visible")
-	}
-	f.recover(t)
-	if got, want := f.held(t), (provisioning.ResourceVector{DiskBytes: 1 << 30}); got != want {
-		t.Fatalf("held after repair = %+v, want retained disk only %+v", got, want)
-	}
-}
-
 // TestDeleteFinalization_CRVanishesUnderReporter: the Workspace CR is
 // deleted out from under the control plane — it carries a finalizer, a pod
 // still runs, and the CR disappears (finalizer stripped, as the operator

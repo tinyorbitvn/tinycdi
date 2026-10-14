@@ -296,7 +296,7 @@ backend:
     internal:
       existingSecret: tinycdi-backend-internal-tls
       # Per-certificate revocation on the internal mTLS listener (ADR
-      # 0009, SR-3-F5): a Secret carrying the serial blocklist file —
+      # 0008, SR-3-F5): a Secret carrying the serial blocklist file —
       # "<serial-hex> <issuer-dn>" per line, blank lines and '#' comments
       # ignored. Mounted read-only at /etc/internal-revoked/ and polled;
       # a listed leaf's handshake is aborted and its live conns severed.
@@ -338,7 +338,7 @@ backend:
   # the control routes.
   controlHosts: []
   # CIDRs of the reverse proxies in front of the app/session listeners
-  # whose X-Forwarded-For claims the backend trusts (E7/S18): per-client
+  # whose X-Forwarded-For claims the backend trusts (E7/TM-32): per-client
   # rate limits and the runtime-bound forwarded headers derive the client
   # from the right-most untrusted chain entry. REQUIRED behind an ingress
   # or Gateway — empty keys every limit on the edge's own address, so all
@@ -369,11 +369,11 @@ backend:
   # bound. Rendered as -terminal-retention-days=<n>.
   retention:
     terminalRowDays: 30
-    # Days audit_event rows are kept (ADR 0011); a daily leader task prunes
+    # Days audit_event rows are kept (ADR 0010); a daily leader task prunes
     # older rows. 1..3650. Rendered as -audit-retention-days=<n>.
     auditDays: 90
   fileTransfer:
-    # Platform per-file bound for session file transfer (ADR 0010 T11).
+    # Platform per-file bound for session file transfer (ADR 0009 §5).
     # A tenant ceiling may only lower it. Rendered as
     # -file-transfer-max-bytes=<n>. 1..10737418240.
     maxFileBytes: 104857600
@@ -625,7 +625,7 @@ alerts:
   # (2→0) from paging critical. 0 disables the floor.
   sessionDropFloor: 5
 
-# Optional admission hardening (S36) — renders a ValidatingAdmissionPolicy
+# Optional admission hardening (TM-45) — renders a ValidatingAdmissionPolicy
 # + binding that DENIES create/update of Workspace objects in the
 # managedNamespaces when the request adds, changes or removes the
 # workspaces.cdi.tinyorbit.vn/template-snapshot annotation, unless the
@@ -706,8 +706,8 @@ runtime:
     tolerations:
       - {key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}
   # Default pod.spec.hostUsers for runtime pods (--runtime-host-users).
-  # false since v0.2 (verified on the reference environment — see
-  # docs/compatibility.md): runtime pods run in their own user namespace.
+  # false: runtime pods run in their own user namespace (verified on the
+  # reference environment — see docs/compatibility.md).
   # null leaves the field unset (the apiserver default — host user
   # namespace); a template's spec.linux.hostUsers overrides either way.
   hostUsers: false
@@ -732,7 +732,7 @@ runtime:
   # (docs/runbooks/capacity.md). It is soft, so it NEVER blocks
   # scheduling: retained-disk reattach on a node-pinned PVC and
   # single-node pools still work. Set enabled=false to keep the
-  # pre-v0.3.1 packed-by-scoring placement.
+  # scheduler's default packed-by-scoring placement.
   topologySpread:
     enabled: true
   # Per-workspace boundary NetworkPolicy posture (operator flag
@@ -744,9 +744,9 @@ runtime:
   # workloads) are unreachable. DNS egress is unaffected.
   #
   # unrestricted: true opts OUT — it renders
-  # --runtime-clusteronly-egress=unrestricted and restores the pre-1.0
-  # posture (any pod in any namespace on any port; confinement rests
-  # entirely on destination-side ingress policies). It cannot be combined
+  # --runtime-clusteronly-egress=unrestricted and allows any pod in any
+  # namespace on any port (confinement rests entirely on destination-side
+  # ingress policies). It cannot be combined
   # with the egress* selectors below — the render fails.
   #
   # To narrow further instead, set egressNamespaceSelector to confine

@@ -133,7 +133,7 @@ func TestCreateConnection_IssuesTicket(t *testing.T) {
 	}
 }
 
-// TestCreateConnection_ResolvedPolicyRidesTicket (ADR 0010 §2): the
+// TestCreateConnection_ResolvedPolicyRidesTicket (ADR 0009 §2): the
 // session policy the WithClipboardSource resolver returns — template
 // policy ∧ tenant ceiling — is what reaches the ticket issuer and what
 // the response mirrors back, so the portal's frame flags always match

@@ -274,10 +274,10 @@ func TestOIDCLoginFlowSucceeds(t *testing.T) {
 		t.Fatalf("session cookie Path = %q, want /", sess.Path)
 	}
 	// The CSRF token is derived from the session ID and read from
-	// GET /v1/me (P1) — the v0.1 tcdi_csrf cookie name is gone entirely
+	// GET /v1/me (P1) — the retired tcdi_csrf cookie name is gone entirely
 	// (E14): no live cookie and no Max-Age=0 deletion for it.
 	if csrf := findCookie(cookies, "tcdi_csrf"); csrf != nil {
-		t.Fatalf("legacy CSRF cookie touched at login: %q", csrf.Name)
+		t.Fatalf("retired CSRF cookie touched at login: %q", csrf.Name)
 	}
 
 	resp2 := env.authedGet(t, sess, "/v1/me")

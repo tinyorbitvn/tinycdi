@@ -253,7 +253,7 @@ export function WorkspaceDetailPage({
   const canStop = ws.desiredState === "Running" && !TERMINAL.has(ws.phase);
   // Connect is owner-only (advisor Q1): a tenant admin viewing another
   // user's workspace gets Start/Stop/Delete plus an acting-as banner, but
-  // never a session on it — no takeover in v1.2. The owner check needs the
+  // never a session on it — no admin takeover of another user's session. The owner check needs the
   // /v1/me subject; while it is absent (loading, or the old-backend stub)
   // Connect stays hidden rather than offered to a non-owner.
   const viewerSubject = me.data?.subject ?? "";

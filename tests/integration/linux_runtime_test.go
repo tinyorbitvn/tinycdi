@@ -440,7 +440,7 @@ func assertNoSecret(t *testing.T, name, password string) {
 var xferEnv = []string{"-e", "TCDI_XFER_POLICY=Bidirectional", "-e", "TCDI_XFER_MAX_BYTES=1048576"}
 
 // assertXferContract drives the in-pod transfer helper through the published
-// :8443 port (ADR 0010 §5 (i)): credential required, upload/download round
+// :8443 port (ADR 0009 §5 (i)): credential required, upload/download round
 // trip on the home volume, jail refusals, hard cap with no leftovers, and
 // KasmVNC reachable only on loopback :8444. secretDir is the host directory
 // mounted at /run/secrets/tcdi.
@@ -716,7 +716,7 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		assertNoSecret(t, c, password)
 
 		// Anonymous requests to :8443 are answered by tcdi-xferd and never
-		// reach KasmVNC (plan ruling 24), so they cannot trip its blacklist.
+		// reach KasmVNC, so they cannot trip its blacklist.
 		mustExec(t, c, `for i in 1 2 3 4 5 6 7 8; do curl -sk -o /dev/null https://127.0.0.1:8443/; done; true`)
 		if log = mustExec(t, c, "cat /home/workspace/.vnc/*.log"); strings.Contains(log, "blacklisted") {
 			t.Fatalf("eight anonymous :8443 requests reached KasmVNC and tripped its blacklist:\n%s", log)

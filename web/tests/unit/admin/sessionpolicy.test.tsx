@@ -46,7 +46,7 @@ function setup() {
 }
 
 // The direction lattice the admin preview renders — the same meet the
-// backend enforces (ADR 0010 §1): Disabled is bottom, Bidirectional top,
+// backend enforces (ADR 0009 §1): Disabled is bottom, Bidirectional top,
 // Send ∩ Receive = Disabled, a ceiling can only narrow.
 describe("meetClipboard: direction lattice", () => {
   const cases: Array<[string, string, string]> = [
@@ -79,7 +79,7 @@ describe("meetClipboard: direction lattice", () => {
 });
 
 // The file-transfer channel runs the same lattice with Upload/Download
-// as the incomparable directions (ADR 0010 T11).
+// as the incomparable directions (ADR 0009 §5).
 describe("meetFileTransfer: direction lattice", () => {
   const cases: Array<[string, string, string]> = [
     ["Bidirectional", "FollowTemplate", "Bidirectional"],

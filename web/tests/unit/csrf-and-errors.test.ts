@@ -14,8 +14,9 @@ afterEach(() => {
   setCsrfToken(undefined);
 });
 
-// v0.2 (P1/D17): the synchronizer token is published by GET /v1/me and held
-// in module state via setCsrfToken — there is no tcdi_csrf cookie. The mock
+// The synchronizer token is published by GET /v1/me and held
+// in module state via setCsrfToken (P1/D17) — the retired tcdi_csrf cookie
+// is never set. The mock
 // composer enforces the published token on every mutation.
 
 describe("CSRF token handling", () => {

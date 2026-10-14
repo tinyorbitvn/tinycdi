@@ -58,12 +58,6 @@ const (
 	// ActionQuarantineIntent — an intent exceeded MaxIntentApplyAttempts
 	// and was parked for manual attention instead of looping forever.
 	ActionQuarantineIntent RecoveryActionKind = "quarantine_intent"
-	ActionHoldRetainedDisk RecoveryActionKind = "hold_retained_disk"
-	// ActionSettleReservation — a held reservation left holding nothing at
-	// all (every dimension zero, no restart vector) on a deleted workspace
-	// was released. Stranded by disk releases that predate the
-	// in-transaction settle in releaseDiskQuota.
-	ActionSettleReservation RecoveryActionKind = "settle_reservation"
 )
 
 // Recovery rebuilds control-plane invariants after an API or operator
@@ -305,78 +299,6 @@ func holdRetainedDisk(ctx context.Context, tx store.Tx, tenantID, workspaceID st
 	return restoreDiskQuota(ctx, tx, tenantID, workspaceID, size)
 }
 
-// repairRetainedDiskHolds restores the disk hold of deleted workspaces whose
-// whole reservation was released while a live retained dataset exists —
-// including rows stranded by releases that predate holdRetainedDisk. It
-// returns the repaired workspace ids.
-func (r *Recovery) repairRetainedDiskHolds(ctx context.Context) ([]PlatformID, error) {
-	rows, err := r.db.Pool().Query(ctx, `
-		SELECT DISTINCT w.id, w.tenant_id
-		FROM workspaces w
-		JOIN quota_reservation qr ON qr.workspace_id = w.id AND qr.state = 'released'
-		JOIN retained_data rd ON rd.source_workspace_id = w.id AND rd.state IN ('Retained', 'Purging')
-		WHERE w.state = 'deleted'
-		ORDER BY w.id`)
-	if err != nil {
-		return nil, err
-	}
-	type target struct{ ws, tenant string }
-	var targets []target
-	for rows.Next() {
-		var t target
-		if err := rows.Scan(&t.ws, &t.tenant); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		targets = append(targets, t)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	var repaired []PlatformID
-	for _, t := range targets {
-		if err := r.db.WithTx(ctx, func(tx store.Tx) error {
-			return holdRetainedDisk(ctx, tx, t.tenant, t.ws)
-		}); err != nil {
-			return repaired, err
-		}
-		repaired = append(repaired, PlatformID(t.ws))
-	}
-	return repaired, nil
-}
-
-// settleEmptyReservations releases held reservation rows that hold
-// nothing at all — every dimension zero and no stored restart vector — on
-// DELETED workspaces. Such rows are stranded by disk releases that
-// predate the in-transaction settle in releaseDiskQuota: nothing they
-// hold can ever be freed by an absence proof, and a deleted workspace
-// never re-acquires. The workspace-state guard keeps a live workspace's
-// (unreachable) all-zero row untouched. Returns the released workspace ids.
-func (r *Recovery) settleEmptyReservations(ctx context.Context) ([]PlatformID, error) {
-	rows, err := r.db.Pool().Query(ctx, `
-		UPDATE quota_reservation qr
-		SET state = 'released', release_proof = $1, released_at = now()
-		FROM workspaces w
-		WHERE qr.workspace_id = w.id AND qr.state = 'held' AND w.state = 'deleted'
-		  AND qr.running_slots = 0 AND qr.cpu_millis = 0 AND qr.memory_bytes = 0 AND qr.disk_bytes = 0
-		  AND qr.restart_slots IS NULL AND qr.restart_cpu_millis IS NULL AND qr.restart_memory_bytes IS NULL
-		RETURNING qr.workspace_id`, string(ProofQuotaSettled))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []PlatformID
-	for rows.Next() {
-		var id PlatformID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 // recordApplyFailure bumps the persisted apply-attempts counter on the
 // intent and quarantines it once the bound is reached. It returns the
 // attempt count and whether the intent is now quarantined.
@@ -539,30 +461,6 @@ func (r *Recovery) Recover(ctx context.Context, applier WorkspaceApplier) ([]Rec
 		default:
 			return actions, err
 		}
-	}
-
-	// --- keep retained disks counted -----------------------------------
-	repaired, err := r.repairRetainedDiskHolds(ctx)
-	if err != nil {
-		return actions, err
-	}
-	for _, ws := range repaired {
-		actions = append(actions, RecoveryAction{
-			WorkspaceUID: ws, Kind: ActionHoldRetainedDisk,
-			Detail: "retained disk re-held against the deleted workspace's reservation",
-		})
-	}
-
-	// --- settle reservations left holding nothing -----------------------
-	settled, err := r.settleEmptyReservations(ctx)
-	if err != nil {
-		return actions, err
-	}
-	for _, ws := range settled {
-		actions = append(actions, RecoveryAction{
-			WorkspaceUID: ws, Kind: ActionSettleReservation,
-			Detail: "empty held reservation released (all dimensions zero)",
-		})
 	}
 	return actions, nil
 }

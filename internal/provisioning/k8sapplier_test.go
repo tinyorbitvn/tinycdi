@@ -149,7 +149,7 @@ func TestK8sApplierLifecycle(t *testing.T) {
 	}
 }
 
-// TestK8sApplierSessionPolicy (ADR 0010 §2): a create intent stamps the
+// TestK8sApplierSessionPolicy (ADR 0009 §2): a create intent stamps the
 // resolved session policy on spec.sessionPolicy, and a later start
 // intent re-stamps it — the mechanism by which a tightened ceiling lands
 // on the pod's next boot.

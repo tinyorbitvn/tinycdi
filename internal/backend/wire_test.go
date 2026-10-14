@@ -129,32 +129,30 @@ func (w *countWindow) RateLimitWindowHit(_ context.Context, route, _ string) (in
 	return w.n[route], time.Minute, nil
 }
 
-// TestRateLimitDefaults_V040Budgets (RL-DEFAULT): the v0.4.0 defaults
-// double the flag budgets — equal to v0.3.0's effective two-replica
-// aggregate (each pod's undivided bucket: login 30/min + burst 10,
-// launch 60/min + burst 20), before v0.3.1's RL-1 made the flags
-// aggregate bounds. Under the exact shared window (ADR 0006) there is
-// no per-replica slack: -login-rate 60/min + loginRateBurst 20 map to
-// an 80/minute window, -launch-rate 120/min + launchRateBurst 40 to
-// 160/minute, and the per-IP callback ceiling stays derived at 10x the
-// login budget. At the chart's backend.replicas=2 each pod's local
-// ceiling equals the bucket one v0.3.0 pod enforced undivided.
-func TestRateLimitDefaults_V040Budgets(t *testing.T) {
+// TestRateLimitDefaults_Budgets (RL-DEFAULT): the flag budgets are
+// aggregate bounds across replicas — with the chart's backend.replicas=2
+// each pod's undivided bucket is half the aggregate (login 30/min + burst
+// 10, launch 60/min + burst 20). Under the exact shared window (ADR 0006)
+// there is no per-replica slack: -login-rate 60/min + loginRateBurst 20
+// map to an 80/minute window, -launch-rate 120/min + launchRateBurst 40
+// to 160/minute, and the per-IP callback ceiling stays derived at 10x the
+// login budget.
+func TestRateLimitDefaults_Budgets(t *testing.T) {
 	cfg, err := ParseFlags(mergedArgs(), noEnv)
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
 	if cfg.LoginRate != 60 {
-		t.Fatalf("default -login-rate = %d, want 60 (2 x the v0.3.0 per-pod 30/min)", cfg.LoginRate)
+		t.Fatalf("default -login-rate = %d, want 60 (2 x the per-pod 30/min)", cfg.LoginRate)
 	}
 	if loginRateBurst != 20 {
-		t.Fatalf("loginRateBurst = %d, want 20 (2 x the v0.3.0 per-pod burst 10)", loginRateBurst)
+		t.Fatalf("loginRateBurst = %d, want 20 (2 x the per-pod burst 10)", loginRateBurst)
 	}
 	if cfg.LaunchRate != 120 {
-		t.Fatalf("default -launch-rate = %d, want 120 (2 x the v0.3.0 per-pod 60/min)", cfg.LaunchRate)
+		t.Fatalf("default -launch-rate = %d, want 120 (2 x the per-pod 60/min)", cfg.LaunchRate)
 	}
 	if launchRateBurst != 40 {
-		t.Fatalf("launchRateBurst = %d, want 40 (2 x the v0.3.0 per-pod burst 20)", launchRateBurst)
+		t.Fatalf("launchRateBurst = %d, want 40 (2 x the per-pod burst 20)", launchRateBurst)
 	}
 
 	// Shared window bounds: rate+burst on each bucket — 80 login, 160
@@ -188,9 +186,8 @@ func TestRateLimitDefaults_V040Budgets(t *testing.T) {
 		t.Fatal("hit 161 inside the launch window allowed — want bound 160 (120+40)")
 	}
 
-	// Two replicas: the divided degraded-mode floors equal the bucket
-	// one v0.3.0 pod enforced undivided — login 30/min + burst 10,
-	// launch 60/min + burst 20.
+	// Two replicas: the divided degraded-mode floors halve the aggregate —
+	// login 30/min + burst 10, launch 60/min + burst 20.
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	local, localCeiling := loginLimiters(Config{LoginRate: cfg.LoginRate, RateLimitReplicas: 2}, clock)

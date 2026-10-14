@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// File-transfer row lifetimes (ADR 0010 T11; plan ruling 15).
+// File-transfer row lifetimes (ADR 0009 §5).
 const (
 	// FileTransferTTL is how long a minted row may wait for its claim.
 	FileTransferTTL = 2 * time.Minute

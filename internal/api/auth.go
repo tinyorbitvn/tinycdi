@@ -299,7 +299,7 @@ func (s *InMemorySessionStore) Delete(_ context.Context, id string) error {
 }
 
 // SessionRevoker destroys the session-layer material a portal session
-// minted (threat-model S17): its active connection leases and its still
+// minted (threat-model TM-07): its active connection leases and its still
 // outstanding launch tickets, revoked at the shared lease store so every
 // gateway replica's renew loop observes the death within one renew cycle
 // and a replayed workspace cookie resolves to a dead lease on any replica.
@@ -420,7 +420,7 @@ func (a *Authenticator) WithMetrics(m *observability.Metrics) *Authenticator {
 }
 
 // WithSessionRevoker attaches the store-level revoker sign-out calls to end
-// the session's live desktop material (S17) — broker.PublicRevoker in the
+// the session's live desktop material (TM-07) — broker.PublicRevoker in the
 // wired backend. Nil disables the call.
 func (a *Authenticator) WithSessionRevoker(r SessionRevoker) *Authenticator {
 	a.revoker = r
@@ -676,7 +676,7 @@ const logoutRetryAfter = "5"
 // LogoutHandler destroys the server-side session and expires all login- and
 // session-scoped cookies. Route it behind RequireAuth + RequireCSRF.
 //
-// Sign-out also ends the session's reach over the desktop layer (S17): the
+// Sign-out also ends the session's reach over the desktop layer (TM-07): the
 // session row dies first — visible to ticket redemption's session check as
 // early as possible — then the session-bound leases and outstanding tickets
 // are revoked at the store (best effort, bounded). A revoked lease fails
@@ -737,7 +737,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // revokeSessionMaterial revokes the portal session's session-layer material
-// (S17) through the attached SessionRevoker — a no-op when none is wired.
+// (TM-07) through the attached SessionRevoker — a no-op when none is wired.
 // Best effort by contract: the local sign-out (session row + cookie) is
 // already complete, so a store failure only produces the failure records —
 // warn log, error metric, failure audit — never a failed response.

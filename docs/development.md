@@ -7,7 +7,7 @@ Building, testing and iterating on TinyCDI. For the platform design see
 ## Layout
 
 ```
-api/       Kubernetes API types (workspaces/v1alpha1) + deepcopy/CRDs source
+api/       Kubernetes API types (workspaces.cdi.tinyorbit.vn/v1) + deepcopy/CRDs source
 build/     one directory per image: build/<name>/Dockerfile (context = repo root)
 cmd/       Go entrypoints: backend, operator (the frontend server lives in build/frontend)
 config/    kubebuilder config: CRDs, RBAC, manager, samples
@@ -39,24 +39,34 @@ plus containers, no cluster required. See
 
 ## Database migrations
 
-Authoring rules live in `internal/store/migrations/README.md` — expand-only,
+The whole schema is one baseline migration:
+`internal/store/migrations/0001_baseline.sql`. The backend applies the
+embedded migrations when it starts and refuses a database whose
+`schema_migrations` table records a migration this build does not embed
+— an unknown or older database fails closed at startup
+(`internal/store/migrate.go`; `TestBaseline_MigrateRefusesUnknownMigration`).
+
+Authoring rules live in
+[`internal/store/migrations/README.md`](../internal/store/migrations/README.md)
+— expand-only,
 idempotent, no data rewrites that outlive the per-migration transaction.
 One rule deserves repeating here because it is easy to get wrong:
 
 **Every migration file runs inside its own transaction.** The runner
 (`internal/store/migrate.go`, `applyMigration`) applies each
-`NNN_name.sql` in a single transaction, so `CREATE INDEX CONCURRENTLY`
+`NNNN_name.sql` in a single transaction, so `CREATE INDEX CONCURRENTLY`
 can never appear in a migration file — and a plain `CREATE INDEX` on a
 large append-mostly table takes a `SHARE` lock that blocks all writes
-for the build's duration (the 020/023 builds on `connection_lease` /
-`launch_ticket` are the documented example, SR-4-F5). Until the runner
+for the build's duration (for example an index on `connection_lease` or
+`launch_ticket`, both append-mostly). Until the runner
 gains a no-transaction mode, an index on a table that can be large in
 production ships instead as a **documented
-`CREATE INDEX CONCURRENTLY IF NOT EXISTS` runbook step** in
-`docs/runbooks/upgrade.md`, run by the operator *before* the upgrade and
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS` step** in
+the release notes of the release that adds the migration, run by the
+operator *before* `helm upgrade` and
 named to match the `IF NOT EXISTS` name the migration would have used —
 the migration can then keep its own `IF NOT EXISTS` statement as a cheap
-no-op when the runbook ran, and as the slow path when it did not.
+no-op when that step ran, and as the slow path when it did not.
 
 ## Local image builds
 
@@ -84,8 +94,11 @@ pinned inputs.
 runs against a live deployment — anonymous surface checks, a scripted
 OIDC login, the workspace lifecycle (create → Ready → stop → start →
 Ready → delete), the quota refusal and sign-out. It needs only `curl` +
-`jq` and the `TCDI_E2E_*` environment — see `hack/e2e/README.md`. The
+`jq` and the `TCDI_E2E_*` environment — see
+[`hack/e2e/README.md`](../hack/e2e/README.md). The
 kind quickstart (`hack/quickstart/up.sh`) is the reference deployment.
+The soak and drill harness lives in
+[`tests/soak/README.md`](../tests/soak/README.md) and runs out of band.
 
 ## Regenerating the README screenshots
 

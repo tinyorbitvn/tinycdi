@@ -10,7 +10,7 @@ package backend
 // and none of them may be skipped:
 //
 //   - rotate platform_meta.session_epoch — every restored session row is
-//     dead on next read, including sessions revoked after the dump (S17);
+//     dead on next read, including sessions revoked after the dump (TM-07);
 //   - revoke every 'active' connection_lease — restored leases resurrect
 //     with live session_digest bindings and no portal-session barrier;
 //   - deny every unconsumed launch_ticket;

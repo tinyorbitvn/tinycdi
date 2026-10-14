@@ -168,10 +168,6 @@ name: {{ .Values.certManager.issuerRef.name }}
 {{/*
 Install-time invariants. Rendering FAILS when violated:
 
-  - chart 0.2.0 replaced the api/gateway/portal components with backend
-    and frontend: any api.*, gateway.*, portal.* or images.api/gateway/
-    portal value fails with a migration hint (tinycdi.legacyValues).
-    sessionHost (0.1.x) moved to sessionDomain — same hint.
   - portalHost must differ from sessionDomain and must NOT be inside it:
     the session edge serves every workspace on <label>.<sessionDomain>
     through the *.<sessionDomain> wildcard route, and a portalHost in
@@ -228,7 +224,6 @@ Install-time invariants. Rendering FAILS when violated:
 {{- end -}}
 
 {{- define "tinycdi.validate" -}}
-{{- include "tinycdi.legacyValues" . -}}
 {{- $portal := .Values.portalHost | default "" | trim -}}
 {{- $session := .Values.sessionDomain | default "" | trim -}}
 {{- if eq $portal "" -}}
@@ -479,35 +474,6 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if and (not $np.image.digest) (not $np.image.tag) -}}
 {{- fail "nodeProfiles.install.image needs a tag or digest — there is no :latest fallback" -}}
 {{- end -}}
-{{- end -}}
-{{- end }}
-
-{{/*
-0.2.0 migration guard: the api, gateway and portal components were
-replaced by backend (public API + session gateway in one deployment) and
-frontend (static SPA server), and the single sessionHost became the
-sessionDomain wildcard. Old keys are accepted by the schema only so
-this can fail with a pointer to the new key instead of a bare schema error.
-*/}}
-{{- define "tinycdi.legacyValues" -}}
-{{- $hints := dict
-  "api" "api.* moved to backend.* (api.internalTLS -> backend.tls.internal, api.clientCA/extraCA/operatorCN/sessionIdle/extraPortalOrigins -> backend.*)"
-  "gateway" "gateway.* moved to backend.* (gateway.tls -> backend.tls.session, gateway.metricsListen -> backend.metrics, gateway.id -> backend.gatewayID, gateway.mtls/trustedCA removed — the gateway reaches the broker in-process; gateway.service removed — expose the session host through ingress or gatewayApi)"
-  "portal" "portal.* moved to frontend.* (portal.tls -> frontend.tls; portal.apiUpstream removed — the edge routes /v1 to the backend; portal.service removed — expose the portal host through ingress or gatewayApi)" -}}
-{{- $found := list -}}
-{{- range $k := list "api" "gateway" "portal" -}}
-{{- if hasKey $.Values $k -}}{{- $found = append $found (get $hints $k) -}}{{- end -}}
-{{- end -}}
-{{- range $k := list "api" "gateway" "portal" -}}
-{{- if hasKey (default dict $.Values.images) $k -}}
-{{- $found = append $found (printf "images.%s moved to images.%s.*" $k (ternary "frontend" "backend" (eq $k "portal"))) -}}
-{{- end -}}
-{{- end -}}
-{{- if hasKey $.Values "sessionHost" -}}
-{{- $found = append $found "sessionHost moved to sessionDomain (D9) — every workspace session is served on its own <label>.<sessionDomain> host; the edge needs one wildcard route and a wildcard certificate for *.<sessionDomain>" -}}
-{{- end -}}
-{{- if $found -}}
-{{- fail (printf "chart 0.2.0 replaced the api, gateway and portal components with backend and frontend — migrate these values (see the chart README \"Upgrading to 0.2.0\"): %s" (join "; " $found)) -}}
 {{- end -}}
 {{- end }}
 

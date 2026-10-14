@@ -660,6 +660,10 @@ func writeFile(t *testing.T, dir, name string, content []byte) string {
 	return p
 }
 
+// drainTab is the stream-owner tab id the drain tests launch and stream
+// under.
+const drainTab = "efefefefefefefefefefefefefefefef"
+
 // TestRun_DrainsOnShutdown: cancelling the run context with a WebSocket
 // open on the session listener drains it — the socket closes, the broker
 // recorded a disconnect, no lease was revoked, and Run returns nil well
@@ -725,7 +729,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 
 	// Launch: redeem the scripted ticket for a session cookie.
 	form := url.Values{"ticket": {"tk-1"}}
-	req, err := http.NewRequest(http.MethodPost, base+"/v1/launch", strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/launch?tcdi_tab="+drainTab, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +753,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	}
 
 	// Open the desktop WebSocket on the session listener.
-	wsReq, err := http.NewRequest(http.MethodGet, base+"/", nil)
+	wsReq, err := http.NewRequest(http.MethodGet, base+"/?tcdi_tab="+drainTab, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,7 +886,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 
 	upgrade := func(ticket, wsHost string) *http.Response {
 		form := url.Values{"ticket": {ticket}}
-		req, err := http.NewRequest(http.MethodPost, base+"/v1/launch", strings.NewReader(form.Encode()))
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/launch?tcdi_tab="+drainTab, strings.NewReader(form.Encode()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -904,7 +908,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 		if resp.StatusCode != http.StatusSeeOther || cookie == "" {
 			t.Fatalf("launch %s = %d, cookie set=%v — want 303 + session cookie", ticket, resp.StatusCode, cookie != "")
 		}
-		wsReq, err := http.NewRequest(http.MethodGet, base+"/", nil)
+		wsReq, err := http.NewRequest(http.MethodGet, base+"/?tcdi_tab="+drainTab, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -55,8 +55,8 @@ export function stubFetch(api = createMockApi()): typeof fetch {
 
 export function loginCookies(): void {
   document.cookie = `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; path=/`;
-  // v0.2 (P1/D17): the CSRF token and session domain come from GET /v1/me
-  // after login — model that bootstrap by installing the published token.
+  // The CSRF token and session domain come from GET /v1/me after login
+  // (P1/D17) — model that bootstrap by installing the published token.
   setCsrfToken(CSRF_TOKEN_VALUE);
 }
 

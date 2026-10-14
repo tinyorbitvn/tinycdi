@@ -51,7 +51,7 @@ type IntentSpec struct {
 	// SessionPolicy is the resolved session data-transfer policy (the meet
 	// of the template's policy and the tenant ceiling) at intent time; the
 	// applier stamps it as spec.sessionPolicy on create/start intents
-	// (ADR 0010 §2). Nil on intents that carry none.
+	// (ADR 0009 §2). Nil on intents that carry none.
 	SessionPolicy *SessionPolicy `json:"sessionPolicy,omitempty"`
 }
 

@@ -147,15 +147,15 @@ chk "release: image set from build/release-images.txt" "$REL" 'build/release-ima
 [ -f "$ROOT/build/release-images.txt" ] \
   || { echo "FAIL: build/release-images.txt missing"; fails=1; }
 active_imgs="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/build/release-images.txt")"
-printf '%s\n' "$active_imgs" | grep -qx 'linux-base' \
+grep -qx 'linux-base' <<< "$active_imgs" \
   || { echo "FAIL: linux-base must be in the release set"; fails=1; }
-printf '%s\n' "$active_imgs" | grep -qx 'linux-desktop' \
+grep -qx 'linux-desktop' <<< "$active_imgs" \
   || { echo "FAIL: linux-desktop must be in the release set"; fails=1; }
-printf '%s\n' "$active_imgs" | grep -qx 'browser' \
+grep -qx 'browser' <<< "$active_imgs" \
   || { echo "FAIL: browser must be in the release set"; fails=1; }
 for profile in browser linux-desktop; do
-  if printf '%s\n' "$active_imgs" | grep -qx "$profile" \
-    && ! printf '%s\n' "$active_imgs" | grep -qx 'linux-base'; then
+  if grep -qx "$profile" <<< "$active_imgs" \
+    && ! grep -qx 'linux-base' <<< "$active_imgs"; then
     echo "FAIL: $profile requires linux-base (its FROM base) in the release set"
     fails=1
   fi
@@ -169,11 +169,11 @@ done
 # api/gateway/portal images and commands must not linger anywhere in the
 # pipeline, and every image list must agree with build/release-images.txt.
 for want in backend frontend operator; do
-  printf '%s\n' "$active_imgs" | grep -qx "$want" \
+  grep -qx "$want" <<< "$active_imgs" \
     || { echo "FAIL: $want must be in the release set"; fails=1; }
 done
 for gone in api gateway portal; do
-  printf '%s\n' "$active_imgs" | grep -qx "$gone" \
+  grep -qx "$gone" <<< "$active_imgs" \
     && { echo "FAIL: removed image '$gone' is still in the release set"; fails=1; }
   for f in "$REL" "$IMG" "$ROOT/.github/scripts/"*.sh; do
     grep -qE "tinycdi-$gone\b|'$gone'|\b$gone\.ref|cmd/$gone\b|build/$gone/" "$f" \

@@ -83,7 +83,7 @@ export function canDelete(ws: ScopedWorkspace): boolean {
 }
 
 // Connect is owner-only (advisor Q1): a tenant admin never gets a session
-// on another user's workspace — no takeover in v1.2.
+// on another user's workspace — no admin takeover of another user's session.
 export function canConnect(ws: ScopedWorkspace, viewerSubject: string | undefined): boolean {
   return !!viewerSubject && ws.owner?.subject === viewerSubject && isConnectable(ws);
 }

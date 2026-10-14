@@ -53,26 +53,26 @@ func TestBaseline_MigrateIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestBaseline_MigrateRefusesPre1Database: a database whose version table holds
-// a migration this build does not embed (a pre-1.0 schema) fails closed
-// instead of silently skipping the baseline.
-func TestBaseline_MigrateRefusesPre1Database(t *testing.T) {
+// TestBaseline_MigrateRefusesUnknownMigration: a database whose version table
+// holds a migration this build does not embed fails closed instead of
+// silently skipping the baseline.
+func TestBaseline_MigrateRefusesUnknownMigration(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 	if _, err := db.Pool().Exec(ctx,
 		`UPDATE schema_migrations SET name = '001_control_plane.sql' WHERE version = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "pre-1.0") {
-		t.Fatalf("Migrate on a pre-1.0 version table = %v, want a pre-1.0 refusal", err)
+	if err := db.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "does not embed") {
+		t.Fatalf("Migrate on a renamed version row = %v, want a refusal", err)
 	}
 	if _, err := db.Pool().Exec(ctx,
 		`UPDATE schema_migrations SET name = '0001_baseline.sql' WHERE version = 1;
 		 INSERT INTO schema_migrations (version, name) VALUES (24, '024_x.sql')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "pre-1.0") {
-		t.Fatalf("Migrate with an unknown version = %v, want a pre-1.0 refusal", err)
+	if err := db.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "does not embed") {
+		t.Fatalf("Migrate with an unknown version = %v, want a refusal", err)
 	}
 }
 

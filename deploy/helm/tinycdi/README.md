@@ -7,12 +7,6 @@ installs the three components, the `workspaces.cdi.tinyorbit.vn` CRDs, and the
 namespaced RBAC/NetworkPolicy baseline — nothing else. It never ships
 Secrets, never installs KubeVirt/CDI, a database, or a dev OIDC provider.
 
-> **v0.2:** [ADR 0005](../../../docs/adr/0005-backend-frontend-operator.md)
-> (accepted) consolidated the v0.1 `api` + `gateway` + `portal` into
-> `backend` + `frontend` and replaced `sessionHost` with a wildcard
-> `sessionDomain` (one host per workspace). The values below describe the
-> v0.2 chart.
-
 * Chart: `deploy/helm/tinycdi` (Helm v4, `apiVersion: v2`)
 * OCI artifact: `oci://ghcr.io/tinyorbitvn/charts/tinycdi`
 * Source: <https://github.com/tinyorbitvn/tinycdi> · License: MIT
@@ -52,56 +46,14 @@ the apiserver NetworkPolicy peers.
 
 ## Upgrade
 
-There is no upgrade from a pre-1.0 release: the CRDs are `v1` only and the
-database schema is a fresh `0001_baseline`, so you uninstall the old
-release, remove its CRDs and database, and reinstall. The backend refuses
-to start on a pre-1.0 database. Later releases upgrade with:
-
 ```bash
-helm upgrade tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
+helm upgrade tinycdi oci://ghcr.io/tinyorbitvn/charts/tinycdi --version <1.x.y> -n tinycdi-system -f my-values.yaml
 ```
 
-Ordering guidance and rollback semantics: `docs/runbooks/upgrade.md`.
+Within 1.x, upgrades follow [the versioning contract](../../../docs/versioning.md#upgrading-within-1x).
 Seeded WorkspaceTemplates are immutable `<name>-<hash8>` revision objects —
 a spec change creates a new revision and removes the superseded one, so
 upgrades and rollbacks never hit the CEL immutability wall.
-
-**Kasm note (E13):** a seeded `adapter: kasm` template with
-`experience: Browser` **fails the render** after this upgrade until its
-image is on `kasmAdapter.browserAllowlist` or the template is re-classed
-as `experience: Desktop` — the allowlist is the chart-side binding to the
-catalog's tightened ≤2-major browser engine gate (non-browser templates
-keep the ≤4 budget). Both options:
-
-```yaml
-# Option A — the image meets the ≤2 gate: allowlist it (it must be a
-# browser-class build/kasm-catalog.txt entry or the catalog check fails).
-kasmAdapter:
-  browserAllowlist:
-    - kasmweb/<app>@sha256:<digest>
-
-# Option B — the image misses the gate: keep it for non-browser use.
-templates:
-  - name: <tpl>
-    spec:
-      experience: Desktop    # was: Browser
-```
-
-The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
-155 pin — lag 1) but the allowlist ships empty, so a Browser template
-pinned to it needs option A (allowlist the ref) or option B. See
-`docs/runbooks/upgrade.md` → "Kasm browser templates — the E13 engine
-gate" and `docs/kasm-images.md`.
-
-## Removed values
-
-Chart 1.0.0 is the first stable chart — every deprecated knob of the
-pre-1.0 releases is gone. There is no upgrade path: install fresh.
-
-| Removed | Replacement |
-|---|---|
-| `templates[].nodeSelector` | `templates[].spec.placement.nodeSelector` — a values file still carrying it fails the render via the values schema (`additionalProperties: false`) |
-| the implicit unrestricted ClusterOnly default | `networkProfile: ClusterOnly` is **restricted** by default — egress confined to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant`; `runtime.networkProfiles.clusterOnly.unrestricted: true` opts back into any-pod-any-namespace egress (see [ClusterOnly egress](#clusteronly-egress)) |
 
 ## Uninstall and CRD policy
 
@@ -116,8 +68,8 @@ objects. It **keeps**:
   Reconcile CRD drift by hand: `kubectl diff -f crds/` then
   `kubectl apply -f crds/` after review. Deleting a CRD deletes every CR.
   Under GitOps (Argo CD), a changed CRD needs a hard refresh before the
-  app syncs CRs that use the new fields — see `docs/runbooks/upgrade.md`
-  → "GitOps note".
+  app syncs CRs that use the new fields (see [Upgrading within
+  1.x](../../../docs/versioning.md#upgrading-within-1x)).
 - Managed namespaces and everything inside (Workspaces, runtime pods,
   **user PVCs**) — they carry `helm.sh/resource-policy: keep`.
 - Secrets you created manually.
@@ -142,7 +94,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace, SEC-09); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -155,7 +107,7 @@ objects. It **keeps**:
 | `backend.loginKeys.existingSecret` | `current` (+ `previous` while rotating), 32 bytes each | backend `-login-key-file` — seals the `__Host-tcdi_login` cookie; **required** unless `loginKeys.generate` |
 | `backend.tls.{app,session,internal}.existingSecret` | `tls.crt`/`tls.key` | backend app listener :8443 / session listener :8444 / internal mTLS listener :9443 |
 | `backend.clientCA.existingSecret` | `ca.crt` | backend verifies internal-listener client certs |
-| `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0009 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
+| `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0008 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
 | `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
 | `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
 | `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
@@ -199,7 +151,7 @@ no default cap.
 
 | Key | Default | Description |
 |---|---|---|
-| `<c>.replicas` | `2` | `operator` runs leader-elected: one active reconciler, one standby (E4) |
+| `<c>.replicas` | `2` | `operator` runs leader-elected: one active reconciler, one standby |
 | `<c>.resources` | set | requests+limits required by chart tests |
 | `<c>.podAnnotations` | `{}` | pod template annotations |
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
@@ -244,13 +196,13 @@ the value to set instead:
 | `backend.controlHosts` / `.audience` | `[]` / `""` (=sessionDomain) | extra Hosts allowed for the session listener's in-cluster control surface (`/healthz`, `/v1/control/*`) on top of the `backend[.<ns>[.svc[.cluster.local]]]` Service names / ticket audience |
 | `backend.hostAliases` | `[]` | pod `spec.hostAliases` on the backend Deployment — e.g. resolve an in-cluster OIDC issuer host to a Service ClusterIP when cluster DNS cannot; empty renders nothing |
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
-| `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
+| `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port; needs `networkPolicy.prometheusPeers` |
 | `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
 | `backend.retention.auditDays` | `90` | days an `audit_event` row is kept before the leader's daily prune deletes it (1..3650) |
-| `backend.fileTransfer.maxFileBytes` | `104857600` | platform per-file bound for session file transfer (ADR 0010 T11), rendered as `-file-transfer-max-bytes`; a tenant ceiling's `maxFileBytes` may only lower it (1..10737418240) |
+| `backend.fileTransfer.maxFileBytes` | `104857600` | platform per-file bound for session file transfer (ADR 0009 §5), rendered as `-file-transfer-max-bytes`; a tenant ceiling's `maxFileBytes` may only lower it (1..10737418240) |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
-| `backend.tls.internal.revokedSerials.{existingSecret,key}` | `""` / `revoked-serials.txt` | per-certificate revocation on the internal mTLS listener (ADR 0009, SR-3-F5): mounts a Secret holding the serial blocklist (`<serial-hex> <issuer-dn>` per line) at `/etc/internal-revoked/` — a listed leaf's handshake is aborted and its live conns severed; propagation is kubelet Secret sync + one 30 s poll (~90 s worst). Empty = off (default render unchanged) |
-| `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |
+| `backend.tls.internal.revokedSerials.{existingSecret,key}` | `""` / `revoked-serials.txt` | per-certificate revocation on the internal mTLS listener (ADR 0008): mounts a Secret holding the serial blocklist (`<serial-hex> <issuer-dn>` per line) at `/etc/internal-revoked/` — a listed leaf's handshake is aborted and its live conns severed; propagation is kubelet Secret sync + one 30 s poll (~90 s worst). Empty = off (default render unchanged) |
+| `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler; `leaderElect=false` with `replicas>1` fails the render |
 | `operator.internetExceptCIDRs` | `[]` | subtracted from runtime `InternetOnly` egress |
 | `operator.clusterCIDRs` | `[]` | this cluster's pod/service/node CIDRs — appended to `--internet-except-cidrs`; **required** (render fails) when any seeded template uses `networkProfile: InternetOnly` |
 | `operator.brokerClient.enabled` | `true` | internal broker wiring (teardown finalizer); `devAllowNoBroker` is dev-only — needs `dev.enabled` |
@@ -324,7 +276,7 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
 | `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
-| `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps pre-v0.3.1 packed-by-scoring placement |
+| `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps packed-by-scoring placement |
 | `runtime.networkProfiles.clusterOnly.unrestricted` | `false` | opt-out of the restricted ClusterOnly default: `true` renders `--runtime-clusteronly-egress=unrestricted` — egress to **any pod in any namespace on any port**, confinement resting entirely on destination-side ingress policies — and install NOTES state the opt-out. Cannot be combined with the `egress*` selectors below (render fails). See [ClusterOnly egress](#clusteronly-egress) |
 | `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | narrowing for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress=<json>`). Empty keeps the restricted default: egress to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant` (the managed namespaces). Set a label selector to confine ClusterOnly egress to pods in matching namespaces instead. DNS egress is unaffected |
 | `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
@@ -335,8 +287,8 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 `networkProfile: ClusterOnly` workspaces are **restricted by default**:
 egress reaches pods in namespaces labelled
 `workspaces.cdi.tinyorbit.vn/tenant` — the managed namespaces — and no
-pod outside them. To opt back into any-pod-any-namespace egress (the
-pre-1.0 posture — confinement then rests entirely on destination-side
+pod outside them. To allow egress to any pod in any namespace
+(confinement then rests entirely on destination-side
 ingress policies, so any pod without its own NetworkPolicy is
 reachable), set:
 
@@ -377,7 +329,7 @@ deliberate unidirectional channel.
 
 Set `runtime.appArmor.requireRuntimeDefault=false` when the workspace pool runs on nodes that cannot enforce AppArmor (kind; RHEL-family and other SELinux-based distributions). This is a supported setting, not a dev escape hatch. The `apparmor` check in `hack/preflight/preflight.sh` (see [preflight README](../../../hack/preflight/README.md)) probes every node workspaces can reach and names the fitting value — run it before install.
 
-- **What changes:** runtime containers (and the Kasm adapter init container) no longer carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
+- **What changes:** runtime containers (and the Kasm adapter init container) do not carry `appArmorProfile: RuntimeDefault`. Nothing else changes — seccomp `RuntimeDefault`, dropped capabilities, `runAsNonRoot`/uid 1000, `allowPrivilegeEscalation=false`, the read-only root filesystem and `hostUsers` stay as configured.
 - **What is lost:** the fail-closed AppArmor guarantee. On an AppArmor host the container runtime's default profile still applies to non-privileged containers even without the field, so little is lost there; on a host without AppArmor there is no AppArmor confinement at all and isolation rests on seccomp, dropped capabilities, the user namespace and SELinux.
 - **Localhost profiles still apply:** a template that requests a Localhost AppArmor profile (`appArmorProfile: <name>`, e.g. the browser templates) always sets it, so those pods are refused on such nodes. Run browser templates only on AppArmor nodes (use `nodeProfiles.install` there), or use a template without a Localhost profile.
 
@@ -427,7 +379,7 @@ the flag is overridden via `backend.extraArgs`, edit the rendered rule
 match your Prometheus Operator's `ruleSelector` (e.g.
 `{release: prometheus}`), the same convention as `serviceMonitor.labels`.
 
-### Admission policy — `admissionPolicy` (default OFF, S36)
+### Admission policy — `admissionPolicy` (default OFF, TM-45)
 
 | Key | Default | Description |
 |---|---|---|
@@ -460,7 +412,7 @@ operator ServiceAccount identity and managed-namespace list, then
 **Symptom.** On Cilium, with a Gateway API or Ingress edge whose envoy runs in the
 host network namespace (Cilium's own Gateway API and Ingress controllers do), every
 request through the edge returns `503` while the pods are Ready and
-`kubectl port-forward` works. This was GitHub issue #13.
+`kubectl port-forward` works.
 
 **Cause.** The default edge rule (`edgeIngress: ipBlock`, `edgeIngressCIDRs:
 [0.0.0.0/0]`) is a plain `NetworkPolicy` `ipBlock` peer. Under Cilium's default
@@ -613,7 +565,7 @@ same edge keys on the edge's own address — one shared bucket (~60 logins and
 outage. The backend logs a startup warning while a limit is on and the list
 is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
 `X-Real-IP` headers the workspace pod sees — client-supplied values are
-stripped and rebuilt from the trusted chain only (S18), so a spoofed address
+stripped and rebuilt from the trusted chain only (TM-32), so a spoofed address
 can never poison the runtime's brute-force blacklist.
 
 The right-most-untrusted derivation is only as good as the list's coverage
@@ -660,7 +612,7 @@ revisions. Per entry:
 | `name` / `namespace` | catalog name; must be a managed namespace |
 | `image` | key into `images` (`linuxDesktop`, `browser`) or literal ref; used when `spec.linux.image` is empty — runtime images must be **digest-pinned** |
 | `seccompProfile` / `appArmorProfile` | Localhost node profile names → `localhost/<name>` annotations (must be pre-loaded on nodes) |
-| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec — pod placement lives in `spec.placement` (`nodeSelector`, `tolerations`, `runtimeClassName`); the v0.1 `nodeSelector` entry field was removed in v0.3 and fails the render |
+| `storageClass` / `annotations` / `spec` | per-template SC override, verbatim annotations, verbatim spec — pod placement lives in `spec.placement` (`nodeSelector`, `tolerations`, `runtimeClassName`); a top-level `nodeSelector` field on a template entry fails the render (values schema) |
 
 ### Kasm workspace images
 
@@ -676,7 +628,7 @@ the adapter contract and the per-image onboarding checklist.
 |---|---|---|
 | `kasmAdapter.enabled` | `false` | opt-in switch. The operator gets `--kasm-adapter-image` **only** when this is `true` — a release-stamped `kasmAdapter.image.digest` alone does not turn the adapter on. `enabled: true` without a digest fails the render, and so does a seeded `adapter: kasm` template while `enabled` is `false` (the backend would reject the workspaces anyway) |
 | `kasmAdapter.image.{repository,tag,digest}` | `tinyorbitvn/tinycdi-kasm-adapter` | adapter init image → operator `--kasm-adapter-image` (when enabled). **Digest is required**: the flag only carries a digest-pinned ref, and a `tag` without `digest` fails the render. Release packaging stamps the digest; set it yourself for a self-built or mirrored image |
-| `kasmAdapter.browserAllowlist` | `[]` | the E13 browser gate: a seeded `adapter: kasm` template with `experience: Browser` renders only when its `spec.linux.image` is listed here; every entry must be a digest-pinned **browser-class** `build/kasm-catalog.txt` entry (≤2-major engine gate — CI enforces it). Non-Browser kasm templates ignore the list (≤4 budget). Empty today — no cataloged kasmweb browser image meets the gate |
+| `kasmAdapter.browserAllowlist` | `[]` | the browser gate: a seeded `adapter: kasm` template with `experience: Browser` renders only when its `spec.linux.image` is listed here; every entry must be a digest-pinned **browser-class** `build/kasm-catalog.txt` entry (≤2-major engine gate — CI enforces it). Non-Browser kasm templates ignore the list (≤4 budget). Ships empty — a Browser template renders only once its image is listed |
 
 A seeded kasm template sets `spec.linux.adapter: kasm`, an optional
 `spec.linux.sessionCmd` (the session payload — for Chromium-family images
@@ -688,6 +640,33 @@ from Docker Hub — never mirrored/republished). The digest must be a
 trivy gate, browser-engine freshness floor). `ci/example-values.yaml`
 ships a complete `kasmweb/chrome` example (a **Desktop**-experience
 seed; the image is browser-class but not on the empty allowlist).
+
+### Kasm browser templates
+
+A seeded `adapter: kasm` template with `experience: Browser` **fails the
+render** until its image is on `kasmAdapter.browserAllowlist` or the
+template is re-classed as `experience: Desktop` — the allowlist is the
+chart-side binding to the catalog's ≤2-major browser engine gate
+(non-browser templates keep the ≤4 budget). Both options:
+
+```yaml
+# Option A — the image meets the ≤2 gate: allowlist it (it must be a
+# browser-class build/kasm-catalog.txt entry or the catalog check fails).
+kasmAdapter:
+  browserAllowlist:
+    - kasmweb/<app>@sha256:<digest>
+
+# Option B — the image misses the gate: keep it for non-browser use.
+templates:
+  - name: <tpl>
+    spec:
+      experience: Desktop    # was: Browser
+```
+
+The cataloged `kasmweb/chrome` is browser-class (Chrome 154 vs the native
+155 pin — lag 1) but the allowlist ships empty, so a Browser template
+pinned to it needs option A (allowlist the ref) or option B. See
+[docs/kasm-images.md](../../../docs/kasm-images.md).
 
 ### Node-profile installer (`nodeProfiles.install`) — default OFF
 
@@ -850,10 +829,12 @@ error.
 
 `values.schema.json` rejects malformed values at lint/template time
 (https-only issuers/origins, hostname-patterned `portalHost`/`sessionDomain`,
-comma-free `oidc.requiredGroups` entries, pinned installer image).
-Render-time guards refuse the removed `api.*`/`gateway.*`/`portal.*`/
-`sessionHost`/`backend.extraAllowedHosts` values
-(with a migration hint), a portalHost equal to or inside
+comma-free `oidc.requiredGroups` entries, pinned installer image) and
+refuses unknown keys — `additionalProperties: false` applies at the top
+level and under each named object, so any key outside the declared set
+(`images.*` included) fails lint/template.
+Render-time guards refuse `backend.extraAllowedHosts` (moved to
+`backend.controlHosts`), a portalHost equal to or inside
 sessionDomain, conflicting exposure modes, a cert-manager toggle without an
 issuer, missing `backend.loginKeys`, empty or placeholder-only
 `database.allowedPeers`, empty

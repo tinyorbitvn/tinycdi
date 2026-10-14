@@ -31,7 +31,7 @@ type IssuedTicket struct {
 // ConnectionIssuer is the ticket-issuing surface the handler needs. The
 // adapter translates domain errors into *Error with the stable codes.
 // policy is the resolved session data-transfer vector (template policy ∧
-// tenant ceiling, ADR 0010 §2): its clipboard feeds the ticket's
+// tenant ceiling, ADR 0009 §2): its clipboard feeds the ticket's
 // clipboard_policy column so the gateway's redirect re-asserts the
 // client's flags, and the whole vector is recorded verbatim on the ticket
 // row. A zero-value policy records nothing.
@@ -88,7 +88,7 @@ func (h *ConnectionHandler) WithLogger(l *slog.Logger) *ConnectionHandler {
 // WithClipboardSource wires the resolver that supplies the workspace's
 // resolved session policy for ticket recording (V3.24: the gateway
 // redirect re-asserts the client flags from what the ticket recorded;
-// ADR 0010: the recorded vector is the template policy ∧ tenant ceiling).
+// ADR 0009: the recorded vector is the template policy ∧ tenant ceiling).
 func (h *ConnectionHandler) WithClipboardSource(fn func(ctx context.Context, p Principal, workspaceUID string) (provisioning.SessionPolicy, error)) *ConnectionHandler {
 	h.clipboard = fn
 	return h
@@ -123,7 +123,7 @@ type launchTicketView struct {
 	// SessionPolicy is the resolved policy the ticket recorded (the meet of
 	// the template's policy and the tenant ceiling); the portal renders
 	// the session iframe's allow from it — what the ticket carries, not
-	// the template it happened to read earlier (ADR 0010 §2). Absent when
+	// the template it happened to read earlier (ADR 0009 §2). Absent when
 	// resolution failed — the ticket then records nothing and least
 	// privilege applies.
 	SessionPolicy *provisioning.SessionPolicy `json:"sessionPolicy,omitempty"`

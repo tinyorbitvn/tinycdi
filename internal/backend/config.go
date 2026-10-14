@@ -125,9 +125,9 @@ type Config struct {
 	// sweep deletes older rows. 0 disables the sweep — the tables then
 	// grow without bound (SR-4-F5).
 	TerminalRetentionDays int
-	AuditRetentionDays    int // days an audit_event row is kept before the leader's daily prune (ADR 0011); 1..3650
+	AuditRetentionDays    int // days an audit_event row is kept before the leader's daily prune (ADR 0010); 1..3650
 	// FileTransferMaxBytes is the platform per-file bound for session
-	// file transfer (ADR 0010 T11): every resolved policy is clipped to
+	// file transfer (ADR 0009 §5): every resolved policy is clipped to
 	// it and a tenant ceiling's maxFileBytes may only lower it. 1..10 GiB.
 	FileTransferMaxBytes int64
 	ImageStaleAfter      time.Duration
@@ -182,7 +182,7 @@ type Config struct {
 	InternalTLSKey   string
 	InternalClientCA string
 	OperatorCN       string
-	// InternalRevokedList is the ADR 0009 per-certificate revocation
+	// InternalRevokedList is the ADR 0008 per-certificate revocation
 	// list for the internal mTLS listener; empty disables the feature —
 	// the handshake path is then byte-identical to an unlisted build.
 	InternalRevokedList string
@@ -196,7 +196,7 @@ type Config struct {
 	GatewayID       string
 	GatewayAudience string
 	LoginKeyFiles   stringList // first file seals; all open (rotation)
-	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/S18)
+	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/TM-32)
 	// RateLimitReplicas divides each rate budget into the degraded-mode
 	// local floor (RL-1, ADR 0006 + RL-CEILING amendment): while the
 	// Postgres window is reachable it enforces -login-rate/-launch-rate
@@ -348,7 +348,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.OperatorCN, "operator-cn", envOr(getenv, "TCDI_OPERATOR_CN", httpapi.DefaultOperatorCN),
 		"client-certificate CN of the operator identity on the internal workspace routes")
 	fs.StringVar(&c.InternalRevokedList, "internal-revoked-list", envOr(getenv, "TCDI_INTERNAL_REVOKED_LIST", ""),
-		"per-certificate revocation list for the internal mTLS listener (ADR 0009: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
+		"per-certificate revocation list for the internal mTLS listener (ADR 0008: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
 
 	// Metrics listener.
 	fs.StringVar(&c.MetricsListen, "metrics-listen", envOr(getenv, "TCDI_METRICS_LISTEN", ""), "metrics listen address (empty disables)")
@@ -396,7 +396,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["tenant-admin-groups"] {
-		// envOr's empty-string "unset" keeps the upgrade path at the
+		// envOr's empty-string "unset" resolves to the
 		// "tenant-admin" default; a set-but-empty env is indistinguishable
 		// from unset through the getenv seam, exactly like required-groups.
 		if err := c.TenantAdminGroups.Set(envOr(getenv, "TCDI_TENANT_ADMIN_GROUPS", api.TenantAdminGroup)); err != nil {

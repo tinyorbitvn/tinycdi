@@ -39,10 +39,11 @@ CREATE TABLE public.connection_lease (
     session_digest bytea,
     stream_epoch bigint DEFAULT 0 NOT NULL,
     stream_owner_tab text,
-    stream_owner_epoch bigint,
     portal_session_digest bytea NOT NULL,
     CONSTRAINT connection_lease_fencing_version_check CHECK ((fencing_version > 0)),
-    CONSTRAINT connection_lease_state_check CHECK ((state = ANY (ARRAY['active'::text, 'superseded'::text, 'revoked'::text, 'expired'::text])))
+    CONSTRAINT connection_lease_state_check CHECK ((state = ANY (ARRAY['active'::text, 'superseded'::text, 'revoked'::text, 'expired'::text]))),
+    CONSTRAINT connection_lease_stream_owner_check CHECK (((stream_epoch = 0) = (stream_owner_tab IS NULL))),
+    CONSTRAINT connection_lease_stream_owner_tab_check CHECK ((stream_owner_tab ~ '^[0-9a-f]{32}$'::text))
 );
 
 CREATE TABLE public.idempotency (

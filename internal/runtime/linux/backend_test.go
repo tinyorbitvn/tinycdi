@@ -189,8 +189,9 @@ func TestAppArmorProfileRejected(t *testing.T) {
 //
 // Placement precedence is per field: the typed template field wins, then the
 // operator's Options defaults. A field the template sets REPLACES the
-// default; it is never merged. The v0.1 node-selector template annotation is
-// gone (E14) — TestBuildPod_AnnotationNoLongerHonoured pins its removal.
+// default; it is never merged. The retired node-selector template annotation
+// is not part of the v1 template API (E14) —
+// TestBuildPod_AnnotationNoLongerHonoured pins its removal.
 
 var poolToleration = corev1.Toleration{
 	Key:      "cdi.tinyorbit.vn/workspace",
@@ -261,13 +262,14 @@ func TestBuildPod_PerFieldFallback(t *testing.T) {
 }
 
 func TestBuildPod_AnnotationNoLongerHonoured(t *testing.T) {
-	// The v0.1 workspaces.cdi.tinyorbit.vn/node-selector annotation is gone
-	// (E14): a template carrying it gets the same placement as one without —
-	// operator default below, spec.placement field when set.
-	const legacyAnnotation = "workspaces.cdi.tinyorbit.vn/node-selector"
+	// The workspaces.cdi.tinyorbit.vn/node-selector annotation is not part
+	// of the v1 template API (E14): a template carrying it gets the same
+	// placement as one without — operator default below, spec.placement
+	// field when set.
+	const retiredAnnotation = "workspaces.cdi.tinyorbit.vn/node-selector"
 	t.Run("annotation loses to operator default", func(t *testing.T) {
 		tpl := testTemplate(map[string]string{
-			legacyAnnotation: `{"workload":"annotated"}`,
+			retiredAnnotation: `{"workload":"annotated"}`,
 		})
 		pod := ensurePodSpecFor(t, tpl, defaultPlacementOptions())
 		if !reflect.DeepEqual(pod.Spec.NodeSelector, map[string]string{"pool": "default"}) {
@@ -276,7 +278,7 @@ func TestBuildPod_AnnotationNoLongerHonoured(t *testing.T) {
 	})
 	t.Run("annotation loses to empty options", func(t *testing.T) {
 		tpl := testTemplate(map[string]string{
-			legacyAnnotation: `{"workload":"annotated"}`,
+			retiredAnnotation: `{"workload":"annotated"}`,
 		})
 		pod := ensurePodSpecFor(t, tpl, Options{})
 		if len(pod.Spec.NodeSelector) != 0 {
@@ -287,7 +289,7 @@ func TestBuildPod_AnnotationNoLongerHonoured(t *testing.T) {
 		// The annotation never carried tolerations/runtimeClass, but a
 		// template that sets only runtimeClassName must not resurrect it.
 		tpl := testTemplate(map[string]string{
-			legacyAnnotation: `{"workload":"annotated"}`,
+			retiredAnnotation: `{"workload":"annotated"}`,
 		})
 		tpl.Spec.Placement = &cdiv1.PlacementSpec{
 			RuntimeClassName: ptr("gvisor"),
@@ -369,9 +371,9 @@ func TestEnsureRefusesRetainedDataWithoutClaim(t *testing.T) {
 
 // ClusterOnly egress defaults to RESTRICTED in v1.0: with no operator
 // narrowing configured the rule confines egress to pods in namespaces
-// carrying the managed-tenant label — never the pre-1.0 any-pod-anywhere
-// posture. PodSelector stays unset and no ports are pinned; DNS is
-// unaffected (it leads the egress list).
+// carrying the managed-tenant label — never the Unrestricted
+// any-pod-anywhere opt-out. PodSelector stays unset and no ports are
+// pinned; DNS is unaffected (it leads the egress list).
 func TestClusterOnlyEgress_DefaultRestricted(t *testing.T) {
 	rule := clusterOnlyEgressRule(Options{})
 	if len(rule.To) != 1 || rule.To[0].NamespaceSelector == nil {

@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
@@ -346,17 +345,10 @@ func recordToView(r *provisioning.WorkspaceRecord) WorkspaceView {
 	}
 }
 
-// templateRevisionOf reports the workspace's template revision as the
-// verbatim spec.revision label, falling back to the numeric revision on
-// rows written before v0.3 carried the label.
+// templateRevisionOf reports the workspace's template revision: the
+// verbatim spec.revision label.
 func templateRevisionOf(t *provisioning.TemplateInfo) string {
-	if t.RevisionLabel != "" {
-		return t.RevisionLabel
-	}
-	if t.Revision > 0 {
-		return strconv.FormatInt(t.Revision, 10)
-	}
-	return ""
+	return t.RevisionLabel
 }
 
 // ---------------------------------------------------------------------------

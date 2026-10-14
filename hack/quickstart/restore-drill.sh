@@ -11,7 +11,7 @@
 #   seed   — dev-realm login (curl OIDC), a Running workspace, a redeemed
 #            launch ticket: live session + live lease + gateway cookie.
 #   dump   — pg_dump of the platform DB.
-#   mutate — sign-out (S17 revocation), a workspace stop, a second
+#   mutate — sign-out (TM-07 revocation), a workspace stop, a second
 #            workspace — changes the dump does not know about.
 #   naive  — the unsafe restore: freeze, load the dump, reopen WITHOUT the
 #            post-restore SQL. Asserts the signed-out session resurrects
@@ -214,7 +214,7 @@ wait_portal
 
 code=$(status_with_cookie "$PORTAL_HOST" /v1/me "$SESS_VALUE")
 if [ "$code" = "200" ]; then
-  log "  OBSERVED: signed-out portal session resurrected (/v1/me 200) — S17 regression without epoch rotation"
+  log "  OBSERVED: signed-out portal session resurrected (/v1/me 200) — TM-07 regression without epoch rotation"
 else
   warn "  expected resurrection but got $code — investigate before trusting this drill"
 fi

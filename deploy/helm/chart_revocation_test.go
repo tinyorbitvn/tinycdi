@@ -3,7 +3,7 @@
 
 package chart_test
 
-// ADR 0009 (SR-3-F5) chart legs: backend.tls.internal.revokedSerials is
+// ADR 0008 (SR-3-F5) chart legs: backend.tls.internal.revokedSerials is
 // additive — unset renders byte-identical (the default-render golden
 // already proves it), set adds exactly the Secret volume projected to a
 // fixed filename, the read-only mount and the -internal-revoked-list arg.

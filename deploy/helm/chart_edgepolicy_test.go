@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// Edge ingress policy (GitHub issue #13). v0.2 already ships
-// networkPolicy.edgeIngress=cilium, which renders CiliumNetworkPolicies that
+// Edge ingress policy. networkPolicy.edgeIngress=cilium renders
+// CiliumNetworkPolicies that
 // admit the ingress/host/remote-node entities — the identities a host-network
 // Gateway API / Ingress envoy carries, and which an ipBlock peer never
 // matches under Cilium's default policy-cidr-match-mode. These tests pin that
@@ -49,8 +49,8 @@ func renderNetworkPolicySource(t *testing.T, extra ...string) string {
 }
 
 // TestEdgePolicyDefaultUnchanged: the default (edgeIngress=ipBlock) render of
-// the network policies is byte-equal to what v0.2 shipped, so adopting a
-// newer chart never silently changes who may reach the public listeners.
+// the network policies is pinned byte-equal by the checked-in golden, so a
+// chart update never silently changes who may reach the public listeners.
 func TestEdgePolicyDefaultUnchanged(t *testing.T) {
 	want, err := os.ReadFile(filepath.Join("testdata", "edge-policy-default.golden.yaml"))
 	if err != nil {
@@ -58,7 +58,7 @@ func TestEdgePolicyDefaultUnchanged(t *testing.T) {
 	}
 	got := renderNetworkPolicySource(t)
 	if got != string(want) {
-		t.Errorf("default network policy render drifted from the v0.2 golden "+
+		t.Errorf("default network policy render drifted from the checked-in golden "+
 			"(deploy/helm/testdata/edge-policy-default.golden.yaml).\n--- got ---\n%s", got)
 	}
 	if strings.Contains(got, "CiliumNetworkPolicy") {

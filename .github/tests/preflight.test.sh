@@ -150,11 +150,11 @@ run() {
 ok()   { echo "ok:   $1"; }
 bad()  { echo "FAIL: $1"; echo "----- output:"; echo "$OUT"; echo "----- kubectl log:"; cat "$LOG"; echo "-----"; fails=1; }
 expect() { # expect <desc> <STATUS> <check>
-  if printf '%s\n' "$OUT" | grep -Eq "^$2 +$3( |$)"; then ok "$1"; else bad "$1 (want $2 $3)"; fi
+  if grep -Eq "^$2 +$3( |$)" <<< "$OUT"; then ok "$1"; else bad "$1 (want $2 $3)"; fi
 }
 expect_rc() { if [ "$RC" = "$2" ]; then ok "$1"; else bad "$1 (rc=$RC, want $2)"; fi; }
-expect_out() { if printf '%s\n' "$OUT" | grep -Eq -- "$2"; then ok "$1"; else bad "$1 (no match for $2)"; fi; }
-expect_no_out() { if printf '%s\n' "$OUT" | grep -Eq -- "$2"; then bad "$1 (found $2)"; else ok "$1"; fi; }
+expect_out() { if grep -Eq -- "$2" <<< "$OUT"; then ok "$1"; else bad "$1 (no match for $2)"; fi; }
+expect_no_out() { if grep -Eq -- "$2" <<< "$OUT"; then bad "$1 (found $2)"; else ok "$1"; fi; }
 expect_log() { if grep -Eq -- "$2" "$LOG"; then ok "$1"; else bad "$1 (log lacks $2)"; fi; }
 expect_no_log() { if grep -Eq -- "$2" "$LOG"; then bad "$1 (log has $2)"; else ok "$1"; fi; }
 expect_fix() { # every WARN/FAIL line is followed by a fix line
@@ -183,7 +183,7 @@ expect_out "summary line" '^preflight: 10 PASS, 0 WARN, 0 FAIL$'
 expect_log "probe namespace deleted" 'delete namespace tcdi-preflight-[0-9a-f]{6}'
 expect_log "userns probe pinned to the workspace pool" 'userns-pod-on-pool'
 # Only probe objects are created or deleted; nothing is applied/patched/labeled.
-if grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^aa-pod|^curl|^psql' "$LOG" | grep -q .; then
+if grep -q . < <(grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^aa-pod|^curl|^psql' "$LOG"); then
   bad "unexpected kubectl verbs: $(grep -Ev '(^| )(get|auth|create|wait|delete namespace tcdi-preflight-)|^userns-pod|^aa-pod|^curl|^psql' "$LOG" | head -3)"
 else ok "only get/auth/create/wait and probe-namespace delete are used"; fi
 expect_no_out "DSN password never printed" 'SECRETPW|app:'

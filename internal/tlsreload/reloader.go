@@ -32,7 +32,7 @@ type Reloader struct {
 type options struct {
 	interval time.Duration
 	log      *slog.Logger
-	// onError and onSwap observe Blocklist reloads only (ADR 0009): the
+	// onError and onSwap observe Blocklist reloads only (ADR 0008): the
 	// kept-last-good reload-error counter and the loaded-entries gauge.
 	// Reloader and CAPool never call them.
 	onError func()

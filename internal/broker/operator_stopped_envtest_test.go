@@ -273,26 +273,25 @@ func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The admitted snapshot (the annotation the operator writes at first
-	// admit) records the lifecycle the workspace actually runs under.
-	snapJSON, err := json.Marshal(struct {
-		Spec cdiv1.WorkspaceTemplateSpec `json:"spec"`
-	}{Spec: cdiv1.WorkspaceTemplateSpec{
-		Lifecycle: cdiv1.LifecycleDefaults{
-			IdleTimeout:       metav1.Duration{Duration: 7 * time.Minute},
-			DisconnectTimeout: metav1.Duration{Duration: 2 * time.Minute},
-			MaxDuration:       metav1.Duration{Duration: time.Hour},
-			DataPolicy:        cdiv1.DataPolicyEphemeral,
-		},
-	}})
-	if err != nil {
-		t.Fatal(err)
+	// The admitted snapshot (status.templateSnapshot, recorded at first
+	// admit) carries the lifecycle the workspace actually runs under.
+	admitted := tpl.Spec.DeepCopy()
+	admitted.Revision = "r1"
+	admitted.Lifecycle = cdiv1.LifecycleDefaults{
+		IdleTimeout:       metav1.Duration{Duration: 7 * time.Minute},
+		DisconnectTimeout: metav1.Duration{Duration: 2 * time.Minute},
+		MaxDuration:       metav1.Duration{Duration: time.Hour},
+		DataPolicy:        cdiv1.DataPolicyEphemeral,
+	}
+	snap := &cdiv1.TemplateSnapshot{
+		Name: "linux-desktop-aaaa1111", UID: "uid-r1", Revision: "r1",
+		SpecHash: "sha256:" + fmt.Sprintf("%064x", 1), Spec: *admitted,
+		RuntimeGeneration: 1, SourceRef: "linux-desktop",
 	}
 	ws := &cdiv1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "snap-pol", Namespace: ns,
-			Labels:      map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_snap-pol"},
-			Annotations: map[string]string{operator.AnnotationTemplateSnapshot: string(snapJSON)},
+			Labels: map[string]string{"workspaces.cdi.tinyorbit.vn/workspace-uid": "ws_snap-pol"},
 		},
 		Spec: cdiv1.WorkspaceSpec{
 			TemplateRef:       cdiv1.TemplateReference{Name: "linux-desktop"},
@@ -310,7 +309,7 @@ func TestK8sRunningSource_PolicyFromRecordedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := metav1.Now()
-	ws.Status = cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady, StartedAt: &started}
+	ws.Status = cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady, StartedAt: &started, TemplateSnapshot: snap}
 	if err := kc.Status().Update(ctx, ws); err != nil {
 		t.Fatal(err)
 	}

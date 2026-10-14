@@ -146,7 +146,7 @@ type Config struct {
 	// set, launch binds the cookie digest to the lease, a cookie this
 	// replica never saw rehydrates its session from the store, and stream
 	// admission claims the lease's stream epoch so a newer claim on any
-	// replica fences this process's stream. Nil keeps v0.1 single-process
+	// replica fences this process's stream. Nil keeps single-process
 	// session semantics.
 	Sessions SessionDirectory
 	// UpstreamCA is the fallback trust root for runtime upstream TLS when a
@@ -172,7 +172,7 @@ type Config struct {
 	// and a per-replica Limiter in split mode (ADR 0006 G2).
 	LaunchLimiter ratelimit.Allower
 	// TrustedProxies lists the CIDRs of reverse proxies in front of the
-	// session listener whose X-Forwarded-For claims are trusted (S18):
+	// session listener whose X-Forwarded-For claims are trusted (TM-32):
 	// it feeds both the launch limiter's client key and the forwarded
 	// headers the runtime sees — client-supplied values are stripped and
 	// rebuilt from the verified chain only.
@@ -714,6 +714,11 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_origin"})
 			return
 		}
+		ownerTab := r.URL.Query().Get(streamOwnerTabParam)
+		if !broker.ValidStreamOwnerTab(ownerTab) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner_tab_required"})
+			return
+		}
 		var ok bool
 		if gen, ok = s.admitUpgrade(); !ok {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "stream_in_use"})
@@ -729,7 +734,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// claiming tab's id rides the same write (FX-R31): GET /connection
 		// can then answer WHO holds the stream, not just the epoch count.
 		if g.cfg.Sessions != nil {
-			epoch, err := g.claimStream(r.Context(), s, r.URL.Query().Get(streamOwnerTabParam))
+			epoch, err := g.claimStream(r.Context(), s, ownerTab)
 			streamEpoch = epoch
 			if err != nil {
 				if terminalBrokerErr(err) {
@@ -987,7 +992,7 @@ func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
 }
 
 // rewriteForwarded rebuilds the client-address headers toward the runtime
-// (S18): every client-supplied entry in clientHeaderStripList is removed
+// (TM-32): every client-supplied entry in clientHeaderStripList is removed
 // from the outbound request and the address headers are re-derived from
 // the INBOUND request's trusted chain only. The runtime keys its
 // brute-force blacklist on the forwarded address, so a spoofed client

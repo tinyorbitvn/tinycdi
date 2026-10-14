@@ -138,8 +138,8 @@ export function useMe(): MeState {
 }
 
 // ---- shared list/loader helpers -------------------------------------------
-// One canonical copy of the data plumbing the admin and data areas used to
-// duplicate (Me/useMe/useLoader; folded in v0.3). useLoader is the generic
+// One canonical copy of the data plumbing the admin and data areas share
+// (Me/useMe/useLoader). useLoader is the generic
 // "run an api read, keep the latest result" hook; loadMe/useMeLoaded serve
 // the principal to pages rendered outside MeProvider (unit tests); get is
 // the narrow typed GET escape for the not-yet-generated reads. Collections

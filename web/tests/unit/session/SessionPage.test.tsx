@@ -753,11 +753,11 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     streamOwnerTab,
   });
 
-  it("two claims of this tab inside one poll interval stay Connected (rc.2 false positive)", async () => {
+  it("two claims of this tab inside one poll interval stay Connected (epoch-bump false positive)", async () => {
     const { ws, control, submitted } = setupScripted({ props: { pollIntervalMs: 20 } });
     await connectViaResume(ws, control);
 
-    // The rc.2 failure mode: a backend restart's re-claim bumps the epoch
+    // A backend restart's re-claim bumps the epoch
     // twice inside one interval — epochs alone read "another tab", but the
     // owner id says the stream is this tab's.
     control.connection = () => owned(4, MY_TAB());
@@ -789,12 +789,12 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Connected");
   });
 
-  it("a legacy claim (no owner id) still decides by epoch arithmetic", async () => {
+  it("a report without an owner id decides by epoch arithmetic", async () => {
     const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
     await connectViaResume(ws, control);
 
-    // No streamOwnerTab: exactly the pre-FX-R31 behaviour — a newer epoch
-    // on our lease reads as another tab.
+    // No streamOwnerTab: the epoch fallback — a newer epoch on our lease
+    // reads as another tab.
     control.connection = () => ({
       state: "connected",
       leaseActive: true,
@@ -839,8 +839,8 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
 // ---- FX-R31 addendum: own-tab reconnect after a backend restart/rollout ----
 
 describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
-  // rc.2 soak: 'elsewhere' suppressed reconnect until lease expiry — a ~120 s
-  // gap (disconnected->stale->none->relaunch). With ownership evidence the
+  // Without ownership evidence 'elsewhere' suppressed reconnect until lease
+  // expiry — a ~120 s gap (disconnected->stale->none->relaunch). With it, the
   // restart's re-claim (new epoch, same tab id) keeps the page 'ours', so
   // the watch's reconnect backoff runs immediately.
   it("a stream loss with our owner id reloads the frame after the in-frame window — the 'elsewhere' gate never engages", async () => {
@@ -868,8 +868,7 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     await waitFor(() => expect(writes.length).toBe(navs + 1), { timeout: 5_000 });
 
     // The reloaded frame's claim lands: the stream is back under our id at
-    // a much later epoch — epochs alone read "another tab" and rc.2 parked
-    // the page on the overlay until the lease expired, but the owner id
+    // a much later epoch — epochs alone read "another tab", but the owner id
     // keeps the page 'ours' throughout.
     control.connection = () => ({
       state: "connected",
@@ -932,13 +931,13 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 
-  it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
+  it("without an owner id the epoch fallback still parks on 'elsewhere'", async () => {
     const { ws, control } = setupScripted({
       props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
 
-    // Pre-FX-R31 shape: no streamOwnerTab. The restart's re-claim bumped
+    // No streamOwnerTab. The restart's re-claim bumped
     // the epoch beyond the +1 window — the page goes 'elsewhere' and the
     // watch stops driving reconnect (lease expiry is the only way back).
     control.connection = () => ({
@@ -994,7 +993,7 @@ describe("SessionPage reconnect suppression (V3.10b evidence)", () => {
 
     // The relaunch goes out on the next poll — a fresh ticket, not an
     // 'elsewhere' wait for user input or for the lease to come back. (The
-    // rc.2 failure was ~85 s with zero POST /v1/connections.)
+    // unowned path waited ~85 s with zero POST /v1/connections.)
     await waitFor(() => expect(ticketPosts()).toHaveLength(1), { timeout: 5_000 });
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
 

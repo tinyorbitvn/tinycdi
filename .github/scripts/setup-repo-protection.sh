@@ -27,7 +27,7 @@
 #      workflow-policy job via check-kasm-catalog.sh). Enforce admins,
 #      dismiss stale reviews. Single maintainer today, so
 #      required_approving_review_count is 0 — when a second maintainer
-#      joins (the trigger recorded in review-v1.0.md §7): set
+#      joins: set
 #      required_approving_review_count 1 + require_last_push_approval on
 #      main, and prevent_self_review true on the `release` and
 #      `runtime-train` environments.

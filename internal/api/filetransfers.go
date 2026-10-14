@@ -45,7 +45,7 @@ type fileTransferView struct {
 	ContentURL    string    `json:"contentUrl"`
 }
 
-// FileTransferHandler mints single-use transfer grants (ADR 0010 T11).
+// FileTransferHandler mints single-use transfer grants (ADR 0009 §5).
 type FileTransferHandler struct {
 	backend workspaceBackend
 	deps    FileTransferDeps
@@ -66,7 +66,7 @@ func (h *FileTransferHandler) WithAuditSink(s observability.AuditSink) *FileTran
 }
 
 // MountFileTransferRoutes mounts the mint route behind the session-keyed
-// rate limit sign-out-everywhere uses (ruling 15).
+// rate limit sign-out-everywhere uses.
 func MountFileTransferRoutes(mux RouteMux, authn *Authenticator, h *FileTransferHandler, limit func(http.Handler) http.Handler) {
 	mux.Handle(routeFileTransferCreate, authn.RequireAuth(limit(
 		audited(h.audit, routeFileTransferCreate, authn.RequireCSRF(http.HandlerFunc(h.Create))))))
@@ -85,7 +85,7 @@ func newTransferID() (string, error) {
 // validTransferName accepts one file name inside the flat transfer root:
 // 1..255 bytes of valid UTF-8, no path separator, NUL or control
 // character, no ";", "%" or "..", and not ".". The in-pod helper re-checks the same
-// rule and opens the name through an os.Root (ruling 11).
+// rule and opens the name through an os.Root.
 func validTransferName(name string) string {
 	switch {
 	case name == "" || len(name) > 255:
@@ -144,7 +144,7 @@ func (h *FileTransferHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	auditSetDetail(ctx, "path", req.Path)
 	// Owner only — a tenant admin acts on others' workspaces but never
-	// moves their files (ruling 16): the scope is always the caller.
+	// moves their files: the scope is always the caller.
 	rec, err := h.backend.GetWorkspace(ctx, p.TenantID, p.Owner(), id)
 	if errors.Is(err, provisioning.ErrWorkspaceNotFound) {
 		writeError(w, r, CodeNotFound, "workspace not found")

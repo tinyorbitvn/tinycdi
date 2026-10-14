@@ -152,7 +152,7 @@ func TestLogout_ClearsSessionAndReturnsEndSessionURL(t *testing.T) {
 func TestLogout_NoIDTokenFallsBackToClientID(t *testing.T) {
 	env := newLogoutEnv(t, nil)
 	sess := env.loginSession(t)
-	// Wipe the retained token, like a legacy session row.
+	// Wipe the retained token, like a session saved without one.
 	if rec, err := env.auth.sessions.Peek(context.Background(), sess.Value); err == nil {
 		rec.IDToken = ""
 		if err := env.auth.sessions.Save(context.Background(), rec); err != nil {
@@ -405,7 +405,7 @@ func TestOpenAPIContract_LogoutResult(t *testing.T) {
 	requireValid(t, "LogoutResult", LogoutResult{EndSessionURL: "https://idp.example/logout?client_id=tinycdi-portal"})
 }
 
-// --- S17: sign-out ends the session's reach over the desktop layer ------
+// --- TM-07: sign-out ends the session's reach over the desktop layer ------
 
 // fakeSessionRevoker records the portal session IDs sign-out asked it to
 // revoke and replays a scripted count/error.

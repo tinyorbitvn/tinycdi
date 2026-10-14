@@ -253,7 +253,7 @@ type RateLimitKeyFunc func(r *http.Request) string
 // tinycdi_rate_limited_total under the matched route template (E8). The
 // key is the socket peer, or the right-most untrusted X-Forwarded-For
 // entry when the peer sits inside trusted — the same derivation the
-// session gateway applies (S18). A nil limiter disables the check
+// session gateway applies (TM-32). A nil limiter disables the check
 // entirely; a nil Metrics skips the count.
 func RateLimit(l ratelimit.Allower, trusted []netip.Prefix, m *observability.Metrics) func(http.Handler) http.Handler {
 	return RateLimitWithKey(l, trusted, m, nil)

@@ -93,7 +93,7 @@ bash, openssl-adjacent libs, etc.). Key packages:
 | libexpat1 (apt-pinned in linux-base) | 2.5.0-1+deb12u4 | MIT |
 | @kasmtech/novnc | 1.3.0 | MPL-2.0 |
 | chromium, chromium-common, chromium-sandbox (browser image) | 155.0.8059.39-1~deb12u1 | mixed BSD/MIT/Apache/GPL/LGPL/MPL — see `/usr/share/doc/<pkg>/copyright` in the image |
-| firefox-esr (browser and linux-desktop images) | 153.4.0esr-1~deb12u1 | MPL-2.0-led mixed — see `/usr/share/doc/<pkg>/copyright` |
+| firefox-esr (browser and linux-desktop images) | 153.5.0esr-1~deb12u1 | MPL-2.0-led mixed — see `/usr/share/doc/<pkg>/copyright` |
 | openbox (browser image) | 3.6.1-10 | BSD-3-Clause AND GPL-2.0/GPL-3.0 |
 | xfce4-session, xfwm4, xfce4-panel, xfdesktop4, xfce4-settings, thunar, xfce4-terminal (linux-desktop image) | 4.18.x / 1.0.4 | GPL-2.0-or-later, LGPL-2.1+ (per package copyright file) |
 | mousepad, xarchiver, ristretto (linux-desktop image) | 0.5.10 / 0.5.4 / 0.12.4 | GPL-2.0-or-later, LGPL-2.0+/LGPL-3+ |

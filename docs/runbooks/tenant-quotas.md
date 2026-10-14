@@ -110,6 +110,26 @@ lowering a limit below current usage is safe — running workspaces keep
 running, new ones are refused. `GET /v1/quota` reports the caller's own
 effective limit in `userLimits` and each user's in `users[].limit`.
 
+### Users
+
+The user directory — **Admin → Users** (`/admin/users`), backed by `GET
+/v1/admin/tenants/{tenant}/users` — lists the principals who have signed
+in to the tenant, one row each: last-seen time, active-workspace count
+and the principal's per-user limit entry. It is paged and sortable by
+`ownerRef` (default), `displayName` and `lastSeen`. Principals who never
+signed in are not listed.
+
+The session list (`GET /v1/admin/tenants/{tenant}/sessions`, optional
+`ownerRef` filter) shows live leases only — active and unexpired — and
+never the lease id (`leaseRef` is a stable, non-secret reference).
+
+**Per-user sign-out** — `POST
+/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all`
+([ADR 0007](../adr/0007-sign-out-everywhere.md)) — ends the user's portal
+sessions in that tenant and revokes their active leases and outstanding
+launch tickets in one transaction; the workspaces keep running. It needs
+the `X-CSRF-Token` header and is audited as `admin.session.revoke`.
+
 ## Operations checklist
 
 - **New tenant onboarded:** add the `managedNamespaces[]` entry with a

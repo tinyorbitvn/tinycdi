@@ -223,7 +223,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	}
 
 	// A Secret without the transfer credential is incomplete, exactly like
-	// one without a password: there is no fallback (plan ruling 25).
+	// one without a password: there is no fallback.
 	delete(sec.Data, "xfer-token")
 	if err := kc.Update(ctx, sec); err != nil {
 		t.Fatalf("drop xfer-token: %v", err)

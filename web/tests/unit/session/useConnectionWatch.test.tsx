@@ -133,7 +133,7 @@ describe("useConnectionWatch (D15)", () => {
   });
 
   // Advisor MINOR-2: a re-navigation is a claim attempt — a claim that
-  // lands inside the 20 s budget (rc.3 measured 5-10 s) must never be
+  // lands inside the 20 s budget (measured 5-10 s at fleet scale) must never be
   // aborted by the next reload.
   it("does not abort a claim that lands within the evidence budget", async () => {
     const { frame, events, fetchStatus } = setup();

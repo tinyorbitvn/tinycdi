@@ -115,7 +115,7 @@ func (b *Backend) wire(ctx context.Context) error {
 // resolveGatewayIdentity derives the session-gateway identity: -gateway-id
 // wins; merged mode defaults to the shared "backend" identity so every
 // replica owns the same leases; split mode falls back to the client
-// certificate's Subject CN (the v0.1 behaviour).
+// certificate's Subject CN.
 func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
@@ -180,7 +180,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// failing sink into a counted metric + rate-limited warning instead of
 	// silent audit loss (the write never fails the request). The durable
 	// wrapper also persists every audited() route event to audit_event,
-	// failing the request closed when that insert fails (ADR 0011); plain
+	// failing the request closed when that insert fails (ADR 0010); plain
 	// WriteAudit callers stay stdout-only. A failed insert or amend is
 	// logged at error level (with the request id) and counted on the same
 	// metric, so an audit-store outage is never silent either.
@@ -435,7 +435,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// just keeps every replica from paying the scan.
 	b.singletons = append(b.singletons, rateLimitWindowSweepLoop(db, log))
 
-	// Transfer-grant sweep (ADR 0010 T11): expires unclaimed mints past
+	// Transfer-grant sweep (ADR 0009 §5): expires unclaimed mints past
 	// their 2-minute TTL, fails claims dead past 30 min and prunes finished
 	// rows. Leader-only like the other sweeps.
 	b.singletons = append(b.singletons, fileTransferSweepLoop(db, log))
@@ -450,7 +450,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
 	}
 
-	// Audit retention (ADR 0011): the leader prunes audit_event rows older
+	// Audit retention (ADR 0010): the leader prunes audit_event rows older
 	// than -audit-retention-days at election and then daily. Always on: the
 	// config range check never lets it be disabled.
 	b.singletons = append(b.singletons, auditRetentionLoop(db, cfg.AuditRetentionDays, metrics, log))
@@ -494,7 +494,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
 		hotReloadClientCAs(tlsCfg, caPool)
-		// ADR 0009 (SR-3-F5): optional per-certificate revocation. The
+		// ADR 0008 (SR-3-F5): optional per-certificate revocation. The
 		// blocklist polls+swaps exactly like the CA pool; a bad file at
 		// boot fails startup (a configured revocation control never starts
 		// silently disabled) and a bad reload keeps the last-good list.
@@ -568,7 +568,7 @@ func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, id broke
 	// wait for.
 	b.markCacheSynced()
 	// P6: split/test mode has no session directory — sessions live in this
-	// process, exactly as in v0.1. G2 (ADR 0006): split mode owns no
+	// process. G2 (ADR 0006): split mode owns no
 	// Postgres handle, so /v1/launch keeps the divided local limiter.
 	return b.newGateway(cfg, bc, id, metrics, nil, launchLimiter(cfg, nil))
 }
@@ -676,7 +676,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	}
 	authn.WithMetrics(b.metrics)
 	// Sign-out ends the portal session's live desktop material at the
-	// lease store (S17): every gateway replica's renew loop observes the
+	// lease store (TM-07): every gateway replica's renew loop observes the
 	// revoke within one cycle and a copied workspace cookie resolves to a
 	// dead lease on any replica.
 	authn.WithSessionRevoker(broker.PublicRevoker{B: brk})
@@ -715,7 +715,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 			// The ticket records the RESOLVED session policy — the meet of
 			// the template's clipboard policy and the tenant ceiling — so
 			// the gateway's redirect flags and the pod's DLP env (stamped
-			// at the same resolver) can never disagree (ADR 0010 §2).
+			// at the same resolver) can never disagree (ADR 0009 §2).
 			rec, err := svc.GetWorkspace(ctx, p.TenantID, p.Owner(), wsID)
 			if err != nil {
 				return provisioning.SessionPolicy{}, err
@@ -749,7 +749,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 		WithAuditSink(appAudit)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
-	// The tenant session-policy ceiling (ADR 0010, T10): API-managed rows
+	// The tenant session-policy ceiling (ADR 0009 §4): API-managed rows
 	// only — no config declaration owns them. :apply restarts through the
 	// generation-fenced RestartWorkspace, judged against the informer's
 	// applied-policy view.
@@ -800,7 +800,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// validated OIDC state — plus a per-IP ceiling at 10x the login
 	// budget, so states an attacker mints through IP-limited logins
 	// cannot amplify throughput past a bounded multiplier. Anonymous
-	// fallback everywhere is the trusted-proxy client key (S18),
+	// fallback everywhere is the trusted-proxy client key (TM-32),
 	// unchanged.
 	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
@@ -958,7 +958,7 @@ func (b *Backend) bind(cfg Config) error {
 	}
 	internalSrv := internalServer(cfg.InternalListen, b.internalHandler)
 	if bl := b.internalBlocklist; bl != nil {
-		// ADR 0009: the live-conn registry tracks only conns the server
+		// ADR 0008: the live-conn registry tracks only conns the server
 		// still holds — drop each on close/hijack so it cannot leak.
 		internalSrv.ConnState = connStateDrop(bl)
 	}

@@ -402,6 +402,9 @@ func (f *fakeBroker) LeaseBySession(ctx context.Context, _ broker.GatewayIdentit
 // previous stream sees it on its next renew. The claiming tab's id is
 // recorded per lease so tests can assert it rode the claim through.
 func (f *fakeBroker) ClaimStream(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ownerTab string) (uint64, error) {
+	if !broker.ValidStreamOwnerTab(ownerTab) {
+		return 0, broker.ErrOwnerTabInvalid
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.renewErr[leaseID]; err != nil {
@@ -513,9 +516,9 @@ func (f *fakeBroker) failRenew(leaseID string, err error) {
 }
 
 // ownerTabOf mirrors the broker's owner columns for lease reads: the last
-// claimed id, but only when it is a valid id (an invalid/empty claim stores
-// NULL, i.e. no owner) and the epoch that recorded it is still current —
-// the fake's ClaimStream writes both atomically, so it always is.
+// claimed id, but only when it is a valid id and the epoch that recorded it
+// is still current — the fake's ClaimStream writes both atomically, so it
+// always is.
 func (f *fakeBroker) ownerTabOf(leaseID string) string {
 	if t := f.ownerTabs[leaseID]; broker.ValidStreamOwnerTab(t) {
 		return t
@@ -616,13 +619,30 @@ func newReplica(t *testing.T, fb *fakeBroker, id string) (*gateway.Gateway, *htt
 	})
 }
 
+// testTabID is the stream-owner tab id the helpers launch and upgrade
+// under.
+const testTabID = "0123456789abcdef0123456789abcdef"
+
+// withTab appends this test's tab id to a request path that carries none —
+// every portal launch and frame WebSocket names its tab.
+func withTab(path string) string {
+	if strings.Contains(path, "tcdi_tab=") {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "tcdi_tab=" + testTabID
+}
+
 // doLaunch POSTs the ticket to /v1/launch on the given request Host with
 // the given header tweaks and returns the response without following the
 // redirect.
 func doLaunch(t *testing.T, srv *httptest.Server, host, ticket string, hdr map[string]string) *http.Response {
 	t.Helper()
 	form := url.Values{gateway.TicketField: {ticket}}
-	req, err := http.NewRequest(http.MethodPost, srv.URL+gateway.LaunchPath, strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+withTab(gateway.LaunchPath), strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("build launch request: %v", err)
 	}
@@ -689,8 +709,16 @@ func drain(resp *http.Response) {
 }
 
 // upgrade performs a raw WebSocket upgrade request on the given request
-// Host, returning the response; on 101 the body is the live socket.
+// Host, returning the response; on 101 the body is the live socket. The
+// path gets this test's tab id when it names none (withTab).
 func upgrade(t *testing.T, srv *httptest.Server, host, path, cookie string, hdr map[string]string) *http.Response {
+	t.Helper()
+	return upgradeExact(t, srv, host, withTab(path), cookie, hdr)
+}
+
+// upgradeExact is upgrade with the path sent verbatim — for tests about a
+// missing or malformed tab id.
+func upgradeExact(t *testing.T, srv *httptest.Server, host, path, cookie string, hdr map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 	if err != nil {

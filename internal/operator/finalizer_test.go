@@ -98,11 +98,6 @@ func (f *fakeBackend) PodTemplateIdentity(context.Context, *cdiv1.Workspace) (tc
 	return tcdiruntime.PodTemplateIdentity{}, nil
 }
 
-// StampPodTemplateIdentity is a no-op: the fake keeps no pods.
-func (f *fakeBackend) StampPodTemplateIdentity(context.Context, *cdiv1.Workspace, *cdiv1.WorkspaceTemplate) error {
-	return nil
-}
-
 // stepRecorder implements every finalizer seam, recording call order and
 // injecting failures: failLeft[step]>0 makes that step return an error and
 // decrements the counter (simulating a crash inside the step).

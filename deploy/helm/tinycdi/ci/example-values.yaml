@@ -80,7 +80,7 @@ backend:
   extraPortalOrigins:
     - https://alt.portal.example.net
   # CIDRs of the edge proxies whose X-Forwarded-For claims are trusted
-  # (per-client rate limits + runtime-bound headers; E7/S18).
+  # (per-client rate limits + runtime-bound headers; E7/TM-32).
   trustedProxies: ["10.99.0.0/16", "fd00::/8"]
   metrics:
     enabled: true

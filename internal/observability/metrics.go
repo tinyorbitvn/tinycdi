@@ -82,7 +82,7 @@ var (
 	frameReloadDests = map[string]struct{}{
 		"iframe": {}, "document": {},
 	}
-	// sessionRevokeResults are the sign-out revocation outcomes (S17):
+	// sessionRevokeResults are the sign-out revocation outcomes (TM-07):
 	// ok = the lease store accepted the revoke (zero or more of the
 	// session's leases and outstanding tickets ended); error = the store
 	// could not answer — the sign-out still completed locally.
@@ -90,7 +90,7 @@ var (
 		"ok": {}, "error": {},
 	}
 	// leaseSessionMissingReasons are the bound-portal-session check
-	// outcomes that revoked a live lease (S17 defence-in-depth):
+	// outcomes that revoked a live lease (TM-07 defence-in-depth):
 	// absent = the sessions row is gone; invalid = the row exists but
 	// fails the epoch or absolute-expiry check (e.g. a restored dump).
 	leaseSessionMissingReasons = map[string]struct{}{
@@ -103,13 +103,13 @@ var (
 		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
 	}
 	// internalMTLSListeners bounds the {listener} label of the internal
-	// mTLS revocation counter (ADR 0009): "internal" today, future mTLS
+	// mTLS revocation counter (ADR 0008): "internal" today, future mTLS
 	// servers slot in without minting new label values.
 	internalMTLSListeners = map[string]struct{}{
 		"internal": {},
 	}
 	// retentionTables are the tables the retention sweeps prune: the
-	// session-layer terminal rows (SR-4-F5) and audit_event (ADR 0011).
+	// session-layer terminal rows (SR-4-F5) and audit_event (ADR 0010).
 	retentionTables = map[string]struct{}{
 		"connection_lease": {}, "launch_ticket": {}, "audit_event": {}, "workspace_boot": {},
 	}
@@ -296,7 +296,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}, []string{"result"}),
 		leaseSessGone: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "lease_session_missing_total",
-			Help: "Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (S17 defence-in-depth), by bounded reason.",
+			Help: "Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (TM-07 defence-in-depth), by bounded reason.",
 		}, []string{"reason"}),
 		auditWriteErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "audit_write_errors_total",
@@ -316,15 +316,15 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}),
 		revokedSerials: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "internal_mtls_revoked_serial_total",
-			Help: "Internal mTLS handshakes aborted because the peer certificate's (issuer, serial) is on the revocation list (ADR 0009), by listener.",
+			Help: "Internal mTLS handshakes aborted because the peer certificate's (issuer, serial) is on the revocation list (ADR 0008), by listener.",
 		}, []string{"listener"}),
 		revocationEntries: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricNamespace, Name: "internal_mtls_revocation_entries",
-			Help: "Entries in the currently loaded internal-mTLS revocation list (ADR 0009) — zero when the feature is off.",
+			Help: "Entries in the currently loaded internal-mTLS revocation list (ADR 0008) — zero when the feature is off.",
 		}),
 		revocationReloadErrs: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "internal_mtls_revocation_reload_errors_total",
-			Help: "Internal-mTLS revocation list reload failures — the last-good list kept serving (ADR 0009).",
+			Help: "Internal-mTLS revocation list reload failures — the last-good list kept serving (ADR 0008).",
 		}),
 		tenants: map[string]struct{}{},
 	}
@@ -506,7 +506,7 @@ func (m *Metrics) IncFrameReload(dest string) {
 }
 
 // IncSessionRevocation counts one sign-out revocation of a portal session's
-// session-bound leases/tickets (S17); result is bounded to {ok, error,
+// session-bound leases/tickets (TM-07); result is bounded to {ok, error,
 // other}.
 func (m *Metrics) IncSessionRevocation(result string) {
 	m.sessionRevokes.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
@@ -521,7 +521,7 @@ func (m *Metrics) IncSessionRevokeAll(result string) {
 }
 
 // IncLeaseSessionMissing counts one lease revoked because its bound portal
-// session no longer validates at renew/attach time (S17 defence-in-depth);
+// session no longer validates at renew/attach time (TM-07 defence-in-depth);
 // reason is bounded to {absent, invalid, other}.
 func (m *Metrics) IncLeaseSessionMissing(reason string) {
 	m.leaseSessGone.WithLabelValues(boundValue(reason, leaseSessionMissingReasons)).Inc()
@@ -559,18 +559,18 @@ func (m *Metrics) SetRetentionLastSuccess(at time.Time) {
 }
 
 // IncInternalRevokedSerial counts one internal-mTLS handshake aborted
-// because the verified peer leaf's (issuer, serial) is on the ADR 0009
+// because the verified peer leaf's (issuer, serial) is on the ADR 0008
 // revocation list; listener is bounded to {internal, other}.
 func (m *Metrics) IncInternalRevokedSerial(listener string) {
 	m.revokedSerials.WithLabelValues(boundValue(listener, internalMTLSListeners)).Inc()
 }
 
 // SetRevocationEntries records the entry count of the currently loaded
-// ADR 0009 revocation list (called on boot load and on every swap).
+// ADR 0008 revocation list (called on boot load and on every swap).
 func (m *Metrics) SetRevocationEntries(entries int) {
 	m.revocationEntries.Set(float64(entries))
 }
 
 // IncRevocationReloadError counts one failed revocation-list reload that
-// kept the last-good list (ADR 0009).
+// kept the last-good list (ADR 0008).
 func (m *Metrics) IncRevocationReloadError() { m.revocationReloadErrs.Inc() }

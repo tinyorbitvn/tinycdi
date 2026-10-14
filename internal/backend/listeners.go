@@ -99,7 +99,7 @@ const (
 	// revokedLogPerMinute is the sustained warn-line budget for the
 	// revoked-serial rejection log (1/second) and revokedLogBurst its
 	// bucket capacity — the same token-budget shape httpapi's rejectAuth
-	// uses (ADR 0009). The single key is revokedWarnKey.
+	// uses (ADR 0008). The single key is revokedWarnKey.
 	revokedLogPerMinute = 60
 	revokedLogBurst     = 10
 	// revokedWarnKey is the rate-limit key of the rejection warn line —
@@ -107,7 +107,7 @@ const (
 	revokedWarnKey = "revoked_serial"
 )
 
-// installRevocation wraps cfg.GetConfigForClient (ADR 0009, SR-3-F5):
+// installRevocation wraps cfg.GetConfigForClient (ADR 0008, SR-3-F5):
 // every per-handshake clone carries a VerifyConnection that aborts the
 // handshake when the verified peer leaf's (issuer, serial) is on the
 // blocklist, and registers every verified conn in the blocklist's

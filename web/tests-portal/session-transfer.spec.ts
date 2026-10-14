@@ -14,7 +14,7 @@ import {
 // session-transfer: upload then download through the real gateway and
 // frontend, against the fake broker and a stub tcdi-xferd. Runs once per
 // site layout, so the credentialed CORS request is proven with the
-// SameSite=Lax cookie and with the partitioned one (plan ruling 12).
+// SameSite=Lax cookie and with the partitioned one.
 const WS = "ws_e2e0003aabbcc";
 
 test("upload then download a file through the session host", async ({ page, request, harnessMode }) => {

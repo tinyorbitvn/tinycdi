@@ -233,7 +233,7 @@ func TestTransfer_DesktopProxyStillRefusesXfer(t *testing.T) {
 		t.Fatalf("generic proxy reached /xfer/: %d %v", res.StatusCode, stub.seen())
 	}
 	// KasmVNC's own upload/download surface stays off the allowlist too
-	// (ADR 0010 §5: the helper is the only transfer path).
+	// (ADR 0009 §5: the helper is the only transfer path).
 	for _, p := range []string{"/xfer", "/api/upload", "/api/download", "/upload", "/downloads/a", "/Downloads/a"} {
 		r := proxied(t, srv, testHost, p, cookie, nil)
 		drain(r)

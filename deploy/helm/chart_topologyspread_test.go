@@ -5,7 +5,7 @@ package chart_test
 
 // TOPO-1: runtime.topologySpread.enabled defaults to true and then renders
 // NO flag (the operator flag --runtime-topology-spread defaults to true),
-// so the operator Deployment is identical to the pre-v0.3.1 render.
+// so the operator Deployment is identical to the render with the value unset.
 // enabled=false renders --runtime-topology-spread=false — the only value
 // that changes the manifest.
 //

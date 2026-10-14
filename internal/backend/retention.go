@@ -100,7 +100,7 @@ const (
 )
 
 // auditRetentionLoop is the leader singleton that prunes audit_event rows
-// older than days, once at election and then daily (ADR 0011).
+// older than days, once at election and then daily (ADR 0010).
 func auditRetentionLoop(db *store.DB, days int, m *observability.Metrics, log *slog.Logger) func(ctx context.Context) {
 	return func(ctx context.Context) {
 		prune := func() {

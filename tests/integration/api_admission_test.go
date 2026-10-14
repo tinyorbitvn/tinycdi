@@ -735,8 +735,8 @@ func TestSessionEpochRotation(t *testing.T) {
 		t.Fatalf("same-epoch get must succeed: %v", err)
 	}
 
-	// A row carried over from a dump written under a different epoch —
-	// or one predating the epoch column — is rejected. The row is keyed by
+	// A row carried over from a dump written under a different epoch is
+	// rejected. The row is keyed by
 	// the session-ID digest (SEC-27) so the epoch check is what rejects it.
 	oldEpochKey := sha256.Sum256([]byte("sess-old-epoch"))
 	if _, err := db.Pool().Exec(ctx, `
@@ -908,7 +908,7 @@ func (e *httpEnv) loginUser(t *testing.T, subject, tenant string) (sess, csrf *h
 		t.Fatalf("login missing session cookie")
 	}
 	// The CSRF token is derived from the session ID and published by
-	// GET /v1/me (P1) — v0.2 sets no tcdi_csrf cookie.
+	// GET /v1/me (P1) — no tcdi_csrf cookie is set.
 	meReq, _ := http.NewRequest(http.MethodGet, e.server.URL+"/v1/me", nil)
 	meReq.AddCookie(sess)
 	meResp, err := client.Do(meReq)

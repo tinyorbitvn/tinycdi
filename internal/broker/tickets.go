@@ -41,6 +41,9 @@ var (
 	// ErrStaleBinding — the fence presented by the gateway no longer matches
 	// the current incarnation (stale runtimeGeneration or runtimeUID).
 	ErrStaleBinding = errors.New("broker: stale runtime binding")
+	// ErrOwnerTabInvalid — a stream claim without a well-formed tab id
+	// (32 lowercase hex). Every claim names the claiming tab.
+	ErrOwnerTabInvalid = errors.New("broker: stream claim needs a 32-hex tab id")
 	// ErrConnectionInUse — a live interactive lease exists and the ticket was
 	// not issued with takeover.
 	ErrConnectionInUse = errors.New("broker: workspace already has an active lease")
@@ -333,7 +336,7 @@ func portalSessionDigest(portalSessionID string) []byte {
 // redemption, fencing the old socket before the new session works.
 // policy is the session data-transfer vector resolved by the API at
 // issue — the meet of the workspace template's policy and the tenant
-// ceiling (ADR 0010 §2). Its Clipboard field is recorded on the ticket
+// ceiling (ADR 0009 §2). Its Clipboard field is recorded on the ticket
 // row's clipboard_policy column so the gateway's post-redemption redirect
 // re-asserts the client's clipboard flags (V3.24), and the whole vector
 // is recorded verbatim as JSON on session_policy — the audit record of
@@ -413,7 +416,7 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 	expires := now.Add(b.ticketTTL)
 	// A resolved policy records both columns: clipboard_policy feeds the
 	// gateway redirect's client flags, session_policy is the whole vector
-	// verbatim — the audit record of which policy applied (ADR 0010 §2).
+	// verbatim — the audit record of which policy applied (ADR 0009 §2).
 	var clipboard, resolved *string
 	if policy.Clipboard != "" {
 		clipboard = &policy.Clipboard
@@ -509,7 +512,7 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		}
 
 		// A ticket minted under a portal session that no longer exists must
-		// not redeem (S17): sign-out deletes the session row before the
+		// not redeem (TM-07): sign-out deletes the session row before the
 		// revocation transaction, and a live session's tickets are revoked
 		// with it — this read is the second barrier, so an outstanding
 		// ticket dies with its session however the revoke itself fared.

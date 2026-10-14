@@ -16,7 +16,7 @@ import (
 )
 
 // TransferPathPrefix is the session-host route family for single-use file
-// transfers (ADR 0010 T11). The id is an identifier, not a credential:
+// transfers (ADR 0009 §5). The id is an identifier, not a credential:
 // the session cookie, the live lease and the broker's single-use claim
 // authorize the request.
 const TransferPathPrefix = "/v1/transfers/"
@@ -162,7 +162,7 @@ func writeTransferClaimError(w http.ResponseWriter, err error) {
 
 // helperURL builds the upstream /xfer/files/<name> URL from the resolved
 // target authority (never client input) and re-checks it with the same
-// parser-differential guard the desktop proxy uses (plan ruling 13).
+// parser-differential guard the desktop proxy uses.
 func helperURL(up *url.URL, name string) (*url.URL, bool) {
 	u := &url.URL{Scheme: up.Scheme, Host: up.Host, Path: "/xfer/files/" + name, RawPath: "/xfer/files/" + url.PathEscape(name)}
 	clean, ok := cleanedProxyPath(u)

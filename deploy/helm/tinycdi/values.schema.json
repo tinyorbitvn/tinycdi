@@ -22,10 +22,7 @@
         "frontend": {"$ref": "#/$defs/image"},
         "linuxBase": {"$ref": "#/$defs/image"},
         "linuxDesktop": {"$ref": "#/$defs/image"},
-        "browser": {"$ref": "#/$defs/image"},
-        "api": {"$ref": "#/$defs/image"},
-        "gateway": {"$ref": "#/$defs/image"},
-        "portal": {"$ref": "#/$defs/image"}
+        "browser": {"$ref": "#/$defs/image"}
       }
     },
     "kasmAdapter": {
@@ -99,7 +96,6 @@
     },
     "portalHost": {"type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"},
     "sessionDomain": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"},
-    "sessionHost": {"type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"},
     "oidc": {
       "type": "object",
       "required": ["issuer", "clientID", "existingSecret"],
@@ -270,29 +266,6 @@
         "securityContext": {"type": "object"}
       }
     },
-    "api": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "replicas": {"type": "integer", "minimum": 0},
-        "sessionIdle": {"type": "string"},
-        "extraPortalOrigins": {"type": "array", "items": {"type": "string", "pattern": "^https://[^/\\s,]+$"}},
-        "operatorCN": {"type": "string"},
-        "internalTLS": {"$ref": "#/$defs/secretRefRequired"},
-        "clientCA": {"$ref": "#/$defs/secretRefRequired"},
-        "extraCA": {"$ref": "#/$defs/secretRef"},
-        "extraArgs": {"type": "array"},
-        "extraEnv": {"type": "array"},
-        "resources": {"type": "object"},
-        "podAnnotations": {"type": "object"},
-        "nodeSelector": {"type": "object"},
-        "tolerations": {"type": "array"},
-        "affinity": {"type": "object"},
-        "podSecurityContext": {"type": "object"},
-        "securityContext": {"type": "object"},
-        "podDisruptionBudget": {"$ref": "#/$defs/pdb"}
-      }
-    },
     "operator": {
       "type": "object",
       "additionalProperties": false,
@@ -313,57 +286,6 @@
           }
         },
         "devAllowNoBroker": {"type": "boolean"},
-        "extraArgs": {"type": "array"},
-        "extraEnv": {"type": "array"},
-        "resources": {"type": "object"},
-        "podAnnotations": {"type": "object"},
-        "nodeSelector": {"type": "object"},
-        "tolerations": {"type": "array"},
-        "affinity": {"type": "object"},
-        "podSecurityContext": {"type": "object"},
-        "securityContext": {"type": "object"},
-        "podDisruptionBudget": {"$ref": "#/$defs/pdb"}
-      }
-    },
-    "gateway": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "replicas": {"type": "integer", "minimum": 0},
-        "id": {"type": "string"},
-        "audience": {"type": "string"},
-        "extraAllowedHosts": {"type": "array", "items": {"type": "string", "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"}},
-        "extraPortalOrigins": {"type": "array", "items": {"type": "string", "pattern": "^https://[^/\\s,]+$"}},
-        "metricsListen": {"type": "string"},
-        "service": {"$ref": "#/$defs/service"},
-        "tls": {"$ref": "#/$defs/secretRefRequired"},
-        "mtls": {"$ref": "#/$defs/secretRefRequired"},
-        "trustedCA": {"$ref": "#/$defs/secretRef"},
-        "upstreamCA": {"$ref": "#/$defs/secretRef"},
-        "controlToken": {"$ref": "#/$defs/secretRef"},
-        "extraArgs": {"type": "array"},
-        "extraEnv": {"type": "array"},
-        "extraVolumes": {"type": "array"},
-        "extraVolumeMounts": {"type": "array"},
-        "resources": {"type": "object"},
-        "podAnnotations": {"type": "object"},
-        "nodeSelector": {"type": "object"},
-        "tolerations": {"type": "array"},
-        "affinity": {"type": "object"},
-        "podSecurityContext": {"type": "object"},
-        "securityContext": {"type": "object"},
-        "podDisruptionBudget": {"$ref": "#/$defs/pdb"}
-      }
-    },
-    "portal": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "replicas": {"type": "integer", "minimum": 0},
-        "apiUpstream": {"type": "string"},
-        "webRoot": {"type": "string"},
-        "service": {"$ref": "#/$defs/service"},
-        "tls": {"$ref": "#/$defs/secretRefRequired"},
         "extraArgs": {"type": "array"},
         "extraEnv": {"type": "array"},
         "resources": {"type": "object"},

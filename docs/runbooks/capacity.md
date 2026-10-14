@@ -11,11 +11,11 @@ as such.
 A workspace consumes resources at two layers:
 
 1. **Runtime pod** — sized by the template's `ResourceProfile`
-   (`cpu`, `memory`, `storage` in `api/v1alpha1/workspacetemplate_types.go`),
+   (`cpu`, `memory`, `storage` in `api/v1/workspacetemplate_types.go`),
    applied as pod requests/limits plus a PVC of `storage` size when the
    lifecycle `dataPolicy` keeps data. The dev templates used
    500 mCPU / 1 GiB / 1 GiB per session on the old openbox desktop; the
-   XFCE desktop profile (`tcdi/linux-desktop`, V3.26) is
+   XFCE desktop profile (`tcdi/linux-desktop`) is
    1 CPU / 2 GiB / 5 GiB
    (`deploy/helm/tinycdi/ci/example-values.yaml`). Measured on that image: a
    fresh session idles at 14 mCPU / 98 MiB; with a terminal, Thunar and
@@ -34,8 +34,9 @@ A workspace consumes resources at two layers:
    listener carries the steady-state cost of live sessions (TLS + WebSocket
    relay); API and operator cost is concentrated at provisioning and
    teardown bursts.
-   **Measured at 20 live streams on the v0.1 topology** (separate api,
-   gateway and portal Deployments; not re-measured on v0.2): gateway
+   **Measured at 20 live streams with the API, gateway and portal as
+   separate Deployments; not yet re-measured on the single backend:**
+   gateway
    peaked at 60 mCPU / 18 MiB, api 49 mCPU / 25 MiB, operator
    31 mCPU / 25 MiB, portal 24 mCPU / 10 MiB, Postgres 42 mCPU / 88 MiB —
    the whole control plane stayed under ~200 mCPU aggregate, i.e. noise at
@@ -73,7 +74,7 @@ images resident on the worker nodes that may schedule workspace pods, or
 accept the pull time inside `bootDeadline`.
 
 **Postgres table growth is bounded.** The session-layer tables
-`connection_lease` and `launch_ticket` are append-mostly; since v1.1 the
+`connection_lease` and `launch_ticket` are append-mostly; the
 leader replica runs an hourly retention sweep
 (`-terminal-retention-days` / `backend.retention.terminalRowDays`,
 default 30, `0` disables) that deletes rows terminal for longer than the
@@ -81,9 +82,7 @@ window — 500 per statement with a pause between batches, so the sweep
 never holds the tables across a redeem or sign-out. Table size is then
 roughly `terminal transitions in the window + ≤1 abandoned 'active'
 lease per workspace`; only the last-success gauge going stale means the
-sweep is not running. Until v1.1 both tables grew without bound — the
-upgrade note for migrations 020/023's index builds
-(`docs/runbooks/upgrade.md`) is why that mattered.
+sweep is not running.
 
 ## Tenant quota — the hard gate
 
@@ -91,7 +90,7 @@ Quota is enforced in Postgres, not by cluster capacity:
 
 - `tenant_quota` holds per-tenant limits (`max_running_slots`,
   `max_cpu_millis`, `max_memory_bytes`, `max_disk_bytes` —
-  `internal/store/migrations/001_control_plane.sql`).
+  `internal/store/migrations/0001_baseline.sql`).
 - `Reserve()` takes a `FOR UPDATE` lock on the tenant's `tenant_quota` row
   inside the create transaction (`internal/provisioning/quota.go`), so
   concurrent creates serialize and at most the configured limit succeeds —
@@ -144,7 +143,7 @@ The absence proof is "no pod for the workspace"; volumes never block it. When
 a **Retain** workspace stops and its pod is gone, Recovery converts its
 reservation in place into a **disk-only hold**: running slot, CPU and memory
 are released, the home disk's `disk_bytes` stay held, and the admitted compute
-vector is kept in `quota_reservation.restart_*` (migration 014). A start
+vector is kept in `quota_reservation.restart_*`. A start
 re-acquires exactly that vector on the same row (and fails
 `409 QUOTA_EXHAUSTED` if the compute no longer fits, leaving the disk hold
 untouched). Existing stopped Retain rows convert on the next recovery pass
@@ -235,17 +234,16 @@ What that means for sizing:
   the refusal tail (refused clients see `429 RATE_LIMITED` +
   `Retry-After` and retry).
 - **Budgets are the exact aggregate across replicas.** The limiter is a
-  Postgres fixed-minute window shared by every backend replica (ADR 0006):
+  Postgres fixed-minute window shared by every backend replica
+  ([ADR 0006](../adr/0006-rate-limit-state.md)):
   one key draws at most rate+burst in a window — `-login-rate` 60/min +
   burst 20 admits an anonymous IP 80 requests inside any wall-clock
-  minute (the fixed-window edge admits up to 2× across a boundary — the
-  same overshoot class the old per-replica buckets had). While Postgres
+  minute (the fixed-window edge admits up to 2× across a boundary). While Postgres
   is healthy each pod also runs an UNDIVIDED in-memory bucket (full
   rate/min + burst) purely as a store-protection prefilter — a request
   refused there never reaches the database — so an uneven spread, or a
   key pinned to one pod by sticky load-balancing, still gets the whole
-  aggregate (v0.5 RL-CEILING amendment; the divided per-pod ceiling that
-  used to 429 such traffic is gone). Every window check runs under a
+  aggregate. Every window check runs under a
   500 ms deadline, and a store error opens a 10 s circuit breaker —
   checks skip the store until one probe closes it — so a slow-but-alive
   Postgres stalls at most one request per cool-down, not every
@@ -253,7 +251,7 @@ What that means for sizing:
   DIVIDED local bucket (`max(1, rate÷N)`/min, `max(1, burst÷N)` burst
   via `-rate-limit-replicas=backend.replicas`) — fail-open, since the
   limited routes all need Postgres to complete anyway — so the flag is
-  now only the outage-floor divisor; a flag smaller than the replica
+  only the outage-floor divisor; a flag smaller than the replica
   count clamps to 1/min per pod (~N/min aggregate, the one overshoot).
   Right at a healthy→degraded switch a pod may briefly have admitted up
   to rate+burst locally before the divided floor binds — the just-failed
@@ -278,12 +276,6 @@ What that means for sizing:
   instead of appending the observed address hands the key to unverified
   bytes, and a dual-stack edge missing its IPv6 ranges collapses every
   v6 client into the proxy's own /64 bucket.
-- **Key format changed once at v1.0 — no migration.** Window rows are
-  keyed by the canonical string, so IPv6 clients move from per-address
-  to per-/64 rows on upgrade (IPv4 keys are unchanged). Rows written
-  under the old format simply expire inside their minute window on the
-  normal sweep; the only effect is that an IPv6 client mid-window at
-  upgrade time gets at most one fresh window's budget.
 
 Set the flags through `backend.extraArgs`
 (`deploy/helm/tinycdi/README.md`, "Rate limits and trusted proxies").
@@ -335,7 +327,7 @@ single-writer-per-workspace via broker fencing).
 
 ## Postgres outage / failover timing — measured
 
-Dependency-outage behaviour measured in the v0.3 drill
+Dependency-outage behaviour measured in an outage drill
 (`tests/integration/postgres_outage_test.go`; Postgres container
 stop/start, production `-revoke-deadline` 30 s, fast renew cadence):
 
@@ -351,8 +343,8 @@ drops all streams — budget it into DB maintenance windows.
 
 ## The 20-session load gate — measured
 
-> Measured on the v0.1 topology (separate api, gateway and portal
-> Deployments); component names below are v0.1's. The v0.2 soak harness is
+> Measured with the API, gateway and portal as separate Deployments; not
+> yet re-measured on the single backend. The soak harness is
 > `tests/soak`.
 
 A load run executed 20 concurrent sessions for 60 minutes
@@ -403,10 +395,9 @@ seeded tenant quota (10 slots — administratively gated, working as
 designed), (2) browser-session density on the profiled node (all
 browser pods share one profiled node), and (3) the single gateway replica's CPU on
 the TLS+WS path at higher stream counts. The 50-session probe is
-exploratory only — it finds the bottleneck, it is **not** a release gate
-in the plan and was not run.
+exploratory only — it finds the bottleneck and was not run.
 
-## Soak at scale on the dev cluster (E9)
+## Soak at scale
 
 Sizing math for the `soak-small` profile (250 mCPU / 512 MiB / 1 GiB
 ephemeral, `requests = limits`, one `desktop` container per pod,
@@ -430,7 +421,7 @@ schedulable ceiling** on the three infra nodes as they stand. Memory
 (512 MiB each) and pod count are not the limiter at this scale; ephemeral
 storage is ~1 GiB per pod against ~91 GiB allocatable per node.
 
-The advisor's operating rule for shared infra is a **≥ 20 % CPU-request
+A practical rule for a shared node pool is a **≥ 20 % CPU-request
 headroom per infra node** (keep live, ArgoCD and monitoring unstarved):
 soakable requests per node = free − 0.20 × 16. At the measured state that
 is floor(5.22/0.25) + floor(11.89/0.25) + floor(3.95/0.25) =
@@ -464,63 +455,15 @@ p50 5.5 s / p95 5.9 s, reload reconnect p95 5.0 s (poll-quantised), zero
 dropped/manual actions, infra node CPU max 51 % during the 25-pod
 start-up burst, ~20 % steady.
 
-### v0.3.0-rc.2 soak: 60 sessions × 60 min (2026-10-03)
+### Soak results
 
-The planned ~82-session run was cut to a **60-session cap** for two
-reasons found on the night:
+#### 60 sessions × 60 min (2026-10-04)
 
-- **The scheduler does not honour the per-node headroom plan.** The
-  template carries only `nodeSelector: workload-type=infra` — no spread
-  or anti-affinity — so pods land where scoring puts them. With even
-  spread the worst node (worker-03, 55 % baseline) crosses the 20 %
-  request-headroom rule at ~45 sessions; the observed run spread
-  10/30/8 because the freest node scored best. A per-wave guard in the
-  harness stops workspace creation when any infra node's CPU requests
-  plus the next wave's projected share would reach 80 %; effective N is
-  recorded in the report.
-  **Fixed in v0.3.1** (TOPO-1): `runtime.topologySpread.enabled`
-  (default true) gives every workspace pod a soft
-  `topologySpreadConstraint` — maxSkew 1 over `kubernetes.io/hostname`,
-  `ScheduleAnyway`, scoped to the tenant namespace's runtime pods. It
-  nudges the scheduler toward even spread without ever blocking
-  placement (a retained PVC's node/zone affinity still wins); the
-  per-wave guard stays as the hard safety.
-- **The per-client-IP rate limits cap a same-IP ramp.** 20 OIDC lanes
-  behind one source IP tripped the then-default `login-rate 30/min` (covers `/v1/login`,
-  `/v1/auth/callback`, `GET /v1/session`) and the then-default `launch-rate 60/min` —
-  152 × 429 in ~15 min, logins failed, connect p95 hit 65 s. The e2e
-  run raised both to 600/min as a recorded deviation (restored after);
-  production ramps from many IPs are unaffected. On rc.3 this is fixed by
-  FX-R30 (per-session/per-state limiter keys — see "Sign-in rate limits
-  and NAT"): the same 20-lane ramp at default limits produces zero 429s.
-
-Measured on 60 × 60 min, 20 users (3 per user), soak-small on rc.2:
-connect p50 6.1 s / p95 7.4 s (opens waved 10 per 15 s), reload
-reconnect p50 0 / p95 5.0 s (half of 60 seamless), inputDispatch p50
-67 ms / p95 89 ms, dropped 0, manual actions 0, per-lane 429s 0.
-Infra usage peaked at 59 % CPU / ~15.5 GiB workspace memory; node
-requests stayed ≤ 75 %. Two backend disruption drills plus a session
-cert rotation mid-run: the drill session reconnected in ≤ 4.5 s, but
-2/60 sessions reported `none` for ~85 s after the rollout and took a
-~120 s end-to-end stream gap to recover — the reconnect tail after a
-backend pod loss is ~2 min, the one metric over its 60 s gate (the
-suppressed re-launch is fixed by FX-R31, PR #76, in rc.3). 13/60
-sessions logged a false "open in another tab" view during the restarts
-(watch item, non-zero on rc.2; same FX-R31 fix).
-
-Capacity answer for the release: **~60 sessions** is the safe level on
-the three-node infra pool under the 20 % headroom rule with today's
-baselines; ~82 is schedulable only if placement could be pinned per
-node; **200 sessions need ~50 CPU of spare requests → more or larger
-workload nodes.**
-
-### v0.3.0-rc.3 soak: 60 sessions × 60 min (2026-10-04)
-
-Same shape as the rc.2 run: 60 soak-small workspaces over 20 OIDC lanes
+60 soak-small workspaces over 20 OIDC lanes
 behind one host IP, waves of 10 / 15 s, the projected-request node guard
-(never fired — placement 15/30/11), default rate limits this time.
+(never fired — placement 15/30/11), default rate limits.
 
-- **NAT / limiter (FX-R30 verified).** 20 lanes logged in, probed and
+- **NAT / limiter.** 20 lanes logged in, probed and
   launched from one IP: 0 × 429 on authenticated traffic (per-lane
   counters 2, both anonymous-phase hits during the OIDC ramp, none after
   lanes held cookies). An anonymous burst on `GET /v1/session` from the
@@ -528,7 +471,7 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
   in the logs — matches the client count exactly).
 - **Connected metrics.** connect p50 6.1 s / p95 6.3 s, mid-run reload
   reconnect p50 0 / p95 5.0 s (near-seamless), inputDispatch p50 66 ms /
-  p95 83 ms, dropped 0, falseElsewhere 0 (rc.2: 13), manual actions 0,
+  p95 83 ms, dropped 0, falseElsewhere 0, manual actions 0,
   longest gap < 60 s. inputTimeouts 3 (bounded sends that hit the 5 s
   cap during the drill churn; no starvation).
 - **Lease contract.** All 61 live leases kept the same lease id across
@@ -541,24 +484,23 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
   streams survived, operator kept reconciling, backend hot-reloaded the
   new server cert and client CA without a restart (`tlsreload` log
   lines), the pre-rotation client cert is refused after the CA rotation.
-  Postscript (found in the rc.4 cleanup): the drill verified the
-  backend's hot-reload and the old client cert being refused — it did
-  **not** cover the operator's server-trust path. The broker client
-  read its server-CA bundle once, so after the CA rotation it could not
-  verify the backend's new internal server cert and workspace deletes
-  wedged in the runtime-cleanup finalizer for ~4 h until an operator
-  restart. FX-R33 (#83) closes it — the broker CA bundle hot-reloads;
-  the rc.5 CA-rotation re-drill is the evidence (finalizer progress
-  without a restart).
+  Postscript: that drill verified the backend's hot-reload and the old
+  client cert being refused — it did **not** cover the operator's
+  server-trust path. The broker client read its server-CA bundle once,
+  so after the CA rotation it could not verify the backend's new
+  internal server cert and workspace deletes wedged in the
+  runtime-cleanup finalizer for ~4 h until an operator restart. The
+  broker CA bundle now hot-reloads; the CA-rotation re-drill below is
+  the evidence (finalizer progress without a restart).
 - **Fleet reconnect tail — the one failed gate.** After the all-pods
   rollout, 54/60 sessions had a disconnect span: p50 ~20 s, tail ~45 s
-  (advisor budget p95 ≤ 10 s / p100 ≤ 30 s — FAIL). Single-pod delete was
+  (budget p95 ≤ 10 s / p100 ≤ 30 s — FAIL). Single-pod delete was
   fine (p50 ~5 s, max ~10 s). Mechanism: the page's
   `RECONNECT_BACKOFF_MS` re-navigates the iframe without checking whether
   the previous navigation is still attaching, so at fleet scale the early
   steps abort nearly-landed claims and only a later, longer step lands.
-  Fixed by FX-R32 (`fix/inframe-reconnect`): in-frame reconnect, no
-  navigation thrash. The first run of this soak also surfaced a harness
+  In-frame reconnect removes the thrash — re-scored in the run below.
+  The first attempt at this soak also surfaced a harness
   flaw — one wedged Playwright call stalled the serialized input loop,
   the 30 min session-idle mass-expired the fleet and the drop>1% abort
   fired correctly; the harness now bounds each input dispatch
@@ -566,62 +508,61 @@ behind one host IP, waves of 10 / 15 s, the projected-request node guard
 - **Abort rules.** dropped>1%, connect-p95>15 s, live-pod/ArgoCD/node
   guards all armed; no live pod restart, no node pressure, no Pending.
 
-Capacity answer unchanged: **~60 sessions** remains the safe level. The
-reconnect tail is a UX latency under full backend loss, not a capacity
-limit — re-score on rc.4 (FX-R32) with the short N=60 × 30 min re-soak.
+Capacity answer: **~60 sessions** is the safe level on
+the three-node infra pool under the 20 % headroom rule with these
+baselines; ~82 is schedulable only if placement could be pinned per
+node; **200 sessions need ~50 CPU of spare requests → more or larger
+workload nodes.** The reconnect tail is a UX latency under full backend
+loss, not a capacity limit — the shorter re-soak below re-scores it.
 
-### v0.3.0-rc.4 soak: 60 sessions × 30 min (2026-10-04)
+#### Backend restart, rollout and session-TLS rotation under 60 sessions (2026-10-04)
 
-The FX-R32 re-score: same shape (60 soak-small, 20 lanes, waves 10/15 s,
-node guard armed, default limits), half duration, drills at ~T+10 —
-backend pod delete, backend **rollout**, session-TLS rotate.
+The reconnect-tail re-score: same shape (60 soak-small, 20 lanes, waves
+10/15 s, node guard armed, default limits), half duration (30 min), drills
+at ~T+10 — backend pod delete, backend **rollout**, session-TLS rotate.
 
 - **In-frame reconnect verified at fleet scale.** PG `connection_lease`
   snapshots around each drill: all 60 leases kept their lease id,
   `stream_epoch` bumped in place, and `stream_owner_tab` unchanged for
   every session through both backend drills. Zero `launch.redeem` audit
   events and zero launch tickets minted in every drill window — the
-  rc.3 relaunch path is gone. Caveat: `stream_owner_tab` is minted once
+  relaunch path is gone. Caveat: `stream_owner_tab` is minted once
   per **outer** page load, so a frame re-navigation keeps the same id —
-  the rc.4 measurement could not see frame navigations (the rc.5
-  navwatch below measured them directly).
+  this measurement could not see frame navigations (the navwatch in the
+  next run measured them directly).
 - **Drill spans.** Pod delete: 6 sessions on the killed pod, p100 ~5 s.
   Rollout: 38/60 sessions observed a span (22 reconnected inside one 5 s
   poll — invisible to the metric): p50 ~5 s / p95 ~15 s / p100 ~15.0 s.
   All span numbers are at the harness's 5 s poll resolution: a ~5 s
   span is one missed poll (≈0–5 s real), ~15 s is three (≈10–15 s
-  real); a 1 s-poll rerun under rc.5 will re-score at true resolution.
+  real); a 1 s-poll rerun re-scores at true resolution (next run).
   TLS rotate: zero disconnects again. The ~15 s tail is 7 sessions whose
   jittered in-frame retries (0.5–2 s, `reconnect_delay`) needed ~3 poll
   cycles to land a claim on the fresh pods.
-- **Gates (advisor).** disconnect-span p95 14.96 s **fails** the ≤ 10 s
+- **Gates.** disconnect-span p95 14.96 s **fails** the ≤ 10 s
   bar (p100 15.02 s inside ≤ 30 s); inputResumeMs p100 23.3 s PASS
   (< 30 s); longest gap 15.0 s PASS (< 60 s); dropped 0; falseElsewhere
-  0; manual actions 0; inputTimeouts 0. vs rc.3: p95 39.9 s → 15.0 s,
-  p100 45 s → 15 s, relaunch thrash → none.
+  0; manual actions 0; inputTimeouts 0. vs the run above: p95 39.9 s →
+  15.0 s, p100 45 s → 15 s, relaunch thrash → none.
 - **Everything else.** connect p50 5.9 s / p95 6.1 s, mid-run reload
   reconnect p50 0 / p95 5.0 s (near-seamless again), inputDispatch p50
   66 ms / p95 83 ms, lane 429s = 4 anonymous-phase hits on soak09/10/14
-  during the OIDC ramp (same class as rc.3's 2; none on authenticated
-  traffic).
+  during the OIDC ramp (same class as the two in the run above; none on
+  authenticated traffic).
 
 Capacity answer unchanged: **~60 sessions** remains the safe level. The
 residual is a ~15 s worst-case reconnect tail under full backend loss —
-roughly three times better than rc.3 and no longer a correctness issue
-(no relaunch, no lost claims), still over the 10 s p95 bar for the
-v0.3.0 tag gate.
+roughly three times better than the run above and not a correctness
+issue (no relaunch, no lost claims), still over the 10 s p95 bar.
 
-### v0.3.0-rc.5: internal-CA drill + 1 s-poll rollout rerun (2026-10-04)
+#### Internal-CA rotation and rollout rerun (2026-10-04)
 
-- **Supply chain/upgrade.** 8/8 cosign OCI signatures + 3/3 release
-  blobs at `refs/tags/v0.3.0-rc.5`; chart 0.3.0-rc.5 deployed (helm rev
-  18); CRD guard held (305, never applied); schema stays 18.
-- **Internal-CA rotation drill (FX-R33) — PASS.** With 6 live sessions
+- **Internal-CA rotation drill — PASS.** With 6 live sessions
   `cmctl renew` on `tcdi-e2e-internal-ca` plus both leaves: operator logs
   show `tlsreload: reloaded CA bundle file=/etc/broker-ca/ca.crt` on both
   replicas (no restart), 6/6 sessions stayed connected, and **3 workspace
   deletes cleared their `runtime-cleanup` finalizer in 2.9 s without an
-  operator restart** (rc.3/rc.4 wedged ~4 h here) with zero
+  operator restart** (earlier drills wedged ~4 h here) with zero
   `broker unreachable` lines; old-CA material is refused at the
   handshake (HTTP 000) while the new cert reaches HTTP 403.
 - **Targeted rerun N=60 × 15 min, rollout only, poll = 1 s.** During
@@ -633,14 +574,14 @@ v0.3.0 tag gate.
   27.7 s, longest gap ~16 s, inputTimeouts 1, one lane 429 (OIDC ramp).
   All 60 claims landed on the same leases — zero tickets, zero
   `launch.redeem`.
-- **Frame-navigation evidence (corrects the rc.4 claim).**
+- **Frame-navigation evidence (corrects the run above).**
   `stream_owner_tab` is minted per outer-page load — a frame
-  re-navigation keeps the same id, so the rc.4 measurement could not
+  re-navigation keeps the same id, so the rollout run above could not
   see frame navigations. A 10-session `framenavigated` probe through
-  the same rollout on rc.5: **5 sessions re-navigated the iframe
+  the same rollout: **5 sessions re-navigated the iframe
   once**, at 12.7–16.5 s into their disconnect — the watch's fallback
   gate (5 s in-frame window + page-side poll lag + jitter) — and each
   nav's claim landed ~instantly. Sessions under ~2 s never navigated;
   one nav also fired late on an already-recovered session. So the tail
   is the single-shot fallback working as designed (one nav, one
-  claim), not rc.3's repeated thrash.
+  claim), not the first run's repeated thrash.

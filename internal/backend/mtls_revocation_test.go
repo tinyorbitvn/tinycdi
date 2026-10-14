@@ -3,7 +3,7 @@
 
 package backend
 
-// ADR 0009 (SR-3-F5) tests: per-certificate revocation on the internal
+// ADR 0008 (SR-3-F5) tests: per-certificate revocation on the internal
 // mTLS listener. A blocked (issuer, serial) aborts the handshake — the
 // client sees a transport error, not the listener's 401 — sibling certs
 // pass, resumed handshakes are checked too, and a live conn on a newly
@@ -254,7 +254,7 @@ func TestRevokedResumedHandshakeRejected(t *testing.T) {
 
 // TestRevokedLiveConnSevered: an established keep-alive conn whose serial
 // becomes blocked is closed by the reload walk — IdleTimeout alone cannot
-// bound it (ADR 0009). A conn on a still-trusted serial is untouched.
+// bound it (ADR 0008). A conn on a still-trusted serial is untouched.
 func TestRevokedLiveConnSevered(t *testing.T) {
 	dir := t.TempDir()
 	ca := newTestCANamed(t, "internal-ca")
@@ -361,7 +361,7 @@ func (f *fakeNetConn) SetWriteDeadline(time.Time) error { return nil }
 
 // TestRevocationOffByteIdentical: with no blocklist installed the clone
 // the handshake gets carries NO VerifyConnection — the wire behaviour is
-// byte-identical to a build without the feature (ADR 0009).
+// byte-identical to a build without the feature (ADR 0008).
 func TestRevocationOffByteIdentical(t *testing.T) {
 	dir := t.TempDir()
 	ca := newTestCA(t)

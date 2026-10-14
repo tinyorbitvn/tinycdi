@@ -142,6 +142,10 @@ func TestLaunch_RedirectLoadsDesktopWithRemoteResize(t *testing.T) {
 	}
 	q := u.Query()
 	q.Del("reconnect_delay")
+	if got, want := q.Get("path"), "websockify?tcdi_tab="+testTabID; got != want {
+		t.Fatalf("redirect path setting = %q, want %q", got, want)
+	}
+	q.Del("path")
 	if got, want := q.Encode(), "clipboard_down=false&clipboard_up=false&enable_webp=true&idle_disconnect=1440&reconnect=true&resize=remote"; got != want {
 		t.Fatalf("redirect params = %q, want %q", got, want)
 	}
@@ -178,7 +182,7 @@ func TestLaunch_RedirectCarriesRecordedClipboardPolicy(t *testing.T) {
 		if resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("policy %q: launch status = %d, want 303", tc.policy, resp.StatusCode)
 		}
-		if !strings.HasSuffix(loc, tc.want) {
+		if !strings.Contains(loc, tc.want+"&path=") {
 			t.Fatalf("policy %q UA %q: Location %q missing %q", tc.policy, tc.ua, loc, tc.want)
 		}
 	}

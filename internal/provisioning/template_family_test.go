@@ -254,6 +254,31 @@ func TestStart_AlreadyNewestNoChange(t *testing.T) {
 	}
 }
 
+// TestStart_PolicyFromRecordedSnapshotOnly: a start resolves its session
+// policy from the policies recorded on the workspace row, never from the
+// live catalog, and every start intent carries a policy. The seed row
+// records no clipboard policy while the catalog revision says
+// Bidirectional; the start must not pick the catalog value up.
+func TestStart_PolicyFromRecordedSnapshotOnly(t *testing.T) {
+	cat := newFakeTemplateLookup()
+	e := familyEntry("linuxdesk", "aaaa1111", "2026-10-a", "OnStart")
+	e.ClipboardPolicy = provisioning.PolicyBidirectional
+	cat.put(e)
+	db, svc, ws := familyWorkspace(t, cat)
+
+	if _, err := svc.SignalWorkspace(context.Background(), familyTenant, "iss|sub", "", ws, "fam-start-pol", provisioning.IntentStart, []byte("{}")); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	intents := pendingIntents(t, db, ws)
+	sp := intents[len(intents)-1].Spec.SessionPolicy
+	if sp == nil {
+		t.Fatal("start intent carries no session policy")
+	}
+	if sp.Clipboard == provisioning.PolicyBidirectional {
+		t.Fatalf("start policy %+v came from the live catalog, want the recorded snapshot", sp)
+	}
+}
+
 // TestStart_ConcurrentIdempotent: two Starts with one idempotency key
 // produce one revision change and one generation bump — the second is a
 // stored replay.

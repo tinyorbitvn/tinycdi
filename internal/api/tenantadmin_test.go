@@ -3,9 +3,8 @@
 
 package api
 
-// Configurable tenant-admin groups (v1.2): the tenant-admin role used to be
-// hard-wired to the literal group "tenant-admin"; AuthConfig.TenantAdminGroups
-// now names the verified groups-claim values that grant it (flag
+// Configurable tenant-admin groups: AuthConfig.TenantAdminGroups names the
+// verified groups-claim values that grant the tenant-admin role (flag
 // -tenant-admin-groups, default exactly "tenant-admin"). These tests pin that
 // EVERY admin gate — /v1/me roles, scope=tenant on both list endpoints,
 // /v1/admin/* reads and writes, foreign-workspace get, retained attach/purge

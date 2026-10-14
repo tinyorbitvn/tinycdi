@@ -203,7 +203,7 @@ spec:
             - -internal-tls-key=/tls/internal/tls.key
             - -internal-client-ca=/etc/client-ca/ca.crt
             {{- if $revokedSerials.existingSecret }}
-            # ADR 0009: per-certificate revocation — the Secret's
+            # ADR 0008: per-certificate revocation — the Secret's
             # blocklist key is projected to a fixed filename.
             - -internal-revoked-list=/etc/internal-revoked/revoked-serials.txt
             {{- end }}
@@ -227,7 +227,7 @@ spec:
             # across replicas. Literal value — never the pod name.
             - -gateway-id={{ .Values.backend.gatewayID }}
             {{- if .Values.backend.trustedProxies }}
-            # CIDRs whose X-Forwarded-For claims are trusted (E7/S18):
+            # CIDRs whose X-Forwarded-For claims are trusted (E7/TM-32):
             # rate limits and the runtime-bound headers derive the client
             # from the right-most untrusted chain entry. Required behind
             # an ingress/Gateway — empty shares one bucket per edge.
@@ -247,10 +247,10 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days={{ .Values.backend.retention.terminalRowDays }}
-            # Audit retention (ADR 0011): the leader's daily prune.
+            # Audit retention (ADR 0010): the leader's daily prune.
             - -audit-retention-days={{ .Values.backend.retention.auditDays }}
-            # Platform per-file bound for session file transfer (ADR 0010
-            # T11); a tenant ceiling may only lower it. int64 keeps the
+            # Platform per-file bound for session file transfer (ADR 0009
+            # §5); a tenant ceiling may only lower it. int64 keeps the
             # value decimal — big integers render in scientific notation.
             - -file-transfer-max-bytes={{ int64 .Values.backend.fileTransfer.maxFileBytes }}
             {{- with .Values.backend.extraArgs }}
@@ -326,7 +326,7 @@ spec:
             items: [{key: {{ .Values.backend.clientCA.key | default "ca.crt" }}, path: ca.crt}]
         {{- if $revokedSerials.existingSecret }}
         - name: internal-revoked
-          # ADR 0009: project ONLY the blocklist key to a fixed filename —
+          # ADR 0008: project ONLY the blocklist key to a fixed filename —
           # same projection pattern as client-ca above.
           secret:
             secretName: {{ $revokedSerials.existingSecret }}

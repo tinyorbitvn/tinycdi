@@ -119,11 +119,10 @@ func reconnectDelayMs() int {
 // src params never reach the frame: the ticket POST's 303 is the final
 // navigation, so the redirect must carry them).
 //
-// ownerTab is the claiming tab's id from the launch POST's query: a valid
-// id is re-asserted as the client's `path` setting so every WebSocket the
-// frame opens — first connect and every KasmVNC retry alike — claims the
-// stream under the same tab id (FX-R31). An absent or malformed id leaves
-// `path` unset, which the broker stores as a NULL (legacy) claim.
+// ownerTab is the claiming tab's id from the launch POST's query, already
+// validated by the launch handler: it is re-asserted as the client's `path`
+// setting so every WebSocket the frame opens — first connect and every
+// KasmVNC retry alike — claims the stream under it (FX-R31).
 func desktopPath(policy, ua, ownerTab string) string {
 	up, down := clipboardDirections(policy)
 	path := fmt.Sprintf("%s&reconnect_delay=%d&clipboard_up=%t&clipboard_down=%t",
@@ -131,9 +130,7 @@ func desktopPath(policy, ua, ownerTab string) string {
 	if up || down {
 		path += fmt.Sprintf("&clipboard_seamless=%t", seamlessClipboardOK(ua))
 	}
-	if broker.ValidStreamOwnerTab(ownerTab) {
-		path += "&path=" + url.QueryEscape("websockify?"+streamOwnerTabParam+"="+ownerTab)
-	}
+	path += "&path=" + url.QueryEscape("websockify?"+streamOwnerTabParam+"="+ownerTab)
 	return path
 }
 
@@ -305,6 +302,14 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_ticket"})
 		return
 	}
+	// Every launch names the claiming tab (the portal's submitLaunch puts it
+	// on the POST's query). Refuse before redeeming, so a bad request never
+	// burns the single-use ticket.
+	ownerTab := r.URL.Query().Get(streamOwnerTabParam)
+	if !broker.ValidStreamOwnerTab(ownerTab) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner_tab_required"})
+		return
+	}
 
 	lease, err := g.cfg.Broker.RedeemTicket(r.Context(), g.cfg.Identity, ticket)
 	if err != nil {
@@ -375,7 +380,7 @@ func (g *Gateway) handleLaunch(w http.ResponseWriter, r *http.Request, wsID stri
 	g.audit(r, "launch.redeem", lease.WorkspaceUID, observability.OutcomeSuccess, "")
 
 	http.SetCookie(w, g.sessionCookie(s.id))
-	w.Header().Set("Location", desktopPath(lease.ClipboardPolicy, r.UserAgent(), r.URL.Query().Get(streamOwnerTabParam)))
+	w.Header().Set("Location", desktopPath(lease.ClipboardPolicy, r.UserAgent(), ownerTab))
 	w.WriteHeader(http.StatusSeeOther)
 }
 

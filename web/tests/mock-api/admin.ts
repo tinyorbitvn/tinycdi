@@ -237,7 +237,7 @@ export interface Tenancy {
   // undefined = the tenant has no quota row (the API then omits `limits`).
   limits: QuotaAmounts | undefined;
   userLimits: QuotaAmounts | undefined;
-  // Per-principal running limits (v0.5): the tenant default (null =
+  // Per-principal running limits: the tenant default (null =
   // unlimited) and ownerRef ("iss|sub") -> max running workspaces.
   userLimitDefault: number | null;
   userLimitOverrides: Map<string, number>;
@@ -246,7 +246,7 @@ export interface Tenancy {
   userLimitVersions: Map<string, number>;
   userLimitDefaultVersion: number;
   userLimitSeq: number;
-  // Tenant session-policy ceiling (ADR 0010): undefined = no row —
+  // Tenant session-policy ceiling (ADR 0009): undefined = no row —
   // every channel FollowTemplate. spVersion is its version; the ETag
   // "sp-<n>" travels as a header and PUT echoes it via If-Match.
   sessionPolicy: { clipboard: string; fileTransfer: string; maxFileBytes: number | null } | undefined;
@@ -889,8 +889,8 @@ export function adminArea(ctx: MockContext): MockArea {
       const failed = t.takeFailure(req);
       if (failed) return failed;
       if (path === "/v1/me") {
-        // v0.2 (P1/D17): /v1/me also publishes the session-bound CSRF token
-        // and the session domain the portal builds launch URLs under.
+        // /v1/me also publishes the session-bound CSRF token and the
+        // session domain the portal builds launch URLs under (P1/D17).
         return ok(200, { ...t.me, csrfToken: CSRF_TOKEN_VALUE, sessionDomain: ctx.sessionDomain });
       }
       if (path === "/v1/quota") return quota();

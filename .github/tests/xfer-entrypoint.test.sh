@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # xfer-entrypoint.test.sh — contract coverage for the in-pod transfer
-# helper wiring (ADR 0010 §5 (i)): both runtime entrypoints start
+# helper wiring (ADR 0009 §5 (i)): both runtime entrypoints start
 # tcdi-xferd, supervise it next to Xvnc and stop it on shutdown; KasmVNC
 # listens on 127.0.0.1:8444 only; the images ship the helper.
 set -uo pipefail

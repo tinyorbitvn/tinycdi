@@ -86,7 +86,7 @@ type Backend struct {
 	sessionHandler  http.Handler
 	internalHandler http.Handler
 	internalTLSCfg  *tls.Config
-	// internalBlocklist is the ADR 0009 revocation list on the internal
+	// internalBlocklist is the ADR 0008 revocation list on the internal
 	// mTLS listener (nil when -internal-revoked-list is unset): it backs
 	// the handshake VerifyConnection and the ConnState drop hook.
 	internalBlocklist *tlsreload.Blocklist

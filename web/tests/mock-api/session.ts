@@ -1,4 +1,4 @@
-// Session area of the contract mock (v0.2): the session-origin routes
+// Session area of the contract mock: the session-origin routes
 // /v1/launch (ticket redeem with the gateway's ADR-0004 origin gate) and the
 // cookie-gated /desktop/*, plus the portal-side session surface:
 // GET /v1/workspaces/{id}/connection (the passive poll endpoint, P4) and the
@@ -9,8 +9,8 @@
 //   from ctx.sessionDomain and core.CSRF_TOKEN_VALUE — /v1/me stays where
 //   the principal state lives.
 // - The CSRF check in handler.ts compares X-CSRF-Token against the token
-//   /v1/me publishes; the v0.1 tcdi_csrf / tcdi_session_origin cookies are
-//   gone (D17).
+//   /v1/me publishes; the retired tcdi_csrf / tcdi_session_origin cookies
+//   are never set (D17).
 // - launchUrl is https://ws-<label>.<sessionDomain>/v1/launch like the real
 //   backend; on a loopback session domain the mock keeps its listener's
 //   scheme so browser e2e can reach it.
@@ -41,7 +41,7 @@ export interface MockConnectionStatus {
   leaseRef?: string;
   /** The lease's stream epoch; advances when a new stream opens. */
   streamEpoch?: number;
-  /** The tab id the current stream was claimed with; absent for a legacy claim (FX-R31). */
+  /** The tab id the current stream was claimed with; absent before the first claim. */
   streamOwnerTab?: string;
 }
 
@@ -183,17 +183,17 @@ export function sessionArea(ctx: MockContext): MockArea {
     if (req.path === "/_control/launchRequests" && req.method === "GET") {
       return { status: 200, headers: { "content-type": "application/json" }, body: { requests: state.launchRequests } };
     }
-    // POST /_control/session/stream {workspaceId, streamOwnerTab?} — a new
+    // POST /_control/session/stream {workspaceId, streamOwnerTab} — a new
     // stream opened on the workspace's current lease: its epoch advances by
-    // one and the claiming tab's id lands on the same "write" (FX-R31).
+    // one and the claiming tab's id lands on the same "write".
     if (req.path === "/_control/session/stream" && req.method === "POST") {
       const id = String(req.body?.workspaceId ?? "");
       const leaseId = state.leases.get(id);
       if (leaseId === undefined) return err(404, "NOT_FOUND", "no active lease", false);
+      if (typeof req.body?.streamOwnerTab !== "string") return gwErr(400, "owner_tab_required");
       const next = (epochs.get(leaseId) ?? 1) + 1;
       epochs.set(leaseId, next);
-      if (typeof req.body?.streamOwnerTab === "string") owners.set(leaseId, req.body.streamOwnerTab);
-      else owners.delete(leaseId); // a legacy claim: NULL, like the broker
+      owners.set(leaseId, req.body.streamOwnerTab);
       return ok(200, { leaseRef: leaseRefOf(leaseId), streamEpoch: next });
     }
     // POST /_control/session/connection {workspaceId, state?, leaseActive?,

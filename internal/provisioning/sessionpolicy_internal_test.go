@@ -10,7 +10,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
-// Meet matrix over EVERY template policy × ceiling combination (ADR 0010
+// Meet matrix over EVERY template policy × ceiling combination (ADR 0009
 // §1): Disabled is bottom, Bidirectional top, the single directions are
 // incomparable (Send ∩ Receive = Disabled), FollowTemplate and an empty
 // ceiling narrow nothing, and a ceiling can never widen a template.

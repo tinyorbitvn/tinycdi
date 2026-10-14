@@ -321,7 +321,7 @@ func TestClusterOnlyEgressDefaultRestricted(t *testing.T) {
 	}
 }
 
-// The Unrestricted opt-out restores the pre-1.0 posture: two peers, one
+// The Unrestricted opt-out widens the rule to any-pod-anywhere: two peers, one
 // selecting every pod in the workspace's own namespace and one every
 // namespace.
 func TestClusterOnlyEgressUnrestrictedOptInOnPolicy(t *testing.T) {

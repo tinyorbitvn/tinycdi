@@ -51,7 +51,7 @@ func TestPodCarriesClipboardPolicy(t *testing.T) {
 	}
 }
 
-// TestPodSessionPolicyWins (ADR 0010 §2): spec.sessionPolicy — the meet
+// TestPodSessionPolicyWins (ADR 0009 §2): spec.sessionPolicy — the meet
 // of template policy ∧ tenant ceiling the API stamped — is the only
 // source pod building reads; the snapshot's own clipboardPolicy is not
 // consulted.

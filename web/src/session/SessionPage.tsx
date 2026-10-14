@@ -187,7 +187,7 @@ export function SessionPage({
     templateRef.current = template;
   }, [template]);
   // The session policy the minted ticket recorded — template policy ∧
-  // tenant ceiling (ADR 0010). Once a launch returns it, it wins over the
+  // tenant ceiling (ADR 0009). Once a launch returns it, it wins over the
   // template the page read earlier: the portal renders allow/embed opts
   // from what the ticket carries, not from a possibly-stale catalog read.
   const [resolvedClipboard, setResolvedClipboard] = useState<ClipboardPolicy | undefined>(
@@ -283,8 +283,8 @@ export function SessionPage({
       // mints a fresh id that only arrives with the frame's next claim,
       // and an early verdict would flash "open in another tab" on each
       // reload (R-V3c). With nothing pending, the stream provably belongs
-      // to a different tab. Absent (a legacy claim stored NULL) falls back
-      // to the epochs.
+      // to a different tab. Absent (no claim yet, or a report for another
+      // portal session) falls back to the epochs.
       if (s.streamOwnerTab) {
         if (s.streamOwnerTab === sessionTabId()) {
           pending.current = null;

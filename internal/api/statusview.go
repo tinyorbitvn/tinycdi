@@ -426,8 +426,8 @@ func (h *WorkspaceHandler) viewWithStatus(ctx context.Context, rec *provisioning
 // mergeImageFreshness fills the optional imageBuiltAt/imageStale view
 // fields from the image age that travels with the workspace: the annotation
 // on its Workspace CR (informer cache), else the template snapshot taken at
-// create time. A workspace created before either existed (every v0.1
-// workspace at upgrade time) falls back to its template's age, looked up at
+// create time. A workspace whose template carried no image age when it was
+// created falls back to its template's current age, looked up at
 // most once per distinct template per request (imageAgeMemo) and served from
 // the informer cache in production (WithImageCatalog). A missing or malformed
 // age leaves both fields absent; freshness is advisory and never fails the

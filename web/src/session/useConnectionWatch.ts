@@ -17,7 +17,7 @@ import { sessionFrameUrl, sessionTabId, submitLaunch, type LaunchTicket } from "
  *   frame to the workspace origin, then keeps re-navigating on
  *   RECONNECT_BACKOFF_MS spacing: one pending reload at a time, and the
  *   spacing is long enough that a nav->claim in flight is never aborted by
- *   the next step (the rc.3 herd). When every step has run and the lease
+ *   the next step (a fleet-wide reconnect herd). When every step has run and the lease
  *   is still active but not streaming, `exhausted` is reported — but only
  *   after the last reload had its own interval to take effect.
  * - `streamOwnerTab` set and different: the stream was fenced by another
@@ -47,7 +47,7 @@ export const RECONNECT_BACKOFF_MS = [10_000, 15_000, 20_000] as const;
 // A re-navigation is a claim attempt: after a nav starts, the watch waits
 // for the poll to show a NEW stream epoch (the claim landed — stop
 // re-navving) or this outer bound to elapse. 20 s covers the 5-10 s
-// nav->claim measured at fleet scale on rc.3, so a slow-but-live claim is
+// nav->claim measured at fleet scale, so a slow-but-live claim is
 // never aborted by the next reload.
 export const CLAIM_EVIDENCE_MS = RECONNECT_BACKOFF_MS[RECONNECT_BACKOFF_MS.length - 1];
 // Jitter added to the FIRST re-navigation only: a fleet whose in-frame

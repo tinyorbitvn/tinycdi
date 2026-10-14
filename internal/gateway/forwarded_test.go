@@ -1,6 +1,6 @@
 package gateway_test
 
-// S18: the client-address chain toward the runtime is rebuilt from the
+// TM-32: the client-address chain toward the runtime is rebuilt from the
 // trusted chain only — a client-sent X-Forwarded-For/Forwarded/X-Real-IP
 // never reaches the pod (the runtime keys its brute-force blacklist on the
 // forwarded address; FX-R26 showed a spoofed value colliding with the

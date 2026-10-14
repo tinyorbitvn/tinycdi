@@ -3,7 +3,7 @@
 
 package tlsreload
 
-// ADR 0009 tests: the internal-mTLS serial blocklist — parse bounds,
+// ADR 0008 tests: the internal-mTLS serial blocklist — parse bounds,
 // fail-closed boot, keep-last-good reload, and the conn registry that
 // severs live conns on a blocking swap, serialized against registration.
 
@@ -86,7 +86,7 @@ func writeList(t *testing.T, path, content string) {
 	}
 }
 
-// TestParseBlocklistFormat covers the ADR 0009 grammar: comments and
+// TestParseBlocklistFormat covers the ADR 0008 grammar: comments and
 // blanks ignored, serials normalized as big integers (colons, case,
 // leading zeros), issuer compared byte-for-byte after a trim.
 func TestParseBlocklistFormat(t *testing.T) {
