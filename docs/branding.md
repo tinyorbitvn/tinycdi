@@ -18,7 +18,7 @@ Every key is optional; only the keys you supply override the defaults.
 |---|---|
 | `branding.json` | `{"productName": "...", "logo": "/branding/<file>", "logoDark": "/branding/<file>"}` — the portal's product name and logo paths. Unknown fields are ignored |
 | `tokens.css` | CSS custom-property overrides for the Orbit design tokens (`--tc-*`/`--to-*` defined in `web/src/design/design.css`), e.g. `:root { --tc-color-accent: #123456; }`. `index.html` links it **after** the app CSS, so the overrides win |
-| logo files | e.g. `logo.svg` — any regular file referenced from `branding.json`; served with the extension's content type |
+| logo files | named `logo*.svg` or `logo*.png` (for example `logo.svg`, `logo-dark.svg`), referenced from `branding.json`; served with the extension's content type |
 | `favicon.svg` / `favicon.ico` | replaces the shipped favicon at `/favicon.svg` / `/favicon.ico`. `favicon.ico` is binary — put it under the ConfigMap's `binaryData`, not `data` |
 
 ### `branding.json` semantics
@@ -42,7 +42,10 @@ request is ever an error.
 
 ### Serving properties
 
-`/branding/` serves regular files only: no directory listing,
+`/branding/` serves only the names in the table above — `branding.json`,
+`tokens.css`, `favicon.svg`, `favicon.ico` and `logo*.svg`/`logo*.png` — as
+regular files in the directory's top level. Any other name, a subdirectory
+or a ConfigMap `..data/` entry answers 404. There is no directory listing,
 `Cache-Control: no-cache`, and `..` path segments are rejected. A same-named
 `favicon.svg`/`favicon.ico` in the branding directory replaces the shipped
 file at the root URL (also `no-cache`).

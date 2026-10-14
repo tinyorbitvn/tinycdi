@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -270,9 +271,19 @@ func branding(dir string, next http.Handler) http.Handler {
 	})
 }
 
-// serveBranding serves regular files from the branding directory
-// (-branding-dir / TCDI_FRONTEND_BRANDING_DIR; the chart mounts a
-// ConfigMap there). GET/HEAD only, no directory listing, Cache-Control
+// brandingNames is the set of names /branding/ serves: the files the
+// portal loads (branding.json, tokens.css), the favicon overrides, and
+// logo files. A name is one path segment, so subdirectories and the
+// ConfigMap's ..data/ entries never match.
+var brandingNames = regexp.MustCompile(`^(branding\.json|tokens\.css|favicon\.(svg|ico)|logo[A-Za-z0-9_-]{0,64}\.(svg|png))$`)
+
+// brandingNameAllowed reports whether name is a documented branding file.
+func brandingNameAllowed(name string) bool { return brandingNames.MatchString(name) }
+
+// serveBranding serves the documented branding files — branding.json,
+// tokens.css, favicon.svg/.ico and logo*.svg/.png (brandingNames) — from
+// the branding directory (-branding-dir / TCDI_FRONTEND_BRANDING_DIR; the
+// chart mounts a ConfigMap there). GET/HEAD only, no directory listing, Cache-Control
 // no-cache. Escapes are impossible: ".." segments are rejected outright,
 // and a file is served only when its fully-resolved path stays inside the
 // resolved branding dir — a ConfigMap mount makes every key a symlink
@@ -294,6 +305,10 @@ func serveBranding(dir string, w http.ResponseWriter, r *http.Request) {
 	name, under := strings.CutPrefix(r.URL.Path, "/branding/")
 	if !under || name == "" || hasDotDotSegment(name) {
 		http.NotFound(w, r) // /branding, the bare listing, or traversal
+		return
+	}
+	if !brandingNameAllowed(name) {
+		http.NotFound(w, r) // only the documented names are served (TM-05)
 		return
 	}
 	full := brandingFile(dir, name)

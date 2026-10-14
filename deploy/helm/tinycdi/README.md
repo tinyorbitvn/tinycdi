@@ -223,7 +223,8 @@ the value to set instead:
 Set `frontend.branding.configMap` to the name of a ConfigMap in the release
 namespace to rebrand the portal. The chart mounts it read-only at
 `/branding` in the frontend pods and passes `-branding-dir=/branding`; the
-frontend serves it at `https://<portalHost>/branding/` (regular files only,
+frontend serves it at `https://<portalHost>/branding/` (only `branding.json`,
+`tokens.css`, `favicon.svg`/`.ico` and `logo*.svg`/`.png`, regular files only,
 no listing, `Cache-Control: no-cache`). Empty (the default) renders no flag
 and no volume, and `/branding/tokens.css` answers an empty stylesheet and
 `/branding/branding.json` the empty object `{}` (the portal keeps its default
@@ -236,7 +237,7 @@ ConfigMap layout — every key is optional:
 |---|---|---|
 | `branding.json` | `web/src/app/branding.ts` (`loadBranding`) | `{"productName": "...", "logo": "/branding/<file>", "logoDark": "/branding/<file>"}` — unknown fields ignored; `logo*` must stay under `/branding/` (same origin) |
 | `tokens.css` | `index.html` stylesheet link, after the app CSS | CSS custom-property overrides (`--to-*`/`--tc-*` design tokens) |
-| logo files | referenced from `branding.json` | e.g. `logo.svg` — served with their extension's content type |
+| logo files | referenced from `branding.json` | named `logo*.svg` or `logo*.png` (for example `logo.svg`) — served with their extension's content type |
 | `favicon.svg`, `favicon.ico` | `index.html` `<link rel="icon">` | replaces the shipped TinyOrbit favicon of the same name at `/favicon.svg` / `/favicon.ico` (`no-cache`); either may be given alone. `favicon.ico` is binary, so put it under the ConfigMap's `binaryData` |
 
 ```yaml
