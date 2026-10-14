@@ -1,7 +1,7 @@
 # Threat model — v1.0 security review preparation
 
 Status: **working document.** The pre-1.0 review it was prepared for ran as
-an internal review — report: [`review-v1.0.md`](review-v1.0.md) — which is
+an internal review — report: `review-v1.0.md` — which is
 not an independent audit; an external review remains an open item (S13).
 This document inventories what exists **today on `main`**, with code and
 test references, so the reviewer can

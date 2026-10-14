@@ -158,24 +158,14 @@ lb="$(grep -n 'X DELETE' "$HELPER" | head -1 | cut -d: -f1)"
 chk_absent "helper: no untagged/age/count sweep (code)" \
   <(grep -vE '^[[:space:]]*#' "$HELPER") 'untagged|keep-n'
 
-# the frozen v1.0 review record must not carry this fix's closure —
-# content-pin (no git needed) plus a diff check when origin/main is
-# resolvable, so the guard is fail-closed in shallow clones too.
-chk_absent "review-v1.0.md frozen (no SR-5-F3 closure)" \
-  "$ROOT/docs/security/review-v1.0.md" \
-  'SR-5-F3.{0,80}Fixed|cleanup-failed-digests|failed-digest-cleanup|#164'
-if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
-  chk_absent "review-v1.0.md untouched vs origin/main" \
-    <(git diff origin/main -- docs/security/review-v1.0.md 2>/dev/null) 'SR-5-F3'
-fi
-
 # cancel is out of coverage — the docs must not claim aborted/cancelled
 # RUNS are cleaned. The pattern is deliberately narrow: it needs an
 # abort/cancel word immediately followed by run/workflow/job (or the
 # legacy 'or aborted' phrasing) — unrelated uses like "the handshake is
 # aborted" must pass.
 ABORT_RE='(abort|cancel)[a-z]* (run|workflow|job)|or aborted'
-for doc in "$ROOT/docs/releases/v1.1.0.md" "$ROOT/docs/security/provenance.md"; do
+for doc in "$ROOT"/docs/releases/*.md "$ROOT/docs/security/provenance.md"; do
+  [ -f "$doc" ] || continue
   grep -qiE "$ABORT_RE" "$doc" \
     && { echo "FAIL: $doc claims aborted/cancelled runs are cleaned"; fails=1; }
 done

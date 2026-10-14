@@ -17,8 +17,7 @@ bug and security fixes ship in patches.
   deprecated for at least one minor release, with a documented
   replacement, before it is removed.
 - **The documented upgrade path** — from the previous `1.x` minor, and
-  from `v0.5.1` to `1.0.0` — as described in
-  [runbooks/upgrade.md](runbooks/upgrade.md).
+  from `v0.5.1` to `1.0.0`.
 
 ## Not covered by the contract
 

@@ -1,0 +1,5 @@
+# docs-versions.allow — reviewed exceptions to the docs version gate
+# (.github/scripts/check-doc-versions.sh). One per line:
+#   <glob> :: <ERE matched against the line> :: <reason, 10+ chars>
+# Only third-party version strings (tools, upstream APIs) and examples of
+# the release tag format belong here — never TinyCDI release history.

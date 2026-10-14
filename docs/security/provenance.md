@@ -151,7 +151,7 @@ artifact was built by **this repository's workflow** from the recorded
 commit/tag — nothing more. In particular it does **not** prove that a
 second person reviewed the change: the project currently has a single
 maintainer, and the same account can author, merge and approve a publish
-(SR-5-F2, accepted residual — [`review-v1.0.md` §7](review-v1.0.md)).
+(SR-5-F2, accepted residual — `review-v1.0.md` §7).
 
 The durable record is the **environment approval**, not the signature:
 the `release` and `runtime-train` environments each require a reviewer

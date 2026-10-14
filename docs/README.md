@@ -21,7 +21,6 @@
 ## Runbooks
 
 - [runbooks/install.md](runbooks/install.md) — install from the Helm chart
-- [runbooks/upgrade.md](runbooks/upgrade.md) — upgrade ordering and rollback
 - [runbooks/observability.md](runbooks/observability.md) — metrics,
   dashboards and alerts: enabling them and what each alert means
 - [runbooks/tenant-quotas.md](runbooks/tenant-quotas.md) — declarative
@@ -39,18 +38,6 @@
 - [runbooks/stuck-finalizer.md](runbooks/stuck-finalizer.md) — workspace
   teardown finalizer recovery
 
-## Releases
-
-- [releases/v0.3.0.md](releases/v0.3.0.md) — v0.3.0 release notes
-  (source for the GitHub release)
-- [releases/v0.3.1.md](releases/v0.3.1.md) — v0.3.1 release notes
-- [releases/v0.3.2.md](releases/v0.3.2.md) — v0.3.2 release notes
-- [releases/v0.4.0.md](releases/v0.4.0.md) — v0.4 release notes
-- [releases/v0.5.0.md](releases/v0.5.0.md) — v0.5 release notes
-- [releases/v0.5.1.md](releases/v0.5.1.md) — v0.5.1 release notes
-- [releases/v1.0.0.md](releases/v1.0.0.md) — v1.0.0 release notes
-- [releases/v1.1.0.md](releases/v1.1.0.md) — v1.1.0 release notes
-
 ## Security
 
 - [../SECURITY.md](../SECURITY.md) — security policy, private reporting,
@@ -63,9 +50,6 @@
   review preparation: assets, actors, trust boundaries, current controls
 - [security/test-inventory.md](security/test-inventory.md) — security-relevant
   tests and CI scanners with paths
-- [security/review-v1.0.md](security/review-v1.0.md) — the v1.0 internal
-  security review report: scope, method, findings, held controls,
-  residuals
 
 ## ADRs
 

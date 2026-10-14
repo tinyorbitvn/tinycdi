@@ -5,11 +5,9 @@ or operator can expose one user's workspace, credentials or network
 position to another. This file sets out how to report a vulnerability and
 the hardening rules that contributors and operators must follow.
 
-> **TinyCDI completed an internal pre-1.0 security review** — report:
-> [docs/security/review-v1.0.md](docs/security/review-v1.0.md). That was
-> an internal review, **not an independent audit**; an external review
-> remains an open item. The mandatory rules and the blocking CI scanners
-> in this file are the bar.
+> **Security review.** Each release's notes state its security-review
+> status. The mandatory rules and the blocking CI scanners in this file
+> are the bar; an independent external review remains an open item.
 >
 > **Architecture note:** v0.2 merged the v0.1 `api`, `portal` and
 > `gateway` Deployments into one `backend` binary plus a static `frontend`
@@ -33,7 +31,6 @@ the hardening rules that contributors and operators must follow.
 
 Only the most recent `1.x` minor release line is fully supported. The
 supported upgrade path is `v0.5.1` → `1.0.0` (see
-[docs/runbooks/upgrade.md](docs/runbooks/upgrade.md) and
 [docs/versioning.md](docs/versioning.md)). Deploy images by digest
 (`images.*.digest`), not by tag: a fix ships as a new release with new
 digests.
@@ -657,7 +654,7 @@ v0.2)
      `cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/vX.Y.Z <image>@sha256:<digest>`.
      Provenance, when published, can also be checked with
      `gh attestation verify oci://<image>@sha256:<digest> --owner tinyorbitvn --signer-workflow tinyorbitvn/tinycdi/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z`;
-   - follow [upgrade](docs/runbooks/upgrade.md) and diff CRDs before
+   - follow [the versioning contract](docs/versioning.md) and diff CRDs before
      applying them.
    - **kasm workspace images** (`spec.linux.adapter: kasm`): run only
      `build/kasm-catalog.txt` entries — digest-pinned, trivy-gated and

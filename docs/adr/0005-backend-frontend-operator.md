@@ -2,7 +2,7 @@
 
 Status: accepted (v0.2 architecture). Accepted ahead of independent
 review; the pre-1.0 internal security review covering it is in
-[docs/security/review-v1.0.md](../security/review-v1.0.md) — internal,
+`docs/security/review-v1.0.md` — internal,
 not an independent audit.
 
 Date: 2026-10-02
