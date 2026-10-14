@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
@@ -451,10 +450,12 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil
 }
 
-// RedeemTicket atomically consumes the ticket — even when expired — and
-// claims the workspace's single active lease in one transaction, bound to the
-// incarnation recorded at issuance. A ticket never redeems twice, and a
-// revoked ticket never redeems. On success it returns the new Lease.
+// RedeemTicket consumes the ticket on every attempt that passes the
+// audience check — an expired, revoked or refused attempt included, because
+// a refusal after the consume commits it — and claims the workspace's
+// single active lease in the same transaction, bound to the incarnation
+// recorded at issuance. A ticket never redeems twice, and a revoked ticket
+// never redeems. On success it returns the new Lease.
 //
 // Lock order matches the session revokes — ticket row first, then the
 // lease row. Both are single-row locks taken by primary key, so the path
@@ -464,6 +465,11 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 	now := b.now()
 	hash := ticketHash(opaque)
 	var lease Lease
+	// refusal is a redemption refused AFTER the consume UPDATE: the closure
+	// returns nil so the consume commits, and the refusal is returned once
+	// the transaction is done (the ClaimTransfer pattern). Every attempt
+	// that passes the audience check therefore spends the ticket.
+	var refusal error
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
 		var (
 			wsUID, tenantID, subject, runtimeUID, audience string
@@ -504,7 +510,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: consume ticket: %w", err)
 		}
 		if !now.Before(expiresAt) {
-			return ErrTicketExpired
+			refusal = ErrTicketExpired
+			return nil
 		}
 
 		// A revocation covering the ticket's generation blocks redemption:
@@ -518,7 +525,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: revocation check: %w", err)
 		}
 		if revoked {
-			return ErrRevoked
+			refusal = ErrRevoked
+			return nil
 		}
 
 		// A ticket minted under a portal session that no longer exists must
@@ -541,7 +549,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: portal session check: %w", err)
 		}
 		if !alive {
-			return ErrRevoked
+			refusal = ErrRevoked
+			return nil
 		}
 
 		// Claim the single active lease for this workspace. The FOR UPDATE
@@ -566,7 +575,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			case takeover:
 				next = `UPDATE connection_lease SET state = 'superseded', closed_at = $2 WHERE id = $1`
 			default:
-				return ErrConnectionInUse
+				refusal = ErrConnectionInUse
+				return nil
 			}
 			if _, err := tx.Exec(ctx, next, liveID, now); err != nil {
 				return fmt.Errorf("broker: fence old lease: %w", err)
@@ -604,25 +614,33 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		if policy != nil {
 			lease.ClipboardPolicy = *policy
 		}
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO connection_lease
 				(id, workspace_id, tenant_id, principal_subject,
 				 runtime_generation, runtime_uid, fencing_version, gateway_id,
 				 state, created_at, expires_at, last_renewed_at,
 				 portal_session_digest)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)
+			 ON CONFLICT DO NOTHING`,
 			lease.ID, wsUID, tenantID, subject, int64(gen), runtimeUID,
-			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession); err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				return ErrConnectionInUse
-			}
+			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession)
+		if err != nil {
 			return fmt.Errorf("broker: insert lease: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// A concurrent redemption holds the workspace's single active
+			// lease (partial unique index). DO NOTHING keeps the
+			// transaction alive, so the consume still commits.
+			refusal = ErrConnectionInUse
+			return nil
 		}
 		return nil
 	})
 	if err != nil {
 		return Lease{}, err
+	}
+	if refusal != nil {
+		return Lease{}, refusal
 	}
 	return lease, nil
 }

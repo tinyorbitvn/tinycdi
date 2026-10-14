@@ -325,8 +325,10 @@ Controls:
   `sessionhost.Domain.Match` (label `ws-[a-z0-9]{8,60}`), control hosts
   come from `-session-control-hosts`, and anything else gets
   `421 bad_host`. API paths do not exist on this listener.
-- **Launch ticket**: 60 s TTL, single use, redeemed atomically (an
-  expired ticket is consumed too), stored as SHA-256, and bound to the
+- **Launch ticket**: 60 s TTL, single use, consumed by every redemption
+  attempt that passes the gateway-audience check, whatever its outcome (an
+  expired, revoked or refused attempt commits the consume;
+  `TestRedeemTicket_EveryRefusalConsumes`), stored as SHA-256, and bound to the
   workspace UID, tenant, principal, gateway audience and portal session
   (`IssueTicket`, `RedeemTicket`, `internal/broker/tickets.go`). The ticket
   travels in the `POST` body only; `?ticket=` is refused with 403. A
