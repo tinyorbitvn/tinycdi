@@ -850,10 +850,12 @@ error.
 
 `values.schema.json` rejects malformed values at lint/template time
 (https-only issuers/origins, hostname-patterned `portalHost`/`sessionDomain`,
-comma-free `oidc.requiredGroups` entries, pinned installer image).
-Render-time guards refuse the removed `api.*`/`gateway.*`/`portal.*`/
-`sessionHost`/`backend.extraAllowedHosts` values
-(with a migration hint), a portalHost equal to or inside
+comma-free `oidc.requiredGroups` entries, pinned installer image) and
+refuses unknown keys — `additionalProperties: false` applies at the top
+level and under each named object, so any key outside the declared set
+(`images.*` included) fails lint/template.
+Render-time guards refuse `backend.extraAllowedHosts` (moved to
+`backend.controlHosts`), a portalHost equal to or inside
 sessionDomain, conflicting exposure modes, a cert-manager toggle without an
 issuer, missing `backend.loginKeys`, empty or placeholder-only
 `database.allowedPeers`, empty
