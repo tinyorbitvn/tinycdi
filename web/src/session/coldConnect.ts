@@ -27,13 +27,21 @@ export function startCold(now: number): ColdAttempt {
 }
 
 /**
- * The /connection report proves a stream is up: `connected` is "an open
- * stream on a live lease" (broker connection_state.go). The stream epoch is
- * not consulted: a backend without a session directory reports epoch 0
- * for every stream, and requiring epoch > 0 would re-mint forever there.
+ * The /connection report proves a stream came up: `connected` is "an open
+ * stream on a live lease" (broker connection_state.go), and a
+ * `streamOwnerTab` on a live lease means a stream claim landed on it (the
+ * broker records the claiming tab with the claim) even if that stream has
+ * dropped since. Such a drop is not a cold connect: the connection watch
+ * owns it (in-frame retry, then one reload — FX-R32), and a cold re-mint
+ * would replace the frame under it. The stream epoch is not consulted: a
+ * backend without a session directory reports epoch 0 for every stream,
+ * and requiring epoch > 0 would re-mint forever there.
  */
-export function streamConfirmed(s: Pick<ConnectionStatus, "state" | "leaseActive">): boolean {
-  return s.state === "connected" && s.leaseActive;
+export function streamConfirmed(
+  s: Pick<ConnectionStatus, "state" | "leaseActive" | "streamOwnerTab">,
+): boolean {
+  if (!s.leaseActive) return false;
+  return s.state === "connected" || (typeof s.streamOwnerTab === "string" && s.streamOwnerTab !== "");
 }
 
 /** What to do after a confirm window ended without a confirmed stream. */

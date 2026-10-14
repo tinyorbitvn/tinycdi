@@ -16,6 +16,17 @@ describe("streamConfirmed", () => {
     expect(streamConfirmed({ state: "none", leaseActive: false })).toBe(false);
     expect(streamConfirmed({ state: "connected", leaseActive: false })).toBe(false);
   });
+
+  it("counts a stream claimed on the live lease even after it dropped", () => {
+    // A claim landed (the broker records the claiming tab), so the connect
+    // was not cold: a later drop belongs to the connection watch (FX-R32),
+    // never to a cold re-mint that would replace the frame.
+    const tab = "0123456789abcdef0123456789abcdef";
+    expect(streamConfirmed({ state: "disconnected", leaseActive: true, streamOwnerTab: tab })).toBe(true);
+    expect(streamConfirmed({ state: "stale", leaseActive: true, streamOwnerTab: tab })).toBe(true);
+    expect(streamConfirmed({ state: "disconnected", leaseActive: true, streamOwnerTab: "" })).toBe(false);
+    expect(streamConfirmed({ state: "none", leaseActive: false, streamOwnerTab: tab })).toBe(false);
+  });
 });
 
 describe("nextColdStep", () => {
