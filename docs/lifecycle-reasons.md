@@ -97,7 +97,7 @@ guard refused), and one `Failed.<reason>` warning synthesized from
 
 ## Message parameters (`params`)
 
-Since v0.4, `WorkspaceEvent` and `WorkspaceCondition` may carry `params`: a
+`WorkspaceEvent` and `WorkspaceCondition` may carry `params`: a
 flat string map holding the values the message interpolates (or used to
 select it), so a client can localize the full text instead of parsing the
 English. `params` is additive and optional — an absent key means the value
@@ -120,8 +120,7 @@ Condition params travel on the
 `workspaces.cdi.tinyorbit.vn/condition-params` object annotation, keyed
 `"<type>.<reason>"`; the API projects only the entry matching each
 condition's type and reason, so a stale entry under a different reason
-never applies. An operator older than v0.4 writes no annotation — the
-conditions then carry no `params` and clients fall back to `message`.
+never applies.
 
 ## API refusal reasons
 

@@ -1,8 +1,8 @@
 # TinyCDI documentation
 
-- [architecture.md](architecture.md) — platform design (original design
-  doc, kept for reference) with the current component overview; decisions
-  are tracked in `adr/`
+- [architecture.md](architecture.md) — the components of a TinyCDI
+  install and where each lives in the repo; decisions are tracked in
+  `adr/`
 - [images.md](images.md) — runtime image contract: endpoints, credentials,
   healthcheck, pinned inputs
 - [lifecycle-reasons.md](lifecycle-reasons.md) — workspace condition reasons

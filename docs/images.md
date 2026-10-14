@@ -49,10 +49,11 @@ debian:bookworm-slim ─► tcdi/linux-base ─┬─► tcdi/linux-desktop   (X
 | `tcdi/browser` | `FROM tcdi/linux-base` + openbox + xterm + `chromium` + `chromium-sandbox` + `firefox-esr` (apt-pinned) | `experience: Browser` templates — the session launches the browser maximized |
 
 Splitting the base out changed what is *inherited*, not what ships:
-`tcdi/browser` keeps exactly the pre-split package list (openbox and xterm moved
-from the old desktop layer into the browser Dockerfile) and
+`tcdi/browser` carries the openbox + xterm kiosk pieces in its own
+Dockerfile, and
 `TestLinuxRuntimeBrowserBaseline` fails if its package count or size grows by
-more than 2 % (`tests/integration/testdata/browser-image-baseline.json`).
+more than 2 % over the recorded baseline
+(`tests/integration/testdata/browser-image-baseline.json`).
 
 Pinned inputs (`docs/compatibility.md`):
 
@@ -104,7 +105,7 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   forwards it, so anonymous probes cannot trip KasmVNC's loopback
   brute-force blacklist; it passes the gateway's `X-Forwarded-*`,
   `Forwarded` and `X-Real-Ip` headers through unchanged.
-- **File transfer** (ADR 0009 §5 (i)) on the same port:
+- **File transfer** ([ADR 0009 §5 (i)](adr/0009-session-data-transfer-policy.md)) on the same port:
   `GET /xfer/files/{name}` returns the file's bytes with `Content-Length`;
   `PUT /xfer/files/{name}` writes the request body and returns
   `{"bytes":n}`. Both require the header `X-Tcdi-Xfer-Token` carrying the
@@ -141,7 +142,7 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   | `password` | yes | KasmVNC Basic-auth password |
   | `username` | no | default `kasm_user` |
   | `tls.crt` / `tls.key` | yes | endpoint TLS material |
-  | `xfer-token` | yes | transfer credential; read by `tcdi-xferd` only (it exits at start without it) |
+  | `xfer-token` | yes | transfer credential `tcdi-xferd` checks on `/xfer/` requests (it exits at start without it). The workspace user can read it as well; the broker's transfer claim is the authoritative check (ADR 0009 §5) |
 
   One trailing line ending (`\n` or `\r\n`) on `password`/`username` is
   ignored — the value itself is used verbatim; an empty `password` is
@@ -250,50 +251,24 @@ pod (the image depends on none, so any pod-level setting works unchanged),
 home on the data volume, and the endpoint/credential contract above. The
 desktop adds no listener, no capability and no setuid/setgid file.
 
-### Upgrading an existing desktop workspace
+### Budgets
 
-A workspace moves to this image when its template's `spec.linux.image`
-digest changes; the pod is recreated, so the running session restarts
-(open windows are lost, as with any restart) and the **retained home is
-reused as it is**. What an old openbox/xterm session left in that home
-(listed from a real old-image run): `.Xauthority`, `.bashrc`/`.profile`/
-`.bash_logout`, `.cache/fontconfig`, `.cache/openbox/`, `.vnc/*` (a stale pid
-file, `kasmvnc.yaml`, `passwd`) and the `.kasmpasswd` symlink — there was no
-`~/.config` at all. On the first XFCE start:
+Measured 2026-10-03 with trivy 0.70.0 and Docker 29.8 on an 8-core host.
 
-- XFCE creates `~/.config/xfce4` and `~/.config/Thunar`, `~/.cache/sessions`,
-  `~/.local`, `~/.dbus` and `~/Desktop`; it reads the system defaults from
-  `/etc/xdg/xfce4` until the user changes a setting. Nothing that was in the
-  home is modified or deleted (asserted file-by-file).
-- The openbox leftovers (`~/.cache/openbox`, a user's own
-  `~/.config/openbox/rc.xml`) are ignored, not removed. `~/.Xresources` was
-  read by xterm only; the XFCE session does not load it.
-- A stale `~/.vnc/xstartup`, `~/.vnc/kasmvnc.yaml` or credential file cannot
-  take over: the entrypoint passes the session explicitly and rewrites the
-  config and the credential link on every boot (runtime contract).
-- The stale `.vnc/<host>:1.pid` and `.Xauthority` are replaced by KasmVNC.
+| | `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` | `browser` |
+|---|---|---|---|
+| Image size (uncompressed / compressed) | 1204 MiB / 290 MB | 599 MiB / 142 MB | 1.743 GiB |
+| Packages (dpkg) | 384 | 253 | 376 (added `fonts-noto-core`, `fonts-noto-mono`, `fonts-wqy-microhei`) |
+| trivy HIGH/CRITICAL **with a fix** (the gate) | 0 | 0 | 0 |
+| trivy HIGH/CRITICAL total (CRITICAL + HIGH, unfixed in bookworm) | 16 + 140 | 14 + 94 | 17 + 153 |
+| Idle CPU of a fresh session (mean over 60 s, after 45 s) | 14 mCPU | — | unchanged |
+| Idle memory (working set) | 98 MiB | — | unchanged |
+| Time to first frame (container start → panel/`xterm` window mapped) | 2.3 s | — | unchanged |
+| Time to healthy (the 5 s healthcheck interval dominates) | 5.4 s | — | unchanged |
 
-`TestLinuxRuntimeDesktop/UpgradeFromOpenboxHome` seeds a volume with exactly
-that state plus user files and stale hijack attempts, boots the desktop on it
-(read-only root), and checks the panel and desktop come up, no `xterm` takes
-over, every pre-existing file is byte-identical, and a second stop/start works.
-
-### Budgets (V3.26, measured 2026-10-03, trivy 0.70.0, Docker 29.8, 8-core host)
-
-| | old `linux-desktop` (openbox + xterm) | new `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` (new) | `browser` before → after |
-|---|---|---|---|---|
-| Image size (uncompressed / compressed) | 790 MiB / 199 MB | 1204 MiB / 290 MB | 599 MiB / 142 MB | 1.726 GiB → 1.743 GiB (+0.99 %) |
-| Packages (dpkg) | 328 | 384 | 253 | 373 → 376 (added `fonts-noto-core`, `fonts-noto-mono`, `fonts-wqy-microhei`) |
-| trivy HIGH/CRITICAL **with a fix** (the gate) | 0 | 0 | 0 | 0 → 0 |
-| trivy HIGH/CRITICAL total (CRITICAL + HIGH, unfixed in bookworm) | 17 + 150 | 16 + 140 | 14 + 94 | 17 + 153 → 17 + 153 |
-| Idle CPU of a fresh session (mean over 60 s, after 45 s) | 14 mCPU | 14 mCPU | — | unchanged |
-| Idle memory (working set) | 37 MiB | 98 MiB | — | unchanged |
-| Time to first frame (container start → panel/`xterm` window mapped) | 2.4 s | 2.3 s | — | unchanged |
-| Time to healthy (the 5 s healthcheck interval dominates) | 5.4 s | 5.4 s | — | unchanged |
-
-**Fonts (added 2026-10-03; the size and package rows above include them,
-the trivy rows predate them — the runtime-train scan re-measures on
-publish).** `linux-base` ships `fontconfig`, `fonts-dejavu-core`,
+**Fonts.** The size and package rows above include the fonts; the
+runtime-train scan measures the trivy rows on every publish.
+`linux-base` ships `fontconfig`, `fonts-dejavu-core`,
 `fonts-noto-core` trimmed to the eight Latin/Greek/Cyrillic faces
 (Sans and Serif × Regular/Bold/Italic — Vietnamese included; the
 package's other ~260 script faces are deleted), `fonts-noto-mono`
@@ -306,7 +281,7 @@ becomes the default `monospace` face. The CJK choice is a budget decision: image
 this table (and in `TestLinuxRuntimeBrowserBaseline`) is
 `docker image inspect .Size`, which on the containerd store counts
 ≈1.8× the bytes of added files. Measured against the browser's +2 %
-headroom (~35 MiB over the pre-split baseline then; `fonts-noto-mono`
+headroom (~35 MiB over the baseline; `fonts-noto-mono`
 left ~18 MiB): full `fonts-noto-cjk`
 adds ~89 MiB unpacked (~160 MiB on the metric) — far over; the
 `NotoSansCJK-Regular.ttc` face alone adds ~35 MiB (+2.39 % measured —
@@ -316,7 +291,7 @@ correct coverage, not native typography). Proper Noto CJK therefore
 needs a baseline re-issue by decision; the baseline cannot absorb added
 software under its own rule.
 
-**Transfer helper (added 2026-10-14, F4).** `linux-base` ships the static
+**Transfer helper.** `linux-base` ships the static
 `tcdi-xferd` helper (`/usr/local/bin/tcdi-xferd`, built with
 `-trimpath -ldflags="-s -w"`): one 6.95 MB layer, which `browser` and
 `linux-desktop` inherit; no other package or software change. Measured on
@@ -324,7 +299,7 @@ the containerd `.Size` metric `TestLinuxRuntimeBrowserBaseline` uses, the
 browser image is 1,899,976,992 bytes against the 1,890,040,137 baseline
 (+0.53 %, inside the 2 % headroom), so the baseline is untouched.
 
-Under use (measured on the new desktop): opening a terminal, Thunar and
+Under use (measured on the desktop): opening a terminal, Thunar and
 Firefox (three tabs) bursts to ~2 CPU for ~40 s while Firefox starts, then
 settles at 20–40 mCPU and a **555 MiB working set** (peak 888 MiB including
 page cache). Scripted mouse and keyboard input into a terminal for five
@@ -468,7 +443,7 @@ before changing anything under `build/linux-*`/`build/browser`.
   and a file saved in the home survives `docker stop`/`start` and a
   recreate on the same volume.
 - `TestLinuxRuntimeBrowserBaseline` — the browser image stays within 2 % of
-  the pre-split package count and size
+  the recorded baseline package count and size
   (`tests/integration/testdata/browser-image-baseline.json`; refresh it only
   in the PR that repins the engines).
 - `TestLinuxRuntimeFirefoxFallback` covers the `TCDI_BROWSER=firefox`
@@ -483,7 +458,10 @@ before changing anything under `build/linux-*`/`build/browser`.
 
 ## Scan results
 
-### 2026-10-03 (V3.26: base split + XFCE desktop) — trivy 0.70.0, syft 1.52.0, DB latest
+### Current images
+
+Scanned 2026-10-03 with trivy 0.70.0 and syft 1.52.0 (DB latest) — the
+base-split build with the XFCE desktop.
 
 > Later the same day `linux-base` gained four font packages
 > (`fontconfig`, `fonts-noto-core`, `fonts-noto-mono`,
@@ -498,36 +476,10 @@ before changing anything under `build/linux-*`/`build/browser`.
 | `browser` | 375 | 0 | 17 / 153 |
 
 The gate (`--severity CRITICAL,HIGH --ignore-unfixed`, no `.trivyignore`
-entry) is clean on all three. Dispositions are as before: every remaining
+entry) is clean on all three. Dispositions: every remaining
 finding is an OS package on bookworm with no fixed version, and the Firefox ESR
 findings that exist at the pinned version are covered by the freshness check
-(the desktop's pin is checked against the browser's). For comparison the old openbox/xterm `linux-desktop` scanned at 17 CRITICAL / 150
-HIGH (also 0 with a fix): moving the shared layers into the base did not add
-findings, and the XFCE packages bring none the gate can act on.
-
-### 2026-09-30 (before the split) — syft 1.52.0 / grype 0.119.0
-
-
-- SBOMs captured 330 / 375 packages (old linux-desktop / browser).
-- Vulnerability scans (grype) from the same scan pass:
-  - linux-desktop: 748 matches — Critical 42, High 168 (18 unique critical
-    CVEs).
-  - browser: 1163 matches — Critical 101, High 286 (43 unique critical CVEs,
-    incl. 17 Chromium + 8 Firefox-ESR engine CVEs at the pinned versions).
-  - **Disposition:** every Critical is an OS package on Debian bookworm with
-    fix state `wont-fix`/`not-fixed` — no fixed version exists in bookworm,
-    so no upgrade action is available; the exposure is inherent to the
-    locked base distro. Engine CVEs are the real surface and are mitigated
-    by the mandatory sandbox (measured), non-root/cap-drop runtime, and the
-    gateway being the only ingress. Re-scan on each base-digest refresh.
-- License scan (syft concluded/declared fields): Debian copyright is
-  free-form, so ~2/3 of packages report NOASSERTION — full license audit is
-  out of scan scope. Known upstream licenses of the shipped differentiators:
-  KasmVNC GPL-2.0 (design §10 NOTICE/source obligations), Chromium BSD-3,
-  Firefox MPL-2.0, all Debian packages DFSG-free.
-- Secret-redaction: container logs + `docker inspect .Config.Env` carry zero
-  secret bytes (verified by container-log and inspect review); `Config.Env` = PATH,HOME
-  only.
+(the desktop's pin is checked against the browser's).
 
 ## Image digests
 
@@ -563,19 +515,18 @@ image digest with `cosign verify`.
   newest build of each package, so once a newer one lands the pinned
   version no longer exists and `apt-get install pkg=<pin>` fails with
   `Version '<pin>' for '<pkg>' was not found` — masked while the build
-  cache still holds the layer (FX-R15: firefox-esr 140.16.0esr vanished
-  and the images workflow went red on the first cache miss). The freshness
+  cache still holds the layer. The freshness
   check covers **both** engines and reports that state as "pinned version
   gone".
 - `network.udp` KasmVNC keys are left at upstream defaults; the streaming
-  contract is websocket-only (G4a). UDP/WebRTC relay is not exercised.
+  contract is websocket-only. UDP/WebRTC relay is not exercised.
 - Clipboard DLP in the system config is fully off and stays the
   fail-closed floor; the workspace's `spec.clipboardPolicy` reaches the
   pod as `TCDI_CLIPBOARD_POLICY` and the entrypoint renders the real
   `data_loss_prevention.clipboard` block into `$HOME/.vnc/kasmvnc.yaml`
   (merges after `/etc` and wins) — unset/unknown renders Disabled.
 - The browser profile's Chromium sandbox needs the node security-profile
-  pair (platform prerequisite C1); without it use `TCDI_BROWSER=firefox`
+  pair (platform prerequisite — `docs/compatibility.md`); without it use `TCDI_BROWSER=firefox`
   (reduced isolation — seccomp-bpf only, no userns layer).
 - `/run/tcdi` must be writable by uid 1000 (tmpfs uid/gid mount options or
   k8s `emptyDir` + `fsGroup`); the entrypoint fails fast otherwise.

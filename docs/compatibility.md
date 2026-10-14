@@ -72,7 +72,7 @@ containerd 2.x, Cilium 1.20, and
 6. **Fixture != product** — session-scoped lease is proven; binding to
    (workspaceUID, runtimeGeneration, runtimeUID) is the locked contract.
 
-## `hostUsers: false` — default since v0.2 (D26 / R1)
+## hostUsers: false (default)
 
 Verified 2026-10-02 on the reference environment (Kubernetes
 v1.37.0+rke2r1, worker kernel 6.8.0-139-generic, containerd 2.3.4): all
@@ -82,10 +82,10 @@ with `workspace:workspace` ownership via idmapped mounts), the browser
 image with the Localhost seccomp + AppArmor node profiles (Chromium
 renderers run with a nested user namespace and `Seccomp: 2`), and a
 `kasmweb/chromium` catalog image behind the injected adapter. This is the
-authoritative R1 result: `hostUsers: false` has been the shipped default
-since v0.2 — the chart sets `runtime.hostUsers: false` (the operator's
+reference result: `hostUsers: false` is the shipped default
+— the chart sets `runtime.hostUsers: false` (the operator's
 `--runtime-host-users=false`), and a template's `spec.linux.hostUsers`
-(D24) still overrides it per workspace.
+still overrides it per workspace.
 
 ## Sandboxed runtimes (`runtimeClassName`)
 
@@ -127,7 +127,7 @@ BasicAuth + websocket + RFB exchange the gateway performs.
 Installing a runtime on nodes is outside the chart: the results above
 cover `runtimeClassName` pass-through plus the workload. The reference
 environment still offers only `crun`, `nvidia` and `nvidia-experimental`,
-so the E12 sandboxed-runtime matrix stays advisory — the weekly workflow
+so the sandboxed-runtime matrix stays advisory — the weekly workflow
 keeps it current. Operator guidance until then: the gVisor result is
 usable for the desktop workload but the shipped browser image's Firefox
 aborts under runsc (see the Firefox row); a gVisor-supported browser
