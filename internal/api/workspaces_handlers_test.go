@@ -224,7 +224,7 @@ func (f *fakeCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 			return TemplateEntry{
 				ID: id, Name: e.Name, Revision: e.Revision,
 				Runtime: e.Runtime, Experience: e.Experience,
-				CPUMillis: 2000, MemoryMiB: 4096, StorageGiB: 20,
+				CPUMillis: 2000, MemoryMiB: 4096, MemoryBytes: 4096 << 20, StorageGiB: 20, StorageBytes: 20 << 30,
 				IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
 				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled", NetworkProfile: "InternetOnly",
 				PublishedAt: time.Now().UTC(),
@@ -852,5 +852,36 @@ func TestListWorkspaces_BadCursor(t *testing.T) {
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
 	if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 		t.Fatalf("bad cursor key: status=%d code=%s, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
+	}
+}
+
+// exactCatalog serves one template whose memory and storage are not whole
+// MiB/GiB — the reservation must carry the exact bytes (R1-20).
+type exactCatalog struct{ fakeCatalog }
+
+func (c *exactCatalog) Resolve(ctx context.Context, tenantID, id string) (TemplateEntry, error) {
+	e, err := c.fakeCatalog.Resolve(ctx, tenantID, id)
+	if err != nil {
+		return e, err
+	}
+	e.MemoryMiB, e.MemoryBytes = 1536, 1536<<20+4096
+	e.StorageGiB, e.StorageBytes = 0, 512<<20
+	return e, nil
+}
+
+func TestCreateWorkspace_ReservesExactTemplateBytes(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, &exactCatalog{*defaultCatalog()}, defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"exact-bytes","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-exact-1000"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusCreated || len(be.gotCreate) != 1 {
+		t.Fatalf("create status=%d creates=%d", r.StatusCode, len(be.gotCreate))
+	}
+	v := be.gotCreate[0].Vector
+	if v.MemoryBytes != 1536<<20+4096 || v.DiskBytes != 512<<20 {
+		t.Fatalf("reserved memory=%d disk=%d, want the exact template bytes %d / %d", v.MemoryBytes, v.DiskBytes, 1536<<20+4096, 512<<20)
 	}
 }

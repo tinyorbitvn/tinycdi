@@ -80,7 +80,10 @@ type TemplateEntry struct {
 	Experience    string
 	CPUMillis     int64
 	MemoryMiB     int64
-	StorageGiB    int64
+	// MemoryBytes is the untruncated memory size; MemoryMiB is the same
+	// value rounded down for the public view. Reservations use the bytes.
+	MemoryBytes int64
+	StorageGiB  int64
 	// StorageBytes is the untruncated disk size; StorageGiB is the same
 	// value rounded down for the public view.
 	StorageBytes           int64
@@ -536,8 +539,8 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,
 		CPUMillis:    tpl.CPUMillis,
-		MemoryBytes:  tpl.MemoryMiB << 20,
-		DiskBytes:    tpl.StorageGiB << 30,
+		MemoryBytes:  tpl.MemoryBytes,
+		DiskBytes:    tpl.StorageBytes,
 	}
 	sum := sha256.Sum256(body)
 	var rec provisioning.WorkspaceRecord

@@ -782,7 +782,7 @@ func (staticCatalog) Resolve(_ context.Context, tenantID, id string) (api.Templa
 	return api.TemplateEntry{
 		ID: "tpl_linuxdesktop", Name: "linux", Revision: 1,
 		Runtime: "LinuxContainer", Experience: "Desktop",
-		CPUMillis: 500, MemoryMiB: 1024, StorageGiB: 1,
+		CPUMillis: 500, MemoryMiB: 1024, MemoryBytes: 1024 << 20, StorageGiB: 1, StorageBytes: 1 << 30,
 		IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
 		DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled",
 		PublishedAt: time.Now().UTC(),

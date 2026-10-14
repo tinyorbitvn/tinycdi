@@ -401,8 +401,8 @@ func (h *DataHandler) Attach(w http.ResponseWriter, r *http.Request) {
 		Vector: provisioning.ResourceVector{
 			RunningSlots: 1,
 			CPUMillis:    tpl.CPUMillis,
-			MemoryBytes:  tpl.MemoryMiB << 20,
-			DiskBytes:    tpl.StorageGiB << 30,
+			MemoryBytes:  tpl.MemoryBytes,
+			DiskBytes:    tpl.StorageBytes,
 		},
 		DesiredState: req.DesiredState,
 	}, sum[:])

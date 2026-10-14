@@ -1125,6 +1125,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		Experience:             e.Experience,
 		CPUMillis:              e.CPUMillis,
 		MemoryMiB:              e.MemoryBytes >> 20,
+		MemoryBytes:            e.MemoryBytes,
 		StorageGiB:             e.DiskBytes >> 30,
 		StorageBytes:           e.DiskBytes,
 		IdleTimeoutSeconds:     int64(e.IdleTimeout / time.Second),
