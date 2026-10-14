@@ -289,7 +289,17 @@ rows, so replicas starting together write once.
   `managedNamespaces`, is left exactly as it is — an existing row (for
   example one set by SQL, see `capacity.md`) survives. `helm install` /
   `upgrade` NOTES print a warning for every tenant without a `quota` block
+  (a `quotaCeiling`-only tenant has no row until its admin sets one)
   because its creates are refused unless a row already exists.
+- **Delegating to tenant admins.** A tenant administrator can set the
+  tenant's quota through the portal (`PUT /v1/admin/tenants/{tenant}/quota`)
+  only when the entry declares a `quotaCeiling` block (same four keys as
+  `quota`; an entry carries one or the other). The chart renders those
+  blocks as `-tenant-quota-ceilings`. A write above the ceiling, or for a
+  tenant with neither block, is refused with `409 QUOTA_ABOVE_CEILING`, so a
+  tenant left without a quota stays fail-closed (`QUOTA_NOT_CONFIGURED`)
+  until the operator acts. The ceiling bounds the API-layer quota only;
+  `namespaceQuota` bounds the namespace in the apiserver.
 - **Declared values win.** For a tenant that has a `quota` block, the chart
   value overwrites a hand-edited row at the next backend start. Change the
   value in `values.yaml`, not in the database.

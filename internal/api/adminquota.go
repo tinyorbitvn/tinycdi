@@ -169,17 +169,42 @@ type adminQuotaView struct {
 	Source     string        `json:"source"`
 	Limits     *quotaAmounts `json:"limits,omitempty"`
 	Usage      quotaAmounts  `json:"usage"`
+	// Ceiling is the operator-declared upper bound on tenant-admin writes
+	// (-tenant-quota-ceilings); absent when none is declared, and then the
+	// quota cannot be written through this API at all.
+	Ceiling *quotaCeilingView `json:"ceiling,omitempty"`
+}
+
+// quotaCeilingView is a declared ceiling in display units (openapi
+// AdminQuotaLimits); byte amounts round down like every quota view.
+type quotaCeilingView struct {
+	RunningWorkspaces int64 `json:"runningWorkspaces"`
+	CPUMillicores     int64 `json:"cpuMillicores"`
+	MemoryMib         int64 `json:"memoryMib"`
+	StorageGib        int64 `json:"storageGib"`
+}
+
+// ceilingFields names, per ResourceVector.Exceeds dimension, the request
+// field a QUOTA_ABOVE_CEILING refusal points at.
+var ceilingFields = map[string]string{
+	"runningSlots": "runningWorkspaces",
+	"cpuMillis":    "cpuMillicores",
+	"memoryBytes":  "memoryMib",
+	"diskBytes":    "storageGib",
 }
 
 // AdminQuotaHandler implements GET and PUT on
 // /v1/admin/tenants/{tenant}/quota. managed is the set of tenant IDs
 // declared in -tenant-quotas: their rows are config-owned, so writes are
-// refused with QUOTA_MANAGED_BY_CONFIG.
+// refused with QUOTA_MANAGED_BY_CONFIG. ceilings holds the operator-declared
+// upper bounds from -tenant-quota-ceilings: a write above its tenant's
+// ceiling, or for a tenant without one, is refused with QUOTA_ABOVE_CEILING.
 type AdminQuotaHandler struct {
-	source  AdminQuotaSource
-	tenants TenantResolver
-	managed map[string]bool
-	maxBody int64
+	source   AdminQuotaSource
+	tenants  TenantResolver
+	managed  map[string]bool
+	ceilings map[string]provisioning.ResourceVector
+	maxBody  int64
 	// audit is the dedicated audit-event sink the admin routes emit
 	// through (nil = no domain audit events).
 	audit observability.AuditSink
@@ -189,6 +214,13 @@ type AdminQuotaHandler struct {
 // dedicated audit events to.
 func (h *AdminQuotaHandler) WithAuditSink(s observability.AuditSink) *AdminQuotaHandler {
 	h.audit = s
+	return h
+}
+
+// WithQuotaCeilings sets the operator-declared per-tenant ceilings. A nil
+// or empty map declares none, so every tenant-admin quota write is refused.
+func (h *AdminQuotaHandler) WithQuotaCeilings(c map[string]provisioning.ResourceVector) *AdminQuotaHandler {
+	h.ceilings = c
 	return h
 }
 
@@ -256,6 +288,14 @@ func (h *AdminQuotaHandler) view(tenantID string, rep store.QuotaReport) adminQu
 		limits := mapQuotaAmounts(rep.Limits)
 		out.Limits = &limits
 	}
+	if c, ok := h.ceilings[tenantID]; ok {
+		out.Ceiling = &quotaCeilingView{
+			RunningWorkspaces: c.RunningSlots,
+			CPUMillicores:     c.CPUMillis,
+			MemoryMib:         c.MemoryBytes >> 20,
+			StorageGib:        c.DiskBytes >> 30,
+		}
+	}
 	return out
 }
 
@@ -294,8 +334,9 @@ func (h *AdminQuotaHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Put handles PUT /v1/admin/tenants/{tenant}/quota: it replaces the
 // tenant's limits, provided the tenant is not declared in -tenant-quotas
-// (config-managed rows answer 409 QUOTA_MANAGED_BY_CONFIG) and If-Match
-// names the current ETag (428 PRECONDITION_REQUIRED without it, 412
+// (config-managed rows answer 409 QUOTA_MANAGED_BY_CONFIG), the limits stay
+// within the tenant's -tenant-quota-ceilings entry (409 QUOTA_ABOVE_CEILING
+// above it or without one) and If-Match names the current ETag (428 PRECONDITION_REQUIRED without it, 412
 // PRECONDITION_FAILED when stale; "*" creates only a missing row). The
 // store re-checks the version in the UPDATE, so a write racing past the
 // handler's check is a 412 too. Limits below current usage are accepted —
@@ -333,6 +374,21 @@ func (h *AdminQuotaHandler) Put(w http.ResponseWriter, r *http.Request) {
 	auditSetDetail(r.Context(), "cpu_millicores", strconv.FormatInt(v.CPUMillis, 10))
 	auditSetDetail(r.Context(), "memory_mib", strconv.FormatInt(v.MemoryBytes>>20, 10))
 	auditSetDetail(r.Context(), "storage_gib", strconv.FormatInt(v.DiskBytes>>30, 10))
+	// The operator owns the upper bound: a tenant admin may write any
+	// quota up to the declared ceiling (inclusive) and nothing without one,
+	// so the fail-closed QUOTA_NOT_CONFIGURED default cannot be lifted
+	// without bound.
+	ceiling, ok := h.ceilings[tenant]
+	if !ok {
+		writeError(w, r, CodeQuotaAboveCeiling,
+			"no quota ceiling is declared for this tenant; the platform operator must declare one before the quota can be set here")
+		return
+	}
+	if dim := v.Exceeds(provisioning.ResourceVector{}, ceiling); dim != "" {
+		writeError(w, r, CodeQuotaAboveCeiling,
+			ceilingFields[dim]+" is above the quota ceiling the platform operator declared for this tenant")
+		return
+	}
 	cur, err := h.source.Report(r.Context(), tenant)
 	if err != nil {
 		writeStoreError(w, r, err)

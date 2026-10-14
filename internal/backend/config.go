@@ -115,6 +115,7 @@ type Config struct {
 	DBSSLMode            string // resolved sslmode label, for logging
 	TenantNamespaces     string
 	TenantQuotas         string // JSON; see provisioning.ParseTenantQuotas
+	TenantQuotaCeilings  string // JSON, same shape; bounds tenant-admin quota writes
 	SessionIdle          time.Duration
 	Kubeconfig           string
 	ExpiryInterval       time.Duration
@@ -291,6 +292,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TenantNamespaces, "tenant-namespaces", envOr(getenv, "TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
 	fs.StringVar(&c.TenantQuotas, "tenant-quotas", envOr(getenv, "TCDI_TENANT_QUOTAS", ""),
 		"declared tenant quotas as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; the singleton leader upserts exactly the listed tenants at startup, unlisted tenants are untouched (env TCDI_TENANT_QUOTAS)")
+	fs.StringVar(&c.TenantQuotaCeilings, "tenant-quota-ceilings", envOr(getenv, "TCDI_TENANT_QUOTA_CEILINGS", ""),
+		"operator ceilings on tenant-admin quota writes as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; a tenant-admin quota write above its tenant's ceiling, or for a tenant without one, is refused (env TCDI_TENANT_QUOTA_CEILINGS)")
 	fs.DurationVar(&c.SessionIdle, "session-idle", envDur(getenv, "TCDI_SESSION_IDLE", 30*time.Minute), "session idle timeout")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", envOr(getenv, "KUBECONFIG", ""), "kubeconfig path (default: in-cluster)")
 	fs.DurationVar(&c.ExpiryInterval, "expiry-interval", envDur(getenv, "TCDI_EXPIRY_INTERVAL", 30*time.Second),
@@ -422,8 +425,8 @@ func (c *Config) validate() error {
 	if c.Listen == "" && c.SessionListen == "" && c.InternalListen == "" && c.MetricsListen == "" {
 		return errors.New("no listeners enabled: at least one of -listen, -session-listen, -internal-listen, -metrics-listen must be set")
 	}
-	if _, err := provisioning.ParseTenantQuotas(c.TenantQuotas); err != nil {
-		return fmt.Errorf("-tenant-quotas: %w", err)
+	if err := validateTenantQuotaFlags(c.TenantQuotas, c.TenantQuotaCeilings); err != nil {
+		return err
 	}
 	if len(c.TenantAdminGroups) == 0 {
 		// Unreachable through ParseFlags (the default lands first and
@@ -570,6 +573,30 @@ func (c *Config) validate() error {
 		u, err := url.Parse(o)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("bad portal-origin %q (want scheme://host[:port])", o)
+		}
+	}
+	return nil
+}
+
+// validateTenantQuotaFlags parses -tenant-quotas and -tenant-quota-ceilings.
+// A tenant may appear in only one: a declared quota is read-only, so a
+// ceiling on it would never apply.
+func validateTenantQuotaFlags(quotas, ceilings string) error {
+	q, err := provisioning.ParseTenantQuotas(quotas)
+	if err != nil {
+		return fmt.Errorf("-tenant-quotas: %w", err)
+	}
+	c, err := provisioning.ParseTenantQuotas(ceilings)
+	if err != nil {
+		return fmt.Errorf("-tenant-quota-ceilings: %w", err)
+	}
+	declared := make(map[string]bool, len(q))
+	for _, e := range q {
+		declared[e.TenantID] = true
+	}
+	for _, e := range c {
+		if declared[e.TenantID] {
+			return fmt.Errorf("-tenant-quota-ceilings: tenant %q also has a quota in -tenant-quotas, which is read-only; declare one or the other", e.TenantID)
 		}
 	}
 	return nil

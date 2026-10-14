@@ -241,7 +241,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithQuotaCeilings(testQuotaCeilings).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink).WithApply(&fakeApplyBackend{restarted: map[string]int64{}, live: map[string]bool{}}, fakeRunningPolicies{}, nil))
 	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(

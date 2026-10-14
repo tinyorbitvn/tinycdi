@@ -197,7 +197,7 @@ Emitted events:
 
 | `action` | Source | Covers |
 |---|---|---|
-| `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals and `QUOTA_MANAGED_BY_CONFIG` rejections; `details` carry the attempted limits |
+| `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals, `QUOTA_MANAGED_BY_CONFIG` and `QUOTA_ABOVE_CEILING` rejections; `details` carry the attempted limits |
 | `admin.user_limit.get` / `.set` / `.clear` / `.default.get` / `.default.set` / `.default.clear` | `GET`/`PUT`/`DELETE /v1/admin/tenants/{t}/user-limits` and `GET`/`PUT .../default` | tenant-admin per-principal limit reads/writes — including denied attempts (denied pre-decode writes record the `.set` attempt action); `details` carry the pseudonymized `owner` ref and attempted `max_running` |
 | `admin.session_policy.get` / `.set` / `.clear` | `GET`/`PUT /v1/admin/tenants/{t}/session-policy` | session-ceiling reads/writes — an all-`FollowTemplate` body records `.clear` |
 | `admin.session_policy.apply` | `POST /v1/admin/tenants/{t}/session-policy:apply` | apply-now runs, dry runs included — `details` carry `dryRun`, `includeActive`, `affected` and `restarted` |

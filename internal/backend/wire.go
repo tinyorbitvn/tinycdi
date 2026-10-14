@@ -745,8 +745,19 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	for _, q := range declaredQuotas {
 		managedQuotas[q.TenantID] = true
 	}
+	// -tenant-quota-ceilings bounds tenant-admin quota writes; a tenant
+	// without a declared ceiling cannot have its quota set through the API.
+	declaredCeilings, err := provisioning.ParseTenantQuotas(cfg.TenantQuotaCeilings)
+	if err != nil {
+		return fmt.Errorf("-tenant-quota-ceilings: %w", err)
+	}
+	quotaCeilings := make(map[string]provisioning.ResourceVector, len(declaredCeilings))
+	for _, q := range declaredCeilings {
+		quotaCeilings[q.TenantID] = q.Limits
+	}
 	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), tenants, managedQuotas).
-		WithAuditSink(appAudit)
+		WithAuditSink(appAudit).
+		WithQuotaCeilings(quotaCeilings)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
 	// The tenant session-policy ceiling (ADR 0009 §4): API-managed rows

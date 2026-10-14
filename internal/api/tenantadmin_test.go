@@ -79,7 +79,7 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountWorkspaceRoutes(mux, a, NewWorkspaceHandler(fx.be, defaultCatalog(), defaultTenants()), nil)
 	MountDataRoutes(mux, a, NewDataHandler(fx.fs, defaultCatalog(), defaultTenants()))
 	MountQuotaRoutes(mux, a, NewQuotaHandler(fx.qs, defaultTenants()))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, defaultTenants(), nil))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, defaultTenants(), nil).WithQuotaCeilings(testQuotaCeilings))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(fx.uls, nil, defaultTenants()))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(fx.sps, defaultTenants()))
 	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(&fakeLeaseSource{}, nil, &fakePrincipalRevoker{}, defaultTenants()))

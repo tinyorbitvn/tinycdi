@@ -149,6 +149,12 @@ spec:
             # tenant_quota rows at startup; unlisted tenants are untouched.
             - {{ printf "-tenant-quotas=%s" $tenantQuotas | quote }}
             {{- end }}
+            {{- $tenantQuotaCeilings := include "tinycdi.tenantQuotaCeilings" . }}
+            {{- if $tenantQuotaCeilings }}
+            # managedNamespaces[].quotaCeiling: the highest quota a tenant
+            # admin may set through the admin quota API.
+            - {{ printf "-tenant-quota-ceilings=%s" $tenantQuotaCeilings | quote }}
+            {{- end }}
             {{- if .Values.oidc.requiredGroups }}
             - --required-groups={{ join "," .Values.oidc.requiredGroups }}
             {{- end }}

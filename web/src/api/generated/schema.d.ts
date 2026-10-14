@@ -525,7 +525,12 @@ export interface paths {
          * @description Replaces the tenant's quota limits for tenants **not** declared in
          *     `-tenant-quotas`; a declared tenant answers
          *     `409 QUOTA_MANAGED_BY_CONFIG` and must be changed through the
-         *     platform configuration. Limits below current usage are accepted:
+         *     platform configuration. For any other tenant the limits must stay
+         *     within the ceiling the platform operator declared for it
+         *     (`managedNamespaces[].quotaCeiling`, backend flag
+         *     `-tenant-quota-ceilings`); a value above it, or any write for a
+         *     tenant without a declared ceiling, answers
+         *     `409 QUOTA_ABOVE_CEILING`. Limits below current usage are accepted:
          *     held reservations stay, new ones are refused — a lowered limit
          *     therefore takes effect without forcing a release. Requires the
          *     tenant-admin role on the named tenant, the `X-CSRF-Token` header
@@ -1022,6 +1027,7 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. A refusal by a per-principal running limit carries `details.reason: UserLimitReached` with `details.params.limit`/`details.params.current`. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried. A `UserLimitReached` refusal can likewise carry `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
+         *     | `QUOTA_ABOVE_CEILING` | 409 | false | a tenant-admin quota write exceeds the ceiling the platform operator declared for the tenant (`-tenant-quota-ceilings`), or no ceiling is declared so the quota cannot be set through the API; the message names the field |
          *     | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
          *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
@@ -1033,7 +1039,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /**
          * @description Uniform error envelope returned for every 4xx/5xx response — the body
          *     is the single key `error` carrying an `ErrorBody`.
@@ -1375,7 +1381,10 @@ export interface components {
          *     absent when the tenant has no quota row (`configured: false`,
          *     `source: none` — or `config` while a declared row is still pending
          *     the startup upsert). The row's version travels as the `ETag`
-         *     response header.
+         *     response header. `ceiling` is the operator-declared upper bound on
+         *     writes through this API, in display units (rounded down); it is
+         *     absent when none is declared, and then `PUT` answers
+         *     `QUOTA_ABOVE_CEILING`.
          */
         AdminQuotaView: {
             tenant: string;
@@ -1388,6 +1397,7 @@ export interface components {
             source: components["schemas"]["QuotaSource"];
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
+            ceiling?: components["schemas"]["AdminQuotaLimits"];
         };
         /**
          * @description One page of per-principal running-workspace limits, ordered by

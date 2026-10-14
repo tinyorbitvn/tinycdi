@@ -84,6 +84,19 @@ imagePullSecrets:
 {{- if $quotas }}{{ toJson $quotas }}{{ end -}}
 {{- end }}
 
+{{/* JSON array for the backend -tenant-quota-ceilings flag: one entry per
+     managedNamespaces entry that carries a quotaCeiling block. Empty when no
+     entry declares one — every tenant-admin quota write is then refused. */}}
+{{- define "tinycdi.tenantQuotaCeilings" -}}
+{{- $ceilings := list -}}
+{{- range .Values.managedNamespaces -}}
+{{- if .quotaCeiling -}}
+{{- $ceilings = append $ceilings (dict "tenant" .tenant "runningWorkspaces" .quotaCeiling.runningWorkspaces "cpu" .quotaCeiling.cpu "memory" .quotaCeiling.memory "storage" .quotaCeiling.storage) -}}
+{{- end -}}
+{{- end -}}
+{{- if $ceilings }}{{ toJson $ceilings }}{{ end -}}
+{{- end }}
+
 {{/* Comma-separated tenant names for the backend TCDI_TENANT_ALLOWLIST (session gateway). */}}
 {{- define "tinycdi.tenantAllowlist" -}}
 {{- $names := list -}}
@@ -429,6 +442,7 @@ Install-time invariants. Rendering FAILS when violated:
   "TCDI_UPSTREAM_CA" "backend.upstreamCA.existingSecret"
   "TCDI_OIDC_POST_LOGOUT_REDIRECT" "oidc.postLogoutRedirect"
   "TCDI_TENANT_QUOTAS" "managedNamespaces[].quota"
+  "TCDI_TENANT_QUOTA_CEILINGS" "managedNamespaces[].quotaCeiling"
 -}}
 {{- range $c := list "backend" "operator" "frontend" -}}
 {{- $cv := default dict (index $.Values $c) -}}

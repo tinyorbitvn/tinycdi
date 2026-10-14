@@ -94,7 +94,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, quotaCeiling?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"); `quotaCeiling` instead lets the tenant's admins set the quota up to it; and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
 | `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
@@ -180,6 +180,7 @@ the value to set instead:
 | `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
 | `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
 | `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
+| `TCDI_TENANT_QUOTA_CEILINGS` | `managedNamespaces[].quotaCeiling` |
 
 ### Component-specific highlights
 
@@ -780,6 +781,16 @@ values overwrite a hand-edited row for that tenant at the next backend
 start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
 flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
 usage, refusal codes, changing limits).
+
+**Tenant-admin quota writes.** A tenant administrator can set the tenant's
+quota through the portal (`PUT /v1/admin/tenants/{tenant}/quota`) only when
+the entry declares a `quotaCeiling` block (same four keys as `quota`; an
+entry carries one or the other). The chart renders those blocks as
+`-tenant-quota-ceilings`. A write above the ceiling, or for a tenant with
+neither block, is refused with `409 QUOTA_ABOVE_CEILING`, so a tenant left
+without a quota stays fail-closed (`QUOTA_NOT_CONFIGURED`) until the
+operator acts. The ceiling bounds the API-layer quota only; `namespaceQuota`
+(below) bounds the namespace in the apiserver.
 
 ### Namespace object quotas
 

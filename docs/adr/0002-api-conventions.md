@@ -96,6 +96,7 @@ operation looks like the existing ones and a client can rely on them.
   | `QUOTA_EXHAUSTED` | 409 | no |
   | `QUOTA_NOT_CONFIGURED` | 409 | no |
   | `QUOTA_MANAGED_BY_CONFIG` | 409 | no |
+  | `QUOTA_ABOVE_CEILING` | 409 | no |
   | `CONNECTION_IN_USE` | 409 | no |
   | `IMAGE_STALE` | 409 | no |
   | `PRECONDITION_FAILED` | 412 | no |

@@ -38,7 +38,10 @@ Tenant quotas: WARNING — no managedNamespaces[].quota for tenant(s)
   {{ join ", " $unquoted }}
   Workspace creates for them are refused with QUOTA_NOT_CONFIGURED (409)
   unless a tenant_quota row already exists. Set quota: {runningWorkspaces,
-  cpu, memory, storage} on each entry — see install.md "Tenant quotas".
+  cpu, memory, storage} on each entry, or quotaCeiling (same keys) to let
+  the tenant's admins set a quota up to it — see install.md "Tenant
+  quotas". Also consider managedNamespaces[].namespaceQuota, which bounds
+  the namespace in the apiserver independently of the platform quota.
 {{- end }}
 
 {{- $placement := (default dict (default dict .Values.runtime).placement) }}

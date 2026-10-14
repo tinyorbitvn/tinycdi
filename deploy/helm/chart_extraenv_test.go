@@ -40,6 +40,7 @@ var deniedEnvNames = []string{
 	"TCDI_UPSTREAM_CA",
 	"TCDI_OIDC_POST_LOGOUT_REDIRECT",
 	"TCDI_TENANT_QUOTAS",
+	"TCDI_TENANT_QUOTA_CEILINGS",
 }
 
 // extraEnvSet builds the --set pair for one extraEnv entry.
@@ -97,6 +98,7 @@ func TestExtraEnvDeniedNamesSuggestValue(t *testing.T) {
 		{"backend", "TCDI_UPSTREAM_CA", "backend.upstreamCA"},
 		{"backend", "TCDI_OIDC_POST_LOGOUT_REDIRECT", "oidc.postLogoutRedirect"},
 		{"backend", "TCDI_TENANT_QUOTAS", "managedNamespaces"},
+		{"backend", "TCDI_TENANT_QUOTA_CEILINGS", "managedNamespaces"},
 	}
 	for _, tc := range cases {
 		sets := append([]string{"-f", vf}, nil...)

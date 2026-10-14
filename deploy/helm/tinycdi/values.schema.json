@@ -43,24 +43,13 @@
       "items": {
         "type": "object",
         "required": ["name", "tenant"],
+        "not": {"required": ["quota", "quotaCeiling"]},
         "additionalProperties": false,
         "properties": {
           "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
           "tenant": {"type": "string", "minLength": 1},
-          "quota": {
-            "type": "object",
-            "required": ["runningWorkspaces", "cpu", "memory", "storage"],
-            "additionalProperties": false,
-            "properties": {
-              "runningWorkspaces": {"type": "integer", "minimum": 0},
-              "cpu": {"anyOf": [
-                {"type": "number", "minimum": 0},
-                {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?|\\.[0-9]+|[0-9]+m)$"}
-              ]},
-              "memory": {"$ref": "#/$defs/byteQuantity"},
-              "storage": {"$ref": "#/$defs/byteQuantity"}
-            }
-          },
+          "quota": {"$ref": "#/$defs/tenantQuota"},
+          "quotaCeiling": {"$ref": "#/$defs/tenantQuota"},
           "namespaceQuota": {
             "type": "object",
             "additionalProperties": false,
@@ -538,6 +527,21 @@
     }
   },
   "$defs": {
+    "tenantQuota": {
+      "description": "Tenant quota amounts: runningWorkspaces, cpu (cores or millicores), memory and storage (byte quantities).",
+      "type": "object",
+      "required": ["runningWorkspaces", "cpu", "memory", "storage"],
+      "additionalProperties": false,
+      "properties": {
+        "runningWorkspaces": {"type": "integer", "minimum": 0},
+        "cpu": {"anyOf": [
+          {"type": "number", "minimum": 0},
+          {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?|\\.[0-9]+|[0-9]+m)$"}
+        ]},
+        "memory": {"$ref": "#/$defs/byteQuantity"},
+        "storage": {"$ref": "#/$defs/byteQuantity"}
+      }
+    },
     "labelSelector": {
       "description": "metav1.LabelSelector: matchLabels map and/or matchExpressions with a real operator enum — the operator also validates it with LabelSelectorAsSelector at startup.",
       "type": ["object", "null"],

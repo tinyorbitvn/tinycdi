@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -109,7 +110,7 @@ func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]boo
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	mux := http.NewServeMux()
-	h := NewAdminQuotaHandler(src, defaultTenants(), managed)
+	h := NewAdminQuotaHandler(src, defaultTenants(), managed).WithQuotaCeilings(testQuotaCeilings)
 	for _, o := range opts {
 		o(h)
 	}
@@ -123,15 +124,33 @@ func newAdminQuotaEnv(t *testing.T, src AdminQuotaSource, managed map[string]boo
 }
 
 type adminQuotaViewJSON struct {
-	Tenant     string           `json:"tenant"`
-	Configured bool             `json:"configured"`
-	Source     string           `json:"source"`
-	Limits     quotaAmountsJSON `json:"limits"`
-	Usage      quotaAmountsJSON `json:"usage"`
+	Tenant     string            `json:"tenant"`
+	Configured bool              `json:"configured"`
+	Source     string            `json:"source"`
+	Limits     quotaAmountsJSON  `json:"limits"`
+	Usage      quotaAmountsJSON  `json:"usage"`
+	Ceiling    *quotaAmountsJSON `json:"ceiling"`
 }
 
 const adminQuotaPath = "/v1/admin/tenants/tenant-a/quota"
 const adminQuotaBody = `{"runningWorkspaces":4,"cpuMillicores":8000,"memoryMib":16384,"storageGib":200}`
+
+// testQuotaCeilings is the operator ceiling newAdminQuotaEnv declares for
+// tenant-a: far above every body the other tests send, so only the
+// ceiling tests see it bite.
+var testQuotaCeilings = map[string]provisioning.ResourceVector{
+	"tenant-a": {RunningSlots: 1000, CPUMillis: 1_000_000, MemoryBytes: 1 << 40, DiskBytes: 1 << 50},
+}
+
+// withCeilings replaces the default ceilings (nil = none declared).
+func withCeilings(c map[string]provisioning.ResourceVector) func(*AdminQuotaHandler) {
+	return func(h *AdminQuotaHandler) { h.WithQuotaCeilings(c) }
+}
+
+// ceilingAtBody is the operator ceiling that equals adminQuotaBody.
+var ceilingAtBody = map[string]provisioning.ResourceVector{
+	"tenant-a": {RunningSlots: 4, CPUMillis: 8000, MemoryBytes: 16384 << 20, DiskBytes: 200 << 30},
+}
 
 // loginAdmin logs in a tenant-admin of the issuer's tenant (tenant-a).
 func loginAdmin(t *testing.T, env *testEnv, subject string) (*http.Cookie, *http.Cookie) {
@@ -551,4 +570,101 @@ func TestAdminQuota_Contract(t *testing.T) {
 		Tenant: "acme", Configured: false, Source: QuotaSourceNone,
 		Usage: quotaAmounts{},
 	})
+	requireValid(t, "AdminQuotaView", adminQuotaView{
+		Tenant: "acme", Configured: true, Source: QuotaSourceAPI,
+		Limits: &limits, Usage: usage,
+		Ceiling: &quotaCeilingView{RunningWorkspaces: 8, CPUMillicores: 32000, MemoryMib: 65536, StorageGib: 400},
+	})
+}
+
+// TestAdminQuota_PutAboveOperatorCeilingRefused (R1-02): a tenant admin
+// cannot raise the tenant quota past the operator-declared ceiling — one
+// dimension above it is 409 QUOTA_ABOVE_CEILING and nothing is stored.
+func TestAdminQuota_PutAboveOperatorCeilingRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"running": `{"runningWorkspaces":5,"cpuMillicores":8000,"memoryMib":16384,"storageGib":200}`,
+		"cpu":     `{"runningWorkspaces":4,"cpuMillicores":8001,"memoryMib":16384,"storageGib":200}`,
+		"memory":  `{"runningWorkspaces":4,"cpuMillicores":8000,"memoryMib":16385,"storageGib":200}`,
+		"storage": `{"runningWorkspaces":4,"cpuMillicores":8000,"memoryMib":16384,"storageGib":201}`,
+		"maxint": fmt.Sprintf(`{"runningWorkspaces":%d,"cpuMillicores":%d,"memoryMib":%d,"storageGib":%d}`,
+			int64(math.MaxInt64), int64(math.MaxInt64), int64(math.MaxInt64>>20), int64(math.MaxInt64>>30)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := &fakeAdminQuotaSource{}
+			env := newAdminQuotaEnv(t, src, nil, withCeilings(ceilingAtBody))
+			sess, csrf := loginAdmin(t, env, "admin-a")
+			r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, body,
+				map[string]string{"If-Match": IfMatchCreate})
+			requireErr(t, r, http.StatusConflict, CodeQuotaAboveCeiling, name+" above the ceiling")
+			if src.setCall != 0 {
+				t.Fatalf("a PUT above the ceiling reached SetLimits %d times", src.setCall)
+			}
+		})
+	}
+}
+
+// TestAdminQuota_UndeclaredTenantCreateRefused (R1-02): with no ceiling
+// declared for the tenant, a tenant admin can neither create the quota row
+// (the fail-closed QUOTA_NOT_CONFIGURED default stays) nor change an
+// existing API-managed row.
+func TestAdminQuota_UndeclaredTenantCreateRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		src     *fakeAdminQuotaSource
+		ifMatch func(*fakeAdminQuotaSource) string
+	}{
+		"create": {&fakeAdminQuotaSource{}, func(*fakeAdminQuotaSource) string { return IfMatchCreate }},
+		"update": {&fakeAdminQuotaSource{hasRow: true, limits: store.QuotaAmounts{RunningSlots: 1}},
+			func(s *fakeAdminQuotaSource) string { return ETagOf(s.currentVersion()) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newAdminQuotaEnv(t, tc.src, nil, withCeilings(nil))
+			sess, csrf := loginAdmin(t, env, "admin-a")
+			r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
+				map[string]string{"If-Match": tc.ifMatch(tc.src)})
+			e := decodeErr(t, r)
+			if r.StatusCode != http.StatusConflict || e.Code != CodeQuotaAboveCeiling {
+				t.Fatalf("status=%d code=%q, want 409 QUOTA_ABOVE_CEILING", r.StatusCode, e.Code)
+			}
+			if e.Retryable {
+				t.Fatal("QUOTA_ABOVE_CEILING must not be retryable")
+			}
+			if tc.src.setCall != 0 {
+				t.Fatalf("a PUT without a declared ceiling reached SetLimits %d times", tc.src.setCall)
+			}
+		})
+	}
+}
+
+// TestAdminQuota_PutAtCeilingAccepted (R1-02): the ceiling is inclusive — a
+// write exactly at it is stored — and lowering the quota below current
+// usage under a ceiling is still accepted. The view reports the ceiling.
+func TestAdminQuota_PutAtCeilingAccepted(t *testing.T) {
+	src := &fakeAdminQuotaSource{}
+	env := newAdminQuotaEnv(t, src, nil, withCeilings(ceilingAtBody))
+	sess, csrf := loginAdmin(t, env, "admin-a")
+
+	r := doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath, adminQuotaBody,
+		map[string]string{"If-Match": IfMatchCreate})
+	v := decodeBody[adminQuotaViewJSON](t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("PUT at the ceiling: status=%d, want 200", r.StatusCode)
+	}
+	if v.Ceiling == nil || v.Ceiling.RunningWorkspaces != 4 || v.Ceiling.CPUMillicores != 8000 ||
+		v.Ceiling.MemoryMib != 16384 || v.Ceiling.StorageGib != 200 {
+		t.Fatalf("view ceiling = %+v, want the declared ceiling in display units", v.Ceiling)
+	}
+
+	src.mu.Lock()
+	src.usage = store.QuotaAmounts{RunningSlots: 3, CPUMillis: 6000, MemoryBytes: 12 << 30, DiskBytes: 150 << 30}
+	src.mu.Unlock()
+	r = doReq(t, env, sess, csrf, http.MethodPut, adminQuotaPath,
+		`{"runningWorkspaces":1,"cpuMillicores":1000,"memoryMib":1024,"storageGib":10}`,
+		map[string]string{"If-Match": ETagOf(src.currentVersion())})
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("lowering below usage under a ceiling: status=%d, want 200", r.StatusCode)
+	}
+	if src.setCall != 2 {
+		t.Fatalf("SetLimits calls = %d, want 2", src.setCall)
+	}
 }
