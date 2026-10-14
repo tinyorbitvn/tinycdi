@@ -102,8 +102,12 @@ transfer on the same workspace is refused while one is streaming.
 **Trust model.** The workspace user can read the `xfer-token` key and can
 interfere with `tcdi-xferd`, because both run as the same user in the same
 container; the checks that hold are the owner-only grant, the broker's
-claim and the gateway's byte cap, so a tampered helper can mishandle only
-that workspace's own files within the allowed direction and size. See
+claim and the gateway's byte cap, so on the transfer leg a tampered
+helper can mishandle only that workspace's own files within the allowed
+direction and size. The file-transfer and clipboard policies bind an
+unmodified runtime only: a user who replaces the in-pod `:8443` server
+can move data either way over the desktop leg with no grant, byte cap or
+transfer audit. See
 [ADR 0009](../adr/0009-session-data-transfer-policy.md) for the design.
 
 ## When does a change take effect?

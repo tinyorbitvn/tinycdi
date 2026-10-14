@@ -54,4 +54,13 @@ absent R1-21 "$TM" 'it runs a dry run first'
 absent R1-21 internal/api/openapi.yaml 'Always dry run first'
 need R1-21 internal/api/openapi.yaml 'The server does not require one'
 
+# R1-27: the in-pod trust residual names the desktop leg everywhere it is stated.
+need_row R1-27 TM-37 'desktop leg'
+need_row R1-27 TM-37 'bind an unmodified runtime only'
+need     R1-27 docs/security/threat-model.md 'TestDesktopLeg_ReplacedHelperRelaysBytesWithoutDisposition'
+need     R1-27 docs/releases/v1.0.0.md 'over the desktop leg'
+absent   R1-27 docs/releases/v1.0.0.md 'Net effect: a tampered helper can mishandle only'
+need     R1-27 docs/runbooks/session-policy.md 'over the desktop leg'
+need     R1-27 SECURITY.md 'Clipboard, file-transfer and other in-desktop restrictions are UX defaults, not DLP'
+
 exit "$fails"

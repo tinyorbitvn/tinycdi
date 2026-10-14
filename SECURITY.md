@@ -677,5 +677,7 @@ and an update to this file.
     - restrict access to API and session-listener logs (the backend
       pods), which contain OIDC subjects and lease IDs;
     - alert on spikes of denied `launch.redeem` events.
-11. **Clipboard and other in-desktop restrictions are UX defaults, not
-    DLP.** The workspace user controls their own runtime.
+11. **Clipboard, file-transfer and other in-desktop restrictions are UX
+    defaults, not DLP.** The workspace user controls their own runtime:
+    by replacing the in-pod `:8443` server they can move data over the
+    desktop leg with no transfer grant, cap or audit row.

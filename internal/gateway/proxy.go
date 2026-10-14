@@ -1284,10 +1284,14 @@ func (g *Gateway) pinSessionHeaders(h http.Header, cspHost string) {
 // Clear-Site-Data, Refresh, Link (Link: rel=serviceworker registers a
 // service worker) — are dropped outright, and upstream-supplied security
 // headers are deleted so they can never weaken the policy ServeHTTP pinned.
+// Content-Disposition is dropped too: the desktop leg carries no file
+// transfers (those go through the claimed transfer leg, which sets its
+// own), so a runtime cannot turn a desktop path into a one-click download
+// (TM-37).
 func (g *Gateway) responsePolicy(resp *http.Response) error {
 	for _, h := range []string{
 		"Set-Cookie", "Service-Worker-Allowed", "Clear-Site-Data",
-		"Refresh", "Link",
+		"Refresh", "Link", "Content-Disposition",
 		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
 		"X-Content-Type-Options", "Strict-Transport-Security",
 		"X-Frame-Options", "Permissions-Policy", "Feature-Policy",
