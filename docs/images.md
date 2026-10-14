@@ -463,12 +463,14 @@ before changing anything under `build/linux-*`/`build/browser`.
 Scanned 2026-10-03 with trivy 0.70.0 and syft 1.52.0 (DB latest).
 `linux-base` includes the four font packages of *Budgets*
 (`fontconfig`, `fonts-noto-core`, `fonts-noto-mono`,
-`fonts-wqy-microhei` — font data and the fc tools, no new libraries);
-the runtime-train scan job re-measures on every publish.
+`fonts-wqy-microhei` — font data and the fc tools, no new libraries)
+and the `tcdi-xferd` helper. Its SBOM count below is re-measured on
+the current build with syft 1.52.0; the runtime-train scan job
+re-measures the full matrix on every publish.
 
 | Image | SBOM packages | HIGH/CRITICAL with a fix (the gate) | CRITICAL / HIGH total (unfixed in bookworm) |
 |---|---|---|---|
-| `linux-base` | 255 | 0 | 14 / 94 |
+| `linux-base` | 256 | 0 | 14 / 94 |
 | `linux-desktop` (XFCE4 + Firefox ESR) | 385 | 0 | 16 / 140 |
 | `browser` | 375 | 0 | 17 / 153 |
 
