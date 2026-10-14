@@ -62,6 +62,14 @@ func (h *AdminUsersHandler) List(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, r, perr)
 		return
 	}
+	// The lastSeen sort keys on a timestamp the store parses; a forged key
+	// is the client's error, refused before any read (never a 500).
+	if page.After != nil && page.Sort.Field == "lastSeen" {
+		if _, err := time.Parse(time.RFC3339Nano, page.After.Key); err != nil {
+			WriteError(w, r, NewError(CodeInvalidRequest, "bad cursor"))
+			return
+		}
+	}
 	tenant := r.PathValue("tenant")
 	p := store.UserPage{Limit: page.Limit, Sort: page.Sort.Field, Desc: page.Sort.Desc}
 	if page.After != nil {

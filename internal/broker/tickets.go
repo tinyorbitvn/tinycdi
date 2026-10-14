@@ -35,8 +35,9 @@ var (
 	ErrTicketInvalid = errors.New("broker: ticket invalid or already used")
 	// ErrTicketExpired — ticket past its 60 s TTL; the attempt still consumes it.
 	ErrTicketExpired = errors.New("broker: ticket expired")
-	// ErrDenied — authenticated but not permitted (wrong tenant, workspace,
-	// gateway identity or lease ownership).
+	// ErrDenied — authenticated but not permitted (foreign gateway identity,
+	// foreign tenant binding, lease ownership or revoked generation). A
+	// workspace owned by another user of the same tenant is ErrNotFound.
 	ErrDenied = errors.New("broker: denied")
 	// ErrStaleBinding — the fence presented by the gateway no longer matches
 	// the current incarnation (stale runtimeGeneration or runtimeUID).
@@ -329,11 +330,13 @@ func portalSessionDigest(portalSessionID string) []byte {
 
 // IssueTicket mints a 60 s, single-use opaque ticket for workspaceUID bound to
 // (workspaceUID, runtimeGeneration, runtimeUID, gateway audience) of the
-// current incarnation. Fails with ErrNotFound/ErrDenied when the principal may
-// not connect, ErrNotReady when the workspace is not Ready, ErrFreshness when
-// observed state is stale, and ErrConnectionInUse when a live lease exists and
-// takeover is false. With takeover the ticket may supersede the live lease at
-// redemption, fencing the old socket before the new session works.
+// current incarnation. Fails with ErrNotFound when the workspace is unknown,
+// in another tenant or owned by someone else, with ErrDenied when the
+// principal's generation was revoked, ErrNotReady when the workspace is not
+// Ready, ErrFreshness when observed state is stale, and ErrConnectionInUse
+// when a live lease exists and takeover is false. With takeover the ticket
+// may supersede the live lease at redemption, fencing the old socket before
+// the new session works.
 // policy is the session data-transfer vector resolved by the API at
 // issue — the meet of the workspace template's policy and the tenant
 // ceiling (ADR 0009 §2). Its Clipboard field is recorded on the ticket
@@ -365,8 +368,10 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 	if state != "active" || tenantID != p.TenantID {
 		return Ticket{}, ErrNotFound
 	}
+	// Another user's workspace in the same tenant is indistinguishable
+	// from a missing one (TM-04): 404, never a 403 existence oracle.
 	if owner != p.Owner() {
-		return Ticket{}, ErrDenied
+		return Ticket{}, ErrNotFound
 	}
 
 	binding, err := b.currentBinding(ctx, workspaceUID, now)

@@ -311,7 +311,7 @@ paths:
         - $ref: "#/components/parameters/ListScope"
         - name: phase
           in: query
-          description: Filter by lifecycle phase.
+          description: Filter by lifecycle phase; a value outside the WorkspacePhase enum is 400 INVALID_REQUEST.
           required: false
           schema:
             $ref: "#/components/schemas/WorkspacePhase"

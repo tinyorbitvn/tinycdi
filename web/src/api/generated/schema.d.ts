@@ -2395,7 +2395,7 @@ export interface operations {
                  *     caller's natural scope (admins see the tenant, users their own rows).
                  */
                 scope?: components["parameters"]["ListScope"];
-                /** @description Filter by lifecycle phase. */
+                /** @description Filter by lifecycle phase; a value outside the WorkspacePhase enum is 400 INVALID_REQUEST. */
                 phase?: components["schemas"]["WorkspacePhase"];
             };
             header?: never;

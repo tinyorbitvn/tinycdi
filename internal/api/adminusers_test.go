@@ -113,3 +113,28 @@ func TestAdminUsers_CursorCarriesSortKey(t *testing.T) {
 		t.Fatalf("cross-sort cursor: %d, want 400", res.StatusCode)
 	}
 }
+
+// TestAdminUsers_ForgedCursorIs400 (R1-19): a forged lastSeen cursor whose
+// key is not a timestamp, and a cursor carrying a NUL, are refused 400
+// before the store is called — never a 500 from the store's own parse or
+// from Postgres.
+func TestAdminUsers_ForgedCursorIs400(t *testing.T) {
+	dir := &fakeUserDirectory{users: directoryUsers()}
+	env := newAdminUsersEnv(t, dir, newFakeUserLimitSource())
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	for _, tc := range []struct{ name, sort, cursor string }{
+		{"lastSeen key not a time", "-lastSeen", NextCursor(SortSpec{Field: "lastSeen", Desc: true}, "not-a-time", "https://idp|bob")},
+		{"NUL in key", "ownerRef", NextCursor(SortSpec{Field: "ownerRef"}, "https://idp|b\x00ob", "https://idp|bob")},
+		{"NUL in id", "ownerRef", NextCursor(SortSpec{Field: "ownerRef"}, "https://idp|bob", "https://idp|b\x00ob")},
+	} {
+		dir.gotPage = store.UserPage{}
+		r := doReq(t, env, sess, csrf, http.MethodGet,
+			adminUsersPath+"?sort="+tc.sort+"&cursor="+url.QueryEscape(tc.cursor), "", nil)
+		if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+			t.Fatalf("%s: status=%d code=%s, want 400 INVALID_REQUEST", tc.name, r.StatusCode, e.Code)
+		}
+		if dir.gotPage.Limit != 0 {
+			t.Fatalf("%s: the store was called with %+v", tc.name, dir.gotPage)
+		}
+	}
+}

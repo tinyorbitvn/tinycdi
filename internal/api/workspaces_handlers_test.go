@@ -855,6 +855,31 @@ func TestListWorkspaces_BadCursor(t *testing.T) {
 	}
 }
 
+// TestListWorkspaces_BadPhaseIs400 (R1-19): a phase filter outside the
+// WorkspacePhase enum — a NUL byte, an unknown value, the wrong case — and
+// a cursor whose key carries a NUL are client errors (400 INVALID_REQUEST),
+// never a 500 from Postgres. A valid phase still filters.
+func TestListWorkspaces_BadPhaseIs400(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+
+	nulCursor := NextCursor(SortSpec{Field: "name"}, "a\x00b", "ws_x")
+	for _, q := range []string{"phase=Running%00", "phase=Ready%00", "phase=Bogus", "phase=ready", "sort=name&cursor=" + nulCursor} {
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?"+q, "", nil)
+		if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+			t.Fatalf("%s: status=%d code=%s, want 400 INVALID_REQUEST", q, r.StatusCode, e.Code)
+		}
+	}
+	for _, q := range []string{"phase=Ready", "phase=Stopped", "phase=Terminating"} {
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?"+q, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status=%d, want 200", q, r.StatusCode)
+		}
+	}
+}
+
 // exactCatalog serves one template whose memory and storage are not whole
 // MiB/GiB — the reservation must carry the exact bytes (R1-20).
 type exactCatalog struct{ fakeCatalog }

@@ -127,6 +127,25 @@ func TestIssueTicket_TenantAndOwnership(t *testing.T) {
 	}
 }
 
+// TestCreateConnection_ForeignOwnerIs404 (R1-18): a workspace owned by
+// another user of the SAME tenant is indistinguishable from a missing one —
+// IssueTicket answers ErrNotFound, and the public mapping is 404, never the
+// 403 existence oracle.
+func TestCreateConnection_ForeignOwnerIs404(t *testing.T) {
+	db, b, clock, src := setup(t)
+	carol := api.Principal{Issuer: "https://idp.example", Subject: "carol", TenantID: "tenant-a"}
+	seedWorkspace(t, db, "tenant-a", carol.Owner(), "ws-carol")
+	src.set(readyBinding("ws-carol", "tenant-a", carol.Owner(), 1, "rt-1", clock.Now()))
+
+	_, err := b.IssueTicket(ctx, alice, "ws-carol", false, provisioning.SessionPolicy{}, testPortalSession)
+	if !errors.Is(err, broker.ErrNotFound) {
+		t.Fatalf("IssueTicket on a same-tenant foreign workspace = %v, want ErrNotFound", err)
+	}
+	if e := broker.PublicIssueError(err); e.Code != api.CodeNotFound {
+		t.Fatalf("public mapping = %s, want %s", e.Code, api.CodeNotFound)
+	}
+}
+
 // TestRedeemTicket_ExactlyOnce: a valid ticket redeems once into a lease bound
 // to the recorded incarnation, fencing version and expiry; replay fails.
 func TestRedeemTicket_ExactlyOnce(t *testing.T) {
