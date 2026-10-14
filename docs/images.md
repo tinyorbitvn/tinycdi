@@ -258,7 +258,7 @@ Measured 2026-10-03 with trivy 0.70.0 and Docker 29.8 on an 8-core host.
 | | `linux-desktop` (XFCE4 + Firefox ESR) | `linux-base` | `browser` |
 |---|---|---|---|
 | Image size (uncompressed / compressed) | 1204 MiB / 290 MB | 599 MiB / 142 MB | 1.743 GiB |
-| Packages (dpkg) | 384 | 253 | 376 (added `fonts-noto-core`, `fonts-noto-mono`, `fonts-wqy-microhei`) |
+| Packages (dpkg) | 384 | 253 | 376 (incl. `fonts-noto-core`, `fonts-noto-mono`, `fonts-wqy-microhei`) |
 | trivy HIGH/CRITICAL **with a fix** (the gate) | 0 | 0 | 0 |
 | trivy HIGH/CRITICAL total (CRITICAL + HIGH, unfixed in bookworm) | 16 + 140 | 14 + 94 | 17 + 153 |
 | Idle CPU of a fresh session (mean over 60 s, after 45 s) | 14 mCPU | — | unchanged |
@@ -275,8 +275,8 @@ package's other ~260 script faces are deleted), `fonts-noto-mono`
 (Noto Sans Mono + Noto Mono) and `fonts-wqy-microhei`
 for CJK (zh/ja/ko). Noto Sans Mono is the Vietnamese monospace fix:
 DejaVu Sans Mono lacks the Vietnamese block (U+1EA0-1EF9), so
-`monospace:lang=vi` used to resolve to the proportional DejaVu Sans;
-with `fonts-noto-mono` it resolves to Noto Sans Mono, which also
+without `fonts-noto-mono`, `monospace:lang=vi` resolves to the
+proportional DejaVu Sans; with it, to Noto Sans Mono, which also
 becomes the default `monospace` face. The CJK choice is a budget decision: image size in
 this table (and in `TestLinuxRuntimeBrowserBaseline`) is
 `docker image inspect .Size`, which on the containerd store counts
@@ -460,18 +460,15 @@ before changing anything under `build/linux-*`/`build/browser`.
 
 ### Current images
 
-Scanned 2026-10-03 with trivy 0.70.0 and syft 1.52.0 (DB latest) — the
-base-split build with the XFCE desktop.
-
-> Later the same day `linux-base` gained four font packages
-> (`fontconfig`, `fonts-noto-core`, `fonts-noto-mono`,
-> `fonts-wqy-microhei` — font data and the fc tools, no new libraries;
-> see *Budgets*). The numbers below predate them; the runtime-train scan
-> job re-measures on publish.
+Scanned 2026-10-03 with trivy 0.70.0 and syft 1.52.0 (DB latest).
+`linux-base` includes the four font packages of *Budgets*
+(`fontconfig`, `fonts-noto-core`, `fonts-noto-mono`,
+`fonts-wqy-microhei` — font data and the fc tools, no new libraries);
+the runtime-train scan job re-measures on every publish.
 
 | Image | SBOM packages | HIGH/CRITICAL with a fix (the gate) | CRITICAL / HIGH total (unfixed in bookworm) |
 |---|---|---|---|
-| `linux-base` | 251 | 0 | 14 / 94 |
+| `linux-base` | 255 | 0 | 14 / 94 |
 | `linux-desktop` (XFCE4 + Firefox ESR) | 385 | 0 | 16 / 140 |
 | `browser` | 375 | 0 | 17 / 153 |
 
