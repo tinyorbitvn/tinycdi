@@ -543,6 +543,17 @@ func TestKasmAdapterChromium(t *testing.T) {
 		assertNoSecret(t, c, password)
 	})
 
+	// R1-06 (TM-36): the adapter's generated kasmvnc.yaml turns the
+	// override list on and leaves it empty, so no X client in the session
+	// can flip a clipboard parameter at runtime.
+	t.Run("ClipboardParamsNotOverridable", func(t *testing.T) {
+		secret, _ := selfSignedSecret(t)
+		c := runKasmContainer(t, runID, "clip", kasmImage, adapterVol(), secret, "", layout,
+			"-e", "TCDI_CLIPBOARD_POLICY=Disabled")
+		waitHealthyTimeout(t, c, kasmRunTimeout)
+		assertClipboardParamsNotOverridable(t, c)
+	})
+
 	t.Run("TransferHelper", func(t *testing.T) {
 		secret, password := selfSignedSecret(t)
 		c := runKasmContainer(t, runID, "xfer", kasmImage, adapterVol(), secret, "", layout, xferEnv...)

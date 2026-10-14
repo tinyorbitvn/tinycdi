@@ -877,7 +877,7 @@ templates: []
   #     # workspace, named from the user's point of view (normative
   #     # semantics: internal/api/openapi.yaml): Disabled | Send (client
   #     # to workspace) | Receive (workspace to client) | Bidirectional.
-  #     # Enforced server-side by the session server's KasmVNC DLP block —
+  #     # Enforced server-side by the session server's KasmVNC DLP block (no VNC parameter is runtime-overridable) —
   #     # the operator passes it to the pod as TCDI_CLIPBOARD_POLICY and a
   #     # change applies on the workspace's next start.
   #     clipboardPolicy: Disabled

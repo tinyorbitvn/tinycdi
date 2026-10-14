@@ -34,8 +34,10 @@ command_line:
 # entrypoint renders the real block into $HOME/.vnc/kasmvnc.yaml, which
 # merges after this file and wins for the keys it sets — so the values
 # below are only the fail-closed default when the env is absent or
-# unreadable. Client-side overrides are disabled entirely so the browser
-# cannot re-enable server policy at runtime.
+# unreadable. Client-side overrides are disabled, and
+# runtime_configuration below leaves no VNC parameter
+# runtime-overridable, so neither the browser nor an X client inside the
+# session can re-enable the clipboard after start.
 data_loss_prevention:
   clipboard:
     server_to_client:
@@ -47,9 +49,15 @@ data_loss_prevention:
     # "verbose" logs keypresses and clipboard contents - keep off.
     level: off
 
+# The launcher passes Xvnc an -AllowOverride list ONLY when
+# allow_override_standard_vnc_server_settings is true. With false it passes
+# none, and Xvnc's compiled default lets any X client in the session flip
+# SendCutText/AcceptCutText/SendPrimary/SetPrimary with vncconfig. true plus
+# an empty list renders -AllowOverride "": no parameter is runtime-settable.
 runtime_configuration:
   allow_client_to_override_kasm_server_settings: false
-  allow_override_standard_vnc_server_settings: false
+  allow_override_standard_vnc_server_settings: true
+  allow_override_list: []
 
 user_session:
   new_session_disconnects_existing_exclusive_session: true

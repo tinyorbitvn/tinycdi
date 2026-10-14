@@ -434,6 +434,47 @@ func assertNoSecret(t *testing.T, name, password string) {
 	}
 }
 
+// assertClipboardParamsNotOverridable pins R1-06 on a running runtime
+// container started with TCDI_CLIPBOARD_POLICY=Disabled. Xvnc must carry
+// -AllowOverride with a value that names no clipboard parameter, and an X
+// client inside the session must not be able to flip one with vncconfig:
+// the parameter reads back unchanged. vncconfig exits 0 even when the
+// server refuses a set, so the read-back is the assertion.
+func assertClipboardParamsNotOverridable(t *testing.T, c string) {
+	t.Helper()
+	argv := strings.Split(strings.TrimRight(
+		mustExec(t, c, `tr '\0' '\n' </proc/"$(pgrep -x Xvnc | head -n1)"/cmdline`), "\n"), "\n")
+	idx := -1
+	for i, a := range argv {
+		if a == "-AllowOverride" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("Xvnc cmdline has no -AllowOverride, so its compiled default (SendCutText, AcceptCutText, SendPrimary, SetPrimary) is runtime-overridable:\n%s", strings.Join(argv, " "))
+	}
+	val := ""
+	if idx+1 < len(argv) {
+		val = argv[idx+1]
+	}
+	for _, p := range []string{"SendCutText", "AcceptCutText", "SendPrimary", "SetPrimary"} {
+		if strings.Contains(strings.ToLower(val), strings.ToLower(p)) {
+			t.Fatalf("Xvnc -AllowOverride %q names clipboard parameter %s", val, p)
+		}
+	}
+	for _, p := range []string{"SendCutText", "AcceptCutText", "SendPrimary"} {
+		before := strings.TrimSpace(mustExec(t, c, "vncconfig -display :1 -get "+p))
+		if before != "0" {
+			t.Fatalf("%s = %q before the override attempt, want 0 under TCDI_CLIPBOARD_POLICY=Disabled", p, before)
+		}
+		out, _ := execIn(t, c, "vncconfig -display :1 -set "+p+"=1 2>&1")
+		after := strings.TrimSpace(mustExec(t, c, "vncconfig -display :1 -get "+p))
+		if after != "0" {
+			t.Fatalf("vncconfig -set %s=1 took effect (now %q; vncconfig said %q): an X client can re-enable the clipboard", p, after, strings.TrimSpace(out))
+		}
+	}
+}
+
 // xferEnv is the pod env the operator renders from the resolved transfer
 // policy (TCDI_XFER_POLICY / TCDI_XFER_MAX_BYTES); the image tests set it by
 // hand. 1 MiB keeps the over-cap probe cheap.
@@ -908,4 +949,24 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		}
 		assertNoSecret(t, c2, password)
 	})
+}
+
+// TestLinuxRuntimeClipboardParamsNotOverridable (R1-06, TM-36): with the
+// clipboard policy Disabled, nothing inside the session can re-enable the
+// clipboard at runtime through Xvnc's parameter-override channel.
+func TestLinuxRuntimeClipboardParamsNotOverridable(t *testing.T) {
+	if _, err := os.Stat(seccompFile); err != nil {
+		t.Fatalf("runtime seccomp profile missing: %s", seccompFile)
+	}
+	requireImage(t, baseImage, "build/linux-base")
+	runBytes := make([]byte, 4)
+	if _, err := rand.Read(runBytes); err != nil {
+		t.Fatal(err)
+	}
+	runID := fmt.Sprintf("%x", runBytes)
+	secret, _ := selfSignedSecret(t)
+	c := runContainer(t, runID, "clip", baseImage, secret, "",
+		"-e", "TCDI_CLIPBOARD_POLICY=Disabled")
+	waitHealthy(t, c)
+	assertClipboardParamsNotOverridable(t, c)
 }
