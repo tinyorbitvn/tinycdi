@@ -6,7 +6,7 @@
 -- were nullable only for rows written by earlier builds are NOT NULL here
 -- (connection_lease/launch_ticket.portal_session_digest). The remaining
 -- nullable columns carry meaning: NULL is "not bound yet", "no stream
--- owner", "no sealer", "follow the template" or "zero policy".
+-- claimed yet", "no sealer", "follow the template" or "zero policy".
 --
 -- schema_migrations is created by the runner (internal/store/migrate.go).
 
@@ -57,12 +57,13 @@ CREATE TABLE IF NOT EXISTS connection_lease (
     session_digest bytea,
     stream_epoch bigint DEFAULT 0 NOT NULL,
     stream_owner_tab text,
-    stream_owner_epoch bigint,
     portal_session_digest bytea NOT NULL,
     CONSTRAINT connection_lease_pkey PRIMARY KEY (id),
     CONSTRAINT connection_lease_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
     CONSTRAINT connection_lease_fencing_version_check CHECK ((fencing_version > 0)),
-    CONSTRAINT connection_lease_state_check CHECK ((state = ANY (ARRAY['active'::text, 'superseded'::text, 'revoked'::text, 'expired'::text])))
+    CONSTRAINT connection_lease_state_check CHECK ((state = ANY (ARRAY['active'::text, 'superseded'::text, 'revoked'::text, 'expired'::text]))),
+    CONSTRAINT connection_lease_stream_owner_check CHECK (((stream_epoch = 0) = (stream_owner_tab IS NULL))),
+    CONSTRAINT connection_lease_stream_owner_tab_check CHECK ((stream_owner_tab ~ '^[0-9a-f]{32}$'::text))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS connection_lease_one_active ON connection_lease USING btree (workspace_id) WHERE (state = 'active'::text);
 CREATE INDEX IF NOT EXISTS connection_lease_portal_session ON connection_lease USING btree (portal_session_digest);

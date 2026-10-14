@@ -93,7 +93,7 @@ func TestProxy_UpgradeConnectionTokensCannotStripInjected(t *testing.T) {
 	cookie := launchOK(t, srv, testHost, "tk-ws")
 	fb.pointLeaseAt(t, "tk-ws", up.srv)
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/websockify", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+withTab("/websockify"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,6 +41,9 @@ var (
 	// ErrStaleBinding — the fence presented by the gateway no longer matches
 	// the current incarnation (stale runtimeGeneration or runtimeUID).
 	ErrStaleBinding = errors.New("broker: stale runtime binding")
+	// ErrOwnerTabInvalid — a stream claim without a well-formed tab id
+	// (32 lowercase hex). Every claim names the claiming tab.
+	ErrOwnerTabInvalid = errors.New("broker: stream claim needs a 32-hex tab id")
 	// ErrConnectionInUse — a live interactive lease exists and the ticket was
 	// not issued with takeover.
 	ErrConnectionInUse = errors.New("broker: workspace already has an active lease")

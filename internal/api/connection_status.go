@@ -33,9 +33,9 @@ type ConnectionStatus struct {
 	// stream is claimed on the lease. 0 without an active lease.
 	StreamEpoch uint64 `json:"streamEpoch"`
 	// StreamOwnerTab is the opaque per-tab id the current stream was claimed
-	// with (migration 018): the portal compares it against its own tab id —
+	// with: the portal compares it against its own tab id —
 	// equal means the stream is ours even across a backend restart, different
-	// means another tab holds it. Absent when the claim carried no id, and
+	// means another tab holds it. Absent before the first stream claim, and
 	// NEVER served to a principal other than the lease's own.
 	StreamOwnerTab string `json:"streamOwnerTab,omitempty"`
 }

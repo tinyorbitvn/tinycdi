@@ -283,8 +283,8 @@ export function SessionPage({
       // mints a fresh id that only arrives with the frame's next claim,
       // and an early verdict would flash "open in another tab" on each
       // reload (R-V3c). With nothing pending, the stream provably belongs
-      // to a different tab. Absent (a legacy claim stored NULL) falls back
-      // to the epochs.
+      // to a different tab. Absent (no claim yet, or a report for another
+      // portal session) falls back to the epochs.
       if (s.streamOwnerTab) {
         if (s.streamOwnerTab === sessionTabId()) {
           pending.current = null;

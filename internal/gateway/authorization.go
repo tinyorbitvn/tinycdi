@@ -432,12 +432,8 @@ func (s *session) streamOwner() string {
 
 // setStreamOwner records the owner this process's claim just wrote — the
 // local mirror of the lease's stream_owner_tab until the next renew
-// confirms it ("" when the claim carried no valid id, matching the NULL
-// the broker stores).
+// confirms it (always a validated id).
 func (s *session) setStreamOwner(ownerTab string) {
-	if !broker.ValidStreamOwnerTab(ownerTab) {
-		ownerTab = ""
-	}
 	s.mu.Lock()
 	s.lease.StreamOwnerTab = ownerTab
 	s.mu.Unlock()

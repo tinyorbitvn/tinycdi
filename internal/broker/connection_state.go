@@ -36,11 +36,10 @@ type ConnectionState struct {
 	// StreamEpoch is the active lease's stream_epoch (0 without a lease).
 	StreamEpoch uint64
 	// StreamOwnerTab is the tab id the current stream was claimed with
-	// (empty without a lease, or when the claim carried no valid id). It is
-	// populated ONLY when the caller's portal session is the session the
-	// lease was minted under (portal_session_digest) — another session,
-	// even of the same user, never learns it — and only while the stored
-	// id still names the current stream (stream_owner_epoch = stream_epoch).
+	// (empty without a lease or before the first claim). It is populated
+	// ONLY when the caller's portal session is the session the lease was
+	// minted under (portal_session_digest) — another session, even of the
+	// same user, never learns it.
 	StreamOwnerTab string
 }
 
@@ -57,9 +56,7 @@ const leaseStaleAfter = 20 * time.Second
 // revealed only when its SHA-256 equals the lease's portal_session_digest —
 // the field tells the caller's OWN tab apart from a foreign one, so it must
 // never be served to another session, not even another session of the same
-// user (nor appear in logs or metrics labels). It is also gated on
-// stream_owner_epoch = stream_epoch: a replica predating the columns bumps
-// the epoch without naming them, so a stale owner id is read as absent.
+// user (nor appear in logs or metrics labels).
 func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, portalSessionID string) (ConnectionState, error) {
 	now := b.now()
 	var (
@@ -69,19 +66,18 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, p
 		lastRenewed *time.Time
 		openStreams int
 		ownerTab    *string
-		ownerEpoch  *int64
 		portalSess  []byte
 	)
 	err := b.db.Pool().QueryRow(ctx, `
 		SELECT l.id, l.stream_epoch, l.expires_at, l.last_renewed_at,
-			COALESCE(a.open_streams, 0), l.stream_owner_tab, l.stream_owner_epoch,
+			COALESCE(a.open_streams, 0), l.stream_owner_tab,
 			l.portal_session_digest
 		FROM connection_lease l
 		LEFT JOIN workspace_activity a
 			ON a.workspace_id = l.workspace_id
 			AND a.runtime_generation = l.runtime_generation
 		WHERE l.workspace_id = $1 AND l.state = 'active'`, workspaceUID).
-		Scan(&leaseID, &streamEpoch, &expiresAt, &lastRenewed, &openStreams, &ownerTab, &ownerEpoch, &portalSess)
+		Scan(&leaseID, &streamEpoch, &expiresAt, &lastRenewed, &openStreams, &ownerTab, &portalSess)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConnectionState{State: "none"}, nil
 	}
@@ -102,7 +98,7 @@ func (b *Broker) ConnectionState(ctx context.Context, workspaceUID PlatformID, p
 	}
 	// Only the portal session that minted the lease sees the owner tab.
 	// An empty caller id names no session and never matches.
-	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch == streamEpoch &&
+	if ownerTab != nil &&
 		portalSessionID != "" && bytes.Equal(portalSess, portalSessionDigest(portalSessionID)) {
 		st.StreamOwnerTab = *ownerTab
 	}

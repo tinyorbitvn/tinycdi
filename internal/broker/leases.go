@@ -35,10 +35,8 @@ type Lease struct {
 	FencingVersion    uint64 `json:"fencingVersion"`
 	GatewayID         string `json:"gatewayId"`
 	StreamEpoch       uint64 `json:"streamEpoch"`
-	// StreamOwnerTab is the tab id the current stream was claimed with —
-	// populated only while the stored id still names the current stream
-	// (stream_owner_epoch = stream_epoch); "" without a claim or when the
-	// claim carried no valid id. Gateway-side correlator only: never a
+	// StreamOwnerTab is the tab id the current stream was claimed with;
+	// empty before the first claim. Gateway-side correlator only: never a
 	// metric label or log field.
 	StreamOwnerTab string `json:"-"`
 	// PortalSessionDigest is the sessions.id key form (hex of the SHA-256
@@ -103,7 +101,6 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		l          Lease
 		state      string
 		ownerTab   *string
-		ownerEpoch *int64
 		portalSess portalSessionCheck
 	)
 	livePred, liveArgs := b.portalSessionLiveSQL(2)
@@ -111,7 +108,7 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	err := b.db.Pool().QueryRow(ctx,
 		`SELECT l.id, l.workspace_id, l.tenant_id, l.principal_subject,
 			l.runtime_generation, l.runtime_uid, l.fencing_version, l.gateway_id,
-			l.state, l.expires_at, l.stream_epoch, l.stream_owner_tab, l.stream_owner_epoch,
+			l.state, l.expires_at, l.stream_epoch, l.stream_owner_tab,
 			encode(l.portal_session_digest, 'hex'),
 			CASE
 				WHEN s.id IS NULL THEN 'absent'
@@ -123,7 +120,7 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 		 WHERE l.id = $1`, args...).
 		Scan(&l.ID, &l.WorkspaceUID, &l.TenantID, &l.PrincipalSubject,
 			&l.RuntimeGeneration, &l.RuntimeUID, &l.FencingVersion,
-			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab, &ownerEpoch,
+			&l.GatewayID, &state, &l.ExpiresAt, &l.StreamEpoch, &ownerTab,
 			&l.PortalSessionDigest, &portalSess)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, "", "", ErrLeaseInvalid
@@ -131,12 +128,7 @@ func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, 
 	if err != nil {
 		return Lease{}, "", "", fmt.Errorf("broker: lease lookup: %w", err)
 	}
-	// The stored owner id counts only while it names the current stream
-	// (stream_owner_epoch = stream_epoch): a replica predating the columns
-	// bumps the epoch without naming them, so a stale id reads as absent
-	// (R-V3c) — same rule ConnectionState applies.
-	if ownerTab != nil && ownerEpoch != nil && *ownerEpoch >= 0 &&
-		uint64(*ownerEpoch) == l.StreamEpoch {
+	if ownerTab != nil {
 		l.StreamOwnerTab = *ownerTab
 	}
 	return l, state, portalSess, nil

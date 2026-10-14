@@ -714,6 +714,11 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_origin"})
 			return
 		}
+		ownerTab := r.URL.Query().Get(streamOwnerTabParam)
+		if !broker.ValidStreamOwnerTab(ownerTab) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner_tab_required"})
+			return
+		}
 		var ok bool
 		if gen, ok = s.admitUpgrade(); !ok {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "stream_in_use"})
@@ -729,7 +734,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// claiming tab's id rides the same write (FX-R31): GET /connection
 		// can then answer WHO holds the stream, not just the epoch count.
 		if g.cfg.Sessions != nil {
-			epoch, err := g.claimStream(r.Context(), s, r.URL.Query().Get(streamOwnerTabParam))
+			epoch, err := g.claimStream(r.Context(), s, ownerTab)
 			streamEpoch = epoch
 			if err != nil {
 				if terminalBrokerErr(err) {

@@ -18,7 +18,7 @@ import (
 // refusal, not fatal on it.
 func launchTry(t *testing.T, f *restartFixture, r *replica, ticket string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch",
+	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch?tcdi_tab="+restartTab,
 		strings.NewReader(url.Values{"ticket": {ticket}}.Encode()))
 	if err != nil {
 		t.Fatal(err)

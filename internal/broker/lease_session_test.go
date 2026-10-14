@@ -175,7 +175,7 @@ func TestLeaseSession_AttachDeniedWhenSessionDeleted(t *testing.T) {
 	if _, err := b.LeaseBySession(ctx, gwA, d); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("LeaseBySession under dead session = %v, want ErrRevoked", err)
 	}
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), ""); !errors.Is(err, broker.ErrRevoked) {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), testTab); !errors.Is(err, broker.ErrRevoked) {
 		t.Fatalf("ClaimStream under dead session = %v, want ErrRevoked", err)
 	}
 	if state, _ := leaseState(t, db, lease.ID); state != "revoked" {
@@ -207,7 +207,7 @@ func TestLeaseSession_RenewUnaffectedWhileSessionAlive(t *testing.T) {
 	if got, err := b.LeaseBySession(ctx, gwA, d); err != nil || got.ID != lease.ID {
 		t.Fatalf("attach = (%v, %v), want the same lease", got.ID, err)
 	}
-	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), ""); err != nil {
+	if _, err := b.ClaimStream(ctx, gwA, lease.ID, fenceOf(lease), testTab); err != nil {
 		t.Fatalf("claim under live session = %v", err)
 	}
 }

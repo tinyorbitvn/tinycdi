@@ -789,12 +789,12 @@ describe("SessionPage stream-owner tab (FX-R31)", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Connected");
   });
 
-  it("a legacy claim (no owner id) still decides by epoch arithmetic", async () => {
+  it("a report without an owner id decides by epoch arithmetic", async () => {
     const { ws, control } = setupScripted({ props: { pollIntervalMs: 20 } });
     await connectViaResume(ws, control);
 
-    // No streamOwnerTab: exactly the pre-FX-R31 behaviour — a newer epoch
-    // on our lease reads as another tab.
+    // No streamOwnerTab: the epoch fallback — a newer epoch on our lease
+    // reads as another tab.
     control.connection = () => ({
       state: "connected",
       leaseActive: true,
@@ -932,13 +932,13 @@ describe("SessionPage reconnect after restart (FX-R31 addendum)", () => {
     expect(screen.queryByText("This session is open in another tab")).toBeNull();
   });
 
-  it("the legacy fallback still parks on 'elsewhere' — the same restart WITHOUT an owner id", async () => {
+  it("without an owner id the epoch fallback still parks on 'elsewhere'", async () => {
     const { ws, control } = setupScripted({
       props: { pollIntervalMs: 20, inFrameRetryMs: 100, reNavJitterMs: 0 },
     });
     await connectViaResume(ws, control);
 
-    // Pre-FX-R31 shape: no streamOwnerTab. The restart's re-claim bumped
+    // No streamOwnerTab. The restart's re-claim bumped
     // the epoch beyond the +1 window — the page goes 'elsewhere' and the
     // watch stops driving reconnect (lease expiry is the only way back).
     control.connection = () => ({

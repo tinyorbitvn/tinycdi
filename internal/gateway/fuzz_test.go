@@ -268,6 +268,7 @@ func FuzzLaunchRedeem(f *testing.F) {
 	for _, c := range [][5]string{
 		// host, method, query, body, origin
 		{testHost, "POST", "", "ticket=" + validTicket, originOK},
+		{testHost, "POST", "tcdi_tab=" + testTabID, "ticket=" + validTicket, originOK},
 		{testHost, "POST", "", "ticket=" + foreignTicket, originOK},
 		{testHost, "POST", "", "ticket=" + expiredTicket, originOK},
 		{testHost, "POST", "", "ticket=unknown-ticket", originOK},

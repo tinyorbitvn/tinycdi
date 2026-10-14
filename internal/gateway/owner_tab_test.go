@@ -7,17 +7,16 @@ package gateway_test
 // per-tab id and sends it on the launch POST's query and — via the KasmVNC
 // `path` setting the redirect re-asserts — on every stream upgrade. The
 // gateway forwards it into ClaimStream, where it lands on the lease in the
-// same write as the stream epoch.
+// same write as the stream epoch, and refuses a launch or upgrade without it.
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 )
-
-const testTabID = "0123456789abcdef0123456789abcdef"
 
 // doLaunchQuery is doLaunch with a query string on the POST URL (the owner
 // tab id rides there — the ticket itself stays in the body).
@@ -43,19 +42,15 @@ func doLaunchQuery(t *testing.T, srv *httptest.Server, host, ticket, query strin
 // TestLaunch_RedirectCarriesOwnerTabPath: a launch POST whose query names a
 // valid tab id gets a redirect that re-asserts it as the KasmVNC `path`
 // setting — path=websockify?tcdi_tab=<id> — so the frame's websocket URL
-// carries the id on every connect and retry. An absent or malformed id
-// leaves `path` at the client's default (a legacy, NULL claim).
+// carries the id on every connect and retry.
 func TestLaunch_RedirectCarriesOwnerTabPath(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		query string
-		want  string // expected path= fragment in the Location, "" = absent
+		want  string // expected path= fragment in the Location
 	}{
 		{"valid id", "tcdi_tab=" + testTabID,
 			"&path=" + url.QueryEscape("websockify?tcdi_tab="+testTabID)},
-		{"absent", "", ""},
-		{"malformed", "tcdi_tab=not-hex!", ""},
-		{"too short", "tcdi_tab=0123456789abcdef", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fb := newFakeBroker(t)
@@ -69,12 +64,6 @@ func TestLaunch_RedirectCarriesOwnerTabPath(t *testing.T) {
 				t.Fatalf("launch = %d, want 303", resp.StatusCode)
 			}
 			loc := resp.Header.Get("Location")
-			if tc.want == "" {
-				if strings.Contains(loc, "path=") {
-					t.Fatalf("redirect %q must not carry a client path setting", loc)
-				}
-				return
-			}
 			if !strings.Contains(loc, tc.want) {
 				t.Fatalf("redirect %q, want it to contain %q", loc, tc.want)
 			}
@@ -84,7 +73,7 @@ func TestLaunch_RedirectCarriesOwnerTabPath(t *testing.T) {
 
 // TestStreamClaim_CarriesOwnerTab: the tab id on the upgrade's query rides
 // the claim into the session directory — same-tab retries claim with the
-// same id, a missing one claims as legacy ("").
+// same id.
 func TestStreamClaim_CarriesOwnerTab(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -92,8 +81,6 @@ func TestStreamClaim_CarriesOwnerTab(t *testing.T) {
 		want string
 	}{
 		{"tab id", "/websockify?tcdi_tab=" + testTabID, testTabID},
-		{"no id", "/websockify", ""},
-		{"malformed id passes through", "/websockify?tcdi_tab=zz", "zz"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fb := newFakeBroker(t)
@@ -157,5 +144,56 @@ func TestStreamClaim_SameTabReconnectKeepsOwner(t *testing.T) {
 	stream("/websockify?tcdi_tab=" + other) // another tab's claim replaces it
 	if got := ownerOf(); got != other {
 		t.Fatalf("owner after foreign claim = %q, want %q", got, other)
+	}
+}
+
+// TestLaunch_RequiresOwnerTab: a launch POST without a well-formed tab id
+// is refused with 400 owner_tab_required BEFORE the ticket is redeemed —
+// the same ticket still launches once the tab id is present.
+func TestLaunch_RequiresOwnerTab(t *testing.T) {
+	for _, q := range []string{"", "tcdi_tab=not-hex!", "tcdi_tab=0123456789abcdef"} {
+		t.Run("query="+q, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			fb.scriptTicket("tk-rq", testWSUID)
+			srv := newGateway(t, fb, nil)
+			hdr := map[string]string{"Origin": testOrigin, "Sec-Fetch-Site": "same-origin"}
+			resp := doLaunchQuery(t, srv, testHost, "tk-rq", q, hdr)
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "owner_tab_required") {
+				t.Fatalf("launch = %d %s, want 400 owner_tab_required", resp.StatusCode, body)
+			}
+			ok := doLaunchQuery(t, srv, testHost, "tk-rq", "tcdi_tab="+testTabID, hdr)
+			defer drain(ok)
+			if ok.StatusCode != http.StatusSeeOther {
+				t.Fatalf("relaunch with a tab id = %d, want 303 (the refused launch must not burn the ticket)", ok.StatusCode)
+			}
+		})
+	}
+}
+
+// TestStreamClaim_RequiresOwnerTab: an upgrade without a well-formed tab id
+// is refused with 400 owner_tab_required and never reaches the claim.
+func TestStreamClaim_RequiresOwnerTab(t *testing.T) {
+	for _, path := range []string{"/websockify", "/websockify?tcdi_tab=zz"} {
+		t.Run(path, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			fb.scriptTicket("tk-rc", testWSUID)
+			_, srv := newReplica(t, fb, "gw-1")
+			cookie := launchOK(t, srv, testHost, "tk-rc")
+			lease := fb.leaseOf(t, "tk-rc")
+			resp := upgradeExact(t, srv, testHost, path, cookie, map[string]string{"Origin": testOrigin})
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "owner_tab_required") {
+				t.Fatalf("upgrade %s = %d %s, want 400 owner_tab_required", path, resp.StatusCode, body)
+			}
+			fb.mu.Lock()
+			_, claimed := fb.ownerTabs[lease.ID]
+			fb.mu.Unlock()
+			if claimed {
+				t.Fatal("a refused upgrade reached the session directory")
+			}
+		})
 	}
 }

@@ -1766,10 +1766,9 @@ export interface components {
              *     (128 bits, lowercase hex): the portal mints it per browser tab and
              *     sends it with its stream claim, so a tab can tell that the live
              *     stream is its own — even across a backend restart that bumped the
-             *     stream epoch — versus another tab's. Absent when the claim carried
-             *     no id (legacy client) and never served to a session other than
-             *     the one the lease was minted under — not even a second session
-             *     of the same user.
+             *     stream epoch — versus another tab's. Absent before the first stream
+             *     claim, and never served to a session other than the one the lease
+             *     was minted under — not even a second session of the same user.
              */
             streamOwnerTab?: string;
         };

@@ -837,12 +837,16 @@ func (f *restartFixture) issueTicket(t *testing.T, r *replica, sessionID, csrf s
 	return ticket
 }
 
+// restartTab is the stream-owner tab id the fixture launches and streams
+// under.
+const restartTab = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+
 // launch POSTs the ticket to the replica's session listener and returns the
 // session cookie value the replica issued.
 func (f *restartFixture) launch(t *testing.T, r *replica, ticket string) string {
 	t.Helper()
 	form := url.Values{"ticket": {ticket}}
-	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch",
+	req, err := http.NewRequest(http.MethodPost, r.sessURL+"/v1/launch?tcdi_tab="+restartTab,
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -909,7 +913,7 @@ func (f *restartFixture) wsOpen(t *testing.T, r *replica, cookie string) *http.R
 // wsTry attempts the upgrade once, returning the response whatever its
 // status; a 101 response carries the live socket in Body.
 func (f *restartFixture) wsTry(r *replica, cookie string) *http.Response {
-	req, err := http.NewRequest(http.MethodGet, r.sessURL+"/websockify", nil)
+	req, err := http.NewRequest(http.MethodGet, r.sessURL+"/websockify?tcdi_tab="+restartTab, nil)
 	if err != nil {
 		return nil
 	}
