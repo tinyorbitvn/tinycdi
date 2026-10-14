@@ -430,6 +430,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			route = "control"
 			g.serveControl(rec, r)
 		}
+	case strings.HasPrefix(r.URL.Path, TransferPathPrefix):
+		route = "transfer"
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.serveTransfer(rec, r, wsID)
 	default:
 		if !wsOK {
 			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})

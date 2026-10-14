@@ -186,6 +186,15 @@ objects. It **keeps**:
 | `gatewayApi.portalRouteName` / `.sessionRouteName` | `portal`/`session` | HTTPRoute object names (DNS-1123 subdomain, must differ); the defaults match every earlier release — rename to pair hand-written routes by convention, e.g. a `<name>-redirect` route |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
+File uploads stream through the session host (`PUT
+/v1/transfers/{id}/content` on `*.<sessionDomain>`). An ingress controller
+that caps request bodies must allow them on the session route:
+ingress-nginx defaults to a 1 MiB body cap, so set
+`nginx.ingress.kubernetes.io/proxy-body-size` at least
+`backend.fileTransfer.maxFileBytes` in `ingress.sessionAnnotations` (or
+the Gateway-API equivalent). Traefik and Gateway API implementations have
+no default cap.
+
 ### Per-component tuning (`backend`, `operator`, `frontend`)
 
 | Key | Default | Description |
