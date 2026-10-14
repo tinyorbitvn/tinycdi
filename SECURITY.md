@@ -412,9 +412,11 @@ and an update to this file.
     - runtime egress = DNS + the template's profile;
     - `InternetOnly` always excludes RFC 1918, 100.64.0.0/10, loopback,
       link-local/metadata, multicast/reserved and the cluster CIDRs;
-    - `ClusterOnly` is restricted by default: egress reaches pods in the
-      managed namespaces (labelled `workspaces.cdi.tinyorbit.vn/tenant`)
-      and no pod outside them. The opt-in
+    - `ClusterOnly` is restricted by default to the workspace's own
+      tenant: egress reaches pods in the namespaces labelled with its
+      tenant (`workspaces.cdi.tinyorbit.vn/tenant: <tenant>`) and no pod
+      in another tenant's namespace or outside the managed namespaces.
+      The opt-in
       `runtime.networkProfiles.clusterOnly.*` values
       (`--runtime-clusteronly-egress`) narrow the rule to
       selector-matched namespaces/pods and/or ports; a ports-only

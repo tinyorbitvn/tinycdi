@@ -376,8 +376,9 @@ type Options struct {
 	// ClusterOnlyEgress (operator --runtime-clusteronly-egress; chart
 	// runtime.networkProfiles.clusterOnly.*) steers the in-cluster
 	// egress rule of NetworkProfileClusterOnly workspaces. Nil keeps
-	// the default posture — egress to pods in namespaces labelled
-	// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces).
+	// the default posture: egress to pods in the namespaces of the
+	// workspace's own tenant (its workspaces.cdi.tinyorbit.vn/tenant
+	// label value), never another tenant's.
 	// Unrestricted is the opt-out: egress to any pod in any namespace.
 	// Otherwise the set selectors admit only pod destinations matching
 	// them, on the listed ports — it can never widen the rule past
@@ -513,13 +514,17 @@ func (b *Backend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.Wo
 			return runtime.Observation{}, err
 		}
 	}
+	// The NetworkPolicy goes first: it selects by the workspace-UID label,
+	// so it can exist before the pod, and tenant code never runs while a
+	// later step (the Service) fails, even in a namespace without a
+	// default-deny (networkPolicy.enabled=false).
+	if err := b.ensureNetPol(ctx, ws, tpl); err != nil {
+		return runtime.Observation{}, err
+	}
 	if err := b.ensurePod(ctx, ws, tpl, appArmor, seccomp); err != nil {
 		return runtime.Observation{}, err
 	}
 	if err := b.ensureService(ctx, ws); err != nil {
-		return runtime.Observation{}, err
-	}
-	if err := b.ensureNetPol(ctx, ws, tpl); err != nil {
 		return runtime.Observation{}, err
 	}
 	return b.Observe(ctx, ws)
@@ -1543,7 +1548,7 @@ func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options
 			}},
 		})
 	case cdiv1.NetworkProfileClusterOnly:
-		profile = append(profile, clusterOnlyEgressRule(opts))
+		profile = append(profile, clusterOnlyEgressRule(ws, opts))
 	}
 	// NetworkProfileIsolated: DNS only, no extra rules.
 
@@ -1593,27 +1598,35 @@ func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options
 	}
 }
 
+// labelTenant is the tenant label the API stamps on every Workspace CR
+// (provisioning.LabelTenant) and the chart puts on every managed namespace
+// (templates/namespaces.yaml), with the same tenant id as its value.
+const labelTenant = "workspaces.cdi.tinyorbit.vn/tenant"
+
+// sameTenantNamespaces selects the managed namespaces of ws's own tenant.
+// A CR without the tenant label fails closed to its own namespace only:
+// the default ClusterOnly peer never spans tenants.
+func sameTenantNamespaces(ws *cdiv1.Workspace) *metav1.LabelSelector {
+	if t := ws.Labels[labelTenant]; t != "" {
+		return &metav1.LabelSelector{MatchLabels: map[string]string{labelTenant: t}}
+	}
+	return &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": ws.Namespace}}
+}
+
 // clusterOnlyEgressRule builds the in-cluster egress rule for
-// NetworkProfileClusterOnly. The zero option is RESTRICTED: egress is
-// confined to pods in namespaces labelled
-// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces). The
-// Unrestricted opt-out admits any pod in any namespace on any port —
+// NetworkProfileClusterOnly. The zero option is RESTRICTED to the
+// workspace's own tenant: egress reaches pods in the namespaces carrying
+// its tenant label value (sameTenantNamespaces), never another tenant's.
+// The Unrestricted opt-out admits any pod in any namespace on any port;
 // confinement then rests entirely on destination-side ingress policies.
-// A configured selector set narrows the destination set to matching
-// pods in matching namespaces and/or the listed ports; it can never
-// widen past pod peers (external IPs stay denied either way).
-func clusterOnlyEgressRule(opts Options) networkingv1.NetworkPolicyEgressRule {
+// A configured selector set replaces the default peer with matching pods
+// in matching namespaces and/or the listed ports; it can never widen past
+// pod peers (external IPs stay denied either way).
+func clusterOnlyEgressRule(ws *cdiv1.Workspace, opts Options) networkingv1.NetworkPolicyEgressRule {
 	co := opts.ClusterOnlyEgress
 	if co == nil {
 		return networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{{
-				NamespaceSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{{
-						Key:      "workspaces.cdi.tinyorbit.vn/tenant",
-						Operator: metav1.LabelSelectorOpExists,
-					}},
-				},
-			}},
+			To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: sameTenantNamespaces(ws)}},
 		}
 	}
 	if co.Unrestricted {

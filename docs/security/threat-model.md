@@ -430,7 +430,10 @@ Controls:
   `8443` from gateway pods only, DNS egress, and profile-scoped egress.
   The chart renders `default-deny` baselines for the release and managed
   namespaces (`templates/networkpolicy.yaml`). `ClusterOnly` egress is
-  restricted by default to pods in the managed namespaces; the
+  restricted by default to pods in the workspace's own tenant's
+  namespaces (its `workspaces.cdi.tinyorbit.vn/tenant` label value), and
+  the policy is created before the pod so a runtime never runs without
+  it (`Ensure`); the
   `runtime.networkProfiles.clusterOnly.*` values narrow it further or,
   with `unrestricted: true`, open it to any pod (TM-34). Opt-in
   `managedNamespaces[].namespaceQuota` bounds a namespace's summed
