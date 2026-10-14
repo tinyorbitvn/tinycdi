@@ -157,8 +157,7 @@ type TemplateInfo struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Revision int64  `json:"revision"`
-	// RevisionLabel is the raw spec.revision identifier ("2026-10-b");
-	// absent on rows written before v0.3.
+	// RevisionLabel is the raw spec.revision identifier ("2026-10-b").
 	RevisionLabel string `json:"revisionLabel,omitempty"`
 	Runtime       string `json:"runtime"`
 	Experience    string `json:"experience"`
@@ -568,12 +567,10 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				if err != nil {
 					return err
 				}
-				if sp != nil {
-					if sigSpec == nil {
-						sigSpec = &IntentSpec{}
-					}
-					sigSpec.SessionPolicy = sp
+				if sigSpec == nil {
+					sigSpec = &IntentSpec{}
 				}
+				sigSpec.SessionPolicy = sp
 			}
 			tpl, err := json.Marshal(rec.Template)
 			if err != nil {
@@ -740,28 +737,14 @@ func (s *Service) ListRunningWorkspaces(ctx context.Context, tenantID string, li
 }
 
 // startSessionPolicy resolves the session data-transfer policy a start
-// intent carries: the meet of the tenant ceiling and the clipboard policy
-// of the revision the start runs on — rec.Template is already the
-// post-re-point snapshot when the family moved. A workspace row predating
-// the snapshot field (ClipboardPolicy "") consults the live catalog for
-// the recorded revision; when that lookup also yields nothing the start
-// carries no stamped policy (nil) — the pod falls back to the operator's
-// template snapshot, the pre-field behaviour.
+// intent carries: the meet of the tenant ceiling and the policies recorded
+// on rec.Template — already the post-re-point snapshot when the family
+// moved. It resolves exactly as create does, so every start intent carries
+// a policy.
 func (s *Service) startSessionPolicy(ctx context.Context, tx store.Tx, tenantID string, rec *WorkspaceRecord) (*SessionPolicy, error) {
-	clipboard := rec.Template.ClipboardPolicy
-	fileTransfer := rec.Template.FileTransferPolicy
-	if clipboard == "" && s.templates != nil {
-		if cur, err := s.templates.Get(ctx, tenantID, rec.Template.ID); err == nil && cur != nil {
-			clipboard = cur.ClipboardPolicy
-			fileTransfer = cur.FileTransferPolicy
-		}
-	}
-	if clipboard == "" {
-		return nil, nil
-	}
 	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
-		ClipboardPolicy:    clipboard,
-		FileTransferPolicy: fileTransfer,
+		ClipboardPolicy:    rec.Template.ClipboardPolicy,
+		FileTransferPolicy: rec.Template.FileTransferPolicy,
 	}, s.fileBound)
 	if err != nil {
 		return nil, fmt.Errorf("start: resolve session policy: %w", err)
@@ -800,14 +783,6 @@ func reserveForStart(ctx context.Context, tx store.Tx, tenantID, workspaceID str
 			RunningSlots: *rs, CPUMillis: *rc, MemoryBytes: *rm})
 	}
 	return Reserve(ctx, tx, tenantID, workspaceID, v)
-}
-
-// ReleaseQuota frees a workspace's reservation only with a runtime
-// absence proof; see Release.
-func (s *Service) ReleaseQuota(ctx context.Context, tenantID, workspaceUID string, proof AbsenceProof) error {
-	return s.db.WithTx(ctx, func(tx store.Tx) error {
-		return Release(ctx, tx, tenantID, workspaceUID, proof)
-	})
 }
 
 // ---------------------------------------------------------------------------

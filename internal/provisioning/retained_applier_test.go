@@ -9,6 +9,7 @@ package provisioning_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -193,5 +194,83 @@ func TestRetainedApplierSameRevisionTwice(t *testing.T) {
 	}
 	if got.State != provisioning.RetainedStateRetained || got.ConsumingWorkspaceID != "" {
 		t.Fatalf("record after delete replay = %+v, want Retained unbound", got)
+	}
+}
+
+// TestRetainedApplierRefusesUnstampedCR: the consuming CR is created
+// carrying the claim reference, so a CR that exists for the same request
+// without it was not created by this claim. The attach fails before the
+// volume is retargeted and the record stays Attaching; the CR is not
+// patched.
+func TestRetainedApplierRefusesUnstampedCR(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	rstore := provisioning.NewRetainedStore(db)
+	svc := provisioning.NewService(db)
+	const tenant = "tenant-unst"
+	if err := db.WithTx(ctx, func(tx store.Tx) error {
+		return provisioning.SetQuota(ctx, tx, tenant, provisioning.ResourceVector{
+			RunningSlots: 10, CPUMillis: 1 << 20, MemoryBytes: 1 << 40, DiskBytes: 1 << 40})
+	}); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+	seedWorkspaceRow(t, db, "ws_unstsrc01", tenant, "iss|sub-1", "src-unst")
+	rec, err := rstore.ImportRetained(ctx, provisioning.RetainedDiskInfo{
+		TenantID: tenant, Owner: "iss|sub-1", SourceWorkspaceID: "ws_unstsrc01",
+		Runtime: "LinuxContainer", SizeBytes: 2 << 30,
+		PVCNamespace: "ns-it", PVCName: "pvc-unst", PVCUID: "uid-pvc-unst",
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	ws, err := svc.AttachRetained(ctx, tenant, "iss|sub-1", "iss|sub-1", rec.ID, "k-unst",
+		provisioning.AttachRequest{
+			Name:     "consumer-unst",
+			Template: provisioning.TemplateInfo{ID: "tpl_t", Name: "tmpl", Runtime: "LinuxContainer"},
+			Vector:   quotaVec, DesiredState: "Stopped",
+		}, []byte("a"))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	pending, err := provisioning.NewOutbox(db).PendingIntents(ctx, provisioning.PlatformID(ws.ID))
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending intents = %v (err %v), want 1 create", pending, err)
+	}
+	create := pending[0]
+
+	pvc := retainedPVC("ns-it", "pvc-unst", "cruid-src", "ws-unstsrc01", nil)
+	kc := fake.NewClientBuilder().WithScheme(retainedApplyScheme(t)).WithObjects(pvc).Build()
+	tmap := provisioning.TenantNamespaces{tenant: "ns-it"}
+	// The same request's CR, created without the claim reference.
+	inner := provisioning.NewK8sApplier(kc, tmap)
+	if err := inner.Apply(ctx, create); err != nil {
+		t.Fatalf("seed unstamped CR: %v", err)
+	}
+
+	applier := provisioning.NewRetainedApplier(inner, kc, tmap, rstore)
+	err = applier.Apply(ctx, create)
+	if err == nil || !strings.Contains(err.Error(), "lacks claim annotation") {
+		t.Fatalf("apply onto unstamped CR: err = %v, want a missing-claim refusal", err)
+	}
+	cr := &cdiv1.Workspace{}
+	if err := kc.Get(ctx, client.ObjectKey{Namespace: "ns-it", Name: provisioning.WorkspaceCRName(create.WorkspaceUID)}, cr); err != nil {
+		t.Fatalf("consuming CR: %v", err)
+	}
+	if v, ok := cr.Annotations[provisioning.AnnotationRetainedDataRef]; ok {
+		t.Fatalf("unstamped CR was patched with the claim reference %q", v)
+	}
+	gotPVC := &corev1.PersistentVolumeClaim{}
+	if err := kc.Get(ctx, client.ObjectKey{Namespace: "ns-it", Name: "pvc-unst"}, gotPVC); err != nil {
+		t.Fatalf("pvc: %v", err)
+	}
+	if gotPVC.Labels["workspaces.cdi.tinyorbit.vn/workspace-uid"] != "cruid-src" {
+		t.Fatalf("pvc retargeted despite the refusal: %v", gotPVC.Labels)
+	}
+	got, err := rstore.GetRetained(ctx, tenant, rec.ID)
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if got.State != provisioning.RetainedStateAttaching {
+		t.Fatalf("record state = %s, want Attaching", got.State)
 	}
 }

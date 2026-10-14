@@ -437,3 +437,38 @@ func TestRecovery_APIRestartCreateDedup(t *testing.T) {
 			rec.intents, first.ID)
 	}
 }
+
+// TestSettleQuota_DeletedWorkspaceKeepsRetainedDiskHeld: settling a deleted
+// workspace whose home was retained frees its compute and, in the SAME
+// transaction, re-holds the retained disk — no later repair pass needed.
+func TestSettleQuota_DeletedWorkspaceKeepsRetainedDiskHeld(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	const tenant = "tenant-rh"
+	seedHeldWorkspace(t, db, tenant, "ws_rhsrc", quotaVec)
+	if _, err := db.Pool().Exec(ctx, `UPDATE workspaces SET state = 'deleted' WHERE id = 'ws_rhsrc'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioning.NewRetainedStore(db).ImportRetained(ctx, provisioning.RetainedDiskInfo{
+		TenantID: tenant, Owner: "iss|sub-1", SourceWorkspaceID: "ws_rhsrc",
+		Runtime: "LinuxContainer", SizeBytes: 3 << 30,
+		PVCNamespace: "ns-it", PVCName: "pvc-rh", PVCUID: "uid-pvc-rh",
+	}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	rec := provisioning.NewRecovery(db, &fakeObserver{gone: true})
+	if err := rec.SettleQuota(ctx, tenant, "ws_rhsrc"); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	state, v, _, _ := resState(t, db, "ws_rhsrc")
+	if state != "held" || v != (provisioning.ResourceVector{DiskBytes: 3 << 30}) {
+		t.Fatalf("after settle: %s %+v, want held disk-only 3 GiB", state, v)
+	}
+	actions, err := rec.Recover(ctx, &recordingApplier{})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("recovery found work after an in-transaction settle: %+v", actions)
+	}
+}

@@ -3080,24 +3080,23 @@ func TestLoginKeysRequired(t *testing.T) {
 	}
 }
 
-// TestRemovedValuesFail: chart 0.2.0 dropped the api, gateway and portal
-// components — setting any of their values must fail the render with a
-// migration hint pointing at backend. / frontend. (D6; the schema keeps
-// the old keys valid so the hint can fire instead of a bare schema error.)
-func TestRemovedValuesFail(t *testing.T) {
-	for _, tc := range []struct{ set, want string }{
-		{"api.replicas=1", "backend."},
-		{"gateway.replicas=1", "backend."},
-		{"portal.replicas=1", "frontend."},
-		{"images.api.repository=x/y", "backend."},
-		{"images.gateway.repository=x/y", "backend."},
-		{"images.portal.repository=x/y", "frontend."},
+// TestUnknownComponentKeysRejected: the chart's components are backend,
+// frontend and operator; any other top-level component key — and any
+// images.* entry outside the release set — is a schema violation.
+func TestUnknownComponentKeysRejected(t *testing.T) {
+	for _, set := range []string{
+		"api.replicas=1", "gateway.replicas=1", "portal.replicas=1",
+		"images.api.repository=x/y", "images.gateway.repository=x/y", "images.portal.repository=x/y",
+		"sessionHost=session.lab.example.net",
 	} {
-		out := renderErrArgs(t,
-			"-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
-			"--set", tc.set)
-		if !strings.Contains(out, tc.want) {
-			t.Errorf("--set %s must fail with a migration hint containing %q, got: %s", tc.set, tc.want, out)
+		key := strings.SplitN(strings.TrimPrefix(set, "images."), ".", 2)[0]
+		key = strings.SplitN(key, "=", 2)[0]
+		out := renderErrArgs(t, "-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"), "--set", set)
+		if !strings.Contains(out, key) {
+			t.Errorf("--set %s must fail naming %q, got: %s", set, key, out)
+		}
+		if strings.Contains(out, "migrate these values") {
+			t.Errorf("--set %s still hits the removed migration hint: %s", set, out)
 		}
 	}
 }

@@ -131,30 +131,18 @@ func (a *RetainedApplier) verifyClaim(ctx context.Context, in Intent) (*retained
 func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent, claim *retainedClaim) error {
 	rec := claim.rec
 
-	// The CR normally already carries the claim reference from its create.
-	// A CR left behind by a delivery that predates single-write creation
-	// (same request, no stamp) is repaired here so a replay still converges;
-	// for a CR created by this version the patch is a no-op.
+	// The CR is created carrying the claim reference (Apply sets it on the
+	// create), so a replay finds it already stamped. A CR without it was
+	// not created by this claim: refuse before the volume is retargeted.
 	ws := &cdiv1.Workspace{}
 	if err := a.Client.Get(ctx, client.ObjectKey{
 		Namespace: claim.ns, Name: WorkspaceCRName(in.WorkspaceUID),
 	}, ws); err != nil {
 		return fmt.Errorf("attach retained: get workspace CR: %w", err)
 	}
-	orig := ws.DeepCopy()
-	if ws.Annotations == nil {
-		ws.Annotations = map[string]string{}
-	}
-	changed := false
 	for k, v := range claim.annotations() {
 		if ws.Annotations[k] != v {
-			ws.Annotations[k] = v
-			changed = true
-		}
-	}
-	if changed {
-		if err := a.Client.Patch(ctx, ws, client.MergeFrom(orig)); err != nil {
-			return fmt.Errorf("attach retained: patch workspace CR: %w", err)
+			return fmt.Errorf("attach retained: workspace CR %s lacks claim annotation %s=%q", ws.Name, k, v)
 		}
 	}
 

@@ -1,4 +1,4 @@
-# Invalid: violates values.schema.json twice — api digest is not a
+# Invalid: violates values.schema.json twice — backend digest is not a
 # sha256:<64hex> reference and database.existingSecret is empty.
 # `helm template`/`helm lint` must reject this file.
 portalHost: portal.lab.example.net
@@ -13,6 +13,6 @@ database:
   existingSecret: tinycdi-backend-db
 
 images:
-  api:
-    repository: legacy/api
+  backend:
+    repository: example/backend
     digest: not-a-sha256-digest
