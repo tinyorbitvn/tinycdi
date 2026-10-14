@@ -324,7 +324,11 @@ Controls:
   routes by host class first. Workspace hosts are matched by
   `sessionhost.Domain.Match` (label `ws-[a-z0-9]{8,60}`), control hosts
   come from `-session-control-hosts`, and anything else gets
-  `421 bad_host`. API paths do not exist on this listener.
+  `421 bad_host`. API paths do not exist on this listener. The host class
+  is a routing check on the client-chosen `Host` header, not a network
+  boundary: a client that reaches `:8444` directly can name a control
+  host. `/healthz` and `/readyz` answer on control hosts only
+  (`controlHostHealth`, `TestSessionListener_HealthOnlyOnControlHosts`).
 - **Launch ticket**: 60 s TTL, single use, consumed by every redemption
   attempt that passes the gateway-audience check, whatever its outcome (an
   expired, revoked or refused attempt commits the consume;
@@ -388,9 +392,13 @@ Controls:
   `/xfer/files/<name>` (`helperURL`). It checks Origin, the session
   cookie, host and live lease, then claims the grant through
   `Broker.ClaimTransfer` before any byte reaches the pod (TM-30, TM-31).
-- **Control surface**: `/v1/control/*` answers only on control hosts and
-  requires the bearer token from `-control-token-file` (`controlAuth`,
-  `internal/gateway/proxy.go`).
+- **Control surface**: `/v1/control/*` answers only on control hosts, and
+  the bearer from `-control-token-file` is its only gate (`controlAuth`,
+  `internal/gateway/proxy.go`). The backend refuses to start with a token
+  shorter than 32 bytes (`checkControlToken`, `TestControlToken_MinLength`).
+  Each client key may fail the bearer check 10 times, refilled at 10 per
+  minute; after that every control request from that client answers `429`,
+  the right token included (`TestControlAuth_FailuresLimitedPerClient`).
 - **Timeouts**: the app, internal and metrics listeners bound every
   request phase; the session listener bounds the header read (10 s)
   and the whole request read (`sessionReadTimeout`, 30 s), so a client

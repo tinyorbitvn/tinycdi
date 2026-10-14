@@ -70,6 +70,22 @@ func (g *groupList) Set(v string) error {
 	return nil
 }
 
+// minControlTokenBytes is the shortest control bearer the backend accepts
+// (R1-26). On the session listener's control hosts the bearer is the only
+// gate — the host class is a Host-header routing check, not a network
+// boundary — so it must resist guessing on its own.
+const minControlTokenBytes = 32
+
+// checkControlToken refuses a configured control token shorter than
+// minControlTokenBytes. An empty token is allowed: the control surface is
+// then closed (fail closed).
+func checkControlToken(tok string) error {
+	if tok != "" && len(tok) < minControlTokenBytes {
+		return fmt.Errorf("control token is %d bytes; it must be at least %d (for example: openssl rand -hex 32)", len(tok), minControlTokenBytes)
+	}
+	return nil
+}
+
 // controlTokenUnsetWarning is logged at startup when no control token is
 // configured (SEC-I2): the /v1/control surface fails CLOSED in that state —
 // it is disabled, not unauthenticated.

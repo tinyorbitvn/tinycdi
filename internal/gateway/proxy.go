@@ -235,6 +235,10 @@ type Gateway struct {
 	embedders     []string // serialized portal origins for frame-ancestors
 	proxy         *httputil.ReverseProxy
 	permissions   string // Permissions-Policy pinned on every response
+	// controlFailures counts failed /v1/control/* bearer checks per client
+	// key (R1-26): once a client spends its budget, every control request
+	// from it answers 429 — the right token included — until it refills.
+	controlFailures *ratelimit.Limiter
 
 	mu          sync.Mutex
 	sessions    map[string]*session                     // cookie value -> session
@@ -319,6 +323,7 @@ func New(cfg Config) (*Gateway, error) {
 		connLogLast:   map[string]time.Time{},
 		done:          make(chan struct{}),
 	}
+	g.controlFailures = ratelimit.New(ControlFailureRate, ControlFailureBurst, controlFailureMaxKeys, cfg.Now)
 	for _, po := range cfg.PortalOrigins {
 		u, ok := parseOrigin(strings.TrimSpace(po))
 		if !ok {
@@ -446,6 +451,21 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Control plane (operator surface, SEC-2 bearer-gated)
 // ---------------------------------------------------------------------------
 
+// Control-surface failure budget (R1-26): ControlFailureBurst failed
+// bearer checks per client key, refilled at ControlFailureRate per minute.
+// The bearer is the only gate on the control hosts — the host class is a
+// Host-header routing check, not a network boundary — so guessing must not
+// run at line rate. controlFailureMaxKeys caps the LRU of tracked clients.
+const (
+	ControlFailureRate    = 10
+	ControlFailureBurst   = 10
+	controlFailureMaxKeys = 10_000
+)
+
+// IsControlHost reports whether r's Host names a configured control host —
+// the backend mounts its health endpoints on those hosts only.
+func (g *Gateway) IsControlHost(r *http.Request) bool { return g.controlHostOK(r) }
+
 func (g *Gateway) controlAuth(r *http.Request) bool {
 	if g.cfg.ControlToken == "" {
 		return false // no token configured: control surface closed (SEC-2)
@@ -467,7 +487,17 @@ func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
 		"/v1/control/session": "session.list",
 		"/v1/control/revoke":  "session.revoke",
 	}[r.URL.Path]
+	client := ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+	if ok, retry := g.controlFailures.Peek(client); !ok {
+		if action != "" {
+			g.audit(r, action, "", observability.OutcomeDenied, "rate_limited")
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return
+	}
 	if !g.controlAuth(r) {
+		g.controlFailures.Allow(client)
 		if action != "" {
 			g.audit(r, action, "", observability.OutcomeDenied, "unauthorized")
 		}

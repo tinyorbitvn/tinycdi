@@ -110,7 +110,7 @@ objects. It **keeps**:
 | `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0008 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
 | `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
 | `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
-| `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
+| `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer (at least 32 bytes); unset = routes closed |
 | `operator.brokerClient.mtls.existingSecret` | `tls.crt`/`tls.key` | operator broker client cert — **CN must equal `backend.operatorCN` (default `operator`)** |
 | `operator.brokerClient.ca.existingSecret` | `ca.crt` | operator verifies the broker cert |
 | `frontend.tls.existingSecret` | `tls.crt`/`tls.key` | frontend TLS |

@@ -79,6 +79,9 @@ func (b *Backend) wire(ctx context.Context) error {
 		}
 		cfg.ControlToken = strings.TrimSpace(string(raw))
 	}
+	if err := checkControlToken(cfg.ControlToken); err != nil {
+		return err
+	}
 	if cfg.ControlToken == "" {
 		b.log.Warn(controlTokenUnsetWarning)
 	}
@@ -634,7 +637,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		return fmt.Errorf("gateway init: %w", err)
 	}
 	b.gw = gw
-	b.sessionHandler = b.readyz(api.RequestID(gw))
+	b.sessionHandler = api.RequestID(b.controlHostHealth(gw))
 	b.closers = append(b.closers, gw.Close)
 	return nil
 }

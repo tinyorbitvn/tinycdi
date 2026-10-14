@@ -214,7 +214,7 @@ Emitted events:
 | `session.touch` | `POST /v1/session:touch` | the portal's activity beat — log stream only, not stored |
 | `connection.create` | `POST /v1/workspaces/{id}/connections` | launch-ticket issue — the ticket itself is never recorded |
 | `session.logout` | `POST /v1/logout` | the sign-out request |
-| `session.revoke` | sign-out + `POST /v1/control/revoke` | revocation of session-bound lease material; bearer-denied control attempts record `denied`/`unauthorized` |
+| `session.revoke` | sign-out + `POST /v1/control/revoke` | revocation of session-bound lease material; bearer-denied control attempts record `denied`/`unauthorized`, and attempts from a client over its failure budget record `denied`/`rate_limited` |
 | `session.list` | `GET /v1/control/session` | the operator's replica-local session listing |
 | `session.host_mismatch` | gateway | a session cookie presented on the wrong workspace host |
 | `session.lookup` | gateway session-listener cookie gate | unseen-cookie lookups refused by the lookup limiter (`denied`/`rate_limited`) |

@@ -49,6 +49,22 @@ import (
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// testControlToken is a control bearer of the minimum accepted length
+// (minControlTokenBytes).
+const testControlToken = "0123456789abcdef0123456789abcdef"
+
+// controlHostGet GETs path on the session listener at base with the
+// control Host the drain tests configure (-session-control-hosts
+// session.test): health answers on control hosts only.
+func controlHostGet(c *http.Client, base, path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = "session.test"
+	return c.Do(req)
+}
+
 // countingHandler records how many requests reach it — used to prove a
 // listener never delegates to another listener's mux.
 type countingHandler struct {
@@ -244,7 +260,8 @@ func (f *fakeBrokerClient) revokeCount() int {
 // ---------------------------------------------------------------------------
 
 // testSessionHandler builds the production session-listener handler on a
-// fake broker — the same readyz+RequestID+Gateway stack wire() builds.
+// fake broker — the same RequestID+controlHostHealth+Gateway stack wire()
+// builds.
 func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.Handler) {
 	t.Helper()
 	b := &Backend{log: testLog()}
@@ -693,7 +710,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
 		// The drain window is held for its full length now — keep this
@@ -853,7 +870,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
 		"-drain-window", window.String(),
@@ -956,7 +973,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// Readiness fails at once even though streams still flow — the drop
 	// must land inside the wait, well before the drain begins.
 	waitFor(t, propDelay, "readiness to drop inside the propagation wait", func() bool {
-		resp, err := insecure.Get(base + "/readyz")
+		resp, err := controlHostGet(insecure, base, "/readyz")
 		if err != nil {
 			return false
 		}
@@ -1036,7 +1053,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-drain-window", window.String(),
 		// Keep the test about the window hold; the propagation wait has
 		// its own test.
@@ -1065,7 +1082,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 	}}
 
 	waitFor(t, 5*time.Second, "session listener serving", func() bool {
-		resp, err := insecure.Get(base + "/healthz")
+		resp, err := controlHostGet(insecure, base, "/healthz")
 		if err != nil {
 			return false
 		}
@@ -1079,7 +1096,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 	// Readiness fails at once, but the socket keeps answering for the
 	// whole window — nothing is refused inside it.
 	waitFor(t, window/2, "readiness to drop inside the window", func() bool {
-		resp, err := insecure.Get(base + "/readyz")
+		resp, err := controlHostGet(insecure, base, "/readyz")
 		if err != nil {
 			return false
 		}
@@ -1091,7 +1108,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
 	case <-time.After(window - 100*time.Millisecond):
 	}
-	resp, err := insecure.Get(base + "/readyz")
+	resp, err := controlHostGet(insecure, base, "/readyz")
 	if err != nil {
 		t.Fatalf("session listener refused a connection inside the drain window: %v", err)
 	}

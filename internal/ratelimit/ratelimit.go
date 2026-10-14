@@ -138,6 +138,33 @@ func (l *Limiter) Refund(key string) {
 	}
 }
 
+// Peek reports what Allow(key) would answer now without spending a token
+// and without creating a bucket for an unseen key (which would pass).
+func (l *Limiter) Peek(key string) (ok bool, retryAfter time.Duration) {
+	if l == nil || l.perSec <= 0 {
+		return true, 0
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	el, found := l.buckets[key]
+	if !found {
+		return true, 0
+	}
+	b := el.Value.(*bucket)
+	tokens := b.tokens
+	if elapsed := now.Sub(b.last); elapsed > 0 {
+		tokens += l.perSec * elapsed.Seconds()
+		if tokens > l.burst {
+			tokens = l.burst
+		}
+	}
+	if tokens >= 1 {
+		return true, 0
+	}
+	return false, time.Duration((1-tokens)/l.perSec*float64(time.Second) + 0.5)
+}
+
 // PerReplica divides a configured per-key budget across n backend
 // replicas so the aggregate over an even spread approximates the
 // configured bound: every replica gets rate/n tokens per minute and

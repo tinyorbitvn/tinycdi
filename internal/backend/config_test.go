@@ -672,3 +672,22 @@ func TestParseFlags_FileTransferMaxBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestControlToken_MinLength (R1-26): a configured control token shorter
+// than 32 bytes is refused at startup; an empty token (control closed) and
+// a 32-byte token are accepted.
+func TestControlToken_MinLength(t *testing.T) {
+	for _, tc := range []struct {
+		tok string
+		ok  bool
+	}{
+		{"", true},
+		{"tok", false},
+		{strings.Repeat("a", minControlTokenBytes-1), false},
+		{strings.Repeat("a", minControlTokenBytes), true},
+	} {
+		if err := checkControlToken(tc.tok); (err == nil) != tc.ok {
+			t.Errorf("checkControlToken(%d bytes) = %v, want ok=%v", len(tc.tok), err, tc.ok)
+		}
+	}
+}

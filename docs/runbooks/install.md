@@ -216,7 +216,7 @@ All in the release namespace unless noted:
 | `tinycdi-internal-ca` | `ca.crt` | internal mTLS CA: backend verifies client certs (`backend.clientCA`), operator verifies the broker cert (`operator.brokerClient.ca`). With `certManager.selfSigned` the CA Secret is `<release>-internal-ca` |
 | `tinycdi-operator-mtls` | `tls.crt`, `tls.key` | operator client cert to the broker — **CN must be `operator`** (or `backend.operatorCN`): the only identity the internal workspace revoke/drain routes accept (ADR 0003). `certManager.enabled` issues it with the right CN |
 | `tinycdi-frontend-tls` | `tls.crt`, `tls.key` | frontend TLS |
-| `tinycdi-backend-control-token` | `token` | backend session control endpoints — **optional**; set `backend.controlToken.existingSecret` (key `token`). Without it the `/v1/control/*` routes stay closed (fail-closed); they answer only on the in-cluster control hosts |
+| `tinycdi-backend-control-token` | `token` | backend session control endpoints — **optional**; set `backend.controlToken.existingSecret` (key `token`). The token must be at least 32 bytes (`openssl rand -hex 32`); a shorter one stops the backend at startup. Without it the `/v1/control/*` routes stay closed (fail-closed); they answer only on the in-cluster control hosts |
 | `tinycdi-extra-ca` | `ca.crt` | optional: backend outbound CA (`backend.extraCA`), runtime upstream CA (`backend.upstreamCA`), DB CA (`database.tls.caSecret`) |
 | `tinycdi-ingress-tls` | `tls.crt`, `tls.key` | optional: ingress TLS when `ingress.enabled` — must cover `portalHost` **and** `*.<sessionDomain>` |
 
