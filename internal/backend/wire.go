@@ -930,10 +930,12 @@ func appMux(authn *api.Authenticator, h appRoutes,
 // ID, audit, the trusted-origin CSRF gate and the readiness endpoint. E8
 // wraps the mux innermost with the app-listener HTTP metrics (the
 // middleware passes through when the metrics listener is off).
+// APIBrowserHeaders is outermost, so every app-listener answer (readiness
+// included) carries the browser policy (TM-01).
 func (b *Backend) wrapApp(authn *api.Authenticator, mux http.Handler, portalOrigins []string) http.Handler {
-	return b.readyz(api.RequestID(api.Audit(b.log)(
+	return api.APIBrowserHeaders(b.readyz(api.RequestID(api.Audit(b.log)(
 		api.RequireTrustedOrigin(authn.SessionCookieName(), portalOrigins)(
-			api.InstrumentHTTP(b.metrics, "app")(mux)))))
+			api.InstrumentHTTP(b.metrics, "app")(mux))))))
 }
 
 // bind opens every enabled listener and records the servers.

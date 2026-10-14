@@ -60,10 +60,12 @@ type AuthConfig struct {
 	// CSRFHeader is the header the CSRF middleware reads.
 	// Defaults to "X-CSRF-Token".
 	CSRFHeader string
-	// SameSite for the session cookie. Defaults to SameSite=Lax: the portal
-	// is a separate origin from the API and OIDC top-level GET navigations
-	// must still carry the session; cross-site POSTs remain blocked and the
-	// synchronizer CSRF token independently guards state changes.
+	// SameSite for the session cookie. Defaults to SameSite=Lax: OIDC
+	// top-level GET navigations must carry the session, and the portal and
+	// session hosts are same-site in the default topology. Lax cookies ride
+	// top-level GETs, so CSRF rests on the synchronizer token (RequireCSRF)
+	// and the Origin / Sec-Fetch-Site gate (RequireTrustedOrigin), not on
+	// SameSite.
 	SameSite http.SameSite
 	// SecureCookies controls the Secure flag. Defaults to true; tests may
 	// set it false for httptest servers, release builds must not.
@@ -160,8 +162,10 @@ func (c *AuthConfig) withDefaults() {
 }
 
 // Session is a server-side authenticated session. The browser only ever holds
-// the opaque session ID in a host-only cookie; ID/access tokens are never sent
-// to the client, never persisted here, and never logged.
+// the opaque session ID in a host-only cookie. The access token is never
+// kept. The ID token is kept sealed at rest (IDToken) and reaches the
+// browser only as id_token_hint in the end-session URL at sign-out; it is
+// never logged.
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID while the
 // session is in flight, but stores persist it only as a SHA-256 digest.
@@ -172,8 +176,9 @@ type Session struct {
 	Principal Principal
 	// IDToken is the raw OIDC id_token retained so logout can send
 	// id_token_hint (the provider then skips its own confirmation page).
-	// It is only ever persisted AEAD-sealed (store); it is never written to
-	// a log line or an API response (V3.24).
+	// It is persisted only AEAD-sealed (store), never logged, and leaves
+	// the server only inside the end-session URL that POST /v1/logout and
+	// POST /v1/me/sessions:revoke-all return.
 	IDToken   string
 	CreatedAt time.Time
 	// LastSeenAt drives the sliding idle timeout; refreshed by store reads.
@@ -853,10 +858,10 @@ func isLoopbackHost(host string) bool {
 	return err == nil && ip.Unmap().IsLoopback()
 }
 
-// sessionCookie builds the host-only session cookie: no Domain attribute
-// (browser scopes it to the API host exactly — required because portal and
-// session origins live on separate registrable domains), Secure, HttpOnly,
-// SameSite per config (default Lax).
+// sessionCookie builds the host-only session cookie: the __Host- prefix
+// and no Domain attribute scope it to the portal host exactly, so a
+// session host on the same site can never set or read it. Secure,
+// HttpOnly, SameSite per config (default Lax).
 func (a *Authenticator) sessionCookie(id string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     a.cfg.SessionCookieName,

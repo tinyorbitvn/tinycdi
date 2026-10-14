@@ -151,6 +151,13 @@ Controls:
   policy are set by `securityHeaders` and `frontendCSP`
   (`build/frontend/main.go`). The SPA session page sets the iframe
   `sandbox` and `allow` attributes (`web/src/`).
+- **API response headers**: `APIBrowserHeaders` (`internal/api/headers.go`)
+  is the outermost app-listener middleware (`wrapApp`,
+  `internal/backend/wire.go`). Every `/v1` answer carries
+  `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and, unless the
+  handler sets its own, `Cache-Control: no-store`.
 - **OIDC login**: authorization code with PKCE S256; go-oidc discovery
   verifies issuer and audience (`internal/api/auth.go`). The in-flight
   login rides in an AEAD-sealed `__Host-tcdi_login` cookie (AES-256-GCM,
@@ -165,7 +172,11 @@ Controls:
   (`AuthConfig.AbsoluteTimeout`). The retained `id_token` is sealed at
   rest with the same keys under a purpose-bound AAD
   (`internal/api/idtoken.go`); if it cannot be opened, logout degrades to
-  a `client_id`-only end-session URL.
+  a `client_id`-only end-session URL. The retained `id_token` reaches the
+  browser at sign-out: `POST /v1/logout` and
+  `POST /v1/me/sessions:revoke-all` return it as `id_token_hint` in
+  `endSessionUrl`, so it lands in browser history and the provider's
+  access logs.
 - **CSRF**: a synchronizer token derived from the session ID
   (`csrfTokenFor`, `internal/api/auth.go`), checked in constant time by
   `RequireCSRF` (`internal/api/middleware.go`). Defense in depth:

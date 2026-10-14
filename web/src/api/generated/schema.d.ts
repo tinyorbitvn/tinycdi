@@ -117,7 +117,11 @@ export interface paths {
          *     discovery document and the deployment configuration — `client_id`
          *     always, `post_logout_redirect_uri` only when the deployment sets
          *     `oidc.postLogoutRedirect` — never from the request (no open redirect).
-         *     The session keeps no ID token, so `id_token_hint` is not sent.
+         *     The session's retained ID token is sent as `id_token_hint` on that
+         *     URL, so the provider can skip its own confirmation page: the raw ID
+         *     token therefore reaches the browser in this response and the provider
+         *     in the navigation URL. A session whose sealed token cannot be opened
+         *     sends `client_id` only.
          *     Otherwise the answer is `204` and the portal stays local.
          *
          *     The server-side session delete is the point of no return: when the
@@ -161,6 +165,8 @@ export interface paths {
          *     `end_session_endpoint` and the deployment has `oidc.endSession` on;
          *     the portal navigates the browser there. The URL is assembled only
          *     from discovery and configuration — never from the request.
+         *     As with logout, the caller's retained ID token is sent on that URL
+         *     as `id_token_hint`.
          *
          *     The revocation is atomic: a store failure rolls the whole
          *     transaction back, so nothing is destroyed, the caller stays signed

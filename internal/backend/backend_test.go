@@ -1327,3 +1327,41 @@ func TestAppListener_UnknownCookieSprayRefused(t *testing.T) {
 		t.Fatalf("%d non-429 answers after the budget was spent, want only refill-sized slack", late)
 	}
 }
+
+// TestWrapApp_PortalBrowserHeaders (R1-10): every app-listener response
+// on the portal host — an authenticated route's 401, the anonymous probe's
+// 200, and the mux's own 404 — carries nosniff, a CSP that denies framing,
+// XFO DENY and no-store.
+func TestWrapApp_PortalBrowserHeaders(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/v1/me", http.StatusUnauthorized},
+		{"/v1/workspaces", http.StatusUnauthorized},
+		{"/v1/session", http.StatusOK},
+		{"/v1/no-such-route", http.StatusNotFound},
+	} {
+		resp, err := http.Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("GET %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+		h := resp.Header
+		if h.Get("X-Content-Type-Options") != "nosniff" ||
+			!strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
+			h.Get("X-Frame-Options") != "DENY" ||
+			h.Get("Cache-Control") != "no-store" ||
+			h.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("GET %s: headers nosniff=%q csp=%q xfo=%q cache=%q referrer=%q",
+				tc.path, h.Get("X-Content-Type-Options"), h.Get("Content-Security-Policy"),
+				h.Get("X-Frame-Options"), h.Get("Cache-Control"), h.Get("Referrer-Policy"))
+		}
+	}
+}

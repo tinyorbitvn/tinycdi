@@ -38,7 +38,7 @@ export function authArea(_ctx: MockContext): MockArea {
           // Only the session cookie remains — the retired tcdi_csrf and
           // tcdi_session_origin names are never set; the CSRF token and
           // session domain come from GET /v1/me (D17).
-          "set-cookie": `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; Path=/; HttpOnly; SameSite=Strict`,
+          "set-cookie": `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; Path=/; HttpOnly; SameSite=Lax`,
         },
         body: "",
       };
@@ -49,7 +49,7 @@ export function authArea(_ctx: MockContext): MockArea {
   // POST /v1/logout (openapi.yaml logout): the composer already enforced
   // the session cookie and CSRF header, so this only ends the session.
   function logout(): MockResponse {
-    const clear = `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
+    const clear = `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
     if (endSessionUrl === null) return { status: 204, headers: { "set-cookie": clear }, body: "" };
     return ok(200, { endSessionUrl }, { "set-cookie": clear, "cache-control": "no-store" });
   }
