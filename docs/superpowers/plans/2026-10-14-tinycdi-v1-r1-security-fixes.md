@@ -28,6 +28,13 @@ These are owner decisions (defaults the owner reviews). Each gives the decision,
    `go build ./... && go vet ./... && GOFLAGS=-timeout=40m make test && go test -count=1 ./deploy/helm/ && KUBEBUILDER_ASSETS="$(bin/setup-envtest use -p path --bin-dir "$PWD/bin")" go test -tags=integration -count=1 -skip '^TestLinuxRuntime(ReadinessAndHome|FirefoxFallback|Desktop|BrowserBaseline|ClipboardParamsNotOverridable)$|^TestKasmAdapter' ./tests/integration/... && (cd web && npm ci && npm run typecheck && npm run lint:strings && npm run test:unit && npm run build) && for t in .github/tests/*.test.sh; do bash "$t" || exit 1; done`
    `GOFLAGS=-timeout=40m` is there because `make test` runs `internal/operator` (about 10 minutes, the `go test` default timeout) without `-timeout`. `TestLinuxRuntimeClipboardParamsNotOverridable` (Task 17) needs the built runtime image, like the other skipped `TestLinuxRuntime*` tests. No CI job runs `TestLinuxRuntime*` (`ci.yml`'s cluster-free integration job skips them; Task 17 adds the new name to that skip regex); they run locally with the images built. The `kasm-contract` job runs the adapter subtest `TestKasmAdapterChromium/ClipboardParamsNotOverridable`. Task 17 also adds a cheap local check (`.github/tests/clipboard-policy.test.sh`). — Reason: owner. — Cost if wrong: none.
 
+### User decisions (2026-10-15)
+
+The owner approved Decisions 1–9 and the plan rulings as written, plus:
+1. R1-29 custom seccomp profile gap: documented in the node-profiles README and the TM-47 residual only; not an accepted risk in the review's §5.
+2. Task 28 may rely on the runner's PyYAML; the gates fail loudly if it is missing.
+3. Task 30 Step 1 filters out the `docs(plan)` commit and checks each subject by exact match; extra review fix-round commits are fine.
+
 ## Plan rulings
 
 These are the planner's rulings, made against the code at `98c7f54`. Each gives the ruling, the reason, and the cost if it is wrong.
