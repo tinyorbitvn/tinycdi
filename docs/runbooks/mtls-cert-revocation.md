@@ -37,8 +37,13 @@ One revoked certificate per line — `<serial-hex> <issuer-dn>`:
   compare equal. A line whose issuer does not parse as a DN rejects the
   file. An entry whose issuer names no CA in the client-CA bundle
   loads, but logs
-  `revocation entry names an issuer outside the client-CA bundle`
-  because it can never match. The match is an (issuer, serial) pair —
+  `revocation entry names an issuer outside the client-CA bundle`:
+  it matches only leaves whose clients present that issuer as an
+  intermediate. With a two-tier PKI (a `certManager.issuerRef` CA backed
+  by an intermediate, where `ca.crt` holds only the root), an entry that
+  names the issuing intermediate is correct and logs this warning on
+  every load — do not rewrite it to the root DN, which would make it
+  match nothing. The match is an (issuer, serial) pair —
   serials are only unique per issuer.
 - The file is parsed atomically: one malformed line rejects the whole
   file; the backend then keeps the last-good list (never applies a

@@ -205,7 +205,7 @@ func (b *Blocklist) warnUnknownIssuers(set *Revocations) {
 	}
 	for e, written := range set.entries {
 		if !known[e.issuer] {
-			b.log.Warn("tlsreload: revocation entry names an issuer outside the client-CA bundle; it can never match",
+			b.log.Warn("tlsreload: revocation entry names an issuer outside the client-CA bundle; it matches only leaves whose clients present that issuer as an intermediate",
 				"file", b.file, "serial", e.serial, "issuer", written)
 		}
 	}
