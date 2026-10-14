@@ -15,8 +15,12 @@
   one command (dev only)
 - [branding.md](branding.md) — operator branding: ConfigMap layout, worked
   example, trademark note
-- [versioning.md](versioning.md) — the 1.0 contract: semantic versioning,
-  the stable surfaces, and what is not covered
+- [versioning.md](versioning.md) — the 1.x contract: semantic versioning,
+  what it covers, and upgrading within 1.x
+
+## Releases
+
+- [releases/v1.0.0.md](releases/v1.0.0.md) — what 1.0.0 contains, how to install it, known limitations
 
 ## Runbooks
 
