@@ -10,7 +10,7 @@ import (
 )
 
 // AuditRecord is one row of audit_event: a domain audit event persisted
-// next to its stdout record (ADR 0011). ActorRef is already pseudonymous.
+// next to its stdout record (ADR 0010). ActorRef is already pseudonymous.
 type AuditRecord struct {
 	ID         int64
 	Tenant     string

@@ -793,7 +793,7 @@ func generateCredentials(uid CRUID) (map[string][]byte, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
-	// The transfer credential (ADR 0010 §5) is separate from the KasmVNC
+	// The transfer credential (ADR 0009 §5) is separate from the KasmVNC
 	// password: only tcdi-xferd reads it, and the gateway injects it as
 	// X-Tcdi-Xfer-Token on the transfer leg.
 	tok := make([]byte, 32)
@@ -1154,7 +1154,7 @@ func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev
 	// the only path a Linux runtime contract offers (pod spec is rendered
 	// at start, containers are immutable after). A new policy therefore
 	// applies to a workspace at its next start only, never mid-session.
-	// spec.sessionPolicy (template policy ∧ tenant ceiling, ADR 0010) is
+	// spec.sessionPolicy (template policy ∧ tenant ceiling, ADR 0009) is
 	// required — it is the only source pod building reads.
 	ctr.Env = append(ctr.Env,
 		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)},

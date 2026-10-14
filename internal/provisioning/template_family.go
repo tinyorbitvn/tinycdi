@@ -41,8 +41,8 @@ const (
 	// pod placement, or the confinement profiles.
 	SkipReasonNetworkProfileChanged  = "network-profile-changed"
 	SkipReasonClipboardPolicyChanged = "clipboard-policy-changed"
-	// File-transfer is a data-boundary channel like clipboard (ADR 0010
-	// T11): a revision that changes it must never be silently adopted.
+	// File-transfer is a data-boundary channel like clipboard (ADR 0009
+	// §5): a revision that changes it must never be silently adopted.
 	SkipReasonFileTransferPolicyChanged = "file-transfer-policy-changed"
 	SkipReasonAdapterChanged            = "adapter-changed"
 	SkipReasonHostUsersChanged          = "host-users-changed"

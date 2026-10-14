@@ -13,7 +13,7 @@ import (
 
 // SessionPolicyCeiling is the tenant_session_policy row: the tenant
 // administrator's ceiling over every template's own session data-transfer
-// policy (ADR 0010 §1). A nil channel column means FollowTemplate — the
+// policy (ADR 0009 §1). A nil channel column means FollowTemplate — the
 // channel is not narrowed — and the store keeps "no row" as the single
 // representation of an all-defaults ceiling (SetCeiling deletes a row
 // whose every ceiling column went NULL).

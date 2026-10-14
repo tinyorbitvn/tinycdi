@@ -1,11 +1,6 @@
-# ADR 0005 — backend/frontend/operator, per-workspace session hosts
+# ADR 0005 — Backend, frontend, operator and per-workspace session hosts
 
-Status: accepted (v0.2 architecture). Accepted ahead of independent
-review; the pre-1.0 internal security review covering it is in
-`docs/security/review-v1.0.md` — internal,
-not an independent audit.
-
-Date: 2026-10-02
+Status: Accepted
 
 Supersedes: the transport section of [ADR 0003](0003-gateway-broker-internal-api.md)
 for the gateway caller (the gateway↔broker calls become in-process); amends
@@ -158,7 +153,7 @@ Header contract:
 | session | `Cross-Origin-Resource-Policy` | `same-origin` |
 | session | `Origin-Agent-Cluster` | `?1` |
 | portal | `frame-src` / `form-action` | `https://*.<sessionDomain>` / `'self' https://*.<sessionDomain>` |
-| portal | `connect-src` | `'self' https://*.<sessionDomain>` (file-transfer content requests, ADR 0010 T11) |
+| portal | `connect-src` | `'self' https://*.<sessionDomain>` (file-transfer content requests, ADR 0009 §5) |
 | portal | `frame-ancestors` (+ `X-Frame-Options: DENY`) | `'none'` — the portal itself is never framed |
 | portal | `Cross-Origin-Opener-Policy` | `same-origin` |
 

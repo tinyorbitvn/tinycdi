@@ -110,7 +110,7 @@ spec:
                 description: |-
                   sessionPolicy is the resolved session data-transfer policy the API
                   recorded at the last create/start intent — the meet of the template's
-                  policy and the tenant ceiling (ADR 0010). Required: pod building
+                  policy and the tenant ceiling (ADR 0009). Required: pod building
                   reads it and nothing else.
                 properties:
                   clipboard:
@@ -1820,10 +1820,10 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days=30
-            # Audit retention (ADR 0011): the leader's daily prune.
+            # Audit retention (ADR 0010): the leader's daily prune.
             - -audit-retention-days=90
-            # Platform per-file bound for session file transfer (ADR 0010
-            # T11); a tenant ceiling may only lower it. int64 keeps the
+            # Platform per-file bound for session file transfer (ADR 0009
+            # §5); a tenant ceiling may only lower it. int64 keeps the
             # value decimal — big integers render in scientific notation.
             - -file-transfer-max-bytes=104857600
           env:

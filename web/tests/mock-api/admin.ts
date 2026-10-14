@@ -246,7 +246,7 @@ export interface Tenancy {
   userLimitVersions: Map<string, number>;
   userLimitDefaultVersion: number;
   userLimitSeq: number;
-  // Tenant session-policy ceiling (ADR 0010): undefined = no row —
+  // Tenant session-policy ceiling (ADR 0009): undefined = no row —
   // every channel FollowTemplate. spVersion is its version; the ETag
   // "sp-<n>" travels as a header and PUT echoes it via If-Match.
   sessionPolicy: { clipboard: string; fileTransfer: string; maxFileBytes: number | null } | undefined;

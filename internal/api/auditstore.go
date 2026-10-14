@@ -38,7 +38,7 @@ type durableAudit interface {
 var notPersisted = map[string]bool{auditActionSessionTouch: true}
 
 // DurableAuditSink writes every event to the stdout sink and, through
-// audited(), persists domain events to audit_event (ADR 0011). Plain
+// audited(), persists domain events to audit_event (ADR 0010). Plain
 // WriteAudit callers (the authenticator's revoke records, config apply)
 // stay stdout-only.
 type DurableAuditSink struct {

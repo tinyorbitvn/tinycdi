@@ -187,7 +187,7 @@ export function SessionPage({
     templateRef.current = template;
   }, [template]);
   // The session policy the minted ticket recorded — template policy ∧
-  // tenant ceiling (ADR 0010). Once a launch returns it, it wins over the
+  // tenant ceiling (ADR 0009). Once a launch returns it, it wins over the
   // template the page read earlier: the portal renders allow/embed opts
   // from what the ticket carries, not from a possibly-stale catalog read.
   const [resolvedClipboard, setResolvedClipboard] = useState<ClipboardPolicy | undefined>(

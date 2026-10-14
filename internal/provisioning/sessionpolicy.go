@@ -28,14 +28,14 @@ const (
 	ClipboardSend    = "Send"
 	ClipboardReceive = "Receive"
 
-	// File-transfer channel directions (ADR 0010 T11).
+	// File-transfer channel directions (ADR 0009 §5).
 	FileTransferUpload   = "Upload"
 	FileTransferDownload = "Download"
 )
 
 // SessionPolicy is the resolved (effective) session data-transfer vector
 // for a (tenant, template) pair — the meet of the template's own policy
-// and the tenant ceiling (ADR 0010 §1). It is recorded wherever a
+// and the tenant ceiling (ADR 0009 §1). It is recorded wherever a
 // decision is taken: on the launch_ticket row (what the client was
 // offered), on the Workspace CR spec.sessionPolicy (what the runtime was
 // built with), and on each file-transfer row. Audit reads
@@ -119,7 +119,7 @@ func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling, bound i
 // resolveSessionPolicy returns the effective data-transfer policy for a
 // (tenant, template) pair: the meet of the template spec and the tenant
 // ceiling row (absent = FollowTemplate). It is the ONLY place the meet
-// is computed — consumers never re-implement the lattice (ADR 0010 §2).
+// is computed — consumers never re-implement the lattice (ADR 0009 §2).
 // resolveSessionPolicyTx resolves inside the intent transaction, so the
 // policy a create/start stamps onto the Workspace CR is read under the
 // same snapshot as the rest of the lifecycle write.

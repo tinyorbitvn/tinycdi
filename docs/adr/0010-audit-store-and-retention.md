@@ -1,9 +1,6 @@
-# ADR 0011 — Audit store and retention
+# ADR 0010 — Audit store and retention
 
-Status: accepted (F6 of the v1.0.0 W1 slate; implemented with the audit
-viewer)
-
-Date: 2026-10-14
+Status: Accepted
 
 ## Context
 

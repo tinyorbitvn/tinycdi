@@ -45,7 +45,7 @@ type fileTransferView struct {
 	ContentURL    string    `json:"contentUrl"`
 }
 
-// FileTransferHandler mints single-use transfer grants (ADR 0010 T11).
+// FileTransferHandler mints single-use transfer grants (ADR 0009 §5).
 type FileTransferHandler struct {
 	backend workspaceBackend
 	deps    FileTransferDeps

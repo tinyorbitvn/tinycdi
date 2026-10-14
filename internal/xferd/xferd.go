@@ -1,4 +1,4 @@
-// Package xferd is the in-pod file-transfer helper (ADR 0010 §5 (i)). It
+// Package xferd is the in-pod file-transfer helper (ADR 0009 §5 (i)). It
 // owns the runtime's single admitted port, serves /xfer/files/{name}
 // against a jailed transfer root, and reverse-proxies everything else to
 // KasmVNC on loopback.

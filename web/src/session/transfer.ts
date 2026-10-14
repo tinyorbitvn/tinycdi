@@ -1,5 +1,5 @@
 // File transfer between the browser and the workspace's Transfers folder
-// (ADR 0010 T11). The portal mints a single-use grant on the API, then
+// (ADR 0009 §5). The portal mints a single-use grant on the API, then
 // moves the bytes with a credentialed CORS request to the workspace's own
 // session host; the gateway claims the grant and streams to the in-pod
 // helper. A download lands in a Blob and is saved with <a download>

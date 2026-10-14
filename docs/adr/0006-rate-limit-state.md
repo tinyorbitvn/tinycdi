@@ -1,8 +1,6 @@
-# ADR 0006 — rate-limiter state placement (per-replica vs Postgres-backed)
+# ADR 0006 — Rate-limiter state placement
 
-Status: **accepted — implemented** (v0.4; see Decision below)
-
-Date: 2026-10-05
+Status: Accepted
 
 ## Decision
 

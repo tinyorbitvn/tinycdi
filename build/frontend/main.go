@@ -162,7 +162,7 @@ const cspBase = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-a
 // the whole session-domain wildcard must be allowed by both form-action
 // (the POST) and frame-src (the iframe navigation) — https://*.<domain>
 // keeps the configured port when one is set. connect-src: the file-transfer
-// content requests (ADR 0010 T11) go to the workspace's own session host;
+// content requests (ADR 0009 §5) go to the workspace's own session host;
 // the portal opens no other cross-origin connection. nil fails closed —
 // frame-src 'none', form-action 'self'.
 func frontendCSP(domain *sessionhost.Domain) string {

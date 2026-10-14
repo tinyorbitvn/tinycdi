@@ -67,7 +67,7 @@ const (
 
 // SessionPolicySpec is the resolved session data-transfer policy the
 // platform API stamped on the workspace at its last create/start intent
-// (ADR 0010 §2): the meet of the WorkspaceTemplate's own policy and the
+// (ADR 0009 §2): the meet of the WorkspaceTemplate's own policy and the
 // tenant's ceiling row. The operator renders pod env (TCDI_CLIPBOARD_*)
 // from it, preferring it over the status templateSnapshot for pod
 // building. It lives in spec — never an annotation — because it is a
@@ -156,7 +156,7 @@ type WorkspaceSpec struct {
 
 	// sessionPolicy is the resolved session data-transfer policy the API
 	// recorded at the last create/start intent — the meet of the template's
-	// policy and the tenant ceiling (ADR 0010). Required: pod building
+	// policy and the tenant ceiling (ADR 0009). Required: pod building
 	// reads it and nothing else.
 	// +required
 	SessionPolicy SessionPolicySpec `json:"sessionPolicy"`

@@ -217,7 +217,7 @@ export type AdminSessionPolicySource = components["schemas"]["AdminSessionPolicy
 export type ApplySessionPolicyResult = components["schemas"]["ApplySessionPolicyResult"];
 
 // Tenant session data-transfer ceiling
-// (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0010): a
+// (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0009): a
 // ceiling narrows every template's own transfer policy, never widens.
 // No row (no ETag) writes with "*" to create one.
 export async function fetchAdminSessionPolicy(

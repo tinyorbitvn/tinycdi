@@ -11,7 +11,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
-// Session-policy ceiling store contract (ADR 0010, T10): a NULL/absent
+// Session-policy ceiling store contract (ADR 0009 §1): a NULL/absent
 // channel follows the template; no row at all
 // means the same thing; the last FollowTemplate write deletes the row —
 // the store keeps exactly one representation of "follows".

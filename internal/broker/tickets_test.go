@@ -362,7 +362,7 @@ func TestTicket_ClipboardPolicyRecordedOnRedeem(t *testing.T) {
 	}
 }
 
-// TestTicket_SessionPolicyRecorded (ADR 0010 §2): the resolved session
+// TestTicket_SessionPolicyRecorded (ADR 0009 §2): the resolved session
 // data-transfer vector — not just the clipboard leg — is recorded on the
 // ticket row verbatim at issue: the audit record of which policy applied.
 // A ticket issued with no resolved policy records NULL on both columns.

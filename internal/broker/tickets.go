@@ -336,7 +336,7 @@ func portalSessionDigest(portalSessionID string) []byte {
 // redemption, fencing the old socket before the new session works.
 // policy is the session data-transfer vector resolved by the API at
 // issue — the meet of the workspace template's policy and the tenant
-// ceiling (ADR 0010 §2). Its Clipboard field is recorded on the ticket
+// ceiling (ADR 0009 §2). Its Clipboard field is recorded on the ticket
 // row's clipboard_policy column so the gateway's post-redemption redirect
 // re-asserts the client's clipboard flags (V3.24), and the whole vector
 // is recorded verbatim as JSON on session_policy — the audit record of
@@ -416,7 +416,7 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 	expires := now.Add(b.ticketTTL)
 	// A resolved policy records both columns: clipboard_policy feeds the
 	// gateway redirect's client flags, session_policy is the whole vector
-	// verbatim — the audit record of which policy applied (ADR 0010 §2).
+	// verbatim — the audit record of which policy applied (ADR 0009 §2).
 	var clipboard, resolved *string
 	if policy.Clipboard != "" {
 		clipboard = &policy.Clipboard

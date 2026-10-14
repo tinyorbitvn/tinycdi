@@ -139,7 +139,7 @@ substitute for review).
   upstream path canonicalization + allowlist (SEC-20), control-surface
   bearer auth and revoke isolation (SEC-1/2), strict upgrade detection
   (SEC-3), lease/cookie plumbing; `TestProxy_StripsClientAuth` pins the
-  broker-injected `Authorization` overwrite (ADR 0008) and
+  broker-injected `Authorization` overwrite (threat model, KasmVNC credential brute force) and
   `TestControlAudit_OperatorSurface` the control-surface audit events
   incl. bearer denials (#120).
 - `internal/gateway/rehydrate_test.go` — digest → lease rehydration,
@@ -279,14 +279,14 @@ substitute for review).
   `ca_reload_test.go` — client cert/CA hot reload (FX-R33, A6-S15).
 - `internal/tlsreload/reloader_test.go`, `capool_test.go` — file-watch reload
   incl. Kubernetes atomic Secret-volume swaps.
-- `internal/tlsreload/blocklist_test.go` — ADR 0009 revocation list
+- `internal/tlsreload/blocklist_test.go` — ADR 0008 revocation list
   (SR-3-F5): format/bounds parse (one bad line rejects the file),
   fail-closed boot, keep-last-good reload with the error observer, the
   conn registry's track/sever/drop, and the swap-vs-registration
   serialization under `-race`.
 - `internal/backend/mtls_reload_test.go` — internal listener cert + client-CA
   hot reload.
-- `internal/backend/mtls_revocation_test.go` — ADR 0009 end-to-end on the
+- `internal/backend/mtls_revocation_test.go` — ADR 0008 end-to-end on the
   production internal-listener stack: blocked (issuer, serial) aborts the
   handshake, sibling + cross-issuer certs pass, an appended entry lands on
   poll, resumed handshakes are refused too, a live conn on a newly blocked
@@ -582,7 +582,7 @@ context):
 | FX-R26 | XFF hygiene + multi-replica cookie liveness — `forwarded_test.go`, `session_cookie_liveness_test.go` |
 | FX-R30 | authenticated rate-limit keying — `ratelimit_key.go` + launch/login tests |
 | FX-R33 | mTLS client cert/CA hot reload — `opclient/ca_reload_test.go`, `mtls_reload_test.go` |
-| SR-3-F5 | per-certificate revocation on internal mTLS (ADR 0009) — `tlsreload/blocklist_test.go`, `mtls_revocation_test.go`, `chart_revocation_test.go` |
+| SR-3-F5 | per-certificate revocation on internal mTLS (ADR 0008) — `tlsreload/blocklist_test.go`, `mtls_revocation_test.go`, `chart_revocation_test.go` |
 | RL-1 | per-replica rate-limit division — `internal/ratelimit`, `wire.go` |
 
 ## 11. Gaps a reviewer will notice

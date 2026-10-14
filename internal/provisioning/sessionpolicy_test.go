@@ -31,7 +31,7 @@ func TestResolveSessionPolicy_NoRowIsFollowTemplate(t *testing.T) {
 		t.Fatalf("no ceiling row must resolve the template's own policy, got %+v", got)
 	}
 	if got.FileTransfer != cdiv1.FileTransferDisabled {
-		t.Fatalf("fileTransfer resolves Disabled until T11: %+v", got.FileTransfer)
+		t.Fatalf("a template with no file-transfer policy must resolve Disabled, got %+v", got.FileTransfer)
 	}
 }
 
@@ -87,7 +87,7 @@ func mustVersion(t *testing.T, sps *store.SessionPolicyStore, tenantID string) s
 // The resolved policy rides the lifecycle intents: the create intent
 // carries the meet stamped at admission, and a start intent re-stamps it
 // — so a ceiling tightened while a workspace was stopped lands on the
-// pod's next boot via spec.sessionPolicy (ADR 0010 §3).
+// pod's next boot via spec.sessionPolicy (ADR 0009 §3).
 func TestService_SessionPolicyRidesIntents(t *testing.T) {
 	db := recoveryDB(t)
 	ctx := context.Background()

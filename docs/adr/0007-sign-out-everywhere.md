@@ -1,8 +1,6 @@
-# ADR 0007 — Sign out everywhere (principal-scoped session revocation)
+# ADR 0007 — Sign out everywhere
 
-Status: **accepted** (implemented in #117)
-
-Date: 2026-10-05
+Status: Accepted
 
 ## Context
 

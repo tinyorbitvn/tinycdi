@@ -1,8 +1,6 @@
 # ADR 0003 — Internal gateway↔broker API (mTLS)
 
-Status: accepted (contract fixed in design review; both sides implement it verbatim)
-
-Date: 2026-09-30
+Status: Accepted
 
 > **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
 > merges the session gateway into the backend binary: the gateway↔broker
@@ -102,8 +100,6 @@ JSON shape (the public `ErrorCode` enum has no 410 mapping).
 ---
 
 ## Addendum: session activity + operator revocation
-
-Status: contract extension fixed in design review.
 
 ### Routes
 

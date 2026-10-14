@@ -295,7 +295,7 @@ export default {
     "Mọi phiên portal của người dùng này sẽ kết thúc và các desktop đang mở sẽ ngắt kết nối. Workspace vẫn tiếp tục chạy.",
   "admin.sessions.done": "Đã đăng xuất: {sessions} phiên portal, {leases} phiên desktop.",
 
-  // Session policy page (giới hạn clipboard của tenant, ADR 0010).
+  // Session policy page (giới hạn clipboard của tenant, ADR 0009).
   "admin.policy.title": "Chính sách phiên",
   "admin.policy.description":
     "Những gì được phép di chuyển giữa thiết bị của người dùng và workspace.",

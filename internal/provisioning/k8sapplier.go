@@ -280,7 +280,7 @@ func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in I
 		}
 		if in.Kind == IntentStart && in.Spec.SessionPolicy != nil {
 			// The resolved policy is re-stamped at every start so a
-			// tightened ceiling lands on the pod's next boot (ADR 0010 §3).
+			// tightened ceiling lands on the pod's next boot (ADR 0009 §3).
 			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
 		}
 		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)

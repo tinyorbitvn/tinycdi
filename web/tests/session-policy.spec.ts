@@ -1,7 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 
 // Session policy page against the contract mock (tests/mock-api): the
-// tenant clipboard ceiling of ADR 0010 — a ceiling narrows every
+// tenant clipboard ceiling of ADR 0009 — a ceiling narrows every
 // template's own clipboard policy, never widens it. The page shows the
 // live effective-policy preview (template policy ∧ selected ceiling).
 

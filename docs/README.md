@@ -34,7 +34,7 @@
 - [runbooks/disaster-recovery.md](runbooks/disaster-recovery.md) — DR procedure
 - [runbooks/capacity.md](runbooks/capacity.md) — sizing and capacity planning
 - [runbooks/mtls-cert-revocation.md](runbooks/mtls-cert-revocation.md) —
-  revoke one internal mTLS certificate (ADR 0009 serial blocklist)
+  revoke one internal mTLS certificate (ADR 0008 serial blocklist)
 - [runbooks/stuck-finalizer.md](runbooks/stuck-finalizer.md) — workspace
   teardown finalizer recovery
 
@@ -55,7 +55,8 @@
 
 - [adr/0001-runtime-streaming.md](adr/0001-runtime-streaming.md) — runtime
   streaming protocol choice
-- [adr/0002-public-api.md](adr/0002-public-api.md) — public API surface
+- [adr/0002-api-conventions.md](adr/0002-api-conventions.md) —
+  API conventions: resources, custom methods, paging, errors, ETags, idempotency
 - [adr/0003-gateway-broker-internal-api.md](adr/0003-gateway-broker-internal-api.md) —
   gateway ↔ broker internal API
 - [adr/0004-launch-origin-policy.md](adr/0004-launch-origin-policy.md) —
@@ -68,16 +69,13 @@
 - [adr/0007-sign-out-everywhere.md](adr/0007-sign-out-everywhere.md) —
   principal-scoped revocation of all portal sessions, leases and tickets
   (proposed)
-- [adr/0008-kasmvnc-bruteforce.md](adr/0008-kasmvnc-bruteforce.md) —
-  KasmVNC endpoint brute-force posture: reachability and credential
-  channel analysis closing threat-model S18 (accepted — no build)
-- [adr/0009-mtls-cert-revocation.md](adr/0009-mtls-cert-revocation.md) —
+- [adr/0008-mtls-cert-revocation.md](adr/0008-mtls-cert-revocation.md) —
   per-certificate revocation on the internal mTLS API: serial blocklist +
   shorter lifetimes (SR-3-F5; proposed)
-- [adr/0010-session-data-transfer-policy.md](adr/0010-session-data-transfer-policy.md) —
+- [adr/0009-session-data-transfer-policy.md](adr/0009-session-data-transfer-policy.md) —
   tenant ceilings over the template clipboard policy plus the v1.3 file
   transfer design (accepted)
-- [adr/0011-audit-store-and-retention.md](adr/0011-audit-store-and-retention.md) —
+- [adr/0010-audit-store-and-retention.md](adr/0010-audit-store-and-retention.md) —
   durable `audit_event` store written in the audited mutation's transaction
   (fail closed), pseudonymous actors, 90-day retention and the tenant-admin
   viewer (accepted)

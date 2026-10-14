@@ -1,11 +1,6 @@
-# ADR 0010 — Session data-transfer policy: tenant ceilings for clipboard and file transfer
+# ADR 0009 — Session data-transfer policy
 
-Status: accepted (design review settled the policy model, the resolution
-path, the propagation semantics, the admin API shape and the file-transfer
-transport; implementation is planned as two change sets — T10 in v1.2.x on
-top of the v1.2 clipboard fix, T11 in v1.3)
-
-Date: 2026-10-12
+Status: Accepted
 
 ## Context
 

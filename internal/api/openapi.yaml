@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: tinycdi Workspace Platform — Public API
-  version: "0.1.0"
+  version: "1.0.0"
   summary: |
     Public HTTP API of the tinycdi workspace platform (portal origin).
   description: |
@@ -53,13 +53,13 @@ info:
     ## Errors
 
     Every `4xx`/`5xx` response has the `Error` body
-    `{code, message, retryable, requestId}`. `code` is a stable enum value
+    `{"error": {code, message, retryable, requestId, details?}}`. `code` is a stable enum value
     clients may switch on; `message` is human-readable and not part of the
     contract; `retryable` tells whether retrying the same request may succeed
     without further user action; `requestId` correlates with server logs/audit.
   license:
-    name: Proprietary
-    identifier: LicenseRef-Proprietary
+    name: MIT
+    identifier: MIT
   contact:
     name: tinycdi platform team
 
@@ -1134,7 +1134,7 @@ paths:
       description: |
         Administrator view of one tenant's session data-transfer policy —
         the ceiling applied over every workspace template's own policy
-        (ADR 0010). Each channel reports its ceiling value;
+        (ADR 0009). Each channel reports its ceiling value;
         `FollowTemplate` means the channel is not narrowed and the
         template's policy applies unchanged. A tenant with no
         session-policy row resolves `FollowTemplate` everywhere
@@ -1181,7 +1181,7 @@ paths:
         per-file bound and may not exceed the platform bound
         (`-file-transfer-max-bytes`), else `400 INVALID_REQUEST`.
 
-        Tightening takes effect on two clocks (ADR 0010 §3): the next
+        Tightening takes effect on two clocks (ADR 0009 §3): the next
         minted connection ticket carries the new client flags
         immediately, while a running workspace's server-side clipboard
         enforcement follows at its next start — pod specs are immutable;
@@ -2615,7 +2615,7 @@ components:
         device). `FollowTemplate` narrows nothing: the template's own
         policy applies. The effective clipboard policy is the meet of the
         template's and this ceiling — `Send ∩ Receive = Disabled`, and a
-        ceiling never widens past the template (ADR 0010 §1).
+        ceiling never widens past the template (ADR 0009 §1).
 
     FileTransferCeiling:
       type: object
@@ -2652,7 +2652,7 @@ components:
       additionalProperties: false
       required: [tenant, clipboard, fileTransfer, source]
       description: |
-        The tenant's session data-transfer ceiling (ADR 0010): one value
+        The tenant's session data-transfer ceiling (ADR 0009): one value
         per channel, `FollowTemplate` where the channel is not narrowed.
         The effective policy a user gets is the meet of the template's
         policy and this ceiling — it can only narrow, never widen. The
@@ -2816,7 +2816,7 @@ components:
         The resolved (effective) session data-transfer policy for a
         (tenant, template) pair — the meet of the template's own policy
         and the tenant ceiling, recorded on the launch ticket at issue
-        (ADR 0010 §2). The portal renders the session iframe's `allow`
+        (ADR 0009 §2). The portal renders the session iframe's `allow`
         from this record, not from a template it may have read earlier.
       properties:
         clipboard:

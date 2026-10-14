@@ -1,9 +1,9 @@
-# ADR 0001: Hai đường streaming runtime — KasmVNC cho Linux/browser, Guacamole/RDP cho Windows
+# ADR 0001 — Runtime streaming
+
+Status: Accepted
+
 > **English note:** this document is in Vietnamese — it is the original design/ADR kept for reference. Current platform state is described by `README.md`, `docs/images.md`, `docs/compatibility.md` and `docs/runbooks/`.
 
-
-Ngày: 2026-09-29. Đối chiếu thực nghiệm: 2026-09-30.
-Trạng thái: **Accepted** — mọi contract Linux đã đối chiếu và có evidence; verdict "PASS with conditions" đã được chốt 2026-09-30. Phạm vi chứng minh hiện tại là đường Linux trên một cluster Kubernetes tham chiếu; đường Windows có gate chứng minh riêng và hiện deferred vì chưa có source image. Bảng đối chiếu evidence ở cuối tài liệu — mọi claim cốt lõi đã được gắn trạng thái PROVEN/STATIC/VENDOR.
 
 *(Ghi chú: mọi claim cốt lõi dưới đây đã được kiểm chứng và giữ trạng thái PROVEN/STATIC/VENDOR.)*
 

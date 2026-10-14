@@ -30,7 +30,7 @@ type Service struct {
 	blockAfter time.Duration
 	// fileBound is the platform per-file bound
 	// (-file-transfer-max-bytes) every resolved session policy is clipped
-	// to (ADR 0010 T11).
+	// to (ADR 0009 §5).
 	fileBound int64
 	// revokeGeneration fences the previous runtime generation inside the
 	// RestartWorkspace transaction (F1); nil refuses a restart.
@@ -166,7 +166,7 @@ type TemplateInfo struct {
 	ImageBuiltAt string `json:"imageBuiltAt,omitempty"`
 	// ClipboardPolicy is the template revision's spec.clipboardPolicy,
 	// snapshotted at create and refreshed by a re-pointing start — the
-	// template leg the session-policy meet is computed against (ADR 0010).
+	// template leg the session-policy meet is computed against (ADR 0009).
 	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
 	// FileTransferPolicy is the template revision's spec.fileTransferPolicy,
 	// snapshotted like ClipboardPolicy; empty resolves as Disabled
@@ -301,7 +301,7 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 		}
 		// The resolved session policy rides the create intent: the applier
 		// stamps it as spec.sessionPolicy so pod building reads the meet —
-		// never re-derived (ADR 0010 §2). Resolution happens inside this
+		// never re-derived (ADR 0009 §2). Resolution happens inside this
 		// transaction so the stamped value is the snapshot the workspace
 		// was admitted under.
 		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
@@ -560,7 +560,7 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				}
 				// The resolved session policy rides every start intent: the
 				// applier re-stamps spec.sessionPolicy so a tightened ceiling
-				// lands on the pod's next start (ADR 0010 §3 — server-side
+				// lands on the pod's next start (ADR 0009 §3 — server-side
 				// enforcement is per-boot).
 				sp, err := s.startSessionPolicy(ctx, tx, tenantID, rec)
 				if err != nil {

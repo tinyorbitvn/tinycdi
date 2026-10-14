@@ -31,7 +31,7 @@ import {
 import { DEMO_EVENTS, DEMO_TEMPLATES, DEMO_TRANSITIONAL, DEMO_WORKSPACES } from "./demo.ts";
 import { tenancy } from "./admin.ts";
 
-// meetClipboard mirrors the server-side lattice (ADR 0010 §1): the meet
+// meetClipboard mirrors the server-side lattice (ADR 0009 §1): the meet
 // of a template's clipboard policy and the tenant ceiling.
 function meetClipboard(template: string, ceiling: string): string {
   switch (ceiling) {
@@ -275,7 +275,7 @@ export function workspacesArea(ctx: MockContext): MockArea {
       ticket,
       launchUrl: sessionLaunchUrl(ctx, ws.id),
       expiresAt: new Date(ctx.now() + 60_000).toISOString(),
-      // The resolved vector the ticket records (ADR 0010): template
+      // The resolved vector the ticket records (ADR 0009): template
       // policy ∧ tenant ceiling.
       sessionPolicy: {
         clipboard: meetClipboard(

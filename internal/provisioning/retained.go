@@ -131,7 +131,7 @@ type RetainedStore struct {
 	db *store.DB
 	// fileBound is the platform per-file bound
 	// (-file-transfer-max-bytes) the attach path's resolved session
-	// policy is clipped to (ADR 0010 T11).
+	// policy is clipped to (ADR 0009 §5).
 	fileBound int64
 
 	keyMu  sync.Mutex
@@ -632,7 +632,7 @@ func (s *RetainedStore) AttachRetained(ctx context.Context, tenantID, caller, ow
 		}
 		// As on the plain create path, the resolved session policy rides
 		// the create intent so the applier stamps spec.sessionPolicy from
-		// the admission-time snapshot (ADR 0010 §2).
+		// the admission-time snapshot (ADR 0009 §2).
 		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
 			ClipboardPolicy:    req.Template.ClipboardPolicy,
 			FileTransferPolicy: req.Template.FileTransferPolicy,

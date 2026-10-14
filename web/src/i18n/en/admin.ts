@@ -296,7 +296,7 @@ export default {
     "Every portal session of this user ends and their open desktops disconnect. Their workspaces keep running.",
   "admin.sessions.done": "Signed out: {sessions} portal sessions, {leases} desktop sessions.",
 
-  // Session policy page (tenant clipboard ceiling, ADR 0010).
+  // Session policy page (tenant clipboard ceiling, ADR 0009).
   "admin.policy.title": "Session policy",
   "admin.policy.description": "What may move between a user's device and their workspace.",
   "admin.policy.loading": "Loading session policy",

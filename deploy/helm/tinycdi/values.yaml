@@ -296,7 +296,7 @@ backend:
     internal:
       existingSecret: tinycdi-backend-internal-tls
       # Per-certificate revocation on the internal mTLS listener (ADR
-      # 0009, SR-3-F5): a Secret carrying the serial blocklist file —
+      # 0008, SR-3-F5): a Secret carrying the serial blocklist file —
       # "<serial-hex> <issuer-dn>" per line, blank lines and '#' comments
       # ignored. Mounted read-only at /etc/internal-revoked/ and polled;
       # a listed leaf's handshake is aborted and its live conns severed.
@@ -369,11 +369,11 @@ backend:
   # bound. Rendered as -terminal-retention-days=<n>.
   retention:
     terminalRowDays: 30
-    # Days audit_event rows are kept (ADR 0011); a daily leader task prunes
+    # Days audit_event rows are kept (ADR 0010); a daily leader task prunes
     # older rows. 1..3650. Rendered as -audit-retention-days=<n>.
     auditDays: 90
   fileTransfer:
-    # Platform per-file bound for session file transfer (ADR 0010 T11).
+    # Platform per-file bound for session file transfer (ADR 0009 §5).
     # A tenant ceiling may only lower it. Rendered as
     # -file-transfer-max-bytes=<n>. 1..10737418240.
     maxFileBytes: 104857600

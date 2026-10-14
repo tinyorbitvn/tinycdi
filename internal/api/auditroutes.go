@@ -231,7 +231,7 @@ func auditSetDetail(ctx context.Context, key, value string) {
 // With a durable sink (DurableAuditSink) the event is also persisted: inside
 // the mutation's transaction through a store.TxHook, else before the
 // buffered response is released; a failed insert answers 500 INTERNAL and
-// nothing the handler wrote reaches the client (ADR 0011). A sink without
+// nothing the handler wrote reaches the client (ADR 0010). A sink without
 // persistence (and session.touch) keeps the pass-through status recorder.
 func audited(sink observability.AuditSink, pattern string, next http.Handler) http.Handler {
 	rt, ok := auditedRoutes[pattern]

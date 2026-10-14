@@ -1,7 +1,7 @@
 # Runbook — Tenant session policy (clipboard and file-transfer ceilings)
 
 A tenant's **session policy** is the ceiling over what data may move
-between a user's device and their workspace (ADR 0010). It has two
+between a user's device and their workspace (ADR 0009). It has two
 channels: the **clipboard** and **file transfer**.
 
 ## What the ceiling does

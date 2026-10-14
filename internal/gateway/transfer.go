@@ -16,7 +16,7 @@ import (
 )
 
 // TransferPathPrefix is the session-host route family for single-use file
-// transfers (ADR 0010 T11). The id is an identifier, not a credential:
+// transfers (ADR 0009 §5). The id is an identifier, not a credential:
 // the session cookie, the live lease and the broker's single-use claim
 // authorize the request.
 const TransferPathPrefix = "/v1/transfers/"

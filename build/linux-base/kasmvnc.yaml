@@ -15,7 +15,7 @@ desktop:
 network:
   protocol: http
   # KasmVNC listens on loopback only: tcdi-xferd owns the pod's :8443 and
-  # reverse-proxies the desktop here (ADR 0010 §5 (i)). Streaming is
+  # reverse-proxies the desktop here (ADR 0009 §5 (i)). Streaming is
   # websocket-only over HTTPS (no HTTP tunnel fallback in KasmVNC 1.5.0).
   interface: 127.0.0.1
   websocket_port: 8444

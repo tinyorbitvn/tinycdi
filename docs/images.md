@@ -104,7 +104,7 @@ older than 14 days (`docs/security/vulnerability-policy.md` §5).
   forwards it, so anonymous probes cannot trip KasmVNC's loopback
   brute-force blacklist; it passes the gateway's `X-Forwarded-*`,
   `Forwarded` and `X-Real-Ip` headers through unchanged.
-- **File transfer** (ADR 0010 §5 (i)) on the same port:
+- **File transfer** (ADR 0009 §5 (i)) on the same port:
   `GET /xfer/files/{name}` returns the file's bytes with `Content-Length`;
   `PUT /xfer/files/{name}` writes the request body and returns
   `{"bytes":n}`. Both require the header `X-Tcdi-Xfer-Token` carrying the

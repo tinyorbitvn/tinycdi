@@ -1,4 +1,4 @@
-# Revoking one internal mTLS certificate (ADR 0009)
+# Revoking one internal mTLS certificate (ADR 0008)
 
 The internal listener (`:9443`) verifies every client cert against the
 mounted client-CA bundle. To distrust ONE certificate while its CA stays
@@ -104,7 +104,7 @@ One revoked certificate per line — `<serial-hex> <issuer-dn>`:
 ## Shrinking the exposure window
 
 Revocation covers certs compromised before expiry; lifetime bounds the
-window when it has not been applied. ADR 0009's documented
+window when it has not been applied. ADR 0008's documented
 recommendation for the internal chain (set explicitly — shipped defaults
 are unchanged):
 

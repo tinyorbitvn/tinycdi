@@ -1,8 +1,6 @@
-# ADR 0004 — Launch POST origin policy (portal-origin allowlist)
+# ADR 0004 — Launch POST origin policy
 
-Status: accepted (policy fixed in design review)
-
-Date: 2026-09-30
+Status: Accepted
 
 > **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
 > keeps this policy verbatim. The launch form POST now targets the

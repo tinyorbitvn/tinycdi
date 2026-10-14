@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	// maxBlocklistBytes bounds the revocation list file (ADR 0009): a
+	// maxBlocklistBytes bounds the revocation list file (ADR 0008): a
 	// blocklist is small by nature — the bound stops a bad push from
 	// stalling the handshake path.
 	maxBlocklistBytes = 1 << 20
@@ -77,7 +77,7 @@ func (s *Revocations) Len() int { return len(s.entries) }
 // by symlink swap, which defeats fsnotify), a failed reload keeps the
 // last-good list, and boot is fail-closed — an unreadable or invalid file
 // fails NewBlocklist, so a configured revocation control never starts
-// silently disabled (ADR 0009, SR-3-F5).
+// silently disabled (ADR 0008, SR-3-F5).
 type Blocklist struct {
 	file string
 	options
@@ -113,7 +113,7 @@ func NewBlocklist(file string, opts ...Option) (*Blocklist, error) {
 	return b, nil
 }
 
-// Current returns the snapshot the handshake path consults (ADR 0009).
+// Current returns the snapshot the handshake path consults (ADR 0008).
 // Reloads replace it wholesale; the returned set is immutable.
 func (b *Blocklist) Current() *Revocations {
 	b.mu.Lock()
@@ -215,7 +215,7 @@ func (b *Blocklist) reload() {
 
 // loadBlocklist reads and parses the list file. Files over
 // maxBlocklistBytes or carrying more than maxBlocklistEntries entry lines
-// are invalid (ADR 0009); parsing is atomic — one malformed line rejects
+// are invalid (ADR 0008); parsing is atomic — one malformed line rejects
 // the whole file, because a partially applied blocklist is worse than a
 // stale one.
 func loadBlocklist(file string) (*Revocations, [32]byte, error) {
@@ -238,7 +238,7 @@ func loadBlocklist(file string) (*Revocations, [32]byte, error) {
 	return &Revocations{entries: entries}, sha256.Sum256(data), nil
 }
 
-// parseBlocklist parses the ADR 0009 format: "<serial-hex> <issuer-dn>"
+// parseBlocklist parses the ADR 0008 format: "<serial-hex> <issuer-dn>"
 // per line; blank lines and lines whose first non-whitespace character is
 // '#' are ignored; there are no trailing comments — the issuer is the
 // rest of the line, trimmed. Any malformed line fails the whole file.

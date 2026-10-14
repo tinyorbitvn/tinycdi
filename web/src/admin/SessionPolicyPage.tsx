@@ -57,7 +57,7 @@ export function fileTransferLabel(policy: string): string {
 }
 
 // meetClipboard resolves the direction lattice the backend enforces
-// (ADR 0010 §1): the effective policy is the meet of the template's own
+// (ADR 0009 §1): the effective policy is the meet of the template's own
 // clipboard policy and the tenant ceiling — Disabled is bottom,
 // Bidirectional is top, the single directions are incomparable
 // (Send ∩ Receive = Disabled) — and a ceiling can only narrow.
@@ -76,7 +76,7 @@ export function meetClipboard(template: string, ceiling: string): string {
 }
 
 // meetFileTransfer is the same direction lattice as meetClipboard with
-// Upload/Download as the two incomparable directions (ADR 0010 §1).
+// Upload/Download as the two incomparable directions (ADR 0009 §1).
 export function meetFileTransfer(template: string, ceiling: string): string {
   switch (ceiling) {
     case "Disabled":

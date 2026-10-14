@@ -650,7 +650,7 @@ export interface paths {
          * Tenant session data-transfer policy ceiling
          * @description Administrator view of one tenant's session data-transfer policy —
          *     the ceiling applied over every workspace template's own policy
-         *     (ADR 0010). Each channel reports its ceiling value;
+         *     (ADR 0009). Each channel reports its ceiling value;
          *     `FollowTemplate` means the channel is not narrowed and the
          *     template's policy applies unchanged. A tenant with no
          *     session-policy row resolves `FollowTemplate` everywhere
@@ -674,7 +674,7 @@ export interface paths {
          *     per-file bound and may not exceed the platform bound
          *     (`-file-transfer-max-bytes`), else `400 INVALID_REQUEST`.
          *
-         *     Tightening takes effect on two clocks (ADR 0010 §3): the next
+         *     Tightening takes effect on two clocks (ADR 0009 §3): the next
          *     minted connection ticket carries the new client flags
          *     immediately, while a running workspace's server-side clipboard
          *     enforcement follows at its next start — pod specs are immutable;
@@ -1457,7 +1457,7 @@ export interface components {
          *     device). `FollowTemplate` narrows nothing: the template's own
          *     policy applies. The effective clipboard policy is the meet of the
          *     template's and this ceiling — `Send ∩ Receive = Disabled`, and a
-         *     ceiling never widens past the template (ADR 0010 §1).
+         *     ceiling never widens past the template (ADR 0009 §1).
          * @enum {string}
          */
         ClipboardCeiling: "FollowTemplate" | "Disabled" | "Send" | "Receive" | "Bidirectional";
@@ -1487,7 +1487,7 @@ export interface components {
          */
         AdminSessionPolicySource: "TenantRow" | "FollowTemplate";
         /**
-         * @description The tenant's session data-transfer ceiling (ADR 0010): one value
+         * @description The tenant's session data-transfer ceiling (ADR 0009): one value
          *     per channel, `FollowTemplate` where the channel is not narrowed.
          *     The effective policy a user gets is the meet of the template's
          *     policy and this ceiling — it can only narrow, never widen. The
@@ -1621,7 +1621,7 @@ export interface components {
          * @description The resolved (effective) session data-transfer policy for a
          *     (tenant, template) pair — the meet of the template's own policy
          *     and the tenant ceiling, recorded on the launch ticket at issue
-         *     (ADR 0010 §2). The portal renders the session iframe's `allow`
+         *     (ADR 0009 §2). The portal renders the session iframe's `allow`
          *     from this record, not from a template it may have read earlier.
          */
         ResolvedSessionPolicy: {

@@ -440,7 +440,7 @@ func assertNoSecret(t *testing.T, name, password string) {
 var xferEnv = []string{"-e", "TCDI_XFER_POLICY=Bidirectional", "-e", "TCDI_XFER_MAX_BYTES=1048576"}
 
 // assertXferContract drives the in-pod transfer helper through the published
-// :8443 port (ADR 0010 §5 (i)): credential required, upload/download round
+// :8443 port (ADR 0009 §5 (i)): credential required, upload/download round
 // trip on the home volume, jail refusals, hard cap with no leftovers, and
 // KasmVNC reachable only on loopback :8444. secretDir is the host directory
 // mounted at /run/secrets/tcdi.
