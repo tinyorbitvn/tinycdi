@@ -20,7 +20,7 @@ ARG BASE_IMAGE=ghcr.io/tinyorbitvn/tinycdi-linux-base:local
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG FIREFOX_ESR_APT_VERSION=153.4.0esr-1~deb12u1
+ARG FIREFOX_ESR_APT_VERSION=153.5.0esr-1~deb12u1
 
 USER root
 RUN apt-get update \

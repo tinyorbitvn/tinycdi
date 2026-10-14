@@ -131,7 +131,7 @@ func TestLinuxRuntimeFirefoxFallback(t *testing.T) {
 		if got != pin {
 			t.Fatalf("installed firefox-esr %q != Dockerfile pin %q", got, pin)
 		}
-		// 153.4.0esr-1~deb12u1 -> `firefox-esr --version` = "Mozilla Firefox 153.4.0esr".
+		// 153.5.0esr-1~deb12u1 -> `firefox-esr --version` = "Mozilla Firefox 153.5.0esr".
 		want := "Mozilla Firefox " + strings.SplitN(pin, "-", 2)[0]
 		if v := strings.TrimSpace(mustExec(t, c, "firefox-esr --version 2>/dev/null")); v != want {
 			t.Fatalf("firefox-esr --version = %q, want %q", v, want)
