@@ -2,72 +2,42 @@
 
 Status: Accepted
 
-Supersedes: the transport section of [ADR 0003](0003-gateway-broker-internal-api.md)
-for the gateway caller (the gateway↔broker calls become in-process); amends
-[ADR 0004](0004-launch-origin-policy.md) (the launch form now targets the
-workspace's own host inside a portal iframe). Both ADRs carry a pointer
-back here; their wire contract and origin policy are unchanged.
-
 ## Context
 
-v0.1 ships **four platform Deployments** plus the runtime pods:
+The platform serves one user-visible URL — the portal host — while each
+workspace's session runs on its own isolated host. Users see sessions
+inside the portal; runtime content is never served from the portal origin.
+The design constraints behind that split:
 
-| v0.1 component | Image | Serves |
-|---|---|---|
-| `portal` | `tinycdi-portal` (`build/portal`) | the SPA **and** a reverse proxy of `/v1/*` to the api (portal + API share one origin) |
-| `api` | `tinycdi-api` (`cmd/api`) | public REST API on plain HTTP `:8080` (reached only through the portal proxy) + the broker's internal mTLS listener `:9443` |
-| `gateway` | `tinycdi-gateway` (`cmd/gateway`) | the session origin: `/v1/launch`, the cookie-gated desktop proxy, websockify, `/v1/control/*`; calls the broker over mTLS |
-| `operator` | `tinycdi-operator` (`cmd/operator`) | reconciles `Workspace`/`WorkspaceTemplate`; calls the broker over mTLS for teardown revoke/drain |
-
-Pain points observed running v0.1:
-
-- **Two visible URLs.** Opening a desktop navigated a new top-level tab to
-  the session host. Users bookmarked and shared the session host; the
-  portal had no way to frame, size, fullscreen or annotate the session.
-- **Four deployments for one control plane.** The portal's `/v1` proxy is
-  a second HTTP hop that exists only to keep the API same-origin with the
-  SPA, and the gateway↔broker mTLS link (ADR 0003) needs its own client
-  PKI and adds a network failure mode between components that are always
-  deployed and upgraded together.
-- **One session host for every workspace.** The gateway sets a single
-  `__Host-tcdi_session` cookie with `Path=/` for the whole session host
-  (`internal/gateway/launch.go`), so a second workspace opened in the same
-  browser overwrites the first workspace's cookie. The gateway also
-  proxies tenant-controlled HTML/JS from the runtime pod, so script from
-  workspace A ran on the same origin as workspace B's session.
-- **Session state was per-process.** Gateway sessions lived in three
-  in-memory maps, pending OIDC logins lived in RAM, and TLS certificates
-  loaded once at startup — so every component ran `replicas: 1` and a
-  gateway restart killed every live session.
-- **The portal could not grow.** The v0.2 UX (workspace, admin and data
-  views, in-portal session, design system) is a frontend concern that
-  should ship and scale independently of the API process.
-
-Decisions taken in the v0.2 design review (2026-10-02):
-
-1. **One visible URL.** Users only ever use the portal host. Sessions are
-   shown **inside** the portal; each workspace keeps its own isolated
-   session host behind the scenes. Runtime content is **never** served
-   from the portal origin.
-2. **Three components:** backend, frontend, operator.
-3. **Sessions survive a replica restart.** Any backend replica can rebuild
-   a session from the durable lease in Postgres; the default is two
-   replicas with no sticky routing.
+- **One visible URL.** A session on a separate top-level host would be a
+  second URL users bookmark and share, and the portal could not frame, size
+  or annotate the session. Sessions render inside the portal instead.
+- **Per-workspace session hosts.** A single session host would force one
+  `__Host-tcdi_session` cookie (`Path=/`) shared by every workspace: a
+  second workspace in the same browser would overwrite the first's cookie,
+  and tenant-controlled runtime HTML/JS from workspace A would share an
+  origin with workspace B's session. A subdomain per workspace gives each
+  workspace its own cookie/storage/service-worker scope.
+- **Shared session state.** Backend replicas are interchangeable: any
+  replica rebuilds a session from the durable lease in Postgres, so a
+  restart never kills live sessions and no sticky routing is needed.
+- **Three components.** The gateway↔broker link (ADR 0003) runs in process;
+  the frontend is a static SPA server that ships and scales independently
+  of the stateful control plane.
 
 ## Decision
 
 ### Components and listeners
 
-| v0.2 component | Image | Command | Listeners |
+| Component | Image | Command | Listeners |
 |---|---|---|---|
-| **backend** | `tinycdi-backend` | `cmd/backend` | `:8443` app (public API on the portal host) · `:8444` session (session gateway on `*.<sessionDomain>`) · `:9443` internal mTLS (operator broker client) · `:9090` metrics (optional) |
+| **backend** | `tinycdi-backend` | `cmd/backend` | `:8443` app (public API on the portal host, `-listen`, `internal/backend/config.go:273`) · `:8444` session (session gateway on `*.<sessionDomain>`, `-session-listen`, `config.go:319`) · `:9443` internal mTLS (operator broker client, `-internal-listen`, `config.go:343`) · `:9090` metrics (**only** when `backend.metrics.enabled` — `-metrics-listen` defaults to empty, `config.go:354`; the chart renders it on its own ClusterIP Service, `deploy/helm/tinycdi/templates/backend.yaml:11,214`) |
 | **frontend** | `tinycdi-frontend` | `build/frontend` | `:8443` static SPA + browser security headers — **no `/v1` proxy** |
-| **operator** | `tinycdi-operator` | `cmd/operator` | unchanged |
-| runtimes | `tinycdi-linux-base` (shared base), `tinycdi-linux-desktop`, `tinycdi-browser`, `kasmweb/*` via adapter | — | unchanged |
+| **operator** | `tinycdi-operator` | `cmd/operator` | reconciles `Workspace`/`WorkspaceTemplate`; calls the broker over mTLS for teardown revoke/drain |
+| runtimes | `tinycdi-linux-base` (shared base), `tinycdi-linux-desktop`, `tinycdi-browser`, `kasmweb/*` via adapter | — | per-workspace pod endpoints (`docs/images.md`) |
 
-The `tinycdi-api`, `tinycdi-gateway` and `tinycdi-portal` images and
-commands are removed. The chart deploys exactly these three control-plane
-Deployments.
+The broker lives **in the backend process** (`broker.LocalGateway`,
+`internal/broker/gatewayshim.go`); Postgres is the only state store.
 
 Each listener is a separate `http.Server` with its own `tls.Config`,
 certificate and route table built at startup. The session listener's mux
@@ -78,19 +48,16 @@ another listener's route answers 404 (or 401 on the cookie-gated session
 catch-all) — a misconfigured edge cannot turn the session host into an API
 host.
 
-The **split/test mode** is kept: `--components` selects which listeners a
-backend process runs, and with `session` alone the process is a standalone
-session gateway that calls the broker over the unchanged ADR 0003 mTLS
-contract. The chart deploys the combined mode; split mode exists for
-end-to-end tests and as the documented way back to a separate gateway.
-Rehydration (below) is an optional interface of the in-process broker; a
-split gateway runs without it and a restart there drops streams, as in
-v0.1.
+A **split/test mode** exists: `-broker-url` makes the process a standalone
+session gateway that calls the broker over the ADR 0003 mTLS contract
+(`config.go:373`). The chart deploys the combined mode and refuses
+`broker-url` in `backend.extraArgs`; split mode exists for end-to-end
+tests.
 
 ### Hosts and routing
 
-`sessionHost` is replaced by a **session domain**. Each workspace is
-served on `<label>.<sessionDomain>` (e.g. `session.cdi.example.com`):
+Every workspace is served on `<label>.<sessionDomain>` (e.g.
+`session.cdi.example.com`):
 
 - `<label>` is a deterministic lower-case DNS-1123 label (≤ 63 chars)
   derived from the platform workspace ID `ws_<hex>` by replacing `_` with
@@ -100,11 +67,13 @@ served on `<label>.<sessionDomain>` (e.g. `session.cdi.example.com`):
 - The session-domain setting accepts `host[:port]` so dev stacks and the
   e2e harness can run on non-default ports.
 - The edge (Gateway API `HTTPRoute` or `Ingress`) gets **one** wildcard
-  rule for `*.<sessionDomain>` and **one** wildcard certificate.
+  rule for `*.<sessionDomain>` (`templates/httproute.yaml`) and **one**
+  wildcard certificate.
+- `portalHost` must differ from `sessionDomain` and must not sit inside it
+  — the `*.<sessionDomain>` wildcard route would otherwise capture portal
+  traffic (the chart fails the render otherwise, `templates/_helpers.tpl`).
 - The portal host keeps path routing: `/v1/*` goes to `backend:8443`,
-  everything else to `frontend:8443`, so the SPA and API stay same-origin
-  exactly as with the v0.1 proxy. Chart values `sessionHost`, `api.*`,
-  `gateway.*` and `portal.*` fail render with a migration hint.
+  everything else to `frontend:8443`, so the SPA and API stay same-origin.
 
 **Why a subdomain per workspace:** the browser then isolates cookies,
 storage and service workers per workspace host; the `__Host-` cookie
@@ -114,13 +83,12 @@ wildcard certificate (usually DNS-01).
 
 ### Session routing and host binding
 
-- The session cookie stays `__Host-tcdi_session` (host-only, `Secure`,
-  `HttpOnly`, `Path=/`) and is set on **the workspace's own host**. Two
-  workspaces in one browser profile no longer overwrite each other.
+- The session cookie is `__Host-tcdi_session` (host-only, `Secure`,
+  `HttpOnly`, `Path=/`), set on **the workspace's own host**. Two
+  workspaces in one browser profile never overwrite each other.
 - `POST /v1/workspaces/{id}/connections` returns `launchUrl` on the
-  workspace's own host. Launch is still a form POST checked against the
-  ADR 0004 portal-origin allowlist; the 303 redirect now lands inside the
-  portal iframe.
+  workspace's own host. Launch is a form POST checked against the ADR 0004
+  portal-origin allowlist; the 303 redirect lands inside the portal iframe.
 - The session listener rejects **any** request whose host is outside
   `<sessionDomain>`, and any request whose host label does not match the
   `workspaceUID` of the lease bound to the presented cookie — a cookie
@@ -128,21 +96,21 @@ wildcard certificate (usually DNS-01).
   proxies nothing. Odd Host headers (upper case, extra labels such as
   `a.ws-x.<domain>`, a trailing dot, a wrong port, labels longer than
   63 chars) are rejected; they are never remapped to another workspace.
-- WebSocket upgrades keep the strict rule, now per workspace: `Origin`
-  must equal the workspace host's own origin. Takeover inside one
-  workspace follows the existing rules.
+- WebSocket upgrades keep the strict rule, per workspace: `Origin` must
+  equal the workspace host's own origin. Takeover inside one workspace
+  follows the lease rules (ADR 0003).
 
 ### Framing and sandbox
 
-The SPA route `/workspaces/:id/session` embeds the session host in an
-iframe with:
+The SPA route for a session embeds the session host in an iframe with:
 
 - `sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock"`
-  — **never** `allow-top-navigation*`, `allow-popups*` or `allow-modals`;
+  — **never** `allow-top-navigation*`, `allow-popups*` or `allow-modals`
+  (`SESSION_FRAME_SANDBOX`, `web/src/session/launch.ts`);
 - `allow="clipboard-read <origin>; clipboard-write <origin>; fullscreen <origin>; keyboard-map <origin>"`,
-  where `<origin>` is the workspace's own session origin. Each feature names
-  it explicitly: the frame is navigated by a form POST and has no `src`
-  attribute, so a bare feature name (default allowlist `'src'`) would
+  where `<origin>` is the workspace's own session origin. Each feature
+  names it explicitly: the frame is navigated by a form POST and has no
+  `src` attribute, so a bare feature name (default allowlist `'src'`) would
   delegate to the portal's own origin and nothing to the session.
 
 Header contract:
@@ -157,17 +125,17 @@ Header contract:
 | portal | `frame-ancestors` (+ `X-Frame-Options: DENY`) | `'none'` — the portal itself is never framed |
 | portal | `Cross-Origin-Opener-Policy` | `same-origin` |
 
-The gateway's `responsePolicy` keeps stripping upstream security headers
-(including `X-Frame-Options`) and re-pins its own, so a hostile runtime
-cannot widen `frame-ancestors`. Template clipboard policy is still
-enforced server-side; the `allow=` delegation does not bypass it.
+The gateway's `responsePolicy` strips upstream security headers (including
+`X-Frame-Options`) and re-pins its own, so a hostile runtime cannot widen
+`frame-ancestors`. Template clipboard policy is enforced server-side; the
+`allow=` delegation does not bypass it.
 
 There is **no `postMessage` channel** between the portal and the session
 frame. The portal learns connection state from the API — the passive
 endpoint `GET /v1/workspaces/{id}/connection`, which never slides the
 portal idle timer — and reloads the iframe on disconnect with bounded
-backoff and a retry cap. "Open in new tab" remains the fallback for
-browsers that block the embedding.
+backoff and a retry cap. "Open in new tab" is the fallback for browsers
+that block the embedding.
 
 ### Cookie modes
 
@@ -185,15 +153,16 @@ partition support cannot embed a cross-site session; the new-tab fallback
 still works there.
 
 The default mode requires **every** portal cookie to carry the `__Host-`
-prefix: the JS-readable `tcdi_csrf` and `tcdi_session_origin` cookies are
-removed, and the SPA reads `csrfToken` and `sessionDomain` from
-`GET /v1/me` and keeps them in memory. Without that, a sibling host on the
-same registrable domain could toss `Domain=` cookies at the portal.
+prefix: the SPA reads `csrfToken` and `sessionDomain` from `GET /v1/me`
+(`internal/api/me.go:79-80`) and keeps them in memory, so no JS-readable
+portal cookie exists a sibling host on the same registrable domain could
+exploit with `Domain=` cookies.
 
 ### CSRF derivation
 
 The portal CSRF token is **derived, not stored**:
-`HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")`. The session row keeps
+`base64url(HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2"))`
+(`csrfTokenFor`, `internal/api/auth.go:1043-1050`). The session row keeps
 only a MAC of the token, so a store read can never yield a usable token —
 yet `/v1/me` can still return the token to the SPA because it is
 recomputable from the session ID. Cookie-authenticated mutations keep the
@@ -204,41 +173,60 @@ allowlist.
 ### Session directory and stream epochs
 
 Restart safety needs server-side session state that any replica can
-rebuild. The durable piece already exists: the `connection_lease` row in
-Postgres. Migration `011_lease_session.sql` adds:
+rebuild. The durable piece is the `connection_lease` row in Postgres
+(`internal/store/migrations/0001_baseline.sql`), which carries:
 
 - `session_digest` — the SHA-256 digest of the session cookie value. The
   value itself is **never** stored.
 - `stream_epoch` — a per-lease counter that fences interactive streams
   across replicas.
+- `stream_owner_tab` — the claiming browser tab's id (32 lowercase hex);
+  `stream_epoch = 0` exactly when it is `NULL` (the baseline's CHECK
+  constraints `connection_lease_stream_owner_check` /
+  `connection_lease_stream_owner_tab_check`).
 
-The broker grows a session directory (`internal/broker/sessions.go`:
-`BindSession`, `LeaseBySession`, `ClaimStream`, `ConnectionState`) used by
-the in-process gateway:
+The broker's session directory (`internal/broker/sessions.go`:
+`BindSession`, `LeaseBySession`, `ClaimStream`, `ConnectionState`) is used
+by the in-process gateway:
 
 - **Rehydration.** A replica that receives a request with a valid cookie
   but has no in-memory session looks up the digest → lease → rebuilds the
   session (the upstream target resolves lazily). An expired or revoked
   lease is rejected. An unknown cookie costs one indexed lookup and a 401;
   no session object or goroutine is allocated.
-- **One stream per lease, across replicas.** `ClaimStream` bumps
-  `stream_epoch`; an older stream observing a newer epoch closes within
-  one renew interval. The v0.1 single-stream rule was per-process;
-  `stream_epoch` makes it hold across replicas.
-- **Takeover and revoke across replicas** are unchanged in spirit: the old
-  replica's 10 s renew sees the lease superseded or revoked and closes the
-  socket; the existing 30 s bound stands.
+- **One stream per lease, across replicas.** Every claim must carry a
+  well-formed `tcdi_tab` (`ErrOwnerTabInvalid` otherwise); `ClaimStream`
+  bumps `stream_epoch` and records the claiming tab as `stream_owner_tab`
+  in the same row update, fencing every earlier stream of the lease — an
+  older stream observing a newer epoch closes within one renew interval
+  (`internal/broker/sessions.go:342-390`).
+- **Takeover and revoke across replicas**: the old replica's 10 s renew
+  sees the lease superseded or revoked and closes the socket; the 30 s
+  bound (ADR 0003) stands.
 - `gateway_id` on the lease is the identity of the **deployment**, shared
   by all replicas — not a per-pod identity.
 
+### Readiness and cold connect
+
+A workspace is Ready only once a ready EndpointSlice endpoint backs the
+current pod — `endpointReady`
+(`internal/runtime/linux/backend.go:595-600`): the kubelet's readiness
+probe has already proved the stream port answers inside the pod, and the
+EndpointSlice check proves the Service route the gateway dials has caught
+up. Behind it the gateway retries a refused upstream dial within a 15 s
+budget (`UpstreamDialBudget`, `internal/gateway/dial.go:11`). On a cold
+first connect the portal re-mints a launch ticket with 1 s, 2 s, 4 s
+backoff within a 60 s total budget (`COLD_BACKOFF_MS`, `COLD_BUDGET_MS`,
+`web/src/session/coldConnect.ts:13-16`).
+
 ### Restart behaviour
 
-- Pending OIDC logins move out of process memory into an AEAD-sealed
-  `__Host-tcdi_login` cookie; the key lives in a shared Secret and two
-  keys are accepted at once for rotation. A login started on one replica
+- Pending OIDC logins live in an AEAD-sealed `__Host-tcdi_login` cookie;
+  the sealing keys live in a shared Secret and several keys are accepted
+  at once for rotation (`-login-key-file`). A login started on one replica
   completes on another.
 - Every backend TLS listener hot-reloads its certificate when the files
-  change.
+  change (`internal/tlsreload`).
 - Chart defaults: `replicas: 2`, `maxUnavailable: 0`, a PDB with
   `minAvailable: 1`, **preferred** node anti-affinity (a `required` rule
   would wedge one replica on single-node clusters). No sticky routing is
@@ -246,47 +234,46 @@ the in-process gateway:
   did not redeem the ticket.
 - On SIGTERM the backend stops accepting new connections and closes
   WebSockets in order; the session page reconnects with the existing
-  cookie — no new ticket — while the lease lives. Deleting one backend pod
-  mid-session resumes the stream within 15 s without user action, and a
-  rolling restart of both replicas forces no re-launch.
-- The portal session keeps its 30 min idle / 12 h absolute timeouts.
-  Input activity on a user's lease extends **that user's** portal idle
-  timer server-side (the client signal is never trusted), so a page left
-  open on an active desktop does not idle out — while the passive
-  connection-status poll never extends it.
+  cookie — no new ticket — while the lease lives.
+- The portal session keeps its 30 min idle / 12 h absolute timeouts
+  (`-session-idle`, `config.go:294`; `Authenticator.AbsoluteTimeout`,
+  `internal/api/auth.go:139`). Input activity on a user's lease extends
+  **that user's** portal idle timer server-side (the client signal is
+  never trusted), so a page left open on an active desktop does not idle
+  out — while the passive connection-status poll never extends it.
 
-### Blast radius of merging the gateway into the backend
+### Blast radius of the merged gateway
 
 The gateway is the most exposed code in the platform: it parses browser
 input on a public host and relays responses and WebSocket frames from
-tenant-influenced runtimes. In v0.1 a full gateway compromise exposed its
-mTLS identity (and through it the runtime credentials of every lease that
-identity held). In v0.2 the same compromise reaches the backend process,
-which additionally holds the database DSN, the OIDC client secret, the
-Kubernetes credentials and the internal listener's server key. **This is a
-real increase in blast radius, accepted for v0.2** because the components
-were already trust-equivalent for session data. Mitigations:
+tenant-influenced runtimes. Running it inside the backend means a full
+gateway compromise reaches a process that additionally holds the database
+DSN, the OIDC client secret, the Kubernetes credentials and the internal
+listener's server key. **This is a real increase in blast radius, accepted**
+because the components are trust-equivalent for session data. Mitigations:
 
 - separate listeners, TLS configs and route tables (above), with tests
   asserting no route bleeds across listeners;
 - the session hosts never share cookies with the API — different hosts,
   host-only `__Host-` cookies;
-- the internal mTLS listener is **operator-only**: it mounts only the
-  workspace revoke/drain routes and refuses every other client identity,
-  so no network-usable gateway identity exists to steal;
-- the gateway is wired with the `BrokerClient` interface, its TLS
-  material, the upstream CA and the control token only — not the database
-  handle, OIDC configuration or Kubernetes client;
-- pod hardening (unchanged, now load-bearing): distroless non-root image,
-  read-only root filesystem, all capabilities dropped, `RuntimeDefault`
-  seccomp; upstream responses treated as hostile;
+- the internal mTLS listener splits its two client populations: the
+  workspace revoke/drain routes admit only the operator CN and the lease
+  routes refuse it (ADR 0003). In the chart topology the gateway calls the
+  broker in process, so no network-usable gateway identity exists to
+  steal;
+- the gateway code is wired with the narrow `BrokerClient` interface
+  (`internal/gateway/proxy.go:37`), its TLS material, the upstream CA and
+  the control token — its own dependencies stay narrow even though the
+  hosting process holds more;
+- pod hardening: distroless non-root image (`build/backend/Dockerfile`),
+  read-only root filesystem, all capabilities dropped
+  (`backend.securityContext` hardened defaults, `values.yaml:405-406`);
+  upstream responses treated as hostile;
 - the backend pod carries the `workspaces.cdi.tinyorbit.vn/role=gateway`
-  label so per-workspace NetworkPolicy admits only it to runtimes; ingress
-  to `:8444` comes only from the edge and to `:9443` only from the
-  operator;
-- **reversible:** the `BrokerClient` boundary plus split mode
-  (`--components=session` + mTLS broker client) make a split-back a wiring
-  change. Deployments serving hostile tenants should revisit this first.
+  label so per-workspace NetworkPolicy admits only it to runtimes, and only
+  from the platform namespace (`internal/runtime/linux/backend.go:332-335`);
+  ingress to `:8444` comes only from the edge and to `:9443` only from the
+  operator.
 
 ## Alternatives considered
 
@@ -301,10 +288,10 @@ were already trust-equivalent for session data. Mitigations:
   pins KasmVNC 1.5.0 (`docs/compatibility.md`) while `kasmweb/*` images
   carry 1.4.0 (`docs/kasm-images.md`), so one bundled client cannot match
   every runtime; proxying the runtime's own client works with any version.
-- **Keep the gateway as a separate Deployment.** Rejected for v0.2: it
-  keeps the mTLS client PKI and the broker network hop for components that
-  are always co-deployed and co-upgraded. The `BrokerClient` interface and
-  split mode keep this path open (see *Blast radius*).
+- **Keep the gateway as a separate Deployment.** Rejected: it keeps the
+  mTLS client PKI and the broker network hop for components that are
+  always co-deployed and co-upgraded. Split mode (`-broker-url`) keeps the
+  code path exercised for tests.
 - **Keep the frontend `/v1` reverse proxy.** Rejected: an extra hop and an
   extra place to get headers, body limits and streaming wrong; path
   routing at the edge gives the same single origin.
@@ -321,19 +308,13 @@ were already trust-equivalent for session data. Mitigations:
 
 - One user-visible URL; sessions render inside the portal in a sandboxed
   iframe, with "open in new tab" as fallback.
-- Three platform Deployments (`backend`, `frontend`, `operator`); the
-  gateway mTLS client Secret and CA wiring disappear.
+- Three platform Deployments (`backend`, `frontend`, `operator`); no
+  gateway mTLS client Secret or CA wiring exists in the chart.
 - Installers need wildcard DNS and a wildcard certificate for
   `*.<sessionDomain>`, and must pick hostnames that satisfy the cookie
   mode (same registrable domain for `lax`, or `partitioned` for
   cross-site).
-- Parallel workspaces per browser now work; cookie replay across hosts is
+- Parallel workspaces per browser work; cookie replay across hosts is
   rejected by host binding.
 - Backend pods are interchangeable and restart-safe for sessions; frontend
   restarts never drop streams.
-- `SECURITY.md` sections written against v0.1 — the threat-model
-  paragraph, the B.2 hardening rule that puts portal and session on
-  different registrable domains, and the `tcdi_csrf` text — are stale;
-  the security reviewer rewrites them at the G2 gate.
-- `docs/runbooks/upgrade.md` gains the v0.1 → v0.2 migration (images,
-  values, wildcard DNS/TLS, rollback).

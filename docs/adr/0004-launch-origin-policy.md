@@ -2,31 +2,20 @@
 
 Status: Accepted
 
-> **v0.2 update:** [ADR 0005](0005-backend-frontend-operator.md) (accepted)
-> keeps this policy verbatim. The launch form POST now targets the
-> workspace's own host (`<label>.<sessionDomain>`) and its 303 redirect
-> lands inside a sandboxed portal iframe; the Origin allowlist, the
-> fetch-metadata gate and the ticket rules below are unchanged. The
-> "different registrable domains" premise is superseded by ADR 0005's
-> cookie modes: `lax` deployments put portal and session domain on the
-> same registrable domain, `partitioned` covers cross-site.
-
 ## Context
 
-`POST /v1/launch` (design §6.3) redeems a one-use 60 s ticket: the portal
-page submits a form POST to the **session origin**, the gateway redeems
-atomically through the broker, sets the host-only `__Host-tcdi_session`
-cookie and 303-redirects to a clean URL.
+`POST /v1/launch` redeems a one-use 60 s ticket: the portal submits a form
+POST to the **workspace's own session host** (`<label>.<sessionDomain>`,
+ADR 0005), the gateway redeems atomically through the broker, sets the
+host-only `__Host-tcdi_session` cookie and 303-redirects to a clean URL
+inside the portal's sandboxed iframe.
 
-End-to-end testing showed the original gate wrong: the handler required
-`Origin == <session public origin>` and rejected `Sec-Fetch-Site:
-cross-site` outright. But the launch POST is **cross-site by design** —
-design §6 requires portal and session on different registrable domains, so
-every real browser launch arrives with `Origin: https://<portal>` and
-`Sec-Fetch-Site: cross-site`. The old rule could only ever pass for
-non-browser clients and made browser launch impossible (403 `bad_origin`).
-
-The actual CSRF / session-fixation protection is:
+The launch POST crosses origins by design — the portal host and the session
+hosts are different origins. Whether it is also *cross-site* depends on the
+cookie mode (ADR 0005): `lax` deployments put portal and session domain on
+the same registrable domain, `partitioned` covers cross-site. The CSRF and
+session-fixation protection therefore cannot be "Origin equals the session
+origin"; it is:
 
 - the ticket itself — opaque, one-use, 60 s TTL, bound to the requesting
   user/tenant/workspace/runtimeGeneration;
@@ -36,93 +25,77 @@ The actual CSRF / session-fixation protection is:
 ## Decision
 
 `Config.PortalOrigins` (flag `-portal-origin`, repeatable or CSV; env
-fallback `TCDI_GW_PORTAL_ORIGINS`) configures the allowlist. For
+`TCDI_PORTAL_ORIGINS`; default the origin of `-oidc-redirect-url`,
+`internal/backend/config.go:359`) configures the allowlist. For
 `POST /v1/launch` only:
 
 - **Origin present** → accept iff it is an exact match
   (scheme+host+port, default ports normalized) of a configured portal
-  origin **or** the gateway's own public origin on the request authority
-  (the old triple-match leg). `Origin: null` never matches.
+  origin **or** the request's own workspace origin
+  (`launchOriginOK`, `internal/gateway/launch.go:149`).
+  `Origin: null` never matches.
 - **Sec-Fetch-Site present** → `same-origin`, `same-site` and `cross-site`
   are accepted **only together with** an allowlisted Origin; any other
-  value is rejected (`bad_fetch_site`), and an absent/`null` Origin is
-  rejected (`bad_origin`). Fetch metadata is a forbidden header page JS
-  cannot forge, so a cross-site label plus allowlisted Origin is a real,
-  attributable portal launch.
-- **Neither header** → allowed unchanged: non-browser clients (curl,
-  control/test tooling) send neither; the ticket requirement is
-  unchanged. This is the documented pre-metadata browser gap, closed on
-  modern browsers by the fetch-metadata gate.
-- A failed validation never consumes the ticket (existing rule).
+  value is rejected (`403 bad_fetch_site`), and an absent/`null` Origin is
+  rejected (`403 bad_origin`) — `internal/gateway/launch.go:270-290`. Fetch
+  metadata is a forbidden header page JS cannot forge, so a site-labelled
+  request with an allowlisted Origin is a real, attributable portal launch.
+- **Neither header** → allowed: non-browser clients (curl, control/test
+  tooling) send neither; the ticket requirement is unchanged.
+- A failed validation never consumes the ticket.
 
-WebSocket upgrades and every other desktop route keep the strict
-`Origin == public origin` rule — the allowlist applies to `/v1/launch`
-only.
+Further current rules:
 
-## Configuration
-
-- Helm: `deploy/helm/tinycdi` renders
-  `-portal-origin=https://<portalHost>` plus `gateway.extraPortalOrigins`;
-  the chart already fails render when portal and session hosts collide.
-- Kind dev stack (removed before publication): the dev gateway manifest passed
-  `-portal-origin=https://portal.tcdi.localtest.me`; the dev tooling rendered the
-  derived portal host port (both hosts sat under `localtest.me`, so dev
-  launches were same-site, not cross-site — both were accepted).
+- A ticket carried in the **query string** is refused outright —
+  `403 ticket_in_query` (`launch.go:292`): the bearer ticket rides the form
+  body, never a URL (no logs, history or referrer copies).
+- Every launch names the claiming browser tab: the request must carry a
+  valid `tcdi_tab` (32 lowercase hex) or it is refused
+  `400 owner_tab_required` **before** the ticket is redeemed
+  (`launch.go:306-311`), so a bad request never burns the single-use
+  ticket. The same id is what `ClaimStream` records as the lease's stream
+  owner (ADR 0005's `stream_owner_tab`).
+- WebSocket upgrades and every other session-host route keep the strict
+  `Origin == workspace's own origin` rule — the portal-origin allowlist
+  applies to `/v1/launch` only.
+- **Session cookie.** `__Host-tcdi_session` is `Secure`, `HttpOnly`,
+  `Path=/`, host-only; `SameSite` follows `-session-cookie-mode` — `lax`
+  (default) or `partitioned` (`SameSite=None; Secure; Partitioned`,
+  `config.go:324,434-435`). A `Strict` cookie would not be sent on the
+  cross-site POST→303 top-level redirect nor on later cross-site
+  top-level navigation; Lax still withholds it from subresource/fetch
+  cross-site requests.
+- **OIDC login binding.** `/v1/login` sets a `__Host-tcdi_login` cookie
+  (Secure, HttpOnly, SameSite=Lax, Path=/) carrying AEAD-sealed login state
+  (`internal/api/auth.go:53-54`); the callback requires a constant-time
+  match against the sealed state. Because the state travels in the sealed
+  cookie rather than process memory, a login started on one backend
+  replica completes on another. A callback URL forwarded to a different
+  browser cannot complete the login.
+- **Portal `Referrer-Policy`.** The frontend sends
+  `Referrer-Policy: strict-origin` (`build/frontend/main.go:195`), never
+  `no-referrer`/`same-origin`: the browser derives the launch POST's
+  `Origin` header from the page's effective referrer policy, and a
+  referrer-suppressing policy makes it send `Origin: null` (or omit it) on
+  a cross-site POST — which the fetch-metadata gate rejects as
+  `bad_origin`. `strict-origin` keeps the privacy property: only the bare
+  origin crosses, never the path or query. The gateway's own responses set
+  no `Referrer-Policy`: its only Origin-bearing browser traffic is
+  same-origin (the WebSocket upgrade and proxied desktop subresources
+  carry the page origin regardless of referrer policy).
+- **Session-domain validation.** `-session-domain` parses as
+  `host[:port]` (`config.go:357`, `sessionhost.ParseDomain`), and the
+  launch URL the API returns is `https://<label>.<sessionDomain>` — the
+  SPA derives the session origin from `GET /v1/me`'s `sessionDomain` and
+  posts the ticket only there.
 
 ## Consequences
 
-- Browser launch works on separate portal/session domains (fixed).
-- A foreign site still cannot redeem: it cannot produce an allowlisted
-  Origin (`Origin` is a forbidden header) and cross-site POSTs without
-  fetch metadata are legacy-only.
-- Operators must configure the portal origin; an empty allowlist fails
-  closed (browser launches 403) rather than open.
-
-## Amendments (2026-10-01 security fixes)
-
-- **SEC-26:** the API's `-session-origin` must now be a bare `https://`
-  origin — no path, query, fragment, or userinfo — and is normalized
-  (lowercase host, default port dropped) before it is used to build
-  `launchUrl`. At login the API additionally publishes that origin to the
-  SPA in a JS-readable `tcdi_session_origin` cookie (Secure, SameSite=Lax,
-  Path=/, session lifetime). `launchSession` in the portal refuses to
-  submit the ticket form when `launchUrl`'s origin differs from the
-  configured origin, or when the cookie is absent — the bearer-equivalent
-  ticket can never be POSTed to a foreign origin.
-- **SEC-03:** OIDC logins are browser-bound: `/v1/login` sets a
-  `__Host-tcdi_login` cookie (Secure, HttpOnly, SameSite=Lax, Path=/,
-  Max-Age=600) whose SHA-256 is stored with the pending state; the
-  callback requires a constant-time match and expires the cookie. A
-  callback URL forwarded to a different browser can no longer complete the
-  login.
-- **Session cookie `SameSite`:** `__Host-tcdi_session` is `SameSite=Lax` (Secure,
-  HttpOnly, Path=/, host-only — `__Host-` rules unchanged). The launch
-  POST is cross-site by design and a `Strict` cookie is not sent on the
-  POST→303 top-level redirect nor on later cross-site top-level
-  navigation, so the desktop loaded "unauthorized" on every real launch.
-  Lax still withholds the cookie from subresource/fetch cross-site
-  requests; launch validation (Origin/Sec-Fetch-Site/Host) is unchanged.
-- **SEC-I5 (operational):** pending OIDC logins live in an in-memory map
-  and gateway session/lease state is likewise per-replica. A multi-replica
-  deployment MUST route a given browser consistently — sticky routing
-  (session affinity) on the portal/API and session ingress — or run a
-  single replica; a callback that lands on a different replica than the
-  one that served `/v1/login` cannot complete the login.
-- **Portal `Referrer-Policy`:** the portal MUST send
-  `Referrer-Policy: strict-origin` (or `strict-origin-when-cross-origin`),
-  never `no-referrer`/`same-origin`. The browser derives the launch form
-  POST's `Origin` header from the page's effective referrer policy: a
-  referrer-suppressing policy makes it send `Origin: null` (or omit it)
-  on the cross-site POST, which the fetch-metadata gate above rejects as
-  `bad_origin` — reproduced end-to-end in headless Chromium, every launch
-  403s (security review 20261001, `e2e-referrer-variants.log`).
-  `strict-origin` keeps the privacy property — only the bare origin
-  crosses, never the path or query. Verified by `TestSecurityHeaders`
-  (`build/portal`) and by `web/tests-portal/portal-csp.spec.ts`, where
-  the mocked session origin enforces this same gate against the real
-  portal binary (positive flow plus a `no-referrer` negative control).
-  The gateway's own responses set no `Referrer-Policy`; its only
-  Origin-bearing browser traffic is same-origin (the WebSocket upgrade
-  and proxied desktop subresources carry the page origin regardless of
-  referrer policy), so the browser default suffices — but if a policy is
-  ever added there it must not suppress the referrer for the same reason.
+- Browser launch works on both cookie topologies — same-site under `lax`,
+  cross-site under `partitioned` — while a foreign site still cannot
+  redeem: it cannot produce an allowlisted Origin (`Origin` is a forbidden
+  header) and a site-labelled request without one is rejected.
+- An empty portal-origin allowlist fails closed: browser launches 403
+  rather than the policy silently widening.
+- The ticket-in-query refusal keeps the bearer ticket out of browser
+  history, logs and referrer headers.

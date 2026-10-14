@@ -9,7 +9,8 @@ described by [`internal/api/openapi.yaml`](../../internal/api/openapi.yaml)
 (OpenAPI 3.1). The portal (`web/`) is its only client; the portal's types
 are generated from the document (`npm run generate`, `web/package.json:13`).
 Handler output is checked against the document's schemas
-(`TestOpenAPIContract_*`, `internal/api/openapi_contract_test.go`), and the
+(`TestOpenAPIContract_ResponsesValidate`,
+`internal/api/openapi_contract_test.go:514`), and the
 error-code enum against the Go constants by `TestErrorCodesMatchOpenAPI`
 (`internal/api/errors_test.go:30`).
 

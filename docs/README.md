@@ -53,22 +53,25 @@
 
 ## ADRs
 
-- [adr/0001-runtime-streaming.md](adr/0001-runtime-streaming.md) — runtime
-  streaming protocol choice
+- [adr/0001-runtime-streaming.md](adr/0001-runtime-streaming.md) —
+  KasmVNC over WebSocket/TLS behind the session gateway; 60 s launch
+  tickets and incarnation-fenced leases
 - [adr/0002-api-conventions.md](adr/0002-api-conventions.md) —
   API conventions: resources, custom methods, paging, errors, ETags, idempotency
 - [adr/0003-gateway-broker-internal-api.md](adr/0003-gateway-broker-internal-api.md) —
-  gateway ↔ broker internal API
+  internal mTLS broker API: lease routes for gateways, revoke/drain for
+  the operator CN
 - [adr/0004-launch-origin-policy.md](adr/0004-launch-origin-policy.md) —
-  launch origin enforcement
+  launch POST origin policy: portal-origin allowlist plus fetch metadata;
+  the ticket never travels in the query
 - [adr/0005-backend-frontend-operator.md](adr/0005-backend-frontend-operator.md) —
-  v0.2: three components and per-workspace session hosts (accepted)
+  three components (backend, frontend, operator) and per-workspace
+  session hosts
 - [adr/0006-rate-limit-state.md](adr/0006-rate-limit-state.md) —
-  rate-limiter state placement: per-replica vs Postgres-backed options
-  (proposed — decision pending for v0.4)
+  Postgres-backed shared fixed-minute windows for the login/launch limits,
+  local buckets as ceiling and floor
 - [adr/0007-sign-out-everywhere.md](adr/0007-sign-out-everywhere.md) —
   principal-scoped revocation of all portal sessions, leases and tickets
-  (proposed)
 - [adr/0008-mtls-cert-revocation.md](adr/0008-mtls-cert-revocation.md) —
   per-certificate revocation on the internal mTLS API: serial blocklist +
   shorter lifetimes (SR-3-F5; proposed)
