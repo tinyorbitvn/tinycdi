@@ -111,6 +111,7 @@ checksum where the registry offers one (`common.sh` holds the pins).
 | `TCDI_QS_DOMAIN` | `tcdi.localtest.me` | base domain: `portal.`, `keycloak.`, `session.` are derived |
 | `TCDI_QS_IMAGES` | `build` | `build` or `published` |
 | `TCDI_QS_IMAGE_TAG` | chart appVersion | tag for `published` images |
+| `TCDI_QS_RUNTIME_IMAGES` | `published` | `published` installs the digest-pinned runtime release train; `build` builds `linux-base`, `browser` and `linux-desktop` from this tree, loads them into kind and pins them by their node digest (slower; CI uses it so the tree's gateway and the in-pod `tcdi-xferd` match) |
 | `TCDI_QS_STATE_DIR` | `~/.local/state/tcdi-quickstart` | kubeconfig, CA, passwords, logs |
 | `TCDI_QS_VALUES_OVERLAY` | unset | extra values file layered after `values.yaml` — e.g. `values-partitioned.yaml` installs with `backend.sessionCookieMode: partitioned` |
 | `TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT` | unset | named opt-out of the smoke's mandatory clipboard round-trip — set only together with `TCDI_QS_{BROWSER,DESKTOP}_DIGEST` pointing at a runtime train older than the entrypoint clipboard render; on the pinned train the round-trip runs unconditionally |

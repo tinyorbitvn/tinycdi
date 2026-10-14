@@ -78,6 +78,14 @@ POSTGRES_IMAGE="docker.io/library/postgres:18.0@sha256:41fc5342eefba6cc2ccda736a
 # overrides exist for installing an older release with ITS chart's pinned
 # runtime digests (set TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT with them when
 # the train predates the entrypoint render); leave them unset otherwise.
+# TCDI_QS_RUNTIME_IMAGES=build builds linux-base, browser and linux-desktop
+# from this working tree instead, loads them into kind and pins them by the
+# digest the node's containerd gives them (the digest pins below are then
+# unused). The runtime images carry half of a contract the backend and
+# gateway in this tree speak (the in-pod tcdi-xferd on :8443, the entrypoint
+# renders), so a tree that changes that contract cannot be tested against a
+# published train that predates it: CI builds them.
+RUNTIME_IMAGES="${TCDI_QS_RUNTIME_IMAGES:-published}"
 BROWSER_DIGEST="${TCDI_QS_BROWSER_DIGEST:-sha256:960ed53041e616ff544085b389360298a99bd31d2f0803f1fbcb4f0a682131c6}"
 BROWSER_BUILT_AT="${TCDI_QS_BROWSER_BUILT_AT:-2026-10-12T05:33:32Z}"
 DESKTOP_DIGEST="${TCDI_QS_DESKTOP_DIGEST:-sha256:7dbfe5a5247250000abeea01a943a7673bd97a5bb02dce049a3d190f03d8f4d8}"

@@ -12,7 +12,8 @@
 #
 # Environment: TCDI_QS_CLUSTER, TCDI_QS_DOMAIN, TCDI_QS_IMAGES (build|published),
 # TCDI_QS_IMAGE_TAG, TCDI_QS_STATE_DIR, TCDI_QS_CHART, TCDI_QS_CHART_VERSION,
-# TCDI_QS_VALUES, TCDI_QS_{BROWSER,DESKTOP}_{DIGEST,BUILT_AT},
+# TCDI_QS_VALUES, TCDI_QS_RUNTIME_IMAGES (published|build),
+# TCDI_QS_{BROWSER,DESKTOP}_{DIGEST,BUILT_AT},
 # TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT - see common.sh.
 set -euo pipefail
 
@@ -38,6 +39,7 @@ trap on_error ERR
 need docker kind kubectl helm openssl curl sed awk sha256sum
 docker info >/dev/null 2>&1 || die "cannot talk to the Docker daemon"
 case "$IMAGES" in build | published) ;; *) die "TCDI_QS_IMAGES must be build or published, got: $IMAGES" ;; esac
+case "$RUNTIME_IMAGES" in build | published) ;; *) die "TCDI_QS_RUNTIME_IMAGES must be build or published, got: $RUNTIME_IMAGES" ;; esac
 [ "${DOMAIN#*.}" != "$DOMAIN" ] || die "TCDI_QS_DOMAIN must be a DNS name with at least two labels"
 
 helm_major="$(helm version --template '{{.Version}}' | sed -E 's/^v([0-9]+)\..*/\1/')"
@@ -71,6 +73,27 @@ if [ "$IMAGES" = build ]; then
   done
 fi
 
+# The runtime images from the working tree: the base first, then both
+# profiles FROM it in parallel (the release train's order, docs/images.md).
+RUNTIME_TAG="qs-rt-$(date +%s)"
+RUNTIME_PID=""
+build_runtime_images() {
+  local base="${LOCAL_IMAGE_PREFIX}/linux-base:${RUNTIME_TAG}" p pids=()
+  (cd "$REPO_ROOT" && docker build -q -f build/linux-base/Dockerfile -t "$base" .) \
+    >"$STATE_DIR/logs/build-linux-base.log" 2>&1 || return 1
+  for p in browser linux-desktop; do
+    (cd "$REPO_ROOT" && docker build -q -f "build/${p}/Dockerfile" --build-arg "BASE_IMAGE=${base}" \
+      -t "${LOCAL_IMAGE_PREFIX}/${p}:${RUNTIME_TAG}" . >"$STATE_DIR/logs/build-${p}.log" 2>&1) &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p" || return 1; done
+}
+if [ "$RUNTIME_IMAGES" = build ]; then
+  log "building the linux-base, browser and linux-desktop runtime images from the working tree (tag $RUNTIME_TAG)"
+  build_runtime_images &
+  RUNTIME_PID=$!
+fi
+
 if cluster_exists; then
   log "kind cluster ${CLUSTER} already exists; reusing it"
   kind export kubeconfig --name "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
@@ -90,10 +113,12 @@ prefetch() {
   docker exec "$NODE" crictl pull "$ref" >"$STATE_DIR/logs/prefetch-${name}.log" 2>&1 || true
 }
 PREFETCH_PIDS=()
-for ref in "$POSTGRES_IMAGE" "$KEYCLOAK_IMAGE" \
-  "docker.io/library/traefik@${TRAEFIK_DIGEST}" \
-  "ghcr.io/tinyorbitvn/tinycdi-browser@${BROWSER_DIGEST}" \
-  "ghcr.io/tinyorbitvn/tinycdi-linux-desktop@${DESKTOP_DIGEST}"; do
+PREFETCH_REFS=("$POSTGRES_IMAGE" "$KEYCLOAK_IMAGE" "docker.io/library/traefik@${TRAEFIK_DIGEST}")
+if [ "$RUNTIME_IMAGES" = published ]; then
+  PREFETCH_REFS+=("ghcr.io/tinyorbitvn/tinycdi-browser@${BROWSER_DIGEST}"
+    "ghcr.io/tinyorbitvn/tinycdi-linux-desktop@${DESKTOP_DIGEST}")
+fi
+for ref in "${PREFETCH_REFS[@]}"; do
   prefetch "$ref" &
   PREFETCH_PIDS+=($!)
 done
@@ -108,6 +133,30 @@ if [ "$IMAGES" = build ]; then
     "${LOCAL_IMAGE_PREFIX}/operator:${IMAGE_TAG_RESOLVED}" \
     "${LOCAL_IMAGE_PREFIX}/frontend:${IMAGE_TAG_RESOLVED}" \
     >"$STATE_DIR/logs/kind-load.log" 2>&1 || { tail -n 30 "$STATE_DIR/logs/kind-load.log" >&2; die "kind load failed"; }
+fi
+
+# Runtime images are digest-pinned (the CRD refuses a tag), and a kind-loaded
+# image has no registry digest: name it <repo>@<the digest the node's
+# containerd recorded on import>, so the pod's ref resolves on the node and
+# is never pulled (IfNotPresent).
+pin_loaded_runtime_image() {
+  local ref="$1" repo="${1%:*}" digest
+  digest="$(docker exec "$NODE" ctr -n k8s.io images ls "name==${ref}" | awk -v r="$ref" '$1 == r {print $3}')"
+  case "$digest" in sha256:*) ;; *) die "no containerd digest for ${ref} on ${NODE}" ;; esac
+  docker exec "$NODE" ctr -n k8s.io images tag --force "$ref" "${repo}@${digest}" >/dev/null
+  printf '%s' "$digest"
+}
+if [ "$RUNTIME_IMAGES" = build ]; then
+  wait "$RUNTIME_PID" || { tail -n 40 "$STATE_DIR"/logs/build-linux-base.log "$STATE_DIR"/logs/build-browser.log "$STATE_DIR"/logs/build-linux-desktop.log >&2 2>/dev/null; die "runtime image build failed"; }
+  log "loading the runtime images into kind"
+  kind load docker-image --name "$CLUSTER" \
+    "${LOCAL_IMAGE_PREFIX}/browser:${RUNTIME_TAG}" \
+    "${LOCAL_IMAGE_PREFIX}/linux-desktop:${RUNTIME_TAG}" \
+    >"$STATE_DIR/logs/kind-load-runtime.log" 2>&1 || { tail -n 30 "$STATE_DIR/logs/kind-load-runtime.log" >&2; die "kind load (runtime) failed"; }
+  BROWSER_DIGEST="$(pin_loaded_runtime_image "${LOCAL_IMAGE_PREFIX}/browser:${RUNTIME_TAG}")"
+  DESKTOP_DIGEST="$(pin_loaded_runtime_image "${LOCAL_IMAGE_PREFIX}/linux-desktop:${RUNTIME_TAG}")"
+  BROWSER_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  DESKTOP_BUILT_AT="$BROWSER_BUILT_AT"
 fi
 
 # ---- 2. cluster plumbing: DNS rewrite, namespaces ---------------------------
@@ -278,9 +327,17 @@ GEN="$STATE_DIR/values-generated.yaml"
     [ -z "$IMAGE_TAG_RESOLVED" ] || echo "    tag: \"${IMAGE_TAG_RESOLVED}\""
   done
   echo "  linuxDesktop:"
+  if [ "$RUNTIME_IMAGES" = build ]; then
+    echo "    registry: tcdi-qs.local"
+    echo "    repository: tcdi-qs/linux-desktop"
+  fi
   echo "    digest: ${DESKTOP_DIGEST}"
   echo "    builtAt: \"${DESKTOP_BUILT_AT}\""
   echo "  browser:"
+  if [ "$RUNTIME_IMAGES" = build ]; then
+    echo "    registry: tcdi-qs.local"
+    echo "    repository: tcdi-qs/browser"
+  fi
   echo "    digest: ${BROWSER_DIGEST}"
   echo "    builtAt: \"${BROWSER_BUILT_AT}\""
 } >"$GEN"

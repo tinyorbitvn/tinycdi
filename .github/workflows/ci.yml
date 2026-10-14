@@ -443,12 +443,14 @@ jobs:
     # dev Keycloak + the chart from this tree; a Playwright smoke logs in,
     # creates a browser workspace and waits for the session frame; down.sh
     # must leave no kind cluster. Images are built from the working tree and
-    # `kind load`ed (a published tag may lag the chart), and the runtime
-    # images come from the published runtime train by digest, pre-pulled in
-    # parallel with the build, so up.sh stays well inside 20 minutes.
+    # `kind load`ed (a published tag may lag the chart). The runtime images
+    # are built from the tree too (TCDI_QS_RUNTIME_IMAGES=build): the
+    # published train lags any change to the in-pod contract the tree's
+    # gateway speaks (tcdi-xferd on :8443, the entrypoint renders), and the
+    # file-transfer smoke needs both halves. up.sh stays inside 20 minutes.
     # Runs on main pushes, workflow_dispatch and PRs touching
-    # hack/quickstart/, deploy/helm/ or build/; every other PR skips it in
-    # ~15 s. Not a required check.
+    # hack/quickstart/, deploy/helm/, build/ or the tcdi-xferd sources;
+    # every other PR skips it in ~15 s. Not a required check.
     name: quickstart (kind up.sh + portal smoke)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
@@ -457,6 +459,7 @@ jobs:
       KIND_VERSION: "0.33.0"
       KIND_BIN_SHA256: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
       TCDI_QS_CLUSTER: tcdi-ci
+      TCDI_QS_RUNTIME_IMAGES: build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -471,7 +474,7 @@ jobs:
             workflow_dispatch|push) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           git fetch -q origin "$BASE_REF"
-          PATHS_RE='^(hack/quickstart/|deploy/helm/|build/)'
+          PATHS_RE='^(hack/quickstart/|deploy/helm/|build/|cmd/tcdi-xferd/|internal/xferd/)'
           changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
           if grep -qE "$PATHS_RE" <<<"$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -614,6 +617,7 @@ jobs:
       KIND_BIN_SHA256: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
       TCDI_QS_CLUSTER: tcdi-ci
       TCDI_QS_VALUES_OVERLAY: hack/quickstart/values-partitioned.yaml
+      TCDI_QS_RUNTIME_IMAGES: build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -629,7 +633,7 @@ jobs:
           esac
           git fetch -q origin "$BASE_REF"
           # One line on purpose (see the kasm-contract gate comment).
-          PATHS_RE='^(hack/quickstart/|deploy/helm/|build/|internal/gateway/|internal/backend/|\.github/workflows/ci\.yml)'
+          PATHS_RE='^(hack/quickstart/|deploy/helm/|build/|cmd/tcdi-xferd/|internal/xferd/|internal/gateway/|internal/backend/|\.github/workflows/ci\.yml)'
           changed="$(git diff --name-only "origin/$BASE_REF...HEAD")"
           if grep -qE "$PATHS_RE" <<<"$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
