@@ -230,7 +230,7 @@ Redaction is enforced in the sink, not by convention: detail keys matching
 credentials (`token`, `cookie`, `session`, `authorization`, …) are replaced
 with `[REDACTED]` on write, request/response headers, bodies and query
 strings are never logged, and raw OIDC subjects/emails never reach the
-record — only the pseudonymous ref (a plain hash: anyone who knows the
+record — only the pseudonymous ref (an unsalted hash: anyone who knows the
 issuer and subject can compute it).
 
 ### Log integrity — what TinyCDI guarantees vs what you must provide
