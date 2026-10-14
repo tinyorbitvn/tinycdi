@@ -91,5 +91,10 @@ out="$(python3 -I "$LINKS" --root "$ROOT" 2>&1)" || { echo "$out"; echo "FAIL: b
 refs="$(sp_refs "$ROOT")"
 [ -z "$refs" ] || { echo "$refs"; echo "FAIL: references into $SP_DIR/ outside it (it is removed before release)"; fails=1; }
 
-[ "$fails" -eq 0 ] && echo "docs-gates: fixtures, links and the $SP_DIR fence pass"
+# live: the version and PR-reference gate over the whole docs scope,
+# with the stale-entry check (every allowlist entry must still match).
+out="$(bash "$ROOT/.github/scripts/check-doc-versions.sh" 2>&1)" \
+  || { echo "FAIL: docs version gate"; echo "$out"; fails=1; }
+
+[ "$fails" -eq 0 ] && echo "docs-gates: fixtures, links, the $SP_DIR fence and the version gate pass"
 exit "$fails"

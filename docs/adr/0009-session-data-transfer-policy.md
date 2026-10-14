@@ -70,7 +70,12 @@ active session are skipped unless `includeActive` is true; at most 500
 affected workspaces are listed and restarted per call, the response
 carrying `truncated` when more qualify (`maxPolicyApply`,
 `adminsessionpolicyapply.go:17-20`). The call requires `If-Match` on the
-ceiling row (ADR 0002).
+ceiling row (ADR 0002). Each restart goes through `RestartWorkspace`
+(`internal/provisioning/service.go`), the same fence an owner's `:start`
+on a recoverable `Failed` workspace uses: it mints a new
+`runtimeGeneration`, revokes the previous generation's leases and launch
+tickets in one transaction, and is fenced on the generation the apply
+observed (TM-16; [lifecycle-reasons.md](../lifecycle-reasons.md)).
 
 ### §4 Admin API
 

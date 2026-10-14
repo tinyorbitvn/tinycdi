@@ -26,8 +26,10 @@ done < <(grep -E '^\| TM-[0-9]{2} \|' "$TM" | sed 's/\\|/¦/g' \
 while IFS= read -r t; do
   git -C "$ROOT" grep -qE "^func $t\(" -- '*.go' || { echo "FAIL: threat model cites $t, which no Go file defines"; fails=1; }
 done < <(grep -oE '`Test[A-Za-z0-9_]+`' "$TM" | tr -d '`' | sort -u)
+declare -A have_id=()
+for id in "${ids[@]}"; do have_id["$id"]=1; done
 while IFS= read -r ref; do
-  printf '%s\n' "${ids[@]}" | grep -qx "$ref" || { echo "FAIL: '$ref' is cited but has no register row"; fails=1; }
+  [ "${have_id[$ref]:-}" = "1" ] || { echo "FAIL: '$ref' is cited but has no register row"; fails=1; }
 done < <(git -C "$ROOT" grep -ohE '\bTM-[0-9]{2}\b' -- ':(exclude,glob)docs/superpowers/**' | sort -u)
 # Old item ids: S<n> or A6-S<n>, not preceded by a letter+slash (NFS/S3) or
 # another word char or dash (FX-S1), not followed by a word char or dash

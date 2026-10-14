@@ -3,3 +3,5 @@
 #   <glob> :: <ERE matched against the line> :: <reason, 10+ chars>
 # Only third-party version strings (tools, upstream APIs) and examples of
 # the release tag format belong here — never TinyCDI release history.
+docs/quickstart.md :: \| kind \| v0\.33\.0 :: upstream kind release the quickstart requires
+docs/compatibility.md :: controller-runtime v0\.25|k8s\.io v0\.37 :: upstream Go module versions the build pins

@@ -39,6 +39,13 @@ plus containers, no cluster required. See
 
 ## Database migrations
 
+The whole schema is one baseline migration:
+`internal/store/migrations/0001_baseline.sql`. The backend applies the
+embedded migrations when it starts and refuses a database whose
+`schema_migrations` table records a migration this build does not embed
+— an unknown or older database fails closed at startup
+(`internal/store/migrate.go`; `TestBaseline_MigrateRefusesUnknownMigration`).
+
 Authoring rules live in
 [`internal/store/migrations/README.md`](../internal/store/migrations/README.md)
 — expand-only,

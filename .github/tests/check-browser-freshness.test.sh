@@ -60,11 +60,11 @@ expect() { # expect <desc> <want-rc>
   fi
 }
 has() { # has <desc> <fixed-string>
-  printf '%s\n' "$out" | grep -qF -- "$2" \
+  grep -qF -- "$2" <<< "$out" \
     || { echo "FAIL: $1: output lacks '$2'"; echo "$out" | sed 's/^/    /'; fails=1; }
 }
 lacks() { # lacks <desc> <fixed-string>
-  if printf '%s\n' "$out" | grep -qF -- "$2"; then
+  if grep -qF -- "$2" <<< "$out"; then
     echo "FAIL: $1: output unexpectedly has '$2'"; echo "$out" | sed 's/^/    /'; fails=1
   fi
 }

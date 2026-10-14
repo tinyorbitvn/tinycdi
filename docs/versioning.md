@@ -36,10 +36,12 @@ security fixes.
 
 Read the release notes of the target release first. Then take the backup
 set described in [backup-restore.md](runbooks/backup-restore.md). A
-downgrade is a restore from that backup: the backend applies database
-migrations when it starts, and it refuses to start on a database that
-holds a migration it does not embed, for example one written by a newer
-release.
+downgrade is a restore from that backup: the schema ships as one
+baseline migration (`internal/store/migrations/0001_baseline.sql`), the
+backend applies embedded database migrations when it starts, and it
+refuses to start on a database whose `schema_migrations` table records
+a migration it does not embed — for example one written by a newer
+release, or an older build.
 
 Helm never upgrades the objects in `crds/`, so diff and apply the CRDs
 yourself after you review the diff. Only additive schema changes are safe

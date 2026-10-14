@@ -117,7 +117,7 @@ done
 [ "$(dlp_val "$(sed -n '/^data_loss_prevention:/,$p' "$SYS_YAML")" server_to_client primary_clipboard_enabled)" = "false" ] ||
   bad "system kasmvnc.yaml primary_clipboard_enabled must stay false"
 # DLP logging off in the system file too (verbose logs keypresses/clipboard).
-sed -n '/^data_loss_prevention:/,$p' "$SYS_YAML" | grep -q 'level: off' ||
+grep -q 'level: off' < <(sed -n '/^data_loss_prevention:/,$p' "$SYS_YAML") ||
   bad "system kasmvnc.yaml dropped data_loss_prevention.logging.level: off"
 ok "hardening pins (client override off, system floor closed, DLP logging off)"
 
