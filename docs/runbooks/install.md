@@ -405,8 +405,8 @@ back in. So, by default, sign-out continues at the provider
 - The URL carries `client_id` (the `oidc.clientID` value) and, when the
   portal session retained the login ID token, `id_token_hint` — the hint is
   what makes the provider end its session without asking the user to
-  confirm. A session without a retained token (pre-v0.3 row, rotated key)
-  sends `client_id` only.
+  confirm. A session without a retained token (for example after a key
+  rotation) sends `client_id` only.
 - `post_logout_redirect_uri` is sent only when `oidc.postLogoutRedirect` is
   set (default empty). The provider only redirects to URIs registered on
   the client, so register the value first, then set it, for example
@@ -452,7 +452,8 @@ $HELM upgrade tinycdi deploy/helm/tinycdi -n tinycdi-system -f my-values.yaml
 after reviewing the diff (`kubectl diff -f deploy/helm/tinycdi/crds/`),
 apply it manually with `$K apply`. No `helm` flag changes this; deleting a
 CRD deletes every CR of that kind — never do it on a cluster holding user
-Workspaces. See `docs/runbooks/upgrade.md` for ordering and rollback.
+Workspaces. Upgrade order, session impact and rollback:
+[Upgrading within 1.x](../versioning.md#upgrading-within-1x).
 
 ## Uninstall (keeps CRDs and user data)
 

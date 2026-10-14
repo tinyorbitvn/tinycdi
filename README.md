@@ -93,9 +93,7 @@ TinyCDI runs other people's desktops — vulnerability reports go through
 GitHub private reporting, and hardening rules are mandatory for
 contributors and operators. See [`SECURITY.md`](SECURITY.md).
 
-**Status:** the 1.0 release line. Each release's notes state its
-security-review status; it is not an independent audit. The versioning and stability contract is in
-[`docs/versioning.md`](docs/versioning.md).
+**Status:** TinyCDI 1.0 — see the [release notes](docs/releases/v1.0.0.md) and [known limitations](docs/releases/v1.0.0.md#known-limitations). Maintained by one person; no independent security audit has been done. Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 ## License
 
