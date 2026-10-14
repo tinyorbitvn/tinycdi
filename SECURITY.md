@@ -138,13 +138,18 @@ and an update to this file.
    *Enforced:* `TestRequiredGroups*`, `TestNewAuthenticatorRejectsEmptyRequiredGroup`,
    `TestGroupListValidation`, `TestHardeningOIDCRequiredGroups`.
 5. Sessions use opaque IDs of at least 256 bits, rotated at login.
-   Cookies are `__Host-`, `Secure`, `HttpOnly` and have no `Domain`.
+   A session cookie the browser already carries is deleted at login
+   unless it is a live session of the same principal (issuer, subject,
+   tenant); that one is kept, so a login navigation cannot end the
+   user's running desktop. Cookies are `__Host-`, `Secure`, `HttpOnly`
+   and have no `Domain`.
    Idle and absolute expiry are enforced server-side and bound to the
    session epoch. The database stores only a hash of the session ID. The
    CSRF token is derived —
    `HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")` — not random and
    never stored.
    *Enforced:* `TestSessionFixationPrevented`,
+   `TestLogin_SamePrincipalKeepsLiveSession`,
    `TestSessionIdleAndAbsoluteExpiry`, `TestOIDCLoginFlowSucceeds`,
    `TestSessionKeyIsDigest`, `TestCSRF_OtherSessionsTokenRejected`,
    `TestPGSessionStore` (integration).

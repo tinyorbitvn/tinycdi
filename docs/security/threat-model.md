@@ -176,7 +176,11 @@ Controls:
   browser at sign-out: `POST /v1/logout` and
   `POST /v1/me/sessions:revoke-all` return it as `id_token_hint` in
   `endSessionUrl`, so it lands in browser history and the provider's
-  access logs.
+  access logs. At login, an existing session cookie is deleted unless it
+  is a live session of the same principal, which is kept
+  (`CallbackHandler`, `internal/api/auth.go`): a cross-site navigation
+  to `/v1/login` cannot end the user's live desktop, and a planted or
+  foreign session is still destroyed.
 - **CSRF**: a synchronizer token derived from the session ID
   (`csrfTokenFor`, `internal/api/auth.go`), checked in constant time by
   `RequireCSRF` (`internal/api/middleware.go`). Defense in depth:

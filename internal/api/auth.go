@@ -506,8 +506,9 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 // binds the callback's state parameter to the sealed state, exchanges the
 // code with the sealed PKCE verifier, verifies the ID token (issuer,
 // audience, expiry, signature via go-oidc) and its nonce, enforces tenant
-// membership, deletes any pre-existing session cookie (fixation), and issues
-// a fresh rotated session ID.
+// membership, deletes a pre-existing session cookie unless it is a live
+// session of the same principal (fixation), and issues a fresh rotated
+// session ID.
 func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -609,10 +610,18 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Session fixation: if the browser already carries a session cookie,
-	// destroy that session. The new session always gets a fresh random ID.
+	// Session fixation: a session cookie the browser already carries is
+	// destroyed unless it is a live session of the principal that just
+	// signed in. A planted, foreign, expired or unknown session dies here;
+	// the same user's own session survives, so a login navigation a
+	// cross-site page triggers (Lax cookies ride top-level GETs, and a live
+	// IdP session answers without a prompt) cannot end their running
+	// desktop. The new session always gets a fresh random ID either way.
 	if old, err := r.Cookie(a.cfg.SessionCookieName); err == nil && old.Value != "" {
-		_ = a.sessions.Delete(ctx, old.Value)
+		prev, err := a.sessions.Peek(ctx, old.Value)
+		if err != nil || !samePrincipal(prev.Principal, principal) {
+			_ = a.sessions.Delete(ctx, old.Value)
+		}
 	}
 
 	sess := &Session{
@@ -649,6 +658,13 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		"tenant", principal.TenantID,
 	)
 	http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
+}
+
+// samePrincipal reports whether two principals are the same account in the
+// same tenant: the verified issuer, subject and tenant claim all match.
+// Groups and display claims may differ between logins and do not count.
+func samePrincipal(a, b Principal) bool {
+	return a.Issuer == b.Issuer && a.Subject == b.Subject && a.TenantID == b.TenantID
 }
 
 // loginOutcome maps a callback response status to the bounded
