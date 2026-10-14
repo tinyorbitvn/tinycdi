@@ -89,7 +89,7 @@ func (d *DB) Migrate(ctx context.Context) (err error) {
 		if want, ok := known[v]; !ok || want != n {
 			rows.Close()
 			return fmt.Errorf("store: schema_migrations holds migration %d %q that this build does not embed; "+
-				"the database was written by a pre-1.0 build and cannot be upgraded: reinstall with a fresh database", v, n)
+				"this build cannot migrate a database written by a different build: install on a fresh database, or run the build that wrote it", v, n)
 		}
 	}
 	rows.Close()

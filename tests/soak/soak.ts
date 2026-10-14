@@ -568,8 +568,8 @@ export class PortalApi {
   }
 
   async csrfToken(): Promise<string> {
-    // v0.2 (T2.3, D17): GET /v1/me returns the session-bound csrfToken.
-    // The legacy readable tcdi_csrf cookie no longer exists.
+    // GET /v1/me returns the session-bound csrfToken (D17).
+    // The retired readable tcdi_csrf cookie is never set.
     const me = await this.ctx.get(`${this.portal}/v1/me`);
     if (me.ok()) {
       const body = (await me.json()) as { csrfToken?: string };
@@ -663,9 +663,9 @@ export interface Driver {
 }
 
 /**
- * Request-level driver: used by --dry-run against the contract mock. The
- * mock predates T2.5's scriptable /connection endpoint, so state falls back
- * to probing the session origin's /desktop page (200 = connected). Input is
+ * Request-level driver: used by --dry-run against the contract mock. State
+ * comes from GET /connection; when that answers 404, the driver probes the
+ * session origin's /desktop page instead (200 = connected). Input is
  * synthetic: the mock has no input channel, so ticks are counted only.
  */
 export class ApiDriver implements Driver {
@@ -773,7 +773,7 @@ export class ApiDriver implements Driver {
         ? { state: st.state, source: "api" }
         : { state: "error", source: "api" };
     }
-    // Endpoint absent (pre-T2.5 mock): probe the session origin instead.
+    // /connection answered 404: probe the session origin instead.
     const page = this.sessionPage.get(id);
     if (!page) return { state: "none", source: "probe" };
     const r = await this.ctx.get(`${page.origin}${page.path}`, {
@@ -1255,9 +1255,9 @@ export async function driveSessions(
         stamp("mid-run reload of every session");
         reloadQueue = [...sessions];
       }
-      // One reload per pass: a serialized reload burst starves the input
-      // loop exactly like a wedged send would (rc.3 e2e: 60 sequential
-      // reloads blocked every input heartbeat for the whole window).
+      // One reload per pass: a serialized reload burst would starve the
+      // input loop exactly like a wedged send would (60 sequential reloads
+      // block every input heartbeat for the whole window).
       const rs = reloadQueue?.shift();
       if (rs !== undefined) {
         rs.reloadedAt = Date.now();

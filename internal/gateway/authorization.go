@@ -695,8 +695,9 @@ func (g *Gateway) killSession(s *session, reason string) {
 
 // lookupSession resolves the session cookie to a live session. With a
 // session directory configured, a cookie this replica never saw falls back
-// to a digest lookup and rebuilds the session (D19); without one the
-// v0.1 behaviour is unchanged. wsID is the workspace the request Host
+// to a digest lookup and rebuilds the session (D19); without a session
+// directory (single-process mode) an unseen cookie is a miss. wsID is the
+// workspace the request Host
 // names: a digest that resolves to another workspace's lease is refused
 // inside fetchSession before any session state is allocated. A non-nil
 // error means the directory could not answer (not "no session"): the caller

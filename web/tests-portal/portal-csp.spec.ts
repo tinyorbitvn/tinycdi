@@ -12,7 +12,7 @@ import {
   type HarnessMode,
 } from "./harness.ts";
 
-// Portal CSP gate (D31): every v0.2 route, served by the REAL frontend
+// Portal CSP gate (D31): every portal route, served by the REAL frontend
 // binary (web/dist through build/frontend with the production security
 // headers), must produce zero `securitypolicyviolation` events. The
 // listener is installed by init script so it catches violations from the
@@ -27,7 +27,7 @@ import {
 
 const WS = "ws_csp0001aabbcc";
 
-// The v0.2 shell routes (same set a11y.spec.ts sweeps).
+// The shell routes (same set a11y.spec.ts sweeps).
 const ROUTES = [
   "/workspaces",
   "/workspaces/new",

@@ -1,4 +1,4 @@
-// Session area of the contract mock (v0.2): the session-origin routes
+// Session area of the contract mock: the session-origin routes
 // /v1/launch (ticket redeem with the gateway's ADR-0004 origin gate) and the
 // cookie-gated /desktop/*, plus the portal-side session surface:
 // GET /v1/workspaces/{id}/connection (the passive poll endpoint, P4) and the
@@ -9,8 +9,8 @@
 //   from ctx.sessionDomain and core.CSRF_TOKEN_VALUE — /v1/me stays where
 //   the principal state lives.
 // - The CSRF check in handler.ts compares X-CSRF-Token against the token
-//   /v1/me publishes; the v0.1 tcdi_csrf / tcdi_session_origin cookies are
-//   gone (D17).
+//   /v1/me publishes; the retired tcdi_csrf / tcdi_session_origin cookies
+//   are never set (D17).
 // - launchUrl is https://ws-<label>.<sessionDomain>/v1/launch like the real
 //   backend; on a loopback session domain the mock keeps its listener's
 //   scheme so browser e2e can reach it.

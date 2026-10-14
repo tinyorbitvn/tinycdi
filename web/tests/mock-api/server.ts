@@ -36,7 +36,7 @@ const portalOrigins = (process.env.MOCK_PORTAL_ORIGINS ?? "http://127.0.0.1:4173
   .filter((s) => s !== "");
 
 // The session domain the mock publishes via /v1/me and builds launch URLs
-// under (v0.2: ws-<label>.<sessionDomain>). Default `localhost:<port>` so
+// under (ws-<label>.<sessionDomain>). Default `localhost:<port>` so
 // browsers resolve ws-<label>.localhost to the mock's loopback listener.
 const sessionDomain =
   process.env.MOCK_SESSION_DOMAIN ?? `localhost:${SESSION_PORT}`;

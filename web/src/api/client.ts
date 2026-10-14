@@ -7,7 +7,8 @@ export type ApiClient = Client<paths>;
 // The CSRF token is derived server-side and returned in the GET /v1/me body
 // (P1/D17). It lives only in module state — installed by web/src/app/me.tsx
 // via setCsrfToken — and is echoed on every state-changing request. No
-// export reads document.cookie; the tcdi_csrf cookie is gone in v0.2.
+// export reads document.cookie; the CSRF token comes from GET /v1/me,
+// never from a cookie.
 export const CSRF_HEADER = "X-CSRF-Token";
 
 let csrfToken: string | undefined;

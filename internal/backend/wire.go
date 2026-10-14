@@ -115,7 +115,7 @@ func (b *Backend) wire(ctx context.Context) error {
 // resolveGatewayIdentity derives the session-gateway identity: -gateway-id
 // wins; merged mode defaults to the shared "backend" identity so every
 // replica owns the same leases; split mode falls back to the client
-// certificate's Subject CN (the v0.1 behaviour).
+// certificate's Subject CN.
 func resolveGatewayIdentity(cfg Config) (broker.GatewayIdentity, error) {
 	audience := cfg.GatewayAudience
 	if audience == "" {
@@ -568,7 +568,7 @@ func (b *Backend) wireSplit(cfg Config, metrics *observability.Metrics, id broke
 	// wait for.
 	b.markCacheSynced()
 	// P6: split/test mode has no session directory — sessions live in this
-	// process, exactly as in v0.1. G2 (ADR 0006): split mode owns no
+	// process. G2 (ADR 0006): split mode owns no
 	// Postgres handle, so /v1/launch keeps the divided local limiter.
 	return b.newGateway(cfg, bc, id, metrics, nil, launchLimiter(cfg, nil))
 }

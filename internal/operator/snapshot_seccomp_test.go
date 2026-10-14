@@ -93,7 +93,7 @@ func TestTemplateInvalidBadSeccompAnnotation(t *testing.T) {
 }
 
 // A recorded status snapshot carrying an out-of-policy seccomp annotation
-// — the shape an operator could have written before the gate existed —
+// — for example one edited through the status subresource —
 // fails recorded-snapshot verification: the record is re-taken from the
 // live template, the admission check refuses it for the same reason, and
 // the workspace holds Degraded/TemplateInvalid with no pod.

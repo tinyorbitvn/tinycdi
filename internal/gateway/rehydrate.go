@@ -29,7 +29,8 @@ import (
 
 // SessionDirectory is the optional broker surface that lets a session
 // survive a gateway restart and be served by any replica. With a nil
-// directory the gateway behaves as in v0.1 (sessions live in one process).
+// directory the gateway runs in single-process mode (sessions live in one
+// process).
 type SessionDirectory interface {
 	BindSession(ctx context.Context, gw broker.GatewayIdentity, leaseID string, d broker.SessionDigest) error
 	LeaseBySession(ctx context.Context, gw broker.GatewayIdentity, d broker.SessionDigest) (broker.Lease, error)

@@ -706,8 +706,8 @@ runtime:
     tolerations:
       - {key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}
   # Default pod.spec.hostUsers for runtime pods (--runtime-host-users).
-  # false since v0.2 (verified on the reference environment — see
-  # docs/compatibility.md): runtime pods run in their own user namespace.
+  # false: runtime pods run in their own user namespace (verified on the
+  # reference environment — see docs/compatibility.md).
   # null leaves the field unset (the apiserver default — host user
   # namespace); a template's spec.linux.hostUsers overrides either way.
   hostUsers: false
@@ -732,7 +732,7 @@ runtime:
   # (docs/runbooks/capacity.md). It is soft, so it NEVER blocks
   # scheduling: retained-disk reattach on a node-pinned PVC and
   # single-node pools still work. Set enabled=false to keep the
-  # pre-v0.3.1 packed-by-scoring placement.
+  # scheduler's default packed-by-scoring placement.
   topologySpread:
     enabled: true
   # Per-workspace boundary NetworkPolicy posture (operator flag
@@ -744,9 +744,9 @@ runtime:
   # workloads) are unreachable. DNS egress is unaffected.
   #
   # unrestricted: true opts OUT — it renders
-  # --runtime-clusteronly-egress=unrestricted and restores the pre-1.0
-  # posture (any pod in any namespace on any port; confinement rests
-  # entirely on destination-side ingress policies). It cannot be combined
+  # --runtime-clusteronly-egress=unrestricted and allows any pod in any
+  # namespace on any port (confinement rests entirely on destination-side
+  # ingress policies). It cannot be combined
   # with the egress* selectors below — the render fails.
   #
   # To narrow further instead, set egressNamespaceSelector to confine

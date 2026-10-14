@@ -374,7 +374,7 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 			pod.OwnerReferences = []metav1.OwnerReference{{
 				APIVersion: "workspaces.cdi.tinyorbit.vn/v1",
 				Kind:       "Workspace",
-				Name:       "ws-legacy",
+				Name:       "ws-other",
 				UID:        "ws-pre-x",
 			}}
 		}},

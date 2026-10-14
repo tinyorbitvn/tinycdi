@@ -109,7 +109,7 @@ test("portal cookies", async ({ page, context, request, harnessMode }) => {
   await login(page);
 
   // D17: every cookie on the portal origin carries the __Host- prefix —
-  // tcdi_csrf and tcdi_session_origin are gone in v0.2.
+  // the retired cookie names tcdi_csrf and tcdi_session_origin are never set.
   const cookies = await context.cookies(PORTAL_ORIGIN);
   expect(cookies.length).toBeGreaterThan(0);
   for (const c of cookies) {

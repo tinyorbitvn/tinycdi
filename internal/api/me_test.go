@@ -2,7 +2,7 @@ package api
 
 // Contract tests for GET /v1/me and the session surface (D18, P1, E14):
 // the CSRF token is derived from the session ID and returned by /v1/me,
-// login and logout write only __Host- cookies (no v0.1 legacy names, not
+// login and logout write only __Host- cookies (no retired names, not
 // even deletions), and desktop input slides the portal idle timer without
 // ever reviving an expired session.
 
@@ -148,16 +148,15 @@ func TestCSRF_OtherSessionsTokenRejected(t *testing.T) {
 	}
 }
 
-// TestLogin_NoLegacyCookieDeletion: every cookie login and logout write is
-// __Host-prefixed (Secure + HttpOnly). The v0.1 tcdi_csrf and
+// TestLogin_OnlyHostPrefixedCookies: every cookie login and logout write is
+// __Host-prefixed (Secure + HttpOnly). The retired tcdi_csrf and
 // tcdi_session_origin names are gone entirely (E14): neither a live value
-// nor a Max-Age=0 deletion may appear — v0.2 spent a release deleting them,
-// so browsers upgraded since carry nothing to drop.
-func TestLogin_NoLegacyCookieDeletion(t *testing.T) {
+// nor a Max-Age=0 deletion may appear.
+func TestLogin_OnlyHostPrefixedCookies(t *testing.T) {
 	env := newTestEnv(t, nil)
 
-	// /auth/login redirects to the IdP; it too must leave the legacy names
-	// alone (it set the deletions until v0.3).
+	// /auth/login redirects to the IdP; it too must leave the retired names
+	// alone.
 	lr, err := noRedirectClient().Get(env.server.URL + "/auth/login")
 	if err != nil {
 		t.Fatal(err)
@@ -186,13 +185,13 @@ func TestLogin_NoLegacyCookieDeletion(t *testing.T) {
 
 // assertPortalCookies checks the E14 cookie surface of a login or logout
 // response: every Set-Cookie is __Host-prefixed (Secure + HttpOnly), and
-// neither v0.1 legacy name appears at all.
+// neither retired name appears at all.
 func assertPortalCookies(t *testing.T, setCookies []string) {
 	t.Helper()
 	for _, h := range setCookies {
 		name, _, _ := strings.Cut(h, "=")
 		if name == "tcdi_csrf" || name == "tcdi_session_origin" {
-			t.Fatalf("legacy cookie %q still touched: %q", name, h)
+			t.Fatalf("retired cookie %q touched: %q", name, h)
 		}
 		if !strings.HasPrefix(name, "__Host-") {
 			t.Fatalf("non-__Host- cookie on portal origin: %q", h)

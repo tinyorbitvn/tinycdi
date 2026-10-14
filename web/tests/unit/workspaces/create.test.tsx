@@ -162,7 +162,7 @@ describe("CreateWorkspacePage", () => {
     expect(alert).not.toHaveTextContent("delete an unused workspace");
   }, 20000);
 
-  // USER-LIMITS (v0.5): QUOTA_EXHAUSTED + details.reason=UserLimitReached
+  // USER-LIMITS: QUOTA_EXHAUSTED + details.reason=UserLimitReached
   // names the caller's own running cap — the banner interpolates
   // details.params limit/current into dedicated copy.
   it("create: per-user limit refusal shows the limit copy with params", async () => {

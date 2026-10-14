@@ -446,10 +446,11 @@ func TestImageDigestPinning(t *testing.T) {
 			t.Errorf("seeded templates missing %q", want)
 		}
 	}
-	// Pod placement lives in the typed spec.placement block — the v0.1
-	// node-selector annotation is gone (E14) and must not be rendered.
+	// Pod placement lives in the typed spec.placement block — the retired
+	// node-selector annotation is not part of the v1 template API (E14)
+	// and must not be rendered.
 	if strings.Contains(s, "workspaces.cdi.tinyorbit.vn/node-selector") {
-		t.Errorf("legacy node-selector annotation must not render:\n%s", s)
+		t.Errorf("retired node-selector annotation must not render:\n%s", s)
 	}
 	var browser doc
 	for _, d := range selectDocs(docs, "WorkspaceTemplate") {

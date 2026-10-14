@@ -221,6 +221,8 @@ function stageSecret() {
   ]);
   writeFileSync(path.join(dir, "password"), DEMO_PASSWORD + "\n", { mode: 0o600 });
   writeFileSync(path.join(dir, "username"), "kasm_user\n", { mode: 0o600 });
+  // tcdi-xferd owns :8443 and refuses to start without its credential.
+  writeFileSync(path.join(dir, "xfer-token"), randomBytes(32).toString("base64url") + "\n", { mode: 0o600 });
   return dir;
 }
 

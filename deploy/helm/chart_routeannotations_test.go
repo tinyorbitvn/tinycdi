@@ -3,7 +3,7 @@
 
 package chart_test
 
-// CHART-3 (v0.4): per-route HTTPRoute annotations and route names.
+// CHART-3: per-route HTTPRoute annotations and route names.
 //
 //   - gatewayApi.portalAnnotations / .sessionAnnotations merge OVER the
 //     shared gatewayApi.annotations — on a key collision the per-route
@@ -11,15 +11,13 @@ package chart_test
 //     for the long-lived-websocket session route, or a link annotation
 //     on the portal route only). Same rule as ingress.portalAnnotations.
 //   - gatewayApi.portalRouteName / .sessionRouteName rename the two
-//     HTTPRoutes; the defaults render the same names every earlier
-//     chart release produced, so a GitOps wrapper that pairs
-//     hand-written routes by convention (e.g. a <name>-redirect route)
-//     keeps working unchanged.
+//     HTTPRoutes; the defaults render stable route names, so a GitOps
+//     wrapper that pairs hand-written routes by convention (e.g. a
+//     <name>-redirect route) keeps working unchanged.
 //
 // Byte-identity of the shared-only render is pinned by
-// TestHTTPRouteRenderedGolden (chart_explicitdefaults_test.go): the
-// checked-in golden predates this change, so a passing golden proves
-// the pre-v0.4 render is unchanged.
+// TestHTTPRouteRenderedGolden (chart_explicitdefaults_test.go): a
+// passing golden proves the default render is unchanged.
 
 import (
 	"path/filepath"

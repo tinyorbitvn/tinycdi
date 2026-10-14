@@ -3,7 +3,7 @@
 // moves the bytes with a credentialed CORS request to the workspace's own
 // session host; the gateway claims the grant and streams to the in-pod
 // helper. A download lands in a Blob and is saved with <a download>
-// (plan ruling 12), so it works in both cookie modes.
+// so it works in both cookie modes.
 import { sessionOrigin } from "./launch";
 
 export type FileTransferPolicy = "Disabled" | "Upload" | "Download" | "Bidirectional";

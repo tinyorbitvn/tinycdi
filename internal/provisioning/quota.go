@@ -417,8 +417,8 @@ func pendingReleaseVector(ctx context.Context, tx store.Tx, tenantID string) (Re
 // checkUserLimit refuses a grant of `slots` running slots when the
 // workspace's owner would exceed their effective per-principal limit: the
 // override stored in user_session_limit when one exists, else the tenant
-// default in tenant_user_limit_default, else unlimited (no rows — the
-// upgrade default). It runs under the caller's tenant_quota row lock, so
+// default in tenant_user_limit_default, else unlimited (no rows).
+// It runs under the caller's tenant_quota row lock, so
 // the owner's count cannot change between the read here and the
 // reservation write that follows — the same serialization the tenant-wide
 // check relies on.

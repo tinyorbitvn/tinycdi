@@ -776,7 +776,7 @@ func (f *restartFixture) portalLogin(t *testing.T, loginOn, callbackOn *replica)
 	}
 
 	// The CSRF token is derived from the session ID and published by
-	// GET /v1/me (P1) — v0.2 sets no tcdi_csrf cookie.
+	// GET /v1/me (P1) — no tcdi_csrf cookie is set.
 	meReq, err := http.NewRequest(http.MethodGet, callbackOn.appURL+"/v1/me", nil)
 	if err != nil {
 		t.Fatal(err)

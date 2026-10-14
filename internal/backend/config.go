@@ -396,7 +396,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if !set["tenant-admin-groups"] {
-		// envOr's empty-string "unset" keeps the upgrade path at the
+		// envOr's empty-string "unset" resolves to the
 		// "tenant-admin" default; a set-but-empty env is indistinguishable
 		// from unset through the getenv seam, exactly like required-groups.
 		if err := c.TenantAdminGroups.Set(envOr(getenv, "TCDI_TENANT_ADMIN_GROUPS", api.TenantAdminGroup)); err != nil {

@@ -378,7 +378,7 @@ type Options struct {
 	// egress rule of NetworkProfileClusterOnly workspaces. Nil keeps
 	// the default posture — egress to pods in namespaces labelled
 	// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces).
-	// Unrestricted restores the pre-1.0 any-pod-any-namespace posture.
+	// Unrestricted is the opt-out: egress to any pod in any namespace.
 	// Otherwise the set selectors admit only pod destinations matching
 	// them, on the listed ports — it can never widen the rule past
 	// pod peers (external IPs stay denied). DNS egress is unaffected.
@@ -393,9 +393,9 @@ type Options struct {
 // into the struct; Unrestricted is reachable only via the flag's
 // "unrestricted" literal, never through the JSON form.
 type ClusterOnlyEgress struct {
-	// Unrestricted restores the pre-1.0 posture: egress to any pod in
-	// any namespace on any port, where confinement rests entirely on
-	// destination-side ingress policies.
+	// Unrestricted is the opt-out: egress to any pod in any namespace on
+	// any port, where confinement rests entirely on destination-side
+	// ingress policies.
 	Unrestricted bool `json:"-"`
 
 	// NamespaceSelector picks the destination namespaces; nil means

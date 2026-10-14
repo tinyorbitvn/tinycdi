@@ -123,29 +123,29 @@ func TestPGSessionStore_IDTokenRotationFallback(t *testing.T) {
 	}
 }
 
-// A session row that predates the id_token column (or was saved without
-// one) reads back with an empty IDToken and a NULL column.
-func TestPGSessionStore_IDTokenLegacyNull(t *testing.T) {
+// A session saved without an id_token (no sealer configured, or no token
+// to keep) reads back with an empty IDToken and a NULL column.
+func TestPGSessionStore_IDTokenAbsentIsNull(t *testing.T) {
 	db := newDB(t)
 	ss := store.NewSessionStore(db, time.Hour, testIDTokenSealer(t, testKey(t)))
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	if err := ss.Save(ctx, &store.Session{
-		ID: "sess-legacy", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
+		ID: "sess-notoken", Issuer: "iss", Subject: "sub", TenantID: "tenant-a",
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	var rowToken *string
 	if err := db.Pool().QueryRow(ctx,
-		`SELECT id_token FROM sessions WHERE id = $1`, sha256Hex("sess-legacy")).Scan(&rowToken); err != nil {
+		`SELECT id_token FROM sessions WHERE id = $1`, sha256Hex("sess-notoken")).Scan(&rowToken); err != nil {
 		t.Fatal(err)
 	}
 	if rowToken != nil {
 		t.Fatalf("id_token = %q, want NULL for a session without one", *rowToken)
 	}
-	got, err := ss.Get(ctx, "sess-legacy")
+	got, err := ss.Get(ctx, "sess-notoken")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

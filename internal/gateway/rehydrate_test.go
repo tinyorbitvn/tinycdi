@@ -359,13 +359,13 @@ func TestRehydrate_PanicDoesNotParkWaiters(t *testing.T) {
 	}
 }
 
-// TestRehydrate_NilDirectoryKeepsV01Behaviour: with no session directory a
+// TestRehydrate_NilDirectorySingleProcess: with no session directory a
 // replica has only its own sessions — A's cookie is a miss on B.
-func TestRehydrate_NilDirectoryKeepsV01Behaviour(t *testing.T) {
+func TestRehydrate_NilDirectorySingleProcess(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-nil", testWSUID)
 	_, srvA := newReplica(t, fb, "gw-A")
-	srvB := newGateway(t, fb, nil) // no Sessions: v0.1 single-process mode
+	srvB := newGateway(t, fb, nil) // no Sessions: single-process mode
 
 	cookie := launchOK(t, srvA, testHost, "tk-nil")
 	resp := proxied(t, srvB, testHost, "/", cookie, nil)

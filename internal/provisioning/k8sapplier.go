@@ -416,8 +416,8 @@ type TemplateCatalogEntry struct {
 	SeccompProfile  string
 	AppArmorProfile string
 	// ImageUpdate is the revision's lifecycle.imageUpdate policy
-	// (OnStart | Pinned); "" on objects published before the field existed,
-	// which callers must read as the OnStart default.
+	// (OnStart | Pinned); the CRD defaults it to OnStart, and callers test
+	// only for Pinned.
 	ImageUpdate string
 	PublishedAt time.Time
 	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339

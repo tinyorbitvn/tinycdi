@@ -1,12 +1,9 @@
 -- 0001_baseline.sql — TinyCDI v1 baseline schema.
 --
--- Generated from pg_dump --schema-only of a database migrated through the
--- pre-1.0 migrations 001…024, then hand-cleaned. There is no upgrade path
--- from pre-1.0 databases: v1 installs start from this file. Columns that
--- were nullable only for rows written by earlier builds are NOT NULL here
--- (connection_lease/launch_ticket.portal_session_digest). The remaining
--- nullable columns carry meaning: NULL is "not bound yet", "no stream
--- claimed yet", "no sealer", "follow the template" or "zero policy".
+-- The v1 baseline schema. Installs start from this file; later releases add
+-- numbered migrations after it. The remaining nullable columns carry
+-- meaning: NULL is "not bound yet", "no stream claimed yet", "no sealer",
+-- "follow the template" or "zero policy".
 --
 -- schema_migrations is created by the runner (internal/store/migrate.go).
 

@@ -1,7 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
 
-// Accessibility gate (D34): axe against every v0.2 route in both themes —
+// Accessibility gate (D34): axe against every portal route in both themes —
 // zero `serious` or `critical` violations — plus a keyboard sweep proving
 // every interactive element on /workspaces is Tab-reachable with a visible
 // focus ring. Runs against the contract mock (tests/mock-api) on :4310.

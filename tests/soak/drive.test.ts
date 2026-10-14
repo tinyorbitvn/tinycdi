@@ -591,8 +591,8 @@ test("V3.10d: a wedged sendInput is bounded by inputTimeoutMs and cannot starve 
   const driver = new FakeDriver();
   // ws_stuck's dispatch never resolves — like a Playwright op on a page whose
   // channel wedged mid-reconnect. Unbounded, the serialized input loop
-  // starves every later session (the rc.3 e2e cascade: inputs froze, the
-  // 30 min session-idle then mass-expired the fleet).
+  // starves every later session (inputs froze, the 30 min session-idle
+  // then mass-expired the fleet).
   driver.sendInputFor = (id) =>
     id === "ws_stuck" ? new Promise<void>(() => {}) : Promise.resolve();
   const stuck = newSession("ws_stuck", "stuck");

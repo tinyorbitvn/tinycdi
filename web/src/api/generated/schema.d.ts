@@ -1245,9 +1245,7 @@ export interface components {
             /**
              * @description Verbatim revision identifier (`spec.revision`) of the template
              *     revision the workspace is on. Refreshed when a start moves the
-             *     workspace to a newer revision of its template family. Rows
-             *     written before v0.3 do not carry the label and fall back to
-             *     the numeric `template.revision`; empty when neither exists.
+             *     workspace to a newer revision of its template family.
              * @example 2026-10-b
              */
             templateRevision: string;
@@ -1484,7 +1482,7 @@ export interface components {
         /**
          * @description Whether a session-policy row exists for the tenant. `TenantRow`:
          *     a row was written through this API. `FollowTemplate`: no row —
-         *     every channel follows the template, the upgrade default.
+         *     every channel follows the template.
          * @enum {string}
          */
         AdminSessionPolicySource: "TenantRow" | "FollowTemplate";

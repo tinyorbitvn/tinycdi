@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// Deploy-time guards (v0.5): two values-driven footguns the render must
+// Deploy-time guards: two values-driven footguns the render must
 // refuse or pin — operator replicas>1 without leader election (two active
 // reconcilers double-driving the same Workspaces), and the unauthenticated
 // scrape-only metrics listener leaking onto the edge path.

@@ -716,7 +716,7 @@ func TestLinuxRuntimeReadinessAndHome(t *testing.T) {
 		assertNoSecret(t, c, password)
 
 		// Anonymous requests to :8443 are answered by tcdi-xferd and never
-		// reach KasmVNC (plan ruling 24), so they cannot trip its blacklist.
+		// reach KasmVNC, so they cannot trip its blacklist.
 		mustExec(t, c, `for i in 1 2 3 4 5 6 7 8; do curl -sk -o /dev/null https://127.0.0.1:8443/; done; true`)
 		if log = mustExec(t, c, "cat /home/workspace/.vnc/*.log"); strings.Contains(log, "blacklisted") {
 			t.Fatalf("eight anonymous :8443 requests reached KasmVNC and tripped its blacklist:\n%s", log)

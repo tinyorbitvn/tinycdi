@@ -146,7 +146,7 @@ type Config struct {
 	// set, launch binds the cookie digest to the lease, a cookie this
 	// replica never saw rehydrates its session from the store, and stream
 	// admission claims the lease's stream epoch so a newer claim on any
-	// replica fences this process's stream. Nil keeps v0.1 single-process
+	// replica fences this process's stream. Nil keeps single-process
 	// session semantics.
 	Sessions SessionDirectory
 	// UpstreamCA is the fallback trust root for runtime upstream TLS when a

@@ -20,8 +20,7 @@ import (
 )
 
 // TestResponsePolicy_PinsCOOP: launch, proxied, denied and control
-// responses all carry COOP: same-origin. Fails on v0.5.0 — no COOP was
-// emitted.
+// responses all carry COOP: same-origin.
 func TestResponsePolicy_PinsCOOP(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-coop", testWSUID)
@@ -72,7 +71,6 @@ func TestResponsePolicy_PinsCOOP(t *testing.T) {
 // TestResponsePolicy_StripsUpstreamCOOP: a tenant-controlled runtime may
 // answer with a permissive COOP — the gateway drops it before pinning
 // its own value, exactly like the rest of the security-header set.
-// Fails on v0.5.0 (COOP was neither stripped nor pinned).
 func TestResponsePolicy_StripsUpstreamCOOP(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cross-Origin-Opener-Policy", "unsafe-none")

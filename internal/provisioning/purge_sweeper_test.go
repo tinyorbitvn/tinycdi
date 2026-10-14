@@ -128,7 +128,7 @@ func TestPurgeSweeper_StripsProtectionWithPatch(t *testing.T) {
 
 // notFoundPVCPatchClient answers every Patch on a PVC with NotFound — the
 // volume was removed between the sweep's second Get and the finalizer
-// strip (seen live on rc.2).
+// strip.
 func notFoundPVCPatchClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(retainedApplyScheme(t)).

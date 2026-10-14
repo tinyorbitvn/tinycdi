@@ -152,7 +152,7 @@ func TestLogout_ClearsSessionAndReturnsEndSessionURL(t *testing.T) {
 func TestLogout_NoIDTokenFallsBackToClientID(t *testing.T) {
 	env := newLogoutEnv(t, nil)
 	sess := env.loginSession(t)
-	// Wipe the retained token, like a legacy session row.
+	// Wipe the retained token, like a session saved without one.
 	if rec, err := env.auth.sessions.Peek(context.Background(), sess.Value); err == nil {
 		rec.IDToken = ""
 		if err := env.auth.sessions.Save(context.Background(), rec); err != nil {

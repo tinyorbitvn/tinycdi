@@ -102,7 +102,7 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// All upstream traffic now comes from 127.0.0.1, so KasmVNC's
 	// brute-force blacklist would lock every client out after a few
 	// anonymous probes. The gateway injects Basic credentials on every
-	// request; answer anything without them here (plan ruling 24).
+	// request; answer anything without them here.
 	if _, _, ok := r.BasicAuth(); !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="tcdi"`)
 		http.Error(w, "authentication required", http.StatusUnauthorized)

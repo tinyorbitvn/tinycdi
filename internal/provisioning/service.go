@@ -167,11 +167,10 @@ type TemplateInfo struct {
 	// ClipboardPolicy is the template revision's spec.clipboardPolicy,
 	// snapshotted at create and refreshed by a re-pointing start — the
 	// template leg the session-policy meet is computed against (ADR 0010).
-	// Empty on rows written before the field existed.
 	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
 	// FileTransferPolicy is the template revision's spec.fileTransferPolicy,
-	// snapshotted like ClipboardPolicy; empty on rows written before the
-	// field existed.
+	// snapshotted like ClipboardPolicy; empty resolves as Disabled
+	// (meetCeiling).
 	FileTransferPolicy string `json:"fileTransferPolicy,omitempty"`
 }
 
@@ -179,9 +178,9 @@ type TemplateInfo struct {
 // the resolved WorkspaceTemplate OBJECT name, not the catalog (family)
 // name. The API resolves the family reference to a concrete revision at
 // admission — req.Template.ID is "tpl_<object name>" — so the operator's
-// exact lookup never re-derives the family's newest member (the legacy
-// catalog-name fallback is gone). The row keeps the family name in
-// Template.Name for the start path's family resolution.
+// exact lookup never re-derives the family's newest member. The row
+// keeps the family name in Template.Name for the start path's family
+// resolution.
 func templateRefName(t TemplateInfo) string {
 	if name, ok := TemplateCRName(t.ID); ok {
 		return name

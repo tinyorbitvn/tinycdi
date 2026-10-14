@@ -24,9 +24,9 @@ import (
 // TestLaunch_UnclaimedSessionReaped: redeem-then-abandon — the launch
 // 303 is never followed. Past the unattached TTL the lease must be
 // revoked at the broker (the workspace pin released) and the same cookie
-// must resolve to a dead lease, not resurrect the ghost. Fails on
-// v0.5.0: the ghost is dropped by the renew deadline WITHOUT a revoke —
-// the lease stays live and the cookie rehydrates a fresh session.
+// must resolve to a dead lease, not resurrect the ghost. A renew-deadline
+// drop without a revoke would leave the lease live and the cookie able to
+// rehydrate a fresh session.
 func TestLaunch_UnclaimedSessionReaped(t *testing.T) {
 	fb := newFakeBroker(t)
 	fb.scriptTicket("tk-ghost", testWSUID)

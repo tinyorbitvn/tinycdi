@@ -1,13 +1,13 @@
 // Workspace reason tokens → portal copy (V3.14b, params B3-PARAMS).
-// Events and conditions arrive with the server's English message text and,
-// since v0.4, an optional `params` string map carrying the values the
+// Events and conditions arrive with the server's English message text and
+// an optional `params` string map carrying the values the
 // message interpolated (revision, recorded cause, teardown step, drain
 // budget...). A known token renders its catalog template with the params
 // formatted for the active locale — token values (step, skipReason) map
 // through their own catalog keys, numbers/durations/sizes through the
 // shared formatters, and every value lands as text so React escapes it.
 // A missing param, an unknown token or an unknown param value falls back
-// to the server message (or the raw token), unchanged from v0.3.x.
+// to the server message (or the raw token).
 //
 // Token inventory: internal/api/events.go (intent + curated events),
 // internal/operator/{status,workspace_controller,finalizer}.go (condition
@@ -257,9 +257,9 @@ export function formatReasonParam(format: ParamFormat, value: string): string {
  * The message for a reason token: its catalog template with `params`
  * formatted per their declared kind. Values are substituted as text —
  * React escapes them on render, so a hostile param can never inject
- * markup. When a template placeholder has no matching param (an older
- * server never sent it) or the token is unknown, returns the server's own
- * message — or the raw token when there is none — exactly as v0.3.x did.
+ * markup. When a template placeholder has no matching param (the server
+ * sent none) or the token is unknown, returns the server's own
+ * message — or the raw token when there is none.
  */
 export function formatReasonMessage(
   reason: string,

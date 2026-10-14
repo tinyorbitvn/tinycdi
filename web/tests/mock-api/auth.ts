@@ -1,7 +1,7 @@
 // Auth bootstrap area of the contract mock: the dev/test login flow
 // (/v1/login — not part of the public contract) that sets the session
-// cookie. v0.2 (D17): the CSRF token and session domain come from
-// GET /v1/me, so the tcdi_csrf / tcdi_session_origin cookies are gone.
+// cookie. The CSRF token and session domain come from GET /v1/me (D17), so
+// the retired tcdi_csrf / tcdi_session_origin cookies are never set.
 
 import {
   SESSION_COOKIE,
@@ -35,9 +35,9 @@ export function authArea(_ctx: MockContext): MockArea {
         status: 302,
         headers: {
           location: returnTo,
-          // v0.2 (D17): only the session cookie remains — tcdi_csrf and
-          // tcdi_session_origin are gone; the CSRF token and session domain
-          // come from GET /v1/me.
+          // Only the session cookie remains — the retired tcdi_csrf and
+          // tcdi_session_origin names are never set; the CSRF token and
+          // session domain come from GET /v1/me (D17).
           "set-cookie": `${SESSION_COOKIE}=${SESSION_PRINCIPAL}; Path=/; HttpOnly; SameSite=Strict`,
         },
         body: "",

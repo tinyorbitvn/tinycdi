@@ -38,7 +38,7 @@ const (
 // and the tenant ceiling (ADR 0010 §1). It is recorded wherever a
 // decision is taken: on the launch_ticket row (what the client was
 // offered), on the Workspace CR spec.sessionPolicy (what the runtime was
-// built with), and — from v1.3 — on each file-transfer row. Audit reads
+// built with), and on each file-transfer row. Audit reads
 // the record; it never re-derives.
 type SessionPolicy struct {
 	Clipboard    string                   `json:"clipboard"`
@@ -87,8 +87,8 @@ func meet(template, ceiling, dirA, dirB string) string {
 
 // meetCeiling applies a stored ceiling row to a template's own policy —
 // the whole resolved vector in one place. Absent row is FollowTemplate
-// on every channel: the upgrade default, and the only state "no row"
-// may resolve to. bound is the platform per-file bound
+// on every channel: the default for a tenant with no ceiling, and the
+// only state "no row" may resolve to. bound is the platform per-file bound
 // (-file-transfer-max-bytes) the ceiling's file_max_bytes clips to; a
 // resolved-Disabled channel carries 0.
 func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling, bound int64) SessionPolicy {
