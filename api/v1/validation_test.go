@@ -86,9 +86,6 @@ func linuxTemplate(name string) map[string]interface{} {
 			"experience": "Browser",
 			"linux": map[string]interface{}{
 				"image": "registry.local/tinycdi/browser@sha256:" + digest(),
-				"browserPolicy": map[string]interface{}{
-					"allowedDomains": []interface{}{"*.corp.example"},
-				},
 			},
 			"resources":       map[string]interface{}{"cpu": "2", "memory": "4Gi", "storage": "20Gi"},
 			"bootDeadline":    "5m",
@@ -710,5 +707,24 @@ func TestWorkspaceRejectsRawPodSpec(t *testing.T) {
 	got := get(t, wsGVR, "ws-podspec")
 	if _, found, _ := unstructured.NestedMap(got.Object, "spec", "podSpec"); found {
 		t.Fatal("spec.podSpec survived round-trip; structural-schema pruning failed")
+	}
+}
+
+// spec.linux.browserPolicy is not part of the API: no runtime code ever
+// applied it, so an admin could not rely on it to restrict the session
+// browser. A strict create naming it is refused; the network profile is the
+// only destination control.
+func TestWorkspaceTemplate_BrowserPolicyFieldRemoved(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	obj := mutate(linuxTemplate("tpl-browserpolicy"), func(s map[string]interface{}) {
+		live(s, "linux")["browserPolicy"] = map[string]interface{}{
+			"allowedDomains": []interface{}{"*.corp.example"},
+		}
+	})
+	_, err := dyn.Resource(tplGVR).Namespace(testNS).Create(ctx,
+		&unstructured.Unstructured{Object: obj}, metav1.CreateOptions{FieldValidation: "Strict"})
+	if err == nil || !strings.Contains(err.Error(), `unknown field "spec.linux.browserPolicy"`) {
+		t.Fatalf("strict create with spec.linux.browserPolicy: err = %v, want unknown field", err)
 	}
 }

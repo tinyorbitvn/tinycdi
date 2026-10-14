@@ -11,8 +11,6 @@ spec:
   experience: Browser
   linux:
     image: registry.local/tinycdi/browser@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    browserPolicy:
-      allowedDomains: ["*.corp.example"]
   resources:
     cpu: "2"
     memory: 4Gi

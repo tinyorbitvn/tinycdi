@@ -147,24 +147,6 @@ spec:
                     - ""
                     - kasm
                     type: string
-                  browserPolicy:
-                    description: |-
-                      browserPolicy restricts the in-session browser when experience is
-                      Browser.
-                    properties:
-                      allowedDomains:
-                        description: |-
-                          allowedDomains is the allowlist of DNS domains the session browser may
-                          reach. Empty means the network profile alone decides.
-                        items:
-                          type: string
-                        type: array
-                      deniedDomains:
-                        description: deniedDomains is subtracted from the allowlist.
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   command:
                     description: |-
                       command is the fixed container command/args chosen by the admin. End
