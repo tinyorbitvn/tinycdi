@@ -4,7 +4,6 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -17,8 +16,8 @@ import (
 // reads for cookie values (TM-06). A random-cookie spray would otherwise
 // turn request rate directly into Postgres reads on a pool the broker
 // shares. Only reads that miss spend the budget: a lookup takes a token
-// first and gives it back when it finds a live session (or the store
-// fails), so signed-in users behind one address are never throttled by it.
+// first and gives it back only when it finds a live session, so signed-in
+// users behind one address are never throttled by it.
 // The bound is local to the replica, like the session listener's
 // SessionLookupLimiter: a shared window would spend the reads it exists to
 // prevent.
@@ -75,8 +74,11 @@ func (a *Authenticator) lookupSession(r *http.Request, id string, slide bool) (*
 	} else {
 		sess, err = a.sessions.Peek(r.Context(), id)
 	}
-	if a.lookups != nil && !errors.Is(err, ErrSessionNotFound) {
-		// A hit, or a store that could not answer: not the client's spray.
+	if a.lookups != nil && err == nil {
+		// Only a hit gives the token back. A read that ended in an error —
+		// not found, a deadline, a cancelled request, a server-side cancel
+		// — still cost the store, and a degraded shared pool is the
+		// condition this bound exists for.
 		a.lookups.Refund(key)
 	}
 	return sess, err

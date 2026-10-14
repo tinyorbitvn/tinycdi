@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -504,6 +505,44 @@ func TestAppListener_UnknownCookieSprayBounded(t *testing.T) {
 	}
 	if limited == 0 {
 		t.Fatal("no /v1/me request was refused 429 once the unknown-cookie budget was spent")
+	}
+}
+
+// TestAppListener_StoreErrorsKeepLookupSpent (R1-03, task-6 fix round 1):
+// only a hit gives the token back. A read that ended in any error —
+// a deadline, a cancelled request, a server-side cancel — still cost the
+// store, so a spray against a degraded pool stays inside the burst.
+func TestAppListener_StoreErrorsKeepLookupSpent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"deadline", fmt.Errorf("get session: %w", context.DeadlineExceeded)},
+		{"canceled", fmt.Errorf("get session: %w", context.Canceled)},
+		{"query canceled", &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &lookupCounter{SessionStore: failingSessionStore{err: tc.err}}
+			frozen := time.Unix(1_700_000_000, 0)
+			const burst = 10
+			srv := lookupSprayServer(t, counter, ratelimit.New(60, burst, 1000, func() time.Time { return frozen }))
+			for i := 0; i < 100; i++ {
+				path := "/v1/session"
+				if i%2 == 1 {
+					path = "/v1/me"
+				}
+				req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+				req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+				resp, err := srv.Client().Do(req)
+				if err != nil {
+					t.Fatalf("%s #%d: %v", path, i, err)
+				}
+				resp.Body.Close()
+			}
+			if got := counter.reads.Load(); got > burst {
+				t.Fatalf("store reads = %d for 100 forged cookies against a failing store, want <= %d", got, burst)
+			}
+		})
 	}
 }
 
