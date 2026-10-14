@@ -15,6 +15,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -215,9 +216,10 @@ func newEnv(t *testing.T, fb *fakeBroker, tweaks ...func(*httpapi.Config)) *env 
 	p := newPKI(t)
 	logs := &bytes.Buffer{}
 	cfg := httpapi.Config{
-		Broker:   fb,
-		Audience: "session.example.dev",
-		Logger:   slog.New(slog.NewJSONHandler(logs, nil)),
+		Broker:     fb,
+		Audience:   "session.example.dev",
+		GatewayCNs: []string{"gw-1"},
+		Logger:     slog.New(slog.NewJSONHandler(logs, nil)),
 	}
 	for _, tw := range tweaks {
 		tw(&cfg)
@@ -953,5 +955,105 @@ tinycdi_internal_auth_failures_total{reason="spiffe_mismatch"} 1
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
 		"tinycdi_internal_auth_failures_total"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// internalRoutes is every route on the internal listener, with a body
+// the handlers would accept far enough to call the broker.
+var internalRoutes = []struct{ method, path, body string }{
+	{http.MethodPost, "/internal/v1/broker/redeem", `{"ticket":"x"}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/renew", `{}`},
+	{http.MethodGet, "/internal/v1/broker/leases/lease-abc/target", ``},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/revoke", ``},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/activity", `{}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/transfers/t-1/claim", `{}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/transfers/t-1/complete", `{}`},
+	{http.MethodPost, "/internal/v1/broker/workspaces/ws-1/revoke", `{}`},
+	{http.MethodGet, "/internal/v1/broker/workspaces/ws-1/drain", ``},
+}
+
+func callRoute(t *testing.T, c *http.Client, base, method, path, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(method, base+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// brokerUntouched fails the test if any broker method recorded a call.
+func brokerUntouched(t *testing.T, fb *fakeBroker) {
+	t.Helper()
+	if fb.gotGW != (broker.GatewayIdentity{}) || fb.gotTicket != "" || fb.gotLeaseID != "" ||
+		fb.gotWsUID != "" || fb.gotTransferID != "" {
+		t.Fatalf("broker was called: %+v", fb)
+	}
+}
+
+// TestUnknownCN_Refused (R1-32): the gateway role is opt-in. A cert the
+// internal CA signed whose CN is neither the operator CN nor on
+// GatewayCNs gets 403 on every route — lease, transfer and workspace —
+// the broker is never called, and each refusal is counted as
+// role_mismatch.
+func TestUnknownCN_Refused(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{revokeChanged: true}, func(c *httpapi.Config) { c.Metrics = m })
+	cert := e.pki.issue(t, "some-other-workload", nil, false)
+	c := e.client(t, &cert)
+	for _, rt := range internalRoutes {
+		if got := callRoute(t, c, e.srv.URL, rt.method, rt.path, rt.body); got != http.StatusForbidden {
+			t.Errorf("%s %s: status %d, want 403", rt.method, rt.path, got)
+		}
+	}
+	brokerUntouched(t, e.fb)
+	want := fmt.Sprintf(`# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="role_mismatch"} %d
+`, len(internalRoutes))
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRoleMismatchCounted (R1-33, TM-40): a listed gateway calling an
+// operator route and the operator calling a gateway route are refused
+// 403 without reaching the broker, and both refusals are counted as
+// role_mismatch and logged as internal_auth_rejected.
+func TestRoleMismatchCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.Metrics = m })
+	gw := e.pki.issue(t, "gw-1", nil, false)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	if got := callRoute(t, e.client(t, &gw), e.srv.URL, http.MethodGet,
+		"/internal/v1/broker/workspaces/ws-1/drain", ""); got != http.StatusForbidden {
+		t.Errorf("gateway on operator route: status %d, want 403", got)
+	}
+	if got := callRoute(t, e.client(t, &op), e.srv.URL, http.MethodPost,
+		"/internal/v1/broker/redeem", `{"ticket":"x"}`); got != http.StatusForbidden {
+		t.Errorf("operator on gateway route: status %d, want 403", got)
+	}
+	brokerUntouched(t, e.fb)
+	want := `# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="role_mismatch"} 2
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(e.logs.String(), `"reason":"role_mismatch"`); n != 2 {
+		t.Errorf("role_mismatch warn lines = %d, want 2: %s", n, e.logs.String())
 	}
 }

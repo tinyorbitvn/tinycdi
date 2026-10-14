@@ -37,7 +37,8 @@ func serveInternalTLS(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool 
 // serveInternalTLSList is serveInternalTLS plus the ADR 0008 leg: when bl
 // is non-nil the listener installs the revocation VerifyConnection
 // (installRevocation) and the ConnState drop hook, plus the TM-38
-// client-CA conn registry, exactly as bind() wires them.
+// client-CA conn registry, exactly as bind() wires them, and, when log or
+// metrics is non-nil, the TM-40 handshake ErrorLog.
 func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool *tlsreload.CAPool,
 	bl *tlsreload.Blocklist, log *slog.Logger, metrics *observability.Metrics) string {
 	t.Helper()
@@ -63,6 +64,9 @@ func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, p
 		w.WriteHeader(http.StatusOK)
 	}))
 	srv.ConnState = internalConnState(conns, bl)
+	if log != nil || metrics != nil {
+		srv.ErrorLog = internalErrorLog(log, metrics)
+	}
 	go func() { _ = serveTLS(srv, ln, tlsCfg) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()

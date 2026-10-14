@@ -29,12 +29,17 @@ env `TCDI_INTERNAL_LISTEN`), never on the public mux.
   error rather than a TLS abort.
 - The client identity is the verified leaf certificate's `Subject CN`. An
   optional SPIFFE URI SAN, if present, must equal the CN or the request is
-  rejected 403 (`internal/broker/httpapi/server.go:145-172`). The identity
-  maps to `broker.GatewayIdentity{ID: CN, Audience: <configured audience>}`.
-- The operator identity is the client-certificate CN configured by
-  `-operator-cn` (default `operator`, `server.go:48-52`, `config.go:348`).
-  There is no CN allowlist: one operator CN, and any other CN the internal
-  CA signed is a gateway identity. Per-certificate revocation is ADR 0008.
+  rejected 403 (`identify` in `internal/broker/httpapi/server.go`). The
+  identity maps to `broker.GatewayIdentity{ID: CN, Audience: <configured
+  audience>}`.
+- Roles are opt-in by CN. The operator identity is the CN configured by
+  `-operator-cn` (default `operator`). A gateway identity is a CN listed
+  in `-internal-gateway-cns` (`TCDI_INTERNAL_GATEWAY_CNS`, empty by
+  default: the chart's session gateway runs in process, so it renders no
+  gateway CN). Any other CN the internal CA signed is refused 403 before
+  a route runs, and a gateway on an operator route or the operator on a
+  gateway route is refused 403; each refusal is counted as
+  `role_mismatch`. Per-certificate revocation is ADR 0008.
 - `X-Request-Id` is propagated into responses and error bodies.
 
 ### Routes

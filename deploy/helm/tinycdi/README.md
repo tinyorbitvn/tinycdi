@@ -121,7 +121,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `certManager.enabled` | `false` | render `Certificate` resources producing the internal mTLS Secrets |
-| `certManager.issuerRef.{kind,name}` | `ClusterIssuer`/`""` | existing signer; required unless `selfSigned` |
+| `certManager.issuerRef.{kind,name}` | `ClusterIssuer`/`""` | existing signer; required unless `selfSigned`. Use a dedicated issuer that signs nothing else (or `kind: Issuer` in the release namespace): it is the internal client CA |
 | `certManager.selfSigned` | `false` | also bootstrap selfsigned ClusterIssuer → CA Certificate → Issuer |
 | `certManager.caSecretName` | `<release>-internal-ca` | bootstrap CA Secret (point `backend.clientCA`/`operator.brokerClient.ca` at it) |
 | `certManager.duration` / `.renewBefore` | `2160h` / `360h` | leaf lifetime/renewal |

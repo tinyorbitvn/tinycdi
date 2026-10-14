@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -560,5 +561,108 @@ func TestParseFlags_RevokedList(t *testing.T) {
 	if _, err := ParseFlags(args, noEnv); err == nil ||
 		!strings.Contains(err.Error(), "-internal-revoked-list requires -internal-listen") {
 		t.Fatalf("expected fail-closed refusal, got %v", err)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for the server's log goroutines.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// callMTLSForced is callMTLS with the client certificate presented
+// unconditionally. Go's TLS client withholds a certificate whose issuer is
+// not in the server's acceptable-CA list (the request then reaches the
+// handler without one), so a foreign-CA probe needs this to fail the
+// handshake the way a non-Go client (curl, openssl s_client) does.
+func callMTLSForced(addr string, cert tls.Certificate) bool {
+	hc := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // test only: the assertion is the server-side client-CA check
+				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+					return &cert, nil
+				},
+			},
+		},
+	}
+	resp, err := hc.Get("https://" + addr + "/")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// TestIdentify_HandshakeRejectionsCounted (R1-33, TM-40): on the real
+// internal listener, a client cert from a foreign CA fails the TLS
+// handshake — and each refusal is counted on
+// tinycdi_internal_auth_failures_total{reason="handshake"}, while the
+// structured internal_auth_rejected warn line is rate-limited (burst 10)
+// and names the failure class and peer, never certificate material.
+func TestIdentify_HandshakeRejectionsCounted(t *testing.T) {
+	dir := t.TempDir()
+	ca := newTestCANamed(t, "internal-ca")
+	foreign := newTestCANamed(t, "foreign-ca")
+	caFile := filepath.Join(dir, "clients-ca.pem")
+	if err := writeFileAtomic(caFile, ca.pem); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := tlsreload.NewCAPool(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, kf := writeTestCert(t, dir, "internal.test")
+	srvCert, err := tls.LoadX509KeyPair(cf, kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs lockedBuffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg, nil)
+	addr := serveInternalTLSList(t, srvCert, ca.pem, pool, nil, log, metrics)
+
+	const probes = 15
+	probe := foreign.sign(t, "operator")
+	for i := 0; i < probes; i++ {
+		if callMTLSForced(addr, probe) {
+			t.Fatal("foreign-CA cert accepted")
+		}
+	}
+	want := map[string]string{"reason": "handshake"}
+	deadline := time.Now().Add(5 * time.Second)
+	for metricSum(t, reg, "tinycdi_internal_auth_failures_total", want) < probes && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := metricSum(t, reg, "tinycdi_internal_auth_failures_total", want); got != probes {
+		t.Fatalf("handshake refusals counted = %v, want %d", got, probes)
+	}
+	out := logs.String()
+	n := strings.Count(out, `"msg":"internal_auth_rejected"`)
+	if n < 1 || n > 11 { // burst 10, plus at most one 1/s refill during the loop
+		t.Errorf("internal_auth_rejected lines = %d, want 1..11 (rate-limited)", n)
+	}
+	for _, want := range []string{`"reason":"handshake"`, `"class":"unknown_ca"`, `"peer":"127.0.0.1:`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warn line missing %s: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "BEGIN CERTIFICATE") || strings.Contains(out, "foreign-ca") {
+		t.Errorf("warn line carries certificate material: %s", out)
 	}
 }

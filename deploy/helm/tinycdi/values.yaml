@@ -535,7 +535,10 @@ frontend:
 # here; point those at real certificates.
 certManager:
   enabled: false
-  # Signer for the leaf Certificates. Ignored when selfSigned=true.
+  # Signer for the leaf Certificates. Ignored when selfSigned=true. It also
+  # signs the internal client CA, so it must be a dedicated issuer that
+  # signs nothing else (or kind: Issuer in the release namespace): any
+  # certificate it issues with the operator CN can drain workspaces.
   issuerRef:
     kind: ClusterIssuer       # Issuer | ClusterIssuer
     name: ""

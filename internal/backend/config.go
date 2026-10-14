@@ -199,6 +199,10 @@ type Config struct {
 	InternalTLSKey   string
 	InternalClientCA string
 	OperatorCN       string
+	// InternalGatewayCNs are the client-certificate CNs holding the
+	// gateway role on the internal listener (opt-in; empty = none — the
+	// chart's gateway is in process). Never the operator CN.
+	InternalGatewayCNs stringList
 	// InternalRevokedList is the ADR 0008 per-certificate revocation
 	// list for the internal mTLS listener; empty disables the feature —
 	// with the flag unset no revocation hook is installed; the client-CA
@@ -367,6 +371,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.InternalClientCA, "internal-client-ca", envOr(getenv, "TCDI_INTERNAL_CLIENT_CA", ""), "CA bundle verifying internal client certs")
 	fs.StringVar(&c.OperatorCN, "operator-cn", envOr(getenv, "TCDI_OPERATOR_CN", httpapi.DefaultOperatorCN),
 		"client-certificate CN of the operator identity on the internal workspace routes")
+	fs.Var(&c.InternalGatewayCNs, "internal-gateway-cns",
+		"client-certificate CNs holding the gateway role on the internal listener (repeatable or comma-separated; empty: no gateway identity)")
 	fs.StringVar(&c.InternalRevokedList, "internal-revoked-list", envOr(getenv, "TCDI_INTERNAL_REVOKED_LIST", ""),
 		"per-certificate revocation list for the internal mTLS listener (ADR 0008: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
 
@@ -428,6 +434,11 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 			_ = c.LoginKeyFiles.Set(v)
 		}
 	}
+	if !set["internal-gateway-cns"] {
+		if v := envOr(getenv, "TCDI_INTERNAL_GATEWAY_CNS", ""); v != "" {
+			_ = c.InternalGatewayCNs.Set(v)
+		}
+	}
 
 	// Env-only secrets.
 	if getenv != nil {
@@ -450,6 +461,11 @@ func (c *Config) validate() error {
 		// groupList rejects empty entries) — kept so a future path can
 		// never silence every admin gate at once.
 		return errors.New("-tenant-admin-groups must name at least one group")
+	}
+	for _, cn := range c.InternalGatewayCNs {
+		if cn == c.OperatorCN {
+			return fmt.Errorf("-internal-gateway-cns must not name the operator CN %q", cn)
+		}
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)

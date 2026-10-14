@@ -691,3 +691,35 @@ func TestControlToken_MinLength(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFlags_InternalGatewayCNs (R1-32): the gateway role on the
+// internal listener is opt-in — the list is empty by default, set by the
+// flag (CSV/repeatable) or TCDI_INTERNAL_GATEWAY_CNS with the flag
+// winning, and may not name the operator CN.
+func TestParseFlags_InternalGatewayCNs(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if len(cfg.InternalGatewayCNs) != 0 {
+		t.Fatalf("default InternalGatewayCNs = %v, want empty", cfg.InternalGatewayCNs)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_INTERNAL_GATEWAY_CNS": "gw-a, gw-b"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if got := strings.Join(cfg.InternalGatewayCNs, ","); got != "gw-a,gw-b" {
+		t.Fatalf("env InternalGatewayCNs = %q, want gw-a,gw-b", got)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-internal-gateway-cns", "gw-c"),
+		envMap(map[string]string{"TCDI_INTERNAL_GATEWAY_CNS": "gw-a"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if got := strings.Join(cfg.InternalGatewayCNs, ","); got != "gw-c" {
+		t.Fatalf("flag InternalGatewayCNs = %q, want gw-c (flag wins over env)", got)
+	}
+	if _, err := ParseFlags(withArg(mergedArgs(), "-internal-gateway-cns", "gw-a,operator"), noEnv); err == nil {
+		t.Fatal("-internal-gateway-cns naming the operator CN must fail")
+	}
+}

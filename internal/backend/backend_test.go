@@ -596,9 +596,10 @@ func TestRouteIsolation_InternalListener(t *testing.T) {
 	ca := newTestCA(t)
 	fake := &fakeInternalBroker{redeemErr: broker.ErrTicketInvalid}
 	h := httpapi.NewHandler(httpapi.Config{
-		Broker:   fake,
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     fake,
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-test"},
+		Logger:     testLog(),
 	})
 	srv := serveInternal(t, h, ca.pem)
 
@@ -693,9 +694,10 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	fb := newFakeBrokerClient(t)
 	fb.scriptTicket("tk-1", "ws_aaaa0001")
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 
@@ -853,9 +855,10 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// the same one would fence the first stream.
 	fb.scriptTicket("tk-2", "ws_bbbb0002")
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 
@@ -1036,9 +1039,10 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 
 	fb := newFakeBrokerClient(t)
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 

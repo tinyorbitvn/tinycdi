@@ -96,11 +96,13 @@ var (
 	leaseSessionMissingReasons = map[string]struct{}{
 		"absent": {}, "invalid": {},
 	}
-	// internalAuthFailReasons are the mTLS identity-refusal classes the
-	// internal broker listener can emit: no peer cert presented, a verified
-	// cert without a CN, or a SPIFFE URI SAN disagreeing with the CN.
+	// internalAuthFailReasons are the refusal classes the internal broker
+	// listener can emit: no peer cert presented, a verified cert without a
+	// CN, a SPIFFE URI SAN disagreeing with the CN, a CN that holds no role
+	// on the route (role_mismatch), or a refused TLS handshake (foreign or
+	// expired CA, wrong EKU, revoked serial — the class is in the log).
 	internalAuthFailReasons = map[string]struct{}{
-		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {},
+		"no_cert": {}, "no_cn": {}, "spiffe_mismatch": {}, "role_mismatch": {}, "handshake": {},
 	}
 	// internalMTLSListeners bounds the {listener} label of the internal
 	// mTLS revocation counter (ADR 0008): "internal" today, future mTLS

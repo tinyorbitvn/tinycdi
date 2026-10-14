@@ -7,9 +7,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +75,81 @@ func internalServer(addr string, h http.Handler) *http.Server {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
+	}
+}
+
+const (
+	// internalErrLogPerMinute/internalErrLogBurst bound the internal
+	// server's error-log warn lines per class (handshake, server_error) —
+	// the same budget shape as rejectAuth.
+	internalErrLogPerMinute = 60
+	internalErrLogBurst     = 10
+	// tlsHandshakeErrPrefix is how net/http reports a failed handshake
+	// through Server.ErrorLog.
+	tlsHandshakeErrPrefix = "http: TLS handshake error from "
+)
+
+// internalErrorLog is the internal listener's http.Server.ErrorLog
+// (TM-40). Go reports a refused handshake — a foreign or expired CA, a
+// wrong EKU, a revoked serial — only through this logger, so each such
+// line is counted on tinycdi_internal_auth_failures_total{reason=
+// "handshake"} and logged as a rate-limited internal_auth_rejected warning
+// with the peer and failure class; certificate material is never logged.
+// Every other server error line becomes a rate-limited
+// internal_server_error warning. log or metrics may be nil.
+func internalErrorLog(log *slog.Logger, metrics *observability.Metrics) *stdlog.Logger {
+	return stdlog.New(&internalErrorWriter{
+		log:     log,
+		metrics: metrics,
+		limit:   ratelimit.New(internalErrLogPerMinute, internalErrLogBurst, 8, nil),
+	}, "", 0)
+}
+
+type internalErrorWriter struct {
+	log     *slog.Logger
+	metrics *observability.Metrics
+	limit   ratelimit.Allower
+}
+
+func (w *internalErrorWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSuffix(string(p), "\n")
+	if rest, ok := strings.CutPrefix(line, tlsHandshakeErrPrefix); ok {
+		peer, cause, _ := strings.Cut(rest, ": ")
+		if w.metrics != nil {
+			w.metrics.IncInternalAuthFailure("handshake")
+		}
+		if w.log != nil {
+			if ok, _ := w.limit.Allow("handshake"); ok {
+				w.log.Warn("internal_auth_rejected",
+					"reason", "handshake",
+					"class", handshakeClass(cause),
+					"peer", peer)
+			}
+		}
+		return len(p), nil
+	}
+	if w.log != nil {
+		if ok, _ := w.limit.Allow("server_error"); ok {
+			w.log.Warn("internal_server_error", "err", line)
+		}
+	}
+	return len(p), nil
+}
+
+// handshakeClass buckets a handshake failure cause into a bounded class
+// for the warn line.
+func handshakeClass(cause string) string {
+	switch {
+	case strings.Contains(cause, "unknown authority"), strings.Contains(cause, errClientCARotated.Error()):
+		return "unknown_ca"
+	case strings.Contains(cause, "expired or is not yet valid"):
+		return "expired"
+	case strings.Contains(cause, "incompatible key usage"):
+		return "bad_eku"
+	case strings.Contains(cause, tlsreload.ErrCertRevoked.Error()):
+		return "revoked"
+	default:
+		return "other"
 	}
 }
 

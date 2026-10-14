@@ -535,7 +535,8 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		// listener="internal" — InstrumentHTTP passes through when the
 		// metrics listener is off.
 		b.internalHandler = api.InstrumentHTTP(metrics, "internal")(httpapi.NewHandler(httpapi.Config{
-			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log, Metrics: metrics,
+			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN,
+			GatewayCNs: cfg.InternalGatewayCNs, Logger: log, Metrics: metrics,
 		}))
 	} else {
 		log.Warn("internal broker api disabled (-internal-listen unset); remote gateways cannot redeem tickets")
@@ -991,6 +992,8 @@ func (b *Backend) bind(cfg Config) error {
 	// Live-conn registries (TM-38, ADR 0008) track only conns the server
 	// still holds — drop each on close/hijack so neither can leak.
 	internalSrv.ConnState = internalConnState(b.internalConns, b.internalBlocklist)
+	// TM-40: refused handshakes are counted and logged structurally.
+	internalSrv.ErrorLog = internalErrorLog(b.log, b.metrics)
 	if err := add("internal", cfg.InternalListen, internalSrv, b.internalTLSCfg); err != nil {
 		return err
 	}
