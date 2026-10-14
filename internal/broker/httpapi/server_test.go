@@ -60,6 +60,13 @@ type fakeBroker struct {
 	gotEvent   broker.ActivityEvent
 	gotWsUID   broker.PlatformID
 	gotWsGen   uint64
+
+	grant         broker.TransferGrant
+	transferErr   error
+	gotTransferID string
+	gotMethod     string
+	gotBytes      int64
+	gotOK         bool
 }
 
 func (f *fakeBroker) RedeemTicket(_ context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error) {
@@ -75,6 +82,16 @@ func (f *fakeBroker) RenewLease(_ context.Context, gw broker.GatewayIdentity, le
 func (f *fakeBroker) ResolveTarget(_ context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error) {
 	f.gotGW, f.gotLeaseID = gw, leaseID
 	return f.target, f.targetErr
+}
+
+func (f *fakeBroker) ClaimTransfer(_ context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	f.gotGW, f.gotLeaseID, f.gotTransferID, f.gotMethod = gw, leaseID, transferID, method
+	return f.grant, f.transferErr
+}
+
+func (f *fakeBroker) CompleteTransfer(_ context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	f.gotGW, f.gotLeaseID, f.gotTransferID, f.gotBytes, f.gotOK = gw, leaseID, transferID, bytesDone, ok
+	return f.transferErr
 }
 
 func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
@@ -561,6 +578,83 @@ func TestActivity_OperatorIdentityForbidden(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("operator activity status=%d, want 403", resp.StatusCode)
+	}
+}
+
+func TestTransferClaim_OK_AndErrorMapping(t *testing.T) {
+	const tid = "xf_abcdefghijklmnopqrstuvwxyz"
+	const base = "/internal/v1/broker/leases/lease-abc/transfers/"
+	fb := &fakeBroker{grant: broker.TransferGrant{ID: tid, WorkspaceUID: "ws-1", Direction: "upload", Path: "a.txt", MaxBytes: 5}}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+base+tid+"/claim",
+		"application/json", strings.NewReader(`{"method":"PUT"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g broker.TransferGrant
+	_ = json.NewDecoder(resp.Body).Decode(&g)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || g != fb.grant || fb.gotMethod != "PUT" || fb.gotTransferID != tid || fb.gotGW.ID != "gw-1" {
+		t.Fatalf("claim: %d %+v method=%q", resp.StatusCode, g, fb.gotMethod)
+	}
+	for _, tc := range []struct {
+		err  error
+		want int
+		code string
+	}{
+		{broker.ErrTransferInvalid, http.StatusGone, "TRANSFER_INVALID"},
+		{broker.ErrTransferDenied, http.StatusForbidden, "TRANSFER_DENIED"},
+		{broker.ErrTransferBusy, http.StatusConflict, "TRANSFER_BUSY"},
+		{broker.ErrRevoked, http.StatusGone, "REVOKED"},
+	} {
+		e := newEnv(t, &fakeBroker{transferErr: tc.err})
+		cert := e.pki.issue(t, "gw-1", nil, false)
+		resp, err := e.client(t, &cert).Post(e.srv.URL+base+tid+"/claim",
+			"application/json", strings.NewReader(`{"method":"GET"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want || body.Code != tc.code {
+			t.Fatalf("claim(%v) = %d %q, want %d %q", tc.err, resp.StatusCode, body.Code, tc.want, tc.code)
+		}
+	}
+	resp, err = e.client(t, &cert).Post(e.srv.URL+base+tid+"/complete",
+		"application/json", strings.NewReader(`{"bytes":5,"ok":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || fb.gotBytes != 5 || !fb.gotOK {
+		t.Fatalf("complete: %d bytes=%d ok=%v", resp.StatusCode, fb.gotBytes, fb.gotOK)
+	}
+	for _, bad := range []struct{ path, body string }{
+		{"xf_..%2Fx/claim", `{"method":"GET"}`},       // malformed transfer id
+		{tid + "/claim", `{"method":"DELETE"}`},       // unknown method
+		{tid + "/complete", `{"bytes":-1,"ok":true}`}, // negative byte count
+	} {
+		resp, err := e.client(t, &cert).Post(e.srv.URL+base+bad.path, "application/json", strings.NewReader(bad.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s %s: %d, want 400", bad.path, bad.body, resp.StatusCode)
+		}
+	}
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err = e.client(t, &op).Post(e.srv.URL+base+tid+"/claim", "application/json", strings.NewReader(`{"method":"GET"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("operator identity on the claim route: %d, want 403", resp.StatusCode)
 	}
 }
 

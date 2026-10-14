@@ -29,7 +29,7 @@ type NamespaceResolver interface {
 }
 
 // K8sCredentialSource reads the per-workspace runtime credential Secret
-// (ws-<uid>-rt: username/password/tls.crt) through a namespaced client. The
+// (ws-<uid>-rt: username/password/xfer-token/tls.crt) through a namespaced client. The
 // read is confined to the tenant's managed namespace — resolved from the
 // binding's tenant, not from request input — so a forged binding can never
 // steer the broker into an unmanaged namespace.
@@ -79,11 +79,12 @@ func (s *K8sCredentialSource) RuntimeCredential(ctx context.Context, workspaceUI
 		return Credential{}, fmt.Errorf("broker: read runtime secret: %w", err)
 	}
 	cred := Credential{
-		Username: strings.TrimSpace(string(sec.Data["username"])),
-		Password: strings.TrimSpace(string(sec.Data["password"])),
-		TLSCA:    sec.Data["tls.crt"],
+		Username:  strings.TrimSpace(string(sec.Data["username"])),
+		Password:  strings.TrimSpace(string(sec.Data["password"])),
+		XferToken: strings.TrimSpace(string(sec.Data["xfer-token"])),
+		TLSCA:     sec.Data["tls.crt"],
 	}
-	if cred.Username == "" || cred.Password == "" || len(cred.TLSCA) == 0 {
+	if cred.Username == "" || cred.Password == "" || cred.XferToken == "" || len(cred.TLSCA) == 0 {
 		return Credential{}, fmt.Errorf("broker: runtime secret %s/%s incomplete", ns, secName)
 	}
 	return cred, nil
@@ -137,12 +138,16 @@ func newSynthesizedCredentials() (*synthesizedCredentials, error) {
 }
 
 func (s *synthesizedCredentials) RuntimeCredential(_ context.Context, workspaceUID PlatformID, _ RuntimeBinding) (Credential, error) {
-	sum := hmac.New(sha256.New, s.key[:])
-	sum.Write([]byte("tcdi-runtime-credential\x00"))
-	sum.Write([]byte(workspaceUID))
+	derive := func(label string) string {
+		sum := hmac.New(sha256.New, s.key[:])
+		sum.Write([]byte(label))
+		sum.Write([]byte(workspaceUID))
+		return base64.RawURLEncoding.EncodeToString(sum.Sum(nil))
+	}
 	return Credential{
-		Username: "kasm_user",
-		Password: base64.RawURLEncoding.EncodeToString(sum.Sum(nil)),
-		TLSCA:    s.caPEM,
+		Username:  "kasm_user",
+		Password:  derive("tcdi-runtime-credential\x00"),
+		XferToken: derive("tcdi-xfer-token\x00"),
+		TLSCA:     s.caPEM,
 	}, nil
 }

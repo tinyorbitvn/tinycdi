@@ -611,6 +611,7 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("workspace-controller"),
 		Backend: linuxruntime.New(mgr.GetClient(), linuxruntime.Options{
+			APIReader:                   mgr.GetAPIReader(),
 			InternetExceptCIDRs:         exceptCIDRs,
 			DisableBuiltinEgressExcepts: disableBuiltinExcepts,
 			GatewayNamespace:            gatewayNamespace,

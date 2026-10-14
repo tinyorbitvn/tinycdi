@@ -30,8 +30,9 @@ type Observation struct {
 	// endpoint answering inside the runtime).
 	RuntimeReady bool
 
-	// ConnectionReady reports the streaming endpoint is reachable on the
-	// internal Service.
+	// ConnectionReady reports the streaming endpoint is reachable: the
+	// runtime is ready and the internal Service routes to this
+	// incarnation's pod.
 	ConnectionReady bool
 
 	// ServiceRef is the internal Service fronting this incarnation. Nil
@@ -53,6 +54,10 @@ type Observation struct {
 	// (e.g. "Provisioning", "PodFailed", "ImagePullBackOff"), surfaced into
 	// condition reasons.
 	Reason string
+	// Message is the waiting container's status message when Reason is a
+	// waiting reason (e.g. the registry's text behind ErrImagePull). Used
+	// only to classify policy denials; never surfaced verbatim.
+	Message string
 }
 
 // Backend is the runtime adapter the operator drives. All methods must be

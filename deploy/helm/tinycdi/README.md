@@ -186,6 +186,15 @@ objects. It **keeps**:
 | `gatewayApi.portalRouteName` / `.sessionRouteName` | `portal`/`session` | HTTPRoute object names (DNS-1123 subdomain, must differ); the defaults match every earlier release — rename to pair hand-written routes by convention, e.g. a `<name>-redirect` route |
 | `backend.service.annotations` / `frontend.service.annotations` | `{}` | the Services are ClusterIP-only — the edge routes `portalHost` `/v1` → `backend:8443`, `/` → `frontend:8443`, and `*.<sessionDomain>` → `backend:8444` |
 
+File uploads stream through the session host (`PUT
+/v1/transfers/{id}/content` on `*.<sessionDomain>`). An ingress controller
+that caps request bodies must allow them on the session route:
+ingress-nginx defaults to a 1 MiB body cap, so set
+`nginx.ingress.kubernetes.io/proxy-body-size` at least
+`backend.fileTransfer.maxFileBytes` in `ingress.sessionAnnotations` (or
+the Gateway-API equivalent). Traefik and Gateway API implementations have
+no default cap.
+
 ### Per-component tuning (`backend`, `operator`, `frontend`)
 
 | Key | Default | Description |
@@ -237,6 +246,8 @@ the value to set instead:
 | `backend.trustedProxies` | `[]` | CIDRs of the edge proxies whose X-Forwarded-For claims are trusted — **required behind an ingress/Gateway** or every user shares one rate-limit bucket; see [Rate limits and trusted proxies](#rate-limits-and-trusted-proxies) |
 | `backend.metrics.{enabled,port}` | `false`/`9090` | metrics listener on the dedicated ClusterIP `backend-metrics` Service — never the public port (SEC-33); needs `networkPolicy.prometheusPeers` |
 | `backend.retention.terminalRowDays` | `30` | days a `connection_lease`/`launch_ticket` row is kept after going terminal (lease revoked/expired/superseded; ticket consumed/revoked/expired) — the leader replica's hourly sweep deletes older rows in bounded batches, keeping both append-mostly tables bounded. Live leases and outstanding tickets are never touched. `0` disables the sweep |
+| `backend.retention.auditDays` | `90` | days an `audit_event` row is kept before the leader's daily prune deletes it (1..3650) |
+| `backend.fileTransfer.maxFileBytes` | `104857600` | platform per-file bound for session file transfer (ADR 0010 T11), rendered as `-file-transfer-max-bytes`; a tenant ceiling's `maxFileBytes` may only lower it (1..10737418240) |
 | `backend.operatorCN` | `""` (=`operator`) | CN required on the operator broker client cert |
 | `backend.tls.internal.revokedSerials.{existingSecret,key}` | `""` / `revoked-serials.txt` | per-certificate revocation on the internal mTLS listener (ADR 0009, SR-3-F5): mounts a Secret holding the serial blocklist (`<serial-hex> <issuer-dn>` per line) at `/etc/internal-revoked/` — a listed leaf's handshake is aborted and its live conns severed; propagation is kubelet Secret sync + one 30 s poll (~90 s worst). Empty = off (default render unchanged) |
 | `operator.leaderElect` / `.webhookPort` | `true` / `-1` | leader election keeps a standby reconciler (E4); `leaderElect=false` with `replicas>1` fails the render |

@@ -44,3 +44,17 @@ func TestRetentionSchemaRejectsBadValues(t *testing.T) {
 		t.Errorf("an unknown key under backend.retention must be rejected by the schema, got: %s", out)
 	}
 }
+
+func TestAuditRetentionDefaultAndCustom(t *testing.T) {
+	if args := backendArgsWith(t); !hasArg(args, "-audit-retention-days=90") {
+		t.Errorf("default render lacks -audit-retention-days=90: %v", args)
+	}
+	if args := backendArgsWith(t, "backend.retention.auditDays=30"); !hasArg(args, "-audit-retention-days=30") {
+		t.Errorf("backend.retention.auditDays=30 not rendered: %v", args)
+	}
+	out := renderErrArgs(t, "-f", filepath.Join("tinycdi", "ci", "minimal-values.yaml"),
+		"--set", "backend.retention.auditDays=0")
+	if !strings.Contains(out, "auditDays") && !strings.Contains(out, "minimum") {
+		t.Errorf("auditDays=0 must be rejected by the schema, got: %s", out)
+	}
+}

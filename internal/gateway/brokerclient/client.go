@@ -169,6 +169,7 @@ type targetJSON struct {
 	TLSCA         []byte `json:"tlsCA"`
 	Username      string `json:"username"`
 	Password      string `json:"password"`
+	XferToken     string `json:"xferToken"`
 	Protocol      string `json:"protocol"`
 }
 
@@ -195,6 +196,7 @@ func (t targetJSON) target() (broker.Target, error) {
 		TLSCA:         t.caPEM(),
 		Username:      t.Username,
 		Password:      t.Password,
+		XferToken:     t.XferToken,
 	}, nil
 }
 
@@ -232,6 +234,16 @@ type apiError struct {
 // sentinel so the gateway fails the session; transient statuses stay
 // sentinel-free.
 func sentinelFor(op string, status int, code string) error {
+	// The transfer codes first: TRANSFER_INVALID rides on 410 too, which the
+	// shortcut below would read as a revoked lease.
+	switch code {
+	case "TRANSFER_INVALID":
+		return broker.ErrTransferInvalid
+	case "TRANSFER_DENIED":
+		return broker.ErrTransferDenied
+	case "TRANSFER_BUSY":
+		return broker.ErrTransferBusy
+	}
 	// 410 is unambiguous regardless of the body's code: the lease is revoked.
 	if status == http.StatusGone {
 		return broker.ErrRevoked
@@ -404,4 +416,29 @@ func (c *Client) ReportActivity(ctx context.Context, _ broker.GatewayIdentity, l
 			Type        broker.ActivityEventType `json:"type"`
 			StreamEpoch uint64                   `json:"streamEpoch,omitempty"`
 		}{Fence: fenceOf(fence), Type: ev.Type, StreamEpoch: ev.StreamEpoch}, nil)
+}
+
+// ClaimTransfer spends a minted transfer grant; the gateway identity is the
+// mTLS client certificate.
+func (c *Client) ClaimTransfer(ctx context.Context, _ broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	var out broker.TransferGrant
+	err := c.do(ctx, "transfer-claim", http.MethodPost,
+		leasesPath+url.PathEscape(leaseID)+"/transfers/"+url.PathEscape(transferID)+"/claim",
+		struct {
+			Method string `json:"method"`
+		}{Method: method}, &out)
+	if err != nil {
+		return broker.TransferGrant{}, err
+	}
+	return out, nil
+}
+
+// CompleteTransfer closes a claimed grant with the bytes moved.
+func (c *Client) CompleteTransfer(ctx context.Context, _ broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	return c.do(ctx, "transfer-complete", http.MethodPost,
+		leasesPath+url.PathEscape(leaseID)+"/transfers/"+url.PathEscape(transferID)+"/complete",
+		struct {
+			Bytes int64 `json:"bytes"`
+			OK    bool  `json:"ok"`
+		}{Bytes: bytesDone, OK: ok}, nil)
 }

@@ -36,8 +36,7 @@ test("admin sets a clipboard ceiling and the effective preview updates", async (
   await expect(clipboard).toHaveValue("FollowTemplate");
   // No row yet: every channel reports FollowTemplate.
   await expect(page.getByText("No ceiling is set", { exact: false })).toBeVisible();
-  // File transfer is the inert v1.3 channel: present, disabled.
-  await expect(page.getByLabel("File transfer", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("File transfer", { exact: true })).toHaveValue("FollowTemplate");
 
   // linux-firefox-desktop's template policy is Bidirectional: the preview
   // shows the template's own policy while the ceiling follows it.
@@ -106,4 +105,55 @@ test("a regular user cannot see the session policy page", async ({ page }) => {
   await page.waitForURL(/\/workspaces\/?$/);
   const res = await page.request.get(`/v1/admin/tenants/acme/session-policy`);
   expect(res.status()).toBe(403);
+});
+
+test("apply now lists looser workspaces and restarts them", async ({ page, request }) => {
+  await makeAdmin(request);
+  await request.post(`${MOCK}/_control/admin/session-policy`, { data: { clipboard: "Disabled" } });
+  await login(page);
+
+  await page.getByRole("button", { name: "Apply now" }).click();
+  const dialog = page.getByRole("dialog", { name: "Apply the ceiling to running workspaces" });
+  await expect(dialog.getByRole("row", { name: /research-desktop/ })).toBeVisible();
+  await expect(dialog.getByRole("row", { name: /build-box/ }).getByText("Live session")).toBeVisible();
+
+  await dialog.getByLabel("Also restart workspaces someone is using right now").check();
+  await dialog.getByRole("button", { name: "Restart affected workspaces" }).click();
+  await expect(dialog.getByRole("row", { name: /research-desktop/ }).getByText("Restarted")).toBeVisible();
+  await expect(dialog.getByRole("row", { name: /build-box/ }).getByText("Restarted")).toBeVisible();
+  await expect(dialog.getByText("2 restarted, 0 skipped.")).toBeVisible();
+});
+
+test("apply now has nothing to do when every workspace follows the ceiling", async ({ page, request }) => {
+  await makeAdmin(request);
+  await request.post(`${MOCK}/_control/admin/session-policy`, { data: { clipboard: "Bidirectional" } });
+  await login(page);
+  await page.getByRole("button", { name: "Apply now" }).click();
+  await expect(
+    page.getByRole("dialog").getByText("Every running workspace already follows the ceiling."),
+  ).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Restart affected workspaces" })).toHaveCount(0);
+});
+
+test("admin sets an Upload-only file-transfer ceiling with a size bound", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page);
+
+  const ft = page.getByLabel("File transfer", { exact: true });
+  await expect(ft).toHaveValue("FollowTemplate");
+  await ft.selectOption("Upload");
+  await page.getByLabel("Largest file (MiB)").fill("10");
+
+  // linux-firefox-desktop's file-transfer policy is Bidirectional, so the
+  // preview shows Bidirectional ∧ Upload = Upload before anything is saved.
+  const preview = page.getByRole("table", { name: "Effective clipboard policy by template" });
+  const linuxRow = preview.getByRole("row", { name: /linux-firefox-desktop/ });
+  await expect(linuxRow.getByRole("cell", { name: "Upload only" }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Save ceiling" }).click();
+  await expect(page.getByText("A ceiling is set for this tenant.")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByLabel("File transfer", { exact: true })).toHaveValue("Upload");
+  await expect(page.getByLabel("Largest file (MiB)")).toHaveValue("10");
 });

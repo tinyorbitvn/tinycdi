@@ -45,6 +45,11 @@ type BrokerClient interface {
 	// ReportActivity posts one session signal (input/connected/disconnect)
 	// for the lease's bound incarnation; the broker stamps receipt time.
 	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
+	// ClaimTransfer spends a minted transfer grant for the lease (method GET
+	// for a download, PUT for an upload); CompleteTransfer closes it with the
+	// bytes moved.
+	ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
 }
 
 // Contract constants from design §6.
@@ -182,6 +187,9 @@ type Config struct {
 	// transport yields the conn to the hijacked stream and applies no
 	// deadline to it.
 	UpstreamResponseHeaderTimeout time.Duration
+	// UpstreamDialBudget is the total retry budget for refused upstream
+	// connects (default UpstreamDialBudget); injectable for tests.
+	UpstreamDialBudget time.Duration
 	// SessionLookupLimiter bounds session-directory lookups for cookies
 	// this replica has never seen — the only proxy-path request that
 	// spends Postgres reads before auth. It is keyed by the plain client
@@ -275,6 +283,9 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.UpstreamResponseHeaderTimeout <= 0 {
 		cfg.UpstreamResponseHeaderTimeout = UpstreamHeaderTimeout
+	}
+	if cfg.UpstreamDialBudget <= 0 {
+		cfg.UpstreamDialBudget = UpstreamDialBudget
 	}
 	if cfg.UnattachedSessionTTL <= 0 {
 		cfg.UnattachedSessionTTL = UnattachedSessionTTL
@@ -419,6 +430,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			route = "control"
 			g.serveControl(rec, r)
 		}
+	case strings.HasPrefix(r.URL.Path, TransferPathPrefix):
+		route = "transfer"
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.serveTransfer(rec, r, wsID)
 	default:
 		if !wsOK {
 			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
@@ -883,6 +901,7 @@ func (g *Gateway) ensureTarget(ctx context.Context, s *session) error {
 			ServerName: t.TLSServerName,
 			MinVersion: tls.VersionTLS12,
 		},
+		DialContext:           dialWithRetry(g.cfg.UpstreamDialBudget),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: g.cfg.UpstreamResponseHeaderTimeout,
 		ExpectContinueTimeout: 1 * time.Second,

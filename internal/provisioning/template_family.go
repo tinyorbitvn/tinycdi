@@ -41,11 +41,14 @@ const (
 	// pod placement, or the confinement profiles.
 	SkipReasonNetworkProfileChanged  = "network-profile-changed"
 	SkipReasonClipboardPolicyChanged = "clipboard-policy-changed"
-	SkipReasonAdapterChanged         = "adapter-changed"
-	SkipReasonHostUsersChanged       = "host-users-changed"
-	SkipReasonPlacementChanged       = "placement-changed"
-	SkipReasonSeccompProfileChanged  = "seccomp-profile-changed"
-	SkipReasonAppArmorProfileChanged = "apparmor-profile-changed"
+	// File-transfer is a data-boundary channel like clipboard (ADR 0010
+	// T11): a revision that changes it must never be silently adopted.
+	SkipReasonFileTransferPolicyChanged = "file-transfer-policy-changed"
+	SkipReasonAdapterChanged            = "adapter-changed"
+	SkipReasonHostUsersChanged          = "host-users-changed"
+	SkipReasonPlacementChanged          = "placement-changed"
+	SkipReasonSeccompProfileChanged     = "seccomp-profile-changed"
+	SkipReasonAppArmorProfileChanged    = "apparmor-profile-changed"
 )
 
 // startTemplateTarget decides whether a Stopped -> Running start moves the
@@ -140,11 +143,13 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		Runtime:       newest.Runtime,
 		Experience:    newest.Experience,
 		ImageBuiltAt:  newest.ImageBuiltAt,
-		// The guard already refuses a move whose clipboard policy differs
-		// (SkipReasonClipboardPolicyChanged), so the snapshot here equals
-		// the recorded revision's — carried explicitly since the row stores
-		// this struct.
-		ClipboardPolicy: newest.ClipboardPolicy,
+		// The guard already refuses a move whose clipboard or
+		// file-transfer policy differs (SkipReasonClipboardPolicyChanged,
+		// SkipReasonFileTransferPolicyChanged), so the snapshot here
+		// equals the recorded revision's — carried explicitly since the
+		// row stores this struct.
+		ClipboardPolicy:    newest.ClipboardPolicy,
+		FileTransferPolicy: newest.FileTransferPolicy,
 	}, name, "", newest.ImageBuiltAt, false, nil
 }
 
@@ -178,6 +183,8 @@ func revisionIncompatible(cur, next *TemplateCatalogEntry) string {
 		return SkipReasonNetworkProfileChanged
 	case cur.ClipboardPolicy != next.ClipboardPolicy:
 		return SkipReasonClipboardPolicyChanged
+	case cur.FileTransferPolicy != next.FileTransferPolicy:
+		return SkipReasonFileTransferPolicyChanged
 	case cur.Adapter != next.Adapter:
 		return SkipReasonAdapterChanged
 	case !reflect.DeepEqual(cur.HostUsers, next.HostUsers):

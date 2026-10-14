@@ -20,28 +20,32 @@ import { t } from "../i18n";
 import type { ApiClient } from "../api/client";
 import { useApi } from "../api/context";
 import {
-  listAdminUserLimitPage,
-  scanAdminUserLimits,
+  getAdminUser,
+  listAdminUserPage,
   scanScopedData,
   scanScopedWorkspaces,
+  type AdminTenantUser,
   type AdminUserLimitEntry,
   type ScopedRetainedData,
   type ScopedWorkspace,
 } from "./api";
-import { formatAge, formatDateTime } from "./format";
+import { formatAge, formatAgo, formatDateTime } from "./format";
+import { isPortalApiError } from "../api/errors";
 import { loadMe, useLoader, useMeLoaded } from "../app/me";
 import { phaseLabelKey } from "../workspaces/helpers";
 import { DataStateBadge } from "../data/DataListPage";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { AdminLayout } from "./AdminLayout";
 import { LimitDialog } from "./UserLimitsSection";
+import { UserSessionsSection } from "./UserSessionsSection";
 
-// One tenant member's row on /admin/users: a per-user limits item (one per
-// principal who holds workspaces or a limit override — it is not a tenant
-// directory) plus that principal's retained-disk count.
 export interface AdminUserRow {
   subject: string;
+  ownerRef: string;
   displayName: string;
+  email: string;
+  lastSeenAt: string;
+  workspaces: number;
   running: number;
   // Stored override (null = inherits the tenant default).
   override: number | null;
@@ -62,15 +66,19 @@ export function diskCounts(disks: readonly ScopedRetainedData[]): Map<string, nu
   return counts;
 }
 
-export function userRowOf(entry: AdminUserLimitEntry, disks: ReadonlyMap<string, number>): AdminUserRow {
+export function userRowOf(user: AdminTenantUser, disks: ReadonlyMap<string, number>): AdminUserRow {
   return {
-    subject: entry.subject,
-    displayName: entry.displayName || entry.subject,
-    running: entry.running,
-    override: entry.limit,
-    effective: entry.effective,
-    retainedDisks: disks.get(entry.subject) ?? 0,
-    limitsEntry: entry,
+    subject: user.subject,
+    ownerRef: user.ownerRef,
+    displayName: user.displayName || user.subject,
+    email: user.email,
+    lastSeenAt: user.lastSeenAt,
+    workspaces: user.workspaces,
+    running: user.limits.running,
+    override: user.limits.limit,
+    effective: user.limits.effective,
+    retainedDisks: disks.get(user.subject) ?? 0,
+    limitsEntry: user.limits,
   };
 }
 
@@ -80,8 +88,20 @@ export function matchesUserFilter(row: AdminUserRow, text: string): boolean {
   return [row.displayName, row.subject].some((v) => v.toLowerCase().includes(q));
 }
 
-export function userDetailPath(subject: string): string {
-  return `/admin/users/${encodeURIComponent(subject)}`;
+export function userDetailPath(ownerRef: string): string {
+  const bin = Array.from(new TextEncoder().encode(ownerRef), (b) => String.fromCharCode(b)).join("");
+  const seg = btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return "/admin/users/" + seg;
+}
+
+// Inverse of the path segment userDetailPath builds; undefined for a segment that is not valid base64url UTF-8.
+export function ownerRefFromParam(param: string): string | undefined {
+  try {
+    const bin = atob(param.replaceAll("-", "+").replaceAll("_", "/"));
+    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch {
+    return undefined;
+  }
 }
 
 // Per-user disk counts need the whole tenant's retained-data list; the
@@ -99,8 +119,7 @@ function EffectiveCell({ row }: { row: AdminUserRow }) {
   return <>{row.effective == null ? t("admin.userLimits.unlimited") : row.effective}</>;
 }
 
-// The collection sorts on ownerRef only (the `issuer|sub` reference).
-const USER_SORT_FIELDS = { user: "ownerRef" } as const;
+const USER_SORT_FIELDS = { user: "displayName", lastSeen: "lastSeen" } as const;
 
 export function UsersAdminPage() {
   const api = useApi();
@@ -111,13 +130,13 @@ export function UsersAdminPage() {
   const load = useCallback(
     (cursor?: string, sort?: string) =>
       tenant === undefined
-        ? Promise.resolve({ items: [] as AdminUserLimitEntry[] })
-        : listAdminUserLimitPage(api, tenant, cursor, sort),
+        ? Promise.resolve({ items: [] as AdminTenantUser[] })
+        : listAdminUserPage(api, tenant, cursor, sort),
     [api, tenant],
   );
   const list = useServerTable(load, {
     fields: USER_SORT_FIELDS,
-    initial: { key: "user", direction: "ascending" },
+    initial: { key: "lastSeen", direction: "descending" },
     key: tenant,
   });
 
@@ -136,7 +155,7 @@ export function UsersAdminPage() {
       sortable: true,
       render: (r) => (
         <span className="tc-admin-cell-stack">
-          <Link to={userDetailPath(r.subject)}>{r.displayName}</Link>
+          <Link to={userDetailPath(r.ownerRef)}>{r.displayName}</Link>
           <code className="tc-admin-muted">{r.subject}</code>
         </span>
       ),
@@ -167,6 +186,24 @@ export function UsersAdminPage() {
       hideOnMobile: true,
       render: (r) => (disks.data ? r.retainedDisks : "—"),
     },
+    {
+      key: "lastSeen",
+      header: t("admin.users.column.lastSeen"),
+      sortable: true,
+      hideOnMobile: true,
+      render: (r) => (
+        <time dateTime={r.lastSeenAt} title={formatDateTime(r.lastSeenAt)}>
+          {formatAgo(r.lastSeenAt)}
+        </time>
+      ),
+    },
+    {
+      key: "workspaces",
+      header: t("admin.users.column.workspaces"),
+      align: "end",
+      hideOnMobile: true,
+      render: (r) => r.workspaces,
+    },
   ];
 
   const reload = () => {
@@ -194,14 +231,13 @@ export function UsersAdminPage() {
         icon={<IconSearch />}
         onClear={() => setFilter("")}
       />
-      <p className="tc-admin-muted">{t("admin.users.note")}</p>
       <ApiErrorAlert error={me.error ?? list.error} onRetry={me.error ? me.reload : list.refresh} />
       <ApiErrorAlert error={disks.error} onRetry={disks.reload} />
       <Table
         caption={t("admin.users.caption")}
         columns={columns}
         rows={rows}
-        rowKey={(r) => r.subject}
+        rowKey={(r) => r.ownerRef}
         sort={list.tableSort}
         onSortChange={list.onSortChange}
         loading={(tenant === undefined || !list.loaded) && !list.error && !me.error}
@@ -229,36 +265,35 @@ export function UsersAdminPage() {
 // keeps the user detail deep-linkable and inside the admin tab context.
 interface UserDetailData {
   tenant: string;
-  entry: AdminUserLimitEntry | undefined;
+  user: AdminTenantUser | undefined;
   disks: ScopedRetainedData[];
 }
 
-// The detail reads the whole per-user limits collection to find the
-// principal (there is no single-item GET) and the tenant's retained disks
-// for its own; the workspaces load separately.
-async function loadUserDetail(api: ApiClient, subject: string): Promise<UserDetailData> {
+// The directory answers 404 for a principal who never signed in; that is the
+// not-found state, not an error alert.
+async function loadUserDetail(api: ApiClient, ownerRef: string): Promise<UserDetailData> {
+  if (ownerRef === "") return { tenant: "", user: undefined, disks: [] };
   const me = await loadMe(api);
-  const [entries, disks] = await Promise.all([
-    scanAdminUserLimits(api, me.tenant),
+  const [user, disks] = await Promise.all([
+    getAdminUser(api, me.tenant, ownerRef).catch((e: unknown) => {
+      if (isPortalApiError(e) && e.httpStatus === 404) return undefined;
+      throw e;
+    }),
     scanScopedData(api, "tenant"),
   ]);
-  return {
-    tenant: me.tenant,
-    entry: entries.find((e) => e.subject === subject),
-    disks: disks.filter((d) => d.owner?.subject === subject),
-  };
+  return { tenant: me.tenant, user, disks: user ? disks.filter((d) => d.owner?.subject === user.subject) : [] };
 }
 
-export function UserDetailPage({ subject, now }: { subject: string; now?: number }) {
-  const u = useLoader((a) => loadUserDetail(a, subject), `admin-user:${subject}`);
+export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: number }) {
+  const u = useLoader((a) => loadUserDetail(a, ownerRef), `admin-user:${ownerRef}`);
   const ws = useLoader((a) => scanScopedWorkspaces(a, "tenant"), "admin-user-ws");
   const [editing, setEditing] = useState(false);
   const ts = now ?? Date.now();
 
-  const row = u.data?.entry ? userRowOf(u.data.entry, new Map([[subject, u.data.disks.length]])) : undefined;
+  const row = u.data?.user ? userRowOf(u.data.user, new Map([[u.data.user.subject, u.data.disks.length]])) : undefined;
   const workspaces = useMemo(
-    () => (ws.data ?? []).filter((w) => w.owner?.subject === subject),
-    [ws.data, subject],
+    () => (ws.data ?? []).filter((w) => w.owner?.subject === u.data?.user?.subject),
+    [ws.data, u.data],
   );
   const disks = u.data?.disks ?? [];
 
@@ -376,6 +411,11 @@ export function UserDetailPage({ subject, now }: { subject: string; now?: number
                 term: t("admin.userDetail.field.ownerRef"),
                 detail: <code>{row.limitsEntry.ownerRef}</code>,
               },
+              { term: t("admin.userDetail.field.email"), detail: row.email || "—" },
+              {
+                term: t("admin.userDetail.field.lastSeen"),
+                detail: <time dateTime={row.lastSeenAt}>{formatDateTime(row.lastSeenAt)}</time>,
+              },
               { term: t("admin.userLimits.column.running"), detail: String(row.running) },
               { term: t("admin.userLimits.column.limit"), detail: <OverrideCell row={row} /> },
               {
@@ -396,6 +436,7 @@ export function UserDetailPage({ subject, now }: { subject: string; now?: number
             empty={t("admin.userDetail.workspaces.empty")}
           />
         </Section>
+        <UserSessionsSection tenant={u.data.tenant} ownerRef={row.ownerRef} displayName={row.displayName} />
         <Section
           title={t("admin.userDetail.disks.title")}
           actions={<Link to="/admin/data">{t("admin.userDetail.disks.all")}</Link>}
@@ -424,7 +465,7 @@ export function UserDetailPage({ subject, now }: { subject: string; now?: number
   return (
     <AdminLayout
       title={row?.displayName ?? t("admin.userDetail.titleFallback")}
-      description={<code className="tc-admin-muted">{subject}</code>}
+      description={<code className="tc-admin-muted">{ownerRef}</code>}
     >
       <ApiErrorAlert error={u.error} onRetry={u.reload} />
       <ApiErrorAlert error={ws.error} onRetry={ws.reload} />

@@ -151,6 +151,11 @@ const ReasonReleasePending = "release_pending"
 // workspaces. Params carry ParamKeyLimit and ParamKeyCurrent.
 const ReasonUserLimitReached = "UserLimitReached"
 
+// ReasonTransferDenied is the details.reason of a transfer mint refused by
+// the file-transfer policy in force — a reason on the public FORBIDDEN
+// code, not a new ErrorCode, so AllErrorCodes is unchanged.
+const ReasonTransferDenied = "transfer_denied"
+
 // Params keys of the UserLimitReached detail — the contract the docs and
 // the portal copy interpolate against; tests assert these constants so a
 // rename cannot drift the wire keys away from the documentation.

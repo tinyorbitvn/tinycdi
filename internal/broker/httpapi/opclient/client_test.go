@@ -60,6 +60,12 @@ func (s *stubBroker) DrainStatus(_ context.Context, uid broker.PlatformID) (int,
 	s.gotUID = uid
 	return s.openStreams, s.drained, nil
 }
+func (s *stubBroker) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, errors.New("stub")
+}
+func (s *stubBroker) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return errors.New("stub")
+}
 
 // pki is a scratch CA + cert factory for the mTLS fixture.
 type pki struct {

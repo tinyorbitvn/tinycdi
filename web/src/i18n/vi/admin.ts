@@ -11,6 +11,7 @@ export default {
   "admin.nav.data": "Dữ liệu",
   "admin.nav.users": "Người dùng",
   "admin.nav.sessionPolicy": "Chính sách phiên",
+  "admin.nav.audit": "Nhật ký kiểm toán",
   "admin.eyebrow": "Quản trị",
   "admin.eyebrow.tenant": "Quản trị · {tenant}",
   "admin.gate.checking": "Đang kiểm tra quyền",
@@ -28,8 +29,33 @@ export default {
   "admin.route.users": "Người dùng tenant",
   "admin.route.user": "Chi tiết người dùng",
   "admin.route.sessionPolicy": "Chính sách phiên",
+  "admin.route.audit": "Nhật ký kiểm toán",
 
   "admin.action.refresh": "Làm mới",
+
+  // Audit page.
+  "admin.audit.title": "Nhật ký kiểm toán",
+  "admin.audit.description":
+    "Mọi thao tác quản trị và thay đổi trong tenant này, mới nhất trước. Sự kiện cũ hơn thời hạn lưu của nền tảng (mặc định 90 ngày) sẽ bị xoá.",
+  "admin.audit.filter.action": "Hành động",
+  "admin.audit.filter.actor": "Người thực hiện",
+  "admin.audit.filter.actorHint": "Mã người thực hiện (oidc:…) hoặc mã người dùng (issuer|subject)",
+  "admin.audit.filter.target": "Đối tượng",
+  "admin.audit.filter.since": "Từ",
+  "admin.audit.filter.until": "Đến",
+  "admin.audit.filter.apply": "Áp dụng",
+  "admin.audit.filter.clear": "Xoá lọc",
+  "admin.audit.column.time": "Thời gian",
+  "admin.audit.column.actor": "Người thực hiện",
+  "admin.audit.column.action": "Hành động",
+  "admin.audit.column.target": "Đối tượng",
+  "admin.audit.column.outcome": "Kết quả",
+  "admin.audit.column.details": "Chi tiết",
+  "admin.audit.outcome.success": "Thành công",
+  "admin.audit.outcome.denied": "Bị từ chối",
+  "admin.audit.outcome.failure": "Thất bại",
+  "admin.audit.caption": "Sự kiện kiểm toán",
+  "admin.audit.empty": "Không có sự kiện nào khớp.",
 
   // Overview page.
   "admin.overview.title": "Tổng quan tenant",
@@ -46,6 +72,16 @@ export default {
   "admin.overview.data.title": "Dữ liệu giữ lại",
   "admin.overview.data.disks": "đĩa được giữ lại",
   "admin.overview.data.all": "Xem dữ liệu giữ lại",
+  "admin.overview.health.title": "Tình trạng",
+  "admin.overview.health.liveSessions": "Phiên đang hoạt động",
+  "admin.overview.health.p95": "Thời gian khởi động (p95, 24 giờ)",
+  "admin.overview.health.samples": "Đã đo {n} lần khởi động",
+  "admin.overview.health.noSamples": "Không có lần khởi động nào trong 24 giờ",
+  "admin.overview.health.stuck": "Xoá bị kẹt",
+  "admin.overview.health.running": "Đang chạy theo template",
+  "admin.overview.health.noneRunning": "Không có workspace nào đang chạy",
+  "admin.overview.health.stale":
+    "Trạng thái workspace chưa cập nhật; số liệu Kubernetes bị ẩn cho đến khi kết nối theo dõi phục hồi.",
 
   // Quota page.
   "admin.quota.title": "Hạn mức",
@@ -214,27 +250,29 @@ export default {
   "admin.data.column.age": "Tuổi",
   "admin.data.action.purgeLabel": "Xoá vĩnh viễn {id}",
 
-  // Users page: principals known to the tenant (quota usage or a per-user
-  // limit row) plus per-user drill-down.
+  // Users page: everyone who has signed in to the tenant (the
+  // principal directory) plus per-user drill-down.
   "admin.users.title": "Người dùng",
-  "admin.users.description": "Mọi principal có mức dùng hoặc giới hạn trong tenant này.",
-  "admin.users.note":
-    "Danh sách này hiển thị những người dùng đã sử dụng tenant — mức dùng hạn mức hoặc giới hạn theo người dùng — không phải toàn bộ thư mục tenant.",
+  "admin.users.description": "Mọi người đã đăng nhập vào tenant này.",
   "admin.users.loading": "Đang tải người dùng",
   "admin.users.caption": "Người dùng tenant",
   "admin.users.filter.label": "Lọc",
   "admin.users.filter.placeholder": "Tên hoặc subject",
-  "admin.users.empty.all": "Chưa ghi nhận người dùng nào.",
+  "admin.users.empty.all": "Chưa có ai đăng nhập vào tenant này.",
   "admin.users.empty.filtered": "Không có người dùng nào khớp bộ lọc.",
   "admin.users.column.disks": "Đĩa",
+  "admin.users.column.lastSeen": "Hoạt động gần nhất",
+  "admin.users.column.workspaces": "Workspace",
   "admin.userDetail.titleFallback": "Chi tiết người dùng",
   "admin.userDetail.notFound.title": "Không tìm thấy người dùng",
   "admin.userDetail.notFound.body":
-    "Principal này không có mức dùng hoặc giới hạn trong tenant — hoặc danh sách đã thay đổi từ khi tải.",
+    "Người dùng này chưa đăng nhập vào tenant này.",
   "admin.userDetail.notFound.back": "Về danh sách người dùng",
   "admin.userDetail.limits.title": "Giới hạn workspace đang chạy",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.email": "Email",
+  "admin.userDetail.field.lastSeen": "Hoạt động gần nhất",
   "admin.userDetail.workspaces.title": "Workspace",
   "admin.userDetail.workspaces.caption": "Workspace của người dùng",
   "admin.userDetail.workspaces.empty": "Người dùng này không có workspace nào.",
@@ -242,6 +280,20 @@ export default {
   "admin.userDetail.disks.caption": "Đĩa giữ lại của người dùng",
   "admin.userDetail.disks.empty": "Người dùng này không có đĩa giữ lại nào.",
   "admin.userDetail.disks.all": "Mở dữ liệu giữ lại",
+
+  // Live sessions section on the user detail page (F5).
+  "admin.sessions.title": "Phiên đang hoạt động",
+  "admin.sessions.caption": "Các phiên desktop đang hoạt động của người dùng này",
+  "admin.sessions.column.workspace": "Workspace",
+  "admin.sessions.column.started": "Bắt đầu",
+  "admin.sessions.column.lastActive": "Gia hạn gần nhất",
+  "admin.sessions.column.ref": "Mã tham chiếu",
+  "admin.sessions.empty": "Không có phiên nào đang hoạt động.",
+  "admin.sessions.signOutAll": "Đăng xuất khỏi mọi nơi",
+  "admin.sessions.confirm.title": "Đăng xuất {name} khỏi mọi nơi?",
+  "admin.sessions.confirm.body":
+    "Mọi phiên portal của người dùng này sẽ kết thúc và các desktop đang mở sẽ ngắt kết nối. Workspace vẫn tiếp tục chạy.",
+  "admin.sessions.done": "Đã đăng xuất: {sessions} phiên portal, {leases} phiên desktop.",
 
   // Session policy page (giới hạn clipboard của tenant, ADR 0010).
   "admin.policy.title": "Chính sách phiên",
@@ -258,19 +310,52 @@ export default {
   "admin.policy.clipboard.hint":
     "Send cho phép sao chép từ thiết bị vào workspace; Receive cho phép sao chép từ workspace về thiết bị.",
   "admin.policy.fileTransfer.label": "Truyền tệp",
-  "admin.policy.fileTransfer.hint": "Sẽ có trong v1.3.",
+  "admin.policy.fileTransfer.hint":
+    "Tải lên là thiết bị → workspace, Tải xuống là workspace → thiết bị. Tệp nằm trong thư mục Transfers của thư mục chính workspace.",
   "admin.policy.option.followTemplate": "Theo template",
+  "admin.policy.ft.option.upload": "Chỉ tải lên",
+  "admin.policy.ft.option.download": "Chỉ tải xuống",
+  "admin.policy.ft.option.bidirectional": "Cả hai chiều",
+  "admin.policy.ft.option.disabled": "Tắt",
+  "admin.policy.ft.maxLabel": "Tệp lớn nhất (MiB)",
+  "admin.policy.ft.maxHint": "Để trống để dùng giới hạn của nền tảng.",
   "admin.policy.appliesNote":
-    "Siết chặt áp dụng ngay với các kết nối mới; workspace đang chạy nhận thay đổi ở lần khởi động tiếp theo.",
+    "Siết chặt áp dụng ngay với các kết nối mới và lượt truyền tệp mới; giới hạn clipboard của workspace đang chạy có hiệu lực ở lần khởi động tiếp theo, hoặc ngay với Áp dụng ngay.",
+  "admin.policy.apply.button": "Áp dụng ngay",
+  "admin.policy.apply.title": "Áp dụng giới hạn cho workspace đang chạy",
+  "admin.policy.apply.description":
+    "Các workspace này đang chạy với chính sách lỏng hơn giới hạn. Áp dụng sẽ khởi động lại chúng; desktop đang mở sẽ ngắt và kết nối lại với chính sách mới. Thư mục chính được giữ nguyên.",
+  "admin.policy.apply.caption": "Workspace đang chạy lỏng hơn giới hạn",
+  "admin.policy.apply.loading": "Đang kiểm tra các workspace đang chạy",
+  "admin.policy.apply.close": "Đóng",
+  "admin.policy.apply.policyText": "Clipboard: {clipboard}; tệp: {fileTransfer}",
+  "admin.policy.apply.includeActive": "Khởi động lại cả workspace đang có người dùng",
+  "admin.policy.apply.confirm": "Khởi động lại các workspace bị ảnh hưởng",
+  "admin.policy.apply.none": "Mọi workspace đang chạy đã tuân theo giới hạn.",
+  "admin.policy.apply.truncated":
+    "Chỉ liệt kê 500 workspace bị ảnh hưởng đầu tiên. Hãy áp dụng lại sau khi chúng khởi động lại.",
+  "admin.policy.apply.live": "Đang có phiên",
+  "admin.policy.apply.result.pending": "Sẽ khởi động lại",
+  "admin.policy.apply.result.restarted": "Đã khởi động lại",
+  "admin.policy.apply.result.skipped_active": "Bỏ qua (đang dùng)",
+  "admin.policy.apply.result.skipped_moved": "Bỏ qua (đang khởi động lại)",
+  "admin.policy.apply.result.failed": "Thất bại",
+  "admin.policy.apply.summary": "{restarted} đã khởi động lại, {skipped} bỏ qua.",
+  "admin.policy.apply.column.workspace": "Workspace",
+  "admin.policy.apply.column.owner": "Chủ sở hữu",
+  "admin.policy.apply.column.change": "Hiện tại → giới hạn",
+  "admin.policy.apply.column.result": "Kết quả",
   "admin.policy.save": "Lưu giới hạn",
   "admin.policy.preview.title": "Chính sách hiệu lực theo template",
   "admin.policy.preview.description":
-    "Điều người dùng nhận được cho từng template: chính sách clipboard của template bị thu hẹp bởi giới hạn đã chọn.",
+    "Người dùng nhận được gì với từng template: chính sách clipboard và truyền tệp của template, được thu hẹp bởi các giới hạn đã chọn.",
   "admin.policy.preview.caption": "Chính sách clipboard hiệu lực theo template",
   "admin.policy.preview.template": "Template",
   "admin.policy.preview.templatePolicy": "Chính sách template",
   "admin.policy.preview.ceiling": "Giới hạn",
   "admin.policy.preview.effective": "Hiệu lực với người dùng",
+  "admin.policy.preview.templateFt": "Truyền tệp của template",
+  "admin.policy.preview.effectiveFt": "Truyền tệp hiệu lực",
   "admin.policy.preview.empty": "Không có template nào trong danh mục.",
 
   // Error guidance (stable code -> next step; server messages are detail).

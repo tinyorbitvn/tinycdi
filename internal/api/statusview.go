@@ -69,6 +69,23 @@ type ObservedStatus struct {
 	// ImageBuiltAt is the raw image-built-at annotation the Workspace CR
 	// carries (copied from its template at create time); empty when absent.
 	ImageBuiltAt string
+	// RuntimeGeneration is the CR's spec.runtimeGeneration — the generation
+	// a restart is fenced on.
+	RuntimeGeneration int64
+	// RuntimeUID and ObservedRuntimeGeneration are the status-side fencing
+	// pair (the same two fields K8sBindingSource projects); they feed only
+	// the file-transfer mint, which binds the grant to exactly the
+	// incarnation the claim compares. They are never copied into
+	// WorkspaceView and never remembered — a stale view never mints.
+	RuntimeUID                string
+	ObservedRuntimeGeneration int64
+	// IntentSettled reports that the operator has applied the CR's latest
+	// spec.intentRevision (status.lastAppliedIntentRevision equals it), so
+	// Phase and FailureReason describe the current generation. Between the
+	// applier bumping the spec and the operator reconciling, the CR still
+	// reads the PREVIOUS generation's Failed status; a second recovery
+	// during that window would bump the generation again.
+	IntentSettled bool
 }
 
 // StatusView supplies observed Workspace CR status keyed by the platform
@@ -165,6 +182,10 @@ func (v *K8sStatusView) WorkspaceStatus(ctx context.Context, tenantID, workspace
 	ws := &list.Items[0]
 	obs.Found = true
 	obs.Phase = string(ws.Status.Phase)
+	obs.RuntimeUID = ws.Status.RuntimeUID
+	obs.ObservedRuntimeGeneration = ws.Status.ObservedRuntimeGeneration
+	obs.RuntimeGeneration = ws.Spec.RuntimeGeneration
+	obs.IntentSettled = ws.Status.LastAppliedIntentRevision == ws.Spec.IntentRevision
 	obs.Conditions = projectConditions(ws.Status.Conditions, ws.Annotations)
 	obs.FailureReason = failureReasonOf(ws.Status.Conditions)
 	obs.ImageBuiltAt = ws.Annotations[provisioning.AnnotationWorkspaceImageBuiltAt]
@@ -607,4 +628,96 @@ func (h *WorkspaceHandler) templateImageAge(ctx context.Context, tenantID, templ
 	}
 	memo.ages[key] = raw
 	return raw
+}
+
+// StuckFinalizerAfter is how long a Workspace may sit with a deletion
+// timestamp and finalizers before the overview counts it as stuck.
+const StuckFinalizerAfter = 10 * time.Minute
+
+// TenantCounts is the Kubernetes half of the admin overview.
+type TenantCounts struct {
+	Fresh             bool
+	RunningByTemplate map[string]int // spec.templateRef.name -> Ready workspaces
+	Phases            map[string]int
+	StuckFinalizers   int
+}
+
+// TenantCounts aggregates the tenant's Workspace CRs from the informer
+// cache. Fresh is false when the watch is stale; the counts are then
+// empty rather than last-known, because aggregates have no per-object
+// snapshot.
+func (v *K8sStatusView) TenantCounts(ctx context.Context, tenantID string, stuckAfter time.Duration) (TenantCounts, error) {
+	out := TenantCounts{RunningByTemplate: map[string]int{}, Phases: map[string]int{}}
+	v.mu.Lock()
+	synced, last := v.synced, v.lastEvent
+	v.mu.Unlock()
+	now := v.now()
+	if !synced || now.Sub(last) > v.maxStale {
+		return out, nil
+	}
+	var list cdiv1.WorkspaceList
+	if err := v.cache.List(ctx, &list, client.MatchingLabels{provisioning.LabelTenant: tenantID}); err != nil {
+		return out, err
+	}
+	out.Fresh = true
+	for i := range list.Items {
+		ws := &list.Items[i]
+		phase := string(ws.Status.Phase)
+		if phase == "" {
+			phase = string(cdiv1.WorkspacePhasePending)
+		}
+		out.Phases[phase]++
+		if ws.Status.Phase == cdiv1.WorkspacePhaseReady {
+			out.RunningByTemplate[ws.Spec.TemplateRef.Name]++
+		}
+		if ws.DeletionTimestamp != nil && len(ws.Finalizers) > 0 && now.Sub(ws.DeletionTimestamp.Time) > stuckAfter {
+			out.StuckFinalizers++
+		}
+	}
+	return out, nil
+}
+
+// AppliedPolicy is what a running Workspace CR was built with: the session
+// policy the applier stamped (spec.sessionPolicy), the generation it
+// belongs to, and whether the operator has applied the CR's latest intent
+// (status.lastAppliedIntentRevision == spec.intentRevision, the rule behind
+// ObservedStatus.IntentSettled from Task 6a). An unsettled CR is mid-change:
+// a restart or stop/start is applied to the spec but not reconciled yet.
+type AppliedPolicy struct {
+	Policy            provisioning.SessionPolicy
+	RuntimeGeneration int64
+	IntentSettled     bool
+}
+
+// RunningPolicies maps each Running-desired Workspace CR of tenantID
+// (keyed by platform workspace id) to its applied policy. fresh is false
+// when the watch is stale; callers must not act on a stale map.
+func (v *K8sStatusView) RunningPolicies(ctx context.Context, tenantID string) (map[string]AppliedPolicy, bool, error) {
+	v.mu.Lock()
+	synced, last := v.synced, v.lastEvent
+	v.mu.Unlock()
+	if !synced || v.now().Sub(last) > v.maxStale {
+		return nil, false, nil
+	}
+	var list cdiv1.WorkspaceList
+	if err := v.cache.List(ctx, &list, client.MatchingLabels{provisioning.LabelTenant: tenantID}); err != nil {
+		return nil, false, err
+	}
+	out := make(map[string]AppliedPolicy, len(list.Items))
+	for i := range list.Items {
+		ws := &list.Items[i]
+		id := ws.Labels[provisioning.LabelWorkspaceUID]
+		if id == "" || ws.Spec.DesiredState != cdiv1.DesiredStateRunning || ws.DeletionTimestamp != nil {
+			continue
+		}
+		sp := ws.Spec.SessionPolicy
+		out[id] = AppliedPolicy{
+			Policy: provisioning.SessionPolicy{
+				Clipboard: string(sp.Clipboard), FileTransfer: sp.FileTransfer, MaxFileBytes: sp.MaxFileBytes,
+			},
+			RuntimeGeneration: ws.Spec.RuntimeGeneration,
+			IntentSettled:     ws.Status.LastAppliedIntentRevision == ws.Spec.IntentRevision,
+		}
+	}
+	return out, true, nil
 }

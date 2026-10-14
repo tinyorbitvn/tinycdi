@@ -443,6 +443,7 @@ func TestUpdate_SkippedReasonMatrix(t *testing.T) {
 		{"storage-smaller", func(e *provisioning.TemplateCatalogEntry) { e.DiskBytes -= 1 << 30 }, provisioning.SkipReasonStorageSmaller},
 		{"network-profile-changed", func(e *provisioning.TemplateCatalogEntry) { e.NetworkProfile = "InternetOnly" }, provisioning.SkipReasonNetworkProfileChanged},
 		{"clipboard-policy-changed", func(e *provisioning.TemplateCatalogEntry) { e.ClipboardPolicy = "Bidirectional" }, provisioning.SkipReasonClipboardPolicyChanged},
+		{"file-transfer-policy-changed", func(e *provisioning.TemplateCatalogEntry) { e.FileTransferPolicy = "Upload" }, provisioning.SkipReasonFileTransferPolicyChanged},
 		{"adapter-changed", func(e *provisioning.TemplateCatalogEntry) { e.Adapter = "kasm" }, provisioning.SkipReasonAdapterChanged},
 		{"host-users-changed", func(e *provisioning.TemplateCatalogEntry) {
 			hu := false
@@ -542,6 +543,9 @@ func TestUpdate_SkippedOnSecurityFieldDrift(t *testing.T) {
 		{"clipboard-policy", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.ClipboardPolicy = cdiv1.ClipboardBidirectional
 		}, provisioning.SkipReasonClipboardPolicyChanged},
+		{"file-transfer-policy", func(tpl *cdiv1.WorkspaceTemplate) {
+			tpl.Spec.FileTransferPolicy = cdiv1.FileTransferUpload
+		}, provisioning.SkipReasonFileTransferPolicyChanged},
 		{"adapter", func(tpl *cdiv1.WorkspaceTemplate) {
 			tpl.Spec.Linux.Adapter = cdiv1.AdapterKasm
 		}, provisioning.SkipReasonAdapterChanged},

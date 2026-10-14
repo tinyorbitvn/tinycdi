@@ -182,8 +182,9 @@ use 16 CPU / 64 GiB workers (the tested environment is described in
   unprofiled nodes *silently degrade* the sandbox rather than fail.
 - **Headroom:** keep one compute worker's worth of capacity free if you
   promise sessions survive a node loss — there is no workspace HA; a node
-  loss kills its runtime pods and users must reconnect (new incarnation,
-  new ticket). Reserve quota accordingly.
+  loss kills its runtime pods; the workspace goes Failed/RuntimeLost and is
+  NOT rescheduled — the user (or you) must `:start` it again, which begins a
+  new incarnation with a new ticket. Reserve quota accordingly.
 
 ## Sign-in rate limits and NAT
 

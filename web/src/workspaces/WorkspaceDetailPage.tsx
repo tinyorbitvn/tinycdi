@@ -36,7 +36,7 @@ import { DEFAULT_BRANDING } from "../app/branding";
 import { getWorkspace, listWorkspaceEvents, startWorkspace, stopWorkspace } from "./api";
 import type { WorkspaceEvent, WorkspaceView } from "./helpers";
 import { blockingReason, desiredLabel } from "./helpers";
-import { ReasonText, reasonMessageKey } from "./reasons";
+import { ReasonText, reasonMessageKey, UNRECOVERABLE_FAILURES } from "./reasons";
 import { useResource } from "./resource";
 import { ConnectButton } from "./ConnectButton";
 import { ConditionsTable, PhasePill } from "./StatusBits";
@@ -248,7 +248,8 @@ export function WorkspaceDetailPage({
   }
 
   const blocker = blockingReason(ws);
-  const canStart = ws.phase === "Stopped" || ws.phase === "Failed";
+  const unrecoverable = ws.phase === "Failed" && UNRECOVERABLE_FAILURES.has(ws.failureReason ?? "");
+  const canStart = ws.phase === "Stopped" || (ws.phase === "Failed" && !unrecoverable);
   const canStop = ws.desiredState === "Running" && !TERMINAL.has(ws.phase);
   // Connect is owner-only (advisor Q1): a tenant admin viewing another
   // user's workspace gets Start/Stop/Delete plus an acting-as banner, but
@@ -391,6 +392,7 @@ export function WorkspaceDetailPage({
             : t("workspaces.detail.stale.bodyUnknown")}
         </Alert>
       ) : null}
+      {unrecoverable ? <Alert tone="danger">{t("workspaces.detail.failed.unrecoverable")}</Alert> : null}
       {ws.updateAvailable === true && (ws.phase === "Stopped" || ws.phase === "Failed") ? (
         <Alert tone="info" title={t("workspaces.detail.update.title")}>
           {t("workspaces.detail.update.body")}

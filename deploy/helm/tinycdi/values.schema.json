@@ -203,7 +203,15 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "terminalRowDays": {"type": "integer", "minimum": 0}
+            "terminalRowDays": {"type": "integer", "minimum": 0},
+            "auditDays": {"type": "integer", "minimum": 1, "maximum": 3650}
+          }
+        },
+        "fileTransfer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxFileBytes": {"type": "integer", "minimum": 1, "maximum": 10737418240}
           }
         },
         "service": {

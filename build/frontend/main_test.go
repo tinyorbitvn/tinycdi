@@ -92,6 +92,7 @@ func TestSecurityHeaders(t *testing.T) {
 		for _, want := range []string{
 			"default-src 'self'", "frame-ancestors 'none'",
 			"object-src 'none'", "base-uri 'none'",
+			"connect-src 'self' https://*.session.test",
 			"frame-src https://*.session.test",
 			"form-action 'self' https://*.session.test",
 		} {
@@ -129,7 +130,7 @@ func TestSecurityHeaders(t *testing.T) {
 // be. With no session domain both collapse (fail closed).
 func TestFrontendCSP(t *testing.T) {
 	const base = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
-	if got, want := frontendCSP(nil), base+"; frame-src 'none'; form-action 'self'"; got != want {
+	if got, want := frontendCSP(nil), base+"; connect-src 'self'; frame-src 'none'; form-action 'self'"; got != want {
 		t.Fatalf("frontendCSP(nil) = %q, want %q", got, want)
 	}
 	for _, domain := range []string{"session.example.dev", "session.example.dev:8443"} {
@@ -137,7 +138,7 @@ func TestFrontendCSP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := base + "; frame-src https://" + d.Wildcard() + "; form-action 'self' https://" + d.Wildcard()
+		want := base + "; connect-src 'self' https://" + d.Wildcard() + "; frame-src https://" + d.Wildcard() + "; form-action 'self' https://" + d.Wildcard()
 		if got := frontendCSP(&d); got != want {
 			t.Fatalf("frontendCSP(%q) = %q, want %q", domain, got, want)
 		}
@@ -155,6 +156,7 @@ func TestFrontendCSP_WildcardSessionDomain(t *testing.T) {
 	}
 	csp := frontendCSP(&d)
 	for _, want := range []string{
+		"connect-src 'self' https://*.session.example.com",
 		"frame-src https://*.session.example.com",
 		"form-action 'self' https://*.session.example.com",
 	} {
@@ -169,6 +171,7 @@ func TestFrontendCSP_WildcardSessionDomain(t *testing.T) {
 	}
 	csp = frontendCSP(&dp)
 	for _, want := range []string{
+		"connect-src 'self' https://*.session.example.com:8443",
 		"frame-src https://*.session.example.com:8443",
 		"form-action 'self' https://*.session.example.com:8443",
 	} {

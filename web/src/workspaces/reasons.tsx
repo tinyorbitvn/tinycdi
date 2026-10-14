@@ -29,6 +29,13 @@ import {
   formatStorage,
 } from "../templates/format";
 
+/** Failure reasons a new generation cannot fix (api/v1 FailureUnrecoverable): Start is not offered. */
+export const UNRECOVERABLE_FAILURES: ReadonlySet<string> = new Set([
+  "ImagePolicyDenied",
+  "HomeVolumeLost",
+  "TemplateRejected",
+]);
+
 const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   // API-curated lifecycle events (internal/api/events.go).
   Created: "workspaces.reason.created",
@@ -64,6 +71,9 @@ const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   RetentionPending: "workspaces.reason.retentionPending",
   CleanupRetry: "workspaces.reason.cleanupRetry",
   FailedCleanup: "workspaces.reason.failedCleanup",
+  RuntimeLost: "workspaces.reason.runtimeLost",
+  ImagePolicyDenied: "workspaces.reason.imagePolicyDenied",
+  HomeVolumeLost: "workspaces.reason.homeVolumeLost",
   MissingWorkspaceID: "workspaces.reason.missingWorkspaceID",
   IntentBehind: "workspaces.reason.intentBehind",
 
@@ -82,6 +92,7 @@ const REASON_TEXT: Readonly<Record<string, MessageKey>> = {
   ContainerCreating: "workspaces.reason.containerCreating",
   PodInitializing: "workspaces.reason.podInitializing",
   NotReady: "workspaces.reason.notReady",
+  WaitingForEndpoint: "workspaces.reason.waitingForEndpoint",
   ImagePullBackOff: "workspaces.reason.imagePull",
   ErrImagePull: "workspaces.reason.imagePull",
   CrashLoopBackOff: "workspaces.reason.crashLoopBackOff",

@@ -28,8 +28,7 @@ const (
 	ClipboardSend    = "Send"
 	ClipboardReceive = "Receive"
 
-	// File-transfer channel directions (inert until T11 lands the
-	// WorkspaceTemplate leg in v1.3).
+	// File-transfer channel directions (ADR 0010 T11).
 	FileTransferUpload   = "Upload"
 	FileTransferDownload = "Download"
 )
@@ -44,6 +43,10 @@ const (
 type SessionPolicy struct {
 	Clipboard    string                   `json:"clipboard"`
 	FileTransfer cdiv1.FileTransferPolicy `json:"fileTransfer"`
+	// MaxFileBytes is the per-file bound: the ceiling's file_max_bytes
+	// clipped to the platform bound (-file-transfer-max-bytes); 0 when
+	// FileTransfer is Disabled.
+	MaxFileBytes int64 `json:"maxFileBytes,omitempty"`
 }
 
 // meet resolves the shared direction lattice: Disabled is bottom,
@@ -85,19 +88,32 @@ func meet(template, ceiling, dirA, dirB string) string {
 // meetCeiling applies a stored ceiling row to a template's own policy —
 // the whole resolved vector in one place. Absent row is FollowTemplate
 // on every channel: the upgrade default, and the only state "no row"
-// may resolve to.
-func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling) SessionPolicy {
-	var clipCeil string
+// may resolve to. bound is the platform per-file bound
+// (-file-transfer-max-bytes) the ceiling's file_max_bytes clips to; a
+// resolved-Disabled channel carries 0.
+func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling, bound int64) SessionPolicy {
+	var clipCeil, ftCeil string
 	if c.Clipboard != nil {
 		clipCeil = *c.Clipboard
 	}
-	return SessionPolicy{
-		Clipboard: meet(tpl.ClipboardPolicy, clipCeil, ClipboardSend, ClipboardReceive),
-		// The catalog entry carries no fileTransferPolicy leg yet (F4/T11
-		// wires it): the template side is Disabled — today's posture —
-		// so the channel resolves Disabled under every ceiling.
-		FileTransfer: cdiv1.FileTransferDisabled,
+	if c.FileTransfer != nil {
+		ftCeil = *c.FileTransfer
 	}
+	ftTpl := tpl.FileTransferPolicy
+	if ftTpl == "" {
+		ftTpl = PolicyDisabled
+	}
+	sp := SessionPolicy{
+		Clipboard:    meet(tpl.ClipboardPolicy, clipCeil, ClipboardSend, ClipboardReceive),
+		FileTransfer: cdiv1.FileTransferPolicy(meet(ftTpl, ftCeil, FileTransferUpload, FileTransferDownload)),
+	}
+	if sp.FileTransfer != cdiv1.FileTransferDisabled {
+		sp.MaxFileBytes = bound
+		if c.FileMaxBytes != nil && *c.FileMaxBytes < bound {
+			sp.MaxFileBytes = *c.FileMaxBytes
+		}
+	}
+	return sp
 }
 
 // resolveSessionPolicy returns the effective data-transfer policy for a
@@ -107,12 +123,12 @@ func meetCeiling(tpl TemplateCatalogEntry, c store.SessionPolicyCeiling) Session
 // resolveSessionPolicyTx resolves inside the intent transaction, so the
 // policy a create/start stamps onto the Workspace CR is read under the
 // same snapshot as the rest of the lifecycle write.
-func resolveSessionPolicyTx(ctx context.Context, db *store.DB, tx store.Tx, tenantID string, tpl TemplateCatalogEntry) (SessionPolicy, error) {
+func resolveSessionPolicyTx(ctx context.Context, db *store.DB, tx store.Tx, tenantID string, tpl TemplateCatalogEntry, bound int64) (SessionPolicy, error) {
 	c, err := store.NewSessionPolicyStore(db).CeilingTx(ctx, tx, tenantID)
 	if err != nil {
 		return SessionPolicy{}, err
 	}
-	return meetCeiling(tpl, c), nil
+	return meetCeiling(tpl, c, bound), nil
 }
 
 // ResolveSessionPolicy is the pool-side resolver the ticket-issue path
@@ -123,5 +139,27 @@ func (s *Service) ResolveSessionPolicy(ctx context.Context, tenantID string, tpl
 	if err != nil {
 		return SessionPolicy{}, err
 	}
-	return meetCeiling(tpl, c), nil
+	return meetCeiling(tpl, c, s.fileBound), nil
+}
+
+// PolicyWithin reports whether a workspace running with applied grants
+// nothing the effective policy does not: every channel of applied is at or
+// below effective in the lattice, and its size bound is no larger. F3 uses
+// it to find running workspaces a tightened ceiling has made too loose.
+func PolicyWithin(applied, effective SessionPolicy) bool {
+	return meet(applied.Clipboard, effective.Clipboard, ClipboardSend, ClipboardReceive) == applied.Clipboard &&
+		meet(string(applied.FileTransfer), string(effective.FileTransfer), FileTransferUpload, FileTransferDownload) == string(applied.FileTransfer) &&
+		applied.MaxFileBytes <= effective.MaxFileBytes
+}
+
+// DirectionAllows reports whether policy permits a transfer in direction
+// ("upload" = device to workspace, "download" = workspace to device).
+func DirectionAllows(policy cdiv1.FileTransferPolicy, direction string) bool {
+	switch direction {
+	case "upload":
+		return policy == cdiv1.FileTransferUpload || policy == cdiv1.FileTransferBidirectional
+	case "download":
+		return policy == cdiv1.FileTransferDownload || policy == cdiv1.FileTransferBidirectional
+	}
+	return false
 }

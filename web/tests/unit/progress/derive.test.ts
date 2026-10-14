@@ -83,6 +83,23 @@ describe("deriveProgress — op detection", () => {
     expect(startInFlight(missing)).toBe(true);
   });
 
+  it("the connect step carries WaitingForEndpoint as a known reason", () => {
+    const m = deriveProgress(
+      ws({
+        conditions: [
+          cond("StorageReady", "True", "Ready"),
+          cond("RuntimeReady", "True", "Ready"),
+          cond("ConnectionReady", "False", "WaitingForEndpoint"),
+        ],
+      }),
+      undefined,
+      NOW,
+    );
+    expect(active(m).id).toBe("connect");
+    expect(active(m).reason).toBe("WaitingForEndpoint");
+    expect(active(m).unknownReason).toBeFalsy();
+  });
+
   it("create: Pending with desiredState Running and createdAt==updatedAt", () => {
     const m = deriveProgress(
       ws({ phase: "Pending", createdAt: T0, updatedAt: T0 }),

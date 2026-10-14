@@ -22,6 +22,27 @@
   border-bottom: 1px solid var(--tc-color-border);
 }
 
+.tc-session__transfer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tc-space-2);
+  align-items: center;
+  padding: var(--tc-space-2) var(--tc-space-3);
+  background: var(--tc-color-surface);
+  border-bottom: 1px solid var(--tc-color-border);
+}
+.tc-session__transfer-download {
+  display: flex;
+  gap: var(--tc-space-2);
+  align-items: flex-end;
+}
+.tc-session__transfer-hint {
+  margin: 0;
+  flex-basis: 100%;
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+}
+
 .tc-session__title {
   font-size: var(--tc-text-md);
   font-weight: var(--tc-weight-semibold);

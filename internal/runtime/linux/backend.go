@@ -38,10 +38,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -173,6 +175,12 @@ const (
 	// clipboard block from it (build/linux-base/entrypoint.sh,
 	// build/kasm-adapter/entrypoint.sh) and fail closed on unset/unknown.
 	envClipboardPolicy = "TCDI_CLIPBOARD_POLICY"
+
+	// envXferPolicy / envXferMaxBytes carry spec.sessionPolicy.fileTransfer
+	// and .maxFileBytes to the runtime; tcdi-xferd fails closed (Disabled)
+	// on an unset or unknown policy.
+	envXferPolicy   = "TCDI_XFER_POLICY"
+	envXferMaxBytes = "TCDI_XFER_MAX_BYTES"
 )
 
 // AdapterBrowserWrappers are the Chromium-family launcher paths the shim
@@ -295,9 +303,19 @@ func retainedClaimMissing(ws *cdiv1.Workspace) bool {
 // step instead of a backend error and retries.
 var ErrRetainedNotClaimed = errors.New("linux backend: retained claim not yet claimed by this workspace")
 
+// ErrHomeVolumeLost reports that a Retain workspace whose home was already
+// provisioned has no home PVC: building a fresh one would silently start
+// the user on an empty home.
+var ErrHomeVolumeLost = errors.New("linux backend: home volume lost")
+
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
+	// APIReader is an uncached reader used to confirm a missing home PVC
+	// before declaring data loss (the cached client may lag the create).
+	// Nil falls back to the cached client.
+	APIReader client.Reader
+
 	// InternetExceptCIDRs are extra CIDRs subtracted from the 0.0.0.0/0
 	// allow under NetworkProfileInternetOnly — the cluster pod/service/node
 	// ranges, which differ per install (network-isolation fixture shape,
@@ -530,6 +548,7 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 		}
 		obs.RuntimeReady = podReady(pod)
 		obs.Reason = podReason(pod)
+		obs.Message = waitingMessage(pod)
 	}
 
 	svc := &corev1.Service{}
@@ -541,10 +560,18 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 	default:
 		obs.ServiceRef = &cdiv1.ServiceReference{Name: svc.Name, Port: streamingPort}
 	}
-	// ConnectionReady: the streaming endpoint answers when the runtime is
-	// ready and the fronting Service exists (endpoints are populated by the
-	// control plane from the same Ready signal).
-	obs.ConnectionReady = obs.RuntimeReady && obs.ServiceRef != nil
+	// ConnectionReady: the runtime is ready, the fronting Service exists and
+	// its EndpointSlices already route to THIS pod (F2).
+	if obs.RuntimeReady && obs.ServiceRef != nil {
+		ready, err := b.endpointReady(ctx, ws.Namespace, ServiceName(uid), types.UID(obs.RuntimeUID))
+		if err != nil {
+			return obs, err
+		}
+		obs.ConnectionReady = ready
+		if !ready {
+			obs.Reason = "WaitingForEndpoint"
+		}
+	}
 
 	if ws.Spec.DataPolicy == cdiv1.DataPolicyRetain {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -563,6 +590,50 @@ func (b *Backend) Observe(ctx context.Context, ws *cdiv1.Workspace) (runtime.Obs
 		obs.StorageReady = true
 	}
 	return obs, nil
+}
+
+// endpointReady reports whether the Service's EndpointSlices carry a ready
+// endpoint that targets podUID. The kubelet's readiness probe already
+// proved the stream port answers inside the pod (healthcheck.sh curls
+// 127.0.0.1:8443 with the runtime credential); this proves the Service
+// route the gateway dials has caught up with that pod (F2).
+func (b *Backend) endpointReady(ctx context.Context, ns, service string, podUID types.UID) (bool, error) {
+	if podUID == "" {
+		return false, nil
+	}
+	var slices discoveryv1.EndpointSliceList
+	if err := b.client.List(ctx, &slices, client.InNamespace(ns),
+		client.MatchingLabels{discoveryv1.LabelServiceName: service}); err != nil {
+		return false, err
+	}
+	for _, s := range slices.Items {
+		for _, ep := range s.Endpoints {
+			if ep.TargetRef != nil && ep.TargetRef.UID == podUID &&
+				ep.Conditions.Ready != nil && *ep.Conditions.Ready {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ReadyEndpointSlice is the EndpointSlice the endpointslice controller
+// publishes for a ready pod behind service. Tests use it where no
+// controller runs (fake clients, envtest).
+func ReadyEndpointSlice(pod *corev1.Pod, service string) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: service + "-ready", Namespace: pod.Namespace,
+			Labels: map[string]string{discoveryv1.LabelServiceName: service},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses:  []string{"10.0.0.1"},
+			Conditions: discoveryv1.EndpointConditions{Ready: ptr(true)},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace, UID: pod.UID},
+		}},
+		Ports: []discoveryv1.EndpointPort{{Port: ptr(streamingPort)}},
+	}
 }
 
 // Stop terminates the current incarnation but keeps data allowed by
@@ -722,13 +793,21 @@ func generateCredentials(uid CRUID) (map[string][]byte, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
+	// The transfer credential (ADR 0010 §5) is separate from the KasmVNC
+	// password: only tcdi-xferd reads it, and the gateway injects it as
+	// X-Tcdi-Xfer-Token on the transfer leg.
+	tok := make([]byte, 32)
+	if _, err := rand.Read(tok); err != nil {
+		return nil, err
+	}
 	// Secret files are newline-terminated: kasmvncpasswd reads its password
 	// via getpass(), which requires a '\n' before EOF.
 	return map[string][]byte{
-		"username": []byte("kasm_user\n"),
-		"password": []byte(base64.RawURLEncoding.EncodeToString(raw) + "\n"),
-		"tls.crt":  pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		"tls.key":  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		"username":   []byte("kasm_user\n"),
+		"password":   []byte(base64.RawURLEncoding.EncodeToString(raw) + "\n"),
+		"tls.crt":    pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		"tls.key":    pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		"xfer-token": []byte(base64.RawURLEncoding.EncodeToString(tok) + "\n"),
 	}, nil
 }
 
@@ -763,6 +842,29 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, err
+	}
+	// The home was provisioned for an earlier incarnation; its absence is
+	// data loss, not a first boot.
+	if ws.Status.ObservedRuntimeGeneration > 0 {
+		// A cached NotFound can be informer lag right after our own create;
+		// the outcome is terminal, so confirm against the API server.
+		var reader client.Reader = b.client
+		if b.opts.APIReader != nil {
+			reader = b.opts.APIReader
+		}
+		live := &corev1.PersistentVolumeClaim{}
+		lerr := reader.Get(ctx, client.ObjectKey{Name: PVCName(uid), Namespace: ws.Namespace}, live)
+		switch {
+		case lerr == nil:
+			if err := checkOwned("PersistentVolumeClaim", live, uid); err != nil {
+				return nil, err
+			}
+			return live, nil
+		case apierrors.IsNotFound(lerr):
+			return nil, ErrHomeVolumeLost
+		default:
+			return nil, lerr
+		}
 	}
 	l := labels(ws)
 	l[LabelDataRole] = string(cdiv1.DataRoleHome)
@@ -1055,7 +1157,9 @@ func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev
 	// spec.sessionPolicy (template policy ∧ tenant ceiling, ADR 0010) is
 	// required — it is the only source pod building reads.
 	ctr.Env = append(ctr.Env,
-		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)})
+		corev1.EnvVar{Name: envClipboardPolicy, Value: string(ws.Spec.SessionPolicy.Clipboard)},
+		corev1.EnvVar{Name: envXferPolicy, Value: string(ws.Spec.SessionPolicy.FileTransfer)},
+		corev1.EnvVar{Name: envXferMaxBytes, Value: strconv.FormatInt(ws.Spec.SessionPolicy.MaxFileBytes, 10)})
 
 	kasm := tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm
 	if kasm {
@@ -1631,6 +1735,18 @@ func podReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// waitingMessage returns the first waiting container's message.
+func waitingMessage(pod *corev1.Pod) string {
+	for _, list := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range list {
+			if w := cs.State.Waiting; w != nil && w.Message != "" {
+				return w.Message
+			}
+		}
+	}
+	return ""
 }
 
 // podReason derives the machine-readable observation reason from pod state:

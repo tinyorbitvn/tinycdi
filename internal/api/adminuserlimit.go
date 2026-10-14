@@ -382,6 +382,11 @@ func userLimitRefs(rep store.QuotaReport) []string {
 
 // entry resolves one principal's row from a quota report.
 func (h *AdminUserLimitsHandler) entry(rep store.QuotaReport, ref string, owner Owner) adminUserLimitEntry {
+	return userLimitEntry(rep, ref, owner)
+}
+
+// userLimitEntry resolves one principal's row from a quota report.
+func userLimitEntry(rep store.QuotaReport, ref string, owner Owner) adminUserLimitEntry {
 	e := adminUserLimitEntry{
 		OwnerRef:    ref,
 		Subject:     owner.Subject,

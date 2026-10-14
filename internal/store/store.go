@@ -96,8 +96,17 @@ func (d *DB) WithTx(ctx context.Context, fn func(Tx) error) (err error) {
 	if err = fn(tx); err != nil {
 		return err
 	}
+	hook := TxHookFromContext(ctx)
+	if hook != nil {
+		if err = hook.PreCommit(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("store: commit %w", err)
+	}
+	if hook != nil {
+		hook.Committed()
 	}
 	return nil
 }

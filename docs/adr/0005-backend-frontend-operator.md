@@ -158,6 +158,7 @@ Header contract:
 | session | `Cross-Origin-Resource-Policy` | `same-origin` |
 | session | `Origin-Agent-Cluster` | `?1` |
 | portal | `frame-src` / `form-action` | `https://*.<sessionDomain>` / `'self' https://*.<sessionDomain>` |
+| portal | `connect-src` | `'self' https://*.<sessionDomain>` (file-transfer content requests, ADR 0010 T11) |
 | portal | `frame-ancestors` (+ `X-Frame-Options: DENY`) | `'none'` — the portal itself is never framed |
 | portal | `Cross-Origin-Opener-Policy` | `same-origin` |
 

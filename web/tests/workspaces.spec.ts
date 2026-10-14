@@ -122,3 +122,22 @@ test("stable codes surface: QUOTA_EXHAUSTED and INVALID_TEMPLATE", async ({ page
   await page.getByRole("button", { name: "Create workspace" }).click();
   await expect(page.getByRole("alert")).toContainText("INVALID_TEMPLATE");
 });
+
+test("a Failed workspace offers Retry start unless its reason is unrecoverable", async ({ page, request }) => {
+  await login(page);
+  await page.getByRole("link", { name: "New workspace" }).click();
+  await page.waitForURL("/workspaces/new");
+  await page.locator('input[name="name"]').fill("failed-desktop");
+  await page.locator('select[name="template"]').selectOption(TEMPLATE_ID);
+  await page.getByRole("button", { name: "Create workspace" }).click();
+  await page.waitForURL(/\/workspaces\/ws_/);
+  const wsId = page.url().split("/").pop()!;
+
+  await patchWorkspace(request, wsId, { phase: "Failed", desiredState: "Running", failureReason: "RuntimeLost" });
+  await expect(page.getByRole("button", { name: "Retry start" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("The desktop stopped unexpectedly").first()).toBeVisible();
+
+  await patchWorkspace(request, wsId, { failureReason: "HomeVolumeLost" });
+  await expect(page.getByText("Starting again would fail the same way")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Retry start" })).toHaveCount(0);
+});

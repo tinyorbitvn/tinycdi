@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { makeAdmin, templatesStubArea } from "./helpers";
-import { SessionPolicyPage, meetClipboard } from "../../../src/admin/SessionPolicyPage";
+import { SessionPolicyPage, meetClipboard, meetFileTransfer } from "../../../src/admin/SessionPolicyPage";
 import { adminArea } from "../../mock-api/admin.ts";
 import type { TemplateFixture } from "../../mock-api/fixtures.ts";
 
@@ -23,6 +23,7 @@ function setup() {
       lifecycleDefaults: {},
       dataPolicyDefault: "Ephemeral",
       clipboardPolicy: "Bidirectional",
+      fileTransferPolicy: "Bidirectional",
       networkProfile: "InternetOnly",
     } as TemplateFixture,
     {
@@ -37,6 +38,7 @@ function setup() {
       lifecycleDefaults: {},
       dataPolicyDefault: "Ephemeral",
       clipboardPolicy: "Send",
+      fileTransferPolicy: "Upload",
       networkProfile: "InternetOnly",
     } as TemplateFixture,
   );
@@ -76,8 +78,29 @@ describe("meetClipboard: direction lattice", () => {
   }
 });
 
+// The file-transfer channel runs the same lattice with Upload/Download
+// as the incomparable directions (ADR 0010 T11).
+describe("meetFileTransfer: direction lattice", () => {
+  const cases: Array<[string, string, string]> = [
+    ["Bidirectional", "FollowTemplate", "Bidirectional"],
+    ["Upload", "Bidirectional", "Upload"],
+    ["Bidirectional", "Upload", "Upload"],
+    ["Bidirectional", "Download", "Download"],
+    ["Upload", "Download", "Disabled"],
+    ["Download", "Upload", "Disabled"],
+    ["Upload", "Upload", "Upload"],
+    ["Disabled", "Bidirectional", "Disabled"],
+    ["Bidirectional", "Disabled", "Disabled"],
+  ];
+  for (const [template, ceiling, want] of cases) {
+    it(`${template} ∩ ${ceiling} = ${want}`, () => {
+      expect(meetFileTransfer(template, ceiling)).toBe(want);
+    });
+  }
+});
+
 describe("session policy page", () => {
-  it("renders the five ceiling options, the inert file-transfer control and the meet preview", async () => {
+  it("renders the five ceiling options, the live file-transfer controls and the meet preview", async () => {
     const api = setup();
     renderWithApi(<SessionPolicyPage />, api);
 
@@ -93,8 +116,9 @@ describe("session policy page", () => {
       "Bidirectional",
     ]);
     expect(clipboard).toHaveValue("FollowTemplate");
-    // The inert v1.3 channel is present but not editable.
-    expect(screen.getByLabelText("File transfer", { exact: true })).toBeDisabled();
+    const ft = screen.getByLabelText("File transfer", { exact: true });
+    expect(ft).toBeEnabled();
+    expect(ft).toHaveValue("FollowTemplate");
 
     const preview = screen.getByRole("table", {
       name: "Effective clipboard policy by template",
@@ -140,6 +164,24 @@ describe("session policy page", () => {
     );
     await waitFor(() =>
       expect(screen.getByText(/No ceiling is set/)).toBeInTheDocument(),
+    );
+  });
+
+  it("the file-transfer ceiling is live: mode and size ride the PUT", async () => {
+    const api = setup();
+    renderWithApi(<SessionPolicyPage />, api);
+    const ft = await screen.findByLabelText("File transfer", { exact: true });
+    fireEvent.change(ft, { target: { value: "Upload" } });
+    fireEvent.change(screen.getByLabelText("Largest file (MiB)"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save ceiling" }));
+    await waitFor(() =>
+      expect(
+        api.state.requests.some((r) => {
+          if (r.method !== "PUT" || r.path !== "/v1/admin/tenants/acme/session-policy") return false;
+          const body = JSON.parse(r.rawBody) as { fileTransfer?: { mode?: string; maxFileBytes?: number } };
+          return body.fileTransfer?.mode === "Upload" && body.fileTransfer?.maxFileBytes === 10485760;
+        }),
+      ).toBe(true),
     );
   });
 });

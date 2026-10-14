@@ -369,6 +369,14 @@ backend:
   # bound. Rendered as -terminal-retention-days=<n>.
   retention:
     terminalRowDays: 30
+    # Days audit_event rows are kept (ADR 0011); a daily leader task prunes
+    # older rows. 1..3650. Rendered as -audit-retention-days=<n>.
+    auditDays: 90
+  fileTransfer:
+    # Platform per-file bound for session file transfer (ADR 0010 T11).
+    # A tenant ceiling may only lower it. Rendered as
+    # -file-transfer-max-bytes=<n>. 1..10737418240.
+    maxFileBytes: 104857600
   # Metrics listener — served on the dedicated ClusterIP backend-metrics
   # Service, never on the public Service (SEC-33).
   # networkPolicy.prometheusPeers must be set when enabled.

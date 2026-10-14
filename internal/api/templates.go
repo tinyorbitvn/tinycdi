@@ -86,21 +86,22 @@ type lifecycleDefaults struct {
 }
 
 type templateView struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	Family            string            `json:"family"`
-	Description       string            `json:"description,omitempty"`
-	Revision          int64             `json:"revision"`
-	Runtime           string            `json:"runtime"`
-	Experience        string            `json:"experience"`
-	Resources         templateResources `json:"resources"`
-	LifecycleDefaults lifecycleDefaults `json:"lifecycleDefaults"`
-	DataPolicyDefault string            `json:"dataPolicyDefault"`
-	ClipboardPolicy   string            `json:"clipboardPolicy"`
-	NetworkProfile    string            `json:"networkProfile"`
-	PublishedAt       time.Time         `json:"publishedAt"`
-	ImageBuiltAt      *time.Time        `json:"imageBuiltAt,omitempty"`
-	ImageStale        *bool             `json:"imageStale,omitempty"`
+	ID                 string            `json:"id"`
+	Name               string            `json:"name"`
+	Family             string            `json:"family"`
+	Description        string            `json:"description,omitempty"`
+	Revision           int64             `json:"revision"`
+	Runtime            string            `json:"runtime"`
+	Experience         string            `json:"experience"`
+	Resources          templateResources `json:"resources"`
+	LifecycleDefaults  lifecycleDefaults `json:"lifecycleDefaults"`
+	DataPolicyDefault  string            `json:"dataPolicyDefault"`
+	ClipboardPolicy    string            `json:"clipboardPolicy"`
+	FileTransferPolicy string            `json:"fileTransferPolicy"`
+	NetworkProfile     string            `json:"networkProfile"`
+	PublishedAt        time.Time         `json:"publishedAt"`
+	ImageBuiltAt       *time.Time        `json:"imageBuiltAt,omitempty"`
+	ImageStale         *bool             `json:"imageStale,omitempty"`
 	// ImageBlocked is true when the image is older than -image-block-after
 	// — a create/start on it is refused 409 IMAGE_STALE (E3). Absent when
 	// the template carries no parseable image-built-at; never blocks.
@@ -140,6 +141,13 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 	out := Page[templateView]{Items: make([]templateView, 0, len(page.Items)), NextCursor: page.NextCursor}
 	for _, e := range page.Items {
 		builtAt, stale := imageFreshness(h.log, e.ImageBuiltAt, h.staleAfter, h.now(), "template", e.ID)
+		// An empty catalog leg reads Disabled — the same value the
+		// session-policy meet resolves it to — so the view always
+		// satisfies the enum.
+		ft := e.FileTransferPolicy
+		if ft == "" {
+			ft = "Disabled"
+		}
 		var blocked *bool
 		if builtAt != nil {
 			b := h.blockAfter > 0 && h.now().Sub(*builtAt) > h.blockAfter
@@ -167,10 +175,11 @@ func (h *TemplateHandler) List(w http.ResponseWriter, r *http.Request) {
 				DisconnectGraceSeconds: e.DisconnectGraceSeconds,
 				MaxRunningSeconds:      e.MaxRunningSeconds,
 			},
-			DataPolicyDefault: e.DataPolicyDefault,
-			ClipboardPolicy:   e.ClipboardPolicy,
-			NetworkProfile:    e.NetworkProfile,
-			PublishedAt:       e.PublishedAt,
+			DataPolicyDefault:  e.DataPolicyDefault,
+			ClipboardPolicy:    e.ClipboardPolicy,
+			FileTransferPolicy: ft,
+			NetworkProfile:     e.NetworkProfile,
+			PublishedAt:        e.PublishedAt,
 		})
 	}
 	respondJSON(w, out)

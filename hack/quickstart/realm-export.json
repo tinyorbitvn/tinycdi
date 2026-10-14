@@ -11,6 +11,9 @@
   "accessTokenLifespan": 900,
   "ssoSessionIdleTimeout": 28800,
   "ssoSessionMaxLifespan": 36000,
+  "groups": [
+    { "name": "tenant-admin", "path": "/tenant-admin" }
+  ],
   "clients": [
     {
       "clientId": "tinycdi",
@@ -53,6 +56,19 @@
             "access.token.claim": "true",
             "userinfo.token.claim": "true"
           }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
         }
       ]
     }
@@ -88,6 +104,27 @@
       "attributes": {
         "tenant_id": [
           "tenant-noquota"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "@DEMO_PASSWORD@",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "@ADMIN_USER@",
+      "email": "demo-admin@tcdi.localtest.me",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "enabled": true,
+      "groups": ["/tenant-admin"],
+      "attributes": {
+        "tenant_id": [
+          "tenant-a"
         ]
       },
       "credentials": [

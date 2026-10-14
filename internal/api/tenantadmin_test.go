@@ -37,6 +37,8 @@ type adminGroupFixtures struct {
 	aqs *fakeAdminQuotaSource
 	uls *fakeUserLimitSource
 	sps *fakeSessionPolicySource
+	aud *fakeAuditSource
+	ud  *fakeUserDirectory
 }
 
 // newAdminGroupEnv mounts every admin-gated surface (/v1/me, /v1/workspaces,
@@ -68,6 +70,8 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 		aqs: &fakeAdminQuotaSource{},
 		uls: newFakeUserLimitSource(),
 		sps: &fakeSessionPolicySource{},
+		aud: &fakeAuditSource{},
+		ud:  &fakeUserDirectory{users: directoryUsers()},
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
@@ -79,6 +83,10 @@ func newAdminGroupEnv(t *testing.T, adminGroups []string) (*testEnv, *adminGroup
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(fx.aqs, defaultTenants(), nil))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(fx.uls, nil, defaultTenants()))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(fx.sps, defaultTenants()))
+	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(&fakeLeaseSource{}, nil, &fakePrincipalRevoker{}, defaultTenants()))
+	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(fx.aud, defaultTenants()))
+	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(fx.ud, fx.uls, defaultTenants()))
+	MountAdminOverviewRoutes(mux, a, NewAdminOverviewHandler(&fakeOverviewDB{calls: map[string]int{}}, fakeCounter{}, defaultTenants()))
 	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
 	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
 	t.Cleanup(func() { srv.Close(); iss.Close() })
@@ -273,6 +281,80 @@ func TestAdminSessionPolicy_CustomAdminGroups(t *testing.T) {
 	if r.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
 	}
+
+	r = doReq(t, env, sess, csrf, http.MethodPost, adminSessionPolicyPath+":apply",
+		`{"dryRun":true}`, map[string]string{"If-Match": "*"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member apply: status=%d, want 403", r.StatusCode)
+	}
+}
+
+// TestAdminSessions_CustomAdminGroups: both F5 routes honour the configured admin group.
+func TestAdminSessions_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+	calls := []struct{ method, path string }{
+		{http.MethodGet, adminSessionsPath},
+		{http.MethodPost, adminRevokePath("https://idp|alice")},
+	}
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	for _, c := range calls {
+		r := doReq(t, env, sess, csrf, c.method, c.path, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("member %s: status=%d, want 200", c.method, r.StatusCode)
+		}
+	}
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	for _, c := range calls {
+		r := doReq(t, env, sess, csrf, c.method, c.path, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusForbidden {
+			t.Fatalf("non-member %s: status=%d, want 403", c.method, r.StatusCode)
+		}
+	}
+}
+
+// TestAdminAudit_CustomAdminGroups: the audit-viewer admin gate honours
+// the configured group — same tenantAdminPrincipal path as quota and
+// session policy.
+func TestAdminAudit_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	r := doReq(t, env, sess, csrf, http.MethodGet, adminAuditPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("member GET: status=%d, want 200", r.StatusCode)
+	}
+
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	r = doReq(t, env, sess, csrf, http.MethodGet, adminAuditPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
+	}
+}
+
+// TestAdminUsers_CustomAdminGroups: the user-directory admin gate honours
+// the configured group — same tenantAdminPrincipal path as quota and
+// user limits.
+func TestAdminUsers_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	r := doReq(t, env, sess, csrf, http.MethodGet, adminUsersPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("member GET: status=%d, want 200", r.StatusCode)
+	}
+
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	r = doReq(t, env, sess, csrf, http.MethodGet, adminUsersPath, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
+	}
 }
 
 // TestWorkspaceForeignGet_CustomAdminGroups: a member of the configured
@@ -399,5 +481,22 @@ func TestNoRawTenantAdminMembershipCheck(t *testing.T) {
 				t.Errorf("%s contains %s — resolve the admin role through Principal.IsTenantAdmin", name, pat)
 			}
 		}
+	}
+}
+
+func TestAdminOverview_CustomAdminGroups(t *testing.T) {
+	env, _ := newAdminGroupEnv(t, []string{testCustomAdminGroup})
+	const path = "/v1/admin/tenants/tenant-a/overview"
+	sess, csrf := loginGroups(t, env, "admin-a", testCustomAdminGroup)
+	r := doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("member GET: status=%d, want 200", r.StatusCode)
+	}
+	sess, csrf = loginGroups(t, env, "admin-b", TenantAdminGroup)
+	r = doReq(t, env, sess, csrf, http.MethodGet, path, "", nil)
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member GET: status=%d, want 403", r.StatusCode)
 	}
 }

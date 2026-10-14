@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { createApi, setCsrfToken } from "../../../src/api/client";
 import { ApiProvider } from "../../../src/api/context";
 import { MeProvider, type Me } from "../../../src/app/me";
+import { ToastProvider } from "../../../src/design";
 import { SessionPage } from "../../../src/session/SessionPage";
 import {
   SESSION_FRAME_SANDBOX,
@@ -55,7 +56,9 @@ function setupPage(workspaceOverrides: Parameters<typeof readyWorkspace>[0] = {}
   const utils = render(
     <ApiProvider client={client}>
       <MeProvider load={async () => ME}>
-        <SessionPage workspaceId={ws.id} />
+        <ToastProvider>
+          <SessionPage workspaceId={ws.id} />
+        </ToastProvider>
       </MeProvider>
     </ApiProvider>,
   );
@@ -116,7 +119,9 @@ describe("SessionPage", () => {
     render(
       <ApiProvider client={client}>
         <MeProvider load={async () => ME}>
-          <SessionPage workspaceId={ws.id} />
+          <ToastProvider>
+            <SessionPage workspaceId={ws.id} />
+          </ToastProvider>
         </MeProvider>
       </ApiProvider>,
     );
@@ -244,7 +249,9 @@ function setupScripted(
   const utils = render(
     <ApiProvider client={createApi(wrapped)}>
       <MeProvider load={async () => ME}>
-        <SessionPage workspaceId={ws.id} onSignIn={onSignIn} {...opts.props} />
+        <ToastProvider>
+          <SessionPage workspaceId={ws.id} onSignIn={onSignIn} {...opts.props} />
+        </ToastProvider>
       </MeProvider>
     </ApiProvider>,
   );
@@ -1133,5 +1140,38 @@ describe("SessionPage in-frame reconnect (FX-R32)", () => {
     expect(writes.length).toBe(base);
     expect(submitted).toHaveLength(0);
     expect(ticketPosts()).toHaveLength(0);
+  });
+});
+
+describe("SessionPage cold connect (F2)", () => {
+  it("cold connect re-mints a ticket once and stops when the stream is confirmed", async () => {
+    vi.spyOn(HTMLIFrameElement.prototype, "contentWindow", "get").mockReturnValue({
+      get location(): Location {
+        throw new DOMException("cross-origin", "SecurityError");
+      },
+    } as unknown as Window);
+    const { ws, control, submitted, ticketPosts } = setupScripted({
+      lease: false,
+      marker: false,
+      props: { pollIntervalMs: 20, inFrameRetryMs: 60_000, coldConfirmMs: 150 },
+    });
+    const ref = leaseRefOf("lease_cold");
+    // The lease is live but the stream never claims: the cold stall.
+    control.connection = () => ({ state: "disconnected", leaseActive: true, leaseRef: ref, streamEpoch: 0 });
+
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    fireEvent.load(await screen.findByTitle(`Desktop: ${ws.name}`));
+
+    // 150 ms confirm window + the 1 s first backoff: one re-mint, as a takeover.
+    await waitFor(() => expect(ticketPosts()).toHaveLength(2), { timeout: 4_000 });
+    expect(JSON.parse(ticketPosts()[0].rawBody)).toEqual({ takeover: false });
+    expect(JSON.parse(ticketPosts()[1].rawBody)).toEqual({ takeover: true });
+    await waitFor(() => expect(submitted).toHaveLength(2));
+
+    // The second attempt's stream comes up: no third mint, ever.
+    control.connection = () => ({ state: "connected", leaseActive: true, leaseRef: ref, streamEpoch: 1 });
+    fireEvent.load(await screen.findByTitle(`Desktop: ${ws.name}`));
+    await new Promise((r) => setTimeout(r, 600)); // > coldConfirmMs + a poll
+    expect(ticketPosts()).toHaveLength(2);
   });
 });

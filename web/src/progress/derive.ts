@@ -101,6 +101,7 @@ const KNOWN_REASONS = new Set([
   "Unschedulable",
   "BackendError",
   "WaitingForDisk",
+  "WaitingForEndpoint",
   "BootDeadlineExceeded",
   "QuotaReserved",
   "TemplateResolved",

@@ -135,6 +135,15 @@ spec:
                     - Download
                     - Bidirectional
                     type: string
+                  maxFileBytes:
+                    description: |-
+                      maxFileBytes is the resolved per-file size bound for file transfer:
+                      the tenant ceiling's maxFileBytes clipped to the platform bound.
+                      0 when fileTransfer is Disabled. Rendered into the runtime pod as
+                      TCDI_XFER_MAX_BYTES; the in-pod transfer helper hard-caps on it.
+                    format: int64
+                    minimum: 0
+                    type: integer
                 required:
                 - clipboard
                 - fileTransfer
@@ -1478,6 +1487,11 @@ rules:
 - apiGroups: ["networking.k8s.io"]
   resources: ["networkpolicies"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Observe reads the Service's EndpointSlices: ConnectionReady needs a ready
+# endpoint for this pod (F2). Read-only.
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
 # Events: the operator emits the IntentBehind warning on Workspace objects
 # (edge-triggered, one per drift transition) inside managed namespaces.
 - apiGroups: [""]
@@ -1806,6 +1820,12 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days=30
+            # Audit retention (ADR 0011): the leader's daily prune.
+            - -audit-retention-days=90
+            # Platform per-file bound for session file transfer (ADR 0010
+            # T11); a tenant ceiling may only lower it. int64 keeps the
+            # value decimal — big integers render in scientific notation.
+            - -file-transfer-max-bytes=104857600
           env:
             - name: TCDI_DATABASE_URL
               valueFrom:

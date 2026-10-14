@@ -38,6 +38,7 @@ export const TEMPLATE_LINUX: TemplateFixture = {
   },
   dataPolicyDefault: "Retain",
   clipboardPolicy: "Bidirectional",
+  fileTransferPolicy: "Bidirectional",
   networkProfile: "InternetOnly",
   publishedAt: "2026-09-01T00:00:00Z",
 };
@@ -58,6 +59,7 @@ export const TEMPLATE_BROWSER: TemplateFixture = {
   },
   dataPolicyDefault: "Ephemeral",
   clipboardPolicy: "Disabled",
+  fileTransferPolicy: "Disabled",
   networkProfile: "Isolated",
   publishedAt: "2026-09-01T00:00:00Z",
 };

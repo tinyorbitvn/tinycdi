@@ -49,6 +49,8 @@ describe("workspaces: action gating", () => {
   it("canStart covers the two terminal phases", () => {
     expect(canStart({ ...base, phase: "Stopped" })).toBe(true);
     expect(canStart({ ...base, phase: "Failed" })).toBe(true);
+    expect(canStart({ ...base, phase: "Failed", failureReason: "RuntimeLost" })).toBe(true);
+    expect(canStart({ ...base, phase: "Failed", failureReason: "HomeVolumeLost" })).toBe(false);
     for (const phase of ["Pending", "Provisioning", "Ready", "Stopping", "Terminating"] as const) {
       expect(canStart({ ...base, phase }), phase).toBe(false);
     }

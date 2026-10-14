@@ -216,6 +216,10 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 		Token:       "tkt_coveragereplay0000000000000",
 		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
 	}}, tenants, d).WithLogger(logger).WithAuditSink(sink)
+	tdeps := &fakeTransferDeps{
+		policy: provisioning.SessionPolicy{FileTransfer: "Bidirectional", MaxFileBytes: 1 << 20},
+		status: ObservedStatus{Fresh: true, Found: true, Phase: "Ready", RuntimeUID: "uid-cov", ObservedRuntimeGeneration: 1},
+	}
 
 	// env.login drives the /auth/* flow; everything below mirrors the
 	// appMux mount block — keep in sync with it. The direct registrations
@@ -233,12 +237,19 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
 	MountWorkspaceRoutes(mux, a, NewWorkspaceHandler(be, cat, tenants).WithAuditSink(sink), NewTemplateHandler(cat, tenants))
 	MountConnectionRoutes(mux, a, connH)
+	MountFileTransferRoutes(mux, a, NewFileTransferHandler(be, tdeps, tdeps, d).WithAuditSink(sink), noop)
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
 	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
-	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink))
+	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink).WithApply(&fakeApplyBackend{restarted: map[string]int64{}, live: map[string]bool{}}, fakeRunningPolicies{}, nil))
+	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(
+		&fakeLeaseSource{leases: []store.LiveLease{{ID: "lease-cov-1", WorkspaceID: "ws_0000000000000000000000000c", WorkspaceName: "cov", OwnerRef: "iss|sub", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}}},
+		newFakeDirectory(), &fakePrincipalRevoker{res: RevokeAllResult{Leases: 1}}, tenants).WithAuditSink(sink))
+	MountAdminAuditRoutes(mux, a, NewAdminAuditHandler(&fakeAuditSource{rows: auditRows(2)}, tenants).WithAuditSink(sink))
+	MountAdminUserRoutes(mux, a, NewAdminUsersHandler(&fakeUserDirectory{users: directoryUsers()}, newFakeUserLimitSource(), tenants).WithAuditSink(sink))
+	MountAdminOverviewRoutes(mux, a, NewAdminOverviewHandler(&fakeOverviewDB{calls: map[string]int{}}, fakeCounter{}, tenants).WithAuditSink(sink))
 
 	// Production wrap order (wire.wrapApp): RequestID → request audit →
 	// trusted-origin gate → mux. The replay requests carry no Origin or
@@ -325,6 +336,10 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 			doReq(t, env, sess, csrf, http.MethodPost,
 				"/v1/workspaces/"+wsID+"/connections", `{"takeover":true}`, nil).Body.Close()
 		}},
+		{"POST /v1/workspaces/{}/file-transfers", auditActionFileTransferUpload, func() {
+			doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil).Body.Close()
+		}},
 		{"DELETE /v1/workspaces/{}", auditActionWorkspaceDelete, func() {
 			doReq(t, env, sess, csrf, http.MethodDelete, "/v1/workspaces/"+wsID, "", nil).Body.Close()
 		}},
@@ -371,6 +386,28 @@ func TestAuditCoverage_MountedMuxEmitsEventPerRoute(t *testing.T) {
 			doReq(t, env, sessA, csrfA, http.MethodPut, adminSessionPolicyPath,
 				`{"clipboard":"Disabled"}`,
 				map[string]string{"If-Match": "*"}).Body.Close()
+		}},
+		{"POST /v1/admin/tenants/{}/session-policy:apply", auditActionAdminSessionPolicyApply, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPost, adminSessionPolicyPath+":apply",
+				`{"dryRun":true}`, map[string]string{"If-Match": ETagOf("v1")}).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/audit", auditActionAdminAuditGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminAuditPath, "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/users", auditActionAdminUserList, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminUsersPath, "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/users/{}", auditActionAdminUserGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminUserPath("https://idp|alice"), "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/sessions", auditActionAdminSessionList, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, adminSessionsPath, "", nil).Body.Close()
+		}},
+		{"POST /v1/admin/tenants/{}/users/{}/sessions:revoke-all", auditActionAdminSessionRevoke, func() {
+			doReq(t, env, sessA, csrfA, http.MethodPost, adminRevokePath("iss|sub"), "", nil).Body.Close()
+		}},
+		{"GET /v1/admin/tenants/{}/overview", auditActionAdminOverviewGet, func() {
+			doReq(t, env, sessA, csrfA, http.MethodGet, "/v1/admin/tenants/tenant-a/overview", "", nil).Body.Close()
 		}},
 		{"POST /v1/logout", auditActionSessionLogout, func() {
 			doReq(t, env, sess, csrf, http.MethodPost, "/v1/logout", "", nil).Body.Close()

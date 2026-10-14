@@ -12,6 +12,7 @@ export default {
   "admin.nav.data": "Data",
   "admin.nav.users": "Users",
   "admin.nav.sessionPolicy": "Session policy",
+  "admin.nav.audit": "Audit log",
   "admin.eyebrow": "Admin",
   "admin.eyebrow.tenant": "Admin · {tenant}",
   "admin.gate.checking": "Checking permissions",
@@ -29,8 +30,33 @@ export default {
   "admin.route.users": "Tenant users",
   "admin.route.user": "User detail",
   "admin.route.sessionPolicy": "Session policy",
+  "admin.route.audit": "Audit log",
 
   "admin.action.refresh": "Refresh",
+
+  // Audit page.
+  "admin.audit.title": "Audit log",
+  "admin.audit.description":
+    "Every administrative and mutating action in this tenant, newest first. Events older than the platform retention period (90 days by default) are removed.",
+  "admin.audit.filter.action": "Action",
+  "admin.audit.filter.actor": "Actor",
+  "admin.audit.filter.actorHint": "An actor reference (oidc:…) or a user reference (issuer|subject)",
+  "admin.audit.filter.target": "Target",
+  "admin.audit.filter.since": "From",
+  "admin.audit.filter.until": "To",
+  "admin.audit.filter.apply": "Apply",
+  "admin.audit.filter.clear": "Clear",
+  "admin.audit.column.time": "Time",
+  "admin.audit.column.actor": "Actor",
+  "admin.audit.column.action": "Action",
+  "admin.audit.column.target": "Target",
+  "admin.audit.column.outcome": "Outcome",
+  "admin.audit.column.details": "Details",
+  "admin.audit.outcome.success": "Success",
+  "admin.audit.outcome.denied": "Denied",
+  "admin.audit.outcome.failure": "Failed",
+  "admin.audit.caption": "Audit events",
+  "admin.audit.empty": "No audit events match.",
 
   // Overview page.
   "admin.overview.title": "Tenant overview",
@@ -47,6 +73,16 @@ export default {
   "admin.overview.data.title": "Retained data",
   "admin.overview.data.disks": "retained disks",
   "admin.overview.data.all": "View retained data",
+  "admin.overview.health.title": "Health",
+  "admin.overview.health.liveSessions": "Live sessions",
+  "admin.overview.health.p95": "Start time (p95, 24 h)",
+  "admin.overview.health.samples": "{n} starts measured",
+  "admin.overview.health.noSamples": "No starts in 24 h",
+  "admin.overview.health.stuck": "Stuck deletions",
+  "admin.overview.health.running": "Running by template",
+  "admin.overview.health.noneRunning": "Nothing running",
+  "admin.overview.health.stale":
+    "Workspace status is out of date; Kubernetes counts are hidden until the watch recovers.",
 
   // Quota page.
   "admin.quota.title": "Quota",
@@ -215,27 +251,29 @@ export default {
   "admin.data.column.age": "Age",
   "admin.data.action.purgeLabel": "Purge {id}",
 
-  // Users page: principals known to the tenant (quota usage or a per-user
-  // limit row) plus per-user drill-down.
+  // Users page: everyone who has signed in to the tenant (the
+  // principal directory) plus per-user drill-down.
   "admin.users.title": "Users",
-  "admin.users.description": "Every principal with usage or a limit in this tenant.",
-  "admin.users.note":
-    "This list shows users who have used the tenant — quota usage or a per-user limit — not a full tenant directory.",
+  "admin.users.description": "Everyone who has signed in to this tenant.",
   "admin.users.loading": "Loading users",
   "admin.users.caption": "Tenant users",
   "admin.users.filter.label": "Filter",
   "admin.users.filter.placeholder": "Name or subject",
-  "admin.users.empty.all": "No users recorded yet.",
+  "admin.users.empty.all": "No one has signed in to this tenant yet.",
   "admin.users.empty.filtered": "No users match the filter.",
   "admin.users.column.disks": "Disks",
+  "admin.users.column.lastSeen": "Last seen",
+  "admin.users.column.workspaces": "Workspaces",
   "admin.userDetail.titleFallback": "User detail",
   "admin.userDetail.notFound.title": "User not found",
   "admin.userDetail.notFound.body":
-    "This principal has no usage or limit in the tenant — or the list changed since it was loaded.",
+    "This user has not signed in to this tenant.",
   "admin.userDetail.notFound.back": "Back to users",
   "admin.userDetail.limits.title": "Running-workspace limit",
   "admin.userDetail.field.subject": "Subject",
   "admin.userDetail.field.ownerRef": "Owner reference",
+  "admin.userDetail.field.email": "Email",
+  "admin.userDetail.field.lastSeen": "Last seen",
   "admin.userDetail.workspaces.title": "Workspaces",
   "admin.userDetail.workspaces.caption": "The user's workspaces",
   "admin.userDetail.workspaces.empty": "This user has no workspaces.",
@@ -243,6 +281,20 @@ export default {
   "admin.userDetail.disks.caption": "The user's retained disks",
   "admin.userDetail.disks.empty": "This user has no retained disks.",
   "admin.userDetail.disks.all": "Open retained data",
+
+  // Live sessions section on the user detail page (F5).
+  "admin.sessions.title": "Live sessions",
+  "admin.sessions.caption": "Live desktop sessions of this user",
+  "admin.sessions.column.workspace": "Workspace",
+  "admin.sessions.column.started": "Started",
+  "admin.sessions.column.lastActive": "Last renewed",
+  "admin.sessions.column.ref": "Reference",
+  "admin.sessions.empty": "No live sessions.",
+  "admin.sessions.signOutAll": "Sign out everywhere",
+  "admin.sessions.confirm.title": "Sign {name} out everywhere?",
+  "admin.sessions.confirm.body":
+    "Every portal session of this user ends and their open desktops disconnect. Their workspaces keep running.",
+  "admin.sessions.done": "Signed out: {sessions} portal sessions, {leases} desktop sessions.",
 
   // Session policy page (tenant clipboard ceiling, ADR 0010).
   "admin.policy.title": "Session policy",
@@ -258,19 +310,52 @@ export default {
   "admin.policy.clipboard.hint":
     "Send lets people copy from their device into the workspace; Receive lets them copy from the workspace back to their device.",
   "admin.policy.fileTransfer.label": "File transfer",
-  "admin.policy.fileTransfer.hint": "Available in v1.3.",
+  "admin.policy.fileTransfer.hint":
+    "Upload is device → workspace, Download is workspace → device. Files land in the Transfers folder of the workspace home.",
   "admin.policy.option.followTemplate": "Follow template",
+  "admin.policy.ft.option.upload": "Upload only",
+  "admin.policy.ft.option.download": "Download only",
+  "admin.policy.ft.option.bidirectional": "Both directions",
+  "admin.policy.ft.option.disabled": "Disabled",
+  "admin.policy.ft.maxLabel": "Largest file (MiB)",
+  "admin.policy.ft.maxHint": "Empty uses the platform limit.",
   "admin.policy.appliesNote":
-    "Tightening applies to new connections right away; a running workspace picks it up at its next start.",
+    "Tightening applies to new connections and new file transfers right away; a running workspace's clipboard limits follow at its next start, or at once with Apply now.",
+  "admin.policy.apply.button": "Apply now",
+  "admin.policy.apply.title": "Apply the ceiling to running workspaces",
+  "admin.policy.apply.description":
+    "These workspaces run with a looser policy than the ceiling. Applying restarts them; open desktops disconnect and reconnect to the new policy. Home folders are kept.",
+  "admin.policy.apply.caption": "Running workspaces looser than the ceiling",
+  "admin.policy.apply.loading": "Checking running workspaces",
+  "admin.policy.apply.close": "Close",
+  "admin.policy.apply.policyText": "Clipboard: {clipboard}; files: {fileTransfer}",
+  "admin.policy.apply.includeActive": "Also restart workspaces someone is using right now",
+  "admin.policy.apply.confirm": "Restart affected workspaces",
+  "admin.policy.apply.none": "Every running workspace already follows the ceiling.",
+  "admin.policy.apply.truncated":
+    "Only the first 500 affected workspaces are listed. Apply again after they restart.",
+  "admin.policy.apply.live": "Live session",
+  "admin.policy.apply.result.pending": "Will restart",
+  "admin.policy.apply.result.restarted": "Restarted",
+  "admin.policy.apply.result.skipped_active": "Skipped (in use)",
+  "admin.policy.apply.result.skipped_moved": "Skipped (already restarting)",
+  "admin.policy.apply.result.failed": "Failed",
+  "admin.policy.apply.summary": "{restarted} restarted, {skipped} skipped.",
+  "admin.policy.apply.column.workspace": "Workspace",
+  "admin.policy.apply.column.owner": "Owner",
+  "admin.policy.apply.column.change": "Applied → ceiling",
+  "admin.policy.apply.column.result": "Result",
   "admin.policy.save": "Save ceiling",
   "admin.policy.preview.title": "Effective policy by template",
   "admin.policy.preview.description":
-    "What users get for each template: the template's own clipboard policy narrowed by the selected ceiling.",
+    "What users get for each template: the template's own clipboard and file-transfer policy narrowed by the selected ceilings.",
   "admin.policy.preview.caption": "Effective clipboard policy by template",
   "admin.policy.preview.template": "Template",
   "admin.policy.preview.templatePolicy": "Template policy",
   "admin.policy.preview.ceiling": "Ceiling",
   "admin.policy.preview.effective": "Effective for users",
+  "admin.policy.preview.templateFt": "Template file transfer",
+  "admin.policy.preview.effectiveFt": "Effective file transfer",
   "admin.policy.preview.empty": "No templates in the catalog.",
 
   // Error guidance (stable code -> next step; server messages are detail).

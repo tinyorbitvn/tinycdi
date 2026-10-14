@@ -155,6 +155,14 @@ func appendIntent(ctx context.Context, tx store.Tx, workspaceUID PlatformID, kin
 		workspaceUID, tenantID, rev, string(kind), requestID, payload); err != nil {
 		return 0, fmt.Errorf("append intent: insert %w", err)
 	}
+	if (kind == IntentCreate || kind == IntentStart) && desired == "Running" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO workspace_boot (workspace_id, runtime_generation, tenant_id)
+			VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+			workspaceUID, gen, tenantID); err != nil {
+			return 0, fmt.Errorf("append intent: record boot %w", err)
+		}
+	}
 	return rev, nil
 }
 

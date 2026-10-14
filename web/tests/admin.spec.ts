@@ -32,7 +32,7 @@ test.beforeEach(async ({ request }) => {
   expect(res.ok()).toBeTruthy();
 });
 
-test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
+test("a tenant admin sees all eight admin pages", async ({ page, request }) => {
   await makeAdmin(request);
 
   await login(page, "/admin");
@@ -47,6 +47,7 @@ test("a tenant admin sees all seven admin pages", async ({ page, request }) => {
   await expect(adminNav.getByRole("tab", { name: "Templates" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Data" })).toBeVisible();
   await expect(adminNav.getByRole("tab", { name: "Users" })).toBeVisible();
+  await expect(adminNav.getByRole("tab", { name: "Audit log" })).toBeVisible();
 
   // The route owns the selection: Overview is the selected tab on /admin.
   await expect(adminNav.getByRole("tab", { name: "Overview" })).toHaveAttribute(
@@ -128,6 +129,8 @@ test("a regular user is redirected away from /admin/users and tenant reads stay 
   // Every read behind the Users page is refused server-side for non-admins.
   const limits = await page.request.get("/v1/admin/tenants/acme/user-limits");
   expect(limits.status()).toBe(403);
+  const dir = await page.request.get("/v1/admin/tenants/acme/users");
+  expect(dir.status()).toBe(403);
   const quota = await page.request.get("/v1/admin/tenants/acme/quota");
   expect(quota.status()).toBe(403);
   const ws = await page.request.get("/v1/workspaces?scope=tenant");
@@ -142,20 +145,22 @@ test("a tenant admin opens a user's detail and edits their running limit", async
   await login(page, "/admin/users");
   await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
 
-  // The paged per-user limits collection lists every principal with usage or a limit.
+  // The paged user directory lists everyone who signed in.
   const table = page.getByRole("table", { name: "Tenant users" });
   await expect(table.getByRole("row", { name: /Grace Hopper/ })).toBeVisible();
   await expect(table.getByRole("row", { name: /Linus Pauling/ })).toBeVisible();
+  await expect(table.getByRole("row", { name: /Margaret Hamilton/ })).toBeVisible();
 
   // Search narrows the list.
   await page.getByLabel("Filter").fill("grace");
   await expect(table.getByRole("row", { name: /Linus Pauling/ })).toHaveCount(0);
   await page.getByLabel("Filter").fill("");
 
-  // Row -> user detail page.
+  // Row -> user detail page (the segment is the base64url owner reference).
   await table.getByRole("link", { name: "Grace Hopper" }).click();
-  await page.waitForURL(/\/admin\/users\/user-01J4ZDGRC$/);
+  await page.waitForURL("**/admin/users/" + Buffer.from("https://idp.invalid|user-01J4ZDGRC").toString("base64url"));
   await expect(page.getByRole("heading", { name: "Grace Hopper" })).toBeVisible();
+  await expect(page.getByText("Last seen", { exact: true })).toBeVisible();
 
   // Her workspaces and retained disk — and nobody else's.
   const wsTable = page.getByRole("table", { name: "The user's workspaces" });
@@ -190,6 +195,18 @@ test("a tenant admin opens a user's detail and edits their running limit", async
     name: /Grace Hopper/,
   });
   await expect(graceRow.getByRole("cell").nth(2)).toHaveText("3");
+});
+
+test("a signed-in user with no workspaces has a detail page", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin/users");
+
+  await page.getByRole("link", { name: "Margaret Hamilton" }).click();
+  await expect(page.getByRole("heading", { name: "Margaret Hamilton" })).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "The user's workspaces" }),
+  ).toContainText("This user has no workspaces.");
+  await expect(page.getByText("Last seen", { exact: true })).toBeVisible();
 });
 
 test("a tenant admin starts another user's stopped workspace", async ({ page, request }) => {
@@ -313,4 +330,75 @@ test("a tenant admin purges another owner's retained disk", async ({ page, reque
 
   await expect(page.getByText("Purge scheduled.")).toBeVisible();
   await expect(graceRow).toContainText("Purging");
+});
+
+test("audit log lists, filters and pages", async ({ page, request }) => {
+  await makeAdmin(request);
+  const errors: string[] = [];
+  page.on("console", (m) => {
+    // The optional operator branding file is served as 200 {} by the real
+    // frontend; the Vite dev server 404s it — not a page error.
+    if (m.type() === "error" && !m.location()?.url.endsWith("/branding/branding.json")) {
+      errors.push(m.text());
+    }
+  });
+  await login(page, "/admin/audit");
+  await expect(page.getByRole("heading", { name: "Audit log", exact: true })).toBeVisible();
+
+  const table = page.getByRole("table", { name: "Audit events" });
+  await expect(table.getByRole("row")).toHaveCount(51); // header + 50
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(table.getByRole("row")).toHaveCount(61); // header + 60
+  await expect(table.getByText("Denied").first()).toBeVisible();
+
+  await page.getByLabel("Action", { exact: true }).fill("workspace.start");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(table.getByRole("row")).toHaveCount(13); // header + 12
+  await expect(table.getByRole("cell", { name: "workspace.stop" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Clear" }).click();
+  await expect(table.getByRole("row")).toHaveCount(51);
+  expect(errors).toEqual([]);
+});
+
+test("admin signs a user out everywhere", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin/users");
+  await page.getByRole("table", { name: "Tenant users" }).getByRole("link", { name: "Grace Hopper" }).click();
+  await page.waitForURL(/\/admin\/users\/.+/);
+
+  const section = page.getByRole("region", { name: "Live sessions" });
+  const table = section.getByRole("table", { name: "Live desktop sessions of this user" });
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+  await expect(table.getByText("grace-analysis")).toBeVisible();
+  await expect(table.getByText("linus-desktop")).toHaveCount(0);
+
+  await section.getByRole("button", { name: "Sign out everywhere" }).click();
+  const dialog = page.getByRole("alertdialog", { name: "Sign Grace Hopper out everywhere?" });
+  await dialog.getByRole("button", { name: "Sign out everywhere" }).click();
+
+  await expect(section.getByRole("status")).toContainText("Signed out: 1 portal sessions, 2 desktop sessions.");
+  await expect(table.getByText("No live sessions.")).toBeVisible();
+
+  const reqs = await (await request.get(`${MOCK}/_control/requests`)).json();
+  expect(
+    reqs.requests.some(
+      (r: { method: string; path: string; headers: Record<string, string> }) =>
+        r.method === "POST" &&
+        decodeURIComponent(r.path) === "/v1/admin/tenants/acme/users/https://idp.invalid|user-01J4ZDGRC/sessions:revoke-all" &&
+        Boolean(r.headers["x-csrf-token"]),
+    ),
+  ).toBeTruthy();
+});
+
+test("overview health cards show the aggregate and the stale notice", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page, "/admin");
+  const health = page.getByRole("region", { name: "Health" });
+  await expect(health).toContainText("12 s");
+  await expect(health).toContainText("7 starts measured");
+  await expect(health.getByText("chrome-r1 — 2")).toBeVisible();
+  await request.post(`${MOCK}/_control/admin/overview`, { data: { fresh: false } });
+  await page.reload();
+  await expect(page.getByText(/Workspace status is out of date/)).toBeVisible();
 });

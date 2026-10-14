@@ -21,6 +21,10 @@ const runtimeStreamingPort int32 = 8443
 type Credential struct {
 	Username string
 	Password string
+	// XferToken is the per-workspace transfer credential (the Secret's
+	// xfer-token) the gateway injects as X-Tcdi-Xfer-Token on the transfer
+	// leg; only the in-pod tcdi-xferd checks it.
+	XferToken string
 	// TLSCA is the pinned trust anchor for the upstream TLS endpoint
 	// (the workspace Secret's tls.crt; the runtime cert is self-signed).
 	TLSCA []byte
@@ -53,6 +57,9 @@ type Target struct {
 	TLSCA    []byte `json:"caPEM"`
 	Username string `json:"username"` // runtime credential injected upstream, never from client
 	Password string `json:"password"`
+	// XferToken is the in-pod transfer helper's credential, injected
+	// upstream as X-Tcdi-Xfer-Token on the transfer leg only.
+	XferToken string `json:"xferToken"`
 }
 
 // credentialSource returns the configured CredentialSource, falling back to
@@ -125,5 +132,6 @@ func (b *Broker) ResolveTarget(ctx context.Context, gw GatewayIdentity, leaseID 
 		TLSCA:         cred.TLSCA,
 		Username:      cred.Username,
 		Password:      cred.Password,
+		XferToken:     cred.XferToken,
 	}, nil
 }

@@ -386,6 +386,7 @@ func TestEvents_TemplateSkipReasons(t *testing.T) {
 		provisioning.SkipReasonStorageSmaller,
 		provisioning.SkipReasonNetworkProfileChanged,
 		provisioning.SkipReasonClipboardPolicyChanged,
+		provisioning.SkipReasonFileTransferPolicyChanged,
 		provisioning.SkipReasonAdapterChanged,
 		provisioning.SkipReasonHostUsersChanged,
 		provisioning.SkipReasonPlacementChanged,

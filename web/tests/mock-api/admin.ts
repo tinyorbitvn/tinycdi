@@ -58,7 +58,52 @@ export const ME: Owner = { subject: "user-01J4ZDADA", displayName: "Ada Lovelace
 export const OTHER_USERS: Owner[] = [
   { subject: "user-01J4ZDGRC", displayName: "Grace Hopper" },
   { subject: "user-01J4ZDLIN", displayName: "Linus Pauling" },
-];
+]
+// Principals who signed in but hold no workspace, disk or override — the
+// user directory lists them, the user-limits collection does not.
+export const SIGNED_IN_ONLY: Owner[] = [
+  { subject: "user-01J4ZDMGH", displayName: "Margaret Hamilton" },
+  { subject: "user-01J4ZDKJN", displayName: "Katherine Johnson" },
+]
+
+export interface AuditRow {
+  id: string;
+  createdAt: string;
+  actor: string;
+  action: string;
+  targetKind: string;
+  targetId: string;
+  outcome: string;
+  errorCode?: string | undefined;
+  requestId: string;
+  details: Record<string, string>;
+}
+
+export const AUDIT_ROWS = 60;
+
+// Deterministic audit rows for the /admin/audit mock: newest first, row 0 a
+// denied workspace.start; workspace.start rows total 12 (one per 5). The 60
+// rows exceed the mock's default page (50), so the UI exercises Load more.
+function auditRows(): AuditRow[] {
+  const ACTIONS = ["workspace.start", "workspace.stop", "admin.quota.set", "admin.user_limit.get", "data.purge"];
+  const rows: AuditRow[] = [];
+  for (let i = 0; i < AUDIT_ROWS; i += 1) {
+    const action = ACTIONS[i % 5];
+    rows.push({
+      id: String(AUDIT_ROWS - i),
+      createdAt: new Date(Date.UTC(2026, 9, 13, 12, 0) - i * 60_000).toISOString(),
+      actor: "oidc:0011223344556677",
+      action,
+      targetKind: action.startsWith("workspace.") ? "workspace" : "tenant",
+      targetId: action.startsWith("workspace.") ? `ws_audit${i}` : TENANT,
+      outcome: i % 7 === 0 ? "denied" : "success",
+      errorCode: i % 7 === 0 ? "FORBIDDEN" : undefined,
+      requestId: `req-${i}`,
+      details: {},
+    });
+  }
+  return rows;
+};
 
 export const DEFAULT_LIMITS: QuotaAmounts = {
   workspaces: 20,
@@ -162,6 +207,31 @@ function seedRetained(): { rec: RetainedFixture; owner: Owner }[] {
   ];
 }
 
+interface MockLiveSession {
+  leaseRef: string;
+  workspaceId: string;
+  workspaceName: string;
+  ownerRef: string;
+  owner: Owner;
+  createdAt: string;
+  lastRenewedAt?: string;
+  expiresAt: string;
+}
+
+// Two live sessions for Grace, one for Linus (newest first by createdAt).
+function seedLiveSessions(): MockLiveSession[] {
+  const [grace, linus] = OTHER_USERS;
+  const row = (leaseRef: string, workspaceId: string, workspaceName: string, o: Owner, createdAt: string): MockLiveSession => ({
+    leaseRef, workspaceId, workspaceName, ownerRef: ownerRefOf(o.subject), owner: o,
+    createdAt, lastRenewedAt: createdAt, expiresAt: "2099-01-01T00:00:00Z",
+  });
+  return [
+    row("0123456789abcdef", SEED_WORKSPACE_IDS.graceReady, "grace-analysis", grace, "2026-10-13T08:00:00Z"),
+    row("fedcba9876543210", "ws_01J4ZGRACEREADY02", "grace-notes", grace, "2026-10-13T08:05:00Z"),
+    row("00112233445566aa", SEED_WORKSPACE_IDS.linusStopped, "linus-desktop", linus, "2026-10-13T08:10:00Z"),
+  ];
+}
+
 export interface Tenancy {
   me: MockMe;
   // undefined = the tenant has no quota row (the API then omits `limits`).
@@ -179,7 +249,7 @@ export interface Tenancy {
   // Tenant session-policy ceiling (ADR 0010): undefined = no row —
   // every channel FollowTemplate. spVersion is its version; the ETag
   // "sp-<n>" travels as a header and PUT echoes it via If-Match.
-  sessionPolicy: { clipboard: string } | undefined;
+  sessionPolicy: { clipboard: string; fileTransfer: string; maxFileBytes: number | null } | undefined;
   spVersion: number;
   // True = the tenant is declared in -tenant-quotas: source "config" and
   // PUT /v1/admin/tenants/{tenant}/quota answers 409 QUOTA_MANAGED_BY_CONFIG.
@@ -272,6 +342,8 @@ function ownerRefOf(subject: string): string {
 export function adminArea(ctx: MockContext): MockArea {
   const { state } = ctx;
   const t = tenancy(ctx);
+  let liveSessions = seedLiveSessions();
+  let overviewFresh = true;
 
   function seed(): void {
     for (const { ws, owner } of seedWorkspaces()) {
@@ -300,6 +372,8 @@ export function adminArea(ctx: MockContext): MockArea {
     t.owners = new Map();
     t.failNext = new Map();
     t.scopesSeen = [];
+    liveSessions = seedLiveSessions();
+    overviewFresh = true;
     if (ctx.demo) seed();
   }
 
@@ -539,6 +613,62 @@ export function adminArea(ctx: MockContext): MockArea {
     return err(405, "INVALID_REQUEST", "method not allowed", false);
   }
 
+  // GET /v1/admin/tenants/{tenant}/users[/{ownerRef}] — the tenant's
+  // principal directory: everyone who signed in, whether or not they hold
+  // a workspace, disk or limit override. lastSeenAt is a fixed instant per
+  // principal (staggered by an hour) so the lastSeen order is stable.
+  function directoryUsers() {
+    const principals = [t.me, ...OTHER_USERS, ...SIGNED_IN_ONLY];
+    const perUser = quotaBody().perUser;
+    return principals.map((p, i) => {
+      const ownerRef = ownerRefOf(p.subject);
+      let workspaces = 0;
+      for (const id of state.workspaces.keys()) {
+        if (t.ownerOf(id).subject === p.subject) workspaces += 1;
+      }
+      return {
+        ownerRef,
+        subject: p.subject,
+        displayName: p.displayName,
+        email: p.subject === t.me.subject ? (t.me.email ?? "") : "",
+        lastSeenAt: new Date(Date.UTC(2026, 9, 13, 9, 0) - i * 3_600_000).toISOString(),
+        workspaces,
+        limits: entryOf({
+          ownerRef,
+          subject: p.subject,
+          displayName: p.displayName,
+          running: perUser.get(p.subject)?.usage.runningWorkspaces ?? 0,
+        }),
+      };
+    });
+  }
+
+  function adminUsers(req: MockRequest, tenant: string, ownerRef: string | undefined): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const rows = directoryUsers();
+    if (ownerRef === undefined) {
+      return paginate(
+        req,
+        rows,
+        {
+          ownerRef: byString((u) => u.ownerRef),
+          displayName: byString((u) => u.displayName),
+          lastSeen: byString((u) => u.lastSeenAt),
+        },
+        "ownerRef",
+        (u) => u.ownerRef,
+      );
+    }
+    const row = rows.find((u) => u.ownerRef === ownerRef);
+    if (!row) return err(404, "NOT_FOUND", "user has not signed in to this tenant", false);
+    return ok(200, row);
+  }
+
   // GET/PUT /v1/admin/tenants/{tenant}/session-policy — tenant-admin of
   // the named tenant only. No row resolves FollowTemplate everywhere
   // (source FollowTemplate); a PUT whose every channel is
@@ -548,7 +678,10 @@ export function adminArea(ctx: MockContext): MockArea {
     return {
       tenant: t.me.tenant,
       clipboard: t.sessionPolicy?.clipboard ?? "FollowTemplate",
-      fileTransfer: { mode: "FollowTemplate", maxFileBytes: null },
+      fileTransfer: {
+        mode: t.sessionPolicy?.fileTransfer ?? "FollowTemplate",
+        maxFileBytes: t.sessionPolicy?.maxFileBytes ?? null,
+      },
       source: t.sessionPolicy ? "TenantRow" : "FollowTemplate",
     };
   }
@@ -576,19 +709,90 @@ export function adminArea(ctx: MockContext): MockArea {
       if (b === null || typeof clip !== "string" || !CEILINGS.includes(clip)) {
         return err(400, "INVALID_REQUEST", "clipboard must be one of FollowTemplate, Disabled, Send, Receive, Bidirectional", false);
       }
-      const ft = b.fileTransfer as { mode?: string; maxFileBytes?: number | null } | undefined;
-      if (ft !== undefined && ((ft.mode ?? "FollowTemplate") !== "FollowTemplate" || (ft.maxFileBytes ?? null) !== null)) {
-        return err(400, "INVALID_REQUEST", "fileTransfer is inert in this version; only FollowTemplate is accepted", false);
+      const FT_MODES = ["FollowTemplate", "Disabled", "Upload", "Download", "Bidirectional"];
+      const PLATFORM_FILE_BOUND = 104857600;
+      const ft = (b.fileTransfer ?? {}) as { mode?: string; maxFileBytes?: number | null };
+      const ftMode = ft.mode ?? "FollowTemplate";
+      const ftMax = ft.maxFileBytes ?? null;
+      if (
+        !FT_MODES.includes(ftMode) ||
+        (ftMax !== null && (!Number.isInteger(ftMax) || ftMax < 1 || ftMax > PLATFORM_FILE_BOUND))
+      ) {
+        return err(400, "INVALID_REQUEST", "fileTransfer.mode or maxFileBytes is invalid", false);
       }
-      if (clip === "FollowTemplate") {
+      if (clip === "FollowTemplate" && ftMode === "FollowTemplate" && ftMax === null) {
         t.sessionPolicy = undefined;
       } else {
-        t.sessionPolicy = { clipboard: clip };
+        t.sessionPolicy = { clipboard: clip, fileTransfer: ftMode, maxFileBytes: ftMax };
       }
       t.spVersion += 1;
       return withTag(200, sessionPolicyBody(), sessionPolicyTag());
     }
     return err(405, "INVALID_REQUEST", "method not allowed", false);
+  }
+
+  // POST …/session-policy:apply — two running workspaces looser than any
+  // ceiling that narrows clipboard: one idle, one with a live session.
+  function adminSessionPolicyApply(req: MockRequest, tenant: string): MockResponse {
+    if (req.method !== "POST") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "session policy administration requires the tenant-admin role", false);
+    }
+    const pre = checkIfMatch(req, sessionPolicyTag());
+    if (pre) return pre;
+    if (!t.sessionPolicy) {
+      return err(409, "INVALID_STATE", "no ceiling is set; every workspace already follows its template", false);
+    }
+    const b = req.body as { dryRun?: unknown; includeActive?: unknown } | null;
+    if (!b || typeof b.dryRun !== "boolean") {
+      return err(400, "INVALID_REQUEST", "invalid request body", false);
+    }
+    const applied = { clipboard: "Bidirectional", fileTransfer: "Disabled" };
+    const effective = { clipboard: t.sessionPolicy.clipboard, fileTransfer: "Disabled" };
+    const owner = { subject: "alice", displayName: "Alice" };
+    const rows =
+      t.sessionPolicy.clipboard === "Bidirectional"
+        ? []
+        : [
+            { workspaceId: "ws_apply_1", name: "research-desktop", owner, applied, effective, live: false },
+            { workspaceId: "ws_apply_2", name: "build-box", owner, applied, effective, live: true },
+          ];
+    const affected = rows.map((r) => ({
+      ...r,
+      result: b.dryRun
+        ? "pending"
+        : r.live && b.includeActive !== true
+          ? "skipped_active"
+          : "restarted",
+    }));
+    return ok(200, { dryRun: b.dryRun, truncated: false, affected });
+  }
+
+  function adminAudit(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const sort = req.query.get("sort") || "-createdAt";
+    if (sort !== "-createdAt") {
+      return err(400, "INVALID_REQUEST", "audit lists newest first only", false);
+    }
+    const action = req.query.get("action");
+    const actor = req.query.get("actor");
+    const target = req.query.get("target");
+    const since = req.query.get("since");
+    const until = req.query.get("until");
+    const rows = auditRows().filter((r) => {
+      if (action !== null && r.action !== action) return false;
+      if (actor !== null && r.actor !== actor) return false;
+      if (target !== null && r.targetId !== target) return false;
+      if (since !== null && Date.parse(r.createdAt) < Date.parse(since)) return false;
+      if (until !== null && Date.parse(r.createdAt) >= Date.parse(until)) return false;
+      return true;
+    });
+    return paginate(req, rows, { createdAt: byString((a) => a.createdAt) }, "-createdAt", (a) => a.id);
   }
 
   function listWorkspaces(req: MockRequest): MockResponse {
@@ -606,14 +810,81 @@ export function adminArea(ctx: MockContext): MockArea {
     );
   }
 
+  function adminSessions(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    if ((req.query.get("sort") || "-createdAt") !== "-createdAt") {
+      return err(400, "INVALID_REQUEST", "sessions list newest first only (sort=-createdAt)", false);
+    }
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    const owner = req.query.get("ownerRef");
+    const rows = liveSessions.filter((s) => !owner || s.ownerRef === owner);
+    return paginate(req, rows, { createdAt: byString((s) => s.createdAt) }, "-createdAt", (s) => s.workspaceId);
+  }
+
+  function adminRevokeSessions(req: MockRequest, tenant: string, rawRef: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "POST") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    let ref: string;
+    try {
+      ref = decodeURIComponent(rawRef);
+    } catch {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    if (!ref.includes("|") || ref.endsWith("|") || ref.startsWith("|")) {
+      return err(400, "INVALID_REQUEST", "ownerRef must be an issuer|sub reference", false);
+    }
+    const gone = liveSessions.filter((s) => s.ownerRef === ref);
+    liveSessions = liveSessions.filter((s) => s.ownerRef !== ref);
+    return ok(200, { sessions: gone.length > 0 ? 1 : 0, tickets: 0, leases: gone.length });
+  }
+
+  // GET /v1/admin/tenants/{tenant}/overview — fixed counts; /_control/admin/overview {fresh} flips the stale flag.
+  function adminOverview(req: MockRequest, tenant: string): MockResponse {
+    if (!t.isAdmin() || tenant !== t.me.tenant) {
+      return err(403, "FORBIDDEN", "tenant administration requires the tenant-admin role", false);
+    }
+    if (req.method !== "GET") return err(405, "INVALID_REQUEST", "method not allowed", false);
+    const failed = t.takeFailure(req);
+    if (failed) return failed;
+    return ok(200, {
+      liveSessions: 2,
+      runningByTemplate: overviewFresh
+        ? [{ template: "chrome-r1", count: 2 }, { template: "linux-r3", count: 1 }]
+        : [],
+      phases: overviewFresh ? { Ready: 3, Stopped: 1 } : {},
+      provisioning: { p95Seconds: 12.4, samples: 7 },
+      stuckFinalizers: 1,
+      fresh: overviewFresh,
+      generatedAt: "2026-10-13T09:00:00Z",
+    });
+  }
+
   function api(req: MockRequest): MockResponse | undefined {
     const { method, path } = req;
+    const mOvw = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/overview$/);
+    if (mOvw) return adminOverview(req, mOvw[1]);
+    const mSess = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/sessions$/);
+    if (mSess) return adminSessions(req, mSess[1]);
+    const mRevoke = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users\/([^/]+)\/sessions:revoke-all$/);
+    if (mRevoke) return adminRevokeSessions(req, mRevoke[1], mRevoke[2]);
     const mQuota = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/quota$/);
     if (mQuota) return adminQuota(req, mQuota[1]);
     const mUL = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/user-limits(?:\/([^/]+))?$/);
     if (mUL) return adminUserLimits(req, mUL[1], mUL[2]);
+    const mU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/users(?:\/([^/]+))?$/);
+    if (mU) return adminUsers(req, mU[1], mU[2] === undefined ? undefined : decodeURIComponent(mU[2]));
+    const mApply = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy:apply$/);
+    if (mApply) return adminSessionPolicyApply(req, mApply[1]);
     const mSP = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/session-policy$/);
     if (mSP) return adminSessionPolicy(req, mSP[1]);
+    const mAU = path.match(/^\/v1\/admin\/tenants\/([^/]+)\/audit$/);
+    if (mAU) return adminAudit(req, mAU[1]);
     if (method === "GET" && (path === "/v1/me" || path === "/v1/quota" || path === "/v1/workspaces")) {
       const failed = t.takeFailure(req);
       if (failed) return failed;
@@ -670,10 +941,17 @@ export function adminArea(ctx: MockContext): MockArea {
         if (req.body?.clipboard === null || req.body?.clipboard === "FollowTemplate") {
           t.sessionPolicy = undefined;
         } else if (typeof req.body?.clipboard === "string") {
-          t.sessionPolicy = { clipboard: req.body.clipboard };
+          t.sessionPolicy = {
+            clipboard: req.body.clipboard,
+            fileTransfer: String(req.body?.fileTransfer ?? "FollowTemplate"),
+            maxFileBytes: typeof req.body?.maxFileBytes === "number" ? req.body.maxFileBytes : null,
+          };
         }
         t.spVersion += 1;
         return ok(200, sessionPolicyBody());
+      case "/_control/admin/overview":
+        overviewFresh = req.body?.fresh !== false;
+        return ok(200, { fresh: overviewFresh });
       case "/_control/admin/fail":
         t.failNext.set(String(req.body?.path), {
           status: Number(req.body?.status ?? 503),

@@ -26,6 +26,8 @@ type GatewaySurface interface {
 	BindSession(ctx context.Context, gw GatewayIdentity, leaseID string, d SessionDigest) error
 	LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error)
 	ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ownerTab string) (uint64, error)
+	ClaimTransfer(ctx context.Context, gw GatewayIdentity, leaseID, transferID, method string) (TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
 }
 
 var _ GatewaySurface = (*Broker)(nil)
@@ -150,6 +152,42 @@ func (l *LocalGateway) ClaimStream(ctx context.Context, _ GatewayIdentity, lease
 	}
 	epoch, err := l.b.ClaimStream(ctx, l.id, leaseID, fence, ownerTab)
 	return epoch, classify("claim", err)
+}
+
+// ClaimTransfer spends a minted transfer grant for the pinned identity.
+func (l *LocalGateway) ClaimTransfer(ctx context.Context, _ GatewayIdentity, leaseID, transferID, method string) (TransferGrant, error) {
+	if !leaseIDOK(leaseID) {
+		return TransferGrant{}, ErrLeaseInvalid
+	}
+	if !TransferIDOK(transferID) {
+		return TransferGrant{}, ErrTransferInvalid
+	}
+	g, err := l.b.ClaimTransfer(ctx, l.id, leaseID, transferID, method)
+	return g, classify("transfer-claim", err)
+}
+
+// CompleteTransfer closes a claimed grant.
+func (l *LocalGateway) CompleteTransfer(ctx context.Context, _ GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	if !leaseIDOK(leaseID) {
+		return ErrLeaseInvalid
+	}
+	if !TransferIDOK(transferID) {
+		return ErrTransferInvalid
+	}
+	return classify("transfer-complete", l.b.CompleteTransfer(ctx, l.id, leaseID, transferID, bytesDone, ok))
+}
+
+// TransferIDOK bounds transfer ids accepted from the gateway (xf_ + 26 base32).
+func TransferIDOK(id string) bool {
+	if len(id) != 29 || !strings.HasPrefix(id, "xf_") {
+		return false
+	}
+	for _, c := range id[3:] {
+		if !(c >= 'a' && c <= 'z') && !(c >= '2' && c <= '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func leaseIDOK(id string) bool {

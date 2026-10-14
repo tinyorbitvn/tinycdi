@@ -273,6 +273,17 @@ export interface paths {
          *     resolved image is older than `-image-block-after` is refused with
          *     `409 IMAGE_STALE` (E3); `imageUpdate: Pinned` workspaces on a stale
          *     image are refused the same way.
+         *
+         *     A `Failed` workspace that is wanted `Running` is recovered by `:start`
+         *     when its failure reason is recoverable (`BootDeadlineExceeded`,
+         *     `FailedCleanup`, `RuntimeLost`): the platform mints a new runtime
+         *     generation, revokes the failed generation's leases and launch tickets,
+         *     and rebuilds the runtime on the same home volume. Repeating the call
+         *     before the new generation is observed does not mint another one.
+         *     A workspace that failed with `ImagePolicyDenied`, `HomeVolumeLost` or
+         *     `TemplateRejected` is refused with `409 INVALID_STATE` and
+         *     `details.reason` set to that reason; stop and start it again after
+         *     the cause is fixed, or delete it.
          */
         post: operations["startWorkspace"];
         delete?: never;
@@ -376,6 +387,37 @@ export interface paths {
          *     `code`/`retryable` envelope.
          */
         post: operations["createConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{workspaceId}/file-transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint a single-use file-transfer grant for a running workspace
+         * @description Resolves the file-transfer policy in force now (template policy met
+         *     against the tenant ceiling and the platform bound), checks the
+         *     direction and, for an upload, the declared size, and records a
+         *     single-use grant bound to the workspace's current runtime
+         *     incarnation and to the caller. The browser then moves the bytes with
+         *     a credentialed request to `contentUrl` on the workspace's session
+         *     origin within 2 minutes; the gateway claims the grant (policy is
+         *     checked again) and streams the body. Only the workspace owner may
+         *     mint; a tenant administrator gets `404` on another user's workspace.
+         *     The workspace must be `Ready`, otherwise `409 INVALID_STATE`. A policy
+         *     that refuses the direction answers `403 FORBIDDEN` with
+         *     `details.reason: transfer_denied`.
+         */
+        post: operations["createFileTransfer"];
         delete?: never;
         options?: never;
         head?: never;
@@ -627,21 +669,218 @@ export interface paths {
          *     `FollowTemplate` deletes the row — "no row" and "all-defaults
          *     row" are the same state, and the store keeps exactly one
          *     representation of it; after it `If-Match: *` is valid again.
-         *     `fileTransfer` is inert in this version (the channel ships in
-         *     v1.3): only its defaults are accepted — a non-default
-         *     `fileTransfer.mode` or any `maxFileBytes` answers
-         *     `400 INVALID_REQUEST`.
+         *     `fileTransfer.mode` narrows the file-transfer channel the same
+         *     way `clipboard` does; `fileTransfer.maxFileBytes` lowers the
+         *     per-file bound and may not exceed the platform bound
+         *     (`-file-transfer-max-bytes`), else `400 INVALID_REQUEST`.
          *
          *     Tightening takes effect on two clocks (ADR 0010 §3): the next
          *     minted connection ticket carries the new client flags
          *     immediately, while a running workspace's server-side clipboard
-         *     enforcement follows at its next start — pod specs are immutable.
+         *     enforcement follows at its next start — pod specs are immutable;
+         *     `POST .../session-policy:apply` restarts the running workspaces
+         *     that are looser than the ceiling.
          *     Requires the tenant-admin role on the named tenant, the
          *     `X-CSRF-Token` header and `If-Match`: the `ETag` of the last read,
          *     or `*` when the tenant has no row (`*` on an existing row is
          *     `412`). Every write is audited.
          */
         put: operations["putAdminSessionPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/session-policy:apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart running workspaces that are looser than the ceiling
+         * @description Applies the tenant's session data-transfer ceiling to running
+         *     workspaces whose stamped policy grants more than the ceiling now
+         *     allows (F3). Always dry run first (`{"dryRun": true}` lists the
+         *     affected workspaces and changes nothing); the confirmed call
+         *     restarts each listed workspace through the generation-fenced
+         *     restart — a double-submitted or superseded call never bumps a
+         *     generation twice, and a workspace whose latest intent the
+         *     operator has not reconciled yet is reported `skipped_moved`,
+         *     never restarted again.
+         *
+         *     Workspaces with a live desktop session are skipped
+         *     (`skipped_active`) unless `includeActive` is true; their users
+         *     are disconnected. One call lists and restarts at most 500
+         *     affected workspaces over a scan of at most 5000 running ones —
+         *     `truncated: true` means more qualify; call again after they
+         *     restart.
+         *
+         *     Requires the tenant-admin role on the named tenant, the
+         *     `X-CSRF-Token` header and `If-Match` carrying the policy row's
+         *     current `ETag` (a stale tag is `412`; a missing row is `409`).
+         *     When the informer view of running workspaces is stale the call
+         *     answers `503` rather than acting on out-of-date state. Every
+         *     call is audited as `admin.session_policy.apply`.
+         */
+        post: operations["applyAdminSessionPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Audit log (paged)
+         * @description One tenant's persisted audit log, newest first: every audited
+         *     administrative and mutating action. Requires the tenant-admin
+         *     role on the named tenant — the read is itself audited
+         *     (`admin.audit.get`). Retention is the platform setting (default
+         *     90 days); older events are pruned. `since` is inclusive and
+         *     `until` exclusive. Sort: `-createdAt` only (default).
+         */
+        get: operations["listAdminAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant user directory (paged)
+         * @description Everyone who has signed in to the tenant (the principal
+         *     directory), not only principals with usage or a stored limit —
+         *     one item per directory row, carrying the last-seen instant, the
+         *     active-workspace count and the principal's per-user limit entry.
+         *     Requires the tenant-admin role on the named tenant. Sort:
+         *     `ownerRef` (default), `displayName`, `lastSeen`; a `-` prefix
+         *     descends.
+         */
+        get: operations["listAdminTenantUsers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/users/{ownerRef}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One tenant directory entry
+         * @description One principal's directory row: everyone who has signed in to the
+         *     tenant (the principal directory), not only principals with usage
+         *     or a stored limit. A principal who never signed in answers `404`.
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminTenantUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live desktop sessions of a tenant (paged)
+         * @description Administrator list of the tenant's live connection leases (state
+         *     `active` and not past `expiresAt`), read from the shared PostgreSQL
+         *     session directory, so every backend replica answers the same.
+         *     `ownerRef` narrows the list to one principal. Items never carry the
+         *     lease id: `leaseRef` is a stable, non-secret reference. Sort:
+         *     `-createdAt` only (newest first; anything else is `INVALID_REQUEST`).
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["listAdminSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign a user out everywhere
+         * @description The administrator variant of `POST /v1/me/sessions:revoke-all`: in
+         *     one store transaction it ends every portal session the named
+         *     principal holds in the named tenant and revokes their active
+         *     connection leases and outstanding launch tickets. The administrator's
+         *     own session is untouched (unless they name themselves). Workspaces
+         *     keep running. Requires the tenant-admin role on the named tenant and
+         *     the `X-CSRF-Token` header; audited as `admin.session.revoke`.
+         */
+        post: operations["revokeAdminUserSessions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants/{tenant}/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant health overview
+         * @description Live desktop sessions (active, unexpired connection leases), Ready
+         *     workspaces per template, the provisioning p95 over the last 24 hours
+         *     (request to Ready, from the boot ledger), the Workspaces stuck
+         *     deleting, and the phase counts. One aggregate query plus the
+         *     operator's status counts; the answer is cached for 15 seconds per
+         *     tenant. `fresh: false` means the Kubernetes watch is stale and the
+         *     Kubernetes-derived counts are empty. Counts only, no identities.
+         *     Requires the tenant-admin role on the named tenant.
+         */
+        get: operations["getAdminOverview"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -836,10 +1075,14 @@ export interface components {
                  *     quota; `params` carries `limit` and `current`, and the
                  *     response may also carry `retryable: true` + `Retry-After`
                  *     when the caller's own teardown-pending holds cover the
-                 *     shortfall.
+                 *     shortfall. On `:start` of a Failed workspace: the
+                 *     unrecoverable failure reason (`ImagePolicyDenied`,
+                 *     `HomeVolumeLost`, `TemplateRejected`). `transfer_denied`
+                 *     on `FORBIDDEN` means the policy in force refuses the
+                 *     requested file-transfer direction.
                  * @enum {string}
                  */
-                reason?: "release_pending" | "UserLimitReached";
+                reason?: "release_pending" | "UserLimitReached" | "ImagePolicyDenied" | "HomeVolumeLost" | "TemplateRejected" | "transfer_denied";
                 /**
                  * @description `IMAGE_STALE` only: the template whose runtime image is
                  *     over `-image-block-after` — the message names it too.
@@ -1221,21 +1464,20 @@ export interface components {
          */
         ClipboardCeiling: "FollowTemplate" | "Disabled" | "Send" | "Receive" | "Bidirectional";
         /**
-         * @description The tenant's file-transfer ceiling — the inert channel carried
-         *     for v1.3 (ADR 0010 T11). Only the defaults are meaningful in this
-         *     version: `mode: FollowTemplate`, `maxFileBytes: null`.
+         * @description The tenant's file-transfer ceiling over the template's
+         *     `fileTransferPolicy`: `mode` narrows the direction,
+         *     `maxFileBytes` lowers the per-file size bound.
          */
         FileTransferCeiling: {
             /**
              * @description Ceiling over the template's file-transfer policy (`Upload` =
              *     device → workspace home, `Download` = workspace → device).
-             *     Inert until v1.3 adds the template leg.
              * @enum {string}
              */
             mode: "FollowTemplate" | "Disabled" | "Upload" | "Download" | "Bidirectional";
             /**
-             * @description Per-file size bound; `null` = the platform default bound.
-             *     Inert until v1.3.
+             * @description Per-file size bound, 1 up to the platform bound; `null` = the
+             *     platform bound.
              */
             maxFileBytes: number | null;
         };
@@ -1261,13 +1503,121 @@ export interface components {
         };
         /**
          * @description Write the tenant's session data-transfer ceiling. `clipboard` is
-         *     required; `fileTransfer` is the inert v1.3 channel and only its
-         *     defaults are accepted in this version. Setting every channel to
-         *     `FollowTemplate` deletes the row.
+         *     required. Setting every channel to `FollowTemplate` deletes the
+         *     row.
          */
         PutAdminSessionPolicy: {
             clipboard: components["schemas"]["ClipboardCeiling"];
             fileTransfer?: components["schemas"]["FileTransferCeiling"];
+        };
+        ApplySessionPolicyRequest: {
+            /** @description true lists the affected workspaces without restarting them. */
+            dryRun: boolean;
+            /**
+             * @description Also restart workspaces with a live desktop session.
+             * @default false
+             */
+            includeActive: boolean;
+        };
+        ApplySessionPolicyResult: {
+            dryRun: boolean;
+            /** @description More workspaces are affected (or running) than one call handles; only the first 500 affected are listed. Call again after they restart. */
+            truncated: boolean;
+            affected: {
+                workspaceId: string;
+                name: string;
+                owner: components["schemas"]["Owner"];
+                applied: components["schemas"]["ResolvedSessionPolicy"];
+                effective: components["schemas"]["ResolvedSessionPolicy"];
+                live: boolean;
+                /** @enum {string} */
+                result: "pending" | "restarted" | "skipped_active" | "skipped_moved" | "failed";
+            }[];
+        };
+        AdminAuditEntry: {
+            id: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** @description Pseudonymous actor reference (oidc:<16 hex>) or anonymous. */
+            actor: string;
+            action: string;
+            /**
+             * @description What targetId identifies; derived from the action namespace (auditTargetKind).
+             * @enum {string}
+             */
+            targetKind: "" | "workspace" | "data" | "tenant" | "session";
+            targetId: string;
+            /** @enum {string} */
+            outcome: "success" | "denied" | "failure";
+            errorCode?: string;
+            requestId: string;
+            details: {
+                [key: string]: string;
+            };
+        };
+        AdminAuditPage: {
+            items: components["schemas"]["AdminAuditEntry"][];
+            nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminTenantUser: {
+            ownerRef: string;
+            subject: string;
+            displayName: string;
+            email: string;
+            /** Format: date-time */
+            lastSeenAt: string;
+            /** Format: int64 */
+            workspaces: number;
+            limits: components["schemas"]["AdminUserLimitEntry"];
+        };
+        AdminTenantUserPage: {
+            items: components["schemas"]["AdminTenantUser"][];
+            nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminLiveSession: {
+            /** @description Stable non-secret reference (SHA-256 prefix of the lease id). */
+            leaseRef: string;
+            workspaceId: string;
+            workspaceName: string;
+            ownerRef: string;
+            owner: components["schemas"]["Owner"];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastRenewedAt?: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        AdminLiveSessionPage: {
+            items: components["schemas"]["AdminLiveSession"][];
+            nextCursor?: components["schemas"]["NextCursor"];
+        };
+        AdminRevokeResult: {
+            sessions: number;
+            tickets: number;
+            leases: number;
+        };
+        AdminOverview: {
+            /** Format: int64 */
+            liveSessions: number;
+            runningByTemplate: {
+                template: string;
+                count: number;
+            }[];
+            phases: {
+                [key: string]: number;
+            };
+            provisioning: {
+                /** @description Absent when no workspace became Ready in the last 24 hours. */
+                p95Seconds?: number;
+                /** Format: int64 */
+                samples: number;
+            };
+            stuckFinalizers: number;
+            /** @description False when the Kubernetes watch is stale; Kubernetes counts are then empty. */
+            fresh: boolean;
+            /** Format: date-time */
+            generatedAt: string;
         };
         /**
          * @description The resolved (effective) session data-transfer policy for a
@@ -1283,13 +1633,17 @@ export interface components {
              */
             clipboard: "Disabled" | "Send" | "Receive" | "Bidirectional";
             /**
-             * @description The resolved file-transfer direction policy — the same enum
-             *     WorkspaceSpec.sessionPolicy.fileTransfer carries. Inert until
-             *     v1.3 — always resolves `Disabled` while no template leg is
-             *     wired into the catalog entry.
+             * @description The resolved file-transfer direction policy: the meet of the
+             *     template's `fileTransferPolicy` and the tenant ceiling — the
+             *     same enum WorkspaceSpec.sessionPolicy.fileTransfer carries.
              * @enum {string}
              */
             fileTransfer: "Disabled" | "Upload" | "Download" | "Bidirectional";
+            /**
+             * Format: int64
+             * @description Per-file bound in bytes; 0 when fileTransfer is Disabled.
+             */
+            maxFileBytes?: number;
         };
         /**
          * @description Create intent. There is no owner field — ownership comes from the
@@ -1460,6 +1814,34 @@ export interface components {
             expiresAt: string;
             sessionPolicy?: components["schemas"]["ResolvedSessionPolicy"];
         };
+        CreateFileTransferRequest: {
+            /** @enum {string} */
+            direction: "upload" | "download";
+            /** @description A file name inside the workspace's Transfers folder ($HOME/transfers). No directories. */
+            path: string;
+            /**
+             * Format: int64
+             * @description Upload size in bytes (required for upload).
+             */
+            bytes?: number;
+        };
+        FileTransfer: {
+            id: string;
+            /** @enum {string} */
+            direction: "upload" | "download";
+            path: string;
+            /** Format: int64 */
+            declaredBytes: number;
+            /** Format: int64 */
+            maxBytes: number;
+            /** Format: date-time */
+            expiresAt: string;
+            /**
+             * Format: uri
+             * @description Single-use URL on the workspace's session origin: PUT the bytes (upload) or GET them (download) with credentials, within 2 minutes.
+             */
+            contentUrl: string;
+        };
         /**
          * @description Catalog entry. Revisions are immutable; end users can never supply raw
          *     PodSpecs, container commands or arbitrary VM manifests — only the
@@ -1519,6 +1901,14 @@ export interface components {
              * @enum {string}
              */
             clipboardPolicy: "Disabled" | "Send" | "Receive" | "Bidirectional";
+            /**
+             * @description File transfer between the user's device and the workspace
+             *     home (Upload = device to workspace, Download = workspace to
+             *     device). Disabled unless the template opts in; the tenant
+             *     ceiling can only narrow it.
+             * @enum {string}
+             */
+            fileTransferPolicy: "Disabled" | "Upload" | "Download" | "Bidirectional";
             /**
              * @description Runtime egress policy of the WorkspaceTemplate CRD —
              *     `InternetOnly` allows Internet egress, `ClusterOnly` restricts to
@@ -2077,6 +2467,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2112,6 +2503,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2150,6 +2542,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2186,6 +2579,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceView"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -2261,6 +2655,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LaunchTicket"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createFileTransfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server-generated workspace identifier. */
+                workspaceId: components["parameters"]["WorkspaceId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateFileTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description Grant minted. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileTransfer"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2762,6 +3191,323 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             412: components["responses"]["PreconditionFailed"];
             428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    applyAdminSessionPolicy: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Strong entity tag of the resource's current version, as returned in
+                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 *     PRECONDITION_REQUIRED`; stale or malformed → `412
+                 *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
+                 *     exist yet (create-or-replace semantics).
+                 */
+                "If-Match": components["parameters"]["IfMatch"];
+            };
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApplySessionPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description The affected workspaces and what the call did with each. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplySessionPolicyResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            412: components["responses"]["PreconditionFailed"];
+            428: components["responses"]["PreconditionRequired"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminAudit: {
+        parameters: {
+            query?: {
+                /** @description Exact audit action (for example `workspace.start`). */
+                action?: string;
+                /**
+                 * @description An actor reference `oidc:<hex>`/`anonymous`, or an
+                 *     `issuer|sub` owner reference, which is pseudonymized
+                 *     server-side.
+                 */
+                actor?: string;
+                /** @description Exact target identifier (for example a workspace ID). */
+                target?: string;
+                /** @description Inclusive lower bound on `createdAt`. */
+                since?: string;
+                /** @description Exclusive upper bound on `createdAt`. */
+                until?: string;
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of audit events for the named tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAuditPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminTenantUsers: {
+        parameters: {
+            query?: {
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the tenant's user directory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTenantUserPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminTenantUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The principal's directory entry. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTenantUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminSessions: {
+        parameters: {
+            query?: {
+                /** @description Only this principal's sessions (`issuer|sub`). */
+                ownerRef?: string;
+                /** @description Maximum items per page (default 50, max 500). */
+                limit?: components["parameters"]["PageLimit"];
+                /**
+                 * @description Opaque keyset cursor from a previous response's `nextCursor`. A cursor
+                 *     minted under a different `sort` is rejected as `INVALID_REQUEST`.
+                 */
+                cursor?: components["parameters"]["Cursor"];
+                /**
+                 * @description Allowlisted sort field; a `-` prefix means descending (for example
+                 *     `-createdAt`). The accepted fields and the default are documented per
+                 *     operation; anything else is `INVALID_REQUEST`.
+                 */
+                sort?: components["parameters"]["Sort"];
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of live sessions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminLiveSessionPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    revokeAdminUserSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+                /**
+                 * @description The principal's `issuer|sub` owner reference, as the user-limits
+                 *     list reports it — percent-encoded in the path (`|` → `%7C`, `/` in
+                 *     the issuer → `%2F`).
+                 */
+                ownerRef: components["parameters"]["OwnerRef"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the revocation destroyed (all zero when the principal had nothing). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminRevokeResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Tenant identifier. Callers may only administer their own tenant —
+                 *     the tenant-admin role is tenant-scoped, so a `tenant` value that
+                 *     differs from the caller's tenant answers `403 FORBIDDEN`.
+                 */
+                tenant: components["parameters"]["Tenant"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant overview. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];

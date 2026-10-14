@@ -191,4 +191,28 @@ describe("WorkspaceDetailPage", () => {
     fireEvent.click(connect);
     expect(window.location.pathname).toBe(`/workspaces/${WS_ID}`);
   }, 20000);
+
+  it("detail: a recoverable failure offers Retry start", async () => {
+    const api = createMockApi();
+    api.state.workspaces.set(
+      WS_ID,
+      readyWorkspace({ id: WS_ID, phase: "Failed", failureReason: "RuntimeLost" }),
+    );
+    loginCookies();
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+    expect(await screen.findByRole("button", { name: "Retry start" })).toBeInTheDocument();
+    expect(screen.queryByText(/would fail the same way/)).not.toBeInTheDocument();
+  }, 20000);
+
+  it("detail: an unrecoverable failure offers no start and says why", async () => {
+    const api = createMockApi();
+    api.state.workspaces.set(
+      WS_ID,
+      readyWorkspace({ id: WS_ID, phase: "Failed", failureReason: "HomeVolumeLost" }),
+    );
+    loginCookies();
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+    expect(await screen.findByText(/Starting again would fail the same way/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry start" })).not.toBeInTheDocument();
+  }, 20000);
 });

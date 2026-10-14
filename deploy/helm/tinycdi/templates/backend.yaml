@@ -247,6 +247,12 @@ spec:
             # deletes connection_lease/launch_ticket rows terminal for
             # longer than this — 0 disables and the tables grow unbounded.
             - -terminal-retention-days={{ .Values.backend.retention.terminalRowDays }}
+            # Audit retention (ADR 0011): the leader's daily prune.
+            - -audit-retention-days={{ .Values.backend.retention.auditDays }}
+            # Platform per-file bound for session file transfer (ADR 0010
+            # T11); a tenant ceiling may only lower it. int64 keeps the
+            # value decimal — big integers render in scientific notation.
+            - -file-transfer-max-bytes={{ int64 .Values.backend.fileTransfer.maxFileBytes }}
             {{- with .Values.backend.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

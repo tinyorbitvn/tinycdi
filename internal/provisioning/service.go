@@ -28,7 +28,14 @@ type Service struct {
 	// (-image-block-after): a start whose resolved revision's image is
 	// older fails with *ImageStaleError. <=0 disables the block.
 	blockAfter time.Duration
-	log        *slog.Logger
+	// fileBound is the platform per-file bound
+	// (-file-transfer-max-bytes) every resolved session policy is clipped
+	// to (ADR 0010 T11).
+	fileBound int64
+	// revokeGeneration fences the previous runtime generation inside the
+	// RestartWorkspace transaction (F1); nil refuses a restart.
+	revokeGeneration GenerationRevoker
+	log              *slog.Logger
 }
 
 // NewService wraps db.
@@ -52,6 +59,17 @@ func (s *Service) WithImageBlockAfter(d time.Duration) *Service {
 	s.blockAfter = d
 	return s
 }
+
+// WithFileTransferMaxBytes sets the platform per-file bound
+// (-file-transfer-max-bytes) every resolved policy is clipped to.
+func (s *Service) WithFileTransferMaxBytes(bound int64) *Service {
+	s.fileBound = bound
+	s.retained.fileBound = bound
+	return s
+}
+
+// FileTransferMaxBytes returns the platform per-file bound.
+func (s *Service) FileTransferMaxBytes() int64 { return s.fileBound }
 
 // WithLogger attaches a logger for lifecycle warnings; nil keeps
 // slog.Default.
@@ -152,6 +170,10 @@ type TemplateInfo struct {
 	// template leg the session-policy meet is computed against (ADR 0010).
 	// Empty on rows written before the field existed.
 	ClipboardPolicy string `json:"clipboardPolicy,omitempty"`
+	// FileTransferPolicy is the template revision's spec.fileTransferPolicy,
+	// snapshotted like ClipboardPolicy; empty on rows written before the
+	// field existed.
+	FileTransferPolicy string `json:"fileTransferPolicy,omitempty"`
 }
 
 // templateRefName is the spec.templateRef value a create intent stamps:
@@ -188,6 +210,9 @@ type WorkspaceRecord struct {
 	Replayed        bool           `json:"replayed,omitempty"`
 	CreatedAt       time.Time      `json:"createdAt"`
 	UpdatedAt       time.Time      `json:"updatedAt"`
+	// RuntimeGeneration is the row's runtime_generation — the fence a
+	// restart is issued against; internal only, never serialized.
+	RuntimeGeneration int64 `json:"-"`
 }
 
 // CreateRequest is the admission input for a workspace create. The owner
@@ -282,8 +307,9 @@ func (s *Service) CreateWorkspace(ctx context.Context, tenantID, idemKey string,
 		// transaction so the stamped value is the snapshot the workspace
 		// was admitted under.
 		sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
-			ClipboardPolicy: req.Template.ClipboardPolicy,
-		})
+			ClipboardPolicy:    req.Template.ClipboardPolicy,
+			FileTransferPolicy: req.Template.FileTransferPolicy,
+		}, s.fileBound)
 		if err != nil {
 			return fmt.Errorf("create: resolve session policy: %w", err)
 		}
@@ -367,14 +393,7 @@ func (s *Service) ListWorkspaces(ctx context.Context, tenantID, ownerScope, phas
 		conds = append(conds, ks.where)
 		args = append(args, ks.args...)
 	}
-	q := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
-		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
-		COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
-		COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0)
-		FROM workspaces WHERE ` + strings.Join(conds, " AND ") + ks.orderLimit
+	q := `SELECT ` + workspaceSelectCols + ` FROM workspaces WHERE ` + strings.Join(conds, " AND ") + ks.orderLimit
 	r, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", "", err
@@ -599,6 +618,127 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 	return res, err
 }
 
+// GenerationRevoker fences a runtime generation inside the caller's
+// transaction (broker.RevokeGenerationTx in production).
+type GenerationRevoker func(ctx context.Context, tx store.Tx, workspaceID string, generation int64) error
+
+// ErrNotRunning refuses a restart of a workspace whose desired state is
+// not Running (a stopped workspace uses a plain start).
+var ErrNotRunning = errors.New("workspace is not running")
+
+// WithGenerationRevoker installs the revoker RestartWorkspace calls.
+func (s *Service) WithGenerationRevoker(r GenerationRevoker) *Service {
+	s.revokeGeneration = r
+	return s
+}
+
+// RestartWorkspace mints a new runtime generation for a workspace that is
+// wanted Running but whose current incarnation is lost or failed (F1), or
+// whose session policy must be re-applied (F3). In one transaction it:
+// bumps runtime_generation, revokes the previous generation's leases and
+// tickets, re-stamps the resolved session policy, and appends a start
+// intent; the applier moves spec.runtimeGeneration and the operator
+// replaces the pod on the same home volume.
+//
+// fromGeneration is the generation the caller observed. When the row has
+// already moved past it (a concurrent restart won), the call is a no-op
+// returning the current record — a double-click bumps once. The running
+// quota reservation is kept, because the workspace never stopped holding it.
+// The template is not re-pointed, because a restart is not an upgrade.
+func (s *Service) RestartWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, fromGeneration int64, bodyHash []byte) (res WorkspaceRecord, err error) {
+	if s.revokeGeneration == nil {
+		return res, errors.New("restart: no generation revoker configured")
+	}
+	err = s.db.WithTx(ctx, func(tx store.Tx) error {
+		rec, err := getWorkspaceTx(ctx, tx, tenantID, ownerScope, wsID, "FOR UPDATE")
+		if err != nil {
+			return err
+		}
+		scopedKey := ""
+		if idemKey != "" {
+			scopedKey = scopedIdemKey(caller, idemKey)
+			idem, replayed, err := BeginIdempotent(ctx, tx, tenantID, scopedKey, string(IntentStart)+":"+wsID, bodyHash)
+			if err != nil {
+				return err
+			}
+			if replayed {
+				if err := json.Unmarshal(idem.Result, &res); err != nil {
+					return fmt.Errorf("restart: stored result %w", err)
+				}
+				res.Replayed = true
+				return nil
+			}
+		}
+		if rec.isDeleted() {
+			return ErrWorkspaceClosed
+		}
+		if rec.DesiredState != "Running" {
+			return ErrNotRunning
+		}
+		if rec.RuntimeGeneration == fromGeneration {
+			if err := CheckImageBlock(rec.Template.ImageBuiltAt, s.blockAfter, time.Now(), rec.Template.Name, true); err != nil {
+				return err
+			}
+			sp, err := s.startSessionPolicy(ctx, tx, tenantID, rec)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE workspaces SET runtime_generation = runtime_generation + 1,
+					phase = 'Provisioning', updated_at = now()
+				WHERE id = $1 AND tenant_id = $2`, wsID, tenantID); err != nil {
+				return fmt.Errorf("restart: bump generation %w", err)
+			}
+			if err := s.revokeGeneration(ctx, tx, wsID, rec.RuntimeGeneration); err != nil {
+				return err
+			}
+			if _, err := appendIntent(ctx, tx, PlatformID(wsID), IntentStart, &IntentSpec{SessionPolicy: sp}); err != nil {
+				return err
+			}
+		}
+		out, err := getWorkspaceTx(ctx, tx, tenantID, "", wsID)
+		if err != nil {
+			return err
+		}
+		res = *out
+		if idemKey != "" {
+			return CompleteIdempotent(ctx, tx, tenantID, scopedKey, res)
+		}
+		return nil
+	})
+	return res, err
+}
+
+// ListRunningWorkspaces returns up to limit active workspaces of tenantID
+// whose desired state is Running, oldest first, in ONE query with the same
+// projection as GetWorkspace (F3 policy apply). Tenant scoping is in the
+// WHERE clause; a workspace being deleted is excluded.
+func (s *Service) ListRunningWorkspaces(ctx context.Context, tenantID string, limit int) ([]WorkspaceRecord, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Pool().Query(ctx, `
+		SELECT `+workspaceSelectCols+` FROM workspaces
+		WHERE tenant_id = $1 AND state = 'active' AND desired_state = 'Running' AND phase <> 'Terminating'
+		ORDER BY created_at, id LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list running: %w", err)
+	}
+	defer rows.Close()
+	var out []WorkspaceRecord
+	for rows.Next() {
+		rec, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list running: %w", err)
+		}
+		out = append(out, *rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list running: %w", err)
+	}
+	return out, nil
+}
+
 // startSessionPolicy resolves the session data-transfer policy a start
 // intent carries: the meet of the tenant ceiling and the clipboard policy
 // of the revision the start runs on — rec.Template is already the
@@ -609,15 +749,20 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 // template snapshot, the pre-field behaviour.
 func (s *Service) startSessionPolicy(ctx context.Context, tx store.Tx, tenantID string, rec *WorkspaceRecord) (*SessionPolicy, error) {
 	clipboard := rec.Template.ClipboardPolicy
+	fileTransfer := rec.Template.FileTransferPolicy
 	if clipboard == "" && s.templates != nil {
 		if cur, err := s.templates.Get(ctx, tenantID, rec.Template.ID); err == nil && cur != nil {
 			clipboard = cur.ClipboardPolicy
+			fileTransfer = cur.FileTransferPolicy
 		}
 	}
 	if clipboard == "" {
 		return nil, nil
 	}
-	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{ClipboardPolicy: clipboard})
+	sp, err := resolveSessionPolicyTx(ctx, s.db, tx, tenantID, TemplateCatalogEntry{
+		ClipboardPolicy:    clipboard,
+		FileTransferPolicy: fileTransfer,
+	}, s.fileBound)
 	if err != nil {
 		return nil, fmt.Errorf("start: resolve session policy: %w", err)
 	}
@@ -681,7 +826,8 @@ func scanWorkspace(row rowScanner) (*WorkspaceRecord, error) {
 		&rec.Name, &tpl, &rec.DesiredState, &rec.DataPolicy, &rec.Phase,
 		&rec.FailureReason, &rec.RetainedDataRef, &rec.RequestID, &rev,
 		&rec.CreatedAt, &rec.UpdatedAt,
-		&rec.Vector.RunningSlots, &rec.Vector.CPUMillis, &rec.Vector.MemoryBytes, &rec.Vector.DiskBytes)
+		&rec.Vector.RunningSlots, &rec.Vector.CPUMillis, &rec.Vector.MemoryBytes, &rec.Vector.DiskBytes,
+		&rec.RuntimeGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -702,18 +848,22 @@ func getWorkspaceTx(ctx context.Context, q querier, tenantID, ownerScope, id str
 	return getWorkspace(ctx, q, tenantID, ownerScope, id, false, lock...)
 }
 
+// workspaceSelectCols is the projection scanWorkspace reads (keep the
+// order in step with it).
+const workspaceSelectCols = `id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
+	template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
+	COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
+	COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
+	runtime_generation`
+
 // getWorkspace reads one row. With visibleOnly it applies the read-side
 // visibility rule (visibleWorkspaceSQL); writers pass false so a repeated
 // delete or an idempotent replay still finds the tombstone.
 func getWorkspace(ctx context.Context, q querier, tenantID, ownerScope, id string, visibleOnly bool, lock ...string) (*WorkspaceRecord, error) {
-	query := `SELECT id, tenant_id, owner_subject, owner_issuer, owner_sub, name,
-		template, desired_state, data_policy, phase, COALESCE(failure_reason, ''),
-		COALESCE(retained_data_ref, ''), request_id, intent_revision, created_at, updated_at,
-		COALESCE((SELECT running_slots FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT cpu_millis FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT memory_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0),
-		COALESCE((SELECT disk_bytes FROM quota_reservation WHERE workspace_id = workspaces.id AND state = 'held'), 0)
-		FROM workspaces WHERE id = $1 AND tenant_id = $2`
+	query := `SELECT ` + workspaceSelectCols + ` FROM workspaces WHERE id = $1 AND tenant_id = $2`
 	args := []any{id, tenantID}
 	if ownerScope != "" {
 		query += ` AND owner_subject = $3`

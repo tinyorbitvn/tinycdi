@@ -178,9 +178,15 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// session.revoke records, the dedicated events the mutating API routes
 	// emit, and the config-driven quota apply below. The guard turns a
 	// failing sink into a counted metric + rate-limited warning instead of
-	// silent audit loss (the write never fails the request).
-	appAudit := observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log,
-		metrics.IncAuditWriteError)
+	// silent audit loss (the write never fails the request). The durable
+	// wrapper also persists every audited() route event to audit_event,
+	// failing the request closed when that insert fails (ADR 0011); plain
+	// WriteAudit callers stay stdout-only. A failed insert or amend is
+	// logged at error level (with the request id) and counted on the same
+	// metric, so an audit-store outage is never silent either.
+	appAudit := api.NewDurableAuditSink(
+		observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), log, metrics.IncAuditWriteError),
+		store.NewAuditStore(db), log, metrics.IncAuditWriteError)
 	if len(quotas) > 0 {
 		// Declared quotas: written by the singleton leader only, so replicas
 		// starting together do not race (FX-R17).
@@ -209,9 +215,10 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	svc := provisioning.NewService(db).
 		WithTemplateLookup(provisioning.NewK8sTemplateCatalog(kc, tenants)).
 		WithImageBlockAfter(cfg.ImageBlockAfter).
+		WithFileTransferMaxBytes(cfg.FileTransferMaxBytes).
 		WithLogger(log)
 	outbox := provisioning.NewOutbox(db)
-	retained := provisioning.NewRetainedStore(db)
+	retained := provisioning.NewRetainedStore(db).WithFileTransferMaxBytes(cfg.FileTransferMaxBytes)
 	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tenants).WithLogger(log), kc, tenants, retained)
 	disp := provisioning.NewDispatcher(outbox, applier,
 		provisioning.WithPollInterval(250*time.Millisecond))
@@ -362,6 +369,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
+	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
+		return fmt.Errorf("boot recorder: %w", err)
+	}
 	// Template ages for the workspace image-age fallback are read from the
 	// same informer cache (registered before Start so cache sync covers it):
 	// a page of old workspaces never costs API-server GETs.
@@ -405,6 +415,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		// renew or rehydrate a lease — the stream dies inside one renew
 		// cycle instead of outliving the session it was minted under.
 		broker.WithSessionIdle(cfg.SessionIdle))
+	// F1: a recovery start revokes the failed generation's leases and
+	// tickets in the same transaction that mints the next generation.
+	svc.WithGenerationRevoker(func(ctx context.Context, tx store.Tx, ws string, gen int64) error {
+		_, err := brk.RevokeGenerationTx(ctx, tx, broker.PlatformID(ws), uint64(gen), time.Now())
+		return err
+	})
 
 	// Expiry planner (design §8): periodically evaluate running workspaces
 	// against recorded session activity and emit generation-fenced stop
@@ -419,6 +435,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// just keeps every replica from paying the scan.
 	b.singletons = append(b.singletons, rateLimitWindowSweepLoop(db, log))
 
+	// Transfer-grant sweep (ADR 0010 T11): expires unclaimed mints past
+	// their 2-minute TTL, fails claims dead past 30 min and prunes finished
+	// rows. Leader-only like the other sweeps.
+	b.singletons = append(b.singletons, fileTransferSweepLoop(db, log))
+
 	// Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
 	// are append-mostly, so without a sweep every deployment's history
 	// grows both tables without bound — and every index build or
@@ -428,6 +449,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		b.singletons = append(b.singletons,
 			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
 	}
+
+	// Audit retention (ADR 0011): the leader prunes audit_event rows older
+	// than -audit-retention-days at election and then daily. Always on: the
+	// config range check never lets it be disabled.
+	b.singletons = append(b.singletons, auditRetentionLoop(db, cfg.AuditRetentionDays, metrics, log))
 
 	// The loops registered above are read-modify-write without a claim, so
 	// only the replica holding the Postgres leader lock runs them.
@@ -724,12 +750,45 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
 	// The tenant session-policy ceiling (ADR 0010, T10): API-managed rows
-	// only — no config declaration owns them.
+	// only — no config declaration owns them. :apply restarts through the
+	// generation-fenced RestartWorkspace, judged against the informer's
+	// applied-policy view.
 	adminSessionPolicyHandler := api.NewAdminSessionPolicyHandler(api.NewAdminSessionPolicySource(db), tenants).
+		WithAuditSink(appAudit).
+		WithFileTransferBound(cfg.FileTransferMaxBytes).
+		WithApply(policyApplyBackend{svc, db}, statusView, directory)
+	adminAuditHandler := api.NewAdminAuditHandler(db, tenants).WithAuditSink(appAudit)
+	adminUsersHandler := api.NewAdminUsersHandler(db, api.NewAdminUserLimitSource(db), tenants).WithAuditSink(appAudit)
+	// F5: live sessions are Postgres connection leases; sign-out-everywhere
+	// reuses the principal revoker the self-service route shares.
+	adminSessionsHandler := api.NewAdminSessionsHandler(db, directory, broker.PublicRevoker{B: brk}, tenants).
+		WithAuditSink(appAudit)
+	// F7: the overview marries the Postgres aggregate (live leases, boot
+	// p95) with the informer's phase/template/finalizer counts.
+	adminOverviewHandler := api.NewAdminOverviewHandler(db, statusView, tenants).
 		WithAuditSink(appAudit)
 
 	// Desktop input slides the owning user's portal idle timer (D18).
 	broker.WithInputHook(authn.InputHook())(brk)
+
+	// The claim-time transfer policy resolver: a claim re-resolves the
+	// policy in force NOW — the workspace's recorded template snapshot (the
+	// same input startSessionPolicy stamps on the pod) met against the
+	// current tenant ceiling — so a ceiling tightened between mint and
+	// claim refuses the claim (review focus 1).
+	brk.WithTransferPolicy(func(ctx context.Context, tenantID, wsID string) (broker.TransferPolicy, error) {
+		rec, err := svc.GetWorkspace(ctx, tenantID, "", wsID)
+		if err != nil {
+			return broker.TransferPolicy{}, err
+		}
+		sp, err := svc.ResolveSessionPolicy(ctx, tenantID, provisioning.TemplateCatalogEntry{
+			ClipboardPolicy: rec.Template.ClipboardPolicy, FileTransferPolicy: rec.Template.FileTransferPolicy,
+		})
+		if err != nil {
+			return broker.TransferPolicy{}, err
+		}
+		return broker.TransferPolicy{Mode: string(sp.FileTransfer), MaxBytes: sp.MaxFileBytes}, nil
+	})
 
 	// E7 + FX-R30: the login family shares one budget per KEY —
 	// /v1/login, /v1/auth/callback and the session probe (backlog 12),
@@ -752,9 +811,50 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
 	callbackLimit := api.RateLimitWithCeiling(loginLimiter, callbackCeiling, trusted, b.metrics, authn.CallbackRateLimitKey())
 
-	mux := appMux(authn, wsHandler, tplHandler, connHandler, meHandler, connStatusHandler, dataHandler, quotaHandler, adminQuotaHandler, adminUserLimitsHandler, adminSessionPolicyHandler, loginLimit, sessionLimit, callbackLimit)
+	mux := appMux(authn, appRoutes{
+		ws: wsHandler, tpl: tplHandler, conn: connHandler, me: meHandler, connStatus: connStatusHandler,
+		data: dataHandler, quota: quotaHandler, adminQuota: adminQuotaHandler,
+		adminUserLimits: adminUserLimitsHandler, adminSessionPolicy: adminSessionPolicyHandler,
+		adminAudit: adminAuditHandler, adminUsers: adminUsersHandler,
+		adminSessions: adminSessionsHandler, adminOverview: adminOverviewHandler,
+		fileTransfers: api.NewFileTransferHandler(svc, fileTransferDeps{svc, db}, statusView, sessionDomain).
+			WithAuditSink(appAudit),
+	}, loginLimit, sessionLimit, callbackLimit)
 	b.appHandler = b.wrapApp(authn, mux, cfg.PortalOrigins)
 	return nil
+}
+
+// appRoutes carries every API handler appMux mounts. The first seven are
+// mounted unconditionally, as before; a nil admin* field skips that
+// resource's mount (unit tests mount a subset).
+type appRoutes struct {
+	ws                 *api.WorkspaceHandler
+	tpl                *api.TemplateHandler
+	conn               *api.ConnectionHandler
+	me                 *api.MeHandler
+	connStatus         *api.ConnectionStatusHandler
+	data               *api.DataHandler
+	quota              *api.QuotaHandler
+	adminQuota         *api.AdminQuotaHandler
+	adminUserLimits    *api.AdminUserLimitsHandler
+	adminSessionPolicy *api.AdminSessionPolicyHandler
+	adminAudit         *api.AdminAuditHandler
+	adminUsers         *api.AdminUsersHandler
+	adminSessions      *api.AdminSessionsHandler
+	adminOverview      *api.AdminOverviewHandler
+	fileTransfers      *api.FileTransferHandler
+}
+
+// fileTransferDeps adapts the provisioning service and the store to the
+// mint handler's FileTransferDeps: the policy resolver is the service's
+// single-resolver entry point, the insert the package-level store call.
+type fileTransferDeps struct {
+	*provisioning.Service
+	db *store.DB
+}
+
+func (d fileTransferDeps) InsertFileTransfer(ctx context.Context, t store.FileTransfer) error {
+	return store.InsertFileTransfer(ctx, d.db, t)
 }
 
 // appMux assembles the public API route table. The session surface
@@ -763,10 +863,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 // the anonymous login start on the plain client-IP key, sessionLimit the
 // session-cookie-aware probe and callbackLimit the OIDC callback
 // (E7, FX-R30).
-func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.TemplateHandler,
-	conn *api.ConnectionHandler, me *api.MeHandler, connStatus *api.ConnectionStatusHandler,
-	data *api.DataHandler, quota *api.QuotaHandler, adminQuota *api.AdminQuotaHandler,
-	adminUserLimits *api.AdminUserLimitsHandler, adminSessionPolicy *api.AdminSessionPolicyHandler,
+func appMux(authn *api.Authenticator, h appRoutes,
 	loginLimit, sessionLimit, callbackLimit func(http.Handler) http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/login", loginLimit(http.HandlerFunc(authn.LoginHandler)))
@@ -775,20 +872,35 @@ func appMux(authn *api.Authenticator, ws *api.WorkspaceHandler, tpl *api.Templat
 	api.MountRevokeAllRoute(mux, authn, sessionLimit)
 	api.MountSessionTouchRoute(mux, authn, sessionLimit)
 	api.MountSessionProbeRoute(mux, authn, sessionLimit)
-	api.MountMeRoutes(mux, authn, me)
-	api.MountWorkspaceRoutes(mux, authn, ws, tpl)
-	api.MountConnectionRoutes(mux, authn, conn)
-	api.MountConnectionStatusRoutes(mux, authn, connStatus)
-	api.MountDataRoutes(mux, authn, data)
-	api.MountQuotaRoutes(mux, authn, quota)
-	if adminQuota != nil {
-		api.MountAdminQuotaRoutes(mux, authn, adminQuota)
+	api.MountMeRoutes(mux, authn, h.me)
+	api.MountWorkspaceRoutes(mux, authn, h.ws, h.tpl)
+	api.MountConnectionRoutes(mux, authn, h.conn)
+	if h.fileTransfers != nil {
+		api.MountFileTransferRoutes(mux, authn, h.fileTransfers, sessionLimit)
 	}
-	if adminUserLimits != nil {
-		api.MountAdminUserLimitRoutes(mux, authn, adminUserLimits)
+	api.MountConnectionStatusRoutes(mux, authn, h.connStatus)
+	api.MountDataRoutes(mux, authn, h.data)
+	api.MountQuotaRoutes(mux, authn, h.quota)
+	if h.adminQuota != nil {
+		api.MountAdminQuotaRoutes(mux, authn, h.adminQuota)
 	}
-	if adminSessionPolicy != nil {
-		api.MountAdminSessionPolicyRoutes(mux, authn, adminSessionPolicy)
+	if h.adminUserLimits != nil {
+		api.MountAdminUserLimitRoutes(mux, authn, h.adminUserLimits)
+	}
+	if h.adminSessionPolicy != nil {
+		api.MountAdminSessionPolicyRoutes(mux, authn, h.adminSessionPolicy)
+	}
+	if h.adminAudit != nil {
+		api.MountAdminAuditRoutes(mux, authn, h.adminAudit)
+	}
+	if h.adminUsers != nil {
+		api.MountAdminUserRoutes(mux, authn, h.adminUsers)
+	}
+	if h.adminSessions != nil {
+		api.MountAdminSessionRoutes(mux, authn, h.adminSessions)
+	}
+	if h.adminOverview != nil {
+		api.MountAdminOverviewRoutes(mux, authn, h.adminOverview)
 	}
 	return mux
 }
@@ -950,6 +1062,17 @@ func (a sessionStoreAdapter) Delete(ctx context.Context, id string) error {
 	return a.s.Delete(ctx, id)
 }
 
+// policyApplyBackend joins the provisioning service and the lease store
+// into api.PolicyApplyBackend.
+type policyApplyBackend struct {
+	*provisioning.Service
+	db *store.DB
+}
+
+func (b policyApplyBackend) HasLiveLease(ctx context.Context, id string, now time.Time) (bool, error) {
+	return b.db.HasLiveLease(ctx, id, now)
+}
+
 // catalogAdapter maps provisioning's K8s catalog onto api.TemplateCatalog.
 type catalogAdapter struct {
 	c *provisioning.K8sTemplateCatalog
@@ -1009,6 +1132,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		MaxRunningSeconds:      int64(e.MaxRunning / time.Second),
 		DataPolicyDefault:      e.DataPolicyDefault,
 		ClipboardPolicy:        e.ClipboardPolicy,
+		FileTransferPolicy:     e.FileTransferPolicy,
 		NetworkProfile:         e.NetworkProfile,
 		ImageUpdate:            e.ImageUpdate,
 		PublishedAt:            e.PublishedAt,

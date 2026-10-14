@@ -133,6 +133,15 @@ spec:
                     - Download
                     - Bidirectional
                     type: string
+                  maxFileBytes:
+                    description: |-
+                      maxFileBytes is the resolved per-file size bound for file transfer:
+                      the tenant ceiling's maxFileBytes clipped to the platform bound.
+                      0 when fileTransfer is Disabled. Rendered into the runtime pod as
+                      TCDI_XFER_MAX_BYTES; the in-pod transfer helper hard-caps on it.
+                    format: int64
+                    minimum: 0
+                    type: integer
                 required:
                 - clipboard
                 - fileTransfer

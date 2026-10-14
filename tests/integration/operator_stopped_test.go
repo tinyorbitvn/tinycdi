@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -223,6 +224,11 @@ func TestMaxDurationBackstopToRestart(t *testing.T) {
 					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 				}
 				_ = k8sClient.Status().Update(ctx, pod)
+				slice := linux.ReadyEndpointSlice(pod, linux.ServiceName(cr.UID))
+				_ = k8sClient.Delete(ctx, slice)
+				if err := k8sClient.Create(ctx, slice); err != nil && !apierrors.IsAlreadyExists(err) {
+					t.Fatalf("publish endpoint slice: %v", err)
+				}
 			}
 			return cr.Status.Phase == cdiv1.WorkspacePhaseReady &&
 				cr.Status.StartedAt != nil && !cr.Status.StartedAt.Time.Before(startedAfter)

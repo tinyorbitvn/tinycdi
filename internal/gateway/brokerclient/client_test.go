@@ -177,6 +177,7 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 			TLSCA:         []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"),
 			Username:      "kasm_user",
 			Password:      "s3cret",
+			XferToken:     "xt-test",
 		},
 		lastBody: map[string]json.RawMessage{},
 	}
@@ -230,6 +231,7 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 				"caPEM":         f.target.TLSCA,
 				"username":      f.target.Username,
 				"password":      f.target.Password,
+				"xferToken":     f.target.XferToken,
 				"protocol":      f.target.Protocol,
 			})
 		case len(r.URL.Path) > 7 && r.URL.Path[len(r.URL.Path)-7:] == "/revoke":
@@ -247,6 +249,21 @@ func newFakeBrokerAPI(t *testing.T, pki testPKI) *fakeBrokerAPI {
 			f.lastBody["streamEpoch"] = json.RawMessage(fmt.Sprint(body.StreamEpoch))
 			f.lastBody["type"] = json.RawMessage(`"` + body.Type + `"`)
 			f.lastBody["version"] = json.RawMessage(json.Number(fmt.Sprint(body.Fence.Version)).String())
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			var body struct {
+				Method string `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.lastBody["method"] = json.RawMessage(`"` + body.Method + `"`)
+			_ = json.NewEncoder(w).Encode(broker.TransferGrant{ID: "xf_abcdefghijklmnopqrstuvwxyz", WorkspaceUID: "ws-1", Direction: "upload", Path: "a.txt", MaxBytes: 5})
+		case strings.HasSuffix(r.URL.Path, "/complete"):
+			var body struct {
+				Bytes int64 `json:"bytes"`
+				OK    bool  `json:"ok"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.lastBody["bytes"] = json.RawMessage(fmt.Sprint(body.Bytes))
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			writeErr(w, http.StatusNotFound, "NOT_FOUND", "no route")
@@ -379,6 +396,37 @@ func TestRenewLease_Revoked410(t *testing.T) {
 	}
 }
 
+func TestTransfer_RoundTripAndSentinelsByCode(t *testing.T) {
+	const tid = "xf_abcdefghijklmnopqrstuvwxyz"
+	pki := newTestPKI(t)
+	api := newFakeBrokerAPI(t, pki)
+	c := clientFor(t, api, pki)
+	g, err := c.ClaimTransfer(context.Background(), testGW, "lease-1", tid, "PUT")
+	if err != nil || g.Direction != "upload" || g.MaxBytes != 5 || string(api.lastBody["method"]) != `"PUT"` ||
+		api.lastPath != "/internal/v1/broker/leases/lease-1/transfers/"+tid+"/claim" {
+		t.Fatalf("claim = %+v, %v, path %q", g, err, api.lastPath)
+	}
+	if err := c.CompleteTransfer(context.Background(), testGW, "lease-1", tid, 5, true); err != nil || string(api.lastBody["bytes"]) != "5" {
+		t.Fatalf("complete: %v, bytes %s", err, api.lastBody["bytes"])
+	}
+	for _, tc := range []struct {
+		status int
+		code   string
+		want   error
+	}{
+		{http.StatusGone, "TRANSFER_INVALID", broker.ErrTransferInvalid},
+		{http.StatusForbidden, "TRANSFER_DENIED", broker.ErrTransferDenied},
+		{http.StatusConflict, "TRANSFER_BUSY", broker.ErrTransferBusy},
+		{http.StatusGone, "REVOKED", broker.ErrRevoked},
+	} {
+		api.status, api.code = tc.status, tc.code
+		_, err := c.ClaimTransfer(context.Background(), testGW, "lease-1", tid, "PUT")
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%d %s: err = %v, want %v", tc.status, tc.code, err, tc.want)
+		}
+	}
+}
+
 func TestRedeemTicket_Unauthorized401(t *testing.T) {
 	pki := newTestPKI(t)
 	api := newFakeBrokerAPI(t, pki)
@@ -404,6 +452,9 @@ func TestResolveTarget_HappyPath(t *testing.T) {
 	}
 	if tgt.Username != "kasm_user" || tgt.Password != "s3cret" {
 		t.Fatal("credentials not decoded")
+	}
+	if tgt.XferToken != "xt-test" {
+		t.Fatalf("transfer credential not decoded: %q", tgt.XferToken)
 	}
 }
 

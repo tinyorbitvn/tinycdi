@@ -309,6 +309,21 @@ CREATE TABLE IF NOT EXISTS workspace_activity (
     CONSTRAINT workspace_activity_open_streams_check CHECK ((open_streams >= 0))
 );
 
+-- One row per runtime incarnation asked to boot (create/start intents with
+-- desired Running). requested_at is written in the intent transaction;
+-- ready_at by the backend when the CR first reports Ready for that
+-- generation (status.startedAt). Feeds the overview's provisioning p95.
+-- No FK: rows are pruned on their own 7-day horizon.
+CREATE TABLE IF NOT EXISTS workspace_boot (
+    workspace_id text NOT NULL,
+    runtime_generation bigint NOT NULL,
+    tenant_id text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    ready_at timestamp with time zone,
+    CONSTRAINT workspace_boot_pkey PRIMARY KEY (workspace_id, runtime_generation)
+);
+CREATE INDEX IF NOT EXISTS workspace_boot_tenant_ready ON workspace_boot USING btree (tenant_id, ready_at);
+
 CREATE TABLE IF NOT EXISTS workspace_revocation (
     workspace_id text NOT NULL,
     runtime_generation bigint NOT NULL,
@@ -324,7 +339,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
     action       text        NOT NULL,
     target_kind  text        NOT NULL DEFAULT '',
     target_id    text        NOT NULL DEFAULT '',
-    outcome      text        NOT NULL CHECK (outcome IN ('success','denied','error')),
+    outcome      text        NOT NULL CHECK (outcome IN ('success','denied','failure')),
     error_code   text        NOT NULL DEFAULT '',
     request_id   text        NOT NULL DEFAULT '',
     details      jsonb       NOT NULL DEFAULT '{}'::jsonb,
@@ -332,6 +347,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
 );
 CREATE INDEX IF NOT EXISTS audit_event_tenant_created_idx ON audit_event (tenant, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS audit_event_created_idx ON audit_event (created_at);
+CREATE INDEX IF NOT EXISTS audit_event_tenant_action_idx ON audit_event (tenant, action, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS session_file_transfer (
     id                  text        PRIMARY KEY,

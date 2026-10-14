@@ -64,7 +64,8 @@ containers:
 volumes: + {name: tcdi-adapter, emptyDir: {}}
 ```
 
-Everything else in the pod is identical to a native runtime: port 8443,
+Everything else in the pod is identical to a native runtime: port 8443
+(served by `tcdi-xferd` in front of loopback-only KasmVNC),
 the exec readiness probe (`/opt/tcdi/healthcheck.sh`), the Secret mount
 at `/run/secrets/tcdi`, the tmpfs `/run/tcdi`, bounded `/dev/shm`, home
 volume at `/home/workspace`, `securityContext` (uid 1000, drop ALL,
@@ -74,7 +75,8 @@ no-new-privs, seccomp/AppArmor), Service and NetworkPolicy.
 
 The adapter image (`build/kasm-adapter/`, published as
 `tinycdi-kasm-adapter`) contains a static `install-adapter` copier that
-writes the adapter files into the shared volume:
+writes the adapter files, and the static `tcdi-xferd` transfer helper,
+into the shared volume:
 
 - `entrypoint.sh` — same contract as `build/linux-base/entrypoint.sh`:
   reads credentials/TLS from the mounted Secret files, stages them on the
@@ -83,14 +85,23 @@ writes the adapter files into the shared volume:
   management surface), seeds `/home/kasm-default-profile` into the
   persistent home on first boot, neutralizes `~/.kasmpasswd`
   (symlink → `/run/tcdi`), rewrites `~/.vnc/kasmvnc.yaml` every boot with
-  the full TinyCDI policy (port 8443, TLS pem → `/run/tcdi`, the
+  the full TinyCDI policy (`interface: 127.0.0.1`, port 8444, TLS pem →
+  `/run/tcdi`, the
   clipboard DLP block rendered from `TCDI_CLIPBOARD_POLICY`, client
   overrides off, COEP/COOP headers, brute-force 5/10),
   then runs `kasmvncserver :1 -xstartup /opt/tcdi/xstartup.sh
-  -select-de manual -SecurityTypes None -websocketPort 8443 -interface
-  0.0.0.0 -sslOnly` and supervises Xvnc.
+  -select-de manual -SecurityTypes None -websocketPort 8444 -interface
+  127.0.0.1 -sslOnly`, starts `/opt/tcdi/tcdi-xferd` on :8443 (the same
+  helper and contract as the native images, `docs/images.md` *Runtime
+  contract*: it proxies the desktop to KasmVNC on `127.0.0.1:8444` and
+  serves `/xfer/files/{name}` against `$HOME/transfers`), and supervises
+  both: the container exits when Xvnc or the helper dies.
+- `tcdi-xferd` — the in-pod transfer helper binary (`cmd/tcdi-xferd`,
+  static Go), installed `0755` next to the scripts. It is not
+  subPath-mounted anywhere; the entrypoint runs it from the shared
+  volume.
 - `healthcheck.sh` — readiness gate: `xdpyinfo` on :1 AND an authenticated
-  HTTPS 200 on :8443, logging in with the mounted Secret (an anonymous probe
+  HTTPS 200 on :8443 (through `tcdi-xferd`, so both hops), logging in with the mounted Secret (an anonymous probe
   is an authentication failure to KasmVNC and blacklists loopback; tolerant of
   KasmVNC 1.4.x's loopback quirk where curl prints the code and exits non-zero).
   Entrypoint and probe both ignore one trailing line ending (`\n`/`\r\n`) on
@@ -130,7 +141,8 @@ Notable deltas vs the tcdi/* images (all proven on
   and wins for every key we set.
 - Kasm images ship dormant upload/audio/gamepad/webcam/printer/smartcard
   binaries — under the adapter the only listening sockets are :8443/tcp
-  and Xvnc's UDP transport on :8443/udp (KasmVNC 1.4.x cannot disable it —
+  (`tcdi-xferd`), `127.0.0.1:8444/tcp` and Xvnc's UDP transport on
+  :8444/udp (KasmVNC 1.4.x cannot disable it —
   `network.udp.port` accepts only `auto`|int and 0 resolves to the
   websocket port; the TCP-only NetworkPolicy is the control, same
   residual as the native images), but the binaries remain in the

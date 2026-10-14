@@ -23,6 +23,7 @@ reason) while it is `False`.
 | `ImagePullBackOff`, `ErrImagePull` | an image (including an init container's) cannot be pulled |
 | `CrashLoopBackOff`, `CreateContainerConfigError`, `PodFailed` | the container does not start |
 | `NotReady` | the container runs; the runtime's readiness check has not passed |
+| `WaitingForEndpoint` | `ConnectionReady` only: the desktop answers inside its pod (`RuntimeReady` is `True`), and the cluster has not yet routed the workspace Service to it (seconds) |
 | `BackendError` | the platform could not complete a runtime step (cluster quota, admission, API-server error); it retries with backoff and the boot deadline still applies |
 | `BootDeadlineExceeded` | the start did not finish within the template's `bootDeadline`; `phase` is `Failed` |
 
@@ -38,7 +39,22 @@ start the workspace rather than build an empty disk.
 Once `phase` is `Failed` the three step conditions are frozen: the reason on
 `ConnectionReady` is the step that stalled (for example `ImagePullBackOff`),
 and it stays after the five-minute cleanup of the failed incarnation.
-`RuntimeReady` reads `BootDeadlineExceeded`. A new start unfreezes them.
+`Degraded` carries the failure reason:
+
+| Reason | Meaning | Start |
+|---|---|---|
+| `BootDeadlineExceeded` | The desktop did not become ready within the template's boot deadline. `RuntimeReady` reads the same reason. | Recovers: a new runtime generation on the same home. |
+| `FailedCleanup` | The failed desktop was removed after five minutes. | Recovers. |
+| `RuntimeLost` | A running desktop's pod was deleted, evicted or failed. It is not rebuilt automatically. | Recovers. Old sessions are revoked. |
+| `ImagePolicyDenied` | A node image policy or an admission policy refused the image. A registry error (typo, missing pull secret) is not this reason; it ends as `BootDeadlineExceeded`. | Refused (409 `INVALID_STATE`, `details.reason`). |
+| `HomeVolumeLost` | A Retain workspace's home disk is gone after it had been used. The platform never starts it on an empty disk. | Refused. |
+| `TemplateRejected` | The runtime refused the template's configuration. | Refused. |
+
+Recovery mints a new runtime generation: the pod is rebuilt on the same home
+volume, and leases and launch tickets of the failed generation are revoked
+in the same transaction. A refused reason stays until the cause is fixed;
+then stop and start the workspace (a start after a stop always begins a
+fresh generation), or delete it.
 
 ## Stopping
 
@@ -117,6 +133,9 @@ Documented values:
 |---|---|---|---|
 | `release_pending` | `QUOTA_EXHAUSTED` | — | the refused amount is held only by workspaces whose quota release is pending teardown; `retryable: true` + `Retry-After` — retry is safe |
 | `UserLimitReached` | `QUOTA_EXHAUSTED` | `limit`, `current` | the caller already holds their maximum of concurrent running workspaces (a per-principal limit, not the tenant quota): `limit` is their cap, `current` the running workspaces they hold. When the caller's own teardown-pending holds cover the shortfall the response also carries `retryable: true` + `Retry-After` |
+| `ImagePolicyDenied` | `INVALID_STATE` | — | `:start` on a `Failed` workspace whose image was refused by a node or admission policy; a new generation would be refused the same way. Fix the policy or the template image, then stop and start the workspace |
+| `HomeVolumeLost` | `INVALID_STATE` | — | `:start` on a `Failed` Retain workspace whose home volume no longer exists; the platform never starts it on an empty home. Restore the volume (or delete the workspace), then stop and start it |
+| `TemplateRejected` | `INVALID_STATE` | — | `:start` on a `Failed` workspace whose template configuration the runtime refuses. Publish a corrected template revision, then stop and start the workspace |
 
 `params` here is the same flat string map convention as
 `WorkspaceEvent.params` — clients may localize the refusal instead of

@@ -85,6 +85,14 @@ type SessionPolicySpec struct {
 	// file-transfer ceiling at intent time.
 	// +required
 	FileTransfer FileTransferPolicy `json:"fileTransfer"`
+
+	// maxFileBytes is the resolved per-file size bound for file transfer:
+	// the tenant ceiling's maxFileBytes clipped to the platform bound.
+	// 0 when fileTransfer is Disabled. Rendered into the runtime pod as
+	// TCDI_XFER_MAX_BYTES; the in-pod transfer helper hard-caps on it.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxFileBytes int64 `json:"maxFileBytes,omitempty"`
 }
 
 // DataReference records a data volume the workspace uses or retains. Persistent

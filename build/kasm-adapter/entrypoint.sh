@@ -22,8 +22,9 @@
 #      planted symlink on the persistent home can never redirect it.
 #   4. Session runs with HOME=/home/workspace (the mounted volume), seeded
 #      from /home/kasm-default-profile on first boot.
-#   5. KasmVNC :1, HTTPS websocket on :8443, -SecurityTypes None (auth at the
-#      HTTPS layer via write-only kasmpasswd; RFB port is never published).
+#   5. KasmVNC :1, HTTPS websocket on 127.0.0.1:8444 only, -SecurityTypes None
+#      (auth at the HTTPS layer via write-only kasmpasswd; RFB port is never
+#      published). tcdi-xferd owns :8443 and proxies the desktop to it.
 set -euo pipefail
 
 # Same fd bound as build/linux-base/entrypoint.sh: the image's Xvnc
@@ -197,13 +198,13 @@ desktop:
     hw3d: false
 network:
   protocol: http
-  interface: 0.0.0.0
-  websocket_port: 8443
+  interface: 127.0.0.1
+  websocket_port: 8444
   use_ipv4: true
   use_ipv6: false
   # NOTE: KasmVNC 1.4.x has no off-switch for its UDP transport —
   # network.udp.port accepts only 'auto' or an integer (0 resolves to the
-  # websocket port), so Xvnc still binds :8443/udp. The NetworkPolicy is
+  # websocket port), so Xvnc still binds :8444/udp. The NetworkPolicy is
   # TCP-only so nothing can reach it; the contract test asserts no OTHER
   # UDP socket exists. Revisit on a KasmVNC bump (docs/kasm-images.md).
   ssl:
@@ -250,11 +251,20 @@ kasmvncserver ":$DISPLAY_NUM" \
   -xstartup /opt/tcdi/xstartup.sh \
   -select-de manual \
   -SecurityTypes None \
-  -websocketPort 8443 \
-  -interface 0.0.0.0 \
+  -websocketPort 8444 -interface 127.0.0.1 \
   -sslOnly >> "$HOME/.vnc/entrypoint.log" 2>&1
 
+# tcdi-xferd owns :8443 (ADR 0010 §5 (i)): it serves /xfer/ against
+# $HOME/transfers and reverse-proxies everything else to KasmVNC, which
+# listens on 127.0.0.1:8444 only. The pod's published contract (one HTTPS
+# port, the Secret's own cert) is unchanged.
+XFERD_BIN="${TCDI_XFERD_BIN:-/opt/tcdi/tcdi-xferd}"
+[ -x "$XFERD_BIN" ] || fail "transfer helper missing: $XFERD_BIN"
+"$XFERD_BIN" >> "$HOME/.vnc/xferd.log" 2>&1 &
+XFERD_PID=$!
+
 shutdown() {
+  kill "$XFERD_PID" 2>/dev/null || true
   kasmvncserver -kill ":$DISPLAY_NUM" >/dev/null 2>&1 || true
   exit 0
 }
@@ -263,7 +273,7 @@ trap shutdown TERM INT
 tail -F "$HOME"/.vnc/*.log 2>/dev/null &
 TAILPID=$!
 
-while pgrep -x Xvnc >/dev/null 2>&1; do sleep 2; done
+while pgrep -x Xvnc >/dev/null 2>&1 && kill -0 "$XFERD_PID" 2>/dev/null; do sleep 2; done
 sleep 12
 kill "$TAILPID" 2>/dev/null || true
 shutdown

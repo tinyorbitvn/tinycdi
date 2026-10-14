@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
@@ -89,6 +90,7 @@ type TemplateEntry struct {
 	MaxRunningSeconds      int64
 	DataPolicyDefault      string
 	ClipboardPolicy        string
+	FileTransferPolicy     string
 	NetworkProfile         string
 	// ImageUpdate is the revision's lifecycle.imageUpdate policy
 	// (OnStart | Pinned); "" reads as the OnStart default.
@@ -132,6 +134,9 @@ type workspaceBackend interface {
 	GetWorkspace(ctx context.Context, tenantID, ownerScope, id string) (provisioning.WorkspaceRecord, error)
 	ListWorkspaces(ctx context.Context, tenantID, ownerScope, phase string, p provisioning.ListPage) ([]provisioning.WorkspaceRecord, string, string, error)
 	SignalWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, kind provisioning.IntentKind, bodyHash []byte) (provisioning.WorkspaceRecord, error)
+	// RestartWorkspace recovers a Failed workspace wanted Running with a new
+	// runtime generation, fenced on fromGeneration (F1).
+	RestartWorkspace(ctx context.Context, tenantID, caller, ownerScope, wsID, idemKey string, fromGeneration int64, bodyHash []byte) (provisioning.WorkspaceRecord, error)
 }
 
 // WorkspaceHandler implements /v1/workspaces per openapi.yaml.
@@ -534,6 +539,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RevisionLabel: tpl.RevisionLabel,
 		Runtime:       tpl.Runtime, Experience: tpl.Experience,
 		ImageBuiltAt: tpl.ImageBuiltAt, ClipboardPolicy: tpl.ClipboardPolicy,
+		FileTransferPolicy: tpl.FileTransferPolicy,
 	}
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,
@@ -635,8 +641,20 @@ func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 	sum := sha256.Sum256(body)
-	rec, err := h.backend.SignalWorkspace(r.Context(), p.TenantID, p.Owner(), ownerScope(p), id, key, kind, sum[:])
+	var rec provisioning.WorkspaceRecord
+	if kind == provisioning.IntentStart {
+		rec, err = h.startOrRecover(r.Context(), p, id, key, sum[:])
+	} else {
+		rec, err = h.backend.SignalWorkspace(r.Context(), p.TenantID, p.Owner(), ownerScope(p), id, key, kind, sum[:])
+	}
 	if err != nil {
+		var refused *recoveryRefused
+		if errors.As(err, &refused) {
+			e := NewError(CodeInvalidState, "the workspace failed with "+refused.reason+" and cannot be restarted; an administrator must fix the cause")
+			e.Details = &ErrorDetails{Reason: refused.reason}
+			WriteError(w, r, e)
+			return
+		}
 		h.writeBackendError(w, r, err)
 		return
 	}
@@ -646,6 +664,43 @@ func (h *WorkspaceHandler) signal(w http.ResponseWriter, r *http.Request, id str
 	v := h.viewWithStatus(r.Context(), &rec)
 	v.Owner = resolveOwner(r.Context(), h.directory, p.TenantID, rec.Owner)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// recoveryRefused is a :start on a Failed workspace whose reason a new
+// generation cannot fix.
+type recoveryRefused struct{ reason string }
+
+func (e *recoveryRefused) Error() string { return "unrecoverable failure: " + e.reason }
+
+// startOrRecover routes :start. A workspace wanted Running whose CR reports
+// Failed is recovered with a new runtime generation when the reason is
+// recoverable (F1); every other start is the plain SignalWorkspace path.
+// The owner-scoped DB read runs first (SEC-21), so a foreign workspace is a
+// 404 before any CR state is consulted. Only a Fresh, settled projection
+// acts: a stale informer, or a CR whose Failed status still belongs to the
+// previous generation (the restart is applied but not yet reconciled), falls
+// through to the plain start, which is a no-op for a workspace wanted Running.
+// A leftover pod of the failed generation needs no check here: the restart
+// revokes the old generation in the same transaction, a fresh ticket needs a
+// Ready binding of the new generation, and the operator replaces the pod
+// before that.
+func (h *WorkspaceHandler) startOrRecover(ctx context.Context, p Principal, id, key string, bodyHash []byte) (provisioning.WorkspaceRecord, error) {
+	cur, err := h.backend.GetWorkspace(ctx, p.TenantID, ownerScope(p), id)
+	if err != nil {
+		return cur, err
+	}
+	if cur.DesiredState == "Running" && h.statusView != nil {
+		obs, err := h.statusView.WorkspaceStatus(ctx, p.TenantID, id)
+		if err == nil && obs.Fresh && obs.Found && obs.IntentSettled && obs.Phase == string(cdiv1.WorkspacePhaseFailed) {
+			switch {
+			case cdiv1.FailureRecoverable(obs.FailureReason):
+				return h.backend.RestartWorkspace(ctx, p.TenantID, p.Owner(), ownerScope(p), id, key, obs.RuntimeGeneration, bodyHash)
+			case cdiv1.FailureUnrecoverable(obs.FailureReason):
+				return cur, &recoveryRefused{reason: obs.FailureReason}
+			}
+		}
+	}
+	return h.backend.SignalWorkspace(ctx, p.TenantID, p.Owner(), ownerScope(p), id, key, provisioning.IntentStart, bodyHash)
 }
 
 // Start handles POST /v1/workspaces/{id}:start (an ActionRouter verb).
@@ -677,7 +732,8 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, provisioning.ErrBadCursor):
 		writeError(w, r, CodeInvalidRequest, "bad cursor")
 	case errors.Is(err, provisioning.ErrWorkspaceClosed),
-		errors.Is(err, provisioning.ErrInvalidState):
+		errors.Is(err, provisioning.ErrInvalidState),
+		errors.Is(err, provisioning.ErrNotRunning):
 		writeError(w, r, CodeInvalidState, err.Error())
 	case errors.Is(err, provisioning.ErrNoQuota):
 		writeError(w, r, CodeQuotaNotConfigured, quotaNotConfiguredMessage)

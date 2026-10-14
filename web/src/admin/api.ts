@@ -101,8 +101,57 @@ export async function listAdminUserLimitPage(
   );
 }
 
-export function scanAdminUserLimits(api: ApiClient, tenant: string): Promise<AdminUserLimitEntry[]> {
-  return scanCollection((cursor, sort) => listAdminUserLimitPage(api, tenant, cursor, sort, SCAN_PAGE_LIMIT));
+export type AdminTenantUser = components["schemas"]["AdminTenantUser"];
+export type AdminLiveSession = components["schemas"]["AdminLiveSession"];
+export type AdminRevokeResult = components["schemas"]["AdminRevokeResult"];
+
+// GET /v1/admin/tenants/{tenant}/sessions — live leases from Postgres, newest first.
+export async function listAdminSessionPage(
+  api: ApiClient,
+  tenant: string,
+  ownerRef?: string,
+  cursor?: string,
+): Promise<ServerPage<AdminLiveSession>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/sessions", {
+      params: {
+        path: { tenant },
+        query: { sort: "-createdAt", ...(ownerRef ? { ownerRef } : {}), ...(cursor ? { cursor } : {}) },
+      },
+    }),
+  );
+}
+
+// POST .../users/{ownerRef}/sessions:revoke-all — "sign out everywhere" for another user.
+export async function revokeAdminUserSessions(api: ApiClient, tenant: string, ownerRef: string): Promise<AdminRevokeResult> {
+  return unwrap(
+    await api.POST("/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all", {
+      params: { path: { tenant, ownerRef } },
+    }),
+  );
+}
+
+// GET .../users: everyone who signed in to the tenant (the principal
+// directory). `sort` is ownerRef | displayName | lastSeen, `-` = descending.
+export async function listAdminUserPage(
+  api: ApiClient,
+  tenant: string,
+  cursor?: string,
+  sort?: string,
+  limit?: number,
+): Promise<ServerPage<AdminTenantUser>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/users", {
+      params: {
+        path: { tenant },
+        query: { ...(sort ? { sort } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+      },
+    }),
+  );
+}
+
+export async function getAdminUser(api: ApiClient, tenant: string, ownerRef: string): Promise<AdminTenantUser> {
+  return unwrap(await api.GET("/v1/admin/tenants/{tenant}/users/{ownerRef}", { params: { path: { tenant, ownerRef } } }));
 }
 
 // Sets one principal's override. `etag` is the entry's tag; an entry
@@ -163,7 +212,9 @@ export async function putAdminUserLimitDefault(
 export type AdminSessionPolicyView = components["schemas"]["AdminSessionPolicyView"];
 export type PutAdminSessionPolicy = components["schemas"]["PutAdminSessionPolicy"];
 export type ClipboardCeiling = components["schemas"]["ClipboardCeiling"];
+export type FileTransferCeiling = components["schemas"]["FileTransferCeiling"];
 export type AdminSessionPolicySource = components["schemas"]["AdminSessionPolicySource"];
+export type ApplySessionPolicyResult = components["schemas"]["ApplySessionPolicyResult"];
 
 // Tenant session data-transfer ceiling
 // (GET/PUT /v1/admin/tenants/{tenant}/session-policy, ADR 0010): a
@@ -190,6 +241,20 @@ export async function putAdminSessionPolicy(
     await api.PUT("/v1/admin/tenants/{tenant}/session-policy", {
       params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
       body: policy,
+    }),
+  );
+}
+
+export async function applyAdminSessionPolicy(
+  api: ApiClient,
+  tenant: string,
+  body: { dryRun: boolean; includeActive?: boolean },
+  etag: string | undefined,
+): Promise<ApplySessionPolicyResult> {
+  return unwrap(
+    await api.POST("/v1/admin/tenants/{tenant}/session-policy:apply", {
+      params: { path: { tenant }, header: { "If-Match": etag ?? "*" } },
+      body: { dryRun: body.dryRun, includeActive: body.includeActive ?? false },
     }),
   );
 }
@@ -300,4 +365,43 @@ export function listTemplatePageAdmin(
 
 export function scanAdminTemplates(api: ApiClient): Promise<AdminTemplateView[]> {
   return scanTemplates(api);
+}
+
+export type AdminAuditEntry = components["schemas"]["AdminAuditEntry"];
+export type AuditFilter = { action?: string; actor?: string; target?: string; since?: string; until?: string };
+
+// GET .../audit: newest first (the only order), filtered server-side. Empty
+// filter fields are omitted. exactOptionalPropertyTypes is on, so the query
+// is built with conditional spreads, not undefined values.
+export async function listAdminAuditPage(
+  api: ApiClient,
+  tenant: string,
+  filter: AuditFilter,
+  cursor?: string,
+): Promise<ServerPage<AdminAuditEntry>> {
+  return unwrap(
+    await api.GET("/v1/admin/tenants/{tenant}/audit", {
+      params: {
+        path: { tenant },
+        query: {
+          sort: "-createdAt",
+          ...(filter.action ? { action: filter.action } : {}),
+          ...(filter.actor ? { actor: filter.actor } : {}),
+          ...(filter.target ? { target: filter.target } : {}),
+          ...(filter.since ? { since: filter.since } : {}),
+          ...(filter.until ? { until: filter.until } : {}),
+          ...(cursor ? { cursor } : {}),
+        },
+      },
+    }),
+  );
+}
+
+export type AdminOverview = components["schemas"]["AdminOverview"];
+
+// GET .../overview (F7): the tenant health aggregate — live sessions, Ready
+// workspaces per template, provisioning p95, stuck deletions — cached
+// server-side for 15 s.
+export async function fetchAdminOverview(api: ApiClient, tenant: string): Promise<AdminOverview> {
+  return unwrap(await api.GET("/v1/admin/tenants/{tenant}/overview", { params: { path: { tenant } } }));
 }

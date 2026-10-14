@@ -271,10 +271,12 @@ func TestNoAdapterPodUnchanged(t *testing.T) {
 	if len(ctr.Command) != 0 {
 		t.Errorf("no-adapter pod must keep the image entrypoint, command=%v", ctr.Command)
 	}
-	// The only env a no-adapter pod may carry is the rendered clipboard
-	// policy — every other knob stays the image entrypoint's own.
-	if len(ctr.Env) != 1 || ctr.Env[0].Name != "TCDI_CLIPBOARD_POLICY" {
-		t.Errorf("no-adapter pod env = %v, want only TCDI_CLIPBOARD_POLICY", ctr.Env)
+	// The only env a no-adapter pod may carry is the rendered session
+	// policy (clipboard + file transfer) — every other knob stays the
+	// image entrypoint's own.
+	if len(ctr.Env) != 3 || ctr.Env[0].Name != "TCDI_CLIPBOARD_POLICY" ||
+		ctr.Env[1].Name != "TCDI_XFER_POLICY" || ctr.Env[2].Name != "TCDI_XFER_MAX_BYTES" {
+		t.Errorf("no-adapter pod env = %v, want only the session-policy envs", ctr.Env)
 	}
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == adapterVolName {

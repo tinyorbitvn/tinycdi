@@ -218,6 +218,14 @@ func (f *fakeBrokerClient) ReportActivity(_ context.Context, _ broker.GatewayIde
 	return nil
 }
 
+func (f *fakeBrokerClient) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, broker.ErrTransferInvalid
+}
+
+func (f *fakeBrokerClient) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return nil
+}
+
 func (f *fakeBrokerClient) activityTypes() []broker.ActivityEventType {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -363,7 +371,7 @@ func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Hand
 	data := api.NewDataHandler(nil, nil, tenants)
 	quota := api.NewQuotaHandler(fakeQuotaSource{}, tenants)
 	pass := func(h http.Handler) http.Handler { return h }
-	mux := appMux(authn, ws, tpl, conn, me, connStatus, data, quota, nil, nil, nil, pass, pass, pass)
+	mux := appMux(authn, appRoutes{ws: ws, tpl: tpl, conn: conn, me: me, connStatus: connStatus, data: data, quota: quota}, pass, pass, pass)
 	b := &Backend{log: testLog(), metrics: m}
 	b.ready.Store(true)
 	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
@@ -454,6 +462,12 @@ func (f *fakeInternalBroker) RevokeWorkspaceLeases(context.Context, broker.Platf
 }
 func (f *fakeInternalBroker) DrainStatus(context.Context, broker.PlatformID) (int, bool, error) {
 	return 0, true, nil
+}
+func (f *fakeInternalBroker) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, broker.ErrTransferInvalid
+}
+func (f *fakeInternalBroker) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return nil
 }
 
 // testCA is a tiny in-test CA used to sign client certs for the internal
@@ -1262,4 +1276,10 @@ func (a internalAdapter) RevokeWorkspaceLeases(context.Context, broker.PlatformI
 }
 func (a internalAdapter) DrainStatus(context.Context, broker.PlatformID) (int, bool, error) {
 	return 0, true, nil
+}
+func (a internalAdapter) ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	return a.fb.ClaimTransfer(ctx, gw, leaseID, transferID, method)
+}
+func (a internalAdapter) CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	return a.fb.CompleteTransfer(ctx, gw, leaseID, transferID, bytesDone, ok)
 }

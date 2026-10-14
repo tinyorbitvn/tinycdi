@@ -29,6 +29,11 @@ type fakeWorkspaceBackend struct {
 	attachErr error
 	gotCreate []provisioning.CreateRequest
 	gotAttach []fakeAttachCall
+	// restartCalls records each RestartWorkspace's fromGeneration;
+	// signalCalls counts SignalWorkspace calls (F1 routing pins).
+	restartCalls []int64
+	signalCalls  int
+	restartErr   error
 }
 
 // fakeAttachCall records one AttachRetained invocation so tests can pin
@@ -170,6 +175,7 @@ func fakeKeysetPage[T any](rows []T, p provisioning.ListPage, key, id func(T) st
 func (f *fakeWorkspaceBackend) SignalWorkspace(_ context.Context, tenantID, _, ownerScope, id, _ string, kind provisioning.IntentKind, _ []byte) (provisioning.WorkspaceRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.signalCalls++
 	if f.signalErr != nil {
 		return provisioning.WorkspaceRecord{}, f.signalErr
 	}
@@ -187,6 +193,22 @@ func (f *fakeWorkspaceBackend) SignalWorkspace(_ context.Context, tenantID, _, o
 	case provisioning.IntentDelete:
 		rec.Phase = "Terminating"
 	}
+	f.recs[id] = rec
+	return rec, nil
+}
+
+func (f *fakeWorkspaceBackend) RestartWorkspace(_ context.Context, tenantID, _, ownerScope, id, _ string, fromGeneration int64, _ []byte) (provisioning.WorkspaceRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec, ok := f.recs[id]
+	if !ok || rec.TenantID != tenantID || (ownerScope != "" && rec.Owner != ownerScope) {
+		return provisioning.WorkspaceRecord{}, provisioning.ErrWorkspaceNotFound
+	}
+	if f.restartErr != nil {
+		return provisioning.WorkspaceRecord{}, f.restartErr
+	}
+	f.restartCalls = append(f.restartCalls, fromGeneration)
+	rec.Phase = "Provisioning"
 	f.recs[id] = rec
 	return rec, nil
 }
@@ -221,7 +243,9 @@ func (f *fakeCatalog) List(_ context.Context, tenantID, _ string) ([]TemplateEnt
 	return out, nil
 }
 
-func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, tenants TenantResolver, opts ...func(*WorkspaceHandler)) *testEnv {
+// newEnvWithRoutes builds an authenticated test server; mount adds the
+// routes under test next to /auth/login and /auth/callback.
+func newEnvWithRoutes(t *testing.T, mount func(mux *http.ServeMux, a *Authenticator)) *testEnv {
 	t.Helper()
 	iss, err := oidctest.NewIssuer()
 	if err != nil {
@@ -239,19 +263,24 @@ func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, ten
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
+	mux := http.NewServeMux()
+	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
+	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
+	mount(mux, a)
+	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
+	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
+	t.Cleanup(func() { srv.Close(); iss.Close() })
+	return env
+}
+
+func newWorkspaceEnv(t *testing.T, be workspaceBackend, cat TemplateCatalog, tenants TenantResolver, opts ...func(*WorkspaceHandler)) *testEnv {
+	t.Helper()
 	h := NewWorkspaceHandler(be, cat, tenants)
 	for _, o := range opts {
 		o(h)
 	}
 	th := NewTemplateHandler(cat, tenants)
-	mux := http.NewServeMux()
-	mux.Handle("/auth/login", http.HandlerFunc(a.LoginHandler))
-	mux.Handle("/auth/callback", http.HandlerFunc(a.CallbackHandler))
-	MountWorkspaceRoutes(mux, a, h, th)
-	srv := httptest.NewServer(RequestID(Audit(logger)(mux)))
-	env := &testEnv{issuer: iss, auth: a, store: sessions, server: srv, logs: logBuf}
-	t.Cleanup(func() { srv.Close(); iss.Close() })
-	return env
+	return newEnvWithRoutes(t, func(mux *http.ServeMux, a *Authenticator) { MountWorkspaceRoutes(mux, a, h, th) })
 }
 
 func defaultCatalog() *fakeCatalog {

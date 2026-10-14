@@ -4,7 +4,9 @@
 # Builds, scans, signs and publishes ONLY the runtime images
 # (linux-base + linux-desktop + browser) on a cadence decoupled from
 # control-plane releases: every push to main that touches
-# build/linux-base/**, build/linux-desktop/** or build/browser/**,
+# build/linux-base/** (or the tcdi-xferd sources it builds:
+# cmd/tcdi-xferd/**, internal/xferd/**), build/linux-desktop/** or
+# build/browser/**,
 # weekly, and on workflow_dispatch. Control-plane
 # images are never built or tagged here (D27) — release.yml owns them.
 #
@@ -74,6 +76,8 @@ name: runtime-images
     branches: [main]
     paths:
       - build/linux-base/**
+      - cmd/tcdi-xferd/**
+      - internal/xferd/**
       - build/linux-desktop/**
       - build/browser/**
   schedule:

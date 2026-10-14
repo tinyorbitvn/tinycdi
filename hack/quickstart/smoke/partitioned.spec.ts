@@ -1,6 +1,10 @@
 import * as https from "node:https";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page, type Response } from "@playwright/test";
+import { transferRoundTrip } from "./transfer";
 
 // Partitioned-cookie smoke (B6-PART). Runs against a quickstart installed
 // with hack/quickstart/values-partitioned.yaml — backend.sessionCookieMode:
@@ -29,6 +33,8 @@ const SESSION_DOMAIN =
   process.env.TCDI_QS_SESSION_DOMAIN ??
   `session.${process.env.TCDI_QS_DOMAIN ?? "tcdi.localtest.me"}`;
 const SYSTEM_NAMESPACE = process.env.TCDI_QS_SYSTEM_NAMESPACE ?? "tinycdi-system";
+const TENANT_NAMESPACE = process.env.TCDI_QS_TENANT_NAMESPACE ?? "tinycdi-tenant-a";
+const HOME_DIR = "/home/workspace";
 const SESSION_COOKIE = "__Host-tcdi_session";
 
 async function login(page: Page, user = USER): Promise<Response> {
@@ -46,12 +52,12 @@ async function login(page: Page, user = USER): Promise<Response> {
   return callback;
 }
 
-async function createBrowserWorkspace(page: Page, name: string): Promise<string> {
+async function createBrowserWorkspace(page: Page, name: string, label: RegExp = /browser/i): Promise<string> {
   await page.getByRole("link", { name: "New workspace" }).click();
   await page.waitForURL("**/workspaces/new");
   await page.locator('input[name="name"]').fill(name);
   const browserTemplate = page
-    .locator('select[name="template"] option', { hasText: /browser/i })
+    .locator('select[name="template"] option', { hasText: label })
     .first();
   await expect(browserTemplate).toBeAttached();
   await page
@@ -361,4 +367,58 @@ test("partitioned cookie mode: CHIPS session cookie across the session lifecycle
   expect(await probeSessionHost(sessionHost, launchCookie.value)).toBe(401);
   const sibling = `${label.slice(0, -1)}${label.endsWith("0") ? "1" : "0"}.${SESSION_DOMAIN}`;
   expect(await probeSessionHost(sibling, launchCookie.value)).toBe(401);
+});
+
+test("partitioned cookie mode: file transfer round trip over the CHIPS cookie", async ({ page }) => {
+  test.setTimeout(20 * 60_000);
+  const stamp = Date.now().toString(36);
+  const tplName = `xfer-part-${stamp}`;
+  const src = (
+    JSON.parse(
+      kubectlIn(TENANT_NAMESPACE, "get", "workspacetemplates", "-l", "workspaces.cdi.tinyorbit.vn/catalog-name=browser", "-o", "json"),
+    ) as { items: Array<Record<string, any>> }
+  ).items[0];
+  expect(src, "seeded browser template").toBeTruthy();
+  const clone = {
+    apiVersion: src.apiVersion,
+    kind: src.kind,
+    metadata: {
+      name: tplName,
+      namespace: TENANT_NAMESPACE,
+      labels: { "workspaces.cdi.tinyorbit.vn/catalog-name": tplName },
+      annotations: { ...(src.metadata.annotations ?? {}), "workspaces.cdi.tinyorbit.vn/display-name": `Transfer ${stamp}` },
+    },
+    spec: { ...src.spec, revision: `xfer-${tplName}`, fileTransferPolicy: "Bidirectional" },
+  };
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tcdi-tpl-")), "tpl.json");
+  fs.writeFileSync(f, JSON.stringify(clone));
+  kubectlIn(TENANT_NAMESPACE, "apply", "-f", f);
+
+  await login(page);
+  const workspaceId = await createBrowserWorkspace(page, `xfer-${stamp}`, new RegExp(tplName, "i"));
+  try {
+    const connect = await waitForConnect(page);
+    const launchRespP = page.waitForResponse(
+      (r) => /\/v1\/launch/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 120_000 },
+    );
+    await connect.click();
+    await page.waitForURL(`**/workspaces/${encodeURIComponent(workspaceId)}/session`);
+    // The transfer's credentialed fetch rides this cookie.
+    expectHostOnlySecure(await mintedSessionCookie(await launchRespP), "None", true);
+    await expect(page.locator(".tc-session__status")).toHaveText("Connected", { timeout: 5 * 60_000 });
+
+    const pod = kubectlIn(
+      TENANT_NAMESPACE, "get", "pods", "-l",
+      `workspaces.cdi.tinyorbit.vn/workspace-name=${workspaceId.replaceAll("_", "-").toLowerCase()}`,
+      "-o", "jsonpath={.items[0].metadata.name}",
+    );
+    await transferRoundTrip(page, stamp, `${HOME_DIR}/transfers`, (script, ...args) =>
+      kubectlIn(TENANT_NAMESPACE, "exec", pod, "-c", "desktop", "--", "sh", "-c", script, "_", ...args),
+    );
+  } finally {
+    await page.goto(`/workspaces/${encodeURIComponent(workspaceId)}`);
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await waitPhase(page, workspaceId, "Stopped");
+  }
 });

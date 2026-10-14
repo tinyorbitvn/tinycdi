@@ -35,7 +35,7 @@ const (
 	// ReasonCleanupRetry — a teardown step failed and will be retried.
 	ReasonCleanupRetry = "CleanupRetry"
 	// ReasonFailedCleanup — Failed incarnation is being torn down.
-	ReasonFailedCleanup = "FailedCleanup"
+	ReasonFailedCleanup = cdiv1.FailureFailedCleanup
 	// ReasonMissingWorkspaceID — the CR carries no platform workspace id
 	// (the workspaces.cdi.tinyorbit.vn/workspace-uid label the API applier
 	// stamps), so broker seams cannot be keyed safely. Teardown blocks

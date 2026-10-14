@@ -88,14 +88,15 @@ func contractTemplate(clipboard string) templateView {
 		LifecycleDefaults: lifecycleDefaults{
 			IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
 		},
-		DataPolicyDefault: "Ephemeral",
-		ClipboardPolicy:   clipboard,
-		NetworkProfile:    "InternetOnly",
-		PublishedAt:       built,
-		ImageBuiltAt:      &built,
-		ImageStale:        &stale,
-		ImageBlocked:      &stale,
-		ImageEngines:      map[string]string{"chromium": "154.0.8037.92", "firefox": "153.4.0esr"},
+		DataPolicyDefault:  "Ephemeral",
+		ClipboardPolicy:    clipboard,
+		FileTransferPolicy: "Disabled",
+		NetworkProfile:     "InternetOnly",
+		PublishedAt:        built,
+		ImageBuiltAt:       &built,
+		ImageStale:         &stale,
+		ImageBlocked:       &stale,
+		ImageEngines:       map[string]string{"chromium": "154.0.8037.92", "firefox": "153.4.0esr"},
 	}
 }
 
@@ -617,6 +618,18 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		{"POST", "/v1/workspaces/{workspaceId}:start", func() *http.Response {
 			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+":start", "", nil)
 		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil)
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+wsID+"/file-transfers",
+				`{"direction":"upload","path":"a.txt"}`, nil) // 400: an upload needs bytes
+		}},
+		{"POST", "/v1/workspaces/{workspaceId}/file-transfers", func() *http.Response {
+			return doReq(t, env, sess, csrf, "POST", "/v1/workspaces/"+unknownWS+"/file-transfers",
+				`{"direction":"upload","path":"a.txt","bytes":1}`, nil) // 404
+		}},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/"+rec.ID, "", nil) }},
 		{"GET", "/v1/data/{dataId}", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/data/rd_unknown", "", nil) }},
 		{"GET", "/v1/quota", func() *http.Response { return doReq(t, env, sess, csrf, "GET", "/v1/quota", "", nil) }},
@@ -634,6 +647,38 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		}},
 		{"GET", "/v1/admin/tenants/{tenant}/session-policy", func() *http.Response {
 			return doReq(t, env, sess, csrf, "GET", adminSessionPolicyPath, "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/audit", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminAuditPath, "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/audit", func() *http.Response {
+			return doReq(t, env, sess, csrf, "GET", adminAuditPath, "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/users", func() *http.Response { return doReq(t, env, sessA, csrfA, "GET", adminUsersPath, "", nil) }},
+		{"GET", "/v1/admin/tenants/{tenant}/users", func() *http.Response { return doReq(t, env, sess, csrf, "GET", adminUsersPath, "", nil) }},
+		{"GET", "/v1/admin/tenants/{tenant}/users/{ownerRef}", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminUserPath("https://idp|alice"), "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/users/{ownerRef}", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminUserPath("https://idp|nobody"), "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/sessions", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminSessionsPath, "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/sessions", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", adminSessionsPath+"?sort=createdAt", "", nil)
+		}},
+		{"POST", "/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminRevokePath("iss|contract"), "", nil)
+		}},
+		{"POST", "/v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminRevokePath("bad"), "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/overview", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "GET", "/v1/admin/tenants/tenant-a/overview", "", nil)
+		}},
+		{"GET", "/v1/admin/tenants/{tenant}/overview", func() *http.Response {
+			return doReq(t, env, sess, csrf, "GET", "/v1/admin/tenants/tenant-a/overview", "", nil)
 		}},
 		// One mutation per admin resource, then its stale precondition.
 		{"PUT", "/v1/admin/tenants/{tenant}/quota", func() *http.Response {
@@ -672,6 +717,12 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		}},
 		{"PUT", "/v1/admin/tenants/{tenant}/session-policy", func() *http.Response {
 			return doReq(t, env, sessA, csrfA, "PUT", adminSessionPolicyPath, `{"clipboard":"Disabled"}`, stale)
+		}},
+		{"POST", "/v1/admin/tenants/{tenant}/session-policy:apply", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminSessionPolicyPath+":apply", `{"dryRun":true}`, map[string]string{"If-Match": ETagOf("v1")})
+		}},
+		{"POST", "/v1/admin/tenants/{tenant}/session-policy:apply", func() *http.Response {
+			return doReq(t, env, sessA, csrfA, "POST", adminSessionPolicyPath+":apply", `{"dryRun":true}`, stale)
 		}},
 	}
 	statuses := map[string]map[int]bool{}

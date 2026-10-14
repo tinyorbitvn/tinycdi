@@ -168,3 +168,36 @@ func mustPending(t *testing.T, db *store.DB, wsID string) []provisioning.Intent 
 	}
 	return list
 }
+
+func TestResolveSessionPolicy_FileTransferLeg(t *testing.T) {
+	db := recoveryDB(t)
+	const bound = int64(100 << 20)
+	svc := provisioning.NewService(db).WithFileTransferMaxBytes(bound)
+	ctx := context.Background()
+	tpl := provisioning.TemplateCatalogEntry{
+		ClipboardPolicy:    provisioning.PolicyDisabled,
+		FileTransferPolicy: provisioning.PolicyBidirectional,
+	}
+
+	got, err := svc.ResolveSessionPolicy(ctx, "tenant-ft", tpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FileTransfer != cdiv1.FileTransferBidirectional || got.MaxFileBytes != bound {
+		t.Fatalf("no ceiling row: %+v, want Bidirectional/%d", got, bound)
+	}
+
+	small := int64(1 << 20)
+	if _, err := store.NewSessionPolicyStore(db).SetCeiling(ctx, "tenant-ft", store.SessionPolicyWrite{
+		FileTransfer: strPtr(provisioning.FileTransferUpload), FileMaxBytes: &small,
+	}, "", true); err != nil {
+		t.Fatal(err)
+	}
+	got, err = svc.ResolveSessionPolicy(ctx, "tenant-ft", tpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FileTransfer != cdiv1.FileTransferUpload || got.MaxFileBytes != small {
+		t.Fatalf("Upload/1MiB ceiling: %+v, want Upload/%d", got, small)
+	}
+}

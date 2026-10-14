@@ -14,7 +14,7 @@ fresh login (expected, not an outage).
 
 | Tier | Event | Recovery |
 |---|---|---|
-| 1 | Component pod/node loss (api, operator, gateway, portal, one worker) | Kubernetes reschedules; streams drop and users reconnect within the lease window or re-ticket. No restore needed. |
+| 1 | Component pod/node loss (api, operator, gateway, portal, one worker) | Kubernetes reschedules platform components; streams drop and users reconnect or re-ticket. A runtime pod lost with its node is not rescheduled: the workspace goes Failed/RuntimeLost and needs a manual `:start`. No restore needed. |
 | 2 | Platform namespace or release loss | `helm install` again + re-create the values-referenced Secrets from escrow; CRs/PVCs in managed namespaces survive (chart keeps them — install.md §Uninstall). |
 | 3 | Postgres loss | Restore DB dump; rebuild retained inventory from PVC metadata; reconcile quota (backup-restore.md §4–6). **If the cluster kept running** (CRs and runtime pods still live), follow "Postgres-only restore onto a live cluster" below instead — the fencing assumptions the rebuild procedure relies on do not hold there. |
 | 4 | Whole cluster loss | Full rebuild below — CRDs + chart + Secrets + CRs + volumes + DB. |

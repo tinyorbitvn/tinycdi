@@ -319,37 +319,48 @@ func (b *Broker) RequestStop(ctx context.Context, workspaceUID PlatformID, runti
 // generation that was never recorded would brick the workspace.
 func (b *Broker) RevokeWorkspaceLeases(ctx context.Context, workspaceUID PlatformID, runtimeGeneration uint64) (int, error) {
 	now := b.now()
-	var n int64
+	var n int
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
-		if err := b.checkRevokeBound(ctx, tx, workspaceUID, runtimeGeneration); err != nil {
-			return err
-		}
-		tag, err := tx.Exec(ctx, `
-			UPDATE connection_lease SET state = 'revoked', closed_at = $3
-			WHERE workspace_id = $1 AND runtime_generation <= $2 AND state = 'active'`,
-			workspaceUID, int64(runtimeGeneration), now)
-		if err != nil {
-			return fmt.Errorf("broker: revoke workspace leases: %w", err)
-		}
-		n = tag.RowsAffected()
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO workspace_revocation (workspace_id, runtime_generation, revoked_at)
-			SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = $1)
-			ON CONFLICT DO NOTHING`, workspaceUID, int64(runtimeGeneration), now); err != nil {
-			return fmt.Errorf("broker: record workspace revocation: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE workspace_activity SET
-				open_streams = 0,
-				disconnected_since = COALESCE(disconnected_since, $3),
-				updated_at = $3
-			WHERE workspace_id = $1 AND runtime_generation <= $2 AND open_streams > 0`,
-			workspaceUID, int64(runtimeGeneration), now); err != nil {
-			return fmt.Errorf("broker: close revoked streams: %w", err)
-		}
-		return nil
+		var err error
+		n, err = b.RevokeGenerationTx(ctx, tx, workspaceUID, runtimeGeneration, now)
+		return err
 	})
-	return int(n), err
+	return n, err
+}
+
+// RevokeGenerationTx is RevokeWorkspaceLeases inside the caller's
+// transaction: it revokes leases of generations <= runtimeGeneration,
+// records the workspace_revocation fence (which rejects tickets and lease
+// renewals bound to those generations) and zeroes their open-stream
+// counters. RestartWorkspace calls it in the same transaction that mints
+// the next generation (F1).
+func (b *Broker) RevokeGenerationTx(ctx context.Context, tx store.Tx, workspaceUID PlatformID, runtimeGeneration uint64, now time.Time) (int, error) {
+	if err := b.checkRevokeBound(ctx, tx, workspaceUID, runtimeGeneration); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE connection_lease SET state = 'revoked', closed_at = $3
+		WHERE workspace_id = $1 AND runtime_generation <= $2 AND state = 'active'`,
+		workspaceUID, int64(runtimeGeneration), now)
+	if err != nil {
+		return 0, fmt.Errorf("broker: revoke workspace leases: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO workspace_revocation (workspace_id, runtime_generation, revoked_at)
+		SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = $1)
+		ON CONFLICT DO NOTHING`, workspaceUID, int64(runtimeGeneration), now); err != nil {
+		return 0, fmt.Errorf("broker: record workspace revocation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE workspace_activity SET
+			open_streams = 0,
+			disconnected_since = COALESCE(disconnected_since, $3),
+			updated_at = $3
+		WHERE workspace_id = $1 AND runtime_generation <= $2 AND open_streams > 0`,
+		workspaceUID, int64(runtimeGeneration), now); err != nil {
+		return 0, fmt.Errorf("broker: close revoked streams: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // checkRevokeBound refuses a workspace revocation whose runtimeGeneration

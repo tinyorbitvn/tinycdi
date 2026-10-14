@@ -245,6 +245,9 @@ func TestK8sRunningSource_OperatorHeldWorkspaceStaysEnforced(t *testing.T) {
 	if err := kc.Status().Update(ctx, pod); err != nil {
 		t.Fatalf("mark pod serving: %v", err)
 	}
+	if err := kc.Create(ctx, linux.ReadyEndpointSlice(pod, linux.ServiceName(ws.UID))); err != nil {
+		t.Fatalf("publish endpoint slice: %v", err)
+	}
 	live := &cdiv1.WorkspaceTemplate{}
 	if err := kc.Get(ctx, client.ObjectKey{Namespace: ns, Name: "fam-held"}, live); err != nil {
 		t.Fatal(err)

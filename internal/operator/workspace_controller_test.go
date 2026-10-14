@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -205,9 +206,9 @@ func countChildren(t *testing.T, c client.Client, ns string, uid types.UID) (pod
 		listOwned(t, c, ns, uid, &networkingv1.NetworkPolicyList{}, "netpols")
 }
 
-// markPodReady simulates the kubelet: Pod scheduled + Ready condition true
+// markPodReadyOnly simulates the kubelet alone: Pod scheduled + Ready
 // (readinessProbe exec of the runtime healthcheck passing).
-func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
+func markPodReadyOnly(t *testing.T, c client.Client, pod *corev1.Pod) {
 	t.Helper()
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.Conditions = []corev1.PodCondition{
@@ -217,6 +218,26 @@ func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
 	if err := c.Status().Update(context.Background(), pod); err != nil {
 		t.Fatalf("mark pod ready: %v", err)
 	}
+}
+
+// publishReadyEndpoint simulates the endpointslice controller: a recreated
+// pod reuses the slice name with a new pod UID, so the old slice is replaced.
+func publishReadyEndpoint(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
+	ctx := context.Background()
+	slice := linux.ReadyEndpointSlice(pod, linux.ServiceName(types.UID(pod.Labels[linux.LabelWorkspaceUID])))
+	_ = c.Delete(ctx, &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: slice.Name, Namespace: slice.Namespace}})
+	if err := c.Create(ctx, slice); err != nil {
+		t.Fatalf("publish endpoint slice: %v", err)
+	}
+}
+
+// markPodReady is what the cluster does for a healthy pod: kubelet Ready,
+// then the slice that routes the Service to it.
+func markPodReady(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
+	markPodReadyOnly(t, c, pod)
+	publishReadyEndpoint(t, c, pod)
 }
 
 func thePod(t *testing.T, c client.Client, ns string, uid types.UID) *corev1.Pod {
@@ -319,7 +340,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			types.NamespacedName{Name: linux.SecretName(ws.UID), Namespace: ns}, sec); err != nil {
 			t.Fatalf("runtime secret: %v", err)
 		}
-		for _, k := range []string{"username", "password", "tls.crt", "tls.key"} {
+		for _, k := range []string{"username", "password", "tls.crt", "tls.key", "xfer-token"} {
 			if len(sec.Data[k]) == 0 {
 				t.Fatalf("secret missing key %q", k)
 			}
@@ -512,7 +533,7 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		}
 	})
 
-	t.Run("pod replacement keeps generation and changes runtimeUID", func(t *testing.T) {
+	t.Run("a lost pod is RuntimeLost; the next generation rebuilds from the recorded snapshot", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		newTemplate(t, c, ns, "tpl-repl", nil)
 		ws := newWorkspace(t, c, ns, "ws-repl", "tpl-repl", nil)
@@ -541,6 +562,21 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 			t.Fatalf("delete pod: %v", err)
 		}
 		reconcile(t, r, key)
+		wsNow = getWorkspace(t, c, key)
+		if wsNow.Status.Phase != cdiv1.WorkspacePhaseFailed || degradedReasonOf(wsNow) != cdiv1.FailureRuntimeLost {
+			t.Fatalf("phase=%q reason=%q, want Failed/RuntimeLost", wsNow.Status.Phase, degradedReasonOf(wsNow))
+		}
+		if pods := listOwned(t, c, ns, ws.UID, &corev1.PodList{}, "pods"); pods != 0 {
+			t.Fatalf("a lost pod was rebuilt inside its generation (%d pods)", pods)
+		}
+
+		// What the applier writes for RestartWorkspace's start intent.
+		wsNow.Spec.RuntimeGeneration = 2
+		wsNow.Spec.IntentRevision = 2
+		if err := c.Update(context.Background(), wsNow); err != nil {
+			t.Fatalf("new generation: %v", err)
+		}
+		reconcile(t, r, key)
 		pod2 := thePod(t, c, ns, ws.UID)
 		if pod2.UID == pod1.UID {
 			t.Fatalf("pod was not actually recreated")
@@ -551,9 +587,8 @@ func TestReconcileLinuxIdempotent(t *testing.T) {
 		if wsNow.Status.RuntimeUID == uid1 || wsNow.Status.RuntimeUID != string(pod2.UID) {
 			t.Fatalf("runtimeUID=%q want new %q", wsNow.Status.RuntimeUID, pod2.UID)
 		}
-		if wsNow.Status.ObservedRuntimeGeneration != 1 {
-			t.Fatalf("observedRuntimeGeneration=%d moved, want 1",
-				wsNow.Status.ObservedRuntimeGeneration)
+		if wsNow.Status.ObservedRuntimeGeneration != 2 {
+			t.Fatalf("observedRuntimeGeneration=%d, want 2", wsNow.Status.ObservedRuntimeGeneration)
 		}
 	})
 
