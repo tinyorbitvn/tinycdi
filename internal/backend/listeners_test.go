@@ -111,24 +111,24 @@ func TestServerTimeouts(t *testing.T) {
 	}
 }
 
-// TestSessionServerTimeouts (SEC-23): the session listener bounds header
-// parsing, keep-alive idleness and header size — but Read/WriteTimeout must
-// stay zero. Go applies them as absolute conn deadlines that survive
-// Hijack() and would kill long-lived WebSocket desktop streams.
+// TestSessionServerTimeouts (SEC-23, R1-05): the session listener bounds
+// header parsing, the whole request read, keep-alive idleness and header
+// size. WriteTimeout stays zero so proxied downloads stream; hijacked
+// WebSocket streams are unaffected by ReadTimeout because net/http clears
+// a conn's deadlines on Hijack (TestSessionListener_AdmittedStreamOutlivesReadBound).
 func TestSessionServerTimeouts(t *testing.T) {
 	srv := sessionServer(":0", nil)
-	if srv.ReadHeaderTimeout <= 0 {
-		t.Fatal("ReadHeaderTimeout must be > 0")
+	if srv.ReadHeaderTimeout <= 0 || srv.IdleTimeout <= 0 {
+		t.Fatal("ReadHeaderTimeout and IdleTimeout must be > 0")
 	}
-	if srv.IdleTimeout <= 0 {
-		t.Fatal("IdleTimeout must be > 0")
+	if srv.ReadTimeout != sessionReadTimeout || srv.ReadTimeout <= 0 {
+		t.Fatalf("ReadTimeout = %v, want sessionReadTimeout (%v) > 0", srv.ReadTimeout, sessionReadTimeout)
 	}
-	if srv.MaxHeaderBytes <= 0 {
-		t.Fatal("MaxHeaderBytes must be > 0")
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %v, want 0 (downloads stream)", srv.WriteTimeout)
 	}
-	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
-		t.Fatalf("Read/WriteTimeout must stay 0 for hijacked WebSockets, got %v/%v",
-			srv.ReadTimeout, srv.WriteTimeout)
+	if srv.MaxHeaderBytes != 64<<10 {
+		t.Fatalf("MaxHeaderBytes = %d, want 64 KiB", srv.MaxHeaderBytes)
 	}
 }
 

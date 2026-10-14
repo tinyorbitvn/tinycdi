@@ -392,9 +392,16 @@ Controls:
   requires the bearer token from `-control-token-file` (`controlAuth`,
   `internal/gateway/proxy.go`).
 - **Timeouts**: the app, internal and metrics listeners bound every
-  request phase; the session listener bounds only the header read,
-  because connections are hijacked for WebSocket
-  (`internal/backend/listeners.go`).
+  request phase; the session listener bounds the header read (10 s)
+  and the whole request read (`sessionReadTimeout`, 30 s), so a client
+  that stalls a declared body is cut at the bound
+  (`TestSessionListener_StalledBodyBounded`). Headers are capped at
+  64 KiB. net/http clears the deadline when a WebSocket upgrade is
+  hijacked, and the transfer leg extends its own deadline after the
+  broker claim, so admitted streams and granted transfers outlive the
+  bound (`TestSessionListener_AdmittedStreamOutlivesReadBound`,
+  `TestSessionListener_TransferUploadOutlivesReadBound`;
+  `internal/backend/listeners.go`).
 
 Register: TM-23 to TM-31.
 

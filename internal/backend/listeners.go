@@ -17,9 +17,11 @@ import (
 
 // Listener timeout budgets (SEC-23). The app, internal and metrics
 // listeners bound every request phase — they serve no streaming or
-// WebSocket endpoints. The session listener carries hijacked WebSocket
-// desktop streams, so its Read/WriteTimeout must stay zero: Go applies
-// them as absolute conn deadlines that survive Hijack().
+// WebSocket endpoints. The session listener bounds the whole request read
+// (sessionReadTimeout) but not writes: net/http clears a conn's deadlines
+// when a handler hijacks it (server.go hijackLocked), so an admitted
+// WebSocket stream outlives the bound, and the transfer leg extends its own
+// read and write deadlines after its claim (gateway transferStreamBudget).
 
 // appServer builds the public API listener.
 func appServer(addr string, h http.Handler) *http.Server {
@@ -34,17 +36,26 @@ func appServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
+// sessionReadTimeout is the session listener's whole-request read bound
+// (R1-05): headers plus body must arrive within it, so an unauthenticated
+// client that stalls a declared body cannot hold a conn or a serve
+// goroutine. A var so tests can shorten it.
+var sessionReadTimeout = 30 * time.Second
+
 // sessionServer builds the session listener. ReadHeaderTimeout bounds
-// header parsing, IdleTimeout bounds idle keep-alive conns and
-// MaxHeaderBytes caps header size; Read/WriteTimeout stay zero for the
-// hijacked desktop streams.
+// header parsing, ReadTimeout bounds the whole request read (including the
+// body drain net/http runs after a handler that left the body unread),
+// IdleTimeout bounds idle keep-alive conns and MaxHeaderBytes caps header
+// size. WriteTimeout stays zero: proxied desktop documents and downloads
+// stream for as long as the client reads.
 func sessionServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       sessionReadTimeout,
 		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes:    64 << 10,
 	}
 }
 
