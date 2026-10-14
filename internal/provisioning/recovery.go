@@ -18,6 +18,12 @@ import (
 // (design §8: reservation held until workload proven not consuming compute).
 var ErrRuntimeNotProvenGone = errors.New("provisioning: runtime absence not proven")
 
+// ErrSettleRaced: the workspace was started again (or its runtime
+// generation moved) between the absence proof and the release. It wraps
+// ErrRuntimeNotProvenGone, so every settle caller keeps the hold and
+// retries on the next pass.
+var ErrSettleRaced = fmt.Errorf("%w: the workspace was started again during the absence check", ErrRuntimeNotProvenGone)
+
 // MaxIntentApplyAttempts bounds how many times recovery re-drives a
 // pending intent before quarantining it for operator attention. It prevents
 // an infinite retry loop from repeatedly attempting to create a new
@@ -217,12 +223,25 @@ func (r *Recovery) pendingCreateIntent(ctx context.Context, workspaceUID Platfor
 }
 
 // SettleQuota releases the workspace's held reservation if and only if the
-// observer proves the runtime is gone. Proof is mapped to AbsenceProof:
-// observed-absent -> ProofRuntimeAbsent; a workspace whose create intent
-// never dispatched -> ProofNeverCreated. Any observer error or
-// still-present report returns ErrRuntimeNotProvenGone and releases
-// nothing. It is idempotent: an already-released reservation is a no-op.
+// observer proves the runtime is gone AND the workspace is still deleted or
+// wanted Stopped in the runtime generation that was current before the
+// proof. Proof is mapped to AbsenceProof: observed-absent ->
+// ProofRuntimeAbsent; a workspace whose create intent never dispatched ->
+// ProofNeverCreated. Any observer error or still-present report returns
+// ErrRuntimeNotProvenGone and releases nothing. The release transaction
+// locks the workspaces row and re-checks the settle predicate and the
+// generation, so a :start that commits during the proof keeps its
+// reservation (ErrSettleRaced). It is idempotent: an already-released
+// reservation is a no-op.
 func (r *Recovery) SettleQuota(ctx context.Context, tenantID string, workspaceUID PlatformID) error {
+	// The generation the absence proof is about. A row that does not exist
+	// can never be started again; -1 marks it.
+	gen := int64(-1)
+	if err := r.db.Pool().QueryRow(ctx,
+		`SELECT runtime_generation FROM workspaces WHERE id = $1`, workspaceUID).
+		Scan(&gen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("settle: read generation %s: %w", workspaceUID, err)
+	}
 	// A never-dispatched create intent is the strongest absence proof: no
 	// runtime was ever materialized.
 	pendingCreate, err := r.pendingCreateIntent(ctx, workspaceUID)
@@ -243,10 +262,25 @@ func (r *Recovery) SettleQuota(ctx context.Context, tenantID string, workspaceUI
 		}
 	}
 	return r.db.WithTx(ctx, func(tx store.Tx) error {
-		var policy, state string
-		if err := tx.QueryRow(ctx, `SELECT data_policy, state FROM workspaces WHERE id = $1`,
-			workspaceUID).Scan(&policy, &state); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("settle: read workspace %s: %w", workspaceUID, err)
+		var policy, state, desired string
+		var curGen int64
+		err := tx.QueryRow(ctx, `
+			SELECT data_policy, state, desired_state, runtime_generation
+			FROM workspaces WHERE id = $1 FOR UPDATE`,
+			workspaceUID).Scan(&policy, &state, &desired, &curGen)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// No row: nothing can start it again; settle on the proof.
+		case err != nil:
+			return fmt.Errorf("settle: lock workspace %s: %w", workspaceUID, err)
+		case state != "deleted" && desired != "Stopped":
+			// Started again after the candidate was picked: its new
+			// runtime needs this reservation.
+			return ErrSettleRaced
+		case curGen != gen:
+			// Stopped again, but in a newer generation than the absence
+			// proof: that generation's runtime is not proven gone.
+			return ErrSettleRaced
 		}
 		if state == "active" && policy == "Retain" {
 			// A stopped Retain workspace keeps its volume: compute is free

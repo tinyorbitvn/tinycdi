@@ -472,3 +472,157 @@ func TestSettleQuota_DeletedWorkspaceKeepsRetainedDiskHeld(t *testing.T) {
 		t.Fatalf("recovery found work after an in-transaction settle: %+v", actions)
 	}
 }
+
+// startDuringObserve runs fire once inside RuntimeGone — the window between
+// the settle candidate check and the release transaction — and then still
+// reports the runtime gone (the new pod is not created yet).
+type startDuringObserve struct {
+	fire func()
+}
+
+func (s *startDuringObserve) RuntimeGone(context.Context, provisioning.PlatformID) (bool, error) {
+	if s.fire != nil {
+		f := s.fire
+		s.fire = nil
+		f()
+	}
+	return true, nil
+}
+
+// settleRaceEnv seeds a tenant with RunningSlots 1 and a per-user limit of
+// 1, creates one Running Ephemeral workspace for iss|sub, stops it and acks
+// the stop intent. It returns the service, the workspace id and a create
+// helper for a second workspace of the same user.
+func settleRaceEnv(t *testing.T, tenant string) (*store.DB, *provisioning.Service, string, func(name string) error) {
+	t.Helper()
+	db := recoveryDB(t)
+	ctx := context.Background()
+	if err := db.WithTx(ctx, func(tx store.Tx) error {
+		return provisioning.SetQuota(ctx, tx, tenant, provisioning.ResourceVector{
+			RunningSlots: 1, CPUMillis: 64000, MemoryBytes: 128 << 30, DiskBytes: 4 << 40})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ulSetDefault(t, db, tenant, i64(1))
+	svc := provisioning.NewService(db)
+	mk := func(name string) (provisioning.WorkspaceRecord, error) {
+		return svc.CreateWorkspace(ctx, tenant, "key-"+name, provisioning.CreateRequest{
+			OwnerIssuer: "iss", OwnerSubject: "sub", Name: name,
+			Template: provisioning.TemplateInfo{ID: "t", Name: "tpl"},
+			Vector:   quotaVec, DesiredState: "Running", DataPolicy: "Ephemeral",
+		}, []byte(name))
+	}
+	ws1, err := mk("ws-1")
+	if err != nil {
+		t.Fatalf("create ws-1: %v", err)
+	}
+	if _, err := mk("ws-2"); err == nil {
+		t.Fatal("control: a second running workspace must be refused before any settle")
+	}
+	if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "iss|sub", ws1.ID, "", provisioning.IntentStop, nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `UPDATE outbox_intent SET dispatched_at = now()`); err != nil {
+		t.Fatal(err)
+	}
+	create := func(name string) error { _, err := mk(name); return err }
+	return db, svc, ws1.ID, create
+}
+
+func reservationState(t *testing.T, db *store.DB, wsID string) string {
+	t.Helper()
+	var st string
+	if err := db.Pool().QueryRow(context.Background(),
+		`SELECT state FROM quota_reservation WHERE workspace_id = $1`, wsID).Scan(&st); err != nil {
+		t.Fatalf("reservation state: %v", err)
+	}
+	return st
+}
+
+// TestSettleQuota_StartRaceKeepsReservation (R1-01): a :start that commits
+// while the settle pass is proving absence keeps the reservation held, so a
+// second workspace over the user limit and the tenant quota is refused.
+func TestSettleQuota_StartRaceKeepsReservation(t *testing.T) {
+	const tenant = "tenant-race"
+	ctx := context.Background()
+	db, svc, ws1, create := settleRaceEnv(t, tenant)
+	obs := &startDuringObserve{fire: func() {
+		if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "iss|sub", ws1, "", provisioning.IntentStart, nil); err != nil {
+			t.Errorf("racing start: %v", err)
+		}
+	}}
+	trig := provisioning.NewSettleTrigger()
+	w := &provisioning.SettleWorker{DB: db, Trigger: trig, Rec: provisioning.NewRecovery(db, obs)}
+	trig.Enqueue(provisioning.PlatformID(ws1))
+	w.DrainOnce(ctx)
+
+	if st := reservationState(t, db, ws1); st != "held" {
+		t.Fatalf("reservation of the restarted workspace = %q, want held", st)
+	}
+	if err := create("ws-2b"); err == nil {
+		t.Fatal("BYPASS: a second workspace was admitted over user limit 1 and tenant RunningSlots 1")
+	}
+
+	// The direct call reports the race as an unproven absence.
+	if err := provisioning.NewRecovery(db, &fakeObserver{gone: true}).SettleQuota(ctx, tenant, provisioning.PlatformID(ws1)); !errors.Is(err, provisioning.ErrRuntimeNotProvenGone) {
+		t.Fatalf("SettleQuota on a workspace wanted Running = %v, want ErrRuntimeNotProvenGone", err)
+	}
+
+	// A stop-then-start-then-stop inside the window moves the generation:
+	// desired is Stopped again, but the absence proof is for an older
+	// generation, so the hold stays.
+	if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "iss|sub", ws1, "", provisioning.IntentStop, nil); err != nil {
+		t.Fatalf("stop again: %v", err)
+	}
+	obs2 := &startDuringObserve{fire: func() {
+		for _, k := range []provisioning.IntentKind{provisioning.IntentStart, provisioning.IntentStop} {
+			if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "iss|sub", ws1, "", k, nil); err != nil {
+				t.Errorf("racing %s: %v", k, err)
+			}
+		}
+	}}
+	err := provisioning.NewRecovery(db, obs2).SettleQuota(ctx, tenant, provisioning.PlatformID(ws1))
+	if !errors.Is(err, provisioning.ErrSettleRaced) {
+		t.Fatalf("SettleQuota across a generation move = %v, want ErrSettleRaced", err)
+	}
+	if st := reservationState(t, db, ws1); st != "held" {
+		t.Fatalf("reservation after a generation move = %q, want held", st)
+	}
+}
+
+// TestSettleQuota_StoppedWorkspaceStillReleases (Review Focus 3): the row
+// lock must not leak quota — a workspace that stays Stopped is released on
+// the settle pass, and a deleted one too.
+func TestSettleQuota_StoppedWorkspaceStillReleases(t *testing.T) {
+	const tenant = "tenant-settle-ok"
+	ctx := context.Background()
+	db, svc, ws1, create := settleRaceEnv(t, tenant)
+	trig := provisioning.NewSettleTrigger()
+	w := &provisioning.SettleWorker{DB: db, Trigger: trig, Rec: provisioning.NewRecovery(db, &fakeObserver{gone: true})}
+	trig.Enqueue(provisioning.PlatformID(ws1))
+	w.DrainOnce(ctx)
+	if st := reservationState(t, db, ws1); st != "released" {
+		t.Fatalf("stopped workspace reservation = %q, want released", st)
+	}
+	if err := create("ws-3"); err != nil {
+		t.Fatalf("create after a proven stop: %v", err)
+	}
+
+	// Deleted: the new workspace is deleted, settles and frees its slot.
+	var ws3 string
+	if err := db.Pool().QueryRow(ctx, `SELECT id FROM workspaces WHERE name = 'ws-3'`).Scan(&ws3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SignalWorkspace(ctx, tenant, "iss|sub", "iss|sub", ws3, "", provisioning.IntentDelete, nil); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `UPDATE outbox_intent SET dispatched_at = now()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioning.NewRecovery(db, &fakeObserver{gone: true}).SettleQuota(ctx, tenant, provisioning.PlatformID(ws3)); err != nil {
+		t.Fatalf("settle deleted: %v", err)
+	}
+	if st := reservationState(t, db, ws3); st != "released" {
+		t.Fatalf("deleted workspace reservation = %q, want released", st)
+	}
+}

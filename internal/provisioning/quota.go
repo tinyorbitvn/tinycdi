@@ -363,22 +363,42 @@ func reacquireCompute(ctx context.Context, tx store.Tx, tenantID, workspaceID st
 
 // Release frees a held reservation and drops any stored restart vector (a
 // disk-only hold that is released belongs to a deleted workspace). proof must
-// evidence that the runtime no longer consumes compute; ProofUnspecified is rejected so a failed
-// request or HTTP timeout never silently frees quota.
+// evidence that the runtime no longer consumes compute; ProofUnspecified is
+// rejected so a failed request or HTTP timeout never silently frees quota.
+// A reservation whose workspace is active and wanted Running is never
+// released (ErrSettleRaced): the release predicate is part of the UPDATE, so
+// it holds even for a caller that skipped SettleQuota's row lock.
 func Release(ctx context.Context, tx store.Tx, tenantID, workspaceID string, proof AbsenceProof) error {
 	if !proof.Valid() {
 		return ErrProofRequired
 	}
 	tag, err := tx.Exec(ctx, `
-		UPDATE quota_reservation
+		UPDATE quota_reservation qr
 		SET state = 'released', release_proof = $3, released_at = now(),
 		    restart_slots = NULL, restart_cpu_millis = NULL, restart_memory_bytes = NULL
-		WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held'`,
+		WHERE qr.workspace_id = $1 AND qr.tenant_id = $2 AND qr.state = 'held'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM workspaces w
+		      WHERE w.id = qr.workspace_id AND w.state = 'active' AND w.desired_state = 'Running')`,
 		workspaceID, tenantID, string(proof))
 	if err != nil {
 		return fmt.Errorf("release: %w", err)
 	}
-	_ = tag // already-released rows are an idempotent no-op
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	// Nothing released: either already released (idempotent no-op) or the
+	// predicate kept a held row for a workspace wanted Running.
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM quota_reservation
+		               WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held')`,
+		workspaceID, tenantID).Scan(&blocked); err != nil {
+		return fmt.Errorf("release: %w", err)
+	}
+	if blocked {
+		return ErrSettleRaced
+	}
 	return nil
 }
 
