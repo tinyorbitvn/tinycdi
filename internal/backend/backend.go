@@ -90,6 +90,10 @@ type Backend struct {
 	// mTLS listener (nil when -internal-revoked-list is unset): it backs
 	// the handshake VerifyConnection and the ConnState drop hook.
 	internalBlocklist *tlsreload.Blocklist
+	// internalConns is the internal listener's verified-conn registry
+	// (TM-38): a client-CA swap closes conns whose chain the new bundle
+	// no longer verifies. Set whenever the internal listener is on.
+	internalConns *clientConns
 
 	// metrics is the platform metric set (E8), built only when the metrics
 	// listener is enabled — with no listener there is nothing to scrape.

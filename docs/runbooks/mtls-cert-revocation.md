@@ -29,11 +29,17 @@ One revoked certificate per line — `<serial-hex> <issuer-dn>`:
   prints it after `serial=`: colons stripped, case-insensitive, no `0x`
   prefix, leading-zero octets optional (entries compare as big integers,
   so `04ab` and `4ab` are the same serial).
-- `ISSUER-DN` — the rest of the line, trimmed. For the chart-issued
-  self-signed CA this is exactly `CN=tinycdi-internal-ca`; in general it
-  must equal `openssl x509 -noout -issuer -nameopt RFC2253` output after
-  `issuer=`. The match is an (issuer, serial) pair — serials are only
-  unique per issuer.
+- `ISSUER-DN` — the rest of the line, trimmed: the issuing CA's
+  distinguished name. Use `openssl x509 -noout -issuer -nameopt RFC2253`
+  output after `issuer=` (for the chart-issued self-signed CA,
+  `CN=tinycdi-internal-ca`). The match is canonical: attribute order,
+  escaping (`\C3\A9`, `\,`) and Go's `pkix.Name.String()` spelling all
+  compare equal. A line whose issuer does not parse as a DN rejects the
+  file. An entry whose issuer names no CA in the client-CA bundle
+  loads, but logs
+  `revocation entry names an issuer outside the client-CA bundle`
+  because it can never match. The match is an (issuer, serial) pair —
+  serials are only unique per issuer.
 - The file is parsed atomically: one malformed line rejects the whole
   file; the backend then keeps the last-good list (never applies a
   partial list). Files over 1 MiB or over 8192 entries are invalid.
@@ -115,5 +121,7 @@ certManager:
 ```
 
 If the internal CA itself is compromised, blocklisting is NOT the fix —
-rotate the CA (rotation drops every client at once, which is correct for
-a suspect CA).
+rotate the CA. When the new bundle lands (Secret sync plus one 30 s
+poll), the backend refuses new handshakes from the removed CA and closes
+every established connection whose certificate chain no longer verifies
+against the new bundle.

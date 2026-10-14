@@ -8,8 +8,10 @@ package backend
 // being trusted, all without a restart.
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -34,8 +36,8 @@ func serveInternalTLS(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool 
 
 // serveInternalTLSList is serveInternalTLS plus the ADR 0008 leg: when bl
 // is non-nil the listener installs the revocation VerifyConnection
-// (installRevocation) and the ConnState drop hook, exactly as bind() does
-// when -internal-revoked-list is set.
+// (installRevocation) and the ConnState drop hook, plus the TM-38
+// client-CA conn registry, exactly as bind() wires them.
 func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, pool *tlsreload.CAPool,
 	bl *tlsreload.Blocklist, log *slog.Logger, metrics *observability.Metrics) string {
 	t.Helper()
@@ -44,6 +46,8 @@ func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, p
 		t.Fatalf("ServerTLSConfig: %v", err)
 	}
 	hotReloadClientCAs(tlsCfg, pool)
+	conns := newClientConns(pool)
+	installClientConnTracking(tlsCfg, conns)
 	if bl != nil {
 		installRevocation(tlsCfg, bl, log, metrics)
 	}
@@ -58,9 +62,7 @@ func serveInternalTLSList(t *testing.T, srvCert tls.Certificate, caPEM []byte, p
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
-	if bl != nil {
-		srv.ConnState = connStateDrop(bl)
-	}
+	srv.ConnState = internalConnState(conns, bl)
 	go func() { _ = serveTLS(srv, ln, tlsCfg) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
@@ -193,4 +195,69 @@ func TestInternalListener_DropsRemovedCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventuallyCall(t, 5*time.Second, func() bool { return callMTLS(addr, client1) }, false)
+}
+
+// waitSevered polls conn until a read fails with something other than a
+// deadline timeout (EOF or reset: the server closed it); it fails the
+// test after d. A timeout means the conn is still open and idle.
+func waitSevered(t *testing.T, conn net.Conn, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	buf := make([]byte, 1)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, err := conn.Read(buf)
+		var ne net.Error
+		if err != nil && !(errors.As(err, &ne) && ne.Timeout()) {
+			return
+		}
+	}
+	t.Fatal("established conn was not severed")
+}
+
+// TestInternalListener_RemovedCASeversLiveConn (R1-30, TM-38): when CA1
+// leaves the client-CA bundle, an established keep-alive conn
+// authenticated by a CA1 cert is closed on the same reload pass — a
+// rotation must not leave a stolen cert's live conn served — while a conn
+// from the still-trusted CA2 keeps answering.
+func TestInternalListener_RemovedCASeversLiveConn(t *testing.T) {
+	dir := t.TempDir()
+	ca1 := newTestCANamed(t, "internal-ca-1")
+	ca2 := newTestCANamed(t, "internal-ca-2")
+	caFile := filepath.Join(dir, "clients-ca.pem")
+	bundle := append(append([]byte(nil), ca1.pem...), ca2.pem...)
+	if err := writeFileAtomic(caFile, bundle); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := tlsreload.NewCAPool(caFile, tlsreload.WithInterval(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go pool.Run(ctx)
+
+	cf, kf := writeTestCert(t, dir, "internal.test")
+	srvCert, err := tls.LoadX509KeyPair(cf, kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := serveInternalTLS(t, srvCert, bundle, pool)
+
+	conn1 := dialMTLS(t, addr, clientTLSCfg(ca1.sign(t, "operator")))
+	br1 := bufio.NewReader(conn1)
+	conn2 := dialMTLS(t, addr, clientTLSCfg(ca2.sign(t, "operator")))
+	br2 := bufio.NewReader(conn2)
+	if mtlsGet(t, conn1, br1) != http.StatusOK || mtlsGet(t, conn2, br2) != http.StatusOK {
+		t.Fatal("setup request failed")
+	}
+
+	if err := writeFileAtomic(caFile, ca2.pem); err != nil {
+		t.Fatal(err)
+	}
+	waitSevered(t, conn1, 5*time.Second)
+	if mtlsGet(t, conn2, br2) != http.StatusOK {
+		t.Fatal("conn from the still-trusted CA2 was severed")
+	}
+	_ = conn2.Close()
 }

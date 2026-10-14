@@ -8,12 +8,14 @@ package tlsreload
 // severs live conns on a blocking swap, serialized against registration.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"io"
 	"log/slog"
@@ -88,7 +90,7 @@ func writeList(t *testing.T, path, content string) {
 
 // TestParseBlocklistFormat covers the ADR 0008 grammar: comments and
 // blanks ignored, serials normalized as big integers (colons, case,
-// leading zeros), issuer compared byte-for-byte after a trim.
+// leading zeros), issuer compared canonically.
 func TestParseBlocklistFormat(t *testing.T) {
 	entries, err := parseBlocklist(`
 # comment line
@@ -103,9 +105,9 @@ func TestParseBlocklistFormat(t *testing.T) {
 		t.Fatalf("parseBlocklist: %v", err)
 	}
 	want := map[revokedEntry]struct{}{
-		{issuer: "CN=tinycdi-internal-ca", serial: "4f8b2c1a09d3e4f5"}: {},
-		{issuer: "CN=Second CA, O=Org", serial: "4ab"}:                 {},
-		{issuer: "CN=zero", serial: "0"}:                               {},
+		{issuer: mustCanonicalDN(t, "CN=tinycdi-internal-ca"), serial: "4f8b2c1a09d3e4f5"}: {},
+		{issuer: mustCanonicalDN(t, "CN=Second CA, O=Org"), serial: "4ab"}:                 {},
+		{issuer: mustCanonicalDN(t, "CN=zero"), serial: "0"}:                               {},
 	}
 	if len(entries) != len(want) {
 		t.Fatalf("got %d entries, want %d: %v", len(entries), len(want), entries)
@@ -139,13 +141,22 @@ func TestParseBlocklistRejectsWholeFile(t *testing.T) {
 // TestParseBlocklistLineIssuerSpaces: the issuer is the rest of the line,
 // trimmed — spaces inside a DN survive.
 func TestParseBlocklistLineIssuerSpaces(t *testing.T) {
-	e, err := parseBlocklistLine("4f8b   CN=Some CA, O=Org Inc  ")
+	e, written, err := parseBlocklistLine("4f8b   CN=Some CA, O=Org Inc  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.issuer != "CN=Some CA, O=Org Inc" || e.serial != "4f8b" {
-		t.Fatalf("got %+v", e)
+	if written != "CN=Some CA, O=Org Inc" || e.issuer != mustCanonicalDN(t, "O=Org Inc,CN=Some CA") || e.serial != "4f8b" {
+		t.Fatalf("got %+v (written %q)", e, written)
 	}
+}
+
+func mustCanonicalDN(t *testing.T, s string) string {
+	t.Helper()
+	k, err := canonicalDN(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
 
 // TestParseBlocklistBounds: > 8192 entries or > 1 MiB files are invalid.
@@ -421,4 +432,100 @@ func TestBlocklistConcurrentTrackAndSwap(t *testing.T) {
 // testLogger returns a discard logger for tests.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// TestBlocklistIssuerCanonicalMatch (R1-31, TM-38): an entry's issuer
+// matches canonically. The runbook's `openssl x509 -noout -issuer
+// -nameopt RFC2253` form of a corporate DN (emailAddress attribute, UTF-8
+// hex escapes, reversed order) blocks the leaf exactly like Go's
+// pkix.Name.String() form; an issuer that is not a DN fails the file
+// instead of loading an entry that can never match; an entry naming an
+// issuer absent from the client-CA bundle logs a warning at load.
+func TestBlocklistIssuerCanonicalMatch(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emailOID := asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}
+	caTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Corp Issuing CA",
+			Organization: []string{"Société Exemple"},
+			Country:      []string{"VN"},
+			ExtraNames:   []pkix.AttributeTypeAndValue{{Type: emailOID, Value: "pki@corp.example"}},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(0x4f8b),
+		Subject:      pkix.Name{CommonName: "operator"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTpl, ca, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	file := filepath.Join(t.TempDir(), "revoked-serials.txt")
+	for _, issuer := range []string{
+		`emailAddress=pki@corp.example,CN=Corp Issuing CA,O=Soci\C3\A9t\C3\A9 Exemple,C=VN`, // openssl -nameopt RFC2253
+		leaf.Issuer.String(), // Go's pkix.Name.String()
+		`C=VN, O=Société Exemple, CN=Corp Issuing CA, E=pki@corp.example`,
+	} {
+		writeList(t, file, "4f8b "+issuer+"\n")
+		bl, err := NewBlocklist(file, WithLogger(testLogger()))
+		if err != nil {
+			t.Fatalf("NewBlocklist(%q): %v", issuer, err)
+		}
+		if err := bl.Track(nil, leaf); !errors.Is(err, ErrCertRevoked) {
+			t.Errorf("issuer %q: leaf 4f8b not blocked (Track err = %v)", issuer, err)
+		}
+	}
+
+	// An issuer that is not a DN fails the whole file — never a silently
+	// dead entry.
+	writeList(t, file, "4f8b not-a-dn\n")
+	if _, err := NewBlocklist(file, WithLogger(testLogger())); err == nil {
+		t.Error("an issuer that is not a DN loaded")
+	}
+
+	// An issuer absent from the client-CA bundle is a load-time warning;
+	// a known one is silent.
+	known := WithKnownIssuers(func() []*x509.Certificate { return []*x509.Certificate{ca} })
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	writeList(t, file, "4f8b CN=Some Other CA\n")
+	if _, err := NewBlocklist(file, WithLogger(log), known); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "outside the client-CA bundle") || !strings.Contains(buf.String(), "CN=Some Other CA") {
+		t.Errorf("unknown issuer: no load warning naming it, log = %s", buf.String())
+	}
+	buf.Reset()
+	writeList(t, file, "4f8b "+leaf.Issuer.String()+"\n")
+	if _, err := NewBlocklist(file, WithLogger(log), known); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "outside the client-CA bundle") {
+		t.Errorf("known issuer warned: %s", buf.String())
+	}
 }

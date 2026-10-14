@@ -463,7 +463,7 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   cross-issuer certs pass, an appended entry lands on poll, resumed
   handshakes are refused too, a live conn on a newly blocked serial
   is severed, `ConnState` close/hijack drops the registration,
-  feature-off installs no `VerifyConnection` (byte-identical),
+  feature-off installs no revocation `VerifyConnection`,
   absent-cert still reaches the 401 path, WARN line + the three
   metrics, and the flag/env/validation surface.
 - `internal/broker/transfers_test.go` — the transfer claim and

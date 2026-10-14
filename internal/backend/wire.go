@@ -502,12 +502,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
 		hotReloadClientCAs(tlsCfg, caPool)
+		// TM-38: a client-CA rotation also ends established conns whose
+		// chain the new bundle no longer verifies.
+		b.internalConns = newClientConns(caPool)
+		installClientConnTracking(tlsCfg, b.internalConns)
 		// ADR 0008 (SR-3-F5): optional per-certificate revocation. The
 		// blocklist polls+swaps exactly like the CA pool; a bad file at
 		// boot fails startup (a configured revocation control never starts
 		// silently disabled) and a bad reload keeps the last-good list.
-		// Unset flag = no VerifyConnection is installed — the handshake
-		// path stays byte-identical.
+		// With the flag unset no revocation hook is installed; the
+		// client-CA conn tracking (installClientConnTracking) still runs.
 		if cfg.InternalRevokedList != "" {
 			var onErr func()
 			var onSwap func(int)
@@ -517,7 +521,8 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			}
 			bl, err := tlsreload.NewBlocklist(cfg.InternalRevokedList,
 				tlsreload.WithLogger(log),
-				tlsreload.WithReloadObserver(onErr, onSwap))
+				tlsreload.WithReloadObserver(onErr, onSwap),
+				tlsreload.WithKnownIssuers(caPool.Certs))
 			if err != nil {
 				return fmt.Errorf("internal revoked list: %w", err)
 			}
@@ -983,11 +988,9 @@ func (b *Backend) bind(cfg Config) error {
 		return err
 	}
 	internalSrv := internalServer(cfg.InternalListen, b.internalHandler)
-	if bl := b.internalBlocklist; bl != nil {
-		// ADR 0008: the live-conn registry tracks only conns the server
-		// still holds — drop each on close/hijack so it cannot leak.
-		internalSrv.ConnState = connStateDrop(bl)
-	}
+	// Live-conn registries (TM-38, ADR 0008) track only conns the server
+	// still holds — drop each on close/hijack so neither can leak.
+	internalSrv.ConnState = internalConnState(b.internalConns, b.internalBlocklist)
 	if err := add("internal", cfg.InternalListen, internalSrv, b.internalTLSCfg); err != nil {
 		return err
 	}

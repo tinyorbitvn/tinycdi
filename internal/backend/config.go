@@ -201,7 +201,8 @@ type Config struct {
 	OperatorCN       string
 	// InternalRevokedList is the ADR 0008 per-certificate revocation
 	// list for the internal mTLS listener; empty disables the feature —
-	// the handshake path is then byte-identical to an unlisted build.
+	// with the flag unset no revocation hook is installed; the client-CA
+	// conn tracking (installClientConnTracking) still runs.
 	InternalRevokedList string
 
 	// Metrics listener (scrape-only, plain HTTP).

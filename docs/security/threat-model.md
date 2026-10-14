@@ -612,13 +612,18 @@ Controls:
   logged (TM-40).
 - **Hot reload**: the listener's certificate and client CA bundle reload
   on file change (`tlsreload.Reloader`, `hotReloadClientCAs` in
-  `internal/backend/listeners.go`). On the client side, `opclient`
+  `internal/backend/listeners.go`). A client-CA swap also closes every
+  established connection whose certificate chain no longer verifies
+  against the new bundle (`clientConns`, `installClientConnTracking`).
+  On the client side, `opclient`
   re-reads its certificate per handshake and its `VerifyConnection` runs
   the full chain and hostname check against the newest CA pool
   (`internal/broker/httpapi/opclient/client.go`). The public listeners
   (app `:8443`, session `:8444`) and the frontend hot-reload the same way.
 - **Serial revocation**: `-internal-revoked-list` names a blocklist of
-  (issuer, serial) pairs; a listed client certificate fails the handshake,
+  (issuer, serial) pairs; issuers compare canonically (any RFC 2253
+  spelling of the DN), and an entry naming an issuer outside the
+  client-CA bundle logs a warning at load; a listed client certificate fails the handshake,
   and live connections it holds are severed on the same reload pass
   ([ADR 0008](../adr/0008-mtls-cert-revocation.md), `internal/tlsreload`).
 - Request logs redact object IDs (`redactID`).

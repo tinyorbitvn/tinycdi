@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -37,6 +38,9 @@ type options struct {
 	// Reloader and CAPool never call them.
 	onError func()
 	onSwap  func(entries int)
+	// knownIssuers returns the client-CA bundle a Blocklist checks its
+	// entries' issuers against (WithKnownIssuers); nil skips the check.
+	knownIssuers func() []*x509.Certificate
 }
 
 // Option configures a Reloader, a CAPool or a Blocklist.
