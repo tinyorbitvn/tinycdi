@@ -372,7 +372,11 @@ Controls:
   `Origin-Agent-Cluster: ?1` and `frame-ancestors <portal-origin>` are set
   on every response, and the upstream's copies are deleted, so a hostile
   runtime cannot weaken them (`responsePolicy`,
-  `internal/gateway/proxy.go`).
+  `internal/gateway/proxy.go`). The proxy's response writer drops every
+  upstream informational response other than `101` and re-applies the
+  full set when the final status is written, so a `1xx` from the runtime
+  can neither reach the browser nor clear the set (`hijackCapture`,
+  `pinSessionHeaders`; `TestResponsePolicy_Upstream1xxCannotStripPinnedHeaders`).
 - **Upstream path allowlist**: only the paths the stock KasmVNC client
   needs are proxied (`upstreamPathOK`, `internal/gateway/authorization.go`);
   everything else, including any upstream management API and `/xfer/`,
