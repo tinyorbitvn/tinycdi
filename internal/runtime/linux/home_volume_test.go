@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
@@ -27,6 +28,17 @@ func TestEnsure_RetainHomeMissingAfterFirstBootIsLost(t *testing.T) {
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(context.Background(), pvcs); err != nil || len(pvcs.Items) != 0 {
 		t.Fatalf("a fresh empty home was created: %d claims, err %v", len(pvcs.Items), err)
+	}
+}
+
+func TestEnsure_RetainHomeCacheLagIsNotLost(t *testing.T) {
+	ws := retainWorkspace(1)
+	live := fake.NewClientBuilder().WithScheme(backendScheme(t)).WithObjects(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: PVCName(ws.UID), Namespace: ws.Namespace, Labels: labels(ws)},
+	}).Build()
+	stale := fake.NewClientBuilder().WithScheme(backendScheme(t)).Build()
+	if _, err := New(stale, Options{APIReader: live}).Ensure(context.Background(), ws, testTemplate(nil)); errors.Is(err, ErrHomeVolumeLost) {
+		t.Fatalf("a PVC present on the API server was declared lost: %v", err)
 	}
 }
 

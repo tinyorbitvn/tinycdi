@@ -311,6 +311,11 @@ var ErrHomeVolumeLost = errors.New("linux backend: home volume lost")
 // Options tunes the backend. The zero value is safe (Isolated-egress,
 // RuntimeDefault seccomp).
 type Options struct {
+	// APIReader is an uncached reader used to confirm a missing home PVC
+	// before declaring data loss (the cached client may lag the create).
+	// Nil falls back to the cached client.
+	APIReader client.Reader
+
 	// InternetExceptCIDRs are extra CIDRs subtracted from the 0.0.0.0/0
 	// allow under NetworkProfileInternetOnly — the cluster pod/service/node
 	// ranges, which differ per install (network-isolation fixture shape,
@@ -841,7 +846,25 @@ func (b *Backend) ensurePVC(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1
 	// The home was provisioned for an earlier incarnation; its absence is
 	// data loss, not a first boot.
 	if ws.Status.ObservedRuntimeGeneration > 0 {
-		return nil, ErrHomeVolumeLost
+		// A cached NotFound can be informer lag right after our own create;
+		// the outcome is terminal, so confirm against the API server.
+		var reader client.Reader = b.client
+		if b.opts.APIReader != nil {
+			reader = b.opts.APIReader
+		}
+		live := &corev1.PersistentVolumeClaim{}
+		lerr := reader.Get(ctx, client.ObjectKey{Name: PVCName(uid), Namespace: ws.Namespace}, live)
+		switch {
+		case lerr == nil:
+			if err := checkOwned("PersistentVolumeClaim", live, uid); err != nil {
+				return nil, err
+			}
+			return live, nil
+		case apierrors.IsNotFound(lerr):
+			return nil, ErrHomeVolumeLost
+		default:
+			return nil, lerr
+		}
 	}
 	l := labels(ws)
 	l[LabelDataRole] = string(cdiv1.DataRoleHome)

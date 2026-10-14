@@ -26,7 +26,7 @@ describe("transferDirections", () => {
 describe("validTransferName", () => {
   it("accepts single file names and refuses the rest", () => {
     for (const ok of ["report.pdf", "Ảnh chụp.png", ".hidden", "a b.txt"]) expect(validTransferName(ok)).toBe(true);
-    for (const bad of ["", ".", "..", "a/b", "a\\b", "x\u0000", "x\n", "é".repeat(128)]) expect(validTransferName(bad)).toBe(false);
+    for (const bad of ["", ".", "..", "a/b", "a\\b", "x\u0000", "x\n", "é".repeat(128), "Report 50%.pdf", "a;b.txt", "v1..2.zip"]) expect(validTransferName(bad)).toBe(false);
   });
 });
 

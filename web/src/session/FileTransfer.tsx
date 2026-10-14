@@ -48,6 +48,7 @@ function failureKey(err: unknown): MessageKey {
     return "session.transfer.error.generic";
   }
   if (isPortalApiError(err)) {
+    if (err.httpStatus === 400) return "session.transfer.error.badName";
     if (err.httpStatus === 403) return "session.transfer.error.denied";
     if (err.httpStatus === 409) return "session.transfer.error.notRunning";
     if (err.httpStatus === 429) return "session.transfer.error.rateLimited";

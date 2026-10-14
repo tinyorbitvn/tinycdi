@@ -21,7 +21,7 @@ const encoder = new TextEncoder();
 export function validTransferName(name: string): boolean {
   const bytes = encoder.encode(name).length;
   if (bytes === 0 || bytes > 255 || name === "." || name === "..") return false;
-  if (/[/\\]/.test(name)) return false;
+  if (/[/\\;%]/.test(name) || name.includes("..")) return false;
   // eslint-disable-next-line no-control-regex
   return !/[\u0000-\u001f\u007f-\u009f]/.test(name);
 }
