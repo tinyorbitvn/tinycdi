@@ -137,7 +137,7 @@ func TestRetainedApplierSameRevisionTwice(t *testing.T) {
 		t.Fatalf("pvc: %v", err)
 	}
 	if gotPVC.Labels["workspaces.cdi.tinyorbit.vn/workspace-uid"] != string(cr.UID) ||
-		gotPVC.Labels["workspaces.cdi.tinyorbit.vn/workspace-name"] != "consumer-b10r" {
+		gotPVC.Labels["workspaces.cdi.tinyorbit.vn/workspace-name"] != provisioning.WorkspaceCRName(create.WorkspaceUID) {
 		t.Fatalf("pvc labels after replay = %v, want consumer binding", gotPVC.Labels)
 	}
 
@@ -272,5 +272,68 @@ func TestRetainedApplierRefusesUnstampedCR(t *testing.T) {
 	}
 	if got.State != provisioning.RetainedStateAttaching {
 		t.Fatalf("record state = %s, want Attaching", got.State)
+	}
+}
+
+// TestRetainedAttach_LabelIsCRName (R1-24): the retargeted PVC's
+// workspace-name label is the consuming CR's name, never the user's display
+// name — a 100-char name (not a valid label value) attaches, and a name
+// shaped like another workspace's CR name cannot steer the post-DB-loss
+// importer.
+func TestRetainedAttach_LabelIsCRName(t *testing.T) {
+	db := recoveryDB(t)
+	ctx := context.Background()
+	rstore := provisioning.NewRetainedStore(db)
+	svc := provisioning.NewService(db)
+	const tenant = "tenant-r124"
+	if err := db.WithTx(ctx, func(tx store.Tx) error {
+		return provisioning.SetQuota(ctx, tx, tenant, provisioning.ResourceVector{
+			RunningSlots: 10, CPUMillis: 1 << 20, MemoryBytes: 1 << 40, DiskBytes: 1 << 40})
+	}); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+	seedWorkspaceRow(t, db, "ws_r124src01", tenant, "iss|sub-1", "src-r124")
+	rec, err := rstore.ImportRetained(ctx, provisioning.RetainedDiskInfo{
+		TenantID: tenant, Owner: "iss|sub-1", SourceWorkspaceID: "ws_r124src01",
+		Runtime: "LinuxContainer", SizeBytes: 2 << 30,
+		PVCNamespace: "ns-r124", PVCName: "pvc-r124", PVCUID: "uid-pvc-r124",
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	// 100 chars, a valid workspace name, and shaped like a CR name.
+	displayName := "ws-" + strings.Repeat("b", 97)
+	ws, err := svc.AttachRetained(ctx, tenant, "iss|sub-1", "iss|sub-1", rec.ID, "k-r124",
+		provisioning.AttachRequest{
+			Name:     displayName,
+			Template: provisioning.TemplateInfo{ID: "tpl_t", Name: "tmpl", Runtime: "LinuxContainer"},
+			Vector:   quotaVec, DesiredState: "Stopped",
+		}, []byte("a"))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	pending, err := provisioning.NewOutbox(db).PendingIntents(ctx, provisioning.PlatformID(ws.ID))
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending intents = %v (err %v), want 1 create", pending, err)
+	}
+
+	pvc := retainedPVC("ns-r124", "pvc-r124", "cruid-src", "ws-r124src01", nil)
+	kc := fake.NewClientBuilder().WithScheme(retainedApplyScheme(t)).WithObjects(pvc).Build()
+	tmap := provisioning.TenantNamespaces{tenant: "ns-r124"}
+	applier := provisioning.NewRetainedApplier(provisioning.NewK8sApplier(kc, tmap), kc, tmap, rstore)
+	if err := applier.Apply(ctx, pending[0]); err != nil {
+		t.Fatalf("apply create: %v", err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := kc.Get(ctx, client.ObjectKey{Namespace: "ns-r124", Name: "pvc-r124"}, got); err != nil {
+		t.Fatalf("pvc: %v", err)
+	}
+	want := provisioning.WorkspaceCRName(pending[0].WorkspaceUID)
+	if label := got.Labels["workspaces.cdi.tinyorbit.vn/workspace-name"]; label != want {
+		t.Fatalf("workspace-name label = %q, want the consuming CR name %q", label, want)
+	}
+	if !strings.HasPrefix(want, "ws-") || len(want) > 63 {
+		t.Fatalf("CR name %q is not a valid ws-<hex> label value", want)
 	}
 }

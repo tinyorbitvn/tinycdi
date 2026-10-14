@@ -166,11 +166,15 @@ func (a *RetainedApplier) applyAttach(ctx context.Context, in Intent, claim *ret
 	if pvc.Labels == nil {
 		pvc.Labels = map[string]string{}
 	}
-	// The workspace-uid label on a runtime child carries the CR's
-	// metadata.uid — never the platform id — matching what the linux
-	// backend stamps and what its claim checks enforce.
+	// Both consumer labels name the CR, never the platform id or the
+	// user's display name — matching what the linux backend stamps and
+	// what its claim checks enforce. The workspace-name label must be the
+	// CR name (ws-<hex>): it is a valid label value whatever the display
+	// name, and the post-DB-loss importer derives the source workspace id
+	// from it (retained_sync.go), so user text there could misattribute
+	// the disk.
 	pvc.Labels[linux.LabelWorkspaceUID] = string(ws.UID)
-	pvc.Labels[linux.LabelWorkspaceName] = in.Spec.WorkspaceName
+	pvc.Labels[linux.LabelWorkspaceName] = ws.Name
 	if err := a.Client.Patch(ctx, pvc, client.MergeFrom(porig)); err != nil {
 		return fmt.Errorf("attach retained: retarget pvc labels: %w", err)
 	}
