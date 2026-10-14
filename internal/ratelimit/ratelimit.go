@@ -3,7 +3,7 @@
 
 // Package ratelimit implements the per-client token buckets behind E7
 // (application rate limits) and the trusted-proxy client-address
-// derivation shared with S18 (forwarded-header hygiene): the app listener
+// derivation shared with TM-32 (forwarded-header hygiene): the app listener
 // throttles /v1/login, /v1/auth/callback and GET /v1/session, the session
 // gateway throttles /v1/launch, and both derive the client key the same
 // way — the socket peer, or the right-most untrusted X-Forwarded-For entry
@@ -193,7 +193,7 @@ func ClientKey(r *http.Request, trusted []netip.Prefix) string {
 // rendered as the real address — IPv4-mapped forms unmapped, IPv6 NOT
 // folded — for consumers that need the literal client address rather than
 // a billing bucket: the gateway's forwarded-header rebuild toward the
-// runtime (S18). Like the key path, a non-IP claim can never reach this
+// runtime (TM-32). Like the key path, a non-IP claim can never reach this
 // render — it collapses to the socket peer — so the value is always a
 // parseable address the runtime can key on.
 func ClientAddr(r *http.Request, trusted []netip.Prefix) string {

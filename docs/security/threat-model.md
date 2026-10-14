@@ -1,79 +1,90 @@
-# Threat model — v1.0 security review preparation
+# Threat model
 
-Status: **working document.** The pre-1.0 review it was prepared for ran as
-an internal review — report: `review-v1.0.md` — which is
-not an independent audit; an external review remains an open item (S13).
-This document inventories what exists **today on `main`**, with code and
-test references, so the reviewer can
-spend time on judgement rather than discovery. The normative policy for
-contributors and operators stays in [`../../SECURITY.md`](../../SECURITY.md);
-this file describes, it does not prescribe.
-
-Every claim below was verified against the tree when written. Where a design
-decision or review question comes from the project's post-MVP review it is
-cited as **A6-S\<n\>** (the numbered "questions for the v1.0 security
-reviewer" list), **D\<n\>** (design decisions) or **E\<n\>** (v0.3 decisions).
+This document describes the TinyCDI 1.0.0 architecture as built: its
+assets, actors, trust boundaries and the controls at each boundary, with
+references to the code that implements a control and the test that pins
+it. It is not an independent audit, and it does not set policy:
+[`SECURITY.md`](../../SECURITY.md) is the normative policy for
+contributors and operators. Threats carry ids `TM-NN`. Each id is one row
+of the register in [§6](#6-threat-register), and every row names its
+control and the test, gate script or CI job that pins it. §7 lists the
+residual risks the project accepts, and §8 is the guide for a reviewer.
 
 ## 1. System in one paragraph
 
 TinyCDI is a Kubernetes-native browser/desktop-as-a-service platform. Three
-components ship as images: **frontend** (static SPA + browser security
-headers; does not proxy `/v1`), **backend** (public API, session gateway, and
-in-process broker on four listeners) and **operator** (reconciles
-`Workspace`/`WorkspaceTemplate` CRDs, creates runtime pods, Secrets, Services
-and per-workspace NetworkPolicies in managed namespaces). Users authenticate
-through an external OIDC IdP, get a launch ticket, and their browser is
-reverse-proxied to a per-workspace KasmVNC server running inside a pod that is
-treated as **tenant-controlled** (the user has a shell in it —
-`SECURITY.md:93-96`). Containers share the host kernel; the product does not
-claim isolation between mutually hostile tenants.
+components ship as images: **frontend** (static SPA and browser security
+headers; it does not proxy `/v1`), **backend** (public API, session
+gateway and in-process broker on four listeners) and **operator**
+(reconciles the `Workspace` and `WorkspaceTemplate` CRDs and creates
+runtime pods, Secrets, Services and per-workspace NetworkPolicies in
+managed namespaces). Users authenticate through an external OIDC IdP, get
+a launch ticket, and their browser is reverse-proxied to a per-workspace
+pod. Inside the pod, the transfer helper `tcdi-xferd` owns the only
+exposed port and proxies the desktop to a KasmVNC server that listens on
+loopback. The pod is **tenant-controlled**: the user has a shell in it
+(see [`SECURITY.md`](../../SECURITY.md)). Containers share the host
+kernel; the product does not claim isolation between mutually hostile
+tenants.
 
-Backend listeners (`internal/backend/config.go`, `listeners.go`):
+Listeners (`internal/backend/config.go`, `listeners.go`;
+`build/frontend/main.go`; `cmd/tcdi-xferd/main.go`):
 
-| Listener | Flag / port | Serves |
-|---|---|---|
-| app | `-listen` `:8443` | public API `/v1/*` for browsers (OIDC login, workspace CRUD, ticket issue) |
-| session | `-session-listen` `:8444` | per-workspace hosts `<label>.<sessionDomain>`: launch POST + desktop proxy + in-cluster control surface |
-| internal | `-internal-listen` `:9443` | mTLS broker API used by the operator (ADR 0003) |
-| metrics | `:9090` | scrape-only metrics |
+| Component | Listener | Flag / port | Serves |
+|---|---|---|---|
+| frontend | HTTPS | `-listen` `:8443` | static SPA, `/branding/` |
+| backend | app | `-listen` `:8443` | public API `/v1/*` (OIDC login, workspace CRUD, admin API, ticket and transfer-grant mint) |
+| backend | session | `-session-listen` `:8444` | per-workspace hosts `<label>.<sessionDomain>`: launch `POST`, desktop proxy, transfer leg; in-cluster control surface on control hosts |
+| backend | internal | `-internal-listen` `:9443` | mTLS broker API used by the operator ([ADR 0003](../adr/0003-gateway-broker-internal-api.md)) |
+| backend | metrics | `:9090` | scrape-only metrics |
+| workspace pod | `tcdi-xferd` | `:8443` | `/xfer/` file transfer; proxies everything else to KasmVNC at `https://127.0.0.1:8444` |
+
+The gateway reaches a pod through its Service `ws-<uid>` on port `8443`
+(`internal/runtime/linux/backend.go`, `streamingPort`).
 
 ## 2. Assets
 
-- **User accounts and sessions** — OIDC identity, server-side portal session
-  (`__Host-tcdi_session`), retained `id_token` used as `id_token_hint` at
-  logout.
-- **Workspace sessions** — the interactive KasmVNC stream, clipboard content,
-  and anything the user does inside the desktop (which has Internet egress).
-- **Workspace data** — persistent home volumes and retained disks.
-- **Credentials and keys** — OIDC client secret, AEAD login-state sealing keys,
-  session cookie values, launch tickets, per-workspace KasmVNC credentials,
-  internal mTLS certificates and CA bundles, Postgres DSN, session-listener
-  control bearer token.
-- **Control plane** — Postgres (sessions, leases, tickets, quotas, principal
-  directory), the `Workspace`/`WorkspaceTemplate` CRDs and the managed
-  namespaces the operator writes to.
-- **Supply chain** — published images and Helm chart, their signatures, SBOMs
-  and provenance attestations; the CI workflows that produce them.
-- **Availability** — backend replicas, Postgres, the runtime pods and the
+- **User accounts and sessions**: OIDC identity, the server-side portal
+  session (`__Host-tcdi_session`), and the retained `id_token` used as
+  `id_token_hint` at logout.
+- **Workspace sessions**: the interactive KasmVNC stream, clipboard
+  content, files moved through the transfer leg, and anything the user
+  does inside the desktop (which can have Internet egress).
+- **Workspace data**: persistent home volumes and retained disks.
+- **Credentials and keys**: OIDC client secret, AEAD login-state sealing
+  keys, session cookie values, launch tickets, transfer grants,
+  per-workspace KasmVNC credentials and `xfer-token`, internal mTLS
+  certificates, CA bundles and the serial blocklist, Postgres DSN,
+  session-listener control bearer token.
+- **Control plane**: Postgres (sessions, leases, tickets, transfer grants,
+  quotas, principal directory, audit store), the `Workspace` and
+  `WorkspaceTemplate` CRDs, and the managed namespaces the operator writes
+  to.
+- **Audit record**: the `audit_event` table and the stdout audit stream.
+- **Supply chain**: published images and Helm chart, their signatures,
+  SBOMs and provenance attestations; the CI workflows that produce them.
+- **Availability**: backend replicas, Postgres, the runtime pods and the
   quotas that bound them.
 
 ## 3. Actors
 
-- **End user (semi-trusted)** — authenticated through OIDC and gated by
+- **End user (semi-trusted)**: authenticated through OIDC and gated by
   `oidc.requiredGroups`. Fully controls their workspace pod at runtime
   (shell access); may be curious or abusive but is not assumed to be a
   kernel-level attacker on shared nodes.
-- **Tenant admin** — a user whose verified `groups` claim includes one of
-  the deployment's configured admin groups (`-tenant-admin-groups` /
-  `oidc.tenantAdminGroups`, default `tenant-admin`); gets a curated
-  tenant-scoped view (S9). Misconfigured = privilege grant (S41).
-- **Operator / platform admin** — deploys the chart, owns Postgres, the OIDC
-  client, sealing keys, mTLS material and node pools. Trusted.
-- **Unauthenticated Internet client** — can reach the portal host, the app
+- **Tenant admin**: a user whose verified `groups` claim includes one of
+  the configured admin groups (`-tenant-admin-groups` /
+  `oidc.tenantAdminGroups`, default `tenant-admin`). Gets a tenant-scoped
+  admin surface: overview, users, live sessions and sign-out, audit log,
+  quotas and per-user limits, and the session-policy ceiling. A
+  misconfigured group list is a privilege grant (TM-11).
+- **Operator / platform admin**: deploys the chart, owns Postgres, the
+  OIDC client, sealing keys, mTLS material and node pools. Trusted.
+- **Unauthenticated Internet client**: can reach the portal host, the app
   listener's login endpoints and every `*.<sessionDomain>` name.
-- **External OIDC IdP** — trusted for identity assertions; its discovery
-  document and JWKS are consumed by the backend.
-- **Kubernetes API** — trusted; the operator and backend hold scoped RBAC.
+- **External OIDC IdP**: trusted for identity assertions; the backend
+  consumes its discovery document and JWKS.
+- **Kubernetes API**: trusted; the operator and backend hold scoped RBAC.
 
 ## 4. Trust boundaries and data flows
 
@@ -89,371 +100,357 @@ Backend listeners (`internal/backend/config.go`, `listeners.go`):
    |  |                       v
    |  |                    Postgres
    |  |
-   |  `--(5) launch POST + desktop HTTP/WS --> backend session :8444
-   |                                             | (6) per-lease pinned CA + injected creds
-   |                                             v
-   |                                       workspace pod (KasmVNC)  [tenant-controlled]
+   |  `--(5) launch POST, desktop HTTP/WS, transfer leg --> backend session :8444
+   |                                       | (6) Service ws-<uid> :8443, pinned CA,
+   |                                       v     injected credentials
+   |                       workspace pod [tenant-controlled]
+   |                         tcdi-xferd :8443 --> KasmVNC 127.0.0.1:8444
    |
  operator --(7) mTLS, client cert --> backend internal :9443
- operator --(8) k8s API ----------> creates pod/Secret/Service/NetworkPolicy
- kasm-adapter init image --(9)--> shared emptyDir (read-only into desktop container)
+ operator --(8) k8s API ----------> pod / Secret / Service / NetworkPolicy
+ kasm-adapter init image ---------> shared emptyDir (read-only into the desktop container)
 ```
 
 ### Boundary 1 — browser ↔ edge
 
-Flows: everything above crosses one TLS edge. The chart enforces Ingress TLS
-and an HTTPRoute `sectionName`; `*.<sessionDomain>` rides one wildcard DNS +
-wildcard cert rule (`deploy/helm/tinycdi/templates/httproute.yaml`,
-`ingress.yaml`). HSTS is sent by both portal and session listener.
-
-Controls that exist today:
-
-- All portal cookies carry the `__Host-` prefix and are host-only
-  (`internal/api/auth.go` — `SessionCookieName`/`LoginCookieName` doc block);
-  the session cookie is `Secure`, `HttpOnly`, `SameSite=Lax` (or
-  `SameSite=None; Secure; Partitioned` under the optional `partitioned`
-  cookie mode — `internal/gateway/proxy.go:81` `ParseCookieMode`).
-- The two JS-readable cookies from earlier designs are gone: the SPA reads
-  the CSRF token and session domain from `GET /v1/me`
-  (`internal/api/me.go:41-42,77-78`), never from `document.cookie`.
-- NetworkPolicy restricts app/session ingress to the edge
-  (`deploy/helm/tinycdi/templates/networkpolicy.yaml`, `edgeIngressRule`).
-
-Open questions: A6-S5 (Host-header parsing as a boundary — see boundary 5),
-cookie-mode `partitioned` cross-site behaviour (a deployment topology the
-kind e2e cannot reproduce).
-
-### Boundary 2 — edge ↔ frontend :8443 / backend app :8443
-
-Flows: `GET /*` → frontend static SPA; `/v1/*` → backend API (path-routed by
-the edge; the frontend never proxies it — `build/frontend/main.go` header,
-`TestNoAPIProxy`).
+Flows: everything above crosses one TLS edge. The chart enforces Ingress
+TLS and an HTTPRoute `sectionName`; `*.<sessionDomain>` uses one wildcard
+DNS name and one wildcard certificate
+(`deploy/helm/tinycdi/templates/httproute.yaml`, `ingress.yaml`). Both
+the portal and the session listener send HSTS.
 
 Controls:
 
-- **Frontend security headers** — CSP (incl. `frame-src https://*.<sessionDomain>`,
+- All portal cookies carry the `__Host-` prefix and are host-only
+  (`internal/api/auth.go`, the `SessionCookieName` / `LoginCookieName`
+  block). The workspace session cookie is `Secure`, `HttpOnly`,
+  `SameSite=Lax`, or `SameSite=None; Secure; Partitioned` under the
+  optional `partitioned` cookie mode (`ParseCookieMode`,
+  `internal/gateway/proxy.go`).
+- The SPA reads the CSRF token and the session domain from `GET /v1/me`
+  (`internal/api/me.go`), never from `document.cookie`; no cookie is
+  JS-readable.
+- NetworkPolicy restricts app and session ingress to the edge
+  (`deploy/helm/tinycdi/templates/networkpolicy.yaml`, `edgeIngressRule`).
+
+Register: TM-01.
+
+### Boundary 2 — edge ↔ frontend and backend app listener :8443
+
+Flows: `GET /*` goes to the frontend's static SPA; `/v1/*` goes to the
+backend API. The edge routes by path; the frontend never proxies `/v1`
+(`build/frontend/main.go`, `TestNoAPIProxy`).
+
+Controls:
+
+- **Frontend security headers**: CSP (including
+  `frame-src https://*.<sessionDomain>`,
   `connect-src 'self' https://*.<sessionDomain>`,
-  `form-action 'self' https://*.<sessionDomain>`, `frame-ancestors 'none'`),
-  COOP `same-origin`, and the rest of the portal policy are pinned by
-  `securityHeaders`/`frontendCSP` in `build/frontend/main.go`
-  (tests: `build/frontend/main_test.go` — `TestSecurityHeaders`,
-  `TestFrontendCSP`, `TestFrontendCSP_WildcardSessionDomain`,
-  `TestFrontendHeaders_COOP`). The iframe sandbox/allow attributes are emitted
-  by the SPA session page (`web/src/`).
-- **OIDC login** — authorization-code + PKCE S256, issuer/audience verified by
-  go-oidc discovery (`internal/api/auth.go:28-40`); the in-flight login rides
-  in an **AEAD-sealed** `__Host-tcdi_login` cookie (AES-256-GCM,
-  `internal/api/loginstate/sealer.go`), so a login can start on one replica
-  and finish on another; `keys[0]` seals, every key opens for rotation
-  (`-login-key-file`, `internal/backend/wire.go:562-569`). State+nonce+PKCE
-  verifier are bound to the initiating browser (SEC-03).
-- **Portal session** — server-side, opaque cookie value; rows keyed by
-  SHA-256 digest of the session ID so a DB/backup read never yields a usable
-  cookie (`internal/store/sessions.go:23,63,102`). Sliding 30 min idle
-  (`-session-idle`/`TCDI_SESSION_IDLE` → `store.NewSessionStore`), 12 h
-  absolute cap (`AuthConfig.AbsoluteTimeout`); the backend extends
-  idle on server-measured input activity. The retained `id_token` is sealed
-  at rest with the same keys under a purpose-bound AAD
-  (`internal/api/idtoken.go`); on read failure logout degrades to a
-  `client_id`-only end-session URL.
-- **CSRF** — synchronizer token derived from the session ID
-  (`csrfTokenFor`, `internal/api/middleware.go:141-167` `RequireCSRF`);
-  verified with a constant-time compare. Defence in depth:
-  `RequireTrustedOrigin` (middleware.go:169-227) requires a single `Origin`
-  byte-equal to the allowlist, or `Sec-Fetch-Site: same-origin` when Origin
-  is absent (tests: `middleware_test.go` CSRF/Origin cases).
-- **Rate limits** — shared Postgres fixed-minute windows (ADR 0006) over
-  per-replica token buckets in `internal/ratelimit`, applied to
-  `/v1/login`, `/v1/auth/callback`, the `GET /v1/session` probe and
-  `POST /v1/me/sessions:revoke-all`
-  (`internal/api/middleware.go:252-316`, wiring `internal/backend/wire.go`,
-  store `internal/store/rate_limit.go`, migration 021). Keys: client IP,
-  or a digest of the *validated* session ID / OIDC login state when
-  present so NAT-shared users keep separate buckets
-  (`internal/api/ratelimit_key.go`, FX-R30); the callback is additionally
-  capped by a 10× per-IP ceiling so validated-state spray stays bounded.
-  While the store is healthy the window is the exact aggregate bound and
-  each pod's local bucket is the undivided rate+burst — a
-  store-protection prefilter (RL-CEILING amendment); the `PerReplica`
-  divided bucket is the fail-open floor, engaged only while the circuit
-  breaker is open (RL-1). Degraded-mode
-  cost is bounded by a circuit breaker: every store call carries a 500 ms
-  deadline, an error opens the circuit for a 10 s cool-down during which
-  checks skip the store entirely, and one single-flight probe re-tests it
-  (`internal/ratelimit/shared.go`; tests `shared_test.go`,
-  `tests/integration/rate_limit_pg_test.go`). The v0.4.0 flag defaults
-  restore the v0.3.x effective two-replica budgets as window bounds
-  (login 80/min, launch 160/min, callback ceiling 800;
-  `TestRateLimitDefaults_V040Budgets`). Client IPs derive from the socket
-  peer, or the right-most untrusted X-Forwarded-For entry when the peer
-  sits inside `-trusted-proxies` CIDRs (`ratelimit.go:174`,
-  `ParseTrustedProxies`).
-- **Passive auth** — since FIX-IDLE every cookie-authenticated `GET` mounts
-  `RequireAuthPassive`, which never extends the idle clock
-  (`internal/api/middleware.go`, and the `safe`/`RequireAuthPassive` mounts
-  in `workspaces.go`, `data.go`, `me.go`, `quota.go`, `adminquota.go`,
-  `adminuserlimit.go`): the portal's interval polls can no longer hold a
-  visible-but-unattended session open. Only mutations and server-measured
-  desktop input slide the window. `GET /v1/session` is anonymous (Peek) and
-  `GET /v1/connections/.../status` was already passive — A6-S6's second
-  authenticated path exists to be reviewed.
-- **Tenant scoping** — the principal is built only from verified claims
-  (`internal/api/principal.go`); the tenant-admin role resolves once per
-  request in `RequireAuth` against the configured admin groups
-  (`AuthConfig.TenantAdminGroups`, flag `-tenant-admin-groups` — exact
-  match like the login gate, explicit empty list = startup error), and
-  every admin gate consults `Principal.IsTenantAdmin` — no handler names a
-  group literal (`TestNoRawTenantAdminMembershipCheck`); tenant-admin surface is scoped and events are
-  curated, not raw (`internal/api/events.go`, `statusview.go`;
-  tests `tenant_scope_test.go`, `events_test.go`). `tenant_id` must come from
-  an admin-controlled IdP mapper (SECURITY.md operator checklist).
-- **Quotas** — per-tenant limits (`internal/api/quota.go`,
-  `adminquota.go`; `internal/backend/tenantquota.go`) plus per-principal
-  running-workspace limits (#121): a tenant default and per-owner
-  overrides (migration 022) are written through the tenant-admin
-  `/v1/admin/tenants/{tenant}/user-limits` API
-  (`internal/api/adminuserlimit.go`, `RequireAuth` + audit + `RequireCSRF`)
-  and enforced inside the reservation transaction under the
-  `tenant_quota` row lock (`checkUserLimit`,
-  `internal/provisioning/quota.go:433-492`) — the live count comes from
-  `quota_reservation` `held` rows, disk-only holds and retained disks
-  never count, a missing workspace row fails closed, and refusal is 409
-  `QUOTA_EXHAUSTED` with `details.reason` `UserLimitReached`
-  (`internal/api/errors.go`). No rows means unlimited, so a fresh upgrade
-  changes nothing until an admin sets a limit.
-- **Branding** — the frontend serves an operator-supplied directory at
-  `/branding/` with traversal and symlink containment checks
-  (`build/frontend/main.go:271-353`; tests `TestBrandingDir_NoTraversal`,
-  `TestBrandingDir_NoListing`, `TestBrandingDir_OtherNamesStay404`) — A6-S10.
-- **Audit trail** — every mutating API route and every `/v1/admin/` read
-  emits exactly one dedicated domain event via `audited()`
-  (`internal/api/auditroutes.go`): the actor is pseudonymised
+  `form-action 'self' https://*.<sessionDomain>` and
+  `frame-ancestors 'none'`), COOP `same-origin` and the rest of the portal
+  policy are set by `securityHeaders` and `frontendCSP`
+  (`build/frontend/main.go`). The SPA session page sets the iframe
+  `sandbox` and `allow` attributes (`web/src/`).
+- **OIDC login**: authorization code with PKCE S256; go-oidc discovery
+  verifies issuer and audience (`internal/api/auth.go`). The in-flight
+  login rides in an AEAD-sealed `__Host-tcdi_login` cookie (AES-256-GCM,
+  `internal/api/loginstate/sealer.go`), so a login can start on one
+  replica and finish on another. `keys[0]` seals and every listed key
+  opens, for rotation (`-login-key-file`). State, nonce and PKCE verifier
+  are bound to the initiating browser.
+- **Portal session**: server-side with an opaque cookie value. Rows are
+  keyed by the SHA-256 digest of the session ID, so a database or backup
+  read never yields a usable cookie (`internal/store/sessions.go`). The
+  idle window is 30 minutes (`-session-idle`) and the absolute cap 12 h
+  (`AuthConfig.AbsoluteTimeout`). The retained `id_token` is sealed at
+  rest with the same keys under a purpose-bound AAD
+  (`internal/api/idtoken.go`); if it cannot be opened, logout degrades to
+  a `client_id`-only end-session URL.
+- **CSRF**: a synchronizer token derived from the session ID
+  (`csrfTokenFor`, `internal/api/auth.go`), checked in constant time by
+  `RequireCSRF` (`internal/api/middleware.go`). Defense in depth:
+  `RequireTrustedOrigin` requires a single `Origin` byte-equal to the
+  allowlist, or `Sec-Fetch-Site: same-origin` when `Origin` is absent.
+- **Rate limits**: shared Postgres fixed-minute windows over per-replica
+  token buckets ([ADR 0006](../adr/0006-rate-limit-state.md);
+  `internal/ratelimit`, `internal/store/rate_limit.go`), applied to
+  `/v1/login`, `/v1/auth/callback`, the `GET /v1/session` probe,
+  `POST /v1/session:touch` and `POST /v1/me/sessions:revoke-all`. Keys
+  are the client IP, or a digest of the validated session ID or OIDC
+  login state when present, so users behind one NAT keep separate buckets
+  (`internal/api/ratelimit_key.go`); the callback also has a 10× per-IP
+  ceiling. While the store is healthy the shared window is the exact
+  bound and each pod's local bucket is a store-protection prefilter; the
+  divided per-replica bucket is the floor only while the circuit breaker
+  is open. Every store call has a 500 ms deadline; an error opens the
+  circuit for a 10 s cool-down that skips the store, and one
+  single-flight probe re-tests it (`internal/ratelimit/shared.go`). The
+  default window bounds are login 80/min, launch 160/min and callback
+  ceiling 800/min. Client IPs come from the socket peer, or from the
+  right-most untrusted `X-Forwarded-For` entry when the peer is inside
+  `-trusted-proxies` (`ClientKey`, `ParseTrustedProxies`,
+  `internal/ratelimit/ratelimit.go`); IPv6 folds to its /64.
+- **Passive authentication**: every cookie-authenticated `GET` mounts
+  `RequireAuthPassive` (`internal/api/middleware.go`), which never
+  extends the idle clock, so interval polls cannot hold an unattended
+  session open. The idle window slides only on mutations — including the
+  explicit activity beat `POST /v1/session:touch`, applied after the
+  CSRF check — and on desktop input measured by the broker, which credits
+  only the portal session the stream's lease was minted under
+  (`TouchSessionDigest`, `internal/store/sessions.go`).
+- **Tenant scoping**: the principal is built only from verified claims
+  (`internal/api/principal.go`). The tenant-admin role resolves once per
+  request in `RequireAuth` against the configured admin groups (exact
+  match; an explicitly empty list is a startup error), and every admin
+  gate consults `Principal.IsTenantAdmin`; no handler names a group
+  literal. A foreign workspace ID answers 404, never 403. Events shown to
+  users are curated, not raw (`internal/api/events.go`,
+  `statusview.go`). `tenant_id` must come from an admin-controlled IdP
+  mapper (`SECURITY.md` operator checklist).
+- **Quotas**: per-tenant limits (`internal/api/quota.go`,
+  `adminquota.go`; `internal/backend/tenantquota.go`) and per-principal
+  running-workspace limits written through the tenant-admin
+  `/v1/admin/tenants/{tenant}/user-limits` API (`adminuserlimit.go`) and
+  enforced inside the reservation transaction under the `tenant_quota`
+  row lock (`checkUserLimit`, `internal/provisioning/quota.go`). The live
+  count comes from `held` reservations; disk-only holds and retained disks
+  never count; a missing workspace row fails closed; refusal is 409
+  `QUOTA_EXHAUSTED` with reason `UserLimitReached`. No rows means
+  unlimited.
+- **Branding**: the frontend serves an operator-supplied directory at
+  `/branding/` with traversal and symlink containment (`branding`,
+  `serveBranding`, `brandingFile` in `build/frontend/main.go`).
+- **Tenant-admin surfaces**: every `/v1/admin/tenants/{tenant}/…` route
+  goes through `tenantAdminPrincipal` (`internal/api/adminquota.go`),
+  which requires the tenant-admin role for the path tenant; every query
+  is scoped by tenant in SQL; every mutation is CSRF-guarded and every
+  route is audited. The audit viewer, user directory, live sessions and
+  sign-out, overview and session-policy `:apply` each have a register
+  row (TM-12 to TM-17).
+- **File-transfer grants**: `FileTransferHandler.Create`
+  (`internal/api/filetransfers.go`) mints a single-use grant that the
+  session listener's transfer leg (Boundary 5) spends (TM-18).
+- **Audit trail**: every mutating API route and every `/v1/admin/` read
+  emits exactly one domain event through `audited()`
+  (`internal/api/auditroutes.go`). The actor is pseudonymous
   (`observability.ActorRef`), the outcome derives from the response
   status, `role=tenant-admin` marks elevated use of shared routes, and a
-  handler panic still emits `failure`/`panic`; the openapi↔table pairing
-  is pinned by `TestAuditCoverage_SpecMatchesTable` (#120). The sink is
-  `GuardedSink` wrapping JSONL stdout — a write failure is counted on
-  `tinycdi_audit_write_errors_total{event}` plus a rate-limited warning
-  and never propagated into the request (`internal/observability/audit.go`;
-  wiring `internal/backend/wire.go`). Durability and tamper-evidence of
-  the stream are the operator's log pipeline (`docs/runbooks/observability.md`
-  "Log integrity").
+  handler panic still emits a failure. Every event emitted through
+  `audited()`, and the broker's transfer claim and completion, is
+  persisted to `audit_event` in the audited transaction; if persisting
+  fails, the request fails (`DurableAuditSink`,
+  `internal/api/auditstore.go`). See TM-50,
+  [ADR 0010](../adr/0010-audit-store-and-retention.md) and
+  [audit.md](../runbooks/audit.md).
 
-### Boundary 3 — backend app listener ↔ OIDC IdP
+Register: TM-02 to TM-18.
 
-Flows: discovery + JWKS fetch, auth-code token exchange (confidential client;
-PKCE means a secretless public client also works), RP-initiated logout.
+### Boundary 3 — backend ↔ OIDC IdP
 
-Controls: exact issuer/audience match via go-oidc; `endSessionURL` is built
-only from discovery + static configuration so request input cannot produce an
-open redirect (`internal/api/auth.go:770-787`);
-`PostLogoutRedirect` is validated as an absolute https URL at startup
-(auth.go) — http is accepted only for loopback dev hosts. Client secret
-comes from `oidc.existingSecret` (chart).
-Tests: `auth_test.go`, `logout_test.go`, `oidctest/` in-memory IdP.
+Flows: discovery and JWKS fetch, authorization-code token exchange
+(confidential client; with PKCE a secretless public client also works),
+RP-initiated logout.
 
-Open question: A6-S2 — replay of the sealed login cookie within its TTL
-(`PendingTTL`, 10 min default) is inherent to state leaving the server; the
-cookie is `HttpOnly` and single-purpose but not single-use.
+Controls: exact issuer and audience match through go-oidc.
+`endSessionURL` (`internal/api/auth.go`) is built only from discovery and
+static configuration, so request input cannot produce an open redirect.
+`PostLogoutRedirect` and the discovered `end_session_endpoint` must be
+absolute `https` URLs; `http` is accepted only for loopback hosts. The
+client secret comes from `oidc.existingSecret`. Tests: `auth_test.go`,
+`logout_test.go` and the in-memory IdP in `oidctest/`.
+
+Register: TM-19, TM-20.
 
 ### Boundary 4 — backend ↔ Postgres
 
-Flows: sessions (digest-keyed), connection leases, launch tickets, quotas,
-principal directory, intent log.
+Flows: sessions (digest-keyed), connection leases, launch tickets,
+transfer grants, quotas, principal directory, intent log, audit store.
 
-Controls: the DSN's `sslmode` must verify the server certificate —
-`checkDatabaseTLS` refuses `disable/allow/prefer/require` unless
-`-dev-insecure-db` is passed (`internal/backend/config.go:414-424,493-514`);
-the chart defaults `database.tls.mode: verify-full` and feeds
-`PGSSLMODE`/`PGSSLROOTCERT`. Session rows store only SHA-256 digests and
-sealed `id_token` blobs (SEC-27, above). Ticket and cookie values are stored
-hashed (`ticketHash`, `sessionDigest`). Session rows also carry
-`platform_meta.session_epoch` at insert and every read compares it to the
-current value in the same statement (`internal/store/sessions.go`
-`currentEpochSQL`), so rotating the epoch — the `post-restore` kill-step —
-makes every row a restored dump brought back dead on its next read,
-including sessions deleted after the dump (S23). Migration startup takes
-a lock so concurrent replicas can't race schema creation
-(`internal/backend/migrate_lock_test.go`). NetworkPolicy: DB egress allowed
-only to configured `database.allowedPeers` (chart; empty list fails render —
-SECURITY.md checklist).
+Controls: the DSN's `sslmode` must verify the server certificate:
+`checkDatabaseTLS` (`internal/backend/config.go`) refuses
+`disable`, `allow`, `prefer` and `require` unless `-dev-insecure-db` is
+passed, and the chart defaults `database.tls.mode: verify-full`. Session
+rows store only SHA-256 digests and sealed `id_token` blobs; ticket and
+cookie values are stored hashed. Session rows carry
+`platform_meta.session_epoch` at insert and every read compares it with
+the current value in the same statement (`internal/store/sessions.go`),
+so rotating the epoch (the `backend post-restore` step) makes every row a
+restored dump brings back dead on its next read. Schema creation takes a
+lock, so concurrent replicas cannot race it
+(`internal/backend/migrate_lock_test.go`). NetworkPolicy allows database
+egress only to `database.allowedPeers`; an empty list fails the render.
 
-### Boundary 5 — browser ↔ session listener :8444 (launch + desktop proxy)
+Register: TM-21, TM-22.
 
-Flows: one-time `POST` launch (ticket redemption) on
-`<label>.<sessionDomain>`, then the cookie-gated reverse proxy for the
-KasmVNC HTTP/WebSocket stream; `/healthz` + `/v1/control/*` on in-cluster
-control hosts only.
+### Boundary 5 — browser ↔ session listener :8444 (launch, desktop proxy, transfer leg)
+
+Flows: a one-time launch `POST` (ticket redemption) on
+`<label>.<sessionDomain>`; the cookie-gated reverse proxy for the KasmVNC
+HTTP and WebSocket stream; the transfer leg
+`/v1/transfers/{id}/content`; `/healthz` and `/v1/control/*` on
+in-cluster control hosts only.
 
 Controls:
 
-- **Host classes** — `Gateway.ServeHTTP` routes by host class first:
-  workspace hosts matched by `sessionhost.Domain.Match` (label
-  `ws-[a-z0-9]{8,60}` ↔ `ws_<suffix>`), control hosts from
-  `-session-control-hosts`; anything else gets `421 bad_host` and API paths
-  simply do not exist on this listener
-  (`internal/gateway/proxy.go:268-330`, `internal/sessionhost/sessionhost.go`;
-  tests `hostbinding_test.go`, `proxy_test.go`) — the A6-S8 listener isolation.
-- **Launch ticket** — 60 s TTL, single-use, redeemed atomically (even an
-  expired ticket is consumed), stored as SHA-256, bound to
-  (workspaceUID, tenant, principal subject, gateway audience) and records the
-  clipboard policy + portal session binding (`internal/broker/tickets.go:53-60,257-383`).
-  The ticket travels in the POST **body** only — `?ticket=` is rejected with
-  403 (`internal/gateway/launch.go:293-296`). The launch origin policy
-  (ADR 0004): when `Sec-Fetch-Site` is present, an absent/`null` Origin can
-  never redeem and a present Origin must be in the portal allowlist
-  (`launchOriginOK`); with no fetch metadata a present Origin is still
-  checked, and a request carrying neither header is treated as a non-browser
-  client and admitted (the ticket is still required)
-  (`launch.go:263-282`). Rate limiting runs **before** redemption so a
-  limited attempt never consumes the ticket (`launch.go:235-308`;
-  tests `launch_test.go`, `launch_origin_test.go`, `launch_ratelimit_test.go`).
-- **Per-workspace cookie + host binding** — `__Host-tcdi_session` is set
-  host-only on the workspace host; every proxied request's cookie digest must
-  resolve to a lease whose `workspaceUID` matches the request host label —
-  a mismatch is denied and audited (`proxy.go:472-510`, A6-S5).
-- **Leases and fencing** — one interactive stream per lease; a new upgrade
-  fences the old socket via `admitUpgrade`, and the Postgres `stream_epoch`
-  fences streams admitted by a dead replica (A6-S4;
-  `internal/gateway/authorization.go:1-104`). Renew every ~10 s; a lease that
-  stops renewing fails closed within 30 s (revoke/expiry/supersede all kill;
-  tests `leases_test.go`, `wsclose_test.go`, `owner_tab_test.go` for the
-  owner-tab takeover flow). Since #123, every lease read that feeds
-  renew/attach/claim — and the `LeaseBySession` cookie→lease resolve —
-  re-validates the bound `portal_session_digest` against a live,
-  current-epoch session row in the same indexed read and revokes the lease
-  on the spot when it fails (`liveLease`, `internal/broker/leases.go:75-190`;
-  `tinycdi_lease_session_missing_total{reason}`) — the second barrier behind
-  the sign-out revoke, and what kills a lease a Postgres restore resurrected
-  (S17, S23).
-- **Rehydration** — a cookie unknown to RAM is resolved by SHA-256 digest to
-  the lease and the session rebuilt on any replica; expired/revoked leases
-  reject (`internal/gateway/rehydrate.go:42-146`; tests `rehydrate_test.go`,
-  `tests/integration/session_cookie_liveness_test.go`).
-- **WebSocket origin** — upgrade requires `Origin` equal to the workspace
-  host's own origin (`originOK`, `internal/gateway/authorization.go:440-446`;
-  upgrade detection itself is strict RFC 7230 — `isUpgrade`);
-  framing tests `framing_test.go`, `framereload_test.go`.
-- **Response policy pinned by the gateway** — `sessionCSP` sized to the pinned
-  KasmVNC 1.5.0 client plus `Cross-Origin-Resource-Policy: same-origin`,
-  `Origin-Agent-Cluster: ?1` and `frame-ancestors <portal-origin>` are set on
-  every response; headers from the upstream pod are deleted so a hostile
-  runtime cannot weaken them (`proxy.go:276-290,966`, `sessionCSP`).
-- **Forwarded-header hygiene** — the whole client-supplied forwarding
-  family (`X-Forwarded-*`, `X-Original-*`, `X-Rewrite-Url`, `Forwarded`,
+- **Host classes**: `Gateway.ServeHTTP` (`internal/gateway/proxy.go`)
+  routes by host class first. Workspace hosts are matched by
+  `sessionhost.Domain.Match` (label `ws-[a-z0-9]{8,60}`), control hosts
+  come from `-session-control-hosts`, and anything else gets
+  `421 bad_host`. API paths do not exist on this listener.
+- **Launch ticket**: 60 s TTL, single use, redeemed atomically (an
+  expired ticket is consumed too), stored as SHA-256, and bound to the
+  workspace UID, tenant, principal, gateway audience and portal session
+  (`IssueTicket`, `RedeemTicket`, `internal/broker/tickets.go`). The ticket
+  travels in the `POST` body only; `?ticket=` is refused with 403. A
+  launch without a valid tab id (`tcdi_tab`) is refused with
+  `400 owner_tab_required` before the ticket is redeemed
+  (`internal/gateway/launch.go`). The launch origin policy
+  ([ADR 0004](../adr/0004-launch-origin-policy.md), `launchOriginOK`):
+  when `Sec-Fetch-Site` is present, an absent or `null` Origin never
+  redeems and a present Origin must be in the portal allowlist; without
+  fetch metadata a present Origin is still checked, and a request with
+  neither header is treated as a non-browser client and admitted (the
+  ticket is still required). Rate limiting runs before redemption, so a
+  limited attempt never consumes the ticket.
+- **Per-workspace cookie and host binding**: `__Host-tcdi_session` is set
+  host-only on the workspace host; every proxied request's cookie digest
+  must resolve to a lease whose workspace UID matches the request host
+  label, and a mismatch is denied and audited.
+- **Leases and fencing**: one interactive stream per lease. A new upgrade
+  fences the old socket (`admitUpgrade`,
+  `internal/gateway/authorization.go`), and the Postgres `stream_epoch`
+  fences streams admitted by a dead replica. Every stream claim carries
+  the owning browser tab's id (`ValidStreamOwnerTab`,
+  `Broker.ClaimStream`, `internal/broker/sessions.go`). Leases renew
+  about every 10 s; a lease that stops renewing fails closed within
+  30 s, and revoke, expiry and supersede all kill the stream. Every lease
+  read that feeds renew, attach, claim or the cookie-to-lease resolve
+  (`liveLease`, `LeaseBySession`) re-validates the bound portal session
+  (epoch, absolute expiry and idle window) in the same indexed read and
+  revokes the lease on the spot when it fails.
+- **Rehydration**: a cookie unknown to the replica's memory is resolved
+  by SHA-256 digest to its lease, and the session is rebuilt on any
+  replica; expired or revoked leases are refused
+  (`internal/gateway/rehydrate.go`). Unknown cookies are bounded by a
+  local per-client token bucket before any store read
+  (`SessionLookupLimiter`, TM-27).
+- **WebSocket origin**: an upgrade requires `Origin` equal to the
+  workspace host's own origin (`originOK`); upgrade detection is strict
+  RFC 7230 (`isUpgrade`).
+- **Response policy**: `sessionCSP`, `Cross-Origin-Resource-Policy:
+  same-origin`, `Cross-Origin-Opener-Policy: same-origin`,
+  `Origin-Agent-Cluster: ?1` and `frame-ancestors <portal-origin>` are set
+  on every response, and the upstream's copies are deleted, so a hostile
+  runtime cannot weaken them (`responsePolicy`,
+  `internal/gateway/proxy.go`).
+- **Upstream path allowlist**: only the paths the stock KasmVNC client
+  needs are proxied (`upstreamPathOK`, `internal/gateway/authorization.go`);
+  everything else, including any upstream management API and `/xfer/`,
+  is refused. `cleanedProxyPath` rejects traversal and parser-differential
+  tricks (dot segments, encoded dots, slashes and backslashes, double
+  encodings) before the allowlist runs.
+- **Transfer leg**: `Gateway.serveTransfer`
+  (`internal/gateway/transfer.go`) is the only path that builds
+  `/xfer/files/<name>` (`helperURL`). It checks Origin, the session
+  cookie, host and live lease, then claims the grant through
+  `Broker.ClaimTransfer` before any byte reaches the pod (TM-30, TM-31).
+- **Control surface**: `/v1/control/*` answers only on control hosts and
+  requires the bearer token from `-control-token-file` (`controlAuth`,
+  `internal/gateway/proxy.go`).
+- **Timeouts**: the app, internal and metrics listeners bound every
+  request phase; the session listener bounds only the header read,
+  because connections are hijacked for WebSocket
+  (`internal/backend/listeners.go`).
+
+Register: TM-23 to TM-31.
+
+### Boundary 6 — session listener ↔ workspace pod (`tcdi-xferd` :8443 → KasmVNC 127.0.0.1:8444)
+
+Flows: the gateway reverse-proxies HTTP and WebSocket to Service
+`ws-<uid>` on `:8443`, where `tcdi-xferd` serves `/xfer/` itself and
+proxies everything else to KasmVNC on `https://127.0.0.1:8444`
+(`cmd/tcdi-xferd/main.go`, `build/linux-base/kasmvnc.yaml`). The pod has
+egress to the Internet (by network profile) and to cluster DNS.
+
+Controls:
+
+- **Per-workspace NetworkPolicy** `ws-<uid>-boundary` (`buildNetPol`,
+  `internal/runtime/linux/backend.go`): default deny, ingress on TCP
+  `8443` from gateway pods only, DNS egress, and profile-scoped egress.
+  The chart renders `default-deny` baselines for the release and managed
+  namespaces (`templates/networkpolicy.yaml`). `ClusterOnly` egress is
+  restricted by default to pods in the managed namespaces; the
+  `runtime.networkProfiles.clusterOnly.*` values narrow it further or,
+  with `unrestricted: true`, open it to any pod (TM-34). Opt-in
+  `managedNamespaces[].namespaceQuota` bounds a namespace's summed
+  resources (TM-44).
+- **Upstream TLS pin and credentials**: the runtime's self-signed
+  certificate is verified against a per-lease pinned CA pool with a
+  pinned server name, never `InsecureSkipVerify`
+  (`TestUpstreamTLS_RequiresPinnedCA`). The gateway injects the
+  workspace's own KasmVNC credential from the workspace Secret
+  (`internal/broker/credentials.go`) and overwrites any client
+  `Authorization` header. The injection runs in the proxy's `Rewrite`
+  hook, after the hop-by-hop strip, and client `Connection` token lists
+  are reduced to `upgrade`, `keep-alive` and `close`, so a client cannot
+  name an injected header for removal.
+- **Forwarded-header hygiene**: the client-supplied forwarding family
+  (`X-Forwarded-*`, `X-Original-*`, `X-Rewrite-Url`, `Forwarded`,
   `X-Real-Ip`) and the vendor client-address headers (`Via`,
   `X-Client-Ip`, `True-Client-Ip`, `CF-Connecting-Ip`,
-  `X-Cluster-Client-Ip`, `X-Envoy-*`) are stripped from one table and the
-  address headers rebuilt from the
-  verified chain only (`rewriteForwarded`, `internal/gateway/proxy.go`);
-  rate-limit keys only honor XFF from configured trusted proxies
-  (tests `forwarded_test.go`, `connheaders_test.go` — FX-R26) — most of
-  A6-S18's surface.
-- **Upstream TLS pin** — the runtime's self-signed cert is verified against a
-  per-lease pinned CA pool with a pinned server name — never
-  `InsecureSkipVerify` (`proxy.go:704-769`); per-workspace credentials are
-  injected from the workspace Secret (`internal/broker/credentials.go`).
-- **Upstream path allowlist** — only the paths the stock KasmVNC client
-  needs are proxied; everything else, including any upstream
-  management/API surface, is denied at the gateway. `cleanedProxyPath`
-  rejects traversal and parser-differential tricks (dot segments, encoded
-  dots/slashes/backslashes, double encodings) before the allowlist runs
-  (`internal/gateway/authorization.go:444-521`, `upstreamAllowlist`,
-  `cleanedProxyPath` — SEC-20).
-- **Control surface** — `/v1/control/*` answers only on control hosts and
-  requires the bearer token from `-control-token-file`
-  (`proxy.go:342-468`, `controlAuth`); on workspace or foreign hosts the
-  paths do not exist.
-- **Timeouts** — app/internal/metrics listeners bound every request phase;
-  the session listener bounds only header read since connections are hijacked
-  for WebSocket (SEC-23, `internal/backend/listeners.go:15-62`).
-
-Open questions: A6-S4's residual window (two streams for at most one renew
-cycle when a replica dies mid-claim).
-
-### Boundary 6 — session listener ↔ workspace pod / KasmVNC
-
-Flows: reverse-proxied HTTP + WebSocket to the pod's KasmVNC server;
-egress from the pod to the Internet (by profile) and DNS.
-
-Controls:
-
-- **Per-workspace NetworkPolicy** `ws-<uid>-boundary`: default-deny, ingress
-  only from the gateway, DNS egress, template/profile-scoped egress
-  (`internal/runtime/linux/backend.go` `buildNetPol`; test
-  `backend_netpol_test.go`); chart-level `default-deny` baselines for the
-  release and managed namespaces (`templates/networkpolicy.yaml`).
-  `ClusterOnly` egress defaults to any pod in any namespace; the opt-in
-  `runtime.networkProfiles.clusterOnly.*` values narrow it to
-  selector-matched destinations/ports (S34), and opt-in
-  `managedNamespaces[].namespaceQuota` bounds the namespace's summed
-  resources (S35).
-- **Pod hardening** — `RunAsNonRoot`, `AllowPrivilegeEscalation=false`,
-  `Drop: ALL` capabilities, seccomp `RuntimeDefault` (or a `localhost/`
-  profile via the template annotation, validated),
-  `securityContext.appArmorProfile` RuntimeDefault or `localhost/`
-  (`internal/runtime/linux/backend.go:78-90,815-905,975-985`). Setting
+  `X-Cluster-Client-Ip`, `X-Envoy-*`) are stripped from one table, and the
+  address headers are rebuilt from the verified chain only
+  (`rewriteForwarded`, `internal/gateway/proxy.go`).
+- **Pod hardening**: `RunAsNonRoot`, `AllowPrivilegeEscalation=false`,
+  all capabilities dropped, seccomp `RuntimeDefault` (or a validated
+  `localhost/` profile, TM-47) and AppArmor `RuntimeDefault` or
+  `localhost/` (`buildPod`, `internal/runtime/linux/backend.go`).
   `runtime.appArmor.requireRuntimeDefault=false` drops the fail-closed
-  guarantee on nodes without AppArmor (`AppArmorNotRequired`) — A6-S16.
-- **Credentials** — per-workspace KasmVNC credentials live in a per-workspace
-  Secret mounted read-only (`secretMountDir`); the broker reads them at
-  target resolution (`credentials.go`). The pod's user can read them — by
-  design, since the pod is tenant-controlled; they only authenticate to that
-  workspace's own VNC server.
-- **Kasm adapter** — an init image writes adapter scripts into a shared
-  emptyDir mounted read-only into the desktop container
-  (`build/kasm-adapter/main.go`); it neutralizes the baked-in `VNC_PW`
-  defaults, makes the rootfs read-only outside the writable mounts, shadows
-  Chromium wrappers with the sandbox-preserving `browser-shim.sh`, and drops
-  managed Chromium policy over each engine's policy dir
-  (`internal/runtime/linux/backend.go` kasm block ~L910-960;
-  `tests/integration/kasm_adapter_test.go`,
+  guarantee on nodes without AppArmor (`AppArmorNotRequired`, TM-41).
+- **Kasm adapter**: an init image writes adapter scripts into a shared
+  `emptyDir` mounted read-only into the desktop container
+  (`build/kasm-adapter/main.go`). The adapter neutralizes the image's
+  baked-in `VNC_PW` defaults, makes the root filesystem read-only outside
+  the writable mounts, shadows Chromium wrappers with the
+  sandbox-preserving `browser-shim.sh`, and drops managed Chromium policy
+  into each engine's policy directory (`tests/integration/kasm_adapter_test.go`,
   `deploy/helm/kasm_adapter_test.go`, CI `kasm-contract` job).
-- **Clipboard policy (server-side)** — the template `clipboardPolicy`
-  reaches the pod as `TCDI_CLIPBOARD_POLICY` and both session entrypoints
-  render the KasmVNC `data_loss_prevention.clipboard` block from it into
-  `$HOME/.vnc/kasmvnc.yaml`, which merges after `/etc` and wins per key
-  (`build/linux-base/entrypoint.sh`, `build/kasm-adapter/entrypoint.sh`,
-  `internal/runtime/linux/backend.go`). Direction semantics are defined
-  once in `internal/api/openapi.yaml`: `Send` maps to `client_to_server`
-  only, `Receive` to `server_to_client` only (primary selection follows
-  it), `Bidirectional` to both; unset or unknown renders `Disabled` —
-  the wiring fails closed. Client-side overrides
-  (`allow_client_to_override_kasm_server_settings`) and DLP logging stay
-  off, so the browser can neither widen the policy nor log clipboard
-  contents. The gateway's `clipboard_up/down/seamless` client flags and
-  the portal iframe `allow` attribute are least-privilege hints layered
-  on top — enforcement is the server's `SendCutText`/`AcceptCutText`
-  (contract test `.github/tests/clipboard-policy.test.sh`,
-  `TestClipboardPolicyDirectionSemantics`, pod env
-  `TestPodCarriesClipboardPolicy`, kind smoke
-  "clipboard follows the template policy"; S40).
-- **Tenant session-policy ceiling (ADR 0009)** — a tenant admin can cap
-  the data-transfer policy *below* every template's own policy through
+- **Clipboard policy (server side)**: the template `clipboardPolicy`,
+  narrowed by the tenant ceiling, reaches the pod as
+  `TCDI_CLIPBOARD_POLICY`. Both session entrypoints render KasmVNC's
+  `data_loss_prevention.clipboard` block from it into
+  `$HOME/.vnc/kasmvnc.yaml`, which merges after `/etc` and wins per key.
+  Direction semantics are defined once in `internal/api/openapi.yaml`:
+  `Send` maps to `client_to_server` only, `Receive` to `server_to_client`
+  only (the primary selection follows it), `Bidirectional` to both; unset
+  or unknown renders `Disabled`. Client-side overrides and DLP logging
+  stay off. The gateway's `clipboard_up/down/seamless` client flags and
+  the portal iframe `allow` attribute are least-privilege hints on top;
+  enforcement is the server's `SendCutText` / `AcceptCutText` (TM-36).
+- **Tenant session-policy ceiling**
+  ([ADR 0009](../adr/0009-session-data-transfer-policy.md)): a tenant
+  admin can cap the clipboard and file-transfer policy below every
+  template's own policy through
   `PUT /v1/admin/tenants/{tenant}/session-policy` (tenant-admin only,
-  CSRF + `If-Match`, audited, ceiling rows in `tenant_session_policy`;
-  the page is `/admin/session-policy`). A single resolver computes the
-  meet — `Send ∩ Receive = Disabled`, a ceiling never widens — and both
-  enforcement layers read it: launch tickets record the resolved vector
-  (`launch_ticket.session_policy`, with `clipboard_policy` driving the
-  gateway's redirect flags), and the workspace's `spec.sessionPolicy`
-  drives the pod's `TCDI_CLIPBOARD_POLICY`. **Residual:** tightening has
-  two propagation clocks — new connection tickets carry the narrowed
-  client flags immediately, but a *running* workspace keeps its boot-time
-  server-side policy until its next start (pod specs are immutable; no
-  mid-session restart is taken). Until then, the server-side residual is
-  bounded by the template's own policy, never wider than it. A no-row
-  tenant resolves `FollowTemplate` everywhere — the upgrade default —
-  and an all-`FollowTemplate` write deletes the row so "follow" keeps
-  exactly one representation.
-- **Node isolation (posture)** — chart defaults workspaces onto a dedicated
-  tainted node pool; `allowSharedNodes` is opt-in and warns; node-profile
-  DaemonSet delivers AppArmor/seccomp profiles (`deploy/node-profiles/`,
-  `templates/nodeprofiles.yaml`; test `chart_hardening_test.go`).
+  CSRF and `If-Match`, audited). One resolver computes the meet; a
+  ceiling never widens. Launch tickets record the resolved vector, the
+  transfer claim re-resolves it, and the workspace's
+  `spec.sessionPolicy` drives the pod's environment. A running workspace
+  keeps its start-time server-side policy until its next start or until
+  an admin restarts it with `:apply` (TM-17); until then the
+  server-side residual is bounded by the template's own policy.
+- **Node isolation (posture)**: the chart places workspaces on a
+  dedicated tainted node pool by default; `allowSharedNodes` is opt-in
+  and warns; the node-profile DaemonSet delivers AppArmor and seccomp
+  profiles (`deploy/node-profiles/`, `templates/nodeprofiles.yaml`).
+- **Connection bound**: the gateway caps live upstream connections per
+  workspace per replica (`-session-stream-cap`, TM-35).
 
-Open question: hostile-pod escape/kernel CVEs are explicitly out of the
-product's isolation claim (`SECURITY.md`); container sandboxing
-(`runtimeClassName` passthrough exists; Kata/gVisor) is post-v1.0 scope.
+Hostile-pod escape and kernel CVEs are outside the product's isolation
+claim (`SECURITY.md`); `runtimeClassName` passes through for operators
+who run a sandboxed runtime.
+
+Register: TM-32 to TM-37.
 
 #### KasmVNC credential brute force
 
@@ -482,297 +479,346 @@ Residual: a process inside the pod can reach `127.0.0.1:8444` directly, but
 it already runs as the desktop user, who can read the credential from the
 workspace Secret mount, so it gains nothing.
 
+#### In-pod transfer helper
+
+This is the trust model of
+[ADR 0009 §5](../adr/0009-session-data-transfer-policy.md#5-file-transfer).
+Register row TM-37.
+
+- The workspace Secret is mounted with mode `0440` and `fsGroup` 1000.
+  The desktop and `tcdi-xferd` both run as uid 1000 in one container
+  (`internal/runtime/linux/backend.go:1103,1236-1247`;
+  `build/linux-base/Dockerfile:106`). So any process the workspace user
+  starts can read `xfer-token`, the KasmVNC password and the TLS key.
+- Such a process can kill `tcdi-xferd` (same uid) and bind `:8443` (an
+  unprivileged port) with the same certificate, so the gateway cannot
+  tell the difference. It holds the port only until the entrypoint's
+  supervision loop sees the helper gone and exits the container: about
+  14 s, a 2 s poll then a 12 s grace (`build/linux-base/entrypoint.sh:191-192`,
+  `build/kasm-adapter/entrypoint.sh:276-277`). It can do this again after
+  each restart.
+- The token therefore proves only "the gateway, or a process in this
+  pod". The broker's `ClaimTransfer` is the authoritative check, and the
+  gateway calls it before sending any byte to the pod
+  (`internal/gateway/transfer.go:120`;
+  `internal/broker/transfers.go:86,101,166`).
+- A replaced helper can change or withhold the bytes of that workspace's
+  own transfers. It cannot exceed the grant's direction or size: the
+  gateway counts and caps the bytes and forces the download's content
+  type (`transfer.go:194-214,259-274`). The audited byte count is the
+  gateway's own count. It sees no portal cookie or session credential:
+  the transfer leg sends only the token (`transfer.go:210,248`).
+
 ### Boundary 7 — operator ↔ internal mTLS listener :9443
 
-Flows: the operator calls the broker internal API (ADR 0003): target
-resolution inputs, workspace revoke/drain, activity reporting surface.
+Flows: the operator calls the broker's internal API
+([ADR 0003](../adr/0003-gateway-broker-internal-api.md)): workspace
+revoke and drain, activity reporting, target resolution inputs.
 
 Controls:
 
-- `ServerTLSConfig`: `VerifyClientCertIfGiven`, TLS 1.3 minimum
-  (`internal/broker/httpapi/server.go:455-468`); every route asserts a peer
-  certificate and maps the client identity to a role — `requireGateway` /
-  `requireOperator` (server.go:106-140,331-348).
-- **Hot reload everywhere** — the internal listener's cert and client CA
-  bundle reload on file change via `tlsreload.Reloader`/`CAPool`
-  (`internal/backend/wire.go:421-429`, `listeners.go:87`
-  `hotReloadClientCAs`; test `internal/backend/mtls_reload_test.go`). On the
-  client side `opclient` reloads both its certificate and the broker CA:
-  `GetClientCertificate` re-reads per handshake and `VerifyConnection` runs
-  the full chain + hostname check against the newest CA pool — the
-  `InsecureSkipVerify` field is set only as that handoff
-  (`internal/broker/httpapi/opclient/client.go:95-160`; tests
-  `ca_reload_test.go` — FX-R33, `verify_internal_test.go`). A6-S15's
-  load-once gap is therefore closed on `main`.
-- Public listener certs (app :8443, session :8444) hot-reload the same way
-  (`wire.go:728-736`; `build/frontend/main_test.go:TestHotReload` for the
-  frontend server).
-- Audit logging redacts object IDs (`server.go:170` `redactID`).
+- `ServerTLSConfig` (`internal/broker/httpapi/server.go`) uses
+  `VerifyClientCertIfGiven` with TLS 1.3 minimum. `identify` asserts a
+  peer certificate on every route and maps the client identity to a role
+  (`requireGateway`, `requireOperator`); every refusal is counted and
+  logged (TM-40).
+- **Hot reload**: the listener's certificate and client CA bundle reload
+  on file change (`tlsreload.Reloader`, `hotReloadClientCAs` in
+  `internal/backend/listeners.go`). On the client side, `opclient`
+  re-reads its certificate per handshake and its `VerifyConnection` runs
+  the full chain and hostname check against the newest CA pool
+  (`internal/broker/httpapi/opclient/client.go`). The public listeners
+  (app `:8443`, session `:8444`) and the frontend hot-reload the same way.
+- **Serial revocation**: `-internal-revoked-list` names a blocklist of
+  (issuer, serial) pairs; a listed client certificate fails the handshake,
+  and live connections it holds are severed on the same reload pass
+  ([ADR 0008](../adr/0008-mtls-cert-revocation.md), `internal/tlsreload`).
+- Request logs redact object IDs (`redactID`).
 
-### Boundary 8 — operator ↔ Kubernetes API (incl. kasm-adapter delivery)
+Register: TM-38 to TM-40.
 
-Flows: CRUD on `Workspace`/`WorkspaceTemplate`, runtime pods, per-workspace
-Secrets/Services/NetworkPolicies in managed namespaces; the kasm-adapter init
-image delivers scripts into the pod.
+### Boundary 8 — operator ↔ Kubernetes API (including the kasm adapter)
 
-Controls: scoped RBAC in `deploy/helm/tinycdi/templates/rbac.yaml` +
-`config/rbac/`; CRD/CEL validation requires digest-pinned image refs
-(`api/v1alpha1/validation.go` `DigestPattern`) and forbids
-`spec.linux.command` with `adapter=kasm` (the adapter entrypoint wins —
-`buildPod` kasm block); `hostUsers` is a typed template field with an
-operator-wide default knob, nil leaves the pod field unset
-(`internal/runtime/linux/backend.go:295-298,1097-1103`). The template
-snapshot that drives pod building is operator-authoritative: it is
-recorded to `status.templateSnapshot` — writable only through the
-`workspaces/status` subresource, granted to the operator service account
-alone — from the live template at first admit, and only mirrored to the
-`workspaces.cdi.tinyorbit.vn/template-snapshot` annotation for readers,
-so Workspace writers can no longer steer convergence by editing
-annotation bytes (S30). Image-digest verification of the recorded spec:
-`internal/operator/snapshot_verify_test.go`. Intent delivery is fenced:
-the operator converges a Workspace only to the newest recorded intent
-(`spec.intentRevision` vs the `applied-intent` annotation — a spec at or
-behind the record is ignored, so a replayed stale intent can never flip
-`desiredState` back; `internal/operator/workspace_controller.go`). Since
-#125 a dropped intent that evidences stream drift — a strictly-behind
-revision, or an equal revision with diverged fields — stamps the
-`workspaces.cdi.tinyorbit.vn/intent-behind` marker annotation
-(`intentFenceDrifted`, `internal/provisioning/k8sapplier.go`), which the
-operator reconciles into an `IntentBehind` condition plus one
-edge-triggered Warning event until the stream realigns (S24).
+Flows: CRUD on `Workspace` and `WorkspaceTemplate`, runtime pods, and
+per-workspace Secrets, Services and NetworkPolicies in managed
+namespaces; the kasm-adapter init image delivers scripts into the pod.
+
+Controls: scoped RBAC (`deploy/helm/tinycdi/templates/rbac.yaml`,
+`config/rbac/`). CRD and CEL validation require digest-pinned image
+references (`DigestPattern`, `api/v1/validation.go`) and forbid
+`spec.linux.command` with `adapter=kasm`. `hostUsers` is a typed
+template field with an operator-wide default; nil leaves the pod field
+unset. The template snapshot that drives pod building is recorded by the
+operator to `status.templateSnapshot`, which only the operator service
+account can write (the `workspaces/status` subresource); the
+`workspaces.cdi.tinyorbit.vn/template-snapshot` annotation is a mirror
+for readers and is never trusted (TM-43). Intent delivery is fenced: the
+operator converges a Workspace only to the newest recorded intent
+(`spec.intentRevision` against the `applied-intent` annotation), so a
+replayed stale intent can never flip `desiredState` back
+(`internal/operator/workspace_controller.go`); drift between the intent
+stream and the fence is surfaced, never applied (TM-22).
+
+Register: TM-41 to TM-47.
 
 ## 5. Cross-cutting controls
 
 ### Secrets handling
 
-- Sealing keys are files (`-login-key-file`, repeatable for rotation); OIDC
-  client secret and DB DSN arrive via Secret env/mounts (`oidc.existingSecret`,
-  `database` chart values); the session-listener control token is a file.
-- Nothing persists usable session material: session IDs → SHA-256, tickets →
-  SHA-256, `id_token` → AEAD-sealed blob (SEC-27).
-- Logs redact IDs (`redactID`); the post-redemption redirect URL is static
-  and carries no ticket or session material (`launch.go` `DesktopPath`
-  contract); tests assert cookie/CSRF/id_token values never leak into API
-  responses (`internal/api/auth_test.go`, `workspaces_handlers_test.go`).
+- Sealing keys are files (`-login-key-file`, repeatable for rotation); the
+  OIDC client secret and the database DSN arrive through Secret env or
+  mounts (`oidc.existingSecret`, `database` values); the session-listener
+  control token is a file.
+- Nothing persists usable session material: session IDs and tickets are
+  stored as SHA-256, and the `id_token` as an AEAD-sealed blob.
+- The per-workspace Secret holds the KasmVNC credential, the TLS key and
+  a separate `xfer-token` (`ensureSecret`,
+  `internal/runtime/linux/backend.go`); the token is generated once and
+  never rotated while the Secret exists.
+- Logs redact IDs (`redactID`); the post-redemption redirect URL is
+  static and carries no ticket or session material (`launch.go`,
+  `DesktopPath`); tests assert that cookie, CSRF and `id_token` values
+  never leak into API responses (`internal/api/auth_test.go`,
+  `workspaces_handlers_test.go`).
 
-### Supply chain (CI) — summary; full inventory in `test-inventory.md`
+### Supply chain
 
-- Build jobs push **by digest only**; cosign keyless signs and attaches the
-  SPDX SBOM attestation on the digest **before** any tag is promoted
-  (`.github/workflows/images.yml`, `release.yml`; `docs/security/provenance.md`).
-- trivy gate per image (fixable CRITICAL/HIGH fails); `.trivyignore` is an
-  expiring-exceptions file enforced by `check-trivyignore.sh`; the scanner
-  runs with an empty `--config` (SUPR-8).
-- govulncheck, `npm audit` (prod deps, high+), `dependency-review-action` on
-  PRs; actionlint + yamllint + zizmor on workflows; `.github/tests/*`
-  regression tests guard the release/workflow scripts.
-- Runtime freshness: `runtime-freshness.yml` (daily) opens pin-bump PRs when
-  bookworm-security publishes a newer Chromium/Firefox-ESR and fails while a
-  pin is stale; `runtime-images.yml` is the always-on runtime train
-  (check → PR → build/scan/sign/publish) — since the v1.0 governance
-  decisions the publish job waits on a `runtime-train` environment
-  approval (required reviewer; an unapproved run expires and
-  runtime-freshness then flags the images stale) while build/scan stay
-  ungated (A6-S12: review each job's permissions, the
-  keyless signing identity, and whether consumers can distinguish a train
-  image from a release image).
-- The train's deployment manifest is signed too (v1.0 fix — it was the
-  one unsigned artifact): `runtime-images.json` ships a
-  `cosign sign-blob` Sigstore bundle on every `runtime-*` release;
-  consumers verify it before pinning digests (`.github/README.md`).
-- Scan jobs validate artifact-supplied image refs against the strict
-  `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<64hex>` form before writing
-  them to `$GITHUB_ENV` (SUPF-10; v1.0 fix — previously unvalidated).
-- Build jobs push by digest before the scan gate; a gate-failed digest
-  stays pullable-by-digest but is never tagged or signed, so it carries
-  no release trust — accepted residual, documented in `provenance.md`
-  "Digest-addressable does not mean released".
+Full inventory: [`test-inventory.md`](test-inventory.md).
+
+- Build jobs push **by digest only**; cosign keyless signing and the SPDX
+  SBOM attestation are attached to the digest **before** any tag is
+  promoted (`.github/workflows/images.yml`, `release.yml`;
+  [`provenance.md`](provenance.md)).
+- A trivy gate runs per image (fixable CRITICAL and HIGH fail);
+  `.trivyignore` is an expiring-exceptions file enforced by
+  `check-trivyignore.sh`; the scanner runs with an empty `--config`.
+- govulncheck, `npm audit` (production dependencies, high and above) and
+  `dependency-review-action` on pull requests; actionlint, yamllint and
+  zizmor on workflows; `.github/tests/*` guard the release and workflow
+  scripts.
+- Runtime freshness: `runtime-freshness.yml` (daily) opens pin-bump pull
+  requests when Debian security publishes a newer Chromium or Firefox ESR,
+  and fails while a pin is stale. `runtime-images.yml` is the runtime
+  image train (check, pull request, build, scan, sign, publish); its
+  publish job waits on the `runtime-train` environment approval, while
+  build and scan are ungated. The train manifest `runtime-images.json`
+  ships with a `cosign sign-blob` Sigstore bundle on every `runtime-*`
+  release (`.github/README.md`).
+- Scan jobs validate artifact-supplied image references against the
+  strict `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<64hex>` form before
+  writing them to `$GITHUB_ENV` (`validate-image-refs.sh`).
+- A digest that fails its gates is never tagged or signed, so it carries
+  no release trust; the failed run's cleanup job deletes the digests that
+  run pushed (`cleanup-failed-digests.sh`; see
+  [`provenance.md`](provenance.md)).
 - The train publish job emits `attest-build-provenance` only under the
-  dedicated `TRAIN_ATTESTATIONS_ENABLED` repo variable (off by default,
-  SEC-I12), and the release ships dedicated `sbom-chart` /
-  `sbom-binaries` SPDX SBOMs for the packaged chart and static binaries.
+  `TRAIN_ATTESTATIONS_ENABLED` repository variable (off by default); the
+  release ships `sbom-chart` and `sbom-binaries` SPDX SBOMs for the
+  packaged chart and static binaries.
 - Required checks and enforce-admins are codified in
   `.github/scripts/setup-repo-protection.sh`.
 
+Register: TM-48, TM-49.
+
+### Audit
+
+- Every route wrapped by `audited()` (`internal/api/auditroutes.go`) and
+  the broker's transfer claim and completion (`internal/broker/transfers.go`)
+  are persisted to `audit_event` in the audited transaction. If
+  persisting fails, the request fails (`DurableAuditSink`,
+  `internal/api/auditstore.go`; `TestAudited_PersistFailureFailsClosed`).
+  Rows are kept 90 days by default (`-audit-retention-days`). See
+  [ADR 0010](../adr/0010-audit-store-and-retention.md) and
+  [audit.md](../runbooks/audit.md).
+- Five kinds of record stay stdout-only:
+  1. `session.touch`, the portal's activity beat
+     (`notPersisted`, `internal/api/auditstore.go`);
+  2. the per-request `http.request` record (`internal/api/middleware.go`);
+  3. the gateway-local launch and control-surface events
+     (`Gateway.audit`, `internal/gateway/launch.go`);
+  4. the sign-out `session.revoke` record (`LogoutHandler`,
+     `internal/api/auth.go`);
+  5. the startup `admin.quota.config_apply` record
+     (`writeQuotaApplyAudit`, `internal/backend/tenantquota.go`).
+- The stdout stream goes through `GuardedSink`
+  (`internal/observability/audit.go`): a write failure is counted on
+  `tinycdi_audit_write_errors_total{event}` with a rate-limited warning
+  and never fails the request. Delivery, retention and tamper evidence of
+  the log stream are the operator's
+  ([observability.md](../runbooks/observability.md#log-integrity--what-tinycdi-guarantees-vs-what-you-must-provide)).
+- Platform-level actions that never pass through TinyCDI
+  (`WorkspaceTemplate` writes, Helm value changes) are recorded only in
+  the Kubernetes API audit log.
+
+Register: TM-50.
+
 ### Failure posture
 
-- Broker freshness budget: issuing/renewing stops when observed runtime
-  state is >15 s stale (`ErrFreshness`, `internal/broker/tickets.go`).
-- Postgres outage: sessions close after ~30 s without renewal (leases fail
-  closed; `tests/integration/postgres_outage_test.go`,
+- Broker freshness budget: issuing and renewing stop when the observed
+  runtime state is more than 15 s stale (`ErrFreshness`,
+  `internal/broker/tickets.go`).
+- Postgres outage: sessions close about 30 s after renewal stops, because
+  leases fail closed (`tests/integration/postgres_outage_test.go`,
   `backend_restart_test.go`).
-- Leader election off by default for the operator (single replica assumption
-  — noted in the post-MVP architecture review).
+- Audit persistence fails closed: an audited mutation whose
+  `audit_event` insert fails is rolled back and answered as an error.
+- The operator runs leader election by default; the chart refuses
+  `operator.leaderElect=false` with `operator.replicas>1` (TM-42).
+- The metrics listener has no authentication; it is served on the
+  dedicated ClusterIP `backend-metrics` Service, and the only rule that
+  opens it admits exactly `networkPolicy.prometheusPeers` (TM-42).
 
-## 6. Known gaps and open items for the v1.0 review
+## 6. Threat register
 
-The post-MVP review (A6) phrased each item as a *question for the reviewer*,
-not a confirmed bug. Status below is against `main` at the time of writing.
-S1–S18 are the A6 questions; S19 onward continue the numbering for the v0.5
-items that landed since.
+Columns: the boundary (§4, or X for cross-cutting), the threat from the
+attacker's side, the control as the code implements it, what pins the
+control, and the residual risk (accepted residuals are also in §7).
 
-| # | Item | State today |
-|---|---|---|
-| S1 | CSRF token derived from session ID | Implemented (`RequireCSRF`, `csrfTokenFor`); model change vs v0.1 — verify derivation is unforgeable cross-session; **v1.0 review:** held — derivation verified unforgeable cross-session (SR-1 held); no finding |
-| S2 | AEAD login cookie, two-key rotation | Implemented (`loginstate`, `-login-key-file`); review in-TTL replay (Boundary 3 above); **v1.0 review:** held — in-TTL replay of the sealed cookie gains nothing (the code is single-use at the IdP and bound to the sealed verifier) |
-| S3 | Cookie digest on lease; session restore | Implemented (`rehydrate.go`, store digests); new auth path for the session listener — review digest lookup + singleflight; **v1.0 review:** held; see also S31 (unknown-cookie spray bound, #147) |
-| S4 | `stream_epoch` cross-replica fencing | Implemented (`authorization.go`); residual ≤1-renew-cycle two-stream window stands; **v1.0 review:** held; the ≤1-renew-cycle two-stream residual stands as documented |
-| S5 | Per-workspace host binding / domain match | Implemented (`sessionhost`, `ServeHTTP` host classes, `host_mismatch` deny); Host-header parsing is the boundary; **v1.0 review:** held (host-class fuzz + foreign-host 421 verified) |
-| S6 | Connection-status endpoint without idle renewal | Implemented (`RequireAuthPassive`); second auth path to review; **v1.0 review:** held, with one coverage gap — only the connection-status poll was passive; every cookie-authenticated GET is passive since #133 (SR-1-F1) and activity slides via the explicit `POST /v1/session:touch` beat |
-| S7 | iframe sandbox, CSP, COOP/CORP, `lax` same-site | Implemented (frontend headers + `sessionCSP` + `responsePolicy`); tenant-controlled content sits same-site with the portal by design; **v1.0 review:** held; the session listener's missing COOP is fixed in #147 (SR-2-F7, S33) |
-| S8 | Listener isolation | Implemented (host classes; API paths absent on :8444, catch-all only on workspace hosts); **v1.0 review:** held (host classes, listener isolation, edge policy verified) |
-| S9 | Tenant scope, curated events, principal directory | Implemented (`principal.go`, `events.go`, `directory.go`); new tenant-admin surface; **v1.0 review:** held (tenant+owner predicates verified end-to-end; foreign ID is 404 never 403) |
-| S10 | Branding directory handler | Implemented (`build/frontend/main.go`); serves operator-supplied files — traversal containment tested; **v1.0 review:** held (traversal + symlink containment verified line-by-line; no bypass found) |
-| S11 | KASM-2 risk acceptance | The risk acceptance lapsed with v0.2; the kasm adapter + catalog scan ship now. Reviewer should confirm the catalog gate (`check-kasm-catalog.sh`, `kasm-contract` job) actually covers the documented minimum engine floor; **v1.0 review:** held — the catalog gate covers the documented engine floor (`check-kasm-catalog.sh`, `scan-kasm-catalog.sh`, the `kasm-contract` job) |
-| S12 | Runtime image release train | Live (`runtime-images.yml`); publish waits on the `runtime-train` environment's required reviewer — review job permissions, keyless identity, train-vs-release image distinguishability; **v1.0 review:** the unsigned train manifest and missing train provenance are fixed in #135 (SR-5-F1, SR-5-F6); the single-actor merge→publish residual is **accepted** (SR-5-F2 — owner `maintainers`, trigger: a second maintainer joins; mitigated by the `runtime-train` publish approval), gate-failed-digest retention is **fixed** in v1.1 (SR-5-F3 — a failed run's `cleanup` job deletes exactly the digests that run pushed, run-scoped and fail-closed on tagged versions), and repo-level SHA-pinning enforcement is **fixed** (SR-5-F5 — `sha_pinning_required` codified in setup-repo-protection.sh, applied by an admin) — see review-v1.0.md §7 |
-| S13 | G0–G5 merged without independent review | Standing: the whole v0.1→v0.3 delta has had no external security review — this document exists to scope it; **v1.0 review:** the internal review now covers the delta (this document + review-v1.0.md); external human review remains **open — deferred to the 1.x line** (maintainer decision 2026-10-11, owner `maintainers`) |
-| S14 | App-layer rate limit for `/v1/login`, `/v1/launch` | Implemented (v0.4: `internal/ratelimit` + Postgres fixed-minute windows, ADR 0006 — FX-R30 keying, exact shared-window bound with the undivided local bucket as a healthy-mode store-protection prefilter and the divided local bucket as the degraded-mode floor (v0.5 RL-CEILING amendment), fail-open on store error). Since then: a circuit breaker bounds degraded-mode cost (500 ms per-call deadline, 10 s cool-down skipping the store, single-flight probe — `internal/ratelimit/shared.go`, `shared_test.go`), the v0.4.0 defaults restore the v0.3.x effective budgets as window bounds (`TestRateLimitDefaults_V040Budgets`), and `/v1/me/sessions:revoke-all` joined the session-keyed limiter. Reviewer verifies coverage, ceilings, bypass resistance and the outage degradation path. Residual: IP-keyed budgets still multiply across the prefixes a client holds — IPv6 keys by /64 and mapped spellings unify with the native v4 key (v1.0), so rotation inside one prefix or across family spellings no longer helps, but a client holding several /64s or several egress addresses still gets a budget per prefix (per-prefix limiting as designed; authenticated routes key by session). A selected XFF entry that is not a plain IP — a garbage token, hostname or zoned IPv6 literal — can never become a key: it collapses to the socket peer for both `ClientKey` and `ClientAddr`, so a client whose own bytes reach the selected slot shares one peer bucket instead of minting fresh keys, and the forwarded-header rebuild never carries non-address bytes (v1.0, `TestClientKey_NonIPSelectedEntryFallsBackToPeer`). The right-most-untrusted XFF derivation additionally assumes every proxy hop in front is in `-trusted-proxies` — a pass-through trusted hop would hand the key to client bytes; the invariant and the dual-stack listing requirement are documented in the chart README; **v1.0 review:** the per-address and mapped-form multipliers are fixed in #132 (SR-1-F5), the non-IP-key spray in #145 (SR-4-F3); the per-prefix residual and the trusted-hop invariant stand as documented above — accepted as designed |
-| S15 | Operator mTLS client cert / listener client-CA hot reload | **Implemented since** (`opclient` reload loop + `hotReloadClientCAs`; FX-R33 test); reviewer confirms rotation edge cases; **v1.0 review:** held (rotation edge cases verified); **v1.1:** SR-3-F5 **fixed** — per-certificate revocation via the ADR 0008 serial blocklist (`-internal-revoked-list`, opt-in): a listed (issuer, serial) fails the TLS handshake and its live conns are severed on the same reload pass; residual — revocation propagates within kubelet Secret sync + one 30 s poll (~90 s), rotation remains the mechanism for a suspect CA — **accepted** |
-| S16 | `runtime.appArmor.requireRuntimeDefault` opt-out | Implemented (`AppArmorNotRequired`); review docs/default/preflight detection on AppArmor-less nodes; **v1.0 review:** held (all four `AppArmorNotRequired` cases + preflight detection verified) |
-| S17 | Sign-out vs live desktop streams | Implemented (#107 + #123; `LogoutHandler` → `Broker.RevokePortalSession`, `internal/api/auth.go:685`, `internal/broker/sessions.go:109`): sign-out revokes the session's digest-bound leases and outstanding tickets in one store tx — every replica's renew loop closes the bound stream within one renew cycle, and a replayed workspace cookie resolves to a revoked lease (401) on any replica; ticket-redemption re-checks the session row (`internal/broker/tickets.go`). Since the SIGNOUT-FIX pass both revoke sweeps pre-lock their covered rows in a deterministic key order (`lockByKeysInOrderTx`, `sessions.go:418` — tickets by `ticket_hash`, sessions by `id`, leases by `id`), so overlapping sweeps serialize on the first contested row instead of crossing waits. Defence-in-depth (#123, DR): every lease read that feeds renew/attach/claim or the cookie→lease resolve (`liveLease`/`LeaseBySession`, `internal/broker/leases.go`) re-validates the bound portal session row — epoch + absolute expiry, same semantics as the redeem-time check — in the same indexed read, and revokes the lease in one statement when it fails (`tinycdi_lease_session_missing_total{reason=absent\|invalid}` + one log line). A lease resurrected as `active` by a Postgres restore therefore dies at its next renew or attach even when the sign-out revoke itself was lost in the dump window; leases with a NULL `portal_session_digest` (pre-018 rows) are exempt — nothing to verify against, and revoking them on sight would mass-kill sessions mid-rolling-upgrade — they keep the TTL lifecycle and are covered by the DR runbook's post-restore lease sweep. Since the FIX-LOGOUT pass the session-row delete is the ordering's point of no return: a store failure on it answers retryable `503 UNAVAILABLE` (+ `Retry-After`) and tears nothing down — no cookie expiry, no lease/ticket revoke — so a response never claims a sign-out that did not commit, and the still-valid session keeps its live leases until a retry completes the destroy (revoking first would leave a live session with dead streams, a half-revoked state the refusal would be lying about). Tests `internal/broker/lease_session_test.go`, `signout_test.go` (api, broker, gateway), `TestLogout_StoreDeleteFailureReturns503`; **v1.0 review:** held, with three gaps closed — the lease-layer liveness now honours the portal idle window (#133; SR-1-F2 / SR-2-F6 / SR-4-F1), input credit is scoped to the bound session digest (#133; SR-1-F3 / SR-4-F2), and logout fails closed on a session-delete error (#131; SR-1-F4); **v1.1:** the SR-4-F5 residual is closed — the leader-gated retention sweep (`internal/store/retention.go`; `-terminal-retention-days` / `backend.retention.terminalRowDays`, default 30, `0` disables) deletes terminal `connection_lease`/`launch_ticket` rows in bounded batches, so the append-mostly tables the 020/023 revoke indexes serve stay bounded and the write-lock cost of a future index build no longer grows with deployment age — every sign-out/redeem path here predicates on live/outstanding rows only, so pruning is unreachable history |
-| S18 | Client address chain gateway → KasmVNC | Closed (see *KasmVNC credential brute force* above): the whole client-supplied forwarding family (`X-Forwarded-*`, `X-Original-*`, `X-Rewrite-Url`, `Forwarded`, `X-Real-Ip`) and vendor client-address headers (`Via`, `X-Client-Ip`, `True-Client-Ip`, `CF-Connecting-Ip`, `X-Cluster-Client-Ip`, `X-Envoy-*`) are stripped and only trusted proxies shift the rebuilt forwarded keys (`forwarded_test.go`, `connheaders_test.go`); the pod-side 5/10 blacklist is correctly keyed on the derived client address and stays as defence-in-depth — credential guesses are unreachable by construction since `Authorization` is broker-injected on every proxied request (`TestProxy_StripsClientAuth`). The injection now runs in the proxy's `Rewrite` hook — after the stdlib hop-by-hop strip — and client `Connection` token lists are canonicalised to upgrade/keep-alive/close, because before this fix a client could name the injected headers in `Connection:` and have them deleted on the wire: unauthenticated requests reached the runtime's auth layer and the forwarded chain arrived degraded; **v1.0 review:** held after fixes — client `Connection:` tokens could strip the injected headers and the wider forwarding/vendor families passed through (SR-2-F1/F2, #142); the session upstream transport also gained a response-header timeout (#142, SR-2-F4) |
-| S19 | Sign-out-everywhere vs the principal's other sessions | Implemented (ADR 0007; `RevokeAllSessionsHandler` → `Broker.RevokePrincipalSessions`, `internal/api/revokeall.go`, `internal/broker/sessions.go`): `POST /v1/me/sessions:revoke-all` destroys every portal session of the principal **in the caller's tenant** — caller's own session included — and revokes its active leases and outstanding tickets in one store transaction (lock order tickets → sessions → leases, identical to `RedeemTicket`/`RevokePortalSession` and deterministic within each kind via `lockByKeysInOrderTx`; both redeem interleavings, a multi-ticket inversion and a `-race` three-way run are pinned on real row locks). Streams die within one renew cycle on every replica; every revoked session's cookie replays to 401. Failure rolls back whole (500, caller stays signed in — never a partial revoke reported as success). No IdP back-channel logout; the provider session ends only via the same RP-initiated `endSessionUrl` as logout. Tests `revokeall_test.go` (api, broker, gateway); **v1.0 review:** held (both redeem interleavings and the multi-ticket inversion under -race verified) |
-| S20 | Per-principal running-workspace limits | Implemented (#121, migration 022): `tenant_user_limit_default` + `user_session_limit` tables written through tenant-admin routes `/v1/admin/tenants/{tenant}/user-limits[/default]` (`internal/api/adminuserlimit.go` — auth + audit + CSRF, set/clear audited under `admin.user_limit.*`); admission enforces the effective limit inside the reservation transaction under the `tenant_quota` row lock (`checkUserLimit`, `internal/provisioning/quota.go:433-492`), counting only `held` running slots — disk-only holds and retained disks are exempt, a missing workspace row fails closed, refusal maps to 409 `UserLimitReached`. No rows means unlimited, so upgrades change nothing until an admin acts. Tests `adminuserlimit_test.go`, `provisioning/userlimit_test.go`; reviewer checks the owner→principal identity mapping (`issuer\|sub`) and cross-tenant authz; **v1.0 review:** held (limit enforced inside the reservation tx under the quota row lock; attach enforces the disk's owner) |
-| S21 | Audit coverage of admin and mutating routes | Implemented (#120): `audited()` emits exactly one domain event per covered route — every non-GET API route plus the `/v1/admin/` reads — with a pseudonymous actor, status-derived outcome, `role=tenant-admin` marker and a deferred emit that survives handler panic (`internal/api/auditroutes.go`; `TestAuditCoverage_SpecMatchesTable` fails when a mutating/admin route is added to the spec without a table entry, and `TestAuditCoverage_MountedMuxEmitsEventPerRoute` replays the mounted mux with a capturing sink — driving one request through every mutating/admin spec route must emit exactly one domain event, so a plainly-mounted (or wrapped-and-discarded) route fails the build (v1.0)). The gateway's control surface audits `session.list`/`session.revoke` including bearer denials (`proxy.go`, `TestControlAudit_OperatorSurface`). `GuardedSink` makes a failing sink loud-but-never-blocking: `tinycdi_audit_write_errors_total{event}` + rate-limited warn (`internal/observability/audit.go`, `TestGuardedSink_ReportsFailureNeverPropagates`). What the platform does NOT provide: tamper-evident/durable storage — the stream is stdout JSONL and inherits the operator's log pipeline (runbook "Log integrity"); **v1.0 review:** held; the mount-level pin `TestAuditCoverage_MountedMuxEmitsEventPerRoute` was added in #145 (SR-4-F4); stdout-JSONL durability stays delegated to the operator's log pipeline |
-| S22 | Deploy-time guards for hazardous value combinations | Implemented (#119): `tinycdi.validate` now fails the render on `operator.leaderElect=false` with `operator.replicas>1` — unelected replicas would double-drive reconciliation and the binary cannot observe the Deployment's replica count (`templates/_helpers.tpl`, `cmd/operator` note; `TestOperatorLeaderElectionGuard`). Metrics-port isolation is pinned for every `edgeIngress` mode: only `allow-metrics-scrape` opens :9090, to exactly `networkPolicy.prometheusPeers` (`TestMetricsListenerIsolation`, `TestEdgePolicyNeverOpensInternalPort`). Residual: single-replica installs (`replicas: 1`) may still run unelected, and guards only constrain chart-rendered manifests — hand-rolled manifests bypass them; **v1.0 review:** held; residual — `extraEnv` carries the guarded flags' env equivalents verbatim — accepted, owner `maintainers`, target v1.1 (SR-3-F2); **v1.1: closed** — `<component>.extraEnv` fails the render on the dev-surface env names plus the env equivalents of the security-relevant flags the chart exposes as first-class values (`TCDI_DEV_INSECURE_DB`, `TCDI_DEV_ALLOW_NO_BROKER`, `TCDI_METRICS_LISTEN`, `TCDI_KASM_ADAPTER_IMAGE`, `PGSSLMODE`, `TCDI_OPERATOR_CN`, `TCDI_WATCH_NAMESPACES`, `TCDI_REQUIRED_GROUPS`, `TCDI_CONTROL_TOKEN`/`TCDI_GW_CONTROL_TOKEN`/`TCDI_CONTROL_TOKEN_FILE`, `TCDI_TRUSTED_PROXIES`, `TCDI_UPSTREAM_CA`, `TCDI_OIDC_POST_LOGOUT_REDIRECT`, `TCDI_TENANT_QUOTAS` — each error names the chart value to set instead) or on any name the chart itself manages for that component (a duplicate later in the env list would silently win), unless `dev.enabled`; non-map/nameless entries fail too (`tinycdi.denyExtraEnv`; the managed set is derived from the rendered `tinycdi.env.<component>` blocks — `TestExtraEnvDevSurfaceNamesDenied` (deny-list × all 3 components), `TestExtraEnvDeniedNamesSuggestValue`, `TestExtraEnvManagedDuplicateDenied`, `TestExtraEnvMalformedEntryFails`, `TestExtraEnvDevGateEscape`, `TestExtraEnvBenignPasses`) |
-| S23 | Postgres-only restore onto a live cluster (DR) | Implemented (#122 runbook + #124 tool): `docs/runbooks/disaster-recovery.md` §"Postgres-only restore onto a live cluster" enumerates what an older dump resurrects — `sessions` rows including post-dump sign-outs (killed by `platform_meta.session_epoch` rotation — `SessionStore.Get` compares epoch in the same read), `'active'` `connection_lease` rows including post-dump revokes (a non-NULL `portal_session_digest` dies at next renew/attach via the S17 check, but the tool revokes every restored lease unconditionally anyway — NULL-digest rows have no barrier), unconsumed `launch_ticket` rows re-arming (denied; redeem also re-checks the session), and `workspaces` rows trailing live CRs (aligned to `spec.desiredState`/`runtimeGeneration`/`intentRevision` so the applied-intent fence is not bypassed). `backend post-restore` is the one-shot implementation: dry-run by default; `-apply` requires `-i-have-scaled-down`, takes the leader advisory lock on a dedicated connection and holds it for the whole run (a serving replica or concurrent run means refusal with zero writes), refuses while backend connections remain in `pg_stat_activity` unless `-i-know-backends-are-running`, and exits non-zero printing per-workspace SQL when Kubernetes read access for CR alignment is absent (`internal/backend/postrestore.go`; tests `postrestore_test.go`, `TestSessionEpochRotation`). The `hack/quickstart/restore-drill.sh` kind drill is manual, not a per-PR gate; **v1.0 review:** held (dry-run default, advisory-lock exclusivity, epoch rotation and refusal modes verified) |
-| S24 | Intent-stream drift vs the applied-intent fence | Implemented (#125): after a DB restore the platform's `workspaces.intent_revision` can trail the fence the CR already recorded, and every new intent would be dropped as stale — silently. The applier now detects the two unreachable-by-replay shapes (strictly-behind revision; equal revision with diverged `desiredState`/`runtimeGeneration`) and stamps `workspaces.cdi.tinyorbit.vn/intent-behind` `{rowRevision, crRevision}` (`intentFenceDrifted`, `internal/provisioning/k8sapplier.go`); the operator raises `ConditionIntentBehind` with the revision params plus one edge-triggered Warning event, and clears it once the stream applies forward again (`internal/operator/workspace_controller.go`, `api/v1alpha1/validation.go`; events `create`/`patch` RBAC added). The fence itself is unchanged — a stale intent is still never applied; drift is only surfaced. Surfaced to users via the conditions/events projection (`statusview.go`, `events.go`; `TestIntentBehindDrift`, `TestK8sApplierIntentDrift`, `TestProjectConditions_IntentBehind`); **v1.0 review:** held (fence, drift marker, condition and event verified end-to-end) |
-| S25 | Dead/misleading auth config knobs | Fixed: `AuthConfig` carried `IdleTimeout` — defaulted at startup but never consumed (the session idle window is owned by the session store: `-session-idle`/`TCDI_SESSION_IDLE` → `store.NewSessionStore`) — and `AllowedTenants` — enforced in `tenantAllowed` but with no flag/env/chart path able to populate it, so the gate could never engage; `-required-groups` (`oidc.requiredGroups`) remains the supported login gate. Both knobs were deleted rather than wired: wiring `IdleTimeout` would have created a second source of truth for the store's window, and `AllowedTenants` had no reachable configuration. Guard: `TestAuthConfig_NoDeadSessionKnobs` fails if either field returns — fixed in **#134** (SR-1-F6) |
-| S26 | Post-logout redirect accepted plaintext `http` | Fixed: `AuthConfig.PostLogoutRedirect` and the discovered `end_session_endpoint` now require an absolute https URL — `http` is accepted only for loopback hosts (`localhost`, 127.0.0.0/8, `::1`; strict `netip` parse — mapped/octal spellings do not count), matching the dev plain-http-on-loopback IdP convention (`oidctest`); the chart schema already required `^https://` (`values.schema.json`). Tests: `TestNewAuthenticator_RejectsBadPostLogoutRedirect`, `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`, `TestLogout_UntrustedDiscoveredEndpointIs204` — fixed in **#134** (SR-1-F6) |
-| S27 | create-connection echoed JSON decoder detail | Fixed: `ConnectionHandler.Create` decodes via the shared `decodeJSON` helper — which also rejects trailing data after the first document, a check the previous inline decode lacked — answers 400 `INVALID_REQUEST` with the generic "invalid request body", and logs the decode detail server-side with the request id (SEC-I7). `decodeJSON` now returns the error so callers can log it without echoing it. Tests: `TestCreateConnection_InvalidBodyGenericMessage`, `TestCreateConnection_TrailingJSONRejected` — fixed in **#134** (SR-1-F7) |
-| S28 | Workspace revoke accepted an unbounded `runtimeGeneration` | Fixed: `POST /internal/v1/broker/workspaces/{uid}/revoke` wrote its `runtimeGeneration` straight into `workspace_revocation` — a far-future value (e.g. 2^62) fenced every generation the workspace would ever mint, permanently (the table has no delete path). `RevokeWorkspaceLeases` now refuses any value beyond the recorded generation plus one (max of `workspaces.runtime_generation` — the mint counter — and the informer binding's observed generation) with `ErrGenerationUnbounded` → 400 `INVALID_REQUEST`, a warn log carrying request id, workspace, requested and recorded generation; calls within the bound stay idempotent and an unknown workspace keeps its no-op shape. Tests: `TestRevokeWorkspaceLeases_GenerationBounded`, `TestRevokeWorkspace_GenerationUnbounded` — fixed in **#143** (SR-3-F3) |
-| S29 | Auth-failed requests on the internal mTLS listener were never logged | Fixed: `identify` is the outer middleware on :9443, so no-cert/empty-CN/SPIFFE-mismatch rejections bypassed `logRequests` and left no record at the trust boundary. `identify` now counts every refusal on `tinycdi_internal_auth_failures_total{reason}` (bounded classes `no_cert`/`no_cn`/`spiffe_mismatch`) and emits a warn line rate-limited per reason class (1/s sustained, burst 10) carrying request id, method, peer and the SEC-41-redacted path — raw paths embed lease ids (bearer material); certificate/SAN material is never logged. Tests: `TestIdentify_RejectionsLogged`, `TestIdentify_RejectedPathRedacted`, `TestIdentify_RejectionsRateLimited`, `TestIdentify_RejectionsCounted` — fixed in **#143** (SR-3-F4) |
-| S30 | Forged `template-snapshot` annotation drove operator-built pods | Fixed: the snapshot that drives pod building moved to `status.templateSnapshot` — writable only through the `workspaces/status` subresource, which RBAC grants to the operator service account alone (pinned for chart + kustomize by `TestWorkspaceStatusWritableOnlyByOperator`/`TestKustomizeWorkspaceStatusWritableOnlyByManager`). The operator records the snapshot itself from the live template named by `spec.templateRef` and mirrors it to the annotation for readers; a workspace with no status record and no resolvable live template holds `Degraded`/`TemplateInvalid` plus one edge event instead of trusting annotation bytes, and the live-object provenance check is gone by design (the status record *is* the provenance — catalog rotation after admit still runs from it). Upgrade never reads the annotation: a running workspace establishes its record from its operator-owned pod — stamped pods name their revision via `…/template-name`/`…/template-revision` pod annotations a workspace writer cannot set, and pre-stamp (pre-upgrade) pods get one candidate — the live revision `spec.templateRef` resolves to — adopted only when the normalized pod rebuild matches (identity stamps are backfilled onto the pod) — with the recorded content always re-read from the LIVE revision object; an unprovable identity (mismatched, pruned, republished, webhook-altered or forged-spec builds) holds `Degraded`/`TemplateRevisionGone` with the pod left running until a stop/start re-snapshots — `Ready` while the operator-owned pod serves (the Degraded condition carries the hold, so the workspace stays under the broker's lifecycle enforcement and reconnect tickets keep working), `Pending` otherwise — and workspaces without a running pod snapshot the live template at next start. The broker's expiry planner likewise ignores the annotation for held workspaces — caps come from the stricter of the resolved template lifecycle and chart defaults (`TestSnapshot_UpgradeAdoption`, `snapshot_adopt_test.go`). Residual: the annotation stays readable/writable by Workspace writers (the backend SA) — it is a mirror for consumers and is never trusted; a ValidatingAdmissionPolicy tightening who may write it is a separate hardening item (S36) — fixed in **#146** (SR-3-F1); the mirror annotation's write path is hardened opt-in in **#149** (S36) |
-| S31 | Unauthenticated cookie spray reached Postgres via the session-listener rehydrate path | Fixed: a request carrying a cookie the replica has never seen was the only pre-auth path that spent store reads — a `session_digest` lookup plus an `EXISTS` probe on miss — and unique cookie values mint a fresh singleflight entry each, so the dedup could never help a spray. The unknown-cookie path now sits behind a LOCAL per-client token bucket (`SessionLookupLimiter`, keyed by `ratelimit.ClientKey` — IPv6 folds to /64, non-IP claims collapse to the socket peer) consulted in `lookupSession` before any store read; refusal answers 429 + `Retry-After`, counts `tinycdi_rate_limited_total{route="session_lookup"}` and audits `session.lookup` denied. The bound is deliberately local-only — a shared window would spend the reads it exists to prevent — sized by `-session-lookup-rate` (300/min, burst 120, per replica; 0 disables). Valid-but-uncached cookies draw tokens too (a backend rollout makes every session uncached), so the burst absorbs a 100-deep reconnect storm from one client address. Cookies a live local session owns, cookie-less requests and rehydrated sessions never consult it. Tests `lookup_limit_test.go`, `lookup_limit_config_test.go` — fixed in **#147** (SR-2-F3) |
-| S32 | Launch abandoned between ticket redeem and 303 delivery pinned the workspace | Fixed: session registration + `renewLoop` start before the Set-Cookie/303 is written, so a client disconnecting in that window left a session no browser holds renewing the lease — and pinning the workspace (`IssueTicket` → `CONNECTION_IN_USE`) — until takeover, control revoke, idle-stop or the bound portal session's absolute expiry. Sessions now mint unattached: the first request admitted on their own host marks them attached, and the renew loop (the session's existing expiry check) reaps a session still unattached at `-unattached-session-ttl` (90 s). The reap's decision runs under the session lock together with the lease revoke, so an attach that already won can never be revoked — an attach either lands before the decision (the reap aborts, the session lives) or after it (the request loses to a session already committed to die). The revoke drops the pin promptly; it is skipped when the lease's stream epoch is nonzero (a sibling replica already claimed a stream on it: the lease is in use elsewhere and only the local copy dies); a failed revoke still kills the session and the lease lapses inside one lease TTL. Tests `unattached_test.go`, `unattached_race_test.go` — redeem-then-abandon, attached-survives, cross-replica used-lease, revoke-failure, attach/reap serialization under -race — fixed in **#147** (SR-2-F5) |
-| S33 | Session listener pinned no `Cross-Origin-Opener-Policy` | Fixed: `Cross-Origin-Opener-Policy: same-origin` is pinned on every session-origin response alongside the existing CSP/Permissions-Policy/CORP/OAC/nosniff/HSTS set, matching the frontend's pin — a document that opens a session-host URL can no longer keep it inside its browsing-context group. Upstream-supplied COOP joined the `responsePolicy` strip list so a tenant-controlled runtime cannot weaken it. Framing is unaffected by construction: embeddability stays governed by CSP `frame-ancestors` (unchanged). Tests `coop_test.go` (`TestResponsePolicy_PinsCOOP`, `TestResponsePolicy_StripsUpstreamCOOP`) — fixed in **#147** (SR-2-F7) |
-| S34 | `ClusterOnly` egress spans every pod in every namespace on every port | Mitigated (opt-in, v1.0): the default is unchanged — a `ClusterOnly` workspace may reach any pod that does not restrict its own ingress, and confinement rests on destination-side policies (SR-2-F8 residual accepted as documented posture). Setting `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` renders `--runtime-clusteronly-egress`, which rewrites every `ws-<uid>-boundary` ClusterOnly rule to a single narrowed peer (selector-matched namespaces/pods, optional `egressPorts`) — the recommended selector `workspaces.cdi.tinyorbit.vn/tenant Exists` confines egress to the managed namespaces. The narrowing can never widen past pod destinations: a ports-only value keeps an all-namespaces *pod* peer rather than an empty peer, so external IPs stay denied; DNS egress is untouched; spec-drift reconcile rolls the change out to existing workspaces. Tests: `TestClusterOnlyEgressDefaultUnrestricted`, `TestClusterOnlyEgressRestrictionOnPolicy`, `TestClusterOnlyEgressPortsOnlyStaysPodOnly`, `TestParseClusterOnlyEgress`, `deploy/helm/chart_clusteronly_egress_test.go`; the whole-render byte-golden `TestDefaultRenderUnchangedGolden` pins that enabling nothing changes nothing — mitigation shipped opt-in in **#148**; the default posture is accepted as a documented residual (SR-2-F8), see review-v1.0.md §6; **v1.1:** the unrestricted default is deprecated and flips to restricted egress in a future minor release (planned v1.3) — install NOTES warn while a seeded `ClusterOnly` template runs with the narrowing unset (`TestClusterOnlyEgressDeprecationNotice`), and the `Isolated`-keeps-cluster-DNS wording is stated across the operator docs |
-| S35 | No Kubernetes-side resource bound on managed namespaces | Mitigated (opt-in, v1.0): tenant `quota` counts workspaces at the API layer, but the namespaces themselves carry no `ResourceQuota`/`LimitRange` — a pod spec that reaches the operator — the class SR-3-F1 demonstrated before its S30 fix, or any future admission bypass — could request unbounded cpu/memory/storage cluster-wide. `managedNamespaces[].namespaceQuota` now renders a `ResourceQuota` (`tinycdi-workspace-quota`: summed requests/limits, pod/PVC/Service counts) and/or a `LimitRange` (`tinycdi-runtime-defaults`) into exactly the listed namespaces, so apiserver admission bounds the blast radius independent of the API layer. Default off: no objects render (`TestNamespaceQuotaDefaultRendersNothing` + the whole-render golden). Tests: `deploy/helm/chart_namespacequota_test.go` — mitigation shipped opt-in in **#148** |
-| S36 | `template-snapshot` mirror annotation writable by any Workspace writer | Hardened (opt-in): chart `admissionPolicy.enabled` (default OFF) and the `config/admissionpolicy/` kustomize sample render a `ValidatingAdmissionPolicy` + binding — `failurePolicy: Fail`, `validationActions: [Deny]`, `admissionregistration.k8s.io/v1` (Kubernetes >= 1.30, the chart's `kubeVersion` floor) — matching only `workspaces` CREATE/UPDATE in the managed namespaces. The CEL exempts the operator ServiceAccount (`system:serviceaccount:<release-ns>:operator` from release values, plus optional `extraAllowedUsernames` for restore tooling); for everyone else a CREATE carrying the annotation is denied and an UPDATE is denied whenever the filtered annotation differs between `oldObject` and `object` (add/change/remove). Nothing trusted reads the annotation (S30), so this is defence-in-depth for consumers that still read the mirror and for the pre-reconcile window. Tests: `chart_admissionpolicy_test.go` (default renders nothing, enabled renders policy+binding with the operator identity), `snapshot_annotation_vap_envtest_test.go` (a real apiserver denies the writer SA and admits the operator) — shipped opt-in in **#149** |
-| S37 | Start-time template guard ignored security-relevant fields | Fixed: the E2 compatibility guard (`revisionIncompatible`, `internal/provisioning/template_family.go`) refused a template-family re-point only on runtime/experience/data-policy/storage shrink — a successor revision could silently move an existing workspace's egress boundary (`networkProfile`), clipboard policy, runtime adapter, `hostUsers` or pod placement at its next start, with no skip event. Each of those fields plus the seccomp/AppArmor profile annotations is now an exact-match dimension carried on the catalog entry (`templateEntry` reads them off the WorkspaceTemplate): any change — even one that reads as tightening — records `TemplateUpdateSkipped` with a reason token naming the field (`network-profile-changed`, `clipboard-policy-changed`, `adapter-changed`, `host-users-changed`, `placement-changed`, `seccomp-profile-changed`, `apparmor-profile-changed`) and the start keeps the recorded revision; the events endpoint curates each token (`internal/api/events.go`). Image/revision freshening still flows. Tests `TestUpdate_SkippedOnSecurityFieldDrift` (end-to-end through `K8sTemplateCatalog`), the extended `TestUpdate_SkippedReasonMatrix`, `TestEvents_TemplateSkipReasons` — fixed in **#150** (SR-3-F6) |
-| S38 | `seccomp-profile` localhost name unvalidated | Fixed: the `workspaces.cdi.tinyorbit.vn/seccomp-profile` template annotation was prefix-checked only — any `localhost/<name>` (including `..` segments escaping the kubelet seccomp root) reached the pod's `securityContext.seccompProfile` untouched, and any other value was silently dropped to RuntimeDefault. The annotation now goes through the same policy gate as `apparmor-profile` (`resolveSeccompProfile`/`validSeccompProfileName`, `internal/runtime/linux/backend.go`): unset or `runtime/default` → RuntimeDefault; `localhost/<clean relative path>` — non-empty segments, no `.`/`..`, no whitespace or backslash — → Localhost; everything else (`unconfined`, `localhost/`, escapes, malformed names) rejects the template with `ErrTemplateRejected` before any child object exists. The operator re-checks the same values at admission: a live template carrying an out-of-policy annotation is never recorded into `status.templateSnapshot` — the workspace holds `Degraded`/`TemplateInvalid` and builds no pod — and a recorded snapshot carrying one fails `verifySnapshotRecord` and is re-taken (`linux.ValidateSeccompAnnotation`, `internal/operator/workspace_controller.go`); the `PodMatchesTemplate` rebuild proof resolves the profile identically. Tests `internal/runtime/linux/seccomp_profile_test.go`, `internal/operator/snapshot_seccomp_test.go` — fixed in **#150** (SR-3-F1 blast-radius follow-on) |
-| S39 | Reconnect storm could crash a workspace runtime (KasmVNC fd bound) | Mitigated (v1.1): KasmVNC 1.5 ships no connection cap, and Xvnc uses `select()`/`FD_SET` on per-connection sockets — once its fd count crosses `FD_SETSIZE` (1024; ~330 conns at ~3 fds/conn + ~23 baseline on a clean pod) `FD_SET` writes past the stack-allocated `fd_set` and the process segfaults, resetting every live stream at once (the v0.5.1 "65 ok / 35 reset" observation was this crash, not a limit). The session gateway now bounds live upstream connections **per workspace per replica** at `-session-stream-cap` (default 32, chart `backend.sessionStreamCap`, minimum 1 — it cannot be disabled): websocket streams and plain proxied requests draw from the same per-workspace slot, checked after session auth and before upgrade admission so a refusal claims no epoch and fences nothing; over cap the session origin answers `429` + `Retry-After: 1` + `{"error": "too_many_streams"}` (retryable — the client's in-frame reconnect absorbs it), counted on `tinycdi_rate_limited_total{route="upstream_streams"}` and audited `session.stream` denied; in-flight count exported as `tinycdi_gateway_upstream_streams` (unlabelled — no workspace label). Residual: the bound is per replica (N replicas admit N x cap), so a split fleet raises the effective ceiling — pick cap with replica count in mind; and the runtime bug itself is fixed separately at the image layer (entrypoint RLIMIT_NOFILE below FD_SETSIZE turns the overflow into EMFILE refusals) pending an upstream fix. A direct burst far above the gateway cap (~1050 conns, well past the 1000-fd clamp) can still crash Xvnc — a null dereference after the EMFILE refusals; no memory corruption observed — and the container restarts; that path is not reachable through the gateway. Tests `streamcap_test.go` (exact bound, every exit path, storm no-leak, per-workspace isolation, metrics) |
-| S40 | Template `clipboardPolicy` never reached the session server | Fixed (v1.2): the policy was declared per template and mapped into the client's `clipboard_up/down` flags, the iframe `allow` attribute and the launch ticket, but both runtime paths pinned KasmVNC `data_loss_prevention.clipboard.*.enabled=false` — the server dropped all cut text regardless of the template (`-SendCutText 0 -AcceptCutText 0`, proven end to end: real-browser copy/paste failed on the released image, succeeded with only the DLP flags flipped). `buildPod` now carries the spec value verbatim as `TCDI_CLIPBOARD_POLICY`; both session entrypoints render the DLP block from it into `$HOME/.vnc/kasmvnc.yaml` — unset/unknown fails closed to Disabled, `primary_clipboard_enabled` follows `server_to_client`, client overrides and DLP logging stay off. Pod specs are immutable, so enforcement lands at each workspace's next start and never disrupts a running session; policy drift across a family re-point stays guarded by the E2 skip reason `clipboard-policy-changed` (S37). Direction semantics are defined once in `internal/api/openapi.yaml` and pinned by `TestClipboardPolicyDirectionSemantics`; render contract `.github/tests/clipboard-policy.test.sh`; pod env `TestPodCarriesClipboardPolicy`; kind smoke "clipboard follows the template policy" — fixed in **#178** |
-| S41 | Tenant-admin role hard-wired to a literal IdP group name | Fixed (v1.2): every admin gate — `/v1/me` roles, `scope=tenant`, foreign workspace/retained read, attach/purge, `/v1/admin/*` quota and user limits, the `role=tenant-admin` audit marker — consulted `InGroup("tenant-admin")` directly, so a deployment whose IdP already names its admin group differently (e.g. `platform-admins` at the login gate) could not grant the role without IdP renames. `-tenant-admin-groups` / `oidc.tenantAdminGroups` now names the verified `groups`-claim values that grant it (exact match, same semantics as `-required-groups`; default exactly `tenant-admin` — zero behaviour change; an explicitly empty list is a startup error — no silent "nobody is admin"). Membership resolves once per request in `RequireAuth` into `Principal.IsTenantAdmin` — the single check every gate shares (`TestNoRawTenantAdminMembershipCheck` fails on a reintroduced raw `InGroup` of the literal name); principals attached any other way fail closed. **Misconfiguration = privilege grant**: every member of a listed group gets tenant-wide read, workspace stop/start, retained-disk attach/purge and quota/per-user-limit admin — review the IdP group membership when changing the value; the chart pins it (schema `minItems: 1`, flag/env equivalents denied in `extraArgs`/`extraEnv`, NOTES echo). Tests `tenantadmin_test.go`, `TestParseFlags_TenantAdminGroups`, `TestHardeningTenantAdminGroups` |
-| S42 | Audit store and viewer | Implemented: domain events persist to audit_event in the audited mutation's transaction (fail closed, ADR 0010); actor and target are pseudonymous refs; the viewer is tenant-admin only, tenant-scoped in SQL, keyset-paged, and itself audited; retention 90 days by default |
-| S43 | Tenant user directory | Implemented: GET /v1/admin/tenants/{t}/users[/{ownerRef}] reads principal_directory scoped by tenant in SQL; tenant-admin only; display data only (names and emails of the caller's own tenant members), never an authorization input; the detail route is addressed by owner reference, carried base64url in the portal URL; detail reads are audited with a pseudonymous target |
-| S44 | Admin live sessions and sign-out | Implemented: the list reads connection_lease (live = active and unexpired) from Postgres, scoped by tenant in SQL and by the tenant-admin gate on the path tenant; neither items nor the opaque cursor carry a lease id (leaseRef = SHA-256 prefix, keyset = workspace id); the revoke reuses the principal revoker transaction (sessions, tickets, leases), is CSRF-guarded, tenant-admin only and audited as admin.session.revoke with a pseudonymous target, inside the same transaction; the dev realm gains a tenant-admin user for the kind e2e |
-| S45 | Admin overview | Implemented: tenant-admin only; one tenant-scoped aggregate query plus informer counts filtered by the tenant label; cached 15 s per tenant per replica; returns counts only, no identities; the boot ledger holds workspace ids and timestamps only and is pruned after 7 days |
-| S46 | Failed-workspace recovery | Implemented: :start on Failed is owner-scoped (DB read before CR state, SEC-21) and acts only on a fresh, settled CR projection; recovery bumps runtimeGeneration and revokes the old generation's leases and tickets in one transaction (workspace_revocation fence, TestRestartWorkspace_FencesOldGenerationEndToEnd); fenced on the observed generation under the workspace row lock so concurrent calls bump once; unrecoverable reasons are refused with 409 INVALID_STATE; a lost pod is never rebuilt inside its generation |
-| S47 | Session-policy apply | Implemented: tenant-admin, CSRF and If-Match on the ceiling version; dry run first; restarts go through RestartWorkspace (generation-fenced, leases of the old generation revoked, unreconciled CRs skipped); live sessions are skipped unless includeActive; at most 500 per call over a tenant-scoped scan of at most 5000; audited with counts |
-| S48 | File-transfer grants | Implemented: owner-only mint (tenant admins cannot), Ready required, single-file names only (no separators, controls, . or ..), 2-min single-use rows bound to workspace, principal, generation and runtime UID, inserted in the audited request's transaction; claim re-resolves the policy and the size ceiling (tighten-after-mint is refused, the row is spent and the refusal recorded), checks the lease binding and allows one live stream per workspace under a workspace row lock; mint, claim, refusal and completion each write an audit row in the same transaction as the state change (`file.transfer.upload\|download`, with path, declared and transferred bytes and resolved policy; denials included); a revoked lease can still close its own stream's row but never another workspace's; mint rides the session rate limit |
-| S49 | In-pod transfer helper | Implemented: tcdi-xferd owns :8443 with the workspace's own cert and proxies the desktop to loopback-only KasmVNC (:8444, pinned cert); /xfer/ needs the per-workspace Secret credential (constant-time compare, never forwarded upstream or logged); single-file names jailed by os.Root under a non-symlink $HOME/transfers; temp-file-then-rename; hard cap at TCDI_XFER_MAX_BYTES; unknown policy fails closed; anonymous desktop requests answered locally so KasmVNC's loopback blacklist cannot be tripped |
-| S50 | Gateway transfer leg | Implemented: /v1/transfers/{id}/content on the workspace host only; Origin required and limited to portal origins or the workspace origin (CORS with credentials, preflight answered without a session); session cookie + host match + live lease; broker claim (single use, policy re-resolved, one stream per workspace); counts against the per-workspace stream cap; upstream path built from the grant and re-checked by cleanedProxyPath; credential injected server-side; bytes counted and aborted at the grant cap; completion recorded even on abort; the desktop proxy still 404s /xfer/ |
+| ID | Boundary | Threat | Control | Pinned by | Residual |
+|---|---|---|---|---|---|
+| TM-01 | 1 | A hostile page frames the portal or a session host, or a tenant-controlled desktop uses the shared site to reach portal state. | `securityHeaders` and `frontendCSP` (`build/frontend/main.go`) pin CSP with `frame-ancestors 'none'` and COOP `same-origin` on the portal; `responsePolicy` and `sessionCSP` (`internal/gateway/proxy.go`) pin CSP, CORP, `Origin-Agent-Cluster` and `frame-ancestors <portal-origin>` on session hosts and delete the upstream's copies; portal cookies are `__Host-`, host-only, `SameSite=Lax` (or `None; Partitioned` under `ParseCookieMode`). | `TestSecurityHeaders`, `TestFrontendCSP`, `TestFrontendCSP_WildcardSessionDomain`, `TestFrontendHeaders_COOP`, `TestHeaders_SessionResponses`, `TestHeaders_UpstreamCannotOverride`, `TestProxy_SecurityHeadersEverywhere`, `TestFraming_PortalOriginsOnEveryResponse`, `TestCookieMode_LaxDefault`, `TestCookieMode_PartitionedCrossSite`, `TestLoginCookieAttributes` | Session hosts are same-site with the portal by design; the `partitioned` cookie mode is exercised on a same-site topology only. |
+| TM-02 | 2 | A cross-site page makes a signed-in browser send a state-changing API request. | `RequireCSRF` (`internal/api/middleware.go`) checks the synchronizer token from `csrfTokenFor` (`internal/api/auth.go`) in constant time; `RequireTrustedOrigin` requires one `Origin` byte-equal to the allowlist, or `Sec-Fetch-Site: same-origin` when `Origin` is absent. | `TestCSRFPostWithoutTokenRejected`, `TestCSRFWrongTokenRejected`, `TestCSRFValidTokenAccepted`, `TestCSRFUnauthenticatedPostRejected`, `TestCSRFChainForgedOriginRejected`, `TestOriginAllowlist`, `TestOriginMultipleHeadersRejected` | — |
+| TM-03 | 2 | A page left open keeps an unattended portal session alive by polling, or one session's activity extends another. | Every cookie-authenticated `GET` mounts `RequireAuthPassive` (`internal/api/middleware.go`), which never slides the idle window; only mutations (including `POST /v1/session:touch`, after the CSRF check) and broker-measured input slide it, and input credits only the lease's own portal session (`TouchSessionDigest`, `internal/store/sessions.go`). | `TestPolledReads_DoNotSlideIdleWindow`, `TestMeRead_DoesNotSlideIdleWindow`, `TestConnectionEndpoint_DoesNotSlideIdle`, `TestSessionProbe_DoesNotSlideIdleTimer`, `TestMutation_StillSlidesIdleWindow`, `TestSessionTouch_SlidesIdleWindow`, `TestInputActivity_SlidesOnlyBoundSession`, `TestInputActivity_OtherPrincipalUntouched`, `TestTouchSessionDigest_ScopesToBoundSession`, `TestSessionIdleAndAbsoluteExpiry` | — |
+| TM-04 | 2 | A user reads or changes another tenant's or another user's workspaces, events or data. | The principal comes only from verified claims (`internal/api/principal.go`); handlers scope by tenant and owner, and a foreign ID answers 404; tenant-admin views are tenant-scoped and events are curated (`internal/api/events.go`, `statusview.go`). | `TestScopeTenant_ForbiddenForUser`, `TestScopeTenant_CrossTenantNeverLeaks`, `TestScopeMine_RestrictsAdmin`, `TestWorkspaceOwnership`, `TestOwnerDerivedFromPrincipalNotBody`, `TestUnknownTenantForbidden`, `TestTenantMembershipRequired`, `TestEvents_Curated`, `TestEvents_NotOwner`, `TestGetRetainedData_Scope`, `TestAttachRetained_ForeignRecord` | `tenant_id` must come from an admin-controlled IdP mapper; a user-editable claim would let a user pick a tenant. |
+| TM-05 | 2 | A request escapes the operator-supplied branding directory to read other frontend files. | `branding`, `serveBranding` and `brandingFile` (`build/frontend/main.go`) serve fixed names only, contain traversal and symlinks, and never list the directory. | `TestBrandingDir_NoTraversal`, `TestBrandingDir_NoListing`, `TestBrandingDir_OtherNamesStay404`, `TestBrandingDir_ServesFiles` | — |
+| TM-06 | 2 | An attacker floods login, callback, launch or session endpoints, or rotates keys to escape the budget. | Shared Postgres windows over local buckets (`internal/ratelimit/shared.go`, ADR 0006), keyed by session or login-state digest when present, else by `ClientKey` (`internal/ratelimit/ratelimit.go`: right-most untrusted `X-Forwarded-For` behind `-trusted-proxies`, IPv6 folded to /64, mapped forms unified, a non-IP entry collapses to the peer); a circuit breaker with a 500 ms deadline and a 10 s cool-down bounds the cost of a store outage. | `TestRateLimitDefaults_Budgets`, `TestShared_WindowBound`, `TestShared_DegradedModeDivides`, `TestShared_FailOpen`, `TestShared_BrownOutStoreDeadline`, `TestShared_CircuitProbeRestoresShared`, `TestShared_ProbeIsSingleFlight`, `TestClientKey_RightmostUntrusted`, `TestClientKey_IgnoresXFFFromUntrustedPeer`, `TestClientKey_IPv6FoldedTo64`, `TestClientKey_MappedFormsUnified`, `TestClientKey_NonIPSelectedEntryFallsBackToPeer`, `TestCallback_ValidatedStateCeiling`, `TestLaunch_RateLimitedDoesNotConsumeTicket` | Budgets are per client address or /64 prefix, so a client holding many gets many; the derivation assumes every proxy hop in front is listed in `-trusted-proxies`; the limiter fails open on a store error. |
+| TM-07 | 2 | A signed-out user's desktop stream, ticket or copied cookie keeps working. | `LogoutHandler` (`internal/api/auth.go`) calls `Broker.RevokePortalSession` (`internal/broker/sessions.go`), which revokes the session's leases and outstanding tickets in one transaction, locking rows in a fixed key order (`lockByKeysInOrderTx`); a failed session-row delete answers 503 and revokes nothing; `liveLease` (`internal/broker/leases.go`) re-validates the bound portal session on every renew, attach, claim and cookie resolve and revokes the lease when it fails; `RedeemTicket` re-checks the session row. | `TestLogout_RevokesSessionBoundMaterial`, `TestLogout_StoreDeleteFailureReturns503`, `TestRevokePortalSession_RevokesBoundLeases`, `TestRevokePortalSession_RevokesOutstandingTickets`, `TestRevokePortalSession_RedeemCommitThenRevoke`, `TestRevokePortalSession_RevokeCommitThenRedeem`, `TestRedeemTicket_DeadPortalSessionDenied`, `TestLeaseSession_RenewRevokesWhenSessionDeleted`, `TestLeaseSession_AttachDeniedWhenSessionDeleted`, `TestLeaseSession_StaleEpochRevokes`, `TestLeaseSession_IdleDeadSessionRevokesOnRenew`, `TestSignout_RevokeEndsStreamOnOtherReplica`, `TestSignout_CookieCannotRehydrateAfterRevoke` | A live stream on another replica ends at that replica's next renew, within one renew cycle. |
+| TM-08 | 2 | A user who lost a device cannot end sessions on other devices, or a partial sign-out reports success. | `RevokeAllSessionsHandler` (`internal/api/revokeall.go`) calls `Broker.RevokePrincipalSessions`, which destroys every portal session of the principal in the caller's tenant and revokes its leases and tickets in one transaction (lock order tickets, sessions, leases); a failure rolls back whole and answers 500 ([ADR 0007](../adr/0007-sign-out-everywhere.md)). | `TestRevokeAll_RevokesEverySessionOfPrincipal`, `TestRevokeAll_UnauthenticatedAndCSRF`, `TestRevokeAll_StoreFailureIs500AndKeepsSession`, `TestRevokePrincipalSessions_RevokesAllInTenant`, `TestRevokePrincipalSessions_TenantScoped`, `TestRevokePrincipalSessions_RedeemCommitThenRevoke`, `TestRevokePrincipalSessions_RevokeCommitThenRedeem`, `TestRevokePrincipalSessions_MultiTicketInversion`, `TestSignoutAll_RevokeEndsEverySessionStream` | No IdP back-channel logout; the IdP session ends only through the RP-initiated end-session URL. |
+| TM-09 | 2 | A user starts more workspaces than the tenant allows them, for example by racing launches. | `checkUserLimit` (`internal/provisioning/quota.go`) enforces the per-principal limit inside the reservation transaction under the `tenant_quota` row lock, counting `held` reservations only; a missing workspace row fails closed; limits are written through tenant-admin routes in `internal/api/adminuserlimit.go` (CSRF, `If-Match`, audited). | `TestUserLimit_DefaultEnforced`, `TestUserLimit_OverrideBeatsDefault`, `TestUserLimit_ConcurrentLaunches`, `TestUserLimit_MissingWorkspaceRowFailsClosed`, `TestUserLimit_NoRowsUnlimited`, `TestUserLimit_PutRequiresIfMatch`, `TestAdminUserLimits_Audit`, `TestUserLimitReachedMapping` | — |
+| TM-10 | 2 | A malformed request body makes the API echo parser internals to the client. | `decodeJSON` (`internal/api/workspaces.go`) rejects trailing data and returns the error to the caller, which answers 400 `INVALID_REQUEST` with a generic message and logs the detail with the request ID (`ConnectionHandler.Create`, `internal/api/connections.go`). | `TestCreateConnection_InvalidBodyGenericMessage`, `TestCreateConnection_TrailingJSONRejected`, `TestCreateDecoderErrorNotEchoed` | — |
+| TM-11 | 2 | A user gains tenant-admin rights through a group name the deployment did not intend, or a handler checks the wrong group. | `-tenant-admin-groups` / `oidc.tenantAdminGroups` lists the verified `groups` values that grant the role (exact match; an empty list is a startup error); `RequireAuth` resolves it once into `Principal.IsTenantAdmin` (`internal/api/principal.go`), the only check admin gates use. | `TestTenantAdminGroups_AuthConfigValidation`, `TestNoRawTenantAdminMembershipCheck`, `TestMe_CustomAdminGroups`, `TestScopeTenant_CustomAdminGroups`, `TestAdminSessions_CustomAdminGroups`, `TestAdminAudit_CustomAdminGroups`, `TestParseFlags_TenantAdminGroups`, `TestHardeningTenantAdminGroups` | A misconfigured list is a privilege grant: every member of a listed group gets tenant-wide read, stop/start, retained-disk attach/purge and admin rights. |
+| TM-12 | 2 | A tenant admin reads another tenant's audit log, or reads it without leaving a trace. | `AdminAuditHandler.List` (`internal/api/adminaudit.go`) is tenant-admin only through `tenantAdminPrincipal`; `DB.ListAudit` (`internal/store/audit.go`) scopes by tenant in SQL with a keyset cursor; the read is itself audited. | `TestAdminAudit_Authz`, `TestAdminAudit_ListPagesAndFilters`, `TestAdminAudit_RejectsBadInput`, `TestAudit_InsertListFilterCursor`, `TestAdminAudit_CustomAdminGroups` | — |
+| TM-13 | 2 | A tenant admin lists users of another tenant, or uses directory data as an authorization input. | `AdminUsersHandler.List` and `AdminUsersHandler.Get` (`internal/api/adminusers.go`) are tenant-admin only and read `principal_directory` scoped by tenant in SQL; the data is display-only (names and emails of the caller's own tenant) and the detail route is addressed by an owner reference; detail reads are audited with a pseudonymous target. | `TestAdminUsers_ListIncludesUsersWithoutWorkspacesOrLimits`, `TestAdminUsers_DetailNotFoundAndBadRef`, `TestAdminUsers_CursorCarriesSortKey`, `TestAdminUsers_CustomAdminGroups` | The directory lists only users who have signed in to the tenant. |
+| TM-14 | 2 | A tenant admin signs out a user of another tenant, a forged request revokes sessions, or the session list leaks lease ids that act as bearer material. | `MountAdminSessionRoutes` (`internal/api/adminsessions.go`) wraps `RevokeAll` in `audited(…, authn.RequireCSRF(…))`; `tenantAdminPrincipal` gates list and revoke; the revoke reuses the principal revoker transaction (sessions, tickets, leases); the list exposes only `leaseRef`, a SHA-256 prefix, never the lease ID, and the cursor carries no lease ID. | `TestAdminSessions_RevokeAllTargetsTheNamedUser`, `TestAdminSessions_RevokeAllRefusals`, `TestAdminSessions_ListHidesLeaseIDs`, `TestAdminSessions_PagingCursorHasNoLeaseID`, `TestAudit_AdminSessionRevoke`, `TestLiveLeases_ListFiltersAndPages` | — |
+| TM-15 | 2 | A user or another tenant's admin reads a tenant's overview to learn its activity or identities. | `AdminOverviewHandler.Get` (`internal/api/adminoverview.go`) is tenant-admin only and returns counts only, from a cache kept per tenant. | `TestAdminOverview_NonAdminRefused`, `TestAdminOverview_CacheIsPerTenant`, `TestAdminOverview_AggregatesAndCaches`, `TestAdminOverview_CustomAdminGroups` | — |
+| TM-16 | 2 | A user restarts or recovers a workspace they do not own, or a recovery leaves the old runtime's sessions alive. | `WorkspaceHandler.Start` (`internal/api/workspaces.go`) on a `Failed` workspace is owner-scoped (the database read comes before the CR state) and acts only on a fresh, settled projection; `RestartWorkspace` (`internal/provisioning/service.go`) bumps `runtimeGeneration` and revokes the old generation's leases and tickets in one transaction, fenced on the observed generation under the workspace row lock; unrecoverable reasons answer 409 `INVALID_STATE`. | `TestStart_FailedRecoverableRestartsWithObservedGeneration`, `TestStart_FailedUnrecoverableIs409WithReason`, `TestStart_ForeignFailedWorkspaceIs404BeforeStatus`, `TestStart_StaleOrUnsettledStatusIsAPlainStart`, `TestRestartWorkspace_BumpsGenerationRevokesOldAndAppendsStart`, `TestRestartWorkspace_GenerationFenced`, `TestRestartWorkspace_FencesOldGenerationEndToEnd`, `TestRecovery_DeletedPodGoesRuntimeLostWithoutRebuild` | A lost pod is never rebuilt inside its generation; the owner or an admin must press Start. |
+| TM-17 | 2 | A forged or replayed `:apply` restarts a tenant's workspaces, kills live sessions, or reaches another tenant. | `AdminSessionPolicyHandler.Apply` (`internal/api/adminsessionpolicyapply.go`) is mounted behind `RequireCSRF` (`internal/api/adminsessionpolicy.go`); `If-Match` pins the ceiling version; it runs a dry run first; live sessions are skipped unless `includeActive`; at most `maxPolicyApply` (500) rows per call; restarts go through the generation-fenced `RestartWorkspace`. | `TestApplySessionPolicy_AuthzAndTenantIsolation`, `TestApplySessionPolicy_Preconditions`, `TestApplySessionPolicy_DryRunListsLooserOnly`, `TestApplySessionPolicy_ConfirmSkipsLiveUnlessIncluded`, `TestApplySessionPolicy_MovedGeneration`, `TestApplySessionPolicy_TruncatesAtCap` | A running workspace that is not restarted keeps its start-time server-side policy, bounded by its template's own policy. |
+| TM-18 | 2 | A user mints a transfer grant for a workspace they do not own, with a path-traversing name, or reuses a grant. | `FileTransferHandler.Create` (`internal/api/filetransfers.go`) allows the owner only and requires `Ready`; `validTransferName` accepts single-file names only; rows are single use, bound to workspace, principal, generation and runtime UID, expire after 2 minutes and are written in the audited request's transaction. | `TestMintFileTransfer_RejectsBadNames`, `TestMintFileTransfer_PolicyOwnerAndReadiness`, `TestMintFileTransfer_AuditsMintAndRefusal`, `TestFileTransfer_InsertAndSweep` | — |
+| TM-19 | 3 | An attacker replays a captured login cookie or swaps login state between browsers. | The in-flight login rides in an AEAD-sealed `__Host-tcdi_login` cookie (`internal/api/loginstate/sealer.go`) carrying state, nonce and the PKCE verifier; the authorization code is single use at the IdP and bound to the sealed verifier; the cookie is cleared after use. | `TestSealOpen_RoundTrip`, `TestOpen_Tampered`, `TestOpen_Expired`, `TestOpen_PreviousKeyStillOpens`, `TestCallbackRejectsStateReplay`, `TestCallbackRejectsWrongLoginCookie`, `TestLogin_CookieClearedAfterUse`, `TestLogin_CallbackOnOtherReplica`, `TestLoginSendsPKCES256` | The sealed cookie can be replayed within its TTL (10 minutes), but a replay gains nothing without the matching authorization code. |
+| TM-20 | 3 | A configured or discovered logout redirect sends users to an attacker or over plaintext. | `endSessionURL` (`internal/api/auth.go`) is built from discovery and static configuration only; `PostLogoutRedirect` and the discovered `end_session_endpoint` must be absolute `https` URLs, with `http` only for loopback hosts. | `TestNewAuthenticator_RejectsBadPostLogoutRedirect`, `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`, `TestLogout_UntrustedDiscoveredEndpointIs204`, `TestLogout_NoOpenRedirect` | — |
+| TM-21 | 4 | Restoring an older Postgres dump onto a live cluster resurrects signed-out sessions, revoked leases or spent tickets. | `platform_meta.session_epoch` is compared on every session read, so rotating it kills every restored session; `backend post-restore` (`internal/backend/postrestore.go`) rotates the epoch, revokes restored leases and tickets and aligns workspace rows to their CRs; it is a dry run by default, `-apply` takes the leader advisory lock for the whole run and refuses while backends are connected. See [disaster-recovery.md](../runbooks/disaster-recovery.md#postgres-only-restore-onto-a-live-cluster). | `TestPostRestoreDryRunMakesNoWrites`, `TestPostRestoreApplyRotatesRevokesDenies`, `TestPostRestoreRefusesWhileLeaderHeld`, `TestPostRestoreRefusesWithBackendConnections`, `TestPostRestoreAlignsDivergedRow`, `TestSessionEpochRotation` | Running the procedure, and the restore drill (`hack/quickstart/restore-drill.sh`), are manual. |
+| TM-22 | 4 | After a database restore the intent stream trails the CR's applied-intent fence and every new intent is dropped silently. | `intentFenceDrifted` (`internal/provisioning/k8sapplier.go`) stamps the `intent-behind` annotation on drift; the operator raises the `IntentBehind` condition and one Warning event until the stream realigns (`internal/operator/workspace_controller.go`); a stale intent is never applied. | `TestK8sApplierIntentDrift`, `TestIntentBehindDrift`, `TestProjectConditions_IntentBehind`, `TestEvents_IntentParams` | — |
+| TM-23 | 5 | An attacker with database or backup read access, or a cookie unknown to the replica, takes over a desktop session. | Session and workspace cookies are stored only as SHA-256 digests; `rehydrate.go` resolves an unknown cookie by digest to a live lease, rebuilds the session on any replica and refuses expired or revoked leases; concurrent lookups are single-flight. | `TestSessionKeyIsDigest`, `TestRehydrate_SecondGatewayServesCookie`, `TestRehydrate_UnknownCookieAllocatesNothing`, `TestRehydrate_DeadLeaseRejected`, `TestRehydrate_ConcurrentRequestsSingleLookup`, `TestRehydrate_TerminalErrorsAre401`, `TestRehydrate_NilDirectorySingleProcess` | — |
+| TM-24 | 5 | A second tab, browser or a dead replica's stream keeps driving a desktop next to the current one. | One interactive stream per lease: a new upgrade fences the old socket (`admitUpgrade`, `internal/gateway/authorization.go`); the Postgres `stream_epoch` fences streams admitted by another replica; every launch and stream claim carries a valid owner tab id, else `400 owner_tab_required` (`ValidStreamOwnerTab`, `Broker.ClaimStream`, `internal/broker/sessions.go`; `internal/gateway/launch.go`). | `TestUpgrade_SequentialFencesPrevious`, `TestStreamFence_CrossGateway`, `TestClaimStream_StaleFence`, `TestClaimStream_ZeroesPreviousStream`, `TestConnection_StreamEpochAdvancesOnNewStream`, `TestLaunch_RequiresOwnerTab`, `TestStreamClaim_RequiresOwnerTab`, `TestClaimStream_RequiresValidOwnerTab`, `TestStreamClaim_SameTabReconnectKeepsOwner`, `TestSingleActiveLeaseAcrossGateways` | When a replica dies mid-claim, two streams can coexist for at most one renew cycle. |
+| TM-25 | 5 | A cookie or ticket for one workspace is used on another workspace's host, or a crafted Host header reaches a different handler. | `sessionhost.Domain.Match` (`internal/sessionhost/sessionhost.go`) maps a label to exactly one workspace; every proxied request's cookie must resolve to a lease for the host's workspace, else it is denied and audited (`host_mismatch`); launch on a foreign host is refused without consuming the ticket. | `TestHostBinding_LaunchOnOtherHost`, `TestHostBinding_CookieOnOtherHost`, `TestHostBinding_UnknownHost`, `TestHostBinding_TwoWorkspacesStayConnected`, `TestHostBinding_WebSocketOrigin`, `TestLaunch_BadHostRejected_NoConsume`, `TestProxy_BadHostRejected` | — |
+| TM-26 | 5 | A browser on the session listener reaches the public API, or the control surface from a workspace host. | `Gateway.ServeHTTP` (`internal/gateway/proxy.go`) routes by host class first: workspace hosts get launch, proxy and transfer only; control hosts get `/healthz` and `/v1/control/*` behind `controlAuth`; any other host gets `421`; API paths do not exist on `:8444`. | `TestRouteIsolation_SessionListener`, `TestRouteIsolation_AppListener`, `TestRouteIsolation_InternalListener`, `TestHostBinding_ControlOnlyOnControlHosts`, `TestControlEndpoints_RequireBearer`, `TestControlEndpoints_NoTokenFailsClosed`, `TestControlEndpoints_WrongBearerRejected` | — |
+| TM-27 | 5 | An unauthenticated client sprays random cookies at session hosts to load Postgres. | `lookupSession` (`internal/gateway/authorization.go`) consults a local per-client token bucket (`SessionLookupLimiter`, keyed by `ratelimit.ClientKey`, `-session-lookup-rate`) before any store read for a cookie the replica does not know; refusal is 429 with `Retry-After` and is counted and audited. | `TestRehydrate_UnknownCookieSprayBounded`, `TestRehydrate_LimiterSkipsKnownSession`, `TestRehydrate_LimiterSkipsRehydratedSession`, `TestRehydrate_ReconnectStormOneClient`, `TestRehydrate_InjectedLookupLimiter` | The bound is per replica by design; a shared window would spend the reads it exists to prevent. |
+| TM-28 | 5 | A client redeems a ticket and drops the connection before the redirect, pinning the workspace with a session no browser holds. | Sessions mint unattached; the first request on their own host attaches them, and the renew loop reaps a session still unattached at `-unattached-session-ttl` (90 s) under the session lock, revoking its lease (`internal/gateway/authorization.go`). | `TestLaunch_UnclaimedSessionReaped`, `TestLaunch_AttachedSessionSurvivesTTL`, `TestLaunch_GhostReapSkipsUsedLease`, `TestLaunch_ReapOnRevokeFailureStillFrees`, `TestLaunch_AttachDuringReapLoses`, `TestLaunch_AttachReapRaceConsistency` | — |
+| TM-29 | 5 | A page that opens a session-host URL keeps it in its browsing-context group, or a runtime weakens the session origin's headers. | `responsePolicy` (`internal/gateway/proxy.go`) pins `Cross-Origin-Opener-Policy: same-origin` with the rest of the session header set and strips the upstream's COOP. | `TestResponsePolicy_PinsCOOP`, `TestResponsePolicy_StripsUpstreamCOOP`, `TestProxy_HostileUpstreamHeadersDropped` | — |
+| TM-30 | 5 | A user or a cross-site page moves a file through the transfer leg without a valid grant, beyond the policy, or beyond the grant's size. | `Gateway.serveTransfer` (`internal/gateway/transfer.go`) checks Origin, the session cookie, host and live lease, then calls `Broker.ClaimTransfer` (`internal/broker/transfers.go`) before any byte reaches the pod; the claim is single use, re-resolves the policy, allows one live transfer per workspace and is audited in its transaction; the gateway caps the bytes at the grant's size, forces `Content-Type: application/octet-stream` and a `Content-Disposition` built from the grant, and sends only `X-Tcdi-Xfer-Token` upstream. | `TestTransfer_UploadRoundTrip`, `TestTransfer_DownloadRoundTrip`, `TestTransfer_UploadOverCapRefused`, `TestTransfer_DownloadOverCapAborts`, `TestTransfer_Refusals`, `TestTransfer_BrokerRefusalsMapped`, `TestClaimTransfer_HappyPathIsSingleUse`, `TestClaimTransfer_PolicyTightenedAfterMint`, `TestClaimTransfer_RejectsMismatches`, `TestClaimFileTransfer_OnePerWorkspaceConcurrent`, `TestCompleteTransfer_BoundToLeaseWorkspaceAndSurvivesRevoke`, `TestTransferClaim_OK_AndErrorMapping` | — |
+| TM-31 | 5 | A client reaches `tcdi-xferd`'s `/xfer/` through the desktop proxy and skips the claim. | `serveProxy` refuses any path not on `upstreamPathOK`'s allowlist (`internal/gateway/proxy.go`, `internal/gateway/authorization.go`); only the transfer leg builds `/xfer/files/<name>` (`helperURL`, `internal/gateway/transfer.go`). | `TestTransfer_DesktopProxyStillRefusesXfer`, `TestProxy_ManagementPathsDenied`, `TestProxy_DotSegmentsRejected` | — |
+| TM-32 | 6 | A client spoofs its address toward the runtime, or strips the injected credential, through forwarding or `Connection` headers. | `rewriteForwarded` (`internal/gateway/proxy.go`) strips the client forwarding and vendor address families and rebuilds the address headers from the trusted chain only; the credential is injected in the `Rewrite` hook after the hop-by-hop strip, and `Connection` tokens are reduced to `upgrade`, `keep-alive` and `close`. | `TestProxy_ClientXFFNeverReachesRuntime`, `TestProxy_XFFFromTrustedChainOnly`, `TestClientAddr_NonIPSelectedEntryFallsBackToPeer`, `TestProxy_ClientForwardedFamilyStripped`, `TestProxy_VendorClientAddressHeadersStripped`, `TestProxy_ConnectionTokensCannotStripInjectedHeaders`, `TestProxy_UpgradeConnectionTokensCannotStripInjected` | — |
+| TM-33 | 6 | An attacker guesses the workspace's KasmVNC password through the gateway or the pod network ([KasmVNC credential brute force](#kasmvnc-credential-brute-force)). | `tcdi-xferd` answers a desktop request without Basic credentials with its own 401 (`internal/xferd/xferd.go:106-110`); the gateway overwrites `Authorization`; KasmVNC listens on `127.0.0.1:8444` only (`build/linux-base/kasmvnc.yaml:20-21`; for the adapter, `build/kasm-adapter/entrypoint.sh:202,254`); the pod NetworkPolicy admits TCP 8443 from gateway pods only (`buildNetPol`, `internal/runtime/linux/backend.go`); the blacklist is 5 failures per 10 s (`build/linux-base/kasmvnc.yaml:80-81`). | `TestProxy_StripsClientAuth`, `TestXferd_ProxiesDesktopAndStripsToken`, `TestIngressPeerScopedToGatewayNamespace`, `.github/tests/xfer-entrypoint.test.sh` | A process inside the pod can reach `127.0.0.1:8444` directly, but it can already read the credential. |
+| TM-34 | 6 | A compromised workspace reaches services elsewhere in the cluster. | `buildNetPol` (`internal/runtime/linux/backend.go`) restricts `ClusterOnly` egress by default to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant`; `--runtime-clusteronly-egress` (`parseClusterOnlyEgress`, `cmd/operator/main.go`) narrows it further, or opens it with `unrestricted`, and a ports-only value keeps a pod-only peer so external IPs stay denied. | `TestClusterOnlyEgressDefaultRestricted`, `TestClusterOnlyEgress_DefaultRestricted`, `TestClusterOnlyEgressUnrestrictedOptInOnPolicy`, `TestClusterOnlyEgressRestrictionOnPolicy`, `TestClusterOnlyEgressPortsOnlyStaysPodOnly`, `TestParseClusterOnlyEgress`, `TestClusterOnlyEgress_DefaultRendersNoFlagAndNoWarning`, `TestClusterOnlyEgress_UnrestrictedRendersFlag` | DNS egress to the cluster DNS pods is open on every network profile, `Isolated` included; with `unrestricted`, confinement rests on destination-side policies. |
+| TM-35 | 6 | A reconnect storm crashes a workspace runtime by exhausting KasmVNC's file-descriptor bound. | The gateway caps live upstream connections per workspace per replica at `-session-stream-cap` (default 32, minimum 1); over the cap it answers 429 with `Retry-After: 1`, counted and audited, before upgrade admission; the image lowers `RLIMIT_NOFILE` below `FD_SETSIZE`, so overload becomes `EMFILE` refusals. | `TestStreamCap_ExactBound`, `TestStreamCap_MixedHTTPAndWebsocket`, `TestStreamCap_SlotRelease`, `TestStreamCap_ConcurrentStormNoLeak`, `TestStreamCap_PerWorkspace`, `TestStreamCap_Metrics`, `TestSessionStreamCapBelowOneRejected` | The cap is per replica (N replicas admit N × cap); a direct burst far above the cap can still crash Xvnc and restart the container, but that path is not reachable through the gateway. |
+| TM-36 | 6 | A user copies data out of, or into, a desktop whose template or tenant ceiling forbids it. | `buildPod` (`internal/runtime/linux/backend.go`) carries the resolved policy as `TCDI_CLIPBOARD_POLICY`; both entrypoints render KasmVNC's DLP clipboard block from it, unset or unknown failing closed to `Disabled`, with client overrides and DLP logging off. | `TestClipboardPolicyDirectionSemantics`, `TestPodCarriesClipboardPolicy`, `TestTicket_ClipboardPolicyRecordedOnRedeem`, `TestLaunch_RedirectCarriesRecordedClipboardPolicy`, `.github/tests/clipboard-policy.test.sh` | A running workspace keeps its start-time policy until it restarts (TM-17). |
+| TM-37 | 6 | A process in the pod, or a request reaching `:8443`, reads or writes files outside the transfer folder, transfers against the policy, or learns the transfer token ([In-pod transfer helper](#in-pod-transfer-helper)). | `internal/xferd/xferd.go` compares the token in constant time and an empty token refuses everything (`:145-146`); it strips the token before proxying to the desktop (`:66`); names are checked by `ValidName` (`:84`) and confined by an `os.Root` jail (`:129`); an unknown policy fails closed (`:114`); the size cap is enforced on upload (`:214`); the token is a separate per-workspace Secret key, `xfer-token` (`internal/runtime/linux/backend.go:796-810`); both entrypoints start and supervise the helper (`build/linux-base/entrypoint.sh:172-191`). | `TestXferd_TokenPolicyAndCap`, `TestXferd_JailRefusesEscapes`, `TestXferd_DownloadAndUnknownPolicyFailsClosed`, `TestXferd_ProxiesDesktopAndStripsToken`, `TestXferd_ProxiesWebSocketUpgrade`, `TestEnsureSecret_CarriesXferTokenAndNeverRotatesIt`, `.github/tests/xfer-entrypoint.test.sh` | Any process the workspace user starts can read `xfer-token` and replace the helper on `:8443`; it can then mishandle only that workspace's own transfers, within the claimed direction and size. |
+| TM-38 | 7 | An attacker with a leaked or removed operator certificate, or a rotated-out CA, keeps calling the internal API. | The internal listener's certificate and client CA bundle hot-reload (`hotReloadClientCAs`, `internal/backend/listeners.go`); `opclient` re-reads its certificate and verifies against the newest CA pool per handshake; `-internal-revoked-list` (`internal/tlsreload`) refuses a listed (issuer, serial) at the handshake and severs its live connections on the same reload pass. | `TestInternalListener_AcceptsNewCAAfterRotation`, `TestInternalListener_DropsRemovedCA`, `TestOpClient_ReloadsServerCA`, `TestOpClient_DropsRemovedServerCA`, `TestOpClient_RejectsServerHostnameMismatch`, `TestRevokedSerialHandshakeAborts`, `TestRevokedLiveConnSevered`, `TestRevokedListReloadBlocks`, `TestRevokedResumedHandshakeRejected`, `TestNewBlocklistFailsClosed`, `TestBlocklistReloadKeepsLastGood` | Revocation is server-side only: the operator does not check the server certificate's serial; a listed serial takes effect within the Secret sync plus one 30 s poll; a suspect CA is rotated, not revoked. |
+| TM-39 | 7 | A caller holding an operator certificate fences every future generation of a workspace with a far-future `runtimeGeneration`. | `RevokeWorkspaceLeases` (`internal/broker/activity.go`) refuses a generation beyond the recorded generation plus one with `ErrGenerationUnbounded` (400 `INVALID_REQUEST`). | `TestRevokeWorkspaceLeases_GenerationBounded`, `TestRevokeWorkspace_GenerationUnbounded` | Revocation records (`workspace_revocation`) are never pruned; the table grows by one row per revoked generation. |
+| TM-40 | 7 | Probes against the internal mTLS listener leave no record at the trust boundary. | `identify` (`internal/broker/httpapi/server.go`) counts every refusal on `tinycdi_internal_auth_failures_total{reason}` and logs a rate-limited warning with request ID, method, peer and redacted path; certificate material is never logged. | `TestIdentify_RejectionsLogged`, `TestIdentify_RejectedPathRedacted`, `TestIdentify_RejectionsRateLimited`, `TestIdentify_RejectionsCounted`, `TestNoClientCert_401`, `TestSPIFFESAN_MismatchRejected` | — |
+| TM-41 | 8 | A workspace runs without AppArmor confinement on nodes that lack it. | By default the pod requests AppArmor `RuntimeDefault` and fails to start where it is unavailable; `runtime.appArmor.requireRuntimeDefault=false` sets `AppArmorNotRequired` (`cmd/operator/main.go`), which omits only the `RuntimeDefault` request and keeps every other hardening field. | `TestBuildPod_AppArmorDefaultUnchanged`, `TestBuildPod_AppArmorNotRequired_RuntimeDefaultOmitted`, `TestBuildPod_AppArmorNotRequired_LocalhostKept`, `TestBuildPod_AppArmorNotRequired_OtherHardeningUnchanged`, `TestAppArmorProfileRejected`, `TestTemplateRejectedAppArmor` | With the opt-out set, workspaces on nodes without AppArmor run unconfined by it. |
+| TM-42 | 8 | A chart value combination silently disables a guard: unelected operator replicas, an exposed metrics port, or an `extraEnv` entry overriding a security flag. | `tinycdi.validate` fails the render on `operator.leaderElect=false` with `operator.replicas>1`; only `allow-metrics-scrape` opens `:9090`, to `networkPolicy.prometheusPeers`; `tinycdi.denyExtraEnv` fails the render on the env equivalents of security-relevant flags and on chart-managed names unless `dev.enabled` (`deploy/helm/tinycdi/templates/_helpers.tpl`). | `TestOperatorLeaderElectionGuard`, `TestMetricsListenerIsolation`, `TestEdgePolicyNeverOpensInternalPort`, `TestExtraEnvDevSurfaceNamesDenied`, `TestExtraEnvDeniedNamesSuggestValue`, `TestExtraEnvManagedDuplicateDenied`, `TestExtraEnvMalformedEntryFails`, `TestExtraEnvDevGateEscape`, `TestExtraEnvBenignPasses` | Guards constrain chart-rendered manifests only; hand-written manifests bypass them, and a single-replica install may run unelected. |
+| TM-43 | 8 | A Workspace writer forges the template snapshot to steer the pod the operator builds. | The operator records the snapshot itself, from the live template, to `status.templateSnapshot`, which RBAC lets only the operator write; `recordedSnapshot` and `verifySnapshotRecord` (`internal/operator/workspace_controller.go`) ignore the annotation and re-check the record; a workspace restored without status adopts only from its own stamped pod (`adoptSnapshotFromStampedPod`) and otherwise holds `Degraded`. | `TestWorkspaceStatusWritableOnlyByOperator`, `TestKustomizeWorkspaceStatusWritableOnlyByManager`, `TestStatusSnapshotAuthoritativeOverForgedAnnotation`, `TestStatusSnapshotRecordedAtFirstAdmit`, `TestRecordedSnapshot_IgnoresAnnotation`, `TestAdoptSnapshot_AnnotationNeverConsulted`, `TestAdoptSnapshot_StampedPodAdoptsLiveRevision`, `TestAdoptSnapshot_UnstampedPodHolds`, `TestAdoptSnapshot_ForgedNetworkProfileLeavesNetPol`, `TestForgedSnapshotBadHashRejected`, `TestBuildPod_AnnotationNoLongerHonoured` | The mirror annotation stays writable by Workspace writers unless the admission policy (TM-45) is enabled; nothing trusted reads it. |
+| TM-44 | 8 | A pod spec that reaches the operator through an admission bypass requests unbounded cluster resources. | Opt-in `managedNamespaces[].namespaceQuota` renders a `ResourceQuota` and/or `LimitRange` into the listed namespaces, so apiserver admission bounds the blast radius independently of the API layer. | `TestNamespaceQuotaDefaultRendersNothing`, `TestNamespaceQuotaRendersPerEntry`, `TestNamespaceQuotaRendersSubObjectsIndependently`, `TestNamespaceQuotaSchema` | Off by default: without it, only the API-layer tenant quota bounds workspaces. |
+| TM-45 | 8 | A Workspace writer edits the template-snapshot mirror annotation that consumers read. | Opt-in `admissionPolicy.enabled` and the `config/admissionpolicy/` sample render a `ValidatingAdmissionPolicy` (`failurePolicy: Fail`, `Deny`) that exempts the operator service account and denies any other create carrying, or update changing, the annotation. | `TestAdmissionPolicyOffByDefault`, `TestAdmissionPolicyObjects`, `TestAdmissionPolicyExpressions`, `TestAdmissionPolicyBinding`, `TestSnapshotAnnotationVAP_Enforced` | Off by default; the annotation is never trusted either way. |
+| TM-46 | 8 | A successor template revision moves a workspace's egress, clipboard policy, adapter, `hostUsers`, placement or security profiles at its next start without notice. | `revisionIncompatible` (`internal/provisioning/template_family.go`) treats each of those fields as an exact-match dimension from `templateEntry` (`internal/provisioning/k8sapplier.go`); any change records `TemplateUpdateSkipped` with a reason naming the field and keeps the recorded revision. | `TestUpdate_SkippedOnSecurityFieldDrift`, `TestUpdate_SkippedReasonMatrix`, `TestEvents_TemplateSkipReasons`, `TestStart_PolicyFromRecordedSnapshotOnly` | — |
+| TM-47 | 8 | A template author points the pod's seccomp profile outside the kubelet seccomp root or to `unconfined`. | `resolveSeccompProfile` and `validSeccompProfileName` (`internal/runtime/linux/backend.go`) accept only `runtime/default` or a clean relative `localhost/<path>` and reject the template otherwise; the operator re-checks at admission (`ValidateSeccompAnnotation`) and never records an out-of-policy snapshot. | `TestSeccompProfileAccepted`, `TestSeccompProfileRejected`, `TestEnsureRejectsBadSeccompAnnotation`, `TestTemplateInvalidBadSeccompAnnotation`, `TestRecordedSnapshotBadSeccompAnnotationResnapshots` | — |
+| TM-48 | X | A third-party `kasmweb/*` image below the supported engine floor, or not digest-pinned, enters the catalog. | `check-kasm-catalog.sh` requires every `kasmweb/*` reference to be a digest-pinned catalog entry; `scan-kasm-catalog.sh` and the CI `kasm-contract` job scan the catalog and check the adapter contract; the chart refuses a kasm template without a digest. | `kasm-contract` CI job, `.github/tests/kasm-catalog.test.sh`, `TestKasmAdapterEnabledRequiresDigest`, `TestKasmAdapterTagWithoutDigestRefused`, `TestKasmBrowserTemplateNeedsFreshEngine`, `TestValidateSnapshotSpecKasmAdapter` | Catalog images carry their own KasmVNC build; the floor and the exception file's expiry are the controls. |
+| TM-49 | X | A compromised or careless change publishes an unsigned, unscanned or stale runtime image that consumers then trust. | `runtime-images.yml` builds, scans and signs by digest, and its publish job waits on the `runtime-train` environment approval; the train manifest ships with a Sigstore bundle; a gate-failed run's cleanup job deletes the digests that run pushed and refuses tagged versions (`cleanup-failed-digests.sh`); `runtime-freshness.yml` fails while a browser pin is stale; required checks are codified in `setup-repo-protection.sh`. | `.github/tests/failed-digest-cleanup.test.sh`, `.github/tests/supply-chain-hardening.test.sh`, `.github/tests/write-runtime-manifest.test.sh`, `.github/tests/check-runtime-image-age.test.sh`, `.github/tests/bump-browser-pin.test.sh`, `.github/tests/setup-repo-protection.test.sh` | One account can author, merge and approve a publish; failed-digest cleanup is check-then-act; browser pins need repinning when Debian security supersedes them. |
+| TM-50 | X | An admin or user action leaves no durable record, or an attacker makes the audit write fail to hide an action. | `audited()` (`internal/api/auditroutes.go`) emits one event per covered route; `DurableAuditSink` (`internal/api/auditstore.go`) persists every action except `session.touch` in the audited transaction and fails the request when persisting fails; the broker's transfer claim and completion are persisted the same way. | `TestAuditCoverage_SpecMatchesTable`, `TestAuditCoverage_MountedMuxEmitsEventPerRoute`, `TestAudited_PersistFailureFailsClosed`, `TestAudited_NoTxMutationPersistFailureFailsClosed`, `TestAudited_TouchStaysStdoutOnly`, `TestAudit_AmendAndPrune`, `TestControlAudit_OperatorSurface`, `TestGuardedSink_ReportsFailureNeverPropagates` | Five kinds of record are stdout-only (§5 Audit); delivery and tamper evidence of the log stream are the operator's. |
 
-*Review note — S17:* the ticket-lock serialization claim (a redeem's
-ticket-row `FOR UPDATE` vs the revoke's `UPDATE` under READ COMMITTED) is
-the load-bearing ordering argument — it is driven deterministically by
-`TestRevokePortalSession_RedeemCommitThenRevoke` and
-`TestRevokePortalSession_RevokeCommitThenRedeem`, which pin both
-interleavings on real row locks. Since the SIGNOUT-FIX pass the sweeps
-also pre-lock in deterministic key order (`lockByKeysInOrderTx`), and
-`TestRevokePrincipalSessions_MultiTicketInversion` runs the principal-
-scoped sweep against a multi-ticket redeem under `-race` to pin the
-no-deadlock claim.
+## 7. Accepted residuals
 
-Additional items found while writing this document (not from A6):
+Each item is also a known limitation in the
+[1.0.0 release notes](../releases/v1.0.0.md#known-limitations).
 
-- **Cookie-mode `partitioned`** — e2e coverage added on kind
-  (`hack/quickstart` + `values-partitioned.yaml`, `partitioned.spec.ts`,
-  `ci.yml` job `partitioned`): real Set-Cookie attributes, in-frame
-  reconnect across a backend rollout, revoked-lease cookie rejection.
-  Same-site topology only; a cross-site deployment is not exercised.
-- **Portal idle-extension depends on lease activity** — Implemented
-  (FIX-IDLE): portal reads are all passive server-side, so no GET a client
-  can shape extends the idle window; extension only ever credits
-  (a) mutations — including the explicit activity beat
-  `POST /v1/session:touch` — passive auth + CSRF with the slide applied
-  explicitly only after the token check, so a cookie-only request never
-  earns a slide; login-family rate limit keyed on the session digest; the
-  SPA sends it on pointer/key/navigation events throttled to 1/min, never
-  from timer polls — and (b) RFB input measured broker-side. Forging a
-  touch requires the session cookie + CSRF token — the same bar as any
-  mutation, so the beat grants nothing a caller could not already do. That input touch
-  is now scoped to the bound portal session digest — the session the
-  stream's lease was minted under — rather than every session of the
-  principal (SR-1-F3; `TouchSessionDigest`,
-  `internal/store/sessions.go`), with the principal-wide path kept only
-  as the NULL-digest fallback for pre-binding leases. Lease
-  redeem/renew/rehydrate honour the portal idle window (SR-1-F2): the
-  liveness re-checks in `loadLease` and `RedeemTicket` consult
-  `last_seen_at` under `WithSessionIdle`, so an idled-out session's lease
-  is revoked at the next renew (reason `invalid`) and a stale cookie
-  cannot rehydrate it. Renew deliberately does NOT slide the window —
-  otherwise a connected-but-idle stream would pin the session open
-  forever — so an abandoned desktop tab dies with its portal session
-  inside one renew cycle.
-- **Metrics listener** is scrape-only but has no auth — Implemented:
-  served on the dedicated ClusterIP `backend-metrics` Service; the only
-  rule opening the metrics port is `allow-metrics-scrape` admitting
-  exactly `networkPolicy.prometheusPeers`, and no edge rule (ipBlock, any
-  or cilium `edgeIngress`) carries it (`TestMetricsListenerIsolation`,
-  `TestEdgePolicyNeverOpensInternalPort`); the observability runbook tells
-  operators to keep it off the edge path.
-- **Operator leader election off by default** — Implemented: election is
-  on by default since v0.3.0 and `operator.leaderElect=false` with
-  `operator.replicas>1` now fails the chart render (`tinycdi.validate`;
-  `TestOperatorLeaderElectionGuard`); the binary cannot observe the
-  replica count, so the guard is chart-side only (cmd/operator note).
-  Single-replica installs (`replicas: 1`) may still run unelected.
-- **`kasmweb/*` third-party images** — the adapter neutralizes their startup
-  but they carry KasmVNC 1.4.0 (vs the pinned 1.5.0 in TinyCDI-built images);
-  the catalog gate enforces a floor — reviewer should confirm the floor and
-  the exception file's expiry policy together.
-- **Postgres backup/restore of digest-keyed sessions** — covered by S23:
-  the restore semantics are documented and the resurrection risks have a
-  tool + tests; what remains manual is running the procedure and the
-  drill.
-- **Audit trail completeness** — coverage of admin operations and
-  mutating routes is implemented (#120, S21); what remains for review is
-  integrity/durability of the stdout JSONL stream, which is delegated to
-  the operator's log pipeline (runbook "Log integrity"), and the fact
-  that platform-level admin actions that never pass through TinyCDI —
-  `WorkspaceTemplate` CRD writes, Helm-value changes — are only in the
-  Kubernetes API audit log.
+1. **In-pod trust (file transfer).** A process the workspace user starts
+   can read `xfer-token` and replace `tcdi-xferd`; the broker claim and
+   the gateway's byte cap are the controls. See
+   [In-pod transfer helper](#in-pod-transfer-helper) and TM-37.
+2. **KasmVNC under connection saturation.** The stream cap is per
+   replica, and a direct burst far above it can still crash Xvnc. See
+   TM-35.
+3. **mTLS revocation is server-side only.** The operator does not check
+   the server certificate's serial. See TM-38.
+4. **Revocation records are not pruned.** `workspace_revocation` grows by
+   one row per revoked generation. See TM-39.
+5. **Some audit events are stdout-only.** Five kinds of record never
+   reach `audit_event`. See TM-50 and §5 Audit.
+6. **Rate-limit budgets are per client address.** A client holding many
+   addresses or /64 prefixes gets one budget per address or prefix. See
+   TM-06.
+7. **DNS egress is open on every network profile.** See TM-34.
+8. **Failed-digest cleanup is check-then-act.** A version could gain a
+   tag or a referrer between the check and the deletion. See TM-49.
+9. **Browser support.** Only the apt-pin staleness is a security
+   residual: pins need repinning when Debian security supersedes them.
+   See TM-49.
+10. **Single maintainer, no independent audit.** The same account can
+    author, merge and approve a publish, and no independent security
+    audit has been done. There is no register row: this is a property of
+    the project, not of a control.
 
-### What the v1.0 reviewer should re-verify
+## 8. Review guide
 
-Load-bearing claims the tests pin today, worth re-checking on the tree
-under review:
+Read in this order:
 
-- **Upstream `Authorization` overwrite** — the session proxy must
-  *replace* (not merely strip) a client-supplied `Authorization` header
-  on every proxied path, since the pod-side credential check is only
-  unreachable while broker injection is unconditional
-  (`TestProxy_StripsClientAuth`; S18, see *KasmVNC credential brute force* above). Injection lives in the
-  `Rewrite` hook — after the stdlib hop-by-hop strip — precisely so a
-  client `Connection:` token list cannot remove it
+1. [`SECURITY.md`](../../SECURITY.md): the normative hardening rules and
+   the operator checklist.
+2. [ADR 0003](../adr/0003-gateway-broker-internal-api.md),
+   [ADR 0004](../adr/0004-launch-origin-policy.md) and
+   [ADR 0005](../adr/0005-backend-frontend-operator.md): the internal API
+   contract, the launch origin policy and the component and session-host
+   split. Then [ADR 0009](../adr/0009-session-data-transfer-policy.md)
+   §5 (file transfer) and
+   [ADR 0010](../adr/0010-audit-store-and-retention.md) (audit store).
+3. The gateway: `internal/gateway/proxy.go` (`ServeHTTP`, `serveProxy`,
+   `responsePolicy`, `rewriteForwarded`), `authorization.go` (sessions,
+   fencing, `upstreamPathOK`, `cleanedProxyPath`), `launch.go` and
+   `transfer.go`.
+4. The broker: `internal/broker/leases.go` (`liveLease`), `sessions.go`
+   (revokes, `lockByKeysInOrderTx`, `ClaimStream`), `tickets.go` and
+   `transfers.go` (`ClaimTransfer`).
+5. The pod side: `internal/xferd/xferd.go`,
+   `internal/runtime/linux/backend.go` (`buildPod`, `buildNetPol`,
+   `ensureSecret`) and the two entrypoints in `build/`.
+6. [`test-inventory.md`](test-inventory.md),
+   [`provenance.md`](provenance.md) and
+   [`vulnerability-policy.md`](vulnerability-policy.md): the automated
+   evidence and the supply-chain posture.
+7. §6 of this document, row by row.
+
+Questions a reviewer should answer on the tree under review:
+
+- **Is the upstream `Authorization` always overwritten?** The session
+  proxy must replace, not merely strip, a client-supplied `Authorization`
+  on every proxied path, because KasmVNC's credential check is unreachable
+  only while injection is unconditional (`TestProxy_StripsClientAuth`;
+  TM-33). Injection lives in the `Rewrite` hook, after the hop-by-hop
+  strip, so a client `Connection` token list cannot remove it
   (`connheaders_test.go`).
-- **Per-workspace NetworkPolicy assumes an enforcing CNI** —
-  `ws-<uid>-boundary` policies bind only where the cluster CNI implements
-  NetworkPolicy (`docs/compatibility.md` lists Cilium; the kind e2e runs
-  on one that enforces). A non-enforcing CNI silently reverts workspace
-  ingress/egress to open — confirm the supported-deployments matrix keeps
+- **Does the cluster CNI enforce NetworkPolicy?** `ws-<uid>-boundary`
+  policies bind only where the CNI implements NetworkPolicy
+  ([`compatibility.md`](../compatibility.md) lists the tested CNI).
+  A non-enforcing CNI silently opens workspace ingress and egress, which
+  removes TM-33 and TM-34. Confirm the supported-deployments matrix keeps
   that assumption explicit.
-- **Lease renew/attach session check coverage** — `liveLease`
-  re-validates the bound portal session on every renew/attach/claim and
-  on the `LeaseBySession` cookie resolve (S17). Re-verify that every new
-  lease-read path funnels through it and that the NULL-digest exemption
-  still matches the rolling-upgrade story.
-- **Deterministic lock order** — the no-deadlock argument for the
-  session-layer revokes is `lockByKeysInOrderTx` (tickets → sessions →
-  leases, ascending key order within each; `sessions.go:418`), pinned by
-  the two redeem/revoke interleaving tests and the `-race`
-  multi-ticket inversion run. Re-check when new session-layer mutators
-  land.
-
-## 7. What the reviewer should read first
-
-1. `SECURITY.md` — normative hardening rules + operator checklist.
-2. `docs/adr/0003`, `0004`, `0005` — internal API contract, launch origin
-   policy, component/session-host split (0005 self-declares as not
-   independently reviewed).
-3. `docs/security/test-inventory.md` — the automated evidence that exists.
-4. `docs/security/provenance.md` + `vulnerability-policy.md` — supply-chain
-   posture and scan gates.
-5. This file's §6 table — the explicit question list.
+- **Does every lease read re-check the portal session?** `liveLease`
+  re-validates the bound portal session on every renew, attach and claim
+  and on the `LeaseBySession` cookie resolve (TM-07). Check that every
+  new lease-read path goes through it.
+- **Is the lock order still deterministic?** The no-deadlock argument for
+  the session-layer revokes is `lockByKeysInOrderTx` (tickets, sessions,
+  leases, ascending key order within each kind), pinned by
+  `TestRevokePortalSession_RedeemCommitThenRevoke`,
+  `TestRevokePortalSession_RevokeCommitThenRedeem` and
+  `TestRevokePrincipalSessions_MultiTicketInversion` under `-race`.
+  Re-check it whenever a session-layer mutator is added.
+- **Can any path reach `/xfer/` without `ClaimTransfer`?** Only
+  `serveTransfer` builds a `/xfer/` URL, after the claim; `serveProxy`
+  refuses it (TM-30, TM-31).
+- **Can a pod-side process obtain anything beyond its own workspace?**
+  The workspace Secret, the transfer token and the KasmVNC credential are
+  per workspace; the pod NetworkPolicy admits only gateway pods; the
+  transfer leg sends the pod nothing but the token
+  ([In-pod transfer helper](#in-pod-transfer-helper), TM-37).

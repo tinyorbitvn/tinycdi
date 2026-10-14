@@ -172,7 +172,7 @@ type Config struct {
 	// and a per-replica Limiter in split mode (ADR 0006 G2).
 	LaunchLimiter ratelimit.Allower
 	// TrustedProxies lists the CIDRs of reverse proxies in front of the
-	// session listener whose X-Forwarded-For claims are trusted (S18):
+	// session listener whose X-Forwarded-For claims are trusted (TM-32):
 	// it feeds both the launch limiter's client key and the forwarded
 	// headers the runtime sees — client-supplied values are stripped and
 	// rebuilt from the verified chain only.
@@ -992,7 +992,7 @@ func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
 }
 
 // rewriteForwarded rebuilds the client-address headers toward the runtime
-// (S18): every client-supplied entry in clientHeaderStripList is removed
+// (TM-32): every client-supplied entry in clientHeaderStripList is removed
 // from the outbound request and the address headers are re-derived from
 // the INBOUND request's trusted chain only. The runtime keys its
 // brute-force blacklist on the forwarded address, so a spoofed client

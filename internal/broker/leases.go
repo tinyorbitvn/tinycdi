@@ -93,7 +93,7 @@ func (b *Broker) portalSessionLiveSQL(argIdx int) (string, []any) {
 }
 
 // loadLease fetches the lease row including its lifecycle state and the
-// liveness of its bound portal session (S17 defence-in-depth): the CASE
+// liveness of its bound portal session (TM-07 defence-in-depth): the CASE
 // rides the same row read, joined to sessions by primary key, so the check
 // costs one extra indexed probe per call — no additional round trip.
 func (b *Broker) loadLease(ctx context.Context, leaseID string) (Lease, string, portalSessionCheck, error) {
@@ -153,7 +153,7 @@ func closeStreamsTx(ctx context.Context, tx store.Tx, wsUID string, gen uint64, 
 // liveLease validates a loaded lease: unknown -> ErrLeaseInvalid;
 // revoked/superseded/time-expired -> ErrRevoked (the lease is dead);
 // bound portal session gone or invalid -> the lease is revoked on the spot
-// and -> ErrRevoked (S17 defence-in-depth); foreign gateway -> ErrDenied.
+// and -> ErrRevoked (TM-07 defence-in-depth); foreign gateway -> ErrDenied.
 // Time-expired rows are lazily marked 'expired' so the partial unique
 // index frees the workspace.
 //
@@ -187,7 +187,7 @@ func (b *Broker) liveLease(ctx context.Context, gw GatewayIdentity, leaseID stri
 		})
 		return Lease{}, ErrRevoked
 	}
-	// S17 defence-in-depth: a lease minted under a portal session that is
+	// TM-07 defence-in-depth: a lease minted under a portal session that is
 	// gone or no longer valid (signed out, absolutely expired, or carrying
 	// a pre-rotation epoch after a database restore) must die however it is
 	// reached — the sign-out revoke is one barrier, this check is the

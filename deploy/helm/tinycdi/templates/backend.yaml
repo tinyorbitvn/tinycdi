@@ -227,7 +227,7 @@ spec:
             # across replicas. Literal value — never the pod name.
             - -gateway-id={{ .Values.backend.gatewayID }}
             {{- if .Values.backend.trustedProxies }}
-            # CIDRs whose X-Forwarded-For claims are trusted (E7/S18):
+            # CIDRs whose X-Forwarded-For claims are trusted (E7/TM-32):
             # rate limits and the runtime-bound headers derive the client
             # from the right-most untrusted chain entry. Required behind
             # an ingress/Gateway — empty shares one bucket per edge.

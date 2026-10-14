@@ -379,7 +379,7 @@ the flag is overridden via `backend.extraArgs`, edit the rendered rule
 match your Prometheus Operator's `ruleSelector` (e.g.
 `{release: prometheus}`), the same convention as `serviceMonitor.labels`.
 
-### Admission policy — `admissionPolicy` (default OFF, S36)
+### Admission policy — `admissionPolicy` (default OFF, TM-45)
 
 | Key | Default | Description |
 |---|---|---|
@@ -565,7 +565,7 @@ same edge keys on the edge's own address — one shared bucket (~60 logins and
 outage. The backend logs a startup warning while a limit is on and the list
 is empty. The same list feeds the `X-Forwarded-For` / `Forwarded` /
 `X-Real-IP` headers the workspace pod sees — client-supplied values are
-stripped and rebuilt from the trusted chain only (S18), so a spoofed address
+stripped and rebuilt from the trusted chain only (TM-32), so a spoofed address
 can never poison the runtime's brute-force blacklist.
 
 The right-most-untrusted derivation is only as good as the list's coverage

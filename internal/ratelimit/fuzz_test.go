@@ -10,7 +10,7 @@ import (
 )
 
 // FuzzClientKey exercises the trusted-proxy client-address derivation
-// (S18 / FX-R26) and the -trusted-proxies CSV parser with arbitrary
+// (TM-32 / FX-R26) and the -trusted-proxies CSV parser with arbitrary
 // RemoteAddr values, X-Forwarded-For lines and CIDR lists. Invariants:
 // the key is deterministic, an untrusted peer always keys to itself, and
 // a trusted peer keys to the right-most chain entry outside the trusted

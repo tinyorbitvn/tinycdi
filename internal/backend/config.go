@@ -196,7 +196,7 @@ type Config struct {
 	GatewayID       string
 	GatewayAudience string
 	LoginKeyFiles   stringList // first file seals; all open (rotation)
-	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/S18)
+	TrustedProxies  string     // CSV CIDRs whose X-Forwarded-For claims are trusted (E7/TM-32)
 	// RateLimitReplicas divides each rate budget into the degraded-mode
 	// local floor (RL-1, ADR 0006 + RL-CEILING amendment): while the
 	// Postgres window is reachable it enforces -login-rate/-launch-rate

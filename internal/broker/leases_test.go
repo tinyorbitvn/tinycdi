@@ -249,7 +249,7 @@ func TestResolveTarget_RequiresLeaseAndGateway(t *testing.T) {
 
 // leaseForSess is leaseFor with the issuing portal session recorded: the
 // owner-tab gate needs a lease whose portal_session_digest is known.
-// Redemption re-checks the session row exists (S17), so it is seeded here.
+// Redemption re-checks the session row exists (TM-07), so it is seeded here.
 func leaseForSess(t *testing.T, db *store.DB, b *broker.Broker, gw broker.GatewayIdentity, wsUID broker.PlatformID, takeover bool, portalSession string) broker.Lease {
 	t.Helper()
 	seedPortalSession(t, db, portalSession)

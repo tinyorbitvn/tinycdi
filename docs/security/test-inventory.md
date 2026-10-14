@@ -38,7 +38,7 @@ substitute for review).
   bucket; valid OIDC state → state-digest bucket; forged values fall back to
   the client-IP bucket; per-IP ceiling on the callback).
 - `internal/api/connection_status_test.go` — passive auth path: polling must
-  not extend idle (A6-S6).
+  not extend idle (TM-03).
 - `internal/api/idlepoll_test.go` — the idle-window contract after #133:
   every cookie-authenticated GET is passive, so timer-driven portal polls
   can never hold a session open (`TestPolledReads_DoNotSlideIdleWindow`,
@@ -60,14 +60,14 @@ substitute for review).
   redirect); `TestLogout_RevokesSessionBoundMaterial` /
   `TestLogout_RevokeFailureStillSignsOut` — sign-out revokes session-bound
   leases/tickets at the store, audits `session.revoke`, and a store failure
-  never blocks the sign-out (S17). Fail-closed sign-out (#131):
+  never blocks the sign-out (TM-07). Fail-closed sign-out (#131):
   `TestLogout_StoreDeleteFailureReturns503` — a session-store `Delete`
   error answers retryable 503 + `Retry-After` with nothing torn down (no
   cookie expiry, no lease/ticket revoke). Post-logout redirect is
   https-only off-loopback (#134):
   `TestNewAuthenticator_RejectsBadPostLogoutRedirect`,
   `TestNewAuthenticator_AllowsLoopbackPostLogoutRedirect`.
-- `internal/api/revokeall_test.go` — sign-out-everywhere (ADR 0007, S19):
+- `internal/api/revokeall_test.go` — sign-out-everywhere (ADR 0007, TM-08):
   `POST /v1/me/sessions:revoke-all` hands the caller's (tenant, issuer,
   subject) to the principal revoker — the caller's own session included —
   audits `session.revoke_all` with per-kind counts, expires the cookie,
@@ -146,23 +146,23 @@ substitute for review).
   singleflight per digest, expired/revoked rejection.
 - `internal/gateway/lookup_limit_test.go`,
   `lookup_limit_config_test.go` — the unknown-cookie session-directory
-  lookup bound (S31): spray → bounded lookups + 429/`Retry-After`,
+  lookup bound (TM-27): spray → bounded lookups + 429/`Retry-After`,
   known/rehydrated/cookie-less requests never limited, a 121-cookie
   concurrent valid-session storm at defaults admits exactly 120 and
   refuses the overflow with `Retry-After` (valid-but-uncached cookies
   pay the pre-lookup gate), injected bucket + disable path, refusal
   audits `session.lookup`.
-- `internal/gateway/unattached_test.go` — ghost-session TTL (S32):
+- `internal/gateway/unattached_test.go` — ghost-session TTL (TM-28):
   redeem-then-abandon reaped with a lease revoke, attached sessions
   survive, a lease in use on a sibling replica is never revoked, reap
   proceeds on revoke failure.
 - `internal/gateway/unattached_race_test.go` — attach/reap
-  serialization (S32): an attach concurrent with the reap's in-flight
+  serialization (TM-28): an attach concurrent with the reap's in-flight
   revoke loses deterministically; the attach-vs-tick hammer asserts no
   end state ever shows a live session on a revoked lease.
 - `internal/gateway/coop_test.go` — `Cross-Origin-Opener-Policy:
   same-origin` pinned on every session-listener response and
-  upstream-supplied COOP stripped (S33); frame-ancestors unchanged.
+  upstream-supplied COOP stripped (TM-29); frame-ancestors unchanged.
 - `internal/gateway/authorization.go` fencing covered by
   `wsclose_test.go` (orderly WS close), `owner_tab_test.go` (owner-tab
   takeover), `activity_test.go`/`activity_internal_test.go`.
@@ -182,7 +182,7 @@ substitute for review).
   (`TestProxy_ConnectionTokensDroppedMetric`) with a bound on the
   debug-log rate (`TestProxy_ConnectionTokenLogRateLimited`).
 - `internal/gateway/forwarded_test.go` — client XFF never reaches the
-  runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / A6-S18);
+  runtime; XFF honored only from trusted-proxy CIDRs (FX-R26 / TM-32);
   `TestProxy_IPv6ForwardsExactAddrKeyFolds` pins that the forwarded
   rebuild carries the client's exact IPv6 address while the limiter key
   folds to /64 (#132);
@@ -191,10 +191,10 @@ substitute for review).
 - `internal/gateway/framing_test.go`, `framereload_test.go` — iframe
   embedding policy, `frame-ancestors`, frame reload behaviour.
 - `internal/gateway/e2e_test.go` — end-to-end session flow in-process.
-- `internal/gateway/signout_test.go` — S17 propagation: a store-level
+- `internal/gateway/signout_test.go` — TM-07 propagation: a store-level
   revoke ends a live stream on a sibling replica within one renew cycle,
   and the workspace cookie replays to 401 on any replica.
-- `internal/gateway/revokeall_test.go` — S19 propagation: a principal-scoped
+- `internal/gateway/revokeall_test.go` — TM-08 propagation: a principal-scoped
   revoke ends every revoked session's stream within one renew cycle on the
   replica holding it, and each session's cookie replays to 401 — including
   on a replica that never saw either session.
@@ -236,12 +236,12 @@ substitute for review).
   `sessions_test.go`, `bindings_envtest_test.go`/`bindings_internal_test.go`,
   `targets_internal_test.go` — lease lifecycle, fencing/freshness, stale
   binding, target resolution.
-- `internal/broker/signout_test.go` — `RevokePortalSession` semantics (S17):
+- `internal/broker/signout_test.go` — `RevokePortalSession` semantics (TM-07):
   digest-bound leases revoked with drain accounting, outstanding tickets
   revoked, redemption denied once the issuing session's row is gone,
   idempotent; migration 020 indexes.
 - `internal/broker/revokeall_test.go` — `RevokePrincipalSessions` semantics
-  (ADR 0007, S19): all of the principal's sessions in the tenant deleted
+  (ADR 0007, TM-08): all of the principal's sessions in the tenant deleted
   (caller's included), leases revoked principal-scoped (pre-digest rows
   covered) with drain accounting, outstanding tickets revoked, replayed
   cookies resolve to dead leases, tenant boundary held, idempotent, both
@@ -252,7 +252,7 @@ substitute for review).
   against a multi-ticket redeem (the deterministic `lockByKeysInOrderTx`
   order); migration 023 indexes (`TestMigration023_Idempotent`).
 - `internal/broker/lease_session_test.go` — bound-portal-session re-check on
-  every live-lease read (S17 defence-in-depth): renew/attach/claim revoke a
+  every live-lease read (TM-07 defence-in-depth): renew/attach/claim revoke a
   lease whose session row was deleted, epoch-staled (restored dump) or
   absolutely expired, with drain accounting and the
   `tinycdi_lease_session_missing_total{reason}` counter; NULL-digest leases
@@ -276,7 +276,7 @@ substitute for review).
   (`TestRevokeWorkspaceLeases_GenerationBounded`).
 - `internal/broker/httpapi/opclient/client_test.go`,
   `verify_internal_test.go` — `VerifyConnection` chain+hostname checks;
-  `ca_reload_test.go` — client cert/CA hot reload (FX-R33, A6-S15).
+  `ca_reload_test.go` — client cert/CA hot reload (FX-R33, TM-38).
 - `internal/tlsreload/reloader_test.go`, `capool_test.go` — file-watch reload
   incl. Kubernetes atomic Secret-volume swaps.
 - `internal/tlsreload/blocklist_test.go` — ADR 0008 revocation list
@@ -304,7 +304,7 @@ substitute for review).
   `migrate_lock_test.go` — leader/migration locking.
 - `internal/backend/postrestore_test.go` — `backend post-restore`
   (runbook kill-steps): dry-run writes nothing, epoch rotation rejects
-  every restored session (S17), lease/ticket denial, CR intent
+  every restored session (TM-07), lease/ticket denial, CR intent
   alignment, refusal with zero writes while the leader lock is held,
   the tool holding the lock for the whole apply (a concurrent lock
   attempt fails mid-run) and releasing it on success and on a mid-run
@@ -351,7 +351,7 @@ substitute for review).
   `ws-<uid>-boundary` NetworkPolicy (SEC-02, SEC-11, SEC-29, SEC-30).
 - `internal/runtime/linux/backend_test.go`,
   `apparmor_setting_test.go` — pod SecurityContext (non-root, drop ALL,
-  seccomp/AppArmor), `requireRuntimeDefault` opt-out (A6-S16).
+  seccomp/AppArmor), `requireRuntimeDefault` opt-out (TM-41).
 - `internal/runtime/linux/backend_kasm_test.go`,
   `backend_kasm_quota_test.go` — kasm adapter injection, wrapper/policy
   mounts, read-only rootfs, quota interaction.
@@ -379,9 +379,9 @@ substitute for review).
 - `internal/operator/snapshot_seccomp_test.go` +
   `internal/runtime/linux/seccomp_profile_test.go` — `seccomp-profile`
   localhost-name validation at template admission, snapshot recording
-  and pod build (#150, S38).
+  and pod build (#150, TM-47).
 - `internal/provisioning/template_family_test.go` — the start-time
-  template guard's security-field coverage (#150, S37):
+  template guard's security-field coverage (#150, TM-46):
   `TestUpdate_SkippedOnSecurityFieldDrift` end to end through
   `K8sTemplateCatalog`, `TestUpdate_SkippedReasonMatrix`;
   `internal/api/events_test.go` `TestEvents_TemplateSkipReasons` curates
@@ -392,7 +392,7 @@ substitute for review).
   `TestKustomizeWorkspaceStatusWritableOnlyByManager`.
 - `deploy/helm/chart_clusteronly_egress_test.go`,
   `chart_namespacequota_test.go`, `chart_defaultrender_test.go` — the
-  opt-in hardening renders (#148, S34/S35): ClusterOnly egress selector/
+  opt-in hardening renders (#148, TM-34/TM-44): ClusterOnly egress selector/
   ports rendering + schema, per-managed-namespace ResourceQuota/
   LimitRange objects, and the whole-render byte golden
   (`TestDefaultRenderUnchangedGolden`) proving the default render is
@@ -408,7 +408,7 @@ substitute for review).
   or no `ClusterOnly` template is seeded.
 - `internal/operator/snapshot_annotation_vap_envtest_test.go` — envtest
   enforcement proof for the optional ValidatingAdmissionPolicy sample
-  (`config/admissionpolicy/`, S36): a real apiserver denies non-operator
+  (`config/admissionpolicy/`, TM-45): a real apiserver denies non-operator
   create/update touching the `template-snapshot` annotation inside the
   managed namespaces and stays inert outside them.
 - `internal/operator/retained_claim_test.go`, `status_test.go`,
@@ -431,7 +431,7 @@ substitute for review).
   `chart_signout_test.go`, `chart_tenantquota_test.go`,
   `kasm_adapter_test.go`, `chart_branding_test.go`,
   `chart_explicitdefaults_test.go`, `chart_topologyspread_test.go`,
-  `chart_admissionpolicy_test.go` (S36: opt-in VAP off by default,
+  `chart_admissionpolicy_test.go` (TM-45: opt-in VAP off by default,
   rendered objects, operator-SA exemption, Deny binding).
 - `build/frontend/main_test.go` — security headers (SEC-22, SEC-26), server
   timeouts (SEC-23), CSP/COOP, no `/v1` proxy, branding-dir
@@ -448,7 +448,7 @@ Security-relevant subset:
 - `session_idtoken_test.go` — sealed id_token round trip on real Postgres.
 - `api_admission_test.go` — admission/authn boundary incl. SEC-03/SEC-27;
   `TestSessionEpochRotation` proves `platform_meta.session_epoch` rotation
-  kills every restored session row (S23), `TestIntentRevisionOrdering`
+  kills every restored session row (TM-21), `TestIntentRevisionOrdering`
   the intent-fence ordering on real Postgres.
 - `principal_directory_test.go` — directory-driven display identity.
 - `kasm_adapter_test.go` — adapter contract vs real kasmweb images.
@@ -550,7 +550,7 @@ newest `runtime-*` release is older than the 14-day SLO.
   `validate-release-version.test.sh`, `release-notes-review-status.test.sh`,
   `supply-chain-hardening.test.sh`, `preflight.test.sh`.
 - `hack/preflight/preflight.sh` — pre-install environment checks (includes
-  node/AppArmor posture detection relevant to A6-S16).
+  node/AppArmor posture detection relevant to TM-41).
 
 ## 10. Finding-tag index
 
@@ -596,7 +596,7 @@ context):
   (`tests/integration/rate_limit_pg_test.go`, B6); `/v1/launch` shares
   the same limiter construction but has no two-replica abuse drill of
   its own.
-- The post-restore drill (`hack/quickstart/restore-drill.sh`, S23) is a
+- The post-restore drill (`hack/quickstart/restore-drill.sh`, TM-21) is a
   manual kind runbook script — executed and recorded once
   (`docs/runbooks/disaster-recovery.md` "Restore drill — executed"), not
   a per-PR or scheduled CI gate, so bit-rot in the drill/tool pair is

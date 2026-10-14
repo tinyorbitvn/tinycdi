@@ -512,7 +512,7 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		}
 
 		// A ticket minted under a portal session that no longer exists must
-		// not redeem (S17): sign-out deletes the session row before the
+		// not redeem (TM-07): sign-out deletes the session row before the
 		// revocation transaction, and a live session's tickets are revoked
 		// with it — this read is the second barrier, so an outstanding
 		// ticket dies with its session however the revoke itself fared.

@@ -183,7 +183,7 @@ const testPortalSession = "test-portal-session"
 
 // seedPortalSession inserts the sessions row a ticket's
 // portal_session_digest points at: redemption re-checks that the issuing
-// portal session still exists (S17). The row key is the same digest form
+// portal session still exists (TM-07). The row key is the same digest form
 // the API's store writes (hex of SHA-256).
 func seedPortalSession(t *testing.T, db *store.DB, portalSessionID string) {
 	t.Helper()

@@ -676,7 +676,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	}
 	authn.WithMetrics(b.metrics)
 	// Sign-out ends the portal session's live desktop material at the
-	// lease store (S17): every gateway replica's renew loop observes the
+	// lease store (TM-07): every gateway replica's renew loop observes the
 	// revoke within one cycle and a copied workspace cookie resolves to a
 	// dead lease on any replica.
 	authn.WithSessionRevoker(broker.PublicRevoker{B: brk})
@@ -800,7 +800,7 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	// validated OIDC state — plus a per-IP ceiling at 10x the login
 	// budget, so states an attacker mints through IP-limited logins
 	// cannot amplify throughput past a bounded multiplier. Anonymous
-	// fallback everywhere is the trusted-proxy client key (S18),
+	// fallback everywhere is the trusted-proxy client key (TM-32),
 	// unchanged.
 	trusted, err := ratelimit.ParseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {

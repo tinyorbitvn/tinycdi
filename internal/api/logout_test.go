@@ -405,7 +405,7 @@ func TestOpenAPIContract_LogoutResult(t *testing.T) {
 	requireValid(t, "LogoutResult", LogoutResult{EndSessionURL: "https://idp.example/logout?client_id=tinycdi-portal"})
 }
 
-// --- S17: sign-out ends the session's reach over the desktop layer ------
+// --- TM-07: sign-out ends the session's reach over the desktop layer ------
 
 // fakeSessionRevoker records the portal session IDs sign-out asked it to
 // revoke and replays a scripted count/error.

@@ -82,7 +82,7 @@ var (
 	frameReloadDests = map[string]struct{}{
 		"iframe": {}, "document": {},
 	}
-	// sessionRevokeResults are the sign-out revocation outcomes (S17):
+	// sessionRevokeResults are the sign-out revocation outcomes (TM-07):
 	// ok = the lease store accepted the revoke (zero or more of the
 	// session's leases and outstanding tickets ended); error = the store
 	// could not answer — the sign-out still completed locally.
@@ -90,7 +90,7 @@ var (
 		"ok": {}, "error": {},
 	}
 	// leaseSessionMissingReasons are the bound-portal-session check
-	// outcomes that revoked a live lease (S17 defence-in-depth):
+	// outcomes that revoked a live lease (TM-07 defence-in-depth):
 	// absent = the sessions row is gone; invalid = the row exists but
 	// fails the epoch or absolute-expiry check (e.g. a restored dump).
 	leaseSessionMissingReasons = map[string]struct{}{
@@ -296,7 +296,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 		}, []string{"result"}),
 		leaseSessGone: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "lease_session_missing_total",
-			Help: "Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (S17 defence-in-depth), by bounded reason.",
+			Help: "Leases revoked because the bound portal session row was absent or failed the epoch/expiry check (TM-07 defence-in-depth), by bounded reason.",
 		}, []string{"reason"}),
 		auditWriteErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Name: "audit_write_errors_total",
@@ -506,7 +506,7 @@ func (m *Metrics) IncFrameReload(dest string) {
 }
 
 // IncSessionRevocation counts one sign-out revocation of a portal session's
-// session-bound leases/tickets (S17); result is bounded to {ok, error,
+// session-bound leases/tickets (TM-07); result is bounded to {ok, error,
 // other}.
 func (m *Metrics) IncSessionRevocation(result string) {
 	m.sessionRevokes.WithLabelValues(boundValue(result, sessionRevokeResults)).Inc()
@@ -521,7 +521,7 @@ func (m *Metrics) IncSessionRevokeAll(result string) {
 }
 
 // IncLeaseSessionMissing counts one lease revoked because its bound portal
-// session no longer validates at renew/attach time (S17 defence-in-depth);
+// session no longer validates at renew/attach time (TM-07 defence-in-depth);
 // reason is bounded to {absent, invalid, other}.
 func (m *Metrics) IncLeaseSessionMissing(reason string) {
 	m.leaseSessGone.WithLabelValues(boundValue(reason, leaseSessionMissingReasons)).Inc()

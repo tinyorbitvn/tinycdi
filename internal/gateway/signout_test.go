@@ -1,6 +1,6 @@
 package gateway_test
 
-// S17: sign-out propagation. The revocation the portal's sign-out writes
+// TM-07: sign-out propagation. The revocation the portal's sign-out writes
 // to the shared lease store reaches a live stream on ANY replica within
 // one renew cycle (the renew loop's terminal-error path), and the revoked
 // lease's workspace cookie is dead server-side everywhere — a replayed

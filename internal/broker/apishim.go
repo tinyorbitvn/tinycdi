@@ -33,7 +33,7 @@ func (s PublicIssuer) IssueTicket(ctx context.Context, p api.Principal, workspac
 // PublicRevoker adapts *Broker to the public API's api.SessionRevoker
 // contract — same pattern as PublicIssuer, so internal/api never imports
 // this package. Sign-out calls it to end the portal session's leases and
-// outstanding tickets at the store (S17).
+// outstanding tickets at the store (TM-07).
 type PublicRevoker struct {
 	B *Broker
 }

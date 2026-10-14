@@ -1312,7 +1312,7 @@ func TestBackendPortalOriginAllowlist(t *testing.T) {
 	}
 }
 
-// TestBackendTrustedProxies (E7/S18): backend.trustedProxies renders the
+// TestBackendTrustedProxies (E7/TM-32): backend.trustedProxies renders the
 // -trusted-proxies flag as a CSV — absent entirely when the list is empty
 // so the binary keeps its own default (untrusted socket peer only).
 func TestBackendTrustedProxies(t *testing.T) {

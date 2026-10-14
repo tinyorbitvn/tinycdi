@@ -91,7 +91,7 @@ func (b *Broker) LeaseBySession(ctx context.Context, gw GatewayIdentity, d Sessi
 }
 
 // RevokePortalSession ends a portal session's authority over the session
-// layer (threat-model S17): inside one transaction it revokes every active
+// layer (threat-model TM-07): inside one transaction it revokes every active
 // connection lease minted under the session's digest — so each gateway
 // replica's renew loop sees the lease die at its next renew and closes the
 // bound stream within one renew cycle, and a replayed workspace cookie

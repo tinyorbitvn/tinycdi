@@ -141,7 +141,7 @@ stays in the middleware.
 
 ### Metrics
 
-`tinycdi_session_revocations_total{result}` (S17) is unchanged for the
+`tinycdi_session_revocations_total{result}` (TM-07) is unchanged for the
 per-session path. Revoke-all counts on the bounded counter
 `tinycdi_session_revoke_all_total{result}` with `result ∈ {ok, error}`
 (`internal/observability/metrics.go`) — keeping bulk revocation
