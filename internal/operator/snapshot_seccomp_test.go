@@ -128,6 +128,8 @@ func TestRecordedSnapshotBadSeccompAnnotationResnapshots(t *testing.T) {
 func TestTemplateValidLocalhostSeccompAnnotation(t *testing.T) {
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-goodsec"))
 	tpl.Annotations[linux.AnnotationSeccompProfile] = "localhost/profiles/chromium-userns.json"
+	hostUsers := false // the userns profile requires its own user namespace
+	tpl.Spec.Linux.HostUsers = &hostUsers
 	ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-good-sec"))
 
 	c, got := seccompReconcile(t, ws, tpl)

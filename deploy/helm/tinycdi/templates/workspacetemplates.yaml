@@ -77,6 +77,19 @@
 {{- if .seccompProfile }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" (printf "localhost/%s" (.seccompProfile | trimPrefix "localhost/")) }}
 {{- end }}
+{{- /* The userns browser seccomp profile lets the workspace user create
+     user and network namespaces; the operator admits it only when the
+     pod runs in its own user namespace. Fail the render the same way:
+     effective hostUsers is spec.linux.hostUsers, else runtime.hostUsers. */ -}}
+{{- if eq (index $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" | default "") "localhost/profiles/chromium-userns.json" }}
+{{- $hostUsers := $.Values.runtime.hostUsers }}
+{{- if and (hasKey $linux "hostUsers") (not (kindIs "invalid" (index $linux "hostUsers"))) }}
+{{- $hostUsers = index $linux "hostUsers" }}
+{{- end }}
+{{- if not (and (kindIs "bool" $hostUsers) (not $hostUsers)) }}
+{{- fail (printf "templates[%s]: seccompProfile localhost/profiles/chromium-userns.json allows unprivileged user namespaces and requires hostUsers: false (set spec.linux.hostUsers: false or runtime.hostUsers: false)" $tplName) }}
+{{- end }}
+{{- end }}
 {{- if .appArmorProfile }}
 {{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/apparmor-profile" (printf "localhost/%s" (.appArmorProfile | trimPrefix "localhost/")) }}
 {{- end }}

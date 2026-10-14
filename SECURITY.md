@@ -366,6 +366,11 @@ and an update to this file.
     - `runAsNonRoot`, `allowPrivilegeEscalation: false`, drop `ALL`;
     - seccomp `RuntimeDefault` or a validated `Localhost` profile, never
       `Unconfined`;
+      - the browser seccomp profile `localhost/profiles/chromium-userns.json`
+        lets the workspace user create user, PID and network namespaces
+        (the Chromium sandbox needs them), so it is admitted only on a pod
+        with `hostUsers: false`: the operator rejects the template
+        (`TemplateRejected`) and the chart fails the render otherwise;
     - `readOnlyRootFilesystem` on platform pods;
     - `automountServiceAccountToken: false` unless the pod calls the
       apiserver;
@@ -383,7 +388,10 @@ and an update to this file.
     with requests/limits + `readOnlyRootFilesystem`, the desktop's ro
     rootfs, and the read-only browser-shim/managed-policy mounts),
     `TestKasmAdapterInitAdmittedUnderQuota` (envtest: the kasm pod is
-    admitted in a ResourceQuota-governed namespace).
+    admitted in a ResourceQuota-governed namespace),
+    `TestEnsureUsernsProfileRequiresHostUsersFalse`,
+    `TestSeededUsernsProfileRequiresHostUsersFalse` (the userns browser
+    profile needs `hostUsers: false`).
     `TestHardeningInstallerNamespaceGuard` (rejects the release, managed,
     `default` and `kube-*` namespaces), `TestHardeningManagedEnforcePrivilegedGated`,
     `TestHardeningDevGateBypasses` (extraArgs, capability lists, Unconfined,
@@ -400,7 +408,8 @@ and an update to this file.
     `dev.enabled`).
     *Not yet enforced:*
     - seccomp and read-only-root assertions on every platform pod;
-    - `readOnlyRootFilesystem` and `hostUsers: false` on runtime pods;
+    - `readOnlyRootFilesystem` on runtime pods, and `hostUsers: false`
+      on runtime pods without the userns browser profile;
     - `localhost/<name>` profile names, which are checked only by
       pattern (allowlist `tinycdi-browser`);
     - the installer verifier still shares `hostPID`.

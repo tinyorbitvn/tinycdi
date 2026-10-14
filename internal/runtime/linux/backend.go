@@ -496,6 +496,9 @@ func (b *Backend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.Wo
 	if err != nil {
 		return runtime.Observation{}, err
 	}
+	if err := requireOwnUserNamespace(seccomp, tpl, b.opts); err != nil {
+		return runtime.Observation{}, err
+	}
 	if tpl.Spec.Linux != nil && tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm &&
 		b.opts.KasmAdapterImage == "" {
 		// The adapter is delivered by the operator-configured init image;
@@ -1039,6 +1042,42 @@ func resolveSeccompProfile(ann map[string]string) (*corev1.SeccompProfile, error
 	}
 }
 
+// usernsSeccompProfile is the shipped browser seccomp profile
+// (deploy/node-profiles/seccomp/chromium-userns.json). It allows clone
+// and unshare with CLONE_NEW* flags (plus setns and chroot) for the
+// Chromium sandbox, so the workspace user can create user and network
+// namespaces.
+const usernsSeccompProfile = "profiles/chromium-userns.json"
+
+// requireOwnUserNamespace admits the userns browser profile only when the
+// pod runs in its own user namespace (effective hostUsers false). The
+// profile opens the namespace-gated kernel code to the workspace user;
+// with host users the pod's UIDs are the node's UIDs, so a kernel bug
+// reached that way lands as a node UID rather than an unmapped one.
+// Other profiles pass untouched.
+func requireOwnUserNamespace(seccomp *corev1.SeccompProfile, tpl *cdiv1.WorkspaceTemplate, opts Options) error {
+	if seccomp == nil || seccomp.Type != corev1.SeccompProfileTypeLocalhost ||
+		seccomp.LocalhostProfile == nil || *seccomp.LocalhostProfile != usernsSeccompProfile {
+		return nil
+	}
+	if hu := effectiveHostUsers(tpl, opts); hu != nil && !*hu {
+		return nil
+	}
+	return &templateRejectedError{reason: fmt.Sprintf(
+		"annotation %s=localhost/%s allows unprivileged user namespaces and requires hostUsers: false "+
+			"(spec.linux.hostUsers, or the operator's --runtime-host-users=false)",
+		AnnotationSeccompProfile, usernsSeccompProfile)}
+}
+
+// effectiveHostUsers is the pod hostUsers value: the template field, else
+// the operator default; nil leaves the pod field unset.
+func effectiveHostUsers(tpl *cdiv1.WorkspaceTemplate, opts Options) *bool {
+	if tpl.Spec.Linux != nil && tpl.Spec.Linux.HostUsers != nil {
+		return tpl.Spec.Linux.HostUsers
+	}
+	return opts.DefaultHostUsers
+}
+
 // validSeccompProfileName: the node-loaded profile reference is a RELATIVE
 // path under the kubelet's seccomp root — the chart installs to
 // "<root>/profiles/<name>.json", so path segments are allowed but every
@@ -1357,13 +1396,7 @@ func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev
 		}}
 	}
 
-	// hostUsers: template field → operator default; nil leaves the pod
-	// field unset (D26 — opt-in until the R1 spike lands).
-	hostUsers := opts.DefaultHostUsers
-	if h := tpl.Spec.Linux.HostUsers; h != nil {
-		hostUsers = h
-	}
-	pod.Spec.HostUsers = hostUsers
+	pod.Spec.HostUsers = effectiveHostUsers(tpl, opts)
 	return pod
 }
 

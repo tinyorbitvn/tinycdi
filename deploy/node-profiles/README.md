@@ -7,6 +7,19 @@ sandbox works inside an otherwise restricted pod (`runAsNonRoot`,
 **pre-loaded on every node that can run browser sessions** — Kubernetes does
 not distribute them; installation is GitOps/node-provisioning owned.
 
+The seccomp profile lets any process in the pod, not only Chromium,
+create user, PID and network namespaces (`clone` and `unshare` with
+`CLONE_NEW*` flags, plus `setns` and `chroot`). The workspace user can
+therefore reach the kernel code behind those namespaces. A template that
+selects the profile must run its pods with `hostUsers: false`, so every
+namespace the user creates sits inside the pod's own user namespace: the
+operator rejects the template otherwise (`TemplateRejected`), and the chart
+fails the render. The pod's effective `hostUsers` is the template's
+`spec.linux.hostUsers`, else the chart's `runtime.hostUsers` (default
+`false`). The check matches this profile by name: a custom `Localhost`
+profile that also allows namespace creation is not detected, so a
+template that selects one must set `hostUsers: false` itself.
+
 | File | Purpose |
 |---|---|
 | `seccomp/chromium-userns.json` | Resolved OCI `LinuxSeccomp` profile (plain `architectures` + unconditional `syscalls`; amd64, zero-capability context). sha256 `c57199218f6ba2e6616f39392f3043b3e057fdfa082ee90f0798170c5715d76a` — locked in `docs/compatibility.md`. |

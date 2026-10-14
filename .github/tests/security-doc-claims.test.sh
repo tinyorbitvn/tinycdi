@@ -74,4 +74,13 @@ need R1-07 docs/releases/v1.0.0.md 'Process count needs a kubelet bound\.'
 need R1-07 docs/security/threat-model.md 'Process count needs a kubelet bound\.'
 need R1-07 docs/security/threat-model.md '\*\*Pod hardening\*\*:[^*]*podPidsLimit'
 
+need R1-29 docs/security/threat-model.md '\*\*Pod hardening\*\*:[^*]*create user, PID and network namespaces[^*]*hostUsers: false'
+need_row R1-29 TM-47 'chromium-userns\.json` the workspace user can create user, PID and network namespaces'
+need R1-29 SECURITY.md 'chromium-userns\.json` lets the workspace user create user, PID and network namespaces'
+need R1-29 deploy/node-profiles/README.md 'must run its pods with `hostUsers: false`'
+need R1-29 deploy/helm/tinycdi/README.md 'chromium-userns\.json` needs an effective `false`'
+need R1-29 docs/releases/v1.0.0.md 'The browser sandbox profile allows namespaces\.'
+need R1-29 deploy/node-profiles/README.md 'a custom `Localhost` profile that also allows namespace creation is not detected'
+need_row R1-29 TM-47 'a custom `Localhost` profile that allows namespace creation is not detected'
+
 exit "$fails"
