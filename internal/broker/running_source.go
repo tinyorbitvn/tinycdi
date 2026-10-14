@@ -99,15 +99,6 @@ func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]Ope
 	return out, nil
 }
 
-// snapshotPolicy is the lifecycle slice of the operator's recorded
-// template-snapshot annotation (operator.AnnotationTemplateSnapshot).
-// Only the spec's lifecycle matters here — the admitted revision's caps.
-type snapshotPolicy struct {
-	Spec struct {
-		Lifecycle cdiv1.LifecycleDefaults `json:"lifecycle"`
-	} `json:"spec"`
-}
-
 // policyFor resolves the lifecycle budget the expiry planner enforces on
 // one workspace. The broker owns expiry decisions and plans them from the
 // workspace's OWN recorded contract: the template snapshot the operator
@@ -115,7 +106,7 @@ type snapshotPolicy struct {
 // change a running generation's caps — that is also the input the
 // operator's max-duration backstop converges on, so the two owners of the
 // stop decision can never disagree. A workspace without a recorded
-// snapshot (never admitted, or the annotation was lost) resolves its
+// snapshot (never admitted, or its status was lost) resolves its
 // templateRef through the shared by-name resolver — a reference to a
 // catalog base name resolves to the newest revision — and a missing or
 // unresolvable template falls back to DefaultTimeoutPolicy, so a broken
@@ -123,13 +114,12 @@ type snapshotPolicy struct {
 //
 // Held workspaces (snapshotHeld — status.templateSnapshot still empty and
 // the operator's Degraded/TemplateRevisionGone or TemplateInvalid
-// condition present) are the one case where the annotation is provably
-// untrusted: their caps come from the resolved template's lifecycle and
-// the chart defaults, the STRICTER of the two per cap — an annotation
-// carrying an inflated cap can never stretch a held session.
+// condition present) take their caps from the resolved template's
+// lifecycle and the chart defaults, the STRICTER of the two per cap — an
+// annotation carrying an inflated cap can never stretch a held session.
 func (s *K8sRunningSource) policyFor(ctx context.Context, ws *cdiv1.Workspace) TimeoutPolicy {
 	held := snapshotHeld(ws)
-	lc := s.lifecycleFor(ctx, ws, held)
+	lc := s.lifecycleFor(ctx, ws)
 	pol := DefaultTimeoutPolicy
 	if lc == nil {
 		return pol
@@ -149,9 +139,7 @@ func (s *K8sRunningSource) policyFor(ctx context.Context, ws *cdiv1.Workspace) T
 // snapshotHeld reports whether the operator has placed the workspace on
 // a template hold: status.templateSnapshot is still empty AND a
 // Degraded=True condition latches one of the template-source reasons
-// (TemplateRevisionGone, TemplateInvalid). While held, the snapshot
-// annotation is provably untrusted — the operator already refused its
-// bytes — so no planner input may come from it.
+// (TemplateRevisionGone, TemplateInvalid).
 func snapshotHeld(ws *cdiv1.Workspace) bool {
 	if ws.Status.TemplateSnapshot != nil {
 		return false
@@ -163,31 +151,14 @@ func snapshotHeld(ws *cdiv1.Workspace) bool {
 }
 
 // lifecycleFor returns the recorded snapshot lifecycle, else the resolved
-// template's, else nil. The operator-recorded status.templateSnapshot is
-// read first — it is the authoritative copy (workspaces/status is writable
-// by the operator service account alone). The annotation is a fallback
-// ONLY for pre-upgrade rows the operator has not reconciled yet — never
-// for held workspaces (held), where its bytes are provably untrusted —
-// and a corrupt annotation resolves the live template rather than
-// failing closed: an unplannable workspace must never silently drop its
-// caps.
-func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *cdiv1.Workspace, held bool) *cdiv1.LifecycleDefaults {
+// template's, else nil. Only the operator-recorded status.templateSnapshot
+// is trusted (workspaces/status is writable by the operator service
+// account alone); the annotation mirror is never read.
+func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *cdiv1.Workspace) *cdiv1.LifecycleDefaults {
 	if snap := ws.Status.TemplateSnapshot; snap != nil &&
 		snap.Spec.Lifecycle != (cdiv1.LifecycleDefaults{}) {
 		lc := snap.Spec.Lifecycle
 		return &lc
-	}
-	if !held {
-		if raw := ws.Annotations[operator.AnnotationTemplateSnapshot]; raw != "" {
-			var snap snapshotPolicy
-			// An all-zero lifecycle — e.g. a snapshot written without the key —
-			// carries no recorded contract; resolve the live template instead.
-			if err := json.Unmarshal([]byte(raw), &snap); err == nil &&
-				snap.Spec.Lifecycle != (cdiv1.LifecycleDefaults{}) {
-				lc := snap.Spec.Lifecycle
-				return &lc
-			}
-		}
 	}
 	if tpl := s.template(ctx, ws); tpl != nil {
 		return &tpl.Spec.Lifecycle

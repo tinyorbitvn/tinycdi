@@ -269,14 +269,14 @@ func TestSnapshot_KeptWhenStartKeepsRef(t *testing.T) {
 	}
 }
 
-// TestSnapshot_UpgradeAdoption: the upgrade path end to end on a real
-// apiserver. A running workspace admitted before status.templateSnapshot
-// existed establishes its record from the incarnation pod's stamped
-// template identity + the LIVE revision object — the annotation is never
-// consulted. Pods that predate the stamps, or whose stamped revision is
-// gone, hold Degraded/TemplateRevisionGone with the pod left running;
-// stop/start re-snapshots.
-func TestSnapshot_UpgradeAdoption(t *testing.T) {
+// TestSnapshot_StatusLossAdoption: status-loss recovery end to end on a
+// real apiserver. A running workspace without status.templateSnapshot
+// re-establishes its record from the incarnation pod's stamped template
+// identity + the LIVE revision object — the annotation is never consulted.
+// Pods without the stamps, or whose stamped revision is gone, hold
+// Degraded/TemplateRevisionGone with the pod left running; stop/start
+// re-snapshots.
+func TestSnapshot_StatusLossAdoption(t *testing.T) {
 	env, c := startEnv(t)
 	defer func() {
 		if err := env.Stop(); err != nil {
@@ -319,7 +319,6 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			scheduled.Spec.NodeName = nodeName
 			scheduled.Spec.PriorityClassName = pc.Name
 			scheduled.Spec.Priority = &prio
-			scheduled.Spec.DeprecatedServiceAccount = scheduled.Spec.ServiceAccountName
 			scheduled.ResourceVersion = ""
 			scheduled.UID = ""
 			scheduled.CreationTimestamp = metav1.Time{}
@@ -486,7 +485,7 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 		assertPodHeldGone(t, key, pod)
 	})
 
-	t.Run("pre-stamp pod adopts resolved revision, pod untouched", func(t *testing.T) {
+	t.Run("unstamped pod holds degraded even when it matches, pod untouched", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptu", "fam32-aaaa1111", nil)
@@ -496,9 +495,9 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			client.ObjectKey{Namespace: ns, Name: "fam32-aaaa1111"}, live); err != nil {
 			t.Fatal(err)
 		}
-		// A v0.5.0 pod carries no identity stamps; its annotation — even
-		// an honest legacy-shaped one — is never a source. The candidate
-		// is the live object templateRef names; the pod provably matches it.
+		// An owned pod without identity stamps cannot prove its revision,
+		// even when templateRef names the exact object it was built from;
+		// its annotation is never a source.
 		pod := seedRunning(t, ns, ws, live, "node-7") // scheduled pod
 		delete(pod.Annotations, linux.AnnotationTemplateName)
 		delete(pod.Annotations, linux.AnnotationTemplateRevision)
@@ -507,27 +506,13 @@ func TestSnapshot_UpgradeAdoption(t *testing.T) {
 			t.Fatalf("unstamp pod: %v", err)
 		}
 		seedAnnotation(t, ws, snapshotAnnotation(t, live, "", 0))
+		markPodReady(t, c, pod)
 		r := newReconciler(c)
 		reconcile(t, r, key)
-		got := getWorkspace(t, c, key)
-		snap := got.Status.TemplateSnapshot
-		if snap == nil || snap.Name != "fam32-aaaa1111" {
-			t.Fatalf("pre-stamp pod's resolved revision was not adopted: %+v", snap)
-		}
-		cur := &corev1.Pod{}
-		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
-			t.Fatalf("pod vanished: %v", err)
-		}
-		if cur.UID != pod.UID {
-			t.Fatal("adoption recreated the pod")
-		}
-		// The identity stamps were backfilled onto the running pod.
-		if cur.Annotations[linux.AnnotationTemplateName] != "fam32-aaaa1111" {
-			t.Fatalf("identity stamps not backfilled: %+v", cur.Annotations)
-		}
+		assertPodHeldGone(t, key, pod)
 	})
 
-	t.Run("pre-stamp pod rotated revision holds degraded", func(t *testing.T) {
+	t.Run("unstamped pod under a re-pointed ref holds degraded", func(t *testing.T) {
 		ns := newNamespace(t, c)
 		familyRevision(t, c, ns, "fam32-aaaa1111", "2026-10-a", resnapImageA)
 		ws := newWorkspace(t, c, ns, "ws-adoptr", "fam32-bbbb2222", nil)

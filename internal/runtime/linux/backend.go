@@ -119,20 +119,20 @@ const (
 
 	// AnnotationTemplateHash stamps every built pod with the hash of the
 	// (spec, annotations) pair it was converged from. It binds the
-	// incarnation to the recorded template revision: the snapshot-upgrade
-	// adoption proof compares it against a candidate record before
-	// trusting a pre-status workspace's annotation.
+	// incarnation to the recorded template revision: status-loss recovery
+	// compares it against the live revision the identity stamps name.
 	AnnotationTemplateHash = "workspaces.cdi.tinyorbit.vn/template-hash"
 
 	// AnnotationTemplateName / AnnotationTemplateRevision stamp every
 	// built pod with the identity of the WorkspaceTemplate revision it
 	// was converged from — operator-written metadata a workspace writer
-	// cannot set. On upgrade the operator reads the identity from the
-	// pod itself and re-reads content from the LIVE template object of
-	// that revision; the (writer-controlled) snapshot annotation is
-	// never consulted. Annotations rather than labels: label values are
-	// capped at 63 chars and restrict characters, while template names
-	// and revision strings are not so constrained.
+	// cannot set. When status.templateSnapshot is lost the operator
+	// reads the identity from the pod itself and re-reads content from
+	// the LIVE template object of that revision; the (writer-controlled)
+	// snapshot annotation is never consulted. Annotations rather than
+	// labels: label values are capped at 63 chars and restrict
+	// characters, while template names and revision strings are not so
+	// constrained.
 	AnnotationTemplateName     = "workspaces.cdi.tinyorbit.vn/template-name"
 	AnnotationTemplateRevision = "workspaces.cdi.tinyorbit.vn/template-revision"
 
@@ -1379,14 +1379,11 @@ func templateHash(tpl *cdiv1.WorkspaceTemplate) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-// PodMatchesTemplate implements runtime.Backend: the adoption proof for
-// snapshots recorded before status.templateSnapshot existed. The
-// incarnation pod must exist, be operator-owned (controller ownerRef to
-// this Workspace UID plus the managed label set for the live
-// generation), and provably derive from tpl — a matching template-hash
-// stamp, or (pods built before the stamp) a spec equal to a fresh build
-// after discounting apiserver defaults. false means the record may not
-// be trusted.
+// PodMatchesTemplate implements runtime.Backend: the incarnation pod must
+// exist, be operator-owned (controller ownerRef to this Workspace UID plus
+// the managed label set for the live generation) and carry a
+// template-hash stamp equal to templateHash(tpl). false means the stamped
+// revision may not be trusted.
 func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) (bool, error) {
 	pod, owned, err := b.ownedPod(ctx, ws)
 	if err != nil || !owned {
@@ -1399,18 +1396,7 @@ func (b *Backend) PodMatchesTemplate(ctx context.Context, ws *cdiv1.Workspace, t
 		}
 		return stamp == want, nil
 	}
-	// Pre-stamp pod: only an exact rebuild match proves the record —
-	// anything looser lets a forged annotation claim an honest pod.
-	appArmor, err := resolveAppArmorProfile(tpl.Annotations)
-	seccomp, serr := resolveSeccompProfile(tpl.Annotations)
-	if err != nil || serr != nil || tpl.Spec.Linux == nil {
-		return false, nil
-	}
-	if tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm && b.opts.KasmAdapterImage == "" {
-		return false, nil
-	}
-	expected := buildPod(ws, tpl, appArmor, seccomp, b.opts)
-	return podSpecBuiltEqual(&pod.Spec, &expected.Spec), nil
+	return false, nil
 }
 
 // ownedPod returns the incarnation pod when it exists and is
@@ -1443,7 +1429,7 @@ func (b *Backend) ownedPod(ctx context.Context, ws *cdiv1.Workspace) (*corev1.Po
 
 // PodTemplateIdentity implements runtime.Backend: the template-revision
 // identity the incarnation pod was stamped with, when the pod exists and
-// is operator-owned. Empty Name/Revision mark a pod that predates the
+// is operator-owned. Empty Name/Revision mark a pod without the identity
 // stamps — the caller must not guess its revision from anywhere else.
 func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace) (runtime.PodTemplateIdentity, error) {
 	pod, owned, err := b.ownedPod(ctx, ws)
@@ -1455,79 +1441,6 @@ func (b *Backend) PodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace) 
 		Name:     pod.Annotations[AnnotationTemplateName],
 		Revision: pod.Annotations[AnnotationTemplateRevision],
 	}, nil
-}
-
-// StampPodTemplateIdentity implements runtime.Backend: backfill the
-// template-identity stamps onto an operator-owned pod whose provenance
-// was proven by the normalized rebuild — later reconciles and upgrades
-// read the identity directly instead of re-running the compare.
-func (b *Backend) StampPodTemplateIdentity(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate) error {
-	pod, owned, err := b.ownedPod(ctx, ws)
-	if err != nil || !owned {
-		return err
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[AnnotationTemplateName] = tpl.Name
-	pod.Annotations[AnnotationTemplateRevision] = tpl.Spec.Revision
-	if h, herr := templateHash(tpl); herr == nil {
-		pod.Annotations[AnnotationTemplateHash] = h
-	}
-	return b.client.Update(ctx, pod)
-}
-
-// podSpecBuiltEqual reports whether actual (a stored pod spec) equals
-// expected (buildPod's fresh output) exactly, once the fields the
-// apiserver defaults but the template never supplies are discounted:
-// DNSPolicy, scheduler/priority bookkeeping, pull-policy and termination
-// plumbing on containers, probe thresholds, and the not-ready/unreachable
-// tolerations the DefaultTolerationSeconds admission plugin appends to
-// every pod.
-func podSpecBuiltEqual(actual, expected *corev1.PodSpec) bool {
-	a := actual.DeepCopy()
-	a.NodeName = ""
-	a.PriorityClassName = ""
-	a.DNSPolicy = ""
-	a.SchedulerName = ""
-	a.Priority = nil
-	a.PreemptionPolicy = nil
-	a.ShareProcessNamespace = nil
-	a.DeprecatedServiceAccount = ""
-	a.Tolerations = stripAdmissionTolerations(a.Tolerations)
-	norm := func(c *corev1.Container) {
-		c.ImagePullPolicy = ""
-		c.TerminationMessagePath = ""
-		c.TerminationMessagePolicy = ""
-		if p := c.ReadinessProbe; p != nil {
-			p.SuccessThreshold = 0
-			p.TerminationGracePeriodSeconds = nil
-		}
-	}
-	for i := range a.Containers {
-		norm(&a.Containers[i])
-	}
-	for i := range a.InitContainers {
-		norm(&a.InitContainers[i])
-	}
-	return apiequality.Semantic.DeepEqual(*a, *expected)
-}
-
-// stripAdmissionTolerations removes the tolerations the apiserver's
-// DefaultTolerationSeconds plugin adds to every pod (a bare
-// not-ready/unreachable Exists toleration carrying tolerationSeconds) —
-// buildPod never writes them, so they must be discounted in the compare.
-func stripAdmissionTolerations(tols []corev1.Toleration) []corev1.Toleration {
-	var out []corev1.Toleration
-	for _, t := range tols {
-		if t.Operator == corev1.TolerationOpExists && t.Value == "" &&
-			t.Effect == corev1.TaintEffectNoExecute && t.TolerationSeconds != nil &&
-			(t.Key == "node.kubernetes.io/not-ready" || t.Key == "node.kubernetes.io/unreachable") {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
 }
 
 func (b *Backend) ensureService(ctx context.Context, ws *cdiv1.Workspace) error {

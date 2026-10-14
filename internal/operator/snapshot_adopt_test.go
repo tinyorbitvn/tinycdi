@@ -1,18 +1,17 @@
 // Copyright (c) 2026 TinyOrbit
 // SPDX-License-Identifier: MIT
 
-// Upgrade-adoption coverage for status.templateSnapshot. A workspace
-// admitted before the status field existed establishes its record from
-// the RUNNING incarnation, never from the annotation: the operator-owned
-// pod names its template revision in stamped metadata
-// (workspaces.cdi.tinyorbit.vn/template-name|template-revision), the
-// LIVE revision object supplies the content, and the pod must provably
-// derive from it (template-hash stamp, or an exact spec rebuild for
-// stamp-less pods). A pod that cannot name its revision — pre-stamp
-// pods, pruned or republished objects, mismatched builds — holds the
-// workspace Degraded/TemplateRevisionGone with the pod left running;
-// a workspace with no pod re-snapshots the live template at next start.
-// The annotation is never consulted.
+// Status-loss recovery for status.templateSnapshot. A running workspace
+// without the status record re-establishes it from the RUNNING
+// incarnation, never from the annotation: the operator-owned pod names its
+// template revision in stamped metadata
+// (workspaces.cdi.tinyorbit.vn/template-name|template-revision), the LIVE
+// revision object supplies the content, and the pod's template-hash stamp
+// must match it. A pod that cannot prove its revision — no identity or
+// hash stamp, a pruned or republished object, a mismatched hash — holds
+// the workspace Degraded/TemplateRevisionGone with the pod left running; a
+// workspace with no pod re-snapshots the live template. The annotation is
+// never consulted.
 package operator
 
 import (
@@ -38,9 +37,9 @@ import (
 	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
 )
 
-// adoptTemplate builds the revision object a v0.5.0 workspace would have
-// been admitted under — catalog-name labeled fam32, the way published
-// revisions carry their family.
+// adoptTemplate builds the revision object a workspace was admitted
+// under — catalog-name labeled fam32, the way published revisions carry
+// their family.
 func adoptTemplate(ns, name string, uid types.UID) *cdiv1.WorkspaceTemplate {
 	return &cdiv1.WorkspaceTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -64,8 +63,8 @@ func adoptTemplate(ns, name string, uid types.UID) *cdiv1.WorkspaceTemplate {
 	}
 }
 
-// adoptWorkspace seeds a Running workspace in the upgrade-time shape —
-// no status.templateSnapshot. ann, when non-empty, seeds the
+// adoptWorkspace seeds a Running workspace whose status was lost — no
+// status.templateSnapshot. ann, when non-empty, seeds the
 // (never-trusted) snapshot annotation.
 func adoptWorkspace(ref, ann string, uid types.UID) *cdiv1.Workspace {
 	annotations := map[string]string{}
@@ -93,9 +92,8 @@ func adoptWorkspace(ref, ann string, uid types.UID) *cdiv1.Workspace {
 	}
 }
 
-// snapshotAnnotation renders the annotation bytes a v0.5.0 operator
-// recorded — used to prove the annotation is never read, and to seed the
-// legacy (pre-V3.2, no sourceRef/runtimeGeneration) shape.
+// snapshotAnnotation renders the annotation bytes the operator mirrors —
+// used to prove the annotation is never read.
 func snapshotAnnotation(t *testing.T, tpl *cdiv1.WorkspaceTemplate, ref string, gen int64) string {
 	t.Helper()
 	s, err := snapshotTemplate(tpl)
@@ -157,7 +155,6 @@ func TestAdoptSnapshot_StampedPodAdoptsLiveRevision(t *testing.T) {
 				// builder never wrote must not break the proof.
 				pod.Spec.NodeName = node
 				pod.Spec.PriorityClassName = "system-cluster-critical"
-				pod.Spec.DeprecatedServiceAccount = "tcdi-workspace"
 				if err := c.Update(context.Background(), pod); err != nil {
 					t.Fatalf("mark pod scheduled: %v", err)
 				}
@@ -187,37 +184,8 @@ func TestAdoptSnapshot_StampedPodAdoptsLiveRevision(t *testing.T) {
 	}
 }
 
-// A stamped-name pod missing the hash stamp falls back to the exact
-// spec-rebuild proof — the F-A fix: scheduler- and apiserver-injected
-// fields (nodeName, priorityClassName, deprecatedServiceAccount) must not
-// break it.
-func TestAdoptSnapshot_ScheduledUnstampedHashAdopts(t *testing.T) {
-	s := snapScheme(t)
-	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	ws := adoptWorkspace("fam32", "", types.UID("ws-pre-9"))
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
-	pod := seedBuiltPod(t, c, ws, tpl)
-	delete(pod.Annotations, linux.AnnotationTemplateHash)
-	pod.Spec.NodeName = "ip-10-0-1-7.compute.internal"
-	pod.Spec.PriorityClassName = "system-cluster-critical"
-	pod.Spec.DeprecatedServiceAccount = "tcdi-workspace"
-	if err := c.Update(context.Background(), pod); err != nil {
-		t.Fatalf("mark pod scheduled: %v", err)
-	}
-	got := adoptReconcile(t, s, c, ws)
-	if got.Status.TemplateSnapshot == nil {
-		t.Fatal("scheduled hash-less stamped pod was not adopted")
-	}
-	want, _ := snapshotTemplate(tpl)
-	if got.Status.TemplateSnapshot.SpecHash != want.SpecHash {
-		t.Fatalf("adopted %q, want live revision %q",
-			got.Status.TemplateSnapshot.SpecHash, want.SpecHash)
-	}
-}
-
-// An annotation — honest, forged, or legacy-shaped — is never consulted:
-// the stamped pod's identity decides everything.
+// An annotation — honest or forged — is never consulted: the stamped
+// pod's identity decides everything.
 func TestAdoptSnapshot_AnnotationNeverConsulted(t *testing.T) {
 	s := snapScheme(t)
 	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
@@ -235,16 +203,8 @@ func TestAdoptSnapshot_AnnotationNeverConsulted(t *testing.T) {
 		RuntimeGeneration: 1, SourceRef: "fam32",
 	})
 
-	// Pre-V3.2 legacy shape — no sourceRef/runtimeGeneration at all.
-	var legacy templateSnapshot
-	if err := json.Unmarshal([]byte(snapshotAnnotation(t, tpl, "", 0)), &legacy); err != nil {
-		t.Fatal(err)
-	}
-	legacyRaw, _ := json.Marshal(&legacy)
-
 	for name, ann := range map[string]string{
 		"forged spec":           string(forgedRaw),
-		"legacy shape":          string(legacyRaw),
 		"honest current record": snapshotAnnotation(t, tpl, "fam32", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -340,7 +300,8 @@ func TestAdoptSnapshot_RevisionGone(t *testing.T) {
 	})
 }
 
-// unstamp removes the identity stamps — the v0.5 pod shape.
+// unstamp turns pod into an owned pod without the identity stamps (name,
+// revision and hash).
 func unstamp(t *testing.T, c client.Client, pod *corev1.Pod) {
 	t.Helper()
 	delete(pod.Annotations, linux.AnnotationTemplateName)
@@ -348,168 +309,6 @@ func unstamp(t *testing.T, c client.Client, pod *corev1.Pod) {
 	delete(pod.Annotations, linux.AnnotationTemplateHash)
 	if err := c.Update(context.Background(), pod); err != nil {
 		t.Fatalf("unstamp pod: %v", err)
-	}
-}
-
-// The pre-stamp candidate match: a pod built before the identity stamps
-// names nothing, so the candidate is the live object spec.templateRef
-// names. A pod that provably was built from it adopts the live
-// object into status — and gets its identity stamps backfilled — with no
-// Degraded and no restart. Scheduled or not.
-func TestAdoptSnapshot_UnstampedPodCandidateMatch(t *testing.T) {
-	for _, node := range []string{"", "node-9"} {
-		t.Run(fmt.Sprintf("nodeName=%q", node), func(t *testing.T) {
-			s := snapScheme(t)
-			tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-			ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-pre-6"+node))
-			c := fake.NewClientBuilder().WithScheme(s).
-				WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
-			pod := seedBuiltPod(t, c, ws, tpl)
-			unstamp(t, c, pod)
-			if node != "" {
-				pod.Spec.NodeName = node
-				pod.Spec.PriorityClassName = "system-cluster-critical"
-				pod.Spec.DeprecatedServiceAccount = "tcdi-workspace"
-				if err := c.Update(context.Background(), pod); err != nil {
-					t.Fatalf("mark pod scheduled: %v", err)
-				}
-			}
-
-			got := adoptReconcile(t, s, c, ws)
-			snap := got.Status.TemplateSnapshot
-			if snap == nil {
-				t.Fatal("pre-stamp pod's resolved revision was not adopted")
-			}
-			want, err := snapshotTemplate(tpl)
-			if err != nil {
-				t.Fatalf("snapshotTemplate: %v", err)
-			}
-			if snap.SpecHash != want.SpecHash || snap.Name != "fam32-aaaa1111" {
-				t.Fatalf("adopted %q/%q, want live revision fam32-aaaa1111", snap.Name, snap.SpecHash)
-			}
-			cond := condition(got, cdiv1.ConditionDegraded)
-			if cond != nil && cond.Status == metav1.ConditionTrue {
-				t.Fatalf("Degraded set on a successful candidate match: %+v", cond)
-			}
-			// Identity stamps were backfilled onto the still-running pod.
-			cur := &corev1.Pod{}
-			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
-				t.Fatalf("pod vanished: %v", err)
-			}
-			if cur.UID != pod.UID {
-				t.Fatal("adoption recreated the pod")
-			}
-			if cur.Annotations[linux.AnnotationTemplateName] != "fam32-aaaa1111" ||
-				cur.Annotations[linux.AnnotationTemplateRevision] != "2026-10-a" {
-				t.Fatalf("identity stamps not backfilled: %+v", cur.Annotations)
-			}
-		})
-	}
-}
-
-// A pre-stamp pod that does NOT equal the resolved candidate's rebuild
-// holds Degraded/TemplateRevisionGone — the pod stays running, never
-// disproved-by-silence. Covers rotated-out revisions, pods built from a
-// forged spec, and webhook-altered pods.
-func TestAdoptSnapshot_UnstampedPodCandidateMismatch(t *testing.T) {
-	s := snapScheme(t)
-	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-
-	forgedBuilt := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	forgedBuilt.Spec.Linux.Image = "attacker.example/miner@sha256:" + fmt.Sprintf("%064x", 4)
-	forgedBuilt.Spec.Placement = &cdiv1.PlacementSpec{
-		NodeSelector: map[string]string{"node-role.kubernetes.io/control-plane": ""},
-	}
-
-	cases := []struct {
-		name     string
-		podTpl   *cdiv1.WorkspaceTemplate // what the pod was built from
-		liveTpl  *cdiv1.WorkspaceTemplate // nil: family pruned
-		mungePod func(pod *corev1.Pod)
-	}{
-		{name: "forged-spec pod mismatch", podTpl: forgedBuilt, liveTpl: tpl},
-		{name: "webhook-altered pod mismatch", podTpl: tpl, liveTpl: tpl,
-			mungePod: func(pod *corev1.Pod) {
-				pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env,
-					corev1.EnvVar{Name: "INJECTED_BY_WEBHOOK", Value: "1"})
-			}},
-		{name: "template pruned entirely", podTpl: tpl},
-	}
-	for i, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ws := adoptWorkspace("fam32-aaaa1111", "", types.UID(fmt.Sprintf("ws-mm-%d", i)))
-			objs := []client.Object{ws}
-			if tc.liveTpl != nil {
-				objs = append(objs, tc.liveTpl)
-			}
-			c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(ws).Build()
-			pod := seedBuiltPod(t, c, ws, tc.podTpl)
-			unstamp(t, c, pod)
-			if tc.mungePod != nil {
-				tc.mungePod(pod)
-				if err := c.Update(context.Background(), pod); err != nil {
-					t.Fatalf("munge pod: %v", err)
-				}
-			}
-			got := adoptReconcile(t, s, c, ws)
-			assertRevisionGone(t, got)
-			cur := &corev1.Pod{}
-			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
-				t.Fatalf("pod vanished on hold: %v", err)
-			}
-		})
-	}
-}
-
-// Rotated case (1): the family now resolves a revision whose built pod
-// differs — the pod disproves the candidate and holds.
-func TestAdoptSnapshot_UnstampedPodRotatedMismatch(t *testing.T) {
-	s := snapScheme(t)
-	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-mm-rot"))
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
-	pod := seedBuiltPod(t, c, ws, tpl)
-	unstamp(t, c, pod)
-	// Rotate: the resolved revision now differs from what the pod was
-	// built from (spec is immutable — a republished object under the
-	// resolved name carries the new content).
-	rotated := tpl.DeepCopy()
-	rotated.Spec.Linux.Image = "cr.example/img@sha256:" + fmt.Sprintf("%064x", 0xb2)
-	if err := c.Update(context.Background(), rotated); err != nil {
-		t.Fatalf("rotate revision: %v", err)
-	}
-	got := adoptReconcile(t, s, c, ws)
-	assertRevisionGone(t, got)
-	cur := &corev1.Pod{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
-		t.Fatalf("pod vanished on hold: %v", err)
-	}
-	if cur.UID != pod.UID {
-		t.Fatal("hold recreated the pod")
-	}
-}
-
-// The rotated-but-pod-identical corner: spec.templateRef resolves a
-// NEWER revision object whose built pod is field-identical — the record
-// silently re-points to the live object (the pod cannot distinguish
-// revisions that build the same pod, and the live object is trusted).
-func TestAdoptSnapshot_UnstampedPodRotatedIdentical(t *testing.T) {
-	s := snapScheme(t)
-	old := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
-	// The resolved object: same pod-shaping content, newer revision name.
-	newer := adoptTemplate("tinycdi-tenant-a", "fam32-bbbb2222", types.UID("uid-b"))
-	newer.Spec.Revision = "2026-10-b"
-	ws := adoptWorkspace("fam32-bbbb2222", "", types.UID("ws-rot"))
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(ws, newer).WithStatusSubresource(ws).Build()
-	pod := seedBuiltPod(t, c, ws, old)
-	unstamp(t, c, pod)
-
-	got := adoptReconcile(t, s, c, ws)
-	snap := got.Status.TemplateSnapshot
-	if snap == nil || snap.Name != "fam32-bbbb2222" {
-		t.Fatalf("pod-identical newer revision was not adopted: %+v", snap)
 	}
 }
 
@@ -620,6 +419,73 @@ func TestAdoptSnapshot_ForeignPodNoAdopt(t *testing.T) {
 				t.Fatalf("want Degraded TemplateInvalid, got %+v", got.Status.Conditions)
 			}
 		})
+	}
+}
+
+// An owned pod without the identity and hash stamps cannot prove its
+// revision: the workspace holds Degraded/TemplateRevisionGone and the pod
+// is left exactly as it was. Every pod this operator builds carries the
+// stamps.
+//
+// templateRef names the exact revision object the pod was built from, so
+// the removed spec-rebuild proof would have matched and adopted it: this is
+// the case that proves the proof is gone.
+func TestAdoptSnapshot_UnstampedPodHolds(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32-aaaa1111", "", types.UID("ws-unstamped"))
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
+	pod := seedBuiltPod(t, c, ws, tpl)
+	unstamp(t, c, pod) // existing helper: drops name, revision and hash stamps and updates
+	before := pod.ResourceVersion
+
+	got := adoptReconcile(t, s, c, ws)
+	assertRevisionGone(t, got) // also fails if a snapshot was recorded
+	after := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), after); err != nil {
+		t.Fatalf("pod gone: %v", err)
+	}
+	if after.ResourceVersion != before {
+		t.Fatal("the held workspace's pod was modified")
+	}
+}
+
+// A pod with the name/revision stamps but no template-hash stamp cannot
+// prove its content either: PodMatchesTemplate is the hash comparison
+// alone, so the workspace holds and the pod is left as it was.
+func TestAdoptSnapshot_StampedPodWithoutHashHolds(t *testing.T) {
+	s := snapScheme(t)
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32", "", types.UID("ws-nohash"))
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(ws, tpl).WithStatusSubresource(ws).Build()
+	pod := seedBuiltPod(t, c, ws, tpl)
+	delete(pod.Annotations, linux.AnnotationTemplateHash)
+	if err := c.Update(context.Background(), pod); err != nil {
+		t.Fatalf("drop hash stamp: %v", err)
+	}
+	before := pod.ResourceVersion
+
+	got := adoptReconcile(t, s, c, ws)
+	assertRevisionGone(t, got)
+	after := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), after); err != nil {
+		t.Fatalf("pod gone: %v", err)
+	}
+	if after.ResourceVersion != before {
+		t.Fatal("the held workspace's pod was modified")
+	}
+}
+
+// recordedSnapshot reads status only: the template-snapshot annotation is a
+// mirror for human readers and is never a source.
+func TestRecordedSnapshot_IgnoresAnnotation(t *testing.T) {
+	tpl := adoptTemplate("tinycdi-tenant-a", "fam32-aaaa1111", types.UID("uid-a"))
+	ws := adoptWorkspace("fam32", "", types.UID("ws-anno"))
+	ws.Annotations = map[string]string{AnnotationTemplateSnapshot: snapshotAnnotation(t, tpl, "fam32-aaaa1111", 1)}
+	if got := recordedSnapshot(ws); got != nil {
+		t.Fatalf("recordedSnapshot = %+v, want nil without status", got)
 	}
 }
 

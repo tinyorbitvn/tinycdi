@@ -72,10 +72,10 @@ const (
 	AnnotationAppliedIntent = "workspaces.cdi.tinyorbit.vn/applied-intent"
 
 	// AnnotationTemplateSnapshot mirrors the operator-recorded
-	// status.templateSnapshot (JSON TemplateSnapshot) for consumers that
-	// predate the status field. It is plain object metadata — a Workspace
-	// writer can rewrite it — so convergence NEVER reads it; the status
-	// copy is the only source of truth.
+	// status.templateSnapshot (JSON TemplateSnapshot) for human readers.
+	// It is plain object metadata — a Workspace writer can rewrite it — so
+	// convergence NEVER reads it; the status copy is the only source of
+	// truth.
 	AnnotationTemplateSnapshot = "workspaces.cdi.tinyorbit.vn/template-snapshot"
 
 	// AnnotationIncarnationStart records the first observation of the
@@ -107,10 +107,10 @@ const (
 	// TemplateRevisionGone — and one edge-triggered Warning event is
 	// emitted after the status persist (SEC-10).
 	ReasonTemplateInvalid = "TemplateInvalid"
-	// ReasonTemplateRevisionGone — upgrade-path hold: a running workspace
-	// has no status.templateSnapshot yet and its incarnation pod's
-	// recorded template revision cannot be proven (the pod predates the
-	// identity stamp, or the stamped revision object was pruned or
+	// ReasonTemplateRevisionGone — status-loss hold: a running workspace
+	// has no status.templateSnapshot and its incarnation pod's recorded
+	// template revision cannot be proven (the pod carries no identity or
+	// hash stamp, or the stamped revision object was pruned or
 	// republished). The pod keeps running untouched; the workspace holds
 	// Pending with Degraded=True and one edge-triggered Warning event
 	// (emitted after the status persist). A stop/start re-snapshots from
@@ -434,13 +434,16 @@ func (r *WorkspaceReconciler) reconcileRunning(ctx context.Context, ws *cdiv1.Wo
 	// record is kept as a mirror for readers and is never trusted.
 	snap := ws.Status.TemplateSnapshot
 	if snap == nil {
-		// Upgrade path: a RUNNING workspace's incarnation pod names its
-		// template revision in operator-written stamped metadata; the
-		// LIVE revision object supplies the record's content. The
-		// writer-controlled annotation is never consulted — no pod (or a
-		// stopped workspace) falls through to a fresh snapshot of the
-		// live template, and an unprovable identity holds Degraded.
-		adopted, hres, done, aerr := r.adoptSnapshotFromPod(ctx, ws, applied)
+		// Status-loss recovery: a workspace whose status was lost (for
+		// example a CR restored without its status subresource) while its
+		// incarnation pod still runs re-establishes the record from the
+		// pod's operator-written template-name/template-revision stamps;
+		// the LIVE revision object supplies the content, and the pod's
+		// template-hash stamp must equal its hash. The writer-controlled
+		// annotation is never consulted — no pod (or a stopped workspace)
+		// falls through to a fresh snapshot of the live template, and an
+		// unprovable identity holds Degraded.
+		adopted, hres, done, aerr := r.adoptSnapshotFromStampedPod(ctx, ws, applied)
 		if aerr != nil {
 			return hres, aerr
 		}
@@ -1030,25 +1033,10 @@ func (r *WorkspaceReconciler) resolveTemplate(ctx context.Context, ws *cdiv1.Wor
 	return tpl, err
 }
 
-// recordedSnapshot returns the operator-recorded template snapshot —
-// status.templateSnapshot, falling back to the annotation mirror for rows
-// recorded before the status field existed. The annotation side is for
-// hints only (deadline requeues, retained-disk runtime labels): any caller
-// needing provenance must go through status or the adoption pod proof —
-// convergence never does this.
+// recordedSnapshot returns the operator-recorded template snapshot,
+// status.templateSnapshot, or nil. The annotation mirror is never read.
 func recordedSnapshot(ws *cdiv1.Workspace) *templateSnapshot {
-	if s := ws.Status.TemplateSnapshot; s != nil {
-		return s
-	}
-	raw := ws.Annotations[AnnotationTemplateSnapshot]
-	if raw == "" {
-		return nil
-	}
-	s := &templateSnapshot{}
-	if err := json.Unmarshal([]byte(raw), s); err != nil {
-		return nil
-	}
-	return s
+	return ws.Status.TemplateSnapshot
 }
 
 // templateFromSnapshot reconstructs the WorkspaceTemplate the runtime
@@ -1080,10 +1068,9 @@ func (r *WorkspaceReconciler) recordSnapshot(ctx context.Context, ws *cdiv1.Work
 }
 
 // mirrorSnapshotAnnotation keeps the template-snapshot annotation equal to
-// the status record for consumers that predate the status field (the
-// broker's expiry projection reads status first and falls back to the
-// annotation only for pre-upgrade rows). A Workspace writer can rewrite
-// the annotation at any time — harmless: nothing in convergence reads it.
+// the status record for human readers; no code reads it. A Workspace
+// writer can rewrite the annotation at any time — harmless: nothing in
+// convergence reads it.
 func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *cdiv1.Workspace, snap *templateSnapshot) error {
 	raw, err := json.Marshal(snap)
 	if err != nil {
@@ -1096,30 +1083,19 @@ func (r *WorkspaceReconciler) mirrorSnapshotAnnotation(ctx context.Context, ws *
 	return r.Update(ctx, ws)
 }
 
-// adoptSnapshotFromPod is the one-time upgrade path for workspaces
-// admitted before status.templateSnapshot existed. Two proofs, one
-// constant: the recorded content ALWAYS comes from a LIVE
-// WorkspaceTemplate object — the writer-controlled annotation is never
-// consulted — and runtimeGeneration/sourceRef come from the workspace
-// alone.
+// adoptSnapshotFromStampedPod recovers status.templateSnapshot for a
+// workspace whose status was lost (for example a CR restored without its
+// status subresource) while its incarnation pod still runs. The pod's
+// operator-written template-name/template-revision stamps name the
+// candidate revision; the LIVE object of that revision supplies the
+// content, and the pod's template-hash stamp must equal its hash. The
+// writer-controlled template-snapshot annotation is never consulted.
 //
-//   - Stamped pod (post-change builds): its operator-written
-//     template-name/template-revision annotations name the candidate
-//     object; the live object must carry the same revision and the pod
-//     must provably match it.
-//   - Pre-stamp pod (v0.5 builds): the candidate is the live revision
-//     spec.templateRef resolves to; the pod must equal a normalized
-//     rebuild of that object — a pod built from a rotated, pruned,
-//     webhook-altered or forged spec never matches and holds. On a
-//     match the identity stamps are backfilled onto the pod so the
-//     next upgrade reads them directly.
-//
-// Returns (nil, _, false, nil) when there is no proving pod: the caller
-// falls through to a fresh snapshot of the live template. When the pod
-// exists but its revision cannot be proven, done is true and the
-// returned ctrl.Result is the Degraded/TemplateRevisionGone hold the
-// caller must return — the pod is left running untouched.
-func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
+// Returns (nil, _, false, nil) when there is no owned pod: the caller
+// takes a fresh snapshot of the live template. When the pod exists but
+// cannot prove its revision, done is true and the returned ctrl.Result is
+// the Degraded/TemplateRevisionGone hold — the pod is left untouched.
+func (r *WorkspaceReconciler) adoptSnapshotFromStampedPod(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent) (snap *templateSnapshot, res ctrl.Result, done bool, err error) {
 	ident, ierr := r.Backend.PodTemplateIdentity(ctx, ws)
 	if ierr != nil {
 		return nil, ctrl.Result{}, false, ierr
@@ -1139,31 +1115,20 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *cdiv
 		hres, hErr := r.holdTemplateInvalid(ctx, ws, applied, detail)
 		return nil, hres, hErr == nil, hErr
 	}
-	var live *cdiv1.WorkspaceTemplate
 	if ident.Name == "" {
-		// Pre-stamp pod: the only trustworthy candidate is the live
-		// object spec.templateRef names — a pod built from a
-		// rotated-out revision fails the rebuild and holds.
-		live, err = r.resolveTemplate(ctx, ws)
-		switch {
-		case apierrors.IsNotFound(err):
-			return gone("the running pod predates the identity stamp and spec.templateRef resolves nothing")
-		case err != nil:
-			return nil, ctrl.Result{}, false, err
-		}
-	} else {
-		live = &cdiv1.WorkspaceTemplate{}
-		gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
-		switch {
-		case apierrors.IsNotFound(gerr):
-			return gone(fmt.Sprintf("recorded template revision %q no longer exists", ident.Name))
-		case gerr != nil:
-			return nil, ctrl.Result{}, false, gerr
-		}
-		if live.Spec.Revision != ident.Revision {
-			return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
-				ident.Name, live.Spec.Revision, ident.Revision))
-		}
+		return gone("the running pod carries no template identity stamp")
+	}
+	live := &cdiv1.WorkspaceTemplate{}
+	gerr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ident.Name}, live)
+	switch {
+	case apierrors.IsNotFound(gerr):
+		return gone(fmt.Sprintf("recorded template revision %q no longer exists", ident.Name))
+	case gerr != nil:
+		return nil, ctrl.Result{}, false, gerr
+	}
+	if live.Spec.Revision != ident.Revision {
+		return gone(fmt.Sprintf("template %q now carries revision %q; the pod recorded %q",
+			ident.Name, live.Spec.Revision, ident.Revision))
 	}
 	// Content gate: an inadmissible template — a live object whose
 	// seccomp-profile annotation is out of policy — is never adopted into
@@ -1173,25 +1138,15 @@ func (r *WorkspaceReconciler) adoptSnapshotFromPod(ctx context.Context, ws *cdiv
 	if verr := linux.ValidateSeccompAnnotation(live.Annotations); verr != nil {
 		return invalid(fmt.Sprintf("template %q carries an out-of-policy seccomp profile: %v", live.Name, verr))
 	}
-	// The pod must provably derive from that object — hash stamp, or an
-	// exact spec rebuild for pods built before the stamps — so a
-	// mislabeled, rotated, forged or webhook-altered pod can never drag
-	// an unrelated record into status.
+	// The pod must provably derive from that object — its template-hash
+	// stamp — so a mislabeled, rotated, forged or webhook-altered pod can
+	// never drag an unrelated record into status.
 	ok, merr := r.Backend.PodMatchesTemplate(ctx, ws, live)
 	if merr != nil {
 		return nil, ctrl.Result{}, false, merr
 	}
 	if !ok {
 		return gone(fmt.Sprintf("the running pod does not match template %q", live.Name))
-	}
-	if ident.Name == "" {
-		// Backfill the stamps so later reconciles and upgrades read the
-		// proven identity off the pod itself. Best-effort: the record is
-		// already proven, the stamp only spares the next compare.
-		if serr := r.Backend.StampPodTemplateIdentity(ctx, ws, live); serr != nil {
-			logf.FromContext(ctx).Info("pod identity stamp backfill failed (continuing)",
-				"error", serr)
-		}
 	}
 	snap, rerr := snapshotTemplate(live)
 	if rerr != nil {
@@ -1281,9 +1236,9 @@ func (r *WorkspaceReconciler) holdTemplateInvalid(ctx context.Context, ws *cdiv1
 		"the workspace's template could not be established; runtime convergence is held")
 }
 
-// holdTemplateRevisionGone is the upgrade-path hold for a workspace whose
+// holdTemplateRevisionGone is the status-loss hold for a workspace whose
 // running pod exists but whose recorded template revision cannot be
-// proven — the pod predates identity stamps, the stamped object was
+// proven — the pod carries no identity or hash stamp, the stamped object was
 // pruned or republished, or the pod does not match it. The pod keeps
 // running untouched; a stop/start re-snapshots from the live template.
 func (r *WorkspaceReconciler) holdTemplateRevisionGone(ctx context.Context, ws *cdiv1.Workspace, applied *AppliedIntent, detail string) (ctrl.Result, error) {
@@ -1334,9 +1289,9 @@ var snapshotSessionCmdPattern = regexp.MustCompile(cdiv1.SessionCmdPattern)
 //     runtime-block exclusivity rules.
 //
 // Provenance is NOT re-checked here and needs no live object: the status
-// copy is writable only by the operator service account, and an
-// annotation-side record reaches the same function only through the
-// upgrade-adoption pod proof — each establishes provenance at record time.
+// copy is writable only by the operator service account, and a record
+// recovered after status loss is taken from the live revision a stamped
+// pod proves — each establishes provenance at record time.
 // A deleted or re-published revision therefore never invalidates a
 // recorded snapshot (design §4).
 func verifySnapshotRecord(snap *templateSnapshot) error {
