@@ -458,6 +458,11 @@ Controls:
   `localhost/` (`buildPod`, `internal/runtime/linux/backend.go`).
   `runtime.appArmor.requireRuntimeDefault=false` drops the fail-closed
   guarantee on nodes without AppArmor (`AppArmorNotRequired`, TM-41).
+  The pod spec has no process limit: the process and thread count is
+  bounded by the kubelet's `podPidsLimit` on the workspace nodes, which
+  the install guide requires and the preflight `pids` check reads.
+  Without it, a workspace bounded only by its memory limit can exhaust
+  the node's `kernel.threads-max`.
 - **Kasm adapter**: an init image writes adapter scripts into a shared
   `emptyDir` mounted read-only into the desktop container
   (`build/kasm-adapter/main.go`). The adapter neutralizes the image's
@@ -834,6 +839,9 @@ Each item is also a known limitation in the
     author, merge and approve a publish, and no independent security
     audit has been done. There is no register row: this is a property of
     the project, not of a control.
+11. **Process count needs a kubelet bound.** The product cannot set or
+    enforce the kubelet's `podPidsLimit`; it requires it at install and
+    checks it in preflight. See [Pod hardening](#boundary-6--session-listener--workspace-pod-tcdi-xferd-8443--kasmvnc-1270018444).
 
 ## 8. Review guide
 

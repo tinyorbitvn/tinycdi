@@ -60,7 +60,8 @@ Run the preflight script first. It checks the Kubernetes version,
 NetworkPolicy enforcement (with a throwaway probe namespace it always
 deletes), a StorageClass, user-namespace support, the workspace node pool,
 AppArmor on the workspace nodes (it names the fitting
-`runtime.appArmor.requireRuntimeDefault` value), wildcard DNS, the session
+`runtime.appArmor.requireRuntimeDefault` value), the kubelet process bound
+on the workspace nodes (`podPidsLimit`), wildcard DNS, the session
 TLS Secret, OIDC discovery and Postgres with TLS verification, and prints
 `PASS`/`WARN`/`FAIL` with a one-line fix for each
 (exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
@@ -192,6 +193,20 @@ Also gather:
    different values when your pool already exists under another label or
    taint — but never leave the selector empty (the render fails: a
    dedicated pool with no selector would schedule nowhere).
+
+   **Process bound (required).** The pod spec has no process limit, so a
+   workspace's process and thread count is bounded only by the kubelet's
+   `podPidsLimit`, and its default (`-1`) is unlimited. Without it, one
+   desktop can use up the node's `kernel.threads-max` and make `fork`
+   fail for every pod on the node, the kubelet included. Set
+   `podPidsLimit` (for example `4096`) in the kubelet configuration of
+   every node that runs workspaces, or reserve PIDs with
+   `--system-reserved=pid=<n>` and a `pid.available` eviction threshold.
+   This is node configuration: TinyCDI cannot set it. The preflight
+   `pids` check reads each workspace node's value from the kubelet
+   `configz` endpoint and warns when it is unset or `-1`. On a shared
+   node (`allowSharedNodes: true`) the same bound protects the unrelated
+   workloads there.
 
    **Shared nodes (opt-out).** `runtime.placement.allowSharedNodes: true`
    passes no placement flags at all: runtime pods schedule anywhere

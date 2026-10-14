@@ -63,4 +63,15 @@ absent   R1-27 docs/releases/v1.0.0.md 'Net effect: a tampered helper can mishan
 need     R1-27 docs/runbooks/session-policy.md 'over the desktop leg'
 need     R1-27 SECURITY.md 'Clipboard, file-transfer and other in-desktop restrictions are UX defaults, not DLP'
 
+# R1-07: a workspace's process/thread count is bounded only by the kubelet's
+# podPidsLimit; the install guide requires it, preflight checks it, the
+# quickstart cluster runs bounded, and the residual is stated.
+need R1-07 docs/runbooks/install.md 'podPidsLimit'
+need R1-07 docs/runbooks/install.md 'kernel\.threads-max'
+need R1-07 hack/quickstart/kind-config.yaml 'kind: KubeletConfiguration podPidsLimit: [1-9][0-9]*'
+need R1-07 hack/preflight/README.md '\| `pids` \|'
+need R1-07 docs/releases/v1.0.0.md 'Process count needs a kubelet bound\.'
+need R1-07 docs/security/threat-model.md 'Process count needs a kubelet bound\.'
+need R1-07 docs/security/threat-model.md '\*\*Pod hardening\*\*:[^*]*podPidsLimit'
+
 exit "$fails"

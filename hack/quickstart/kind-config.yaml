@@ -15,3 +15,10 @@ nodes:
     extraPortMappings:
       - {containerPort: 30080, hostPort: 80, listenAddress: "127.0.0.1", protocol: TCP}
       - {containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: TCP}
+# Workspace pods have no pod-spec process limit; the kubelet's podPidsLimit
+# is the bound (docs/runbooks/install.md step 9). The quickstart runs with
+# one so CI's kind clusters exercise a bounded node.
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    podPidsLimit: 4096
