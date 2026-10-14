@@ -541,7 +541,14 @@ and an update to this file.
      retained-disk attach/purge and quota/per-user limit admin —
      misconfiguration is a privilege grant, so keep the list small and
      review the IdP group membership; the match is the same exact,
-     no-full-path form as the login gate and the list must not be empty;
+     no-full-path form as the login gate and the list must not be empty.
+     The role follows the `groups` stored with the portal session at
+     sign-in: removing someone from an admin group at the IdP takes effect
+     at their next sign-in, up to the absolute timeout (12 h by default).
+     To end it at once, another tenant admin signs them out with
+     `POST /v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all`
+     (per-user sign-out), which ends their portal sessions, leases and
+     launch tickets in that tenant;
    - **gate who may log in** with `oidc.requiredGroups` (e.g.
      `[platform-admins]`). Every account that passes gets a desktop with
      Internet egress inside your network. The match is verbatim, so emit

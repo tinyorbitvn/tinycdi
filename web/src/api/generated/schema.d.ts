@@ -717,13 +717,15 @@ export interface paths {
          * Restart running workspaces that are looser than the ceiling
          * @description Applies the tenant's session data-transfer ceiling to running
          *     workspaces whose stamped policy grants more than the ceiling now
-         *     allows (F3). Always dry run first (`{"dryRun": true}` lists the
-         *     affected workspaces and changes nothing); the confirmed call
-         *     restarts each listed workspace through the generation-fenced
-         *     restart — a double-submitted or superseded call never bumps a
-         *     generation twice, and a workspace whose latest intent the
-         *     operator has not reconciled yet is reported `skipped_moved`,
-         *     never restarted again.
+         *     allows (F3). Run a dry run first (`{"dryRun": true}` lists the
+         *     affected workspaces and changes nothing); the portal always does.
+         *     The server does not require one: every call must state `dryRun`,
+         *     and a confirmed call (`{"dryRun": false}`) with a current
+         *     `If-Match` restarts each affected workspace through the
+         *     generation-fenced restart — a double-submitted or superseded call
+         *     never bumps a generation twice, and a workspace whose latest
+         *     intent the operator has not reconciled yet is reported
+         *     `skipped_moved`, never restarted again.
          *
          *     Workspaces with a live desktop session are skipped
          *     (`skipped_active`) unless `includeActive` is true; their users

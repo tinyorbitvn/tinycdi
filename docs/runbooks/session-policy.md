@@ -128,7 +128,9 @@ are kept and open desktops reconnect to the new policy.
 
 1. **Dry run.** `{"dryRun": true}` restarts nothing and lists every running
    workspace that is looser than the stored ceiling, with its owner, the
-   applied and the resulting policy, and whether a session is live.
+   applied and the resulting policy, and whether a session is live. The
+   portal always runs it before the confirm. The API does not enforce the
+   order, so a scripted caller must run it itself.
 2. **Confirm.** `{"dryRun": false}` restarts the listed workspaces, except
    those with a live session. Add `"includeActive": true` to restart those
    too; their users are disconnected.
