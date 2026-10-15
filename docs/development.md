@@ -103,31 +103,44 @@ The soak and drill harness lives in
 ## Regenerating the README screenshots
 
 `web/scripts/screenshots.mjs` reproduces every image under
-`docs/images/screenshots/` — real captures, no mockups. It is a manual
-tool and is NOT wired into CI.
+`docs/images/screenshots/`. These are real captures, not mockups. It is a
+manual tool and is NOT wired into CI.
 
 ```sh
-npm --prefix web ci          # once — provides Playwright + its browsers
-node web/scripts/screenshots.mjs
+npm --prefix web ci                                   # once: Playwright + its browsers
+node web/scripts/screenshots.mjs                      # both passes
+node web/scripts/screenshots.mjs --only portal        # portal/admin only (no Docker)
+node web/scripts/screenshots.mjs --only runtime       # runtime images only
+node web/scripts/screenshots.mjs --list               # print the files a run writes
 ```
 
 What it does:
 
-1. **Portal views** — boots the `tests-portal` harness: the built SPA
-   served by the real Go frontend binary (`build/frontend`) over HTTPS with the contract mock
-   (`web/tests/mock-api`) behind it, seeds generic demo workspaces through
-   the mock's public + `/_control` endpoints, and captures the workspace
-   list, create form, detail and retained-data pages.
-2. **Live sessions** — runs `ghcr.io/tinyorbitvn/tinycdi-linux-desktop`
-   and `ghcr.io/tinyorbitvn/tinycdi-browser` under Docker exactly like the
-   integration suite (mounted TLS cert + credentials, tmpfs `/run/tcdi`,
-   caps dropped, seccomp). The browser container additionally bind-mounts
-   an xstartup that points Chromium at `https://example.com` instead of
-   `about:blank` — the only deviation, the sandbox stays on. The KasmVNC
-   web client is screenshotted over HTTPS with basic-auth credentials.
+1. **Portal and admin views.** Boots the `tests-portal` harness: the built
+   SPA served by the real Go frontend binary (`build/frontend`) over HTTPS,
+   with the contract mock (`web/tests/mock-api`) behind it in demo mode
+   (`MOCK_DEMO=1`). It makes the principal a tenant admin, adds peer users
+   through `/_control`, and captures the workspace list, create form,
+   workspace detail, admin overview, session policy and audit log. Each
+   view is captured twice, at 1440×900 and device scale 2, with
+   Playwright's `colorScheme` set to `light` and `dark`:
+   `<stem>-light.png` / `<stem>-dark.png`. The README shows the pair
+   through `<picture>`.
+2. **Live sessions.** Runs `ghcr.io/tinyorbitvn/tinycdi-linux-desktop:1.0.0`
+   and `ghcr.io/tinyorbitvn/tinycdi-browser:1.0.0` under Docker exactly
+   like the integration suite (mounted TLS cert + credentials, tmpfs
+   `/run/tcdi`, caps dropped, seccomp). The browser container additionally
+   bind-mounts an xstartup that points Chromium at `https://example.com`
+   instead of `about:blank`. That is the only deviation, and the sandbox
+   stays on. The KasmVNC web client is screenshotted over HTTPS with
+   basic-auth credentials, one capture each (`session-desktop.png`,
+   `session-browser.png`), since the desktop is not themed by the portal.
    Containers are named `tcdi-w19-*` and removed afterwards.
+3. **Optimisation.** When `pngquant` and/or `oxipng` are on `PATH`, every
+   PNG is optimised in place. Files above the 400 KB README budget are
+   reported as warnings.
 
-Requires Docker and ~5 GB of free disk for the runtime images.
+The runtime pass requires Docker and ~5 GB of free disk for the images.
 Environment knobs: `SHOTS_DIR` (output directory), `DESKTOP_IMAGE` /
 `BROWSER_IMAGE` (image refs), `KEEP=1` (leave containers running for
 inspection).

@@ -14,12 +14,17 @@
 //
 // Manual tool — NOT part of CI. See docs/development.md.
 //
-// Usage:  npm --prefix web ci && node web/scripts/screenshots.mjs
+// Usage:  npm --prefix web ci && node web/scripts/screenshots.mjs [--only portal|runtime] [--list]
+//   --only portal   portal/admin pass only (no Docker needed)
+//   --only runtime  runtime-image pass only
+//   --list          print the files this run would write, then exit
+// Portal/admin views are captured twice (colorScheme light + dark) at
+// 1440×900, device scale 2, English UI, demo data (MOCK_DEMO=1).
 // Env knobs: SHOTS_DIR, DESKTOP_IMAGE, BROWSER_IMAGE, KEEP=1 (skip cleanup).
 
 import { chromium } from "@playwright/test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,8 +35,8 @@ import { randomBytes } from "node:crypto";
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = path.resolve(WEB_DIR, "..");
 const OUT_DIR = path.resolve(process.env.SHOTS_DIR ?? path.join(REPO_ROOT, "docs/images/screenshots"));
-const DESKTOP_IMAGE = process.env.DESKTOP_IMAGE ?? "ghcr.io/tinyorbitvn/tinycdi-linux-desktop:0.1.0";
-const BROWSER_IMAGE = process.env.BROWSER_IMAGE ?? "ghcr.io/tinyorbitvn/tinycdi-browser:0.1.0";
+const DESKTOP_IMAGE = process.env.DESKTOP_IMAGE ?? "ghcr.io/tinyorbitvn/tinycdi-linux-desktop:1.0.0";
+const BROWSER_IMAGE = process.env.BROWSER_IMAGE ?? "ghcr.io/tinyorbitvn/tinycdi-browser:1.0.0";
 const KEEP = process.env.KEEP === "1";
 const RUN_PREFIX = "tcdi-w19-";
 
@@ -41,9 +46,46 @@ const VIEWPORT = { width: 1440, height: 900 };
 
 // Demo identities are deliberately generic — no real names, hostnames or
 // emails in shipped screenshots.
-const TEMPLATE_LINUX = "tpl_01J4ZB3N1RXD7P2V8W5K0H6Q4M"; // linux-firefox-desktop (mock fixture)
-const TEMPLATE_BROWSER = "tpl_01J4ZC7M2QXW8P3V9H5K1N6R4T"; // linux-chromium-browser
 const DEMO_PASSWORD = randomBytes(18).toString("base64url");
+
+const PORTAL_STEMS = [
+  "portal-workspaces",
+  "portal-create",
+  "portal-detail",
+  "admin-overview",
+  "admin-session-policy",
+  "admin-audit",
+];
+const RUNTIME_STEMS = ["session-desktop", "session-browser"];
+const SCHEMES = ["light", "dark"];
+
+function parseArgs(argv) {
+  const out = { only: null, list: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--list") out.list = true;
+    else if (a === "--only") out.only = argv[++i] ?? "";
+    else if (a.startsWith("--only=")) out.only = a.slice("--only=".length);
+    else throw new Error(`unknown argument ${a} (use --only portal|runtime, --list)`);
+  }
+  if (out.only !== null && out.only !== "portal" && out.only !== "runtime") {
+    throw new Error(`--only must be portal or runtime, got "${out.only}"`);
+  }
+  return out;
+}
+
+function outputFiles(only) {
+  const portal = PORTAL_STEMS.flatMap((s) => SCHEMES.map((c) => `${s}-${c}.png`));
+  const runtime = RUNTIME_STEMS.map((s) => `${s}.png`);
+  return only === "portal" ? portal : only === "runtime" ? runtime : [...portal, ...runtime];
+}
+
+const ARGS = parseArgs(process.argv.slice(2));
+if (ARGS.list) {
+  // Before any process/cleanup hooks: --list never starts the harness.
+  for (const f of outputFiles(ARGS.only)) console.log(f);
+  process.exit(0);
+}
 
 const procs = [];
 function cleanup() {
@@ -108,106 +150,101 @@ async function api(method, p, body) {
   return text ? JSON.parse(text) : {};
 }
 
-const READY_CONDITIONS = [
-  { type: "Admitted", status: "True", reason: "QuotaReserved", lastTransitionTime: "2026-09-30T10:00:00Z" },
-  { type: "StorageReady", status: "True", reason: "VolumeBound", lastTransitionTime: "2026-09-30T10:01:00Z" },
-  { type: "RuntimeReady", status: "True", reason: "RuntimeUp", lastTransitionTime: "2026-09-30T10:02:00Z" },
-  { type: "ConnectionReady", status: "True", reason: "StreamEndpointUp", lastTransitionTime: "2026-09-30T10:02:30Z" },
-];
-
 async function seedPortalData() {
+  // MOCK_DEMO=1: reset re-seeds the demo tenant (mixed phases, events,
+  // retained data); the admin role + peer users fill the admin views.
   await api("POST", "/_control/reset");
+  await api("POST", "/_control/admin/me", { roles: ["user", "tenant-admin"] });
+  await api("POST", "/_control/admin/seed");
+  const { items = [] } = await api("GET", "/v1/workspaces");
+  const ready = items.find((w) => w.phase === "Ready");
+  if (!ready) throw new Error("demo tenant has no Ready workspace to open");
+  return { readyId: ready.id, readyName: ready.name };
+}
 
-  // A ready Linux desktop — the one the detail screenshot opens.
-  const alice = await api("POST", "/v1/workspaces", {
-    name: "alice-desktop",
-    templateRef: TEMPLATE_LINUX,
-    desiredState: "Running",
+async function capturePortal(browser, scheme, ids) {
+  const ctx = await browser.newContext({
+    viewport: VIEWPORT,
+    deviceScaleFactor: 2,
+    colorScheme: scheme,
+    locale: "en-US",
+    reducedMotion: "reduce",
+    ignoreHTTPSErrors: true,
   });
-  await api("POST", `/_control/workspaces/${alice.id}`, {
-    phase: "Ready",
-    conditions: READY_CONDITIONS,
-  });
+  const page = await ctx.newPage();
+  const shoot = async (stem) => {
+    await page.waitForTimeout(500); // let fonts and the first poll settle
+    const file = `${stem}-${scheme}.png`;
+    await page.screenshot({ path: path.join(OUT_DIR, file) });
+    console.log(`[portal] captured ${file}`);
+  };
 
-  // A ready browser workspace.
-  const browser = await api("POST", "/v1/workspaces", {
-    name: "scratch-browser",
-    templateRef: TEMPLATE_BROWSER,
-    desiredState: "Running",
-  });
-  await api("POST", `/_control/workspaces/${browser.id}`, {
-    phase: "Ready",
-    conditions: READY_CONDITIONS,
-  });
+  // Log in through the mock's dev SSO form (real redirect path).
+  await page.goto(`${PORTAL_ORIGIN}/`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Log in with SSO" }).click();
+  await page.getByRole("table", { name: "workspaces" }).waitFor();
+  await shoot("portal-workspaces");
 
-  // One mid-lifecycle workspace for variety in the list.
-  await api("POST", "/v1/workspaces", {
-    name: "render-job",
-    templateRef: TEMPLATE_LINUX,
-    desiredState: "Running",
-  }); // stays Provisioning
+  await page.goto(`${PORTAL_ORIGIN}/workspaces/new`);
+  await page.getByRole("heading", { name: "New workspace" }).waitFor();
+  await page.getByLabel(/^Name\b/).fill("team-browser");
+  await page.locator("select[name='template']").selectOption({ index: 1 });
+  await shoot("portal-create");
 
-  return { aliceId: alice.id };
+  await page.goto(`${PORTAL_ORIGIN}/workspaces/${ids.readyId}`);
+  await page.locator("h1", { hasText: ids.readyName }).waitFor();
+  await shoot("portal-detail");
+
+  await page.goto(`${PORTAL_ORIGIN}/admin`);
+  await page.getByRole("heading", { name: "Tenant overview" }).waitFor();
+  await shoot("admin-overview");
+
+  await page.goto(`${PORTAL_ORIGIN}/admin/session-policy`);
+  await page.getByRole("heading", { name: "Session policy", level: 1 }).waitFor();
+  await shoot("admin-session-policy");
+
+  await page.goto(`${PORTAL_ORIGIN}/admin/audit`);
+  await page.getByRole("heading", { name: "Audit log", level: 1 }).waitFor();
+  await shoot("admin-audit");
+
+  await ctx.close();
 }
 
 async function shotPortal() {
   console.log("[portal] starting tests-portal harness (builds SPA + portal binary)…");
-  const serve = spawn(
-    "node",
-    ["--disable-warning=ExperimentalWarning", "tests-portal/serve.ts"],
-    { cwd: WEB_DIR, stdio: ["ignore", "pipe", "inherit"] },
-  );
+  const serve = spawn("node", ["--disable-warning=ExperimentalWarning", "tests-portal/serve.ts"], {
+    cwd: WEB_DIR,
+    stdio: ["ignore", "pipe", "inherit"],
+    env: { ...process.env, MOCK_DEMO: "1" },
+  });
   procs.push(serve);
   serve.stdout.on("data", (d) => process.stdout.write(`[harness] ${d}`));
   await waitHttp(`${MOCK_API}/_control/health`, "mock api");
   await waitHttp(`${PORTAL_ORIGIN}/healthz`, "portal");
 
-  const { aliceId } = await seedPortalData();
-
+  const ids = await seedPortalData();
   const browser = await chromium.launch();
   try {
-    const ctx = await browser.newContext({
-      viewport: VIEWPORT,
-      deviceScaleFactor: 1,
-      ignoreHTTPSErrors: true,
-    });
-    const page = await ctx.newPage();
-
-    // Log in through the mock's dev SSO form (real redirect path).
-    await page.goto(`${PORTAL_ORIGIN}/`, { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: "Log in with SSO" }).click();
-    await page.getByRole("heading", { name: "Workspaces" }).waitFor();
-    await page.waitForSelector("table[aria-label='workspaces']");
-    await page.waitForTimeout(400);
-    await page.screenshot({ path: path.join(OUT_DIR, "portal-workspaces.png") });
-    console.log("[portal] captured portal-workspaces.png");
-
-    // Create-workspace form, filled in.
-    await page.getByRole("link", { name: "New workspace" }).click();
-    await page.getByRole("heading", { name: "New workspace" }).waitFor();
-    await page.getByLabel("Name").fill("team-browser");
-    await page.locator("select[name='template']").selectOption(TEMPLATE_BROWSER);
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: path.join(OUT_DIR, "portal-create.png") });
-    console.log("[portal] captured portal-create.png");
-
-    // Workspace detail of the ready desktop (conditions + connect).
-    await page.goto(`${PORTAL_ORIGIN}/workspaces/${aliceId}`);
-    await page.getByRole("heading", { name: /alice-desktop/ }).waitFor();
-    await page.waitForTimeout(400);
-    await page.screenshot({ path: path.join(OUT_DIR, "portal-detail.png") });
-    console.log("[portal] captured portal-detail.png");
-
-    // Retained-data inventory.
-    await page.goto(`${PORTAL_ORIGIN}/data`);
-    await page.getByRole("heading", { name: /retained data/i }).waitFor();
-    await page.waitForTimeout(400);
-    await page.screenshot({ path: path.join(OUT_DIR, "portal-data.png") });
-    console.log("[portal] captured portal-data.png");
-
-    await ctx.close();
+    for (const scheme of SCHEMES) await capturePortal(browser, scheme, ids);
   } finally {
     await browser.close();
+  }
+}
+
+// Lossy-then-lossless PNG optimisation when the tools exist; warn above the
+// 400 KB README budget instead of failing (manual tool).
+function optimise(files) {
+  const has = (bin) => spawnSync(bin, ["--version"], { stdio: "ignore" }).status === 0;
+  const quant = has("pngquant");
+  const oxi = has("oxipng");
+  if (!quant && !oxi) console.warn("[optimise] neither pngquant nor oxipng found; PNGs left as captured");
+  for (const f of files) {
+    const p = path.join(OUT_DIR, f);
+    if (!existsSync(p)) continue;
+    if (quant) spawnSync("pngquant", ["--force", "--skip-if-larger", "--quality=70-95", "--output", p, p], { stdio: "inherit" });
+    if (oxi) spawnSync("oxipng", ["-o", "3", "--strip", "safe", "-q", p], { stdio: "inherit" });
+    const kb = Math.round(statSync(p).size / 1024);
+    if (kb > 400) console.warn(`[optimise] ${f} is ${kb} KB (target ≤ 400 KB)`);
   }
 }
 
@@ -271,7 +308,7 @@ async function shotRuntime(name, port, file, settleMs, interact) {
   try {
     const ctx = await browser.newContext({
       viewport: VIEWPORT,
-      deviceScaleFactor: 1,
+      deviceScaleFactor: 2,
       ignoreHTTPSErrors: true,
       httpCredentials: { username: "kasm_user", password: DEMO_PASSWORD },
     });
@@ -328,9 +365,10 @@ async function shotRuntimes() {
 
 mkdirSync(OUT_DIR, { recursive: true });
 try {
-  await shotPortal();
-  await shotRuntimes();
+  if (ARGS.only !== "runtime") await shotPortal();
+  if (ARGS.only !== "portal") await shotRuntimes();
+  optimise(outputFiles(ARGS.only));
 } finally {
   cleanup();
 }
-console.log(`done — screenshots in ${OUT_DIR}`);
+console.log(`done: screenshots in ${OUT_DIR}`);
