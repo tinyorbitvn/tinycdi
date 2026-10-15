@@ -268,6 +268,17 @@ signed images actually installed — read off each image's attested SPDX
 SBOM at publish time (what `dpkg-query` reports), not the Dockerfile
 pins that requested them. `linux-base` carries no browser.
 
+`builtAt` is the earliest build time of the train's three images. Each
+build job records one UTC second, stamps it into the image's
+`org.opencontainers.image.created` label and writes it as
+`<image>.built-at` next to the image ref. `write-runtime-manifest.sh`
+refuses to run without it, so `builtAt` is never the publish time. The
+publish job also refuses to sign when any scan leg finished more than
+`SCAN_MAX_AGE_HOURS` (24) hours earlier (`check-scan-age.sh`, reading
+the run's jobs API). An approval granted later than that, or a re-run
+of an old run's failed publish, fails, and the remedy is a fresh run,
+which rebuilds and rescans.
+
 Chart values stay GitOps-owned (P7): deployments bump
 `images.*.digest`/`images.*.builtAt` from the manifest — the train
 mutates nothing downstream. `runtime-freshness.yml`'s `image-age` job

@@ -16,14 +16,19 @@
 #             installed in the shipped image, not the Dockerfile pins
 #             that asked for them.
 # Env: RT_TAG   — required; the rt-YYYYMMDD.N tag just promoted
-#      BUILT_AT — manifest timestamp (default: now, UTC)
+#      BUILT_AT — required; the earliest build time of the train's images
+#                 (earliest-built-at.sh over the build jobs' <image>.built-at),
+#                 UTC YYYY-MM-DDTHH:MM:SSZ. Never defaulted to the publish
+#                 clock (R1-09): a late approval must not make old images new.
 set -euo pipefail
 
 DIR="${1:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
 SBOMS="${2:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
 OUT="${3:?usage: write-runtime-manifest.sh <refs-dir> <sboms-dir> <out-file>}"
 TAG="${RT_TAG:?RT_TAG unset (the rt-YYYYMMDD.N tag this train promoted)}"
-BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+BUILT_AT="${BUILT_AT:?BUILT_AT unset (the build-job time from earliest-built-at.sh)}"
+[[ "$BUILT_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+  || { echo "::error::BUILT_AT '$BUILT_AT' is not UTC YYYY-MM-DDTHH:MM:SSZ"; exit 1; }
 
 [[ "$TAG" =~ ^rt-[0-9]{8}\.[0-9]+$ ]] \
   || { echo "::error::RT_TAG '$TAG' is not rt-YYYYMMDD.N"; exit 1; }

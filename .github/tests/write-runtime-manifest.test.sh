@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 GEN="$ROOT/.github/scripts/write-runtime-manifest.sh"
 D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
 fails=0
+EARLIEST="$ROOT/.github/scripts/earliest-built-at.sh"
 
 # real-shaped 64-hex digests
 DGD="$(printf 'a%.0s' $(seq 64))"
@@ -119,6 +120,44 @@ echo 'not json' > "$D/sboms-badjson/sbom-browser.spdx.json"
 run_gen "$D/refs" "$D/sboms-badjson" "$D/badjson.json"
 { [ "$rc" -ne 0 ] && [ ! -e "$D/badjson.json" ]; } \
   || { echo "FAIL: non-JSON SBOM accepted"; fails=1; }
+
+# --- R1-09: BUILT_AT is required — the publish clock is never builtAt ---
+out="$(RT_TAG=rt-20261020.1 bash "$GEN" "$D/refs" "$D/sboms" "$D/nobuilt.json" 2>&1)" && rc=0 || rc=$?
+{ [ "$rc" -ne 0 ] && [ ! -e "$D/nobuilt.json" ]; } \
+  || { echo "FAIL: unset BUILT_AT accepted (builtAt would be the publish time)"; fails=1; }
+
+# --- R1-09: BUILT_AT must be a UTC RFC 3339 second ---
+out="$(RT_TAG=rt-20261020.1 BUILT_AT=yesterday \
+  bash "$GEN" "$D/refs" "$D/sboms" "$D/badbuilt.json" 2>&1)" && rc=0 || rc=$?
+{ [ "$rc" -ne 0 ] && [ ! -e "$D/badbuilt.json" ]; } \
+  || { echo "FAIL: malformed BUILT_AT accepted"; fails=1; }
+
+# --- R1-09: builtAt is the EARLIEST build-job time of the train ---
+mkdir -p "$D/refs-ba"; cp "$D/refs/"*.ref "$D/refs-ba/"
+printf '2026-09-01T04:23:00Z\n' > "$D/refs-ba/linux-base.built-at"
+printf '2026-09-01T04:41:10Z\n' > "$D/refs-ba/linux-desktop.built-at"
+printf '2026-09-01T04:40:02Z\n' > "$D/refs-ba/browser.built-at"
+ba="$(bash "$EARLIEST" "$D/refs-ba" linux-base linux-desktop browser 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || [ "$ba" != "2026-09-01T04:23:00Z" ]; then
+  echo "FAIL: earliest-built-at.sh gave '$ba' (rc=$rc), want 2026-09-01T04:23:00Z"; fails=1
+else
+  out="$(RT_TAG=rt-20261020.1 BUILT_AT="$ba" \
+    bash "$GEN" "$D/refs-ba" "$D/sboms" "$D/early.json" 2>&1)" && rc=0 || rc=$?
+  { [ "$rc" -eq 0 ] && jq -e '.builtAt == "2026-09-01T04:23:00Z"' "$D/early.json" >/dev/null 2>&1; } \
+    || { echo "FAIL: manifest builtAt is not the build-job time: $out"; fails=1; }
+fi
+
+# --- R1-09: a missing or malformed build time fails closed ---
+mkdir -p "$D/refs-noba"; cp "$D/refs-ba/"* "$D/refs-noba/"; rm "$D/refs-noba/browser.built-at"
+bash "$EARLIEST" "$D/refs-noba" linux-base linux-desktop browser >/dev/null 2>&1 \
+  && { echo "FAIL: earliest-built-at.sh accepted a missing browser.built-at"; fails=1; }
+mkdir -p "$D/refs-badba"; cp "$D/refs-ba/"* "$D/refs-badba/"
+printf '2026-09-31T25:00:00Z\n' > "$D/refs-badba/browser.built-at"
+bash "$EARLIEST" "$D/refs-badba" linux-base linux-desktop browser >/dev/null 2>&1 \
+  && { echo "FAIL: earliest-built-at.sh accepted an impossible date"; fails=1; }
+printf '2026-09-01 04:40:02\n' > "$D/refs-badba/browser.built-at"
+bash "$EARLIEST" "$D/refs-badba" linux-base linux-desktop browser >/dev/null 2>&1 \
+  && { echo "FAIL: earliest-built-at.sh accepted a non-RFC 3339 time"; fails=1; }
 
 if [ "$fails" -eq 0 ]; then echo "write-runtime-manifest: all cases pass"; fi
 exit "$fails"

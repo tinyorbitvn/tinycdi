@@ -263,6 +263,16 @@ n="$(grep -c 'next-rt-tag\.sh' "$TRAIN")"
 chk_absent "runtime-images: rt N is not the run number" "$TRAIN" 'GITHUB_RUN_NUMBER'
 order "runtime-images: rt derive after attest" "$TRAIN" 'cosign attest image SBOMs' 'derive rt tag at publish time'
 order "runtime-images: rt derive before promote" "$TRAIN" 'derive rt tag at publish time' 'name: promote rt tag$'
+# R1-09: the train's builtAt is the build jobs' recorded time, never the
+# publish clock, and publish refuses a scan older than the bound.
+chk "runtime-images: base records its build time" "$TRAIN" 'refs/linux-base\.built-at'
+chk "runtime-images: profile legs record their build time" "$TRAIN" 'refs/\$IMG\.built-at'
+chk "runtime-images: label created = recorded build time" "$TRAIN" 'org\.opencontainers\.image\.created=\$BUILT_AT'
+chk "runtime-images: manifest builtAt from build times" "$TRAIN" 'earliest-built-at\.sh refs linux-base linux-desktop browser\)'
+chk "runtime-images: scan age bound wired" "$TRAIN" 'check-scan-age\.sh jobs\.json "\$SCAN_MAX_AGE_HOURS"'
+order "runtime-images: scan age checked before signing" "$TRAIN" 'check-scan-age\.sh jobs\.json' 'name: cosign sign images'
+chk_absent "runtime-images: manifest never defaults builtAt to now" \
+  "$ROOT/.github/scripts/write-runtime-manifest.sh" 'BUILT_AT:-'
 [ -x "$ROOT/.github/scripts/next-rt-tag.sh" ] \
   || { echo "FAIL: next-rt-tag.sh missing/not executable"; fails=1; }
 # V3.26: the desktop and browser images must carry the SAME firefox-esr pin.
