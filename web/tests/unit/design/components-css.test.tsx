@@ -101,3 +101,12 @@ describe("links, dialog, empty state, tabs", () => {
     expect(declarations(narrow, ".tc-tabs__list")["mask-image"]).toContain("currentColor");
   });
 });
+
+describe("catalog cards", () => {
+  it("align the dl term column across rows and stretch to equal height", () => {
+    const css = topLevel(readWeb("src/design/design.css"));
+    expect(declarations(css, ".tc-dl--fit")["grid-template-columns"]).toBe("minmax(6rem, auto) minmax(0, 1fr)");
+    expect(declarations(css, ".tc-dl--fit .tc-dl__row")["grid-template-columns"]).toBe("subgrid");
+    expect(declarations(css, ".tc-grid > .tc-card").height).toBe("100%");
+  });
+});

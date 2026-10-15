@@ -88,7 +88,7 @@ export function TemplateCard({ template }: { template: TemplateView }) {
             : t("templates.catalog.stale.badge")}
         </Alert>
       ) : null}
-      <DescriptionList items={details} />
+      <DescriptionList items={details} className="tc-dl--fit" />
     </Card>
   );
 }

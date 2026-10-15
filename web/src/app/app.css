@@ -123,6 +123,29 @@
   padding: var(--tc-space-6);
 }
 
+.tc-signedout__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--tc-space-3);
+  width: 100%;
+  max-width: 28rem;
+  padding: var(--tc-space-8) var(--tc-space-6);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-lg);
+  background: var(--tc-color-surface);
+  text-align: center;
+}
+
+.tc-signedout__title {
+  font-size: var(--tc-text-xl);
+}
+
+.tc-signedout__body {
+  margin-bottom: var(--tc-space-3);
+  color: var(--tc-color-text-muted);
+}
+
 /* ---------- body: sidebar + content ---------- */
 .tc-shell__body {
   display: flex;

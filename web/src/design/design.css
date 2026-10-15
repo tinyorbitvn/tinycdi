@@ -668,6 +668,10 @@
   grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
 }
 
+.tc-grid > .tc-card {
+  height: 100%;
+}
+
 .tc-gap-0 {
   gap: 0;
 }
@@ -758,6 +762,18 @@
   min-width: 0;
   font-size: var(--tc-text-sm);
   overflow-wrap: anywhere;
+}
+
+/* Catalog cards: the term column sizes to the longest label (min 6rem) and
+   every row shares it through subgrid, so values line up. */
+.tc-dl--fit {
+  grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+  column-gap: var(--tc-space-4);
+}
+
+.tc-dl--fit .tc-dl__row {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
 }
 
 /* ---------- meter ---------- */

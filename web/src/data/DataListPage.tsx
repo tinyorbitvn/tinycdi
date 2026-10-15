@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   type Column,
+  Cluster,
   EmptyState,
   Page,
   Pagination,
@@ -157,22 +158,18 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "actions",
         header: <VisuallyHidden>{t("data.list.col.actions")}</VisuallyHidden>,
         render: (r) => (
-          <>
+          <Cluster gap={2}>
             {canAttach(r) ? (
-              <Button size="sm" onClick={() => setAttaching(r)}>
+              <Button size="sm" variant="secondary" onClick={() => setAttaching(r)}>
                 {t("data.action.attach")}
               </Button>
             ) : null}
             {canPurge(r) ? (
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => setPurging(r)}
-              >
+              <Button size="sm" variant="danger-ghost" onClick={() => setPurging(r)}>
                 {t("data.action.purge")}
               </Button>
             ) : null}
-          </>
+          </Cluster>
         ),
       },
     );

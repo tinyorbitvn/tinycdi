@@ -32,6 +32,8 @@ export default {
   "data.error.retry": "Thử lại",
   "data.detail.title": "Đĩa giữ lại {id}",
   "data.detail.back": "Về dữ liệu giữ lại",
+  "data.detail.copyId": "Sao chép ID",
+  "data.detail.copied": "Đã sao chép ID",
   "data.detail.notFound.title": "Không tìm thấy dữ liệu giữ lại",
   "data.detail.notFound.description":
     "Bản ghi không tồn tại hoặc bạn không thấy nó.",

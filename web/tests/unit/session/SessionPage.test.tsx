@@ -1173,4 +1173,17 @@ describe("SessionPage cold connect (F2)", () => {
     await new Promise((r) => setTimeout(r, 600)); // > coldConfirmMs + a poll
     expect(ticketPosts()).toHaveLength(2);
   });
+
+  it("shows a centred connecting placeholder behind the frame and a page-style back link", async () => {
+    const { container } = setupPage();
+    const back = await screen.findByRole("link", { name: "Back to dashboard" });
+    expect(back).toHaveClass("tc-backlink");
+    const placeholder = container.querySelector(".tc-session__stage > .tc-session__placeholder");
+    expect(placeholder).not.toBeNull();
+    expect(placeholder).toHaveTextContent("Connecting to your desktop…");
+    expect(placeholder).toHaveAttribute("aria-hidden", "true");
+    const controls = container.querySelectorAll(".tc-session__controls .tc-button");
+    expect(controls.length).toBeGreaterThan(0);
+    for (const b of Array.from(controls)) expect(b).toHaveClass("tc-button--secondary", "tc-button--sm");
+  });
 });
