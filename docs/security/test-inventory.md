@@ -970,3 +970,54 @@ Families seen in the tree (count = hits of the family pattern in
   be caught by the browser checklist.
 - Branch-protection drift is only as good as the last run of
   `setup-repo-protection.sh` (TM-49).
+- `podPidsLimit` is checked by preflight, not enforced by the product (TM-53).
+
+## 12. Security-review fix tests
+
+Tests added by the fixes for the internal v1.0 security review
+([report](review-v1.0.md)). Each was written to fail before its fix.
+Tests that need a built runtime image run in CI only (§7).
+
+| Finding | Tests | File | Row |
+|---|---|---|---|
+| R1-01 | `TestSettleQuota_StartRaceKeepsReservation`, `TestSettleQuota_StoppedWorkspaceStillReleases` | `internal/provisioning/recovery_test.go` | TM-09 |
+| R1-02 | `TestAdminQuota_PutAboveOperatorCeilingRefused`, `TestAdminQuota_UndeclaredTenantCreateRefused`, `TestAdminQuota_PutAtCeilingAccepted`, `TestTenantQuotaCeilingsRenderFlag`, `TestTenantQuotaCeilingsFlagAbsentByDefault`, `TestSchemaRejectsBadQuotaCeilings`, `TestParseFlags_TenantQuotaCeilings` | `internal/api/adminquota_test.go`, `deploy/helm/chart_tenantquota_test.go`, `internal/backend/tenantquota_test.go` | TM-51 |
+| R1-03 | `TestAppListener_UnknownCookieSprayBounded`, `TestAppListener_ValidSessionsBehindOneClientNotThrottled`, `TestAppListener_UnknownCookieSprayRefused`, `TestAppListener_StoreErrorsKeepLookupSpent`, `TestLimiter_RefundReturnsOneToken`, `TestSessionStore_MissNeverWrites`, `TestPruneDeadSessions_RemovesOnlyDeadRows` | `internal/api/middleware_test.go`, `internal/backend/backend_test.go`, `internal/ratelimit/ratelimit_test.go`, `internal/store/sessions_pg_test.go` | TM-06 |
+| R1-04 | `TestResponsePolicy_Upstream1xxCannotStripPinnedHeaders`, `TestProxy_WebSocketUpgradeSurvives1xxGuard` | `internal/gateway/proxy_1xx_test.go` | TM-29 |
+| R1-05 | `TestSessionListener_StalledBodyBounded`, `TestSessionListener_AdmittedStreamOutlivesReadBound`, `TestSessionListener_TransferUploadOutlivesReadBound` | `internal/backend/session_readbound_test.go`, `internal/gateway/readbound_test.go` | TM-52 |
+| R1-06 | `TestLinuxRuntimeClipboardParamsNotOverridable` (image IT, run locally with the images built; the adapter subtest `TestKasmAdapterChromium/ClipboardParamsNotOverridable` runs in CI's `kasm-contract` job), `clipboard-policy.test.sh` | `tests/integration/linux_runtime_test.go`, `tests/integration/kasm_adapter_test.go`, `.github/tests/clipboard-policy.test.sh` | TM-36 |
+| R1-07 | `preflight.test.sh`, `security-doc-claims.test.sh` | `.github/tests/preflight.test.sh`, `.github/tests/security-doc-claims.test.sh` | TM-53 |
+| R1-08 | `TestWorkspaceTemplate_BrowserPolicyFieldRemoved` | `api/v1/validation_test.go` | TM-46 |
+| R1-09 | `write-runtime-manifest.test.sh`, `check-scan-age.test.sh`, `publish-inputs.test.sh`, `release-topology.test.sh` | `.github/tests/` | TM-49 |
+| R1-10 | `TestWrapApp_PortalBrowserHeaders`, `TestAPIBrowserHeaders_SetOnEveryResponse` | `internal/backend/backend_test.go`, `internal/api/headers_test.go` | TM-01 |
+| R1-11 | `TestOpenAPI_SessionCookieMatchesAuthDefaults` | `internal/api/openapi_contract_test.go` | TM-01 |
+| R1-12 | `TestOpenAPI_LogoutDocumentsIDTokenHint` | `internal/api/openapi_contract_test.go` | TM-20 |
+| R1-13 | `TestBrandingDir_OnlyAllowlistedNames` | `build/frontend/main_test.go` | TM-05 |
+| R1-14 | `TestLogin_SamePrincipalKeepsLiveSession` | `internal/api/auth_test.go` | TM-07 |
+| R1-15 | `TestNotesWarnUnrestrictedEdgeOpen`, `security-doc-claims.test.sh` | `deploy/helm/chart_edgepolicy_test.go`, `.github/tests/security-doc-claims.test.sh` | TM-06 |
+| R1-16 | `TestAudit_RequestLogNeverContainsRawOwnerRef` | `internal/api/auditroutes_test.go` | TM-13 |
+| R1-17 | `security-doc-claims.test.sh` | `.github/tests/security-doc-claims.test.sh` | TM-11 |
+| R1-18 | `TestCreateConnection_ForeignOwnerIs404` | `internal/broker/tickets_test.go` | TM-04 |
+| R1-19 | `TestListWorkspaces_BadPhaseIs400`, `TestAdminUsers_ForgedCursorIs400`, `TestParsePage_CursorTextMustBePostgresSafe` | `internal/api/workspaces_handlers_test.go`, `internal/api/adminusers_test.go`, `internal/api/page_test.go` | TM-04 |
+| R1-20 | `TestCreateWorkspace_ReservesExactTemplateBytes`, `TestStart_RevisionMoveReservesNewVector` | `internal/api/workspaces_handlers_test.go`, `internal/provisioning/template_family_test.go` | TM-09 |
+| R1-21 | `security-doc-claims.test.sh` | `.github/tests/security-doc-claims.test.sh` | TM-17 |
+| R1-22 | `TestAudited_TargetSanitizedAndBounded`, `TestAudit_InsertSanitizedTarget` | `internal/api/auditstore_test.go`, `internal/store/audit_test.go` | TM-50 |
+| R1-23 | `TestAdminUserLimit_AuditFailureRollsBackWrite` | `internal/api/adminuserlimit_test.go` | TM-50 |
+| R1-24 | `TestRetainedAttach_LabelIsCRName` | `internal/provisioning/retained_applier_test.go` | TM-09 |
+| R1-25 | `TestRedeemTicket_EveryRefusalConsumes` | `internal/broker/ticket_consume_test.go` | TM-23 |
+| R1-26 | `TestSessionListener_HealthOnlyOnControlHosts`, `TestControlToken_MinLength`, `TestControlAuth_FailuresLimitedPerClient`, `TestLimiter_PeekDoesNotSpend` | `internal/backend/session_health_test.go`, `internal/backend/config_test.go`, `internal/gateway/control_limit_test.go`, `internal/ratelimit/ratelimit_test.go` | TM-26 |
+| R1-27 | `TestDesktopLeg_ReplacedHelperRelaysBytesWithoutDisposition`, `security-doc-claims.test.sh` | `internal/gateway/desktopleg_trust_test.go`, `.github/tests/security-doc-claims.test.sh` | TM-37 |
+| R1-28 | `TestClusterOnlyEgressDefaultSameTenantOnly` | `internal/runtime/linux/backend_netpol_test.go` | TM-34 |
+| R1-29 | `TestEnsureUsernsProfileRequiresHostUsersFalse`, `TestSeededUsernsProfileRequiresHostUsersFalse`, `security-doc-claims.test.sh` | `internal/runtime/linux/userns_profile_test.go`, `deploy/helm/chart_userns_profile_test.go`, `.github/tests/security-doc-claims.test.sh` | TM-47 |
+| R1-30 | `TestInternalListener_RemovedCASeversLiveConn` | `internal/backend/mtls_reload_test.go` | TM-38 |
+| R1-31 | `TestBlocklistIssuerCanonicalMatch` | `internal/tlsreload/blocklist_test.go` | TM-38 |
+| R1-32 | `TestUnknownCN_Refused`, `TestParseFlags_InternalGatewayCNs` | `internal/broker/httpapi/server_test.go`, `internal/backend/config_test.go` | TM-54 |
+| R1-33 | `TestRoleMismatchCounted`, `TestIdentify_HandshakeRejectionsCounted` | `internal/broker/httpapi/server_test.go`, `internal/backend/mtls_revocation_test.go` | TM-40 |
+| R1-34 | `TestExtraArgsCannotOverrideRenderedFlags` | `deploy/helm/chart_extraenv_test.go` | TM-42 |
+| R1-35 | `TestEnsure_NetPolPrecedesPod` | `internal/runtime/linux/backend_netpol_test.go` | TM-34 |
+| R1-36 | `TestPodSecurityValuesAllReferenced` | `deploy/helm/chart_hardening_test.go` | TM-41 |
+| R1-37 | `release-topology.test.sh`, `security-doc-claims.test.sh`, `failed-digest-cleanup.test.sh` | `.github/tests/` | TM-48 |
+| R1-38 | `publish-gating.test.sh` | `.github/tests/publish-gating.test.sh` | TM-49 |
+| R1-39 | `setup-repo-protection.test.sh` | `.github/tests/setup-repo-protection.test.sh` | TM-49 |
+| R1-40 | `push-sign-chart.test.sh` | `.github/tests/push-sign-chart.test.sh` | TM-49 |
+| R1-41 | `release-topology.test.sh`, `security-doc-claims.test.sh` | `.github/tests/` | TM-49 |

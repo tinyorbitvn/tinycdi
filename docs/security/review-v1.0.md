@@ -8,8 +8,10 @@ report a vulnerability.
 - Reviewed commit: `351029a`
 - Review date: 2026-10-14
 - Threat model: [threat-model.md](threat-model.md), register rows TM-01 to TM-50
-- Result: **0 P0, 0 P1, 9 P2, 32 P3**. All findings are open at the
-  reviewed commit.
+- Result: **0 P0, 0 P1, 9 P2, 32 P3** at the reviewed commit.
+- Fix status: every finding is fixed, each by the commit named in its
+  Status cell. The node-level part of R1-07 is accepted by the owner
+  (§5). See [After the fixes](#after-the-fixes).
 
 ## 1. Scope
 
@@ -171,6 +173,34 @@ Nine findings fit no single register row. They are listed against their
 boundary in §4: R1-02, R1-05, R1-07, R1-08, R1-24, R1-32, R1-35, R1-36
 and R1-41.
 
+### After the fixes
+
+The verdicts above are the review's record at the reviewed commit. After
+the fixes, the rows below change verdict. Every other row stays Verified.
+
+| Row | Verdict at review | After the fixes | Findings |
+|---|---|---|---|
+| TM-06 | Partial | Verified | R1-03, R1-15 |
+| TM-09 | Partial | Verified | R1-01, R1-20, R1-24 |
+| TM-26 | Partial | Verified | R1-26 |
+| TM-29 | Gap | Verified | R1-04 |
+| TM-36 | Partial | Verified | R1-06 |
+| TM-38 | Partial | Verified | R1-30, R1-31 |
+| TM-40 | Partial | Verified | R1-33 |
+| TM-42 | Partial | Verified | R1-34 |
+| TM-48 | Partial | Verified | R1-37 |
+| TM-49 | Partial | Verified | R1-09, R1-38, R1-39, R1-40, R1-41 |
+| TM-50 | Partial | Verified | R1-22, R1-23 |
+
+Four register rows were added for findings that fit no row: TM-51
+(R1-02), TM-52 (R1-05), TM-53 (R1-07) and TM-54 (R1-32). R1-35 is
+recorded under TM-34, R1-36 under TM-41 and R1-08 under TM-46 (the field
+was removed). After the fixes: 54 rows, all Verified. TM-53 carries the
+accepted node-level residual. The R1-29 gate matches the shipped
+`chromium-userns.json` profile by name; TM-47's residual states that a
+custom `Localhost` profile allowing namespace creation is not detected
+and needs `hostUsers: false` from the operator.
+
 ## 4. Findings
 
 Fix guidance and the security test that each fix must add are tracked
@@ -180,52 +210,52 @@ with the fix work. This report gives the finding and where it is.
 
 | ID | Sev | Row | Title | Where | Status |
 |---|---|---|---|---|---|
-| R1-01 | P2 | TM-09 | The quota settle pass can race a `:start` and release the reservation of a workspace that is running again, so it counts against neither the per-user limit nor the tenant quota | `internal/provisioning/recovery.go` | open |
-| R1-02 | P2 | — (2) | A tenant admin can set an effectively unbounded quota for a tenant whose quota the platform configuration does not declare | `internal/api/adminquota.go` | open |
-| R1-03 | P2 | TM-06 | Random session cookies cost a store read per request on the app listener, including requests the rate limiter then refuses; the session listener's unknown-cookie bound has no app-listener equivalent | `internal/api/ratelimit_key.go`, `internal/api/middleware.go` | open |
-| R1-04 | P2 | TM-29 | An informational (1xx) response from the runtime removes the security headers the gateway pins on session-host responses | `internal/gateway/proxy.go` | open |
-| R1-05 | P2 | — (5) | The session listener sets no request-body read deadline, so an unauthenticated client can hold connections open indefinitely | `internal/backend/listeners.go` | open |
-| R1-06 | P2 | TM-36 | A program inside the session can re-enable the clipboard after start, because Xvnc's default parameter-override list stays in force | `build/linux-base/kasmvnc.yaml`, `build/kasm-adapter/entrypoint.sh` | open |
-| R1-07 | P2 | — (6, 8) | Workspace pods have no process or thread bound, and the install guide does not require one, so one workspace can exhaust a shared node's thread table | `internal/runtime/linux/backend.go`, `docs/runbooks/install.md` | open |
-| R1-08 | P2 | — (8) | The `WorkspaceTemplate` field `browserPolicy` is documented as restricting the in-session browser, but nothing applies it | `api/v1/workspacetemplate_types.go` | open |
-| R1-09 | P2 | TM-49 | The runtime-train publish can sign images whose scan is weeks old and stamps `builtAt` with the publish time; release charts carry no `builtAt`, so the stale-image block never fires for them | `.github/scripts/write-runtime-manifest.sh`, `.github/workflows/runtime-images.yml` | open |
+| R1-01 | P2 | TM-09 | The quota settle pass can race a `:start` and release the reservation of a workspace that is running again, so it counts against neither the per-user limit nor the tenant quota | `internal/provisioning/recovery.go` | fixed (`fix(quota): settle releases a reservation only under the workspace row lock`) |
+| R1-02 | P2 | — (2) | A tenant admin can set an effectively unbounded quota for a tenant whose quota the platform configuration does not declare | `internal/api/adminquota.go` | fixed (`feat(quota): operator-declared tenant quota ceilings bound tenant-admin writes`) |
+| R1-03 | P2 | TM-06 | Random session cookies cost a store read per request on the app listener, including requests the rate limiter then refuses; the session listener's unknown-cookie bound has no app-listener equivalent | `internal/api/ratelimit_key.go`, `internal/api/middleware.go` | fixed (`fix(auth): bound unknown-cookie store lookups per client on the app listener`) |
+| R1-04 | P2 | TM-29 | An informational (1xx) response from the runtime removes the security headers the gateway pins on session-host responses | `internal/gateway/proxy.go` | fixed (`fix(gateway): upstream 1xx responses cannot strip pinned session headers`) |
+| R1-05 | P2 | — (5) | The session listener sets no request-body read deadline, so an unauthenticated client can hold connections open indefinitely | `internal/backend/listeners.go` | fixed (`fix(backend): bound request reads on the session listener`) |
+| R1-06 | P2 | TM-36 | A program inside the session can re-enable the clipboard after start, because Xvnc's default parameter-override list stays in force | `build/linux-base/kasmvnc.yaml`, `build/kasm-adapter/entrypoint.sh` | fixed (`fix(runtime): KasmVNC refuses runtime overrides of clipboard parameters`) |
+| R1-07 | P2 | — (6, 8) | Workspace pods have no process or thread bound, and the install guide does not require one, so one workspace can exhaust a shared node's thread table | `internal/runtime/linux/backend.go`, `docs/runbooks/install.md` | fixed (`docs(install): require a kubelet podPidsLimit on workspace nodes and check it in preflight`); node-level enforcement accepted (owner) |
+| R1-08 | P2 | — (8) | The `WorkspaceTemplate` field `browserPolicy` is documented as restricting the in-session browser, but nothing applies it | `api/v1/workspacetemplate_types.go` | fixed (`fix(crd)!: remove the unenforced WorkspaceTemplate browserPolicy`) |
+| R1-09 | P2 | TM-49 | The runtime-train publish can sign images whose scan is weeks old and stamps `builtAt` with the publish time; release charts carry no `builtAt`, so the stale-image block never fires for them | `.github/scripts/write-runtime-manifest.sh`, `.github/workflows/runtime-images.yml` | fixed (`ci(runtime): carry build time into the train manifest and refuse a stale scan before signing`, `ci(release): stamp runtime builtAt and refuse a stale scan before signing`) |
 
 ### P3
 
 | ID | Sev | Row | Title | Where | Status |
 |---|---|---|---|---|---|
-| R1-10 | P3 | TM-01 | `/v1` responses on the portal host carry no `nosniff`, framing or `no-store` headers | `internal/backend/wire.go` | open |
-| R1-11 | P3 | TM-01 | The API contract misstates the session cookie's name and SameSite mode, and the basis of the CSRF defence | `internal/api/openapi.yaml` | open |
-| R1-12 | P3 | TM-20 | The API contract says the ID token never reaches the client; sign-out returns it as `id_token_hint` | `internal/api/auth.go`, `internal/api/openapi.yaml` | open |
-| R1-13 | P3 | TM-05 | The register says branding serves fixed names only; it serves any regular file in the directory (containment holds) | `build/frontend/main.go` | open |
-| R1-14 | P3 | TM-07 | A cross-site navigation to `GET /v1/login` replaces a signed-in user's portal session and ends their desktop stream | `internal/api/auth.go` | open |
-| R1-15 | P3 | TM-06 | The install guide tells operators to trust the whole pod CIDR for `X-Forwarded-For` | `docs/runbooks/install.md` | open |
-| R1-16 | P3 | TM-13 | The request log records the raw target issuer and subject for admin routes addressed by user | `internal/api/middleware.go` | open |
-| R1-17 | P3 | TM-11 | Removal from a tenant-admin group takes effect only at the user's next sign-in, and the docs do not say so | `internal/api/middleware.go`, `SECURITY.md` | open |
-| R1-18 | P3 | TM-04 | The connection route answers 403, not 404, for another user's workspace in the same tenant | `internal/broker/tickets.go` | open |
-| R1-19 | P3 | TM-04 | NUL bytes in list filters and cursors answer 500 instead of 400 | `internal/api/workspaces.go` | open |
-| R1-20 | P3 | TM-09 | The quota reservation can under-count what actually runs | `internal/provisioning/service.go` | open |
-| R1-21 | P3 | TM-17 | The register says `:apply` runs a dry run first; the server does not require one | `internal/api/adminsessionpolicyapply.go` | open |
-| R1-22 | P3 | TM-50 | Audit rows store the raw path value as the target id: unbounded, and invalid bytes fail the request | `internal/api/auditroutes.go` | open |
-| R1-23 | P3 | TM-50 | Single-statement quota and user-limit writes commit outside the audit transaction | `internal/store/userlimit.go` | open |
-| R1-24 | P3 | — (2, 8) | The retained-disk volume label carries the user-chosen workspace name | `internal/provisioning/retained_applier.go` | open |
-| R1-25 | P3 | — (5) | A refused ticket redemption leaves the ticket unconsumed until it expires | `internal/broker/tickets.go` | open |
-| R1-26 | P3 | TM-26 | Health probes answer on every Host of the session listener; the control-host class rests on the bearer token alone | `internal/backend/wire.go`, `internal/gateway/authorization.go` | open |
-| R1-27 | P3 | TM-37 | The in-pod trust residual understates the risk: a replaced in-pod server can move files over the desktop leg with no grant, cap or transfer audit | `docs/security/threat-model.md`, `docs/releases/v1.0.0.md` | open |
-| R1-28 | P3 | TM-34 | Default ClusterOnly egress admits every pod in other tenants' namespaces; only the destination's policy blocks it | `internal/runtime/linux/backend.go` | open |
-| R1-29 | P3 | TM-47 | The browser seccomp and AppArmor pair lets a workspace user create user and network namespaces; the docs do not state the trade-off | `deploy/node-profiles/` | open |
-| R1-30 | P3 | TM-38 | Rotating the internal client CA does not drop established connections, contrary to the runbook | `internal/backend/listeners.go` | open |
-| R1-31 | P3 | TM-38 | The revocation runbook's issuer-name recipe can produce blocklist entries that never match | `internal/tlsreload/blocklist.go` | open |
-| R1-32 | P3 | — (7) | The internal listener grants the gateway role to any client certificate from its CA whose name is not the operator's | `internal/broker/httpapi/server.go` | open |
-| R1-33 | P3 | TM-40 | Handshake and role refusals on the internal listener are not counted | `internal/broker/httpapi/server.go` | open |
-| R1-34 | P3 | TM-42 | The `extraArgs`/`extraEnv` deny lists are incomplete and asymmetric between flags and environment | `deploy/helm/tinycdi/templates/_helpers.tpl` | open |
-| R1-35 | P3 | — (8) | The workspace NetworkPolicy is created after the pod and Service | `internal/runtime/linux/backend.go` | open |
-| R1-36 | P3 | — (8) | The chart value `podSecurity.platformEnforce` has no effect | `deploy/helm/tinycdi/values.yaml` | open |
-| R1-37 | P3 | TM-48 | The kasm engine-floor and image-scan gate is advisory; it blocks neither merge nor release | `.github/workflows/ci.yml` | open |
-| R1-38 | P3 | TM-49 | The tests cited for TM-49 do not pin the signing chain (scan first, main only, only the gated job signs) | `.github/tests/` | open |
-| R1-39 | P3 | TM-49 | The codified required-check set is narrower than the docs state | `.github/scripts/setup-repo-protection.sh` | open |
-| R1-40 | P3 | TM-49 | The Helm chart is published under its version tag before it is signed | `.github/workflows/release.yml` | open |
-| R1-41 | P3 | — (X) | Signed main-channel images build from the shared Actions cache | `.github/workflows/images.yml` | open |
+| R1-10 | P3 | TM-01 | `/v1` responses on the portal host carry no `nosniff`, framing or `no-store` headers | `internal/backend/wire.go` | fixed (`fix(api): pin browser security headers on /v1 and correct the cookie and id-token contract`) |
+| R1-11 | P3 | TM-01 | The API contract misstates the session cookie's name and SameSite mode, and the basis of the CSRF defence | `internal/api/openapi.yaml` | fixed (`fix(api): pin browser security headers on /v1 and correct the cookie and id-token contract`) |
+| R1-12 | P3 | TM-20 | The API contract says the ID token never reaches the client; sign-out returns it as `id_token_hint` | `internal/api/auth.go`, `internal/api/openapi.yaml` | fixed (`fix(api): pin browser security headers on /v1 and correct the cookie and id-token contract`) |
+| R1-13 | P3 | TM-05 | The register says branding serves fixed names only; it serves any regular file in the directory (containment holds) | `build/frontend/main.go` | fixed (`fix(frontend): serve only the documented branding file names`) |
+| R1-14 | P3 | TM-07 | A cross-site navigation to `GET /v1/login` replaces a signed-in user's portal session and ends their desktop stream | `internal/api/auth.go` | fixed (`fix(auth): a login started with a valid session keeps it`) |
+| R1-15 | P3 | TM-06 | The install guide tells operators to trust the whole pod CIDR for `X-Forwarded-For` | `docs/runbooks/install.md` | fixed (`fix(chart): narrow trusted-proxy guidance and remove podSecurity.platformEnforce`) |
+| R1-16 | P3 | TM-13 | The request log records the raw target issuer and subject for admin routes addressed by user | `internal/api/middleware.go` | fixed (`fix(audit): bound audit targets, log route patterns, audit single-statement writes in-tx`) |
+| R1-17 | P3 | TM-11 | Removal from a tenant-admin group takes effect only at the user's next sign-in, and the docs do not say so | `internal/api/middleware.go`, `SECURITY.md` | fixed (`docs(security): state admin-role revocation latency and the :apply dry-run contract`) |
+| R1-18 | P3 | TM-04 | The connection route answers 403, not 404, for another user's workspace in the same tenant | `internal/broker/tickets.go` | fixed (`fix(api): foreign-owner tickets answer 404 and NUL filters answer 400`) |
+| R1-19 | P3 | TM-04 | NUL bytes in list filters and cursors answer 500 instead of 400 | `internal/api/workspaces.go` | fixed (`fix(api): foreign-owner tickets answer 404 and NUL filters answer 400`) |
+| R1-20 | P3 | TM-09 | The quota reservation can under-count what actually runs | `internal/provisioning/service.go` | fixed (`fix(quota): reserve exact template bytes and re-reserve on a revision move`) |
+| R1-21 | P3 | TM-17 | The register says `:apply` runs a dry run first; the server does not require one | `internal/api/adminsessionpolicyapply.go` | fixed (`docs(security): state admin-role revocation latency and the :apply dry-run contract`) |
+| R1-22 | P3 | TM-50 | Audit rows store the raw path value as the target id: unbounded, and invalid bytes fail the request | `internal/api/auditroutes.go` | fixed (`fix(audit): bound audit targets, log route patterns, audit single-statement writes in-tx`) |
+| R1-23 | P3 | TM-50 | Single-statement quota and user-limit writes commit outside the audit transaction | `internal/store/userlimit.go` | fixed (`fix(audit): bound audit targets, log route patterns, audit single-statement writes in-tx`) |
+| R1-24 | P3 | — (2, 8) | The retained-disk volume label carries the user-chosen workspace name | `internal/provisioning/retained_applier.go` | fixed (`fix(retained): label retained PVCs with the workspace CR name`) |
+| R1-25 | P3 | — (5) | A refused ticket redemption leaves the ticket unconsumed until it expires | `internal/broker/tickets.go` | fixed (`fix(broker): every refused ticket redemption consumes the ticket`) |
+| R1-26 | P3 | TM-26 | Health probes answer on every Host of the session listener; the control-host class rests on the bearer token alone | `internal/backend/wire.go`, `internal/gateway/authorization.go` | fixed (`fix(backend): health only on control hosts; control token length and failure limit`) |
+| R1-27 | P3 | TM-37 | The in-pod trust residual understates the risk: a replaced in-pod server can move files over the desktop leg with no grant, cap or transfer audit | `docs/security/threat-model.md`, `docs/releases/v1.0.0.md` | fixed (`docs(security): in-pod trust covers the desktop leg; drop upstream Content-Disposition`) |
+| R1-28 | P3 | TM-34 | Default ClusterOnly egress admits every pod in other tenants' namespaces; only the destination's policy blocks it | `internal/runtime/linux/backend.go` | fixed (`fix(runtime): ClusterOnly egress stays in-tenant and the NetworkPolicy precedes the pod`) |
+| R1-29 | P3 | TM-47 | The browser seccomp and AppArmor pair lets a workspace user create user and network namespaces; the docs do not state the trade-off | `deploy/node-profiles/` | fixed (`fix(runtime): the userns browser profile pair requires hostUsers false`) |
+| R1-30 | P3 | TM-38 | Rotating the internal client CA does not drop established connections, contrary to the runbook | `internal/backend/listeners.go` | fixed (`fix(mtls): CA rotation severs removed-CA connections; blocklist matches issuers canonically`) |
+| R1-31 | P3 | TM-38 | The revocation runbook's issuer-name recipe can produce blocklist entries that never match | `internal/tlsreload/blocklist.go` | fixed (`fix(mtls): CA rotation severs removed-CA connections; blocklist matches issuers canonically`) |
+| R1-32 | P3 | — (7) | The internal listener grants the gateway role to any client certificate from its CA whose name is not the operator's | `internal/broker/httpapi/server.go` | fixed (`fix(mtls): gateway role is opt-in by CN; count handshake and role refusals`) |
+| R1-33 | P3 | TM-40 | Handshake and role refusals on the internal listener are not counted | `internal/broker/httpapi/server.go` | fixed (`fix(mtls): gateway role is opt-in by CN; count handshake and role refusals`) |
+| R1-34 | P3 | TM-42 | The `extraArgs`/`extraEnv` deny lists are incomplete and asymmetric between flags and environment | `deploy/helm/tinycdi/templates/_helpers.tpl` | fixed (`fix(chart): extraArgs and extraEnv cannot override any chart-rendered flag`) |
+| R1-35 | P3 | — (8) | The workspace NetworkPolicy is created after the pod and Service | `internal/runtime/linux/backend.go` | fixed (`fix(runtime): ClusterOnly egress stays in-tenant and the NetworkPolicy precedes the pod`) |
+| R1-36 | P3 | — (8) | The chart value `podSecurity.platformEnforce` has no effect | `deploy/helm/tinycdi/values.yaml` | fixed (`fix(chart): narrow trusted-proxy guidance and remove podSecurity.platformEnforce`) |
+| R1-37 | P3 | TM-48 | The kasm engine-floor and image-scan gate is advisory; it blocks neither merge nor release | `.github/workflows/ci.yml` | fixed (`ci: gate releases on the kasm catalog scan and build main images without the shared cache`) |
+| R1-38 | P3 | TM-49 | The tests cited for TM-49 do not pin the signing chain (scan first, main only, only the gated job signs) | `.github/tests/` | fixed (`ci: pin publish gating per job, codify required checks, never leave an unsigned chart tagged`) |
+| R1-39 | P3 | TM-49 | The codified required-check set is narrower than the docs state | `.github/scripts/setup-repo-protection.sh` | fixed (`ci: pin publish gating per job, codify required checks, never leave an unsigned chart tagged`) |
+| R1-40 | P3 | TM-49 | The Helm chart is published under its version tag before it is signed | `.github/workflows/release.yml` | fixed (`ci: pin publish gating per job, codify required checks, never leave an unsigned chart tagged`) |
+| R1-41 | P3 | — (X) | Signed main-channel images build from the shared Actions cache | `.github/workflows/images.yml` | fixed (`ci: gate releases on the kasm catalog scan and build main images without the shared cache`) |
 
 ## 5. Accepted risks
 
@@ -250,14 +280,14 @@ the finding is named.
 | Failed-digest cleanup is check-then-act | No change. |
 | Browser support (apt pin staleness) | No change. A related freshness gap in signing and `builtAt`: R1-09. |
 | Single maintainer, no independent audit | No change. This review is internal. |
+| Workspace PID bound depends on node configuration | Accepted (owner): the node-level part of R1-07. Kubernetes has no pod-spec PID limit; the kubelet's `podPidsLimit` is node configuration this project does not ship. The install guide requires it and `hack/preflight/preflight.sh` warns for a workspace node without it. |
 
 ## 6. Residual risk
 
-**Release gate.** No P0 or P1 finding is open at the reviewed commit.
-Each of the nine P2 findings must be fixed, or accepted with an owner
-and a reason, before the stable release. This report's status column
-records the outcome. The P3 findings are hardening and documentation
-corrections.
+**Release gate.** No P0 or P1 finding was open at the reviewed commit.
+All nine P2 and all 32 P3 findings are fixed; the Status column names
+each fix. The node-level part of R1-07 is accepted by the owner (§5).
+The themes below describe the state at the reviewed commit.
 
 The open findings fall into five themes:
 

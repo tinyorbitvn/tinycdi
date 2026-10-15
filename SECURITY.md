@@ -5,9 +5,12 @@ or operator can expose one user's workspace, credentials or network
 position to another. This file sets out how to report a vulnerability and
 the hardening rules that contributors and operators must follow.
 
-> **Security review.** Each release's notes state its security-review
-> status. The mandatory rules and the blocking CI scanners in this file
-> are the bar; an independent external review remains an open item.
+> **Security review.** The maintainers completed an internal security
+> review of 1.0.0 before release ([report](docs/security/review-v1.0.md)).
+> It is **not an independent audit**. Each release's notes state its
+> security-review status. The mandatory rules and the blocking CI
+> scanners in this file are the bar; an independent external review
+> remains an open item.
 
 ## Supported versions
 

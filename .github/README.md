@@ -162,7 +162,8 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   maintainer — when a second maintainer joins, set it to 1 +
   `require_last_push_approval`, and `prevent_self_review` true on the
   `release` and `runtime-train` environments, which require a reviewer
-  approval before their jobs run.
+  approval before their jobs run (single-maintainer risk:
+  [security review §5](../docs/security/review-v1.0.md#5-accepted-risks)).
 - **Security features** — private vulnerability reporting, secret
   scanning and push protection.
 - **Actions variables** `ATTESTATIONS_ENABLED=true` and
