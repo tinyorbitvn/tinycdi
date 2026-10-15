@@ -154,7 +154,7 @@
 }
 
 .tc-session__stage:fullscreen {
-  background: #000;
+  background: var(--tc-color-stage);
 }
 
 .tc-session__frame {

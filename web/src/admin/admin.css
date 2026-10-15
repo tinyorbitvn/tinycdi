@@ -52,7 +52,7 @@
 
 .tc-admin-list {
   margin: 0;
-  padding-inline-start: var(--tc-space-5);
+  padding-inline-start: var(--tc-space-6);
 }
 
 .tc-admin-list li + li {

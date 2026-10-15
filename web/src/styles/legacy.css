@@ -101,7 +101,7 @@
   background: var(--tc-color-surface-raised);
   border: 1px solid var(--tc-color-border);
   border-radius: var(--tc-radius-lg);
-  padding: var(--tc-space-4) var(--tc-space-5);
+  padding: var(--tc-space-4) var(--tc-space-6);
   box-shadow: var(--tc-shadow-lg);
   max-width: min(30rem, calc(100vw - 2rem));
   z-index: var(--tc-z-overlay);

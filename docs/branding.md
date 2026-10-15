@@ -21,6 +21,30 @@ Every key is optional; only the keys you supply override the defaults.
 | logo files | named `logo*.svg` or `logo*.png` (for example `logo.svg`, `logo-dark.svg`), referenced from `branding.json`; served with the extension's content type |
 | `favicon.svg` / `favicon.ico` | replaces the shipped favicon at `/favicon.svg` / `/favicon.ico`. `favicon.ico` is binary — put it under the ConfigMap's `binaryData`, not `data` |
 
+### Polish-pass tokens (1.0.1)
+
+These `--tc-*` variables were added with the Orbit polish pass. Like every
+other `--tc-*` variable they are declared on `:root` and can be overridden
+from the branding `tokens.css`:
+
+| Variable | Default (Orbit) | Used for |
+|---|---|---|
+| `--tc-text-2xs` | `0.6875rem` (11px) | badges, table headers, field hints and errors |
+| `--tc-control-font-size` | `--to-control-font-size` (12px) | button text |
+| `--tc-control-font-weight` | `--to-control-font-weight` (600) | button text |
+| `--tc-color-stage` | `--to-neutral-950` | fullscreen desktop stage |
+| `--tc-color-danger-strong` | `--to-rose-700` | solid danger buttons |
+| `--tc-color-danger-strong-hover` | `--to-rose-900` | solid danger buttons, hover |
+| `--tc-color-on-danger` | `--to-neutral-0` | text on solid danger buttons |
+| `--tc-color-meter-track` | `--to-border-default` | quota meter track |
+| `--tc-color-meter-warning` | `--to-amber-500` | quota meter fill at the warning threshold |
+| `--tc-color-meter-danger` | `--to-rose-500` | quota meter fill at the danger threshold |
+| `--tc-color-table-head` | `--to-surface-sunken` | table header row |
+| `--tc-color-row-hover` | `--to-surface-hover` | table row hover |
+
+`--tc-space-5` was removed (it was off the Orbit 4px scale); use
+`--tc-space-4` or `--tc-space-6`.
+
 ### `branding.json` semantics
 
 `web/src/app/branding.ts` (`loadBranding`) fetches `/branding/branding.json`

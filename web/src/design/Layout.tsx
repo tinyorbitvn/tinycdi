@@ -66,7 +66,7 @@ export function Section({ title, description, actions, headingLevel = 2, childre
   );
 }
 
-export type Gap = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 8;
+export type Gap = 0 | 1 | 2 | 3 | 4 | 6 | 8;
 
 export interface StackProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
   gap?: Gap;

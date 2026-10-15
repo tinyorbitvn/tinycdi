@@ -10,6 +10,7 @@
   /* ---- typography ---- */
   --tc-font-sans: var(--to-font-family-core);
   --tc-font-mono: var(--to-font-family-mono);
+  --tc-text-2xs: 0.6875rem;
   --tc-text-xs: 0.75rem;
   --tc-text-sm: 0.8125rem;
   --tc-text-md: 0.875rem;
@@ -30,7 +31,6 @@
   --tc-space-2: var(--to-space-2);
   --tc-space-3: var(--to-space-3);
   --tc-space-4: var(--to-space-4);
-  --tc-space-5: 1.25rem;
   --tc-space-6: var(--to-space-6);
   --tc-space-8: var(--to-space-8);
   --tc-space-10: var(--to-space-10);
@@ -52,6 +52,8 @@
   --tc-control-height-sm: var(--to-control-height-small);
   --tc-control-height-md: var(--to-control-height);
   --tc-control-height-lg: 48px;
+  --tc-control-font-size: var(--to-control-font-size);
+  --tc-control-font-weight: var(--to-control-font-weight);
 
   /* ---- motion ---- */
   --tc-duration-fast: var(--to-duration-fast);
@@ -72,6 +74,9 @@
   --tc-color-surface-raised: var(--to-surface-raised);
   --tc-color-surface-sunken: var(--to-surface-sunken);
   --tc-color-overlay: var(--to-navy-950);
+  --tc-color-stage: var(--to-neutral-950);
+  --tc-color-table-head: var(--to-surface-sunken);
+  --tc-color-row-hover: var(--to-surface-hover);
 
   --tc-color-text: var(--to-text-primary);
   --tc-color-text-muted: var(--to-text-secondary);
@@ -101,12 +106,18 @@
   --tc-color-danger-subtle: var(--to-rose-surface);
   --tc-color-danger-text: var(--to-rose-ink);
   --tc-color-danger-border: var(--to-rose-border);
+  --tc-color-danger-strong: var(--to-rose-700);
+  --tc-color-danger-strong-hover: var(--to-rose-900);
+  --tc-color-on-danger: var(--to-neutral-0);
   --tc-color-info: var(--to-iris-solid);
   --tc-color-info-subtle: var(--to-iris-surface);
   --tc-color-info-text: var(--to-iris-ink);
   --tc-color-info-border: var(--to-iris-border);
   --tc-color-neutral-subtle: var(--to-neutral-surface);
   --tc-color-neutral-text: var(--to-neutral-ink);
+  --tc-color-meter-track: var(--to-border-default);
+  --tc-color-meter-warning: var(--to-amber-500);
+  --tc-color-meter-danger: var(--to-rose-500);
 
   --tc-color-focus: var(--to-focus-ring);
   --tc-color-skeleton: var(--to-surface-sunken);

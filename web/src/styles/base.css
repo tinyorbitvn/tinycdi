@@ -81,6 +81,12 @@ a:hover {
   text-decoration-thickness: 2px;
 }
 
+/* Flat canvas: Orbit's dark page gradient (navy-night / palette-system
+   `body` background-image) reads as a purple glow behind flat cards. */
+html[data-theme="dark"] body {
+  background-image: none;
+}
+
 code,
 kbd,
 samp,

@@ -154,6 +154,22 @@ test.describe("locale: vi", () => {
 });
 
 test.describe("keyboard", () => {
+  test("skip link: clipped until the first Tab, then visible without a shadow", async ({ page, request }) => {
+    await seed(request);
+    await login(page);
+    await page.goto("/workspaces");
+    await settle(page);
+    const skip = page.locator(".tc-skip-link");
+    expect(await skip.evaluate((el) => getComputedStyle(el).clipPath)).not.toBe("none");
+    await page.keyboard.press("Tab");
+    await expect(skip).toBeFocused();
+    const style = await skip.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { clip: s.clipPath, shadow: s.boxShadow };
+    });
+    expect(style).toEqual({ clip: "none", shadow: "none" });
+  });
+
   test("every interactive element on /workspaces is Tab-reachable with a visible focus ring", async ({
     page,
     request,
