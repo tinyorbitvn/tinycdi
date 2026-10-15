@@ -26,7 +26,7 @@ family and `/v1/launch`, with local token buckets as ceiling and floor:
   `INSERT … ON CONFLICT … RETURNING count` per check
   (`internal/store/rate_limit.go`) and enforced by `SharedLimiter`
   (`internal/ratelimit/shared.go`). The shared window bound is
-  rate + burst per minute (`internal/backend/ratelimit.go:96,106`).
+  rate + burst per minute (`internal/backend/ratelimit.go`).
 - **G1 — fail-open with a floor.** A store error falls back to the
   divided local limiter, never to unlimited and never to a hard refusal:
   every limited route's completion already needs Postgres, so the outage
@@ -58,10 +58,10 @@ family and `/v1/launch`, with local token buckets as ceiling and floor:
 - **RL-DEFAULT — the default budgets** are the flag table below; the
   shared window makes them exact aggregates across replicas.
 - **Latency bound + circuit breaker.** Every store check runs under a
-  500 ms deadline (`storeCallTimeout`, `internal/ratelimit/shared.go:37`,
+  500 ms deadline (`storeCallTimeout`, `internal/ratelimit/shared.go`,
   always — healthy or probing), so a slow-but-alive Postgres adds at most
   ~500 ms to one request. A store error/timeout opens a 10 s cool-down
-  (`storeCooldown`, `shared.go:45`): checks skip the store entirely (the
+  (`storeCooldown`, `shared.go`): checks skip the store entirely (the
   divided local limiter decides), then exactly one request probes —
   single-flight, the rest keep their local verdict. Probe success closes
   the circuit; failure reopens it for another cool-down.
@@ -81,24 +81,24 @@ spread, plus Postgres-outage fail-open and recovery — is pinned by
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-login-rate` | 60/min, burst 20 | per-client bound on `/v1/login`, `/v1/auth/callback` and `GET /v1/session` (`internal/backend/config.go:315-316`) |
-| `-launch-rate` | 120/min, burst 40 | per-client bound on `/v1/launch` (`config.go:333-334`) |
+| `-login-rate` | 60/min, burst 20 | per-client bound on `/v1/login`, `/v1/auth/callback` and `GET /v1/session` (`internal/backend/config.go`) |
+| `-launch-rate` | 120/min, burst 40 | per-client bound on `/v1/launch` (`config.go`) |
 | `-session-lookup-rate` | 300/min, burst 120 | per-client bound on requests carrying a session cookie that does not resolve: on the app listener (`internal/api/session_lookup.go`, only misses spend) and for cookies the session listener has never seen — a **local** per-replica bucket only, so a random-cookie spray cannot multiply Postgres reads (`internal/backend/config.go`, `internal/gateway/proxy.go`, `internal/api/session_lookup.go`) |
-| `-rate-limit-replicas` | 1 | divisor of the degraded-mode floor — the shared window makes the flags exact aggregates while Postgres is healthy (`config.go:369`) |
-| `-trusted-proxies` | empty | CIDRs of reverse proxies whose forwarding headers set the client key (`config.go:367`) |
+| `-rate-limit-replicas` | 1 | divisor of the degraded-mode floor — the shared window makes the flags exact aggregates while Postgres is healthy (`config.go`) |
+| `-trusted-proxies` | empty | CIDRs of reverse proxies whose forwarding headers set the client key (`config.go`) |
 
 While Postgres is healthy the login and launch budgets are aggregate
 across replicas; a configured rate of `0` disables the limiter. The
 callback additionally carries a per-IP ceiling at 10× the login budget
-(`rateLimitRouteCallbackCeiling`, `internal/backend/ratelimit.go:50,98`).
+(`rateLimitRouteCallbackCeiling`, `internal/backend/ratelimit.go`).
 
 Keying: the anonymous client key is the socket peer, or the right-most
 `X-Forwarded-For` entry outside `-trusted-proxies` CIDRs — a non-IP token
 is never trusted. Authenticated keys are `sha256` digests with a
 `sess:`/`oidc:` namespace prefix so they can never collide with an IP key
-(`ratelimit.KeyDigest`, `internal/ratelimit/ratelimit.go:143-148`).
+(`ratelimit.KeyDigest`, `internal/ratelimit/ratelimit.go`).
 Per-key local state lives in an LRU capped at `rateLimitMaxKeys =
-100 000` (`internal/backend/wire.go:66`).
+100 000` (`internal/backend/wire.go`).
 
 Everything else is deliberately unlimited at this layer: the
 authenticated API carries quota/ownership bounds instead, the internal

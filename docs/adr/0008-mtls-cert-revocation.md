@@ -20,7 +20,7 @@ or lost operator or gateway certificate.
 ## Decision
 
 `-internal-revoked-list` (env `TCDI_INTERNAL_REVOKED_LIST`,
-`internal/backend/config.go:350`) names a plain-text file of revoked
+`internal/backend/config.go`) names a plain-text file of revoked
 certificates, one per line:
 
 ```
@@ -80,7 +80,7 @@ Chart: `backend.tls.internal.revokedSerials.existingSecret` names the
 Secret holding the blocklist file and `.key` the key within it (default
 `revoked-serials.txt`); the render mounts it read-only at
 `/etc/internal-revoked/` and appends the flag
-(`deploy/helm/tinycdi/values.yaml:298-306`). Metrics:
+(`deploy/helm/tinycdi/values.yaml`). Metrics:
 `tinycdi_internal_mtls_revoked_serial_total{listener="internal"}`
 counts aborted handshakes, `tinycdi_internal_mtls_revocation_entries`
 gauges the loaded entries and
@@ -92,7 +92,7 @@ and issuer of each refusal.
 Certificate lifetimes bound the un-revocable window: cert-manager
 `certManager.duration` (default `2160h`, 90 days) and
 `certManager.renewBefore` (`360h`)
-(`deploy/helm/tinycdi/values.yaml:542-543`). An operator may shorten
+(`deploy/helm/tinycdi/values.yaml`). An operator may shorten
 them; the blocklist covers a stolen key until its certificate expires.
 
 The operator procedure — read the serial and issuer off the
@@ -133,7 +133,7 @@ reissue — is
 - One backend flag + env, one `tlsreload` type, three metric series,
   two chart values, one Secret convention.
 - Stated limitation: the internal mTLS **clients** — the operator's
-  broker client (`internal/broker/httpapi/opclient/client.go:120-130`)
+  broker client (`internal/broker/httpapi/opclient/client.go`)
   and the gateway's `brokerclient` — verify the server chain but do not
   check the server leaf's serial against the list. A compromised server
   certificate means the internal CA itself is suspect: rotate the CA.

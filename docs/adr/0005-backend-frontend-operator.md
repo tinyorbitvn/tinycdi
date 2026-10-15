@@ -31,7 +31,7 @@ The design constraints behind that split:
 
 | Component | Image | Command | Listeners |
 |---|---|---|---|
-| **backend** | `tinycdi-backend` | `cmd/backend` | `:8443` app (public API on the portal host, `-listen`, `internal/backend/config.go:273`) · `:8444` session (session gateway on `*.<sessionDomain>`, `-session-listen`, `config.go:319`) · `:9443` internal mTLS (operator broker client, `-internal-listen`, `config.go:343`) · `:9090` metrics (**only** when `backend.metrics.enabled` — `-metrics-listen` defaults to empty, `config.go:354`; the chart renders it on its own ClusterIP Service, `deploy/helm/tinycdi/templates/backend.yaml:11,214`) |
+| **backend** | `tinycdi-backend` | `cmd/backend` | `:8443` app (public API on the portal host, `-listen`, `internal/backend/config.go`) · `:8444` session (session gateway on `*.<sessionDomain>`, `-session-listen`, `config.go`) · `:9443` internal mTLS (operator broker client, `-internal-listen`, `config.go`) · `:9090` metrics (**only** when `backend.metrics.enabled` — `-metrics-listen` defaults to empty, `config.go`; the chart renders it on its own ClusterIP Service, `deploy/helm/tinycdi/templates/backend.yaml`) |
 | **frontend** | `tinycdi-frontend` | `build/frontend` | `:8443` static SPA + browser security headers — **no `/v1` proxy** |
 | **operator** | `tinycdi-operator` | `cmd/operator` | reconciles `Workspace`/`WorkspaceTemplate`; calls the broker over mTLS for teardown revoke/drain |
 | runtimes | `tinycdi-linux-base` (shared base), `tinycdi-linux-desktop`, `tinycdi-browser`, `kasmweb/*` via adapter | — | per-workspace pod endpoints (`docs/images.md`) |
@@ -50,7 +50,7 @@ host.
 
 A **split/test mode** exists: `-broker-url` makes the process a standalone
 session gateway that calls the broker over the ADR 0003 mTLS contract
-(`config.go:373`). The chart deploys the combined mode and refuses
+(`config.go`). The chart deploys the combined mode and refuses
 `broker-url` in `backend.extraArgs`; split mode exists for end-to-end
 tests.
 
@@ -154,7 +154,7 @@ still works there.
 
 The default mode requires **every** portal cookie to carry the `__Host-`
 prefix: the SPA reads `csrfToken` and `sessionDomain` from `GET /v1/me`
-(`internal/api/me.go:79-80`) and keeps them in memory, so no JS-readable
+(`internal/api/me.go`) and keeps them in memory, so no JS-readable
 portal cookie exists a sibling host on the same registrable domain could
 exploit with `Domain=` cookies.
 
@@ -162,7 +162,7 @@ exploit with `Domain=` cookies.
 
 The portal CSRF token is **derived, not stored**:
 `base64url(HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2"))`
-(`csrfTokenFor`, `internal/api/auth.go:1043-1050`). The session row keeps
+(`csrfTokenFor`, `internal/api/auth.go`). The session row keeps
 only a MAC of the token, so a store read can never yield a usable token —
 yet `/v1/me` can still return the token to the SPA because it is
 recomputable from the session ID. Cookie-authenticated mutations keep the
@@ -199,7 +199,7 @@ by the in-process gateway:
   bumps `stream_epoch` and records the claiming tab as `stream_owner_tab`
   in the same row update, fencing every earlier stream of the lease — an
   older stream observing a newer epoch closes within one renew interval
-  (`internal/broker/sessions.go:342-390`).
+  (`internal/broker/sessions.go`).
 - **Takeover and revoke across replicas**: the old replica's 10 s renew
   sees the lease superseded or revoked and closes the socket; the 30 s
   bound (ADR 0003) stands.
@@ -210,14 +210,14 @@ by the in-process gateway:
 
 A workspace is Ready only once a ready EndpointSlice endpoint backs the
 current pod — `endpointReady`
-(`internal/runtime/linux/backend.go:595-600`): the kubelet's readiness
+(`internal/runtime/linux/backend.go`): the kubelet's readiness
 probe has already proved the stream port answers inside the pod, and the
 EndpointSlice check proves the Service route the gateway dials has caught
 up. Behind it the gateway retries a refused upstream dial within a 15 s
-budget (`UpstreamDialBudget`, `internal/gateway/dial.go:11`). On a cold
+budget (`UpstreamDialBudget`, `internal/gateway/dial.go`). On a cold
 first connect the portal re-mints a launch ticket with 1 s, 2 s, 4 s
 backoff within a 60 s total budget (`COLD_BACKOFF_MS`, `COLD_BUDGET_MS`,
-`web/src/session/coldConnect.ts:13-16`).
+`web/src/session/coldConnect.ts`).
 
 ### Restart behaviour
 
@@ -236,8 +236,8 @@ backoff within a 60 s total budget (`COLD_BACKOFF_MS`, `COLD_BUDGET_MS`,
   WebSockets in order; the session page reconnects with the existing
   cookie — no new ticket — while the lease lives.
 - The portal session keeps its 30 min idle / 12 h absolute timeouts
-  (`-session-idle`, `config.go:294`; `Authenticator.AbsoluteTimeout`,
-  `internal/api/auth.go:139`). Input activity on a user's lease extends
+  (`-session-idle`, `config.go`; `Authenticator.AbsoluteTimeout`,
+  `internal/api/auth.go`). Input activity on a user's lease extends
   **that user's** portal idle timer server-side (the client signal is
   never trusted), so a page left open on an active desktop does not idle
   out — while the passive connection-status poll never extends it.
@@ -262,16 +262,16 @@ because the components are trust-equivalent for session data. Mitigations:
   broker in process, so no network-usable gateway identity exists to
   steal;
 - the gateway code is wired with the narrow `BrokerClient` interface
-  (`internal/gateway/proxy.go:37`), its TLS material, the upstream CA and
+  (`internal/gateway/proxy.go`), its TLS material, the upstream CA and
   the control token — its own dependencies stay narrow even though the
   hosting process holds more;
 - pod hardening: distroless non-root image (`build/backend/Dockerfile`),
   read-only root filesystem, all capabilities dropped
-  (`backend.securityContext` hardened defaults, `values.yaml:405-406`);
+  (`backend.securityContext` hardened defaults, `values.yaml`);
   upstream responses treated as hostile;
 - the backend pod carries the `workspaces.cdi.tinyorbit.vn/role=gateway`
   label so per-workspace NetworkPolicy admits only it to runtimes, and only
-  from the platform namespace (`internal/runtime/linux/backend.go:332-335`);
+  from the platform namespace (`internal/runtime/linux/backend.go`);
   ingress to `:8444` comes only from the edge and to `:9443` only from the
   operator.
 

@@ -426,8 +426,8 @@ func TestSessionFixationPrevented(t *testing.T) {
 // while the browser already holds a live session of the SAME principal —
 // for example a cross-site page navigating the user to /v1/login with a
 // live IdP SSO session — must not destroy that session: its desktop lease
-// and CSRF token stay valid. The browser still gets a freshly minted
-// session cookie. A different principal's session is still deleted
+// and CSRF token stay valid. The same session is re-issued (no second
+// session whose leases sign-out would miss, TM-07). A different principal's session is still deleted
 // (TestSessionFixationPrevented).
 func TestLogin_SamePrincipalKeepsLiveSession(t *testing.T) {
 	env := newTestEnv(t, nil)
@@ -444,10 +444,10 @@ func TestLogin_SamePrincipalKeepsLiveSession(t *testing.T) {
 		t.Fatalf("second login callback = %d, want 302", resp2.StatusCode)
 	}
 	s2 := findCookie(cookies2, env.auth.SessionCookieName())
-	if s2 == nil || s2.Value == s1.Value {
-		t.Fatal("second login did not mint a fresh session cookie")
+	if s2 == nil || s2.Value != s1.Value {
+		t.Fatal("same-principal login must re-issue the live session, not mint a second one")
 	}
-	for name, c := range map[string]*http.Cookie{"pre-existing": s1, "new": s2} {
+	for name, c := range map[string]*http.Cookie{"pre-existing": s1, "re-issued": s2} {
 		r := env.authedGet(t, c, "/v1/me")
 		r.Body.Close()
 		if r.StatusCode != http.StatusOK {

@@ -50,9 +50,9 @@ covers the stored log; the log stream is covered in
   `launch.host_mismatch`, `session.lookup`, `session.stream`,
   `session.list`, `session.revoke`, `session.host_mismatch`),
   `session.touch`, `http.request`, the sign-out `session.revoke` record
-  ([`internal/api/auth.go:790`](../../internal/api/auth.go)) and
+  ([`internal/api/auth.go`](../../internal/api/auth.go)) and
   `admin.quota.config_apply`
-  ([`internal/backend/tenantquota.go:79`](../../internal/backend/tenantquota.go)).
+  ([`internal/backend/tenantquota.go`](../../internal/backend/tenantquota.go)).
 - Each row: tenant, actor, action, target kind and id, request id,
   outcome (`success`, `failure`, `denied`), error code, details, time.
   File-transfer rows carry the file name and byte count, never content.

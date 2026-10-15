@@ -612,16 +612,28 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 
 	// Session fixation: a session cookie the browser already carries is
 	// destroyed unless it is a live session of the principal that just
-	// signed in. A planted, foreign, expired or unknown session dies here;
-	// the same user's own session survives, so a login navigation a
+	// signed in. A planted, foreign, expired or unknown session dies here.
+	// The same user's own live session is re-issued as is (same ID, its
+	// own absolute deadline) rather than replaced: a login navigation a
 	// cross-site page triggers (Lax cookies ride top-level GETs, and a live
 	// IdP session answers without a prompt) cannot end their running
-	// desktop. The new session always gets a fresh random ID either way.
+	// desktop, and no second session exists whose leases and tickets
+	// sign-out would miss (TM-07). A new session gets a fresh random ID.
 	if old, err := r.Cookie(a.cfg.SessionCookieName); err == nil && old.Value != "" {
 		prev, err := a.sessions.Peek(ctx, old.Value)
-		if err != nil || !samePrincipal(prev.Principal, principal) {
-			_ = a.sessions.Delete(ctx, old.Value)
+		if err == nil && samePrincipal(prev.Principal, principal) {
+			if ttl := int(prev.ExpiresAt.Sub(a.now()).Seconds()); ttl > 0 {
+				http.SetCookie(w, a.sessionCookie(old.Value, ttl))
+				a.log.Info("oidc login succeeded",
+					"request_id", RequestIDFromContext(ctx),
+					"actor", observability.ActorRef(principal.Issuer, principal.Subject),
+					"tenant", principal.TenantID,
+				)
+				http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
+				return
+			}
 		}
+		_ = a.sessions.Delete(ctx, old.Value)
 	}
 
 	sess := &Session{

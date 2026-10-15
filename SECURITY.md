@@ -143,7 +143,7 @@ and an update to this file.
 5. Sessions use opaque IDs of at least 256 bits, rotated at login.
    A session cookie the browser already carries is deleted at login
    unless it is a live session of the same principal (issuer, subject,
-   tenant); that one is kept, so a login navigation cannot end the
+   tenant); that one is kept and re-issued (no second session), so a login navigation cannot end the
    user's running desktop. Cookies are `__Host-`, `Secure`, `HttpOnly`
    and have no `Domain`.
    Idle and absolute expiry are enforced server-side and bound to the
