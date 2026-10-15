@@ -157,7 +157,11 @@ async function seedPortalData() {
   await api("POST", "/_control/admin/me", { roles: ["user", "tenant-admin"] });
   await api("POST", "/_control/admin/seed");
   const { items = [] } = await api("GET", "/v1/workspaces");
-  const ready = items.find((w) => w.phase === "Ready");
+  // Prefer the demo workspace that carries events, so the detail shot
+  // shows a populated Events table.
+  const ready =
+    items.find((w) => w.phase === "Ready" && w.name === "design-review") ??
+    items.find((w) => w.phase === "Ready");
   if (!ready) throw new Error("demo tenant has no Ready workspace to open");
   return { readyId: ready.id, readyName: ready.name };
 }

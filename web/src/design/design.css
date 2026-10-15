@@ -792,11 +792,12 @@
   grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
 }
 
+/* Label above value on every meter, so bars in one row share a baseline
+   whether or not a label would have wrapped. */
 .tc-meter__header {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0 var(--tc-space-2);
+  flex-direction: column;
+  gap: 0;
   margin-bottom: var(--tc-space-1);
   font-size: var(--tc-text-sm);
 }

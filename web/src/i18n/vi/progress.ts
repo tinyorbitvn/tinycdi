@@ -33,6 +33,7 @@ export default {
   "progress.state.failed": "lỗi",
   "progress.state.skipped": "đã bỏ qua",
 
+  "progress.compact.failedAt": "Lỗi ở bước {current} trên {total}",
   "progress.step.of": "bước {current} trên {total}",
   "progress.step.elapsed": "trong {elapsed}",
   "progress.step.reason": "Trạng thái: {reason}",

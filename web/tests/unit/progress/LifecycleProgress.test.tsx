@@ -185,7 +185,10 @@ describe("LifecycleProgress", () => {
       ],
     });
     const compact = render(<LifecycleProgress workspace={ws} variant="compact" />);
-    await screen.findByText(/step/, { selector: ".tc-progress__compactline" });
+    const line = await screen.findByText(/step/, { selector: ".tc-progress__compactline" });
+    // A failed row says it failed; it must not read like a start in progress.
+    expect(line.textContent).toMatch(/^Failed at step \d of \d/);
+    expect(line.textContent).not.toMatch(/^Starting/);
     expect(compact.container.querySelector(".tc-progress__elapsed")).toBeNull();
     compact.unmount();
 

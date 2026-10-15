@@ -155,8 +155,12 @@ export function LifecycleProgress({
     return (
       <span className={cx("tc-progress", "tc-progress--compact", className)}>
         <span className="tc-progress__compactline">
-          {t(model.title, { name: workspace.name })} ·{" "}
-          {t("progress.step.of", { current: model.current + 1, total: model.steps.length })}
+          {model.terminal === "failed"
+            ? t("progress.compact.failedAt", { current: model.current + 1, total: model.steps.length })
+            : `${t(model.title, { name: workspace.name })} · ${t("progress.step.of", {
+                current: model.current + 1,
+                total: model.steps.length,
+              })}`}
           {cur ? ` · ${t(cur.label)}` : ""}
         </span>
         {showTimer ? (
