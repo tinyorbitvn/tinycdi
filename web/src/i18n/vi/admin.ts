@@ -294,6 +294,8 @@ export default {
   "admin.sessions.confirm.body":
     "Mọi phiên portal của người dùng này sẽ kết thúc và các desktop đang mở sẽ ngắt kết nối. Workspace vẫn tiếp tục chạy.",
   "admin.sessions.done": "Đã đăng xuất: {sessions} phiên portal, {leases} phiên desktop.",
+  "admin.sessions.selfSignedOut":
+    "Phiên portal của chính bạn cũng đã bị đăng xuất. Đang chuyển tới trang đăng xuất…",
 
   // Session policy page (giới hạn clipboard của tenant, ADR 0009).
   "admin.policy.title": "Chính sách phiên",

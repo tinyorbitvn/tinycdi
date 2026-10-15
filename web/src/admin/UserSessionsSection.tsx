@@ -2,21 +2,42 @@ import { useCallback, useState } from "react";
 import { Button, ConfirmDialog, Pagination, Section, Table, useServerPage } from "../design";
 import type { Column } from "../design/Table";
 import { useApi } from "../api/context";
+import { unwrap, type ApiClient } from "../api/client";
+import { SIGNED_OUT_PATH } from "../auth/signOut";
 import { t } from "../i18n";
 import { ApiErrorAlert } from "./ApiErrorAlert";
 import { listAdminSessionPage, revokeAdminUserSessions, type AdminLiveSession } from "./api";
 import { formatDateTime } from "./format";
 
+// How long the success message stays up before an admin who signed
+// themself out everywhere is taken to the signed-out page.
+export const SELF_SIGN_OUT_DELAY_MS = 2000;
+
+// stillSignedIn asks the passive session probe whether this browser's
+// portal session survived the revoke. An admin who signs out their own
+// principal everywhere ends this session too — expected, not an error. A
+// failed probe keeps the old behavior (stay on the page).
+async function stillSignedIn(api: ApiClient): Promise<boolean> {
+  try {
+    return unwrap(await api.GET("/v1/session")).authenticated;
+  } catch {
+    return true;
+  }
+}
+
 // The "Live sessions" section of the user detail page (F5): the user's live
 // desktop leases, read from Postgres, and the confirmed "Sign out everywhere".
+// `leave` navigates away (injectable for tests).
 export function UserSessionsSection({
   tenant,
   ownerRef,
   displayName,
+  leave = (url) => window.location.assign(url),
 }: {
   tenant: string;
   ownerRef: string;
   displayName: string;
+  leave?: (url: string) => void;
 }) {
   const api = useApi();
   const [confirming, setConfirming] = useState(false);
@@ -47,7 +68,16 @@ export function UserSessionsSection({
     try {
       const r = await revokeAdminUserSessions(api, tenant, ownerRef);
       setConfirming(false);
-      setResult(t("admin.sessions.done", { sessions: r.sessions, leases: r.leases }));
+      const done = t("admin.sessions.done", { sessions: r.sessions, leases: r.leases });
+      if (!(await stillSignedIn(api))) {
+        // The admin's own portal session was among those revoked: report
+        // success, skip the list reload (it would only answer 401), and
+        // leave for the signed-out page.
+        setResult(`${done} ${t("admin.sessions.selfSignedOut")}`);
+        window.setTimeout(() => leave(SIGNED_OUT_PATH), SELF_SIGN_OUT_DELAY_MS);
+        return;
+      }
+      setResult(done);
       list.reset();
     } catch (e) {
       setActionError(e);
