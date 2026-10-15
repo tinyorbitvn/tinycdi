@@ -510,8 +510,9 @@ func TestAppListener_UnknownCookieSprayBounded(t *testing.T) {
 
 // TestAppListener_StoreErrorsKeepLookupSpent (R1-03, task-6 fix round 1):
 // only a hit gives the token back. A read that ended in any error —
-// a deadline, a cancelled request, a server-side cancel — still cost the
-// store, so a spray against a degraded pool stays inside the burst.
+// a deadline, a cancelled request, a server-side cancel, a non-transient
+// store fault — still cost the store, so a spray against a degraded pool
+// stays inside the burst.
 func TestAppListener_StoreErrorsKeepLookupSpent(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -520,6 +521,7 @@ func TestAppListener_StoreErrorsKeepLookupSpent(t *testing.T) {
 		{"deadline", fmt.Errorf("get session: %w", context.DeadlineExceeded)},
 		{"canceled", fmt.Errorf("get session: %w", context.Canceled)},
 		{"query canceled", &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}},
+		{"non-transient", errors.New("scan: column count mismatch")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counter := &lookupCounter{SessionStore: failingSessionStore{err: tc.err}}

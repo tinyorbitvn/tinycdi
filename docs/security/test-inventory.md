@@ -53,6 +53,16 @@ tracking tags kept in code comments (`SEC-…`, `SR-…`, `FX-R…`, `RL-…`,
   session-digest bucket; valid OIDC state → state-digest bucket; forged
   values fall back to the client-IP bucket; per-IP ceiling on the
   callback (`TestCallback_ValidatedStateCeiling`).
+- `internal/api/session_lookup_test.go` — the app listener's
+  unknown-cookie budget (TM-06, R1-03): a session this replica confirmed
+  live keeps working after a forged-cookie spray from the same client key
+  spends the budget (`TestAppListener_LiveSessionSurvivesSharedKeySpray`);
+  the live-session cache never authenticates on its own — a cached id
+  whose row was deleted is refused and evicted
+  (`TestAppListener_DeletedCachedSessionRefusedAndEvicted`); the cache is
+  bounded and expires entries (`TestLiveSessionCache_BoundedAndExpiring`).
+  `middleware_test.go` pins that any store error, transient or not, keeps
+  the token spent (`TestAppListener_StoreErrorsKeepLookupSpent`).
 - `internal/api/connection_status_test.go` — passive auth path: polling
   must not extend idle (TM-03).
 - `internal/api/idlepoll_test.go` — the idle-window contract (TM-03):
@@ -982,7 +992,7 @@ Tests that need a built runtime image run in CI only (§7).
 |---|---|---|---|
 | R1-01 | `TestSettleQuota_StartRaceKeepsReservation`, `TestSettleQuota_StoppedWorkspaceStillReleases` | `internal/provisioning/recovery_test.go` | TM-09 |
 | R1-02 | `TestAdminQuota_PutAboveOperatorCeilingRefused`, `TestAdminQuota_UndeclaredTenantCreateRefused`, `TestAdminQuota_PutAtCeilingAccepted`, `TestTenantQuotaCeilingsRenderFlag`, `TestTenantQuotaCeilingsFlagAbsentByDefault`, `TestSchemaRejectsBadQuotaCeilings`, `TestParseFlags_TenantQuotaCeilings` | `internal/api/adminquota_test.go`, `deploy/helm/chart_tenantquota_test.go`, `internal/backend/tenantquota_test.go` | TM-51 |
-| R1-03 | `TestAppListener_UnknownCookieSprayBounded`, `TestAppListener_ValidSessionsBehindOneClientNotThrottled`, `TestAppListener_UnknownCookieSprayRefused`, `TestAppListener_StoreErrorsKeepLookupSpent`, `TestLimiter_RefundReturnsOneToken`, `TestSessionStore_MissNeverWrites`, `TestPruneDeadSessions_RemovesOnlyDeadRows` | `internal/api/middleware_test.go`, `internal/backend/backend_test.go`, `internal/ratelimit/ratelimit_test.go`, `internal/store/sessions_pg_test.go` | TM-06 |
+| R1-03 | `TestAppListener_UnknownCookieSprayBounded`, `TestAppListener_ValidSessionsBehindOneClientNotThrottled`, `TestAppListener_UnknownCookieSprayRefused`, `TestAppListener_StoreErrorsKeepLookupSpent`, `TestAppListener_LiveSessionSurvivesSharedKeySpray`, `TestAppListener_DeletedCachedSessionRefusedAndEvicted`, `TestLiveSessionCache_BoundedAndExpiring`, `TestLimiter_RefundReturnsOneToken`, `TestSessionStore_MissNeverWrites`, `TestPruneDeadSessions_RemovesOnlyDeadRows` | `internal/api/middleware_test.go`, `internal/api/session_lookup_test.go`, `internal/backend/backend_test.go`, `internal/ratelimit/ratelimit_test.go`, `internal/store/sessions_pg_test.go` | TM-06 |
 | R1-04 | `TestResponsePolicy_Upstream1xxCannotStripPinnedHeaders`, `TestProxy_WebSocketUpgradeSurvives1xxGuard` | `internal/gateway/proxy_1xx_test.go` | TM-29 |
 | R1-05 | `TestSessionListener_StalledBodyBounded`, `TestSessionListener_AdmittedStreamOutlivesReadBound`, `TestSessionListener_TransferUploadOutlivesReadBound` | `internal/backend/session_readbound_test.go`, `internal/gateway/readbound_test.go` | TM-52 |
 | R1-06 | `TestLinuxRuntimeClipboardParamsNotOverridable` (image IT, run locally with the images built; the adapter subtest `TestKasmAdapterChromium/ClipboardParamsNotOverridable` runs in CI's `kasm-contract` job), `clipboard-policy.test.sh` | `tests/integration/linux_runtime_test.go`, `tests/integration/kasm_adapter_test.go`, `.github/tests/clipboard-policy.test.sh` | TM-36 |

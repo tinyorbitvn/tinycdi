@@ -337,6 +337,9 @@ type Authenticator struct {
 	// turn out unknown (TM-06); trusted feeds ratelimit.ClientKey.
 	lookups SessionLookupLimiter
 	trusted []netip.Prefix
+	// live exempts cookies this replica recently confirmed live from the
+	// lookups budget (R1-03); it never replaces the store read.
+	live *liveSessionCache
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
@@ -409,6 +412,7 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 		},
 		sessions:           sessions,
 		lookups:            ratelimit.New(SessionLookupRate, SessionLookupBurst, sessionLookupMaxKeys, nil),
+		live:               newLiveSessionCache(sessionLookupMaxKeys),
 		endSessionEndpoint: endSession,
 		log:                log,
 		now:                time.Now,
@@ -634,6 +638,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		_ = a.sessions.Delete(ctx, old.Value)
+		a.forgetLiveSession(old.Value)
 	}
 
 	sess := &Session{
@@ -761,6 +766,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, CodeUnavailable, "could not sign out; retry")
 			return
 		}
+		a.forgetLiveSession(c.Value)
 		a.revokeSessionMaterial(r, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
