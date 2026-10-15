@@ -114,10 +114,13 @@ only). It shows counts only, no identities:
 The answer is cached for 15 seconds per tenant. `fresh: false` in the
 response means the backend's Kubernetes watch is unhealthy and the
 Kubernetes-derived counts are empty: the Workspace informer has not
-synced, the API server has not answered the backend's liveness probe for
-15 seconds, or the watch has kept failing for over 15 seconds (the
-backend logs `Failed to watch`). A tenant with no recent Workspace changes
-stays fresh; quiet is not stale. Reading the overview is itself
+synced, the backend's cache has not been shown to match the API server
+for 15 seconds (a metadata list every 5 seconds is compared with the
+cache; an unreachable API server, or a watch that stopped delivering
+changes, fails it), or the watch has kept failing for over 15 seconds
+(the backend logs `Failed to watch`). A tenant with no recent Workspace
+changes stays fresh; quiet is not stale. The broker applies the same rule
+before it issues or renews a connection. Reading the overview is itself
 audited (`admin.overview.get`).
 
 ## Alerts

@@ -41,6 +41,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 // defaultMergedGatewayID is the session-gateway identity when -gateway-id
@@ -368,7 +369,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// informer cache, so a quiet tenant keeps connecting while a watch that
 	// stopped delivering (or an unreachable API server) stops it.
 	b.bg = append(b.bg, func(ctx context.Context) {
-		bindings.RunLiveness(ctx, broker.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
+		bindings.RunLiveness(ctx, watchhealth.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
 	})
 	// Event-driven quota settle: the operator writes its observed runtime
 	// absence into Workspace CR status (or the CR's deletion); every event
@@ -402,12 +403,12 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		return fmt.Errorf("status view: %w", err)
 	}
 	statusViewRef.Store(statusView)
-	// Liveness heartbeat for an idle watch: while no Workspace changes, an
-	// uncached one-item list proves the API server still serves the
-	// resource, so a quiet tenant stays fresh and an unreachable API server
-	// does not.
+	// Same consistency probe as the binding source (internal/watchhealth):
+	// the overview is fresh while the cache matches the API server. Each
+	// component keeps its own tracker, so this is a second metadata list per
+	// namespace every 5 s.
 	b.bg = append(b.bg, func(ctx context.Context) {
-		statusView.RunLiveness(ctx, api.WorkspaceListProbe(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
+		statusView.RunLiveness(ctx, watchhealth.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
 	})
 	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
 		return fmt.Errorf("boot recorder: %w", err)

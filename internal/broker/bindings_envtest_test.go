@@ -24,6 +24,7 @@ import (
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 func envtestAssets(t *testing.T) string {
@@ -106,7 +107,7 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	// The consistency probe against the real API server: a metadata-only
 	// list that must match the cache for the source to stay fresh.
 	const probeEvery = time.Second
-	go src.RunLiveness(cctx, broker.WorkspaceMetadataVersions(kc, []string{ns.Name}), probeEvery)
+	go src.RunLiveness(cctx, watchhealth.WorkspaceMetadataVersions(kc, []string{ns.Name}), probeEvery)
 
 	if _, err := src.CurrentBinding(context.Background(), "ws-nope"); !errors.Is(err, broker.ErrNotFound) {
 		t.Fatalf("unknown uid = %v, want ErrNotFound", err)

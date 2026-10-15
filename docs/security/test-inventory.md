@@ -426,6 +426,11 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   (a cache trailing a busy Workspace by one interval stays fresh),
   `TestK8sBindingSource_IdleHealthyWatchStaysFresh`; the envtest
   `TestK8sBindingSource_Projection` runs the real metadata-list probe.
+  The rule lives in `internal/watchhealth` (`TestNewVersion_ResyncIsNoEvent`,
+  `TestWorkspaceMetadataVersions`) and the API status view applies it too
+  (`TestK8sStatusView_SilentStalledWatchGoesStale`,
+  `TestK8sStatusView_IdleHealthyWatchStaysFresh`,
+  `TestK8sStatusView_InFlightChangeStaysFresh`).
 - `internal/broker/signout_test.go` — `RevokePortalSession` semantics
   (TM-07): digest-bound leases revoked with drain accounting,
   outstanding tickets revoked, redemption denied once the issuing

@@ -20,6 +20,7 @@ import (
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 func TestK8sBindingSource_FreshnessGate(t *testing.T) {
@@ -28,8 +29,10 @@ func TestK8sBindingSource_FreshnessGate(t *testing.T) {
 		t.Fatalf("unsynced source = %v, want ErrFreshness", err)
 	}
 
+	clk := &fakeClock{t: time.Now()}
+	src.now = clk.Now
 	src.MarkSynced()
-	src.lastEvent = time.Now().Add(-MaxBindingAge - time.Second)
+	clk.Advance(MaxBindingAge + time.Second)
 	if _, err := src.CurrentBinding(context.Background(), "ws-1"); !errors.Is(err, ErrFreshness) {
 		t.Fatalf("stale source = %v, want ErrFreshness", err)
 	}
@@ -239,28 +242,28 @@ func TestK8sBindingSource_UnreachableAPIServerGoesStale(t *testing.T) {
 // TestK8sBindingSource_WatchFailureStreak: the watch keeps failing while
 // lists still succeed and the cache still matches. A non-benign failure
 // streak longer than MaxBindingAge is stale; benign closes, other informers'
-// failures and a streak whose last report is older than watchRetryWindow are
+// failures and a streak whose last report is older than watchhealth.WatchRetryWindow are
 // not.
 func TestK8sBindingSource_WatchFailureStreak(t *testing.T) {
 	e := newProbeEnv(t)
 	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "workspaces.cdi.tinyorbit.vn", Resource: "workspaces"}, "", errors.New("watch denied"))
 
 	e.src.NoteWatchError("*v1.Secret", forbidden)
-	e.src.NoteWatchError(workspaceTypeDescription, apierrors.NewResourceExpired("too old"))
+	e.src.NoteWatchError(watchhealth.WorkspaceTypeDescription, apierrors.NewResourceExpired("too old"))
 	for i := 0; i < 4; i++ {
 		e.tick()
 	}
 	e.fresh(t, "benign/foreign watch errors")
 
-	e.src.NoteWatchError(workspaceTypeDescription, forbidden)
+	e.src.NoteWatchError(watchhealth.WorkspaceTypeDescription, forbidden)
 	for i := 0; i < 4; i++ { // streak reaches 20 s > MaxBindingAge
 		e.tick()
-		e.src.NoteWatchError(workspaceTypeDescription, forbidden)
+		e.src.NoteWatchError(watchhealth.WorkspaceTypeDescription, forbidden)
 	}
 	e.stale(t, "failing watch")
 
-	// No new report for longer than watchRetryWindow: the watch re-established.
-	for d := time.Duration(0); d <= watchRetryWindow; d += every {
+	// No new report for longer than watchhealth.WatchRetryWindow: the watch re-established.
+	for d := time.Duration(0); d <= watchhealth.WatchRetryWindow; d += every {
 		e.tick()
 	}
 	e.fresh(t, "after the streak lapsed")

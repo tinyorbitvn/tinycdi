@@ -21,14 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"reflect"
 	"regexp"
 	"sync"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	toolscache "k8s.io/client-go/tools/cache"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -36,25 +33,15 @@ import (
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 // maxObservedStale is the freshness budget for observed Workspace status —
 // the same 15 s bound the broker enforces on bindings (design §4): the view
-// is stale once it has had no heartbeat (informer event or successful
-// liveness probe) for this long, or once a watch failure streak has lasted
-// this long.
+// is stale once the informer cache has not been shown to match the API
+// server for this long, or once a watch failure streak has lasted this long
+// (internal/watchhealth).
 const maxObservedStale = 15 * time.Second
-
-// watchRetryWindow is how long one reported watch failure keeps the view
-// suspect. A reflector that is still failing re-reports at least every
-// [30, 60) s (client-go's backoff cap), so a failure older than this with
-// no successor means the watch re-established.
-const watchRetryWindow = time.Minute
-
-// workspaceTypeDescription is the reflector type description of the
-// Workspace informer, used to pick its failures out of the shared cache's
-// watch error handler.
-var workspaceTypeDescription = reflect.TypeOf(&cdiv1.Workspace{}).String()
 
 // ReasonObservedStale marks conditions carried over from a stale observed
 // snapshot: the informer can no longer prove they are current.
@@ -116,24 +103,18 @@ type StatusView interface {
 // cache scoped to the managed tenant namespaces — in production the same
 // cache the broker's BindingSource runs (in the backend).
 //
-// Freshness reflects watch health, not how recently a Workspace changed: an
-// idle tenant emits no watch events while its watch is perfectly healthy.
-// The projection is Fresh while
-//
-//   - the informer has synced,
-//   - a heartbeat arrived within maxObservedStale — an informer event that
-//     carries a new object version (a resync replay of the local store does
-//     not count: it keeps firing while the watch is down) or, while the
-//     informer is quiet, a successful liveness probe of the API server
-//     (RunLiveness), and
-//   - no watch failure streak (NoteWatchError, fed by the cache's watch
-//     error handler) has lasted longer than maxObservedStale. A streak ends
-//     on the next informer event or watchRetryWindow after its last report.
-//
-// A disconnected watch therefore turns stale within maxObservedStale either
-// way: client-go retries a refused connection silently, which stops the
-// probe from succeeding, and reports every other list/watch failure, which
-// starts a streak.
+// Freshness means the informer cache matches the API server, the rule the
+// broker's binding source applies too (internal/watchhealth): fresh while
+// the informer has synced, a consistency probe (RunLiveness: an uncached
+// metadata-only list compared with the cache) matched within
+// maxObservedStale with no difference outliving one probe interval, and no
+// watch failure streak (NoteWatchError, fed by the cache's watch error
+// handler) has lasted longer than maxObservedStale. An idle tenant with a
+// healthy watch stays fresh; a watch that stops delivering — silently, or
+// while client-go retries a refused or throttled connection — turns stale
+// as soon as a change it missed outlives its grace, and an unreachable API
+// server turns stale by age. Informer events, resync replays included, are
+// never a heartbeat.
 //
 // The last fresh projection per workspace is remembered so a stalled watch
 // degrades to "last known state + StatusStale" instead of going blank.
@@ -141,18 +122,16 @@ type K8sStatusView struct {
 	cache    crcache.Cache
 	now      func() time.Time
 	maxStale time.Duration
+	watch    watchhealth.Tracker
 
 	mu        sync.Mutex
-	synced    bool
-	lastEvent time.Time                 // last heartbeat: informer event or liveness probe success
-	failSince time.Time                 // first watch failure of the current streak; zero when none
-	failLast  time.Time                 // latest watch failure of the current streak
 	lastKnown map[string]ObservedStatus // workspaceUID -> last fresh projection
 }
 
 // NewK8sStatusView registers a Workspace event handler on the cache's
-// informer. The caller starts the cache and calls MarkSynced once
-// WaitForCacheSync reports true.
+// informer. The caller starts the cache, calls MarkSynced once
+// WaitForCacheSync reports true, feeds the cache's watch error handler to
+// NoteWatchError and runs RunLiveness.
 func NewK8sStatusView(ctx context.Context, c crcache.Cache) (*K8sStatusView, error) {
 	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
@@ -165,144 +144,44 @@ func NewK8sStatusView(ctx context.Context, c crcache.Cache) (*K8sStatusView, err
 		lastKnown: map[string]ObservedStatus{},
 	}
 	if _, err := inf.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(interface{}) { v.note() },
+		AddFunc: func(interface{}) { v.watch.Delivered() },
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			if watchDelivered(oldObj, newObj) {
-				v.note()
+			if watchhealth.NewVersion(oldObj, newObj) {
+				v.watch.Delivered()
 			}
 		},
-		DeleteFunc: func(interface{}) { v.note() },
+		DeleteFunc: func(interface{}) { v.watch.Delivered() },
 	}); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
 
-// watchDelivered reports whether an informer update carries a new object
-// version. A periodic resync replays the local store with an unchanged
-// resource version — it keeps firing while the watch is down, so it is no
-// evidence the watch is alive and must not count as a heartbeat.
-func watchDelivered(oldObj, newObj interface{}) bool {
-	o, ok1 := oldObj.(metav1.Object)
-	n, ok2 := newObj.(metav1.Object)
-	return !ok1 || !ok2 || o.GetResourceVersion() != n.GetResourceVersion()
-}
-
 // MarkSynced records that the informer cache completed its initial sync.
-func (v *K8sStatusView) MarkSynced() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.synced = true
-	v.lastEvent = v.now()
-}
+func (v *K8sStatusView) MarkSynced() { v.watch.MarkSynced(v.now()) }
 
-// note records a watch event: the informer is live and emitting, which
-// also ends any watch failure streak.
-func (v *K8sStatusView) note() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.synced = true
-	v.lastEvent = v.now()
-	v.failSince, v.failLast = time.Time{}, time.Time{}
-}
-
-// NoteWatchError records a list/watch failure reported by the cache's watch
-// error handler for the informer of typeDescription (the reflector's
-// TypeDescription). Failures of other informers are ignored, and so are the
-// routine closes client-go itself treats as benign (an expired resource
-// version, EOF): the reflector resumes from them without a gap.
+// NoteWatchError feeds a list/watch failure from the cache's watch error
+// handler (see watchhealth.Tracker.NoteWatchError).
 func (v *K8sStatusView) NoteWatchError(typeDescription string, err error) {
-	if typeDescription != workspaceTypeDescription || benignWatchError(err) {
-		return
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	now := v.now()
-	if v.failSince.IsZero() || now.Sub(v.failLast) > watchRetryWindow {
-		v.failSince = now
-	}
-	v.failLast = now
+	v.watch.NoteWatchError(v.now(), typeDescription, err)
 }
 
-// benignWatchError mirrors client-go's DefaultWatchErrorHandler, which logs
-// these as routine: the watch closed normally or its resource version
-// expired, and the reflector re-lists or re-watches at once.
-func benignWatchError(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		apierrors.IsResourceExpired(err) || apierrors.IsGone(err)
+// RunLiveness runs the consistency probe every interval until ctx ends: api
+// (watchhealth.WorkspaceMetadataVersions over an uncached client) against
+// the informer cache. See internal/watchhealth for the rule and its cost.
+func (v *K8sStatusView) RunLiveness(ctx context.Context, api watchhealth.Versions, every time.Duration) {
+	v.watch.Run(ctx, v.now, api, v.cache, every)
 }
 
-// RunLiveness probes the API server every interval in which the informer
-// delivered no event, and counts a success as a heartbeat; it returns when
-// ctx ends. This is what keeps an idle but healthy watch fresh: silence
-// alone cannot tell it from a dead one. probe must bypass the informer cache
-// (see WorkspaceListProbe).
-func (v *K8sStatusView) RunLiveness(ctx context.Context, probe func(context.Context) error, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		v.livenessTick(ctx, probe, every)
-	}
-}
-
-// livenessTick runs one RunLiveness round: probe only while synced and
-// quiet for at least every, and record a success as a heartbeat.
-func (v *K8sStatusView) livenessTick(ctx context.Context, probe func(context.Context) error, every time.Duration) {
-	v.mu.Lock()
-	quiet := v.synced && v.now().Sub(v.lastEvent) >= every
-	v.mu.Unlock()
-	if !quiet {
-		return
-	}
-	pctx, cancel := context.WithTimeout(ctx, every)
-	err := probe(pctx)
-	cancel()
-	if err != nil {
-		return
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if now := v.now(); now.After(v.lastEvent) {
-		v.lastEvent = now
-	}
-}
-
-// WorkspaceListProbe returns a liveness probe that lists at most one
-// Workspace in each namespace (cluster-wide when namespaces is empty)
-// through reader, which must be an uncached client: it proves the API
-// server still serves the resource the informer watches.
-func WorkspaceListProbe(reader client.Reader, namespaces []string) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if len(namespaces) == 0 {
-			return reader.List(ctx, &cdiv1.WorkspaceList{}, client.Limit(1))
-		}
-		for _, ns := range namespaces {
-			if err := reader.List(ctx, &cdiv1.WorkspaceList{}, client.InNamespace(ns), client.Limit(1)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+// livenessTick runs one probe with grace one interval.
+func (v *K8sStatusView) livenessTick(ctx context.Context, api watchhealth.Versions, grace time.Duration) {
+	v.watch.Probe(ctx, v.now, api, v.cache, grace)
 }
 
 // health reports whether the view is fresh (see K8sStatusView) and the
-// time of the last heartbeat.
+// time the cache was last shown to match the API server.
 func (v *K8sStatusView) health() (bool, time.Time) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	now := v.now()
-	if !v.synced || now.Sub(v.lastEvent) > v.maxStale {
-		return false, v.lastEvent
-	}
-	if !v.failSince.IsZero() && now.Sub(v.failLast) <= watchRetryWindow && now.Sub(v.failSince) > v.maxStale {
-		return false, v.lastEvent
-	}
-	return true, v.lastEvent
+	return v.watch.Health(v.now(), v.maxStale)
 }
 
 // WorkspaceStatus returns the observed status for the workspace UID. It
