@@ -273,3 +273,20 @@ test.describe("locale: vi at 390px", () => {
     }
   });
 });
+
+// Spec §3.2: the dark canvas is flat. Orbit's navy-night sheet paints a
+// radial page gradient on `html[data-theme="dark"] body` after base.css
+// loads, so this checks the computed result, not the declaration.
+test.describe("theme: dark canvas", () => {
+  test("the page body has no gradient glow", async ({ page, request, context }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await context.addInitScript(() => window.localStorage.setItem("tcdi.theme", "dark"));
+    await seed(request);
+    await login(page);
+    await page.goto("/admin");
+    await settle(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    const backgroundImage = await page.evaluate(() => getComputedStyle(document.body).backgroundImage);
+    expect(backgroundImage).toBe("none");
+  });
+});

@@ -127,7 +127,10 @@ describe("design layer contract", () => {
 
   it("dark mode has a flat canvas (no purple page glow)", () => {
     const base = topLevel(readWeb("src/styles/base.css"));
-    expect(declarations(base, 'html[data-theme="dark"] body')["background-image"]).toBe("none");
+    // navy-night.css (loaded later) sets the gradient on
+    // `html[data-theme="dark"] body`; the override must out-rank it.
+    expect(readWeb("src/design/orbit/css/navy-night.css")).toContain('html[data-theme="dark"] body{');
+    expect(declarations(base, ':root[data-theme="dark"] body')["background-image"]).toBe("none");
   });
 
   it("the skip link has no shadow and is clipped until focused", () => {

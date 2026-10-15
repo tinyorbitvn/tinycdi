@@ -1144,6 +1144,9 @@
 
 /* ---------- table ---------- */
 .tc-table-wrap {
+  /* Contains position:absolute descendants (visually hidden headers) so
+     they scroll with the table instead of widening the page. */
+  position: relative;
   width: 100%;
   overflow-x: auto;
   background: var(--tc-color-surface);

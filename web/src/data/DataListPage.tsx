@@ -193,8 +193,12 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
     <Page
       title={t("data.list.title")}
       description={t("data.list.description")}
-      actions={
-        admin ? (
+    >
+      {/* A labelled field, so it lives above the table rather than in the
+          header's actions slot, where its label + control height pushed
+          the description away from the title. */}
+      {admin ? (
+        <Cluster gap={2}>
           <Select
             label={t("data.list.scope.label")}
             value={effectiveScope}
@@ -204,9 +208,8 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
               { value: "tenant", label: t("data.list.scope.tenant") },
             ]}
           />
-        ) : undefined
-      }
-    >
+        </Cluster>
+      ) : null}
       {notice ? (
         <Alert tone="success" onDismiss={() => setNotice(null)}>
           {notice}

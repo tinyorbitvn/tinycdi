@@ -95,8 +95,10 @@ p a,
 }
 
 /* Flat canvas: Orbit's dark page gradient (navy-night / palette-system
-   `body` background-image) reads as a purple glow behind flat cards. */
-html[data-theme="dark"] body {
+   `body` background-image) reads as a purple glow behind flat cards.
+   navy-night.css loads later with `html[data-theme="dark"] body`, so this
+   selector must out-rank it: `:root[...]` adds a pseudo-class (0,2,1). */
+:root[data-theme="dark"] body {
   background-image: none;
 }
 

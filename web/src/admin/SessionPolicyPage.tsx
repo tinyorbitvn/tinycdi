@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Form, FormActions, Input, Section, Select, Spinner, Table, useTableSort } from "../design";
+import { Alert, Button, Card, Form, FormActions, Input, Section, Select, Spinner, Stack, Table, useTableSort } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import { t, type MessageKey } from "../i18n";
@@ -227,50 +227,52 @@ export function SessionPolicyContent({
         title={t("admin.policy.ceiling.title")}
         description={t("admin.policy.ceiling.description")}
       >
-        <SourceNote source={policy.source} />
-        <Form
-          columns={2}
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-        >
-          <Select
-            label={t("admin.policy.clipboard.label")}
-            hint={t("admin.policy.clipboard.hint")}
-            name="clipboard-ceiling"
-            value={ceiling}
-            onChange={(e) => setCeiling(e.target.value as ClipboardCeiling)}
-            options={CEILINGS.map((v) => ({ value: v, label: t(CEILING_LABEL[v]) }))}
-          />
-          <Select
-            label={t("admin.policy.fileTransfer.label")}
-            hint={t("admin.policy.fileTransfer.hint")}
-            name="file-transfer-ceiling"
-            value={ftMode}
-            onChange={(e) => setFtMode(e.target.value as FileTransferCeiling["mode"])}
-            options={FT_MODES.map((v) => ({ value: v, label: t(FT_LABEL[v]) }))}
-          />
-          <Input
-            label={t("admin.policy.ft.maxLabel")}
-            hint={t("admin.policy.ft.maxHint")}
-            name="file-max-mib"
-            type="number"
-            min={0}
-            step="any"
-            value={ftMax}
-            onChange={(e) => setFtMax(e.target.value)}
-          />
-          <Alert tone="info">{t("admin.policy.appliesNote")}</Alert>
-          <FormActions>
-            <Button type="submit" variant="primary" loading={busy} disabled={!dirty || ftInvalid}>
-              {t("admin.policy.save")}
-            </Button>
-            {policy.source === "TenantRow" && !dirty ? (
-              <Button onClick={() => setApplyOpen(true)}>{t("admin.policy.apply.button")}</Button>
-            ) : null}
-          </FormActions>
-        </Form>
+        <Stack gap={4}>
+          <SourceNote source={policy.source} />
+          <Form
+            columns={2}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void save();
+            }}
+          >
+            <Select
+              label={t("admin.policy.clipboard.label")}
+              hint={t("admin.policy.clipboard.hint")}
+              name="clipboard-ceiling"
+              value={ceiling}
+              onChange={(e) => setCeiling(e.target.value as ClipboardCeiling)}
+              options={CEILINGS.map((v) => ({ value: v, label: t(CEILING_LABEL[v]) }))}
+            />
+            <Select
+              label={t("admin.policy.fileTransfer.label")}
+              hint={t("admin.policy.fileTransfer.hint")}
+              name="file-transfer-ceiling"
+              value={ftMode}
+              onChange={(e) => setFtMode(e.target.value as FileTransferCeiling["mode"])}
+              options={FT_MODES.map((v) => ({ value: v, label: t(FT_LABEL[v]) }))}
+            />
+            <Input
+              label={t("admin.policy.ft.maxLabel")}
+              hint={t("admin.policy.ft.maxHint")}
+              name="file-max-mib"
+              type="number"
+              min={0}
+              step="any"
+              value={ftMax}
+              onChange={(e) => setFtMax(e.target.value)}
+            />
+            <Alert tone="info">{t("admin.policy.appliesNote")}</Alert>
+            <FormActions>
+              <Button type="submit" variant="primary" loading={busy} disabled={!dirty || ftInvalid}>
+                {t("admin.policy.save")}
+              </Button>
+              {policy.source === "TenantRow" && !dirty ? (
+                <Button onClick={() => setApplyOpen(true)}>{t("admin.policy.apply.button")}</Button>
+              ) : null}
+            </FormActions>
+          </Form>
+        </Stack>
         <ApiErrorAlert error={saveError} />
       </Section>
       <Section
