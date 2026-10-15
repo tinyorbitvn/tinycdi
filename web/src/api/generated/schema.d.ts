@@ -888,8 +888,10 @@ export interface paths {
          *     (request to Ready, from the boot ledger), the Workspaces stuck
          *     deleting, and the phase counts. One aggregate query plus the
          *     operator's status counts; the answer is cached for 15 seconds per
-         *     tenant. `fresh: false` means the Kubernetes watch is stale and the
-         *     Kubernetes-derived counts are empty. Counts only, no identities.
+         *     tenant. `fresh: false` means the Kubernetes watch is unhealthy (not
+         *     synced, API server unreachable, or the watch failing for over
+         *     15 s) and the Kubernetes-derived counts are empty; a tenant without
+         *     recent Workspace changes stays fresh. Counts only, no identities.
          *     Requires the tenant-admin role on the named tenant.
          */
         get: operations["getAdminOverview"];

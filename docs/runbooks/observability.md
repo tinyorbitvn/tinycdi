@@ -112,8 +112,12 @@ only). It shows counts only, no identities:
 - workspace phase counts.
 
 The answer is cached for 15 seconds per tenant. `fresh: false` in the
-response means the backend's Kubernetes watch is stale and the
-Kubernetes-derived counts are empty. Reading the overview is itself
+response means the backend's Kubernetes watch is unhealthy and the
+Kubernetes-derived counts are empty: the Workspace informer has not
+synced, the API server has not answered the backend's liveness probe for
+15 seconds, or the watch has kept failing for over 15 seconds (the
+backend logs `Failed to watch`). A tenant with no recent Workspace changes
+stays fresh; quiet is not stale. Reading the overview is itself
 audited (`admin.overview.get`).
 
 ## Alerts
