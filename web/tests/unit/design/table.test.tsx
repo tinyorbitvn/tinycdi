@@ -190,3 +190,36 @@ describe("design/Table sortable columns", () => {
     );
   });
 });
+
+describe("design/Table empty", () => {
+  const cols: Column<Row>[] = [{ key: "name", header: "Name" }];
+
+  it("an empty table is marked empty and shows the text in place of rows", () => {
+    const { container } = render(
+      <Table caption="rows" columns={cols} rows={[] as Row[]} rowKey={(r) => r.id} empty="Nothing here" />,
+    );
+    expect(container.querySelector(".tc-table-wrap")).toHaveClass("tc-table-wrap--empty");
+    expect(screen.getByRole("table", { name: "rows" })).toHaveClass("tc-table--empty");
+    expect(screen.getByText("Nothing here")).toHaveClass("tc-table__empty-text");
+  });
+
+  it("an element empty state is rendered as given", () => {
+    render(
+      <Table
+        caption="rows"
+        columns={cols}
+        rows={[] as Row[]}
+        rowKey={(r) => r.id}
+        empty={<div data-testid="custom-empty">Custom</div>}
+      />,
+    );
+    expect(screen.getByTestId("custom-empty")).toBeInTheDocument();
+  });
+
+  it("a loading table is not marked empty", () => {
+    const { container } = render(
+      <Table caption="rows" columns={cols} rows={[] as Row[]} rowKey={(r) => r.id} loading />,
+    );
+    expect(container.querySelector(".tc-table-wrap")).not.toHaveClass("tc-table-wrap--empty");
+  });
+});

@@ -322,17 +322,19 @@
   display: inline-flex;
   align-items: center;
   gap: var(--tc-space-1);
+  width: max-content;
   max-width: 100%;
-  min-height: var(--tc-space-6);
-  padding: 0 var(--tc-space-2);
+  padding: var(--tc-space-1) var(--tc-space-2);
+  border: 1px solid var(--tc-badge-border);
   border-radius: var(--tc-radius-sm);
-  font-size: var(--tc-text-xs);
+  font-size: var(--tc-text-2xs);
   font-weight: var(--tc-weight-semibold);
-  line-height: 1;
+  line-height: var(--tc-leading-tight);
   white-space: nowrap;
   --tc-badge-fg: var(--tc-color-neutral-text);
   --tc-badge-bg: var(--tc-color-neutral-subtle);
   --tc-badge-dot: var(--tc-color-text-subtle);
+  --tc-badge-border: var(--tc-color-border-strong);
   color: var(--tc-badge-fg);
   background: var(--tc-badge-bg);
 }
@@ -341,34 +343,35 @@
   --tc-badge-fg: var(--tc-color-info-text);
   --tc-badge-bg: var(--tc-color-info-subtle);
   --tc-badge-dot: var(--tc-color-info);
+  --tc-badge-border: var(--tc-color-info-border);
 }
 
 .tc-badge--success {
   --tc-badge-fg: var(--tc-color-success-text);
   --tc-badge-bg: var(--tc-color-success-subtle);
   --tc-badge-dot: var(--tc-color-success);
+  --tc-badge-border: var(--tc-color-success-border);
 }
 
 .tc-badge--warning {
   --tc-badge-fg: var(--tc-color-warning-text);
   --tc-badge-bg: var(--tc-color-warning-subtle);
   --tc-badge-dot: var(--tc-color-warning);
+  --tc-badge-border: var(--tc-color-warning-border);
 }
 
 .tc-badge--danger {
   --tc-badge-fg: var(--tc-color-danger-text);
   --tc-badge-bg: var(--tc-color-danger-subtle);
   --tc-badge-dot: var(--tc-color-danger);
+  --tc-badge-border: var(--tc-color-danger-border);
 }
 
 .tc-badge--accent {
   --tc-badge-fg: var(--tc-color-accent-text);
   --tc-badge-bg: var(--tc-color-accent-subtle);
   --tc-badge-dot: var(--tc-color-accent);
-}
-
-.tc-status-pill {
-  border-radius: var(--tc-radius-full);
+  --tc-badge-border: var(--tc-color-border-strong);
 }
 
 .tc-badge__dot {
@@ -488,7 +491,7 @@
   text-align: center;
   gap: var(--tc-space-2);
   padding: var(--tc-space-12) var(--tc-space-6);
-  border: 1px dashed var(--tc-color-border-strong);
+  border: 1px solid var(--tc-color-border);
   border-radius: var(--tc-radius-lg);
   background: var(--tc-color-surface);
 }
@@ -974,7 +977,7 @@
 
 .tc-table {
   width: 100%;
-  font-size: var(--tc-text-md);
+  font-size: var(--tc-text-sm);
 }
 
 .tc-table__caption {
@@ -996,17 +999,48 @@
 }
 
 .tc-table thead th {
-  background: var(--tc-color-surface-sunken);
+  background: var(--tc-color-table-head);
   color: var(--tc-color-text-muted);
-  font-size: var(--tc-text-xs);
+  font-size: var(--tc-text-2xs);
   font-weight: var(--tc-weight-semibold);
   letter-spacing: 0.03em;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
+/* Row headers sit on the row background (Orbit's bare `th` rule would paint
+   the canvas colour and leave a first-column seam). */
 .tc-table tbody th {
+  background: transparent;
   font-weight: var(--tc-weight-medium);
+}
+
+.tc-table tbody tr:hover > * {
+  background: var(--tc-color-row-hover);
+}
+
+.tc-table a {
+  text-decoration: none;
+}
+
+.tc-table a:hover,
+.tc-table a:focus-visible {
+  text-decoration: underline;
+}
+
+.tc-table__sub {
+  display: block;
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-xs);
+  font-weight: var(--tc-weight-regular);
+}
+
+.tc-cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--tc-space-1);
+  min-width: 0;
 }
 
 .tc-table tbody tr:last-child > * {
@@ -1019,6 +1053,7 @@
 
 .tc-table__cell--end {
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .tc-table__cell--center {
@@ -1029,7 +1064,6 @@
   cursor: pointer;
 }
 
-.tc-table__row--clickable:hover,
 .tc-table__row--selected {
   background: var(--tc-color-bg-subtle);
 }
@@ -1043,6 +1077,30 @@
   padding: var(--tc-space-8) var(--tc-space-4);
   text-align: center;
   color: var(--tc-color-text-muted);
+}
+
+.tc-table-wrap--empty {
+  border: 0;
+  background: transparent;
+}
+
+.tc-table--empty thead {
+  display: none;
+}
+
+.tc-table--empty .tc-table__empty {
+  padding: 0;
+  border-bottom: 0;
+}
+
+.tc-table__empty-text {
+  margin: 0;
+  padding: var(--tc-space-8) var(--tc-space-4);
+  border: 1px solid var(--tc-color-border);
+  border-radius: var(--tc-radius-lg);
+  background: var(--tc-color-surface);
+  color: var(--tc-color-text-muted);
+  text-align: center;
 }
 
 @media (max-width: 40rem) {
@@ -1059,6 +1117,8 @@
   padding: 0;
   margin: 0;
   font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
   color: inherit;
   cursor: pointer;
   display: inline-flex;
@@ -1140,6 +1200,12 @@
   gap: var(--tc-space-1);
   overflow-x: auto;
   border-bottom: 1px solid var(--tc-color-border);
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.tc-tabs__list::-webkit-scrollbar {
+  display: none;
 }
 
 .tc-tabs__tab {
@@ -1154,6 +1220,7 @@
   color: var(--tc-color-text-muted);
   font-weight: var(--tc-weight-medium);
   white-space: nowrap;
+  scroll-snap-align: start;
 }
 
 .tc-tabs__tab:hover:not(:disabled):not([aria-disabled="true"]) {
@@ -1181,6 +1248,15 @@
   padding-top: var(--tc-space-6);
 }
 
+/* Narrow screens: the tab row scrolls; the edges fade to show there is more. */
+@media (max-width: 47.99rem) {
+  .tc-tabs__list {
+    scroll-padding-inline: var(--tc-space-4);
+    -webkit-mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4), currentColor calc(100% - var(--tc-space-4)), transparent);
+    mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4), currentColor calc(100% - var(--tc-space-4)), transparent);
+  }
+}
+
 /* ---------- overlay: dialog / drawer ---------- */
 .tc-scroll-locked,
 .tc-scroll-locked body {
@@ -1203,7 +1279,7 @@
 .tc-overlay__backdrop {
   position: absolute;
   inset: 0;
-  background: var(--tc-color-overlay);
+  background: color-mix(in srgb, var(--tc-color-overlay) 55%, transparent);
   animation: tc-fade-in var(--tc-duration-normal) var(--tc-ease);
 }
 
@@ -1215,6 +1291,10 @@
   background: var(--tc-color-surface-raised);
   border: 1px solid var(--tc-color-border);
   box-shadow: var(--tc-shadow-lg);
+}
+
+[data-theme="dark"] .tc-overlay__panel {
+  border-color: var(--tc-color-border-strong);
 }
 
 .tc-dialog {

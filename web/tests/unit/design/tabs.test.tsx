@@ -69,3 +69,25 @@ describe("design/Tabs", () => {
     expect(screen.getByRole("tab", { name: "Nav" })).not.toHaveAttribute("aria-controls");
   });
 });
+
+describe("design/Tabs scroll into view", () => {
+  it("scrolls the selected tab into view without smooth behaviour (reduced motion safe)", () => {
+    const seen: Element[] = [];
+    const spy = vi.fn(function (this: Element, _arg?: boolean | ScrollIntoViewOptions) {
+      seen.push(this);
+    });
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = spy as unknown as HTMLElement["scrollIntoView"];
+    try {
+      render(<Tabs tabs={tabs} label="Sections" defaultValue="d" />);
+      expect(spy).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+      expect(seen[0]).toBe(screen.getByRole("tab", { name: "Delta" }));
+
+      fireEvent.keyDown(screen.getByRole("tab", { name: "Delta" }), { key: "Home" });
+      expect(seen[seen.length - 1]).toBe(screen.getByRole("tab", { name: "Alpha" }));
+      for (const call of spy.mock.calls) expect(call[0]).not.toHaveProperty("behavior");
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+});

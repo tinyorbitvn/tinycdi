@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { cx } from "./cx";
 import { useDomId } from "./useId";
 
@@ -29,6 +29,13 @@ export function Tabs({ tabs, label, value, defaultValue, onChange, className }: 
   const [internal, setInternal] = useState(defaultValue ?? tabs.find((t) => !t.disabled)?.id ?? "");
   const selected = value ?? internal;
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  // Keep the selected tab visible in the horizontally scrolling list (mobile
+  // admin nav). No `behavior`: an instant scroll, so nothing animates for
+  // reduced-motion users.
+  useEffect(() => {
+    refs.current[selected]?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [selected]);
 
   const select = (id: string) => {
     if (value === undefined) setInternal(id);

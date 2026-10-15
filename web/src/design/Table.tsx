@@ -140,9 +140,14 @@ export function Table<T>({
     }
   };
 
+  const isEmpty = !loading && rows.length === 0;
+
   return (
-    <div className={cx("tc-table-wrap", className)}>
-      <table className={cx("tc-table", `tc-table--${density}`)} aria-busy={loading || undefined}>
+    <div className={cx("tc-table-wrap", isEmpty && "tc-table-wrap--empty", className)}>
+      <table
+        className={cx("tc-table", `tc-table--${density}`, isEmpty && "tc-table--empty")}
+        aria-busy={loading || undefined}
+      >
         <caption className={showCaption ? "tc-table__caption" : "tc-sr-only"}>{caption}</caption>
         <thead>
           <tr>
@@ -194,7 +199,11 @@ export function Table<T>({
           ) : rows.length === 0 ? (
             <tr>
               <td colSpan={columns.length} className="tc-table__empty">
-                {empty ?? "Nothing to show."}
+                {empty === undefined || typeof empty === "string" ? (
+                  <p className="tc-table__empty-text">{empty ?? "Nothing to show."}</p>
+                ) : (
+                  empty
+                )}
               </td>
             </tr>
           ) : (
