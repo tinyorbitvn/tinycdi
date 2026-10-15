@@ -99,7 +99,12 @@ case "$url" in
     redir="https://idp.example.test:8443/realms/x/protocol/openid-connect/auth?client_id=tinycdi&state=s1" ;;
   https://idp.example.test:8443/realms/x/protocol/openid-connect/auth*)
     code=200
-    rbody='<html><body><form id="kc-form-login" method="post" action="/realms/x/login-actions/authenticate?session_code=a&amp;execution=b&amp;client_id=tinycdi&amp;tab_id=t"><input name="username"><input name="password"></form></body></html>' ;;
+    if [ -n "${STUB_KC_JS:-}" ]; then
+      # Keycloakify: no <form>; the action lives in the kcContext JSON.
+      rbody='<html><body><div id="root"></div><script>window.kcContext = { "url": { "loginAction": "https:\/\/idp.example.test:8443\/realms\/x\/login-actions\/authenticate?session_code=a\u0026execution=b\u0026client_id=tinycdi" } };</script></body></html>'
+    else
+    rbody='<html><body><form id="kc-form-login" method="post" action="/realms/x/login-actions/authenticate?session_code=a&amp;execution=b&amp;client_id=tinycdi&amp;tab_id=t"><input name="username"><input name="password"></form></body></html>'
+    fi ;;
   https://idp.example.test:8443/realms/x/login-actions/*)
     code=302; redir="https://portal.example.test/v1/auth/callback?code=c1&state=s1" ;;
   https://portal.example.test/v1/auth/callback*)
@@ -226,6 +231,21 @@ grep -qF 's3cr3t-p4ss' "$D/stub/argv.log" \
 grep -q 'idp.example.test:8443/realms/x/login-actions' "$D/stub/argv.log" \
   || bad "relative form action not joined to the issuer's :8443 origin"
 ok "authenticated flow + no credential in argv + port-preserving action join"
+
+# ---- 7b. JavaScript-rendered login theme (Keycloakify kcContext) ----------------
+rm -f "$D/stub/state" "$D/stub/created" "$D/stub/deleted" "$D/stub/argv.log"
+out="$(PATH="$D/shim:$PATH" STUB_DIR="$D/stub" STUB_KC_JS=1 \
+  TCDI_E2E_PORTAL_URL=https://portal.example.test \
+  TCDI_E2E_SESSION_HOST=ws-00000000.session.example.test \
+  TCDI_E2E_IDP_ISSUER=https://idp.example.test:8443/realms/x \
+  TCDI_E2E_USER=e2e-user TCDI_E2E_PASSWORD='s3cr3t-p4ss' \
+  TCDI_E2E_TEMPLATE=browser \
+  "$SMOKE" 2>&1)" && rc=0 || rc=$?
+[ "$rc" = 0 ] || bad "kcContext login should pass under the stub (rc=$rc): $out"
+grep -q '^PASS login' <<<"$out" || bad "missing 'PASS login' (kcContext) in: $out"
+grep -q 'login-actions/authenticate?session_code=a&execution=b&client_id=tinycdi' "$D/stub/argv.log" \
+  || bad "kcContext loginAction not unescaped/used: $(grep -n login-actions "$D/stub/argv.log")"
+ok "kcContext loginAction (JS-rendered theme) is used and unescaped"
 
 # ---- 8. per-principal limit configured but tenant quota bound first -> SKIP ------
 # userLimits.runningWorkspaces=5 > the 409 refusal the tenant quota produces on

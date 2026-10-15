@@ -240,6 +240,12 @@ oidc_login() { # oidc_login <jar>: leaves an authenticated session cookie in jar
   code="${out%% *}"; cb="${out#* }"; [ "$cb" = "$code" ] && cb=""
   if [ "$code" = "200" ]; then
     action="$(sed -n 's/.*<form[^>]*action="\([^"]*\)".*/\1/p' "$W/idp.html" | head -1 | sed 's/&amp;/\&/g')"
+    # A JavaScript-rendered login theme (Keycloakify) ships no <form> in the
+    # HTML; the action is in its kcContext JSON as url.loginAction.
+    if [ -z "$action" ]; then
+      action="$(sed -n 's/.*"loginAction"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$W/idp.html" | head -1 \
+        | sed 's/\\u0026/\&/g; s#\\/#/#g')"
+    fi
     if [ -z "$action" ]; then LOGIN_ERR="IdP login page carried no form action"; return 1; fi
     case "$action" in
       *://*) ;;                                    # absolute — use as-is
