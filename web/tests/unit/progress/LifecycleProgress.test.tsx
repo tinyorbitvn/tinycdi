@@ -38,10 +38,10 @@ describe("LifecycleProgress", () => {
     const region = await screen.findByRole("region", { name: "Starting research-desktop" });
     const steps = within(region).getAllByRole("listitem");
     expect(steps).toHaveLength(5); // Retain: accepted, disk, machine, desktop, connect
-    // Marks are text characters, never colour alone.
-    expect(within(steps[0]).getByText("✓")).toBeInTheDocument();
-    expect(within(steps[2]).getByText("●")).toBeInTheDocument();
-    expect(within(steps[3]).getByText("○")).toBeInTheDocument();
+    // Marks are distinct icon shapes plus a text state, never colour alone.
+    expect(steps[0].querySelector('.tc-progress__mark [data-icon="done"]')).not.toBeNull();
+    expect(steps[2].querySelector('.tc-progress__mark [data-icon="active"]')).not.toBeNull();
+    expect(steps[3].querySelector('.tc-progress__mark [data-icon="waiting"]')).not.toBeNull();
     // The active step carries aria-current and the slow reason copy.
     const active = steps.find((li) => li.getAttribute("aria-current") === "step");
     expect(active).toHaveTextContent("Finding a machine");
@@ -71,11 +71,13 @@ describe("LifecycleProgress", () => {
     expect(status.textContent).toContain("Downloading the desktop image");
   });
 
-  it("compact variant is one line with mark, title and step position", async () => {
-    render(<LifecycleProgress workspace={provisioning("Provisioning")} variant="compact" />);
+  it("compact variant is a muted line with title and step position, without a mark", async () => {
+    const { container } = render(<LifecycleProgress workspace={provisioning("Provisioning")} variant="compact" />);
     const text = await screen.findByText(/step 3 of 5/, { selector: ".tc-progress__compactline" });
     expect(text).toHaveTextContent("Starting research-desktop");
     expect(text).toHaveTextContent("Finding a machine");
+    expect(container.querySelector(".tc-progress__mark")).toBeNull();
+    expect(container.querySelector(".tc-progress__elapsed")).not.toBeNull();
   });
 
   it("failed op marks the stalled step and raises an alert", async () => {
@@ -93,7 +95,7 @@ describe("LifecycleProgress", () => {
     expect(alert.some((a) => a.textContent?.includes("couldn't be downloaded"))).toBe(true);
     const failed = screen.getAllByRole("listitem").find((li) => li.dataset.state === "failed");
     expect(failed).toHaveTextContent("Downloading the desktop image");
-    expect(within(failed!).getByText("!")).toBeInTheDocument();
+    expect(failed!.querySelector('.tc-progress__mark [data-icon="failed"]')).not.toBeNull();
   });
 
   it("shows 'Status delayed' for a stale observed view", async () => {
@@ -170,5 +172,25 @@ describe("LifecycleProgress", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a failed workspace shows no elapsed timer in either variant", async () => {
+    const ws = provisioning("BootDeadlineExceeded", {
+      phase: "Failed",
+      failureReason: "BootDeadlineExceeded",
+      conditions: [
+        cond("StorageReady", "True", "Ready"),
+        cond("RuntimeReady", "False", "BootDeadlineExceeded"),
+        cond("ConnectionReady", "False", "ErrImagePull"),
+      ],
+    });
+    const compact = render(<LifecycleProgress workspace={ws} variant="compact" />);
+    await screen.findByText(/step/, { selector: ".tc-progress__compactline" });
+    expect(compact.container.querySelector(".tc-progress__elapsed")).toBeNull();
+    compact.unmount();
+
+    const full = render(<LifecycleProgress workspace={ws} />);
+    await screen.findAllByRole("listitem");
+    expect(full.container.querySelector(".tc-progress__elapsed")).toBeNull();
   });
 });

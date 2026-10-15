@@ -14,13 +14,15 @@
 
 .tc-progress--compact {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--tc-space-1);
+  gap: var(--tc-space-1) var(--tc-space-2);
   color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-xs);
 }
 
 .tc-progress--compact .tc-progress__compactline {
-  color: var(--tc-color-text);
+  color: var(--tc-color-text-muted);
 }
 
 .tc-progress--compact .tc-progress__elapsed {
@@ -80,10 +82,12 @@
 }
 
 .tc-progress__mark {
+  display: inline-flex;
   flex: none;
+  align-items: center;
+  justify-content: center;
   width: 1.25em;
-  text-align: center;
-  font-weight: var(--tc-weight-semibold);
+  min-height: 1.25em;
 }
 
 .tc-progress__mark[data-state="done"] {

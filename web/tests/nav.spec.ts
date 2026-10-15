@@ -74,3 +74,16 @@ test("mobile: the drawer trap keeps Tab cycling inside the dialog", async ({ pag
   );
   expect(inside).toBeTruthy();
 });
+
+test("mobile: a 63-character workspace name wraps inside its stacked row", async ({ page, request }) => {
+  const long = `w${"x".repeat(62)}`; // max-length DNS label, no hyphen to break at
+  const res = await request.put(`${MOCK}/_control/workspaces/ws_longname`, { data: { name: long } });
+  expect(res.ok()).toBeTruthy();
+  await login(page);
+  const link = page.getByRole("link", { name: long });
+  await expect(link).toBeVisible();
+  const box = await link.boundingBox();
+  expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});
