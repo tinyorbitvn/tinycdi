@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { EmptyState, Page, Spinner, Tabs } from "../design";
+import { EmptyState, Page, Spinner, Tabs, type BackTarget } from "../design";
 import { IconShieldCheck } from "../design/icons";
 import { Link, navigate, usePathname } from "../lib/router";
 import { t, type MessageKey } from "../i18n";
@@ -67,11 +67,13 @@ export function AdminLayout({
   title,
   description,
   actions,
+  back,
   children,
 }: {
   title: string;
   description?: ReactNode;
   actions?: ReactNode;
+  back?: BackTarget;
   children: ReactNode;
 }) {
   const me = useMeLoaded();
@@ -100,7 +102,7 @@ export function AdminLayout({
     <Page
       eyebrow={me.data?.tenant ? t("admin.eyebrow.tenant", { tenant: me.data.tenant }) : t("admin.eyebrow")}
       title={title}
-      width="full"
+      {...(back ? { back } : {})}
       {...(description ? { description } : {})}
       {...(actions && isTenantAdmin(me.data) ? { actions } : {})}
     >

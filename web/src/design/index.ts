@@ -50,5 +50,5 @@ export { ToastProvider, useToast } from "./Toast";
 export type { ToastOptions, ToastApi } from "./Toast";
 export { Tooltip } from "./Tooltip";
 export type { TooltipProps } from "./Tooltip";
-export { Page, Section, Stack, Cluster, Grid, DescriptionList, VisuallyHidden, Meter } from "./Layout";
-export type { PageProps, SectionProps, StackProps, ClusterProps, GridProps, DescriptionListProps, MeterProps, Gap } from "./Layout";
+export { Page, Section, Stack, Cluster, Grid, DescriptionList, VisuallyHidden, Meter, BackLink } from "./Layout";
+export type { PageProps, SectionProps, StackProps, ClusterProps, GridProps, DescriptionListProps, MeterProps, Gap, BackTarget } from "./Layout";
