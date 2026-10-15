@@ -1254,8 +1254,81 @@
 }
 
 @media (max-width: 40rem) {
-  .tc-table__cell--hide-sm {
+  .tc-table__cell--hide-sm,
+  .tc-table--stack-md tbody .tc-table__cell--hide-sm {
     display: none;
+  }
+}
+
+/* Table stackBelow="md": below 768px each row is a block of label/value
+   pairs. The header row stays in the accessibility tree, visually hidden. */
+@media (max-width: 47.99rem) {
+  .tc-table--stack-md thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .tc-table--stack-md,
+  .tc-table--stack-md tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .tc-table--stack-md tbody tr {
+    display: block;
+    width: 100%;
+    padding: var(--tc-space-3) var(--tc-space-4);
+    border-bottom: 1px solid var(--tc-color-border);
+  }
+
+  .tc-table--stack-md tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .tc-table--stack-md tbody th,
+  .tc-table--stack-md tbody td {
+    display: grid;
+    grid-template-columns: minmax(6rem, 34%) minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--tc-space-3);
+    padding: var(--tc-space-1) 0;
+    border: 0;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
+  .tc-table--stack-md tbody [data-label]::before {
+    content: attr(data-label);
+    color: var(--tc-color-text-muted);
+    font-size: var(--tc-text-xs);
+    font-weight: var(--tc-weight-semibold);
+  }
+
+  .tc-table--stack-md tbody [data-label=""] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tc-table--stack-md tbody [data-label=""]::before {
+    content: none;
+  }
+
+  .tc-table--stack-md .tc-table__empty {
+    display: block;
+  }
+}
+
+.tc-table__value {
+  min-width: 0;
+}
+
+/* Names never break mid-word on wide screens; stacked rows wrap instead. */
+@media (min-width: 48rem) {
+  .tc-table__nowrap {
+    white-space: nowrap;
   }
 }
 

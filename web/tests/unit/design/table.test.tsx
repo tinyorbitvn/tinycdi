@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import {
   sortRows,
@@ -8,6 +8,7 @@ import {
   type Column,
   type TableSortState,
 } from "../../../src/design/Table";
+import { declarations, mediaBlocks, readWeb } from "./css";
 
 type Row = { id: string; name: string };
 
@@ -221,5 +222,55 @@ describe("design/Table empty", () => {
       <Table caption="rows" columns={cols} rows={[] as Row[]} rowKey={(r) => r.id} loading />,
     );
     expect(container.querySelector(".tc-table-wrap")).not.toHaveClass("tc-table-wrap--empty");
+  });
+});
+
+describe("design/Table stackBelow", () => {
+  const cols: Column<Row>[] = [
+    { key: "name", header: "Name", rowHeader: true },
+    { key: "id", header: <span>Identifier</span>, label: "ID" },
+    { key: "act", header: "" },
+  ];
+
+  it("labels every body cell for the stacked layout", () => {
+    render(<Table caption="rows" columns={cols} rows={rows} rowKey={(r) => r.id} stackBelow="md" />);
+    const table = screen.getByRole("table", { name: "rows" });
+    expect(table).toHaveClass("tc-table--stack-md");
+    const row = within(table).getAllByRole("row")[1]!;
+    const header = within(row).getByRole("rowheader");
+    expect(header).toHaveAttribute("data-label", "Name");
+    expect(header.firstElementChild).toHaveClass("tc-table__value");
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[0]).toHaveAttribute("data-label", "ID");
+    expect(cells[1]).toHaveAttribute("data-label", "");
+  });
+
+  it("emits no data-label and no wrapper without stackBelow", () => {
+    render(<Table caption="rows" columns={cols} rows={rows} rowKey={(r) => r.id} />);
+    const table = screen.getByRole("table", { name: "rows" });
+    expect(table).not.toHaveClass("tc-table--stack-md");
+    expect(table.querySelector("[data-label]")).toBeNull();
+    expect(table.querySelector(".tc-table__value")).toBeNull();
+  });
+
+  it("clickable rows stay focusable and Enter-activatable when stacked", () => {
+    const onRowClick = vi.fn();
+    render(
+      <Table caption="rows" columns={cols} rows={rows} rowKey={(r) => r.id} stackBelow="md" onRowClick={onRowClick} />,
+    );
+    const row = screen.getAllByRole("row")[1]!;
+    expect(row).toHaveAttribute("tabindex", "0");
+    row.focus();
+    expect(row).toHaveFocus();
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(onRowClick).toHaveBeenCalledWith(rows[0]);
+  });
+
+  it("stacks only below 768px and lets long values wrap", () => {
+    const narrow = mediaBlocks(readWeb("src/design/design.css"), "(max-width: 47.99rem)").join("\n");
+    expect(declarations(narrow, ".tc-table--stack-md thead").position).toBe("absolute");
+    expect(declarations(narrow, ".tc-table--stack-md tbody [data-label]::before").content).toBe("attr(data-label)");
+    expect(declarations(narrow, ".tc-table--stack-md tbody td")["overflow-wrap"]).toBe("anywhere");
+    expect(declarations(narrow, ".tc-table--stack-md tbody tr").display).toBe("block");
   });
 });

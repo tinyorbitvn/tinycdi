@@ -42,6 +42,11 @@ export interface Column<T> {
   className?: string;
   /** Render as the row header (<th scope="row">). */
   rowHeader?: boolean;
+  /**
+   * Label shown beside the value when the table stacks (`stackBelow`).
+   * Defaults to `header` when that is a string; "" hides the label.
+   */
+  label?: string;
 }
 
 /**
@@ -105,6 +110,11 @@ export interface TableProps<T> {
   /** Rows highlighted as selected. */
   isRowSelected?: (row: T) => boolean;
   density?: "comfortable" | "compact";
+  /**
+   * Below this breakpoint every row renders as a stacked block of
+   * label/value pairs (same columns, no separate mobile markup).
+   */
+  stackBelow?: "md";
   className?: string;
 }
 
@@ -121,10 +131,13 @@ export function Table<T>({
   onRowClick,
   isRowSelected,
   density = "comfortable",
+  stackBelow,
   className,
 }: TableProps<T>) {
   const cellClass = (c: Column<T>) =>
     cx(`tc-table__cell--${c.align ?? "start"}`, c.hideOnMobile && "tc-table__cell--hide-sm", c.className);
+
+  const labelOf = (c: Column<T>): string => c.label ?? (typeof c.header === "string" ? c.header : "");
 
   // Click/Enter/Space on a header button: same column flips direction, a new
   // column starts at its declared `sortStart` (ascending by default).
@@ -145,7 +158,12 @@ export function Table<T>({
   return (
     <div className={cx("tc-table-wrap", isEmpty && "tc-table-wrap--empty", className)}>
       <table
-        className={cx("tc-table", `tc-table--${density}`, isEmpty && "tc-table--empty")}
+        className={cx(
+          "tc-table",
+          `tc-table--${density}`,
+          isEmpty && "tc-table--empty",
+          stackBelow && `tc-table--stack-${stackBelow}`,
+        )}
         aria-busy={loading || undefined}
       >
         <caption className={showCaption ? "tc-table__caption" : "tc-sr-only"}>{caption}</caption>
@@ -233,13 +251,15 @@ export function Table<T>({
                     const content = c.render
                       ? c.render(row)
                       : String((row as Record<string, unknown>)[c.key] ?? "");
+                    const stackProps = stackBelow ? { "data-label": labelOf(c) } : {};
+                    const body = stackBelow ? <div className="tc-table__value">{content}</div> : content;
                     return c.rowHeader ? (
-                      <th key={c.key} scope="row" className={cellClass(c)}>
-                        {content}
+                      <th key={c.key} scope="row" className={cellClass(c)} {...stackProps}>
+                        {body}
                       </th>
                     ) : (
-                      <td key={c.key} className={cellClass(c)}>
-                        {content}
+                      <td key={c.key} className={cellClass(c)} {...stackProps}>
+                        {body}
                       </td>
                     );
                   })}
