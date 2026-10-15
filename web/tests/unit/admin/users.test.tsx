@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { makeAdmin, seedTenant } from "./helpers";
 import {
+  issuerOf,
   diskCounts,
   matchesUserFilter,
   ownerRefFromParam,
@@ -293,5 +294,15 @@ describe("UserDetailPage", () => {
     expect(within(limit).queryByText("Subject", { selector: "dt" })).toBeNull();
     expect(document.querySelector(".tc-page__description")).toBeNull();
     expect(screen.getByRole("link", { name: "Back to users" })).toHaveClass("tc-backlink");
+  });
+});
+
+describe("issuerOf", () => {
+  it("keeps the whole issuer when the subject contains a pipe", () => {
+    expect(issuerOf("https://x.auth0.com/|auth0|abc123", "auth0|abc123")).toBe("https://x.auth0.com/");
+  });
+  it("handles plain subjects and missing issuers", () => {
+    expect(issuerOf("https://idp.example|user-1", "user-1")).toBe("https://idp.example");
+    expect(issuerOf("nopipe", "x")).toBe("—");
   });
 });

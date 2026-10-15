@@ -105,8 +105,13 @@ export function ownerRefFromParam(param: string): string | undefined {
 }
 
 /** The issuer half of an `issuer|subject` owner reference ("—" when absent). */
-function issuerOf(ownerRef: string): string {
-  const cut = ownerRef.lastIndexOf("|");
+export function issuerOf(ownerRef: string, subject: string): string {
+  // Subjects may themselves contain "|" (e.g. "auth0|abc"), so strip the known subject suffix.
+  const suffix = "|" + subject;
+  if (subject !== "" && ownerRef.endsWith(suffix) && ownerRef.length > suffix.length) {
+    return ownerRef.slice(0, ownerRef.length - suffix.length);
+  }
+  const cut = ownerRef.indexOf("|");
   return cut > 0 ? ownerRef.slice(0, cut) : "—";
 }
 
@@ -404,7 +409,7 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
         <Section title={t("admin.userDetail.identity.title")}>
           <DescriptionList
             items={[
-              { term: t("admin.userDetail.field.issuer"), detail: <code>{issuerOf(row.limitsEntry.ownerRef)}</code> },
+              { term: t("admin.userDetail.field.issuer"), detail: <code>{issuerOf(row.limitsEntry.ownerRef, row.subject)}</code> },
               { term: t("admin.userDetail.field.subject"), detail: <code>{row.subject}</code> },
               {
                 term: t("admin.userDetail.field.ownerRef"),
