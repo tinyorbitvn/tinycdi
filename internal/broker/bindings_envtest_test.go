@@ -72,7 +72,7 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache: %v", err)
 	}
-	deadSrc, err := broker.NewK8sBindingSource(context.Background(), dead)
+	deadSrc, err := broker.NewK8sBindingSource(context.Background(), dead, nil)
 	if err != nil {
 		t.Fatalf("dead source: %v", err)
 	}
@@ -93,9 +93,19 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache: %v", err)
 	}
-	src, err := broker.NewK8sBindingSource(context.Background(), kcache)
+	// One shared tracker, wired as the backend does: event handler on the
+	// informer, MarkSynced after sync, one Run of the probe.
+	watch := &watchhealth.Tracker{}
+	src, err := broker.NewK8sBindingSource(context.Background(), kcache, watch)
 	if err != nil {
 		t.Fatalf("source: %v", err)
+	}
+	inf, err := kcache.GetInformer(context.Background(), &cdiv1.Workspace{})
+	if err != nil {
+		t.Fatalf("informer: %v", err)
+	}
+	if _, err := inf.AddEventHandler(watch.Handler()); err != nil {
+		t.Fatalf("watch handler: %v", err)
 	}
 	cctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -103,11 +113,11 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	if !kcache.WaitForCacheSync(cctx) {
 		t.Fatal("cache did not sync")
 	}
-	src.MarkSynced()
+	watch.MarkSynced(time.Now())
 	// The consistency probe against the real API server: a metadata-only
 	// list that must match the cache for the source to stay fresh.
 	const probeEvery = time.Second
-	go src.RunLiveness(cctx, watchhealth.WorkspaceMetadataVersions(kc, []string{ns.Name}), probeEvery)
+	go watch.Run(cctx, time.Now, watchhealth.WorkspaceMetadataVersions(kc, []string{ns.Name}), kcache, probeEvery, broker.MaxBindingAge)
 
 	if _, err := src.CurrentBinding(context.Background(), "ws-nope"); !errors.Is(err, broker.ErrNotFound) {
 		t.Fatalf("unknown uid = %v, want ErrNotFound", err)
@@ -147,6 +157,16 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	}
 	if err := kc.Status().Update(context.Background(), ws); err != nil {
 		t.Fatalf("status update: %v", err)
+	}
+
+	// The probe's API side against the real API server: metadata-only,
+	// keyed namespace/name, carrying the server's current resourceVersion.
+	versions, err := watchhealth.WorkspaceMetadataVersions(kc, []string{ns.Name})(context.Background())
+	if err != nil {
+		t.Fatalf("metadata versions: %v", err)
+	}
+	if got := versions[ns.Name+"/ws-binding01"]; len(versions) != 1 || got != ws.ResourceVersion {
+		t.Fatalf("metadata versions = %v, want only %s/ws-binding01 at %s", versions, ns.Name, ws.ResourceVersion)
 	}
 
 	deadline := time.Now().Add(10 * time.Second)

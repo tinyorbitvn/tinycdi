@@ -427,7 +427,12 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   `TestK8sBindingSource_IdleHealthyWatchStaysFresh`; the envtest
   `TestK8sBindingSource_Projection` runs the real metadata-list probe.
   The rule lives in `internal/watchhealth` (`TestNewVersion_ResyncIsNoEvent`,
-  `TestWorkspaceMetadataVersions`) and the API status view applies it too
+  `TestWorkspaceMetadataVersions`, `TestWorkspaceMetadataVersions_Paging`,
+  `TestProbe_ManyNamespacesBehindALimiter` (client-go's default limiter
+  starves the probe; the probe client's does not),
+  `TestProbe_SlowListWithinBudget`, `TestProbe_UnevenListLatency`,
+  `TestProbe_PendingSurvivesFailedProbe`, `TestSyncedWhen_HandlerRegistration`)
+  and the API status view applies it too
   (`TestK8sStatusView_SilentStalledWatchGoesStale`,
   `TestK8sStatusView_IdleHealthyWatchStaysFresh`,
   `TestK8sStatusView_InFlightChangeStaysFresh`).

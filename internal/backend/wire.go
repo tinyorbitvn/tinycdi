@@ -15,7 +15,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -326,28 +325,21 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		}
 	})
 
-	// Binding source: an informer cache over Workspace CRs, scoped to the
-	// managed tenant namespaces. Resync replays are not a heartbeat (they
-	// keep firing while the watch is down): the binding source is fresh while
-	// an uncached metadata list on the same period matches the cache and the
-	// watch reports no lasting failures, so a stalled watch stops issuance
-	// within broker.MaxBindingAge (15 s, fail closed).
-	bindingResync := 5 * time.Second
-	// The status view and the binding source read watch health from the
-	// cache's list/watch failures; both are created after the cache, so the
-	// one handler reaches them through pointers set before the cache starts.
-	var statusViewRef atomic.Pointer[api.K8sStatusView]
-	var bindingsRef atomic.Pointer[broker.K8sBindingSource]
+	// Workspace informer cache, scoped to the managed tenant namespaces,
+	// shared by the broker's binding source and the API's status view. Both
+	// read freshness from ONE watchhealth.Tracker: fresh while an uncached
+	// metadata list (every watchProbeEvery) matches the cache and the watch
+	// reports no lasting failures, so a stalled watch stops issuance within
+	// broker.MaxBindingAge (15 s, fail closed). No SyncPeriod override:
+	// resync replays prove nothing about the watch, and every handler on
+	// this informer (settle trigger, boot recorder) has its own catch-all.
+	const watchProbeEvery = 5 * time.Second
+	watch := &watchhealth.Tracker{}
 	cacheOpts := crcache.Options{
-		Scheme: scheme, SyncPeriod: &bindingResync,
+		Scheme: scheme,
 		DefaultWatchErrorHandler: func(ctx context.Context, r *toolscache.Reflector, err error) {
 			toolscache.DefaultWatchErrorHandler(ctx, r, err)
-			if sv := statusViewRef.Load(); sv != nil {
-				sv.NoteWatchError(r.TypeDescription(), err)
-			}
-			if bs := bindingsRef.Load(); bs != nil {
-				bs.NoteWatchError(r.TypeDescription(), err)
-			}
+			watch.NoteWatchError(time.Now(), r.TypeDescription(), err)
 		},
 	}
 	if len(tenants) > 0 {
@@ -360,17 +352,43 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("workspace cache: %w", err)
 	}
-	bindings, err := broker.NewK8sBindingSource(ctx, kcache)
+	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
+	if err != nil {
+		return fmt.Errorf("workspace informer: %w", err)
+	}
+	watchReg, err := wsInformer.AddEventHandler(watch.Handler())
+	if err != nil {
+		return fmt.Errorf("watch health: %w", err)
+	}
+	// Freshness starts once the Workspace informer holds its initial list,
+	// not when WaitForCacheSync (every informer, polled every 100 ms)
+	// returns: a replica serves connects as soon as its bindings are known.
+	watch.SyncedWhen(watchReg.HasSynced)
+	// The consistency probe gets its own client and rate limit: on kc's
+	// client-go default (QPS 5, burst 10) a probe over more than a handful
+	// of namespaces, or any other kc traffic, would wait on the limiter
+	// until every probe failed and the broker refused all connects with no
+	// real outage. A probe is one list per namespace (plus a page per 500
+	// Workspaces), at most watchhealth.ProbeParallelism in flight: burst 100
+	// sends a probe of up to 100 namespaces unthrottled, and QPS 50
+	// sustains 250 namespace lists per 5 s interval — far above the
+	// steady N/5 req/s, while API Priority and Fairness still protects the
+	// API server.
+	probeCfg := rest.CopyConfig(rcfg)
+	probeCfg.QPS, probeCfg.Burst = 50, 100
+	probeKC, err := client.New(probeCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("watch probe client: %w", err)
+	}
+	b.bg = append(b.bg, func(ctx context.Context) {
+		watch.Run(ctx, time.Now,
+			watchhealth.WorkspaceMetadataVersions(probeKC, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))),
+			kcache, watchProbeEvery, broker.MaxBindingAge)
+	})
+	bindings, err := broker.NewK8sBindingSource(ctx, kcache, watch)
 	if err != nil {
 		return fmt.Errorf("binding source: %w", err)
 	}
-	bindingsRef.Store(bindings)
-	// Consistency probe: an uncached metadata-only list compared with the
-	// informer cache, so a quiet tenant keeps connecting while a watch that
-	// stopped delivering (or an unreachable API server) stops it.
-	b.bg = append(b.bg, func(ctx context.Context) {
-		bindings.RunLiveness(ctx, watchhealth.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
-	})
 	// Event-driven quota settle: the operator writes its observed runtime
 	// absence into Workspace CR status (or the CR's deletion); every event
 	// enqueues the platform id, and the leader-gated worker re-checks the
@@ -379,10 +397,6 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// catch-all, so a lost event or an early leader change only delays the
 	// release back to the tick.
 	settle := provisioning.NewSettleTrigger()
-	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
-	if err != nil {
-		return fmt.Errorf("workspace informer: %w", err)
-	}
 	if _, err := wsInformer.AddEventHandler(settle.Handler()); err != nil {
 		return fmt.Errorf("settle trigger: %w", err)
 	}
@@ -398,18 +412,10 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// /v1/workspaces projects observed CR phase + conditions (design §6 —
 	// without it the API only ever reports the intent-side DB phase and the
 	// portal can never offer Connect).
-	statusView, err := api.NewK8sStatusView(ctx, kcache)
+	statusView, err := api.NewK8sStatusView(ctx, kcache, watch)
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
-	statusViewRef.Store(statusView)
-	// Same consistency probe as the binding source (internal/watchhealth):
-	// the overview is fresh while the cache matches the API server. Each
-	// component keeps its own tracker, so this is a second metadata list per
-	// namespace every 5 s.
-	b.bg = append(b.bg, func(ctx context.Context) {
-		statusView.RunLiveness(ctx, watchhealth.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
-	})
 	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
 		return fmt.Errorf("boot recorder: %w", err)
 	}
@@ -430,8 +436,7 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	})
 	b.bg = append(b.bg, func(ctx context.Context) {
 		if kcache.WaitForCacheSync(ctx) {
-			bindings.MarkSynced()
-			statusView.MarkSynced()
+			watch.MarkSynced(time.Now())
 			b.markCacheSynced()
 		}
 	})

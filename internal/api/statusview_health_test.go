@@ -51,6 +51,12 @@ func healthView(t *testing.T) (*K8sStatusView, *time.Time, *apiServer) {
 	return sv, &clock, api
 }
 
+// livenessTick runs one probe as the backend's Tracker.Run does: grace one
+// interval, timeout maxStale − interval.
+func (v *K8sStatusView) livenessTick(ctx context.Context, api watchhealth.Versions, every time.Duration) {
+	v.tracker().Probe(ctx, v.now, api, v.cache, every, v.maxStale-every)
+}
+
 // apiServer is the probe's API-server side: versions as the API server
 // reports them, or a refused connection while down.
 type apiServer struct {
@@ -228,7 +234,7 @@ func TestK8sStatusView_WatchFailureStreakGoesStale(t *testing.T) {
 	if countsFresh(t, sv) {
 		t.Fatal("watch failing for 20 s still fresh")
 	}
-	sv.watch.Delivered() // the informer delivered an event: the watch is back
+	sv.tracker().Delivered() // the informer delivered an event: the watch is back
 	if !countsFresh(t, sv) {
 		t.Fatal("a delivered event did not end the streak")
 	}

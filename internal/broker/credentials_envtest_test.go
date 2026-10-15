@@ -155,7 +155,7 @@ func TestResolveTarget_CRUIDChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache: %v", err)
 	}
-	src, err := broker.NewK8sBindingSource(ctx, kcache)
+	src, err := broker.NewK8sBindingSource(ctx, kcache, nil)
 	if err != nil {
 		t.Fatalf("binding source: %v", err)
 	}

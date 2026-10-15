@@ -120,12 +120,18 @@ func (e *probeEnv) versions(context.Context) (map[string]string, error) {
 	return out, nil
 }
 
+// livenessTick runs one probe as the backend's Tracker.Run does: grace one
+// interval, timeout maxStale − interval.
+func (s *K8sBindingSource) livenessTick(ctx context.Context, api watchhealth.Versions, every time.Duration) {
+	s.tracker().Probe(ctx, s.clock, api, s.cache, every, MaxBindingAge-every)
+}
+
 // tick advances one probe interval, replays the cache like a resync does,
 // and runs one probe.
 func (e *probeEnv) tick() {
 	e.clk.Advance(every)
 	for _, ws := range e.cache.items {
-		e.src.onUpdate(ws, ws)
+		e.src.tracker().Handler().OnUpdate(ws, ws)
 	}
 	e.src.livenessTick(context.Background(), e.versions, every)
 }

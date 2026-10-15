@@ -3,9 +3,9 @@ package broker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
-	toolscache "k8s.io/client-go/tools/cache"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -24,30 +24,48 @@ import (
 // last time it was shown to — the broker refuses issue/renew once that
 // stamp ages past MaxBindingAge, so a stalled watch fails closed. Informer
 // events, resync replays included, are never a heartbeat.
+//
+// In the backend the Tracker is shared with the API's status view and run
+// once (internal/backend); a source built without one owns its own.
 type K8sBindingSource struct {
-	cache  crcache.Cache
-	now    func() time.Time // nil: time.Now
-	health watchhealth.Tracker
+	cache crcache.Cache
+	now   func() time.Time // nil: time.Now
+
+	mu     sync.Mutex
+	health *watchhealth.Tracker // nil until first use: a private tracker
 }
 
-// NewK8sBindingSource registers a Workspace event handler on the cache's
-// informer. The caller starts the cache, calls MarkSynced once
-// WaitForCacheSync reports true, feeds the cache's watch error handler to
-// NoteWatchError and runs RunLiveness.
-func NewK8sBindingSource(ctx context.Context, c crcache.Cache) (*K8sBindingSource, error) {
+// NewK8sBindingSource builds the source over the cache's Workspace informer.
+// With a shared tracker the caller feeds it (Tracker.Handler on the
+// informer with SyncedWhen on its registration, the cache's watch error handler, MarkSynced, Run); with nil the
+// source owns a tracker and registers its event handler itself, and the
+// caller calls MarkSynced and NoteWatchError and runs the tracker's probe.
+func NewK8sBindingSource(ctx context.Context, c crcache.Cache, health *watchhealth.Tracker) (*K8sBindingSource, error) {
 	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return nil, fmt.Errorf("broker: workspace informer: %w", err)
 	}
-	s := &K8sBindingSource{cache: c}
-	if _, err := inf.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { s.health.Delivered() },
-		UpdateFunc: s.onUpdate,
-		DeleteFunc: func(interface{}) { s.health.Delivered() },
-	}); err != nil {
-		return nil, fmt.Errorf("broker: informer handler: %w", err)
+	s := &K8sBindingSource{cache: c, health: health}
+	if health == nil {
+		tr := s.tracker()
+		reg, err := inf.AddEventHandler(tr.Handler())
+		if err != nil {
+			return nil, fmt.Errorf("broker: informer handler: %w", err)
+		}
+		tr.SyncedWhen(reg.HasSynced)
 	}
 	return s, nil
+}
+
+// tracker returns the source's freshness tracker, creating a private one on
+// first use.
+func (s *K8sBindingSource) tracker() *watchhealth.Tracker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.health == nil {
+		s.health = &watchhealth.Tracker{}
+	}
+	return s.health
 }
 
 func (s *K8sBindingSource) clock() time.Time {
@@ -58,32 +76,12 @@ func (s *K8sBindingSource) clock() time.Time {
 }
 
 // MarkSynced records that the informer cache has completed its initial sync.
-func (s *K8sBindingSource) MarkSynced() { s.health.MarkSynced(s.clock()) }
-
-// onUpdate records a delivered watch event unless the update is a resync
-// replay.
-func (s *K8sBindingSource) onUpdate(oldObj, newObj interface{}) {
-	if watchhealth.NewVersion(oldObj, newObj) {
-		s.health.Delivered()
-	}
-}
+func (s *K8sBindingSource) MarkSynced() { s.tracker().MarkSynced(s.clock()) }
 
 // NoteWatchError feeds a list/watch failure from the cache's watch error
 // handler (see watchhealth.Tracker.NoteWatchError).
 func (s *K8sBindingSource) NoteWatchError(typeDescription string, err error) {
-	s.health.NoteWatchError(s.clock(), typeDescription, err)
-}
-
-// RunLiveness runs the consistency probe every interval until ctx ends: api
-// (watchhealth.WorkspaceMetadataVersions over an uncached client) against
-// the informer cache. See internal/watchhealth for the rule and its cost.
-func (s *K8sBindingSource) RunLiveness(ctx context.Context, api watchhealth.Versions, every time.Duration) {
-	s.health.Run(ctx, s.clock, api, s.cache, every)
-}
-
-// livenessTick runs one probe with grace one interval.
-func (s *K8sBindingSource) livenessTick(ctx context.Context, api watchhealth.Versions, grace time.Duration) {
-	s.health.Probe(ctx, s.clock, api, s.cache, grace)
+	s.tracker().NoteWatchError(s.clock(), typeDescription, err)
 }
 
 // CurrentBinding returns the RuntimeBinding for workspaceUID projected from
@@ -91,7 +89,7 @@ func (s *K8sBindingSource) livenessTick(ctx context.Context, api watchhealth.Ver
 // never synced or its watch is unhealthy (see K8sBindingSource), and ErrNotFound
 // when no managed Workspace carries the UID label.
 func (s *K8sBindingSource) CurrentBinding(ctx context.Context, workspaceUID PlatformID) (RuntimeBinding, error) {
-	fresh, last := s.health.Health(s.clock(), MaxBindingAge)
+	fresh, last := s.tracker().Health(s.clock(), MaxBindingAge)
 	if !fresh {
 		return RuntimeBinding{}, ErrFreshness
 	}

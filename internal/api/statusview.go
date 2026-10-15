@@ -27,7 +27,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	toolscache "k8s.io/client-go/tools/cache"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -105,8 +104,8 @@ type StatusView interface {
 //
 // Freshness means the informer cache matches the API server, the rule the
 // broker's binding source applies too (internal/watchhealth): fresh while
-// the informer has synced, a consistency probe (RunLiveness: an uncached
-// metadata-only list compared with the cache) matched within
+// the informer has synced, a consistency probe (watchhealth.Tracker.Run: an
+// uncached metadata-only list compared with the cache) matched within
 // maxObservedStale with no difference outliving one probe interval, and no
 // watch failure streak (NoteWatchError, fed by the cache's watch error
 // handler) has lasted longer than maxObservedStale. An idle tenant with a
@@ -118,21 +117,25 @@ type StatusView interface {
 //
 // The last fresh projection per workspace is remembered so a stalled watch
 // degrades to "last known state + StatusStale" instead of going blank.
+//
+// In the backend the Tracker is shared with the broker's binding source and
+// run once (internal/backend); a view built without one owns its own.
 type K8sStatusView struct {
 	cache    crcache.Cache
 	now      func() time.Time
 	maxStale time.Duration
-	watch    watchhealth.Tracker
 
 	mu        sync.Mutex
+	watch     *watchhealth.Tracker      // nil until first use: a private tracker
 	lastKnown map[string]ObservedStatus // workspaceUID -> last fresh projection
 }
 
-// NewK8sStatusView registers a Workspace event handler on the cache's
-// informer. The caller starts the cache, calls MarkSynced once
-// WaitForCacheSync reports true, feeds the cache's watch error handler to
-// NoteWatchError and runs RunLiveness.
-func NewK8sStatusView(ctx context.Context, c crcache.Cache) (*K8sStatusView, error) {
+// NewK8sStatusView builds the view over the cache's Workspace informer.
+// With a shared tracker the caller feeds it (Tracker.Handler on the
+// informer with SyncedWhen on its registration, the cache's watch error handler, MarkSynced, Run); with nil the
+// view owns a tracker and registers its event handler itself, and the
+// caller calls MarkSynced and NoteWatchError and runs the tracker's probe.
+func NewK8sStatusView(ctx context.Context, c crcache.Cache, watch *watchhealth.Tracker) (*K8sStatusView, error) {
 	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return nil, err
@@ -141,47 +144,44 @@ func NewK8sStatusView(ctx context.Context, c crcache.Cache) (*K8sStatusView, err
 		cache:     c,
 		now:       time.Now,
 		maxStale:  maxObservedStale,
+		watch:     watch,
 		lastKnown: map[string]ObservedStatus{},
 	}
-	if _, err := inf.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(interface{}) { v.watch.Delivered() },
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			if watchhealth.NewVersion(oldObj, newObj) {
-				v.watch.Delivered()
-			}
-		},
-		DeleteFunc: func(interface{}) { v.watch.Delivered() },
-	}); err != nil {
-		return nil, err
+	if watch == nil {
+		tr := v.tracker()
+		reg, err := inf.AddEventHandler(tr.Handler())
+		if err != nil {
+			return nil, err
+		}
+		tr.SyncedWhen(reg.HasSynced)
 	}
 	return v, nil
 }
 
+// tracker returns the view's freshness tracker, creating a private one on
+// first use.
+func (v *K8sStatusView) tracker() *watchhealth.Tracker {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.watch == nil {
+		v.watch = &watchhealth.Tracker{}
+	}
+	return v.watch
+}
+
 // MarkSynced records that the informer cache completed its initial sync.
-func (v *K8sStatusView) MarkSynced() { v.watch.MarkSynced(v.now()) }
+func (v *K8sStatusView) MarkSynced() { v.tracker().MarkSynced(v.now()) }
 
 // NoteWatchError feeds a list/watch failure from the cache's watch error
 // handler (see watchhealth.Tracker.NoteWatchError).
 func (v *K8sStatusView) NoteWatchError(typeDescription string, err error) {
-	v.watch.NoteWatchError(v.now(), typeDescription, err)
-}
-
-// RunLiveness runs the consistency probe every interval until ctx ends: api
-// (watchhealth.WorkspaceMetadataVersions over an uncached client) against
-// the informer cache. See internal/watchhealth for the rule and its cost.
-func (v *K8sStatusView) RunLiveness(ctx context.Context, api watchhealth.Versions, every time.Duration) {
-	v.watch.Run(ctx, v.now, api, v.cache, every)
-}
-
-// livenessTick runs one probe with grace one interval.
-func (v *K8sStatusView) livenessTick(ctx context.Context, api watchhealth.Versions, grace time.Duration) {
-	v.watch.Probe(ctx, v.now, api, v.cache, grace)
+	v.tracker().NoteWatchError(v.now(), typeDescription, err)
 }
 
 // health reports whether the view is fresh (see K8sStatusView) and the
 // time the cache was last shown to match the API server.
 func (v *K8sStatusView) health() (bool, time.Time) {
-	return v.watch.Health(v.now(), v.maxStale)
+	return v.tracker().Health(v.now(), v.maxStale)
 }
 
 // WorkspaceStatus returns the observed status for the workspace UID. It
