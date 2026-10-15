@@ -52,3 +52,5 @@ export { Tooltip } from "./Tooltip";
 export type { TooltipProps } from "./Tooltip";
 export { Page, Section, Stack, Cluster, Grid, DescriptionList, VisuallyHidden, Meter, BackLink } from "./Layout";
 export type { PageProps, SectionProps, StackProps, ClusterProps, GridProps, DescriptionListProps, MeterProps, Gap, BackTarget } from "./Layout";
+export { Stat, StatList } from "./Stat";
+export type { StatProps, StatListProps, StatListItem, StatTone } from "./Stat";
