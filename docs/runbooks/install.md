@@ -60,7 +60,8 @@ Run the preflight script first. It checks the Kubernetes version,
 NetworkPolicy enforcement (with a throwaway probe namespace it always
 deletes), a StorageClass, user-namespace support, the workspace node pool,
 AppArmor on the workspace nodes (it names the fitting
-`runtime.appArmor.requireRuntimeDefault` value), wildcard DNS, the session
+`runtime.appArmor.requireRuntimeDefault` value), the kubelet process bound
+on the workspace nodes (`podPidsLimit`), wildcard DNS, the session
 TLS Secret, OIDC discovery and Postgres with TLS verification, and prints
 `PASS`/`WARN`/`FAIL` with a one-line fix for each
 (exit code 1 on any `FAIL`). It works without cluster-admin: a check it is
@@ -193,6 +194,20 @@ Also gather:
    taint — but never leave the selector empty (the render fails: a
    dedicated pool with no selector would schedule nowhere).
 
+   **Process bound (required).** The pod spec has no process limit, so a
+   workspace's process and thread count is bounded only by the kubelet's
+   `podPidsLimit`, and its default (`-1`) is unlimited. Without it, one
+   desktop can use up the node's `kernel.threads-max` and make `fork`
+   fail for every pod on the node, the kubelet included. Set
+   `podPidsLimit` (for example `4096`) in the kubelet configuration of
+   every node that runs workspaces, or reserve PIDs with
+   `--system-reserved=pid=<n>` and a `pid.available` eviction threshold.
+   This is node configuration: TinyCDI cannot set it. The preflight
+   `pids` check reads each workspace node's value from the kubelet
+   `configz` endpoint and warns when it is unset or `-1`. On a shared
+   node (`allowSharedNodes: true`) the same bound protects the unrelated
+   workloads there.
+
    **Shared nodes (opt-out).** `runtime.placement.allowSharedNodes: true`
    passes no placement flags at all: runtime pods schedule anywhere
    schedulable, and the install NOTES print a warning. That is the right
@@ -216,7 +231,7 @@ All in the release namespace unless noted:
 | `tinycdi-internal-ca` | `ca.crt` | internal mTLS CA: backend verifies client certs (`backend.clientCA`), operator verifies the broker cert (`operator.brokerClient.ca`). With `certManager.selfSigned` the CA Secret is `<release>-internal-ca` |
 | `tinycdi-operator-mtls` | `tls.crt`, `tls.key` | operator client cert to the broker — **CN must be `operator`** (or `backend.operatorCN`): the only identity the internal workspace revoke/drain routes accept (ADR 0003). `certManager.enabled` issues it with the right CN |
 | `tinycdi-frontend-tls` | `tls.crt`, `tls.key` | frontend TLS |
-| `tinycdi-backend-control-token` | `token` | backend session control endpoints — **optional**; set `backend.controlToken.existingSecret` (key `token`). Without it the `/v1/control/*` routes stay closed (fail-closed); they answer only on the in-cluster control hosts |
+| `tinycdi-backend-control-token` | `token` | backend session control endpoints — **optional**; set `backend.controlToken.existingSecret` (key `token`). The token must be at least 32 bytes (`openssl rand -hex 32`); a shorter one stops the backend at startup. Without it the `/v1/control/*` routes stay closed (fail-closed); they answer only on the in-cluster control hosts |
 | `tinycdi-extra-ca` | `ca.crt` | optional: backend outbound CA (`backend.extraCA`), runtime upstream CA (`backend.upstreamCA`), DB CA (`database.tls.caSecret`) |
 | `tinycdi-ingress-tls` | `tls.crt`, `tls.key` | optional: ingress TLS when `ingress.enabled` — must cover `portalHost` **and** `*.<sessionDomain>` |
 
@@ -289,7 +304,17 @@ rows, so replicas starting together write once.
   `managedNamespaces`, is left exactly as it is — an existing row (for
   example one set by SQL, see `capacity.md`) survives. `helm install` /
   `upgrade` NOTES print a warning for every tenant without a `quota` block
+  (a `quotaCeiling`-only tenant has no row until its admin sets one)
   because its creates are refused unless a row already exists.
+- **Delegating to tenant admins.** A tenant administrator can set the
+  tenant's quota through the portal (`PUT /v1/admin/tenants/{tenant}/quota`)
+  only when the entry declares a `quotaCeiling` block (same four keys as
+  `quota`; an entry carries one or the other). The chart renders those
+  blocks as `-tenant-quota-ceilings`. A write above the ceiling, or for a
+  tenant with neither block, is refused with `409 QUOTA_ABOVE_CEILING`, so a
+  tenant left without a quota stays fail-closed (`QUOTA_NOT_CONFIGURED`)
+  until the operator acts. The ceiling bounds the API-layer quota only;
+  `namespaceQuota` bounds the namespace in the apiserver.
 - **Declared values win.** For a tenant that has a `quota` block, the chart
   value overwrites a hand-edited row at the next backend start. Change the
   value in `values.yaml`, not in the database.
@@ -362,10 +387,21 @@ backend:
 
 ```yaml
 # Traefik or another ingress running as pods — the peer is the proxy pod
-# IP; list the cluster pod CIDR (shown: 10.42.0.0/16) or a tighter range.
+# IP. List only addresses the proxy pods can hold: an IP pool dedicated
+# to the ingress namespace (shown) or, for a hostNetwork proxy, the node
+# subnet.
 backend:
-  trustedProxies: ["10.42.0.0/16"]
+  trustedProxies: ["10.42.250.0/24"]
 ```
+
+Never list the cluster pod CIDR or any range where workspace pods run.
+A peer inside `backend.trustedProxies` chooses, through
+`X-Forwarded-For`, the client address the backend keys its rate limits
+on and forwards toward workspace pods. With
+`runtime.networkProfiles.clusterOnly.unrestricted=true` a workspace can
+reach the backend directly (the edge ingress admits
+`networkPolicy.edgeIngressCIDRs`, `0.0.0.0/0` by default), and the chart
+NOTES print a warning for that combination.
 
 No edge proxy at all needs nothing — the peer already is the client.
 Rates are tunable via `backend.extraArgs` (`-login-rate`, `-launch-rate`;

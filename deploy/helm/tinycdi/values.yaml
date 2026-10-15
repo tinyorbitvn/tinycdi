@@ -43,8 +43,11 @@ images:
   # entries using `image: linuxDesktop` / `image: browser`). Runtime images
   # must be DIGEST-pinned (spec.linux.image requires <repo>@sha256:<64hex>)
   # — a tag-only runtime image is rejected by the CRD.
-  # builtAt is the image build timestamp (RFC 3339) from the runtime
-  # release train's runtime-images.json; it renders as the template's
+  # builtAt is the image build timestamp (RFC 3339, UTC): the second the
+  # build job recorded and stamped into the image's
+  # org.opencontainers.image.created label. A release stamps it here for
+  # linuxBase, linuxDesktop and browser; a runtime-train bump copies it
+  # from runtime-images.json. It renders as the template's
   # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
   # report imageBuiltAt/imageStale on templates and workspaces. A stale
   # image past -image-block-after (45 d default) refuses create/start with
@@ -122,6 +125,12 @@ kasmAdapter:
 #   memory, storage    Kubernetes quantities: "64Gi", "200G", 107374182400
 # Values below current usage are accepted: running workspaces keep running
 # and new creates are refused until usage drops.
+# quotaCeiling (per entry, OPTIONAL; same four keys as quota, not together
+# with quota) lets the tenant's admins set the quota themselves through the
+# admin quota API, up to these amounts. It renders as -tenant-quota-ceilings.
+# Without quota or quotaCeiling, tenant admins cannot set a quota at all and
+# every create is refused with QUOTA_NOT_CONFIGURED until an operator
+# declares one.
 # namespaceQuota (per entry, OPTIONAL) renders Kubernetes-side bounds for
 # the namespace — a ResourceQuota (total requests/limits/object counts
 # across every pod, PVC and Service the workspaces create) and/or a
@@ -139,6 +148,8 @@ managedNamespaces: []
   # - name: tinycdi-tenant-a
   #   tenant: tenant-a
   #   quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+  #   # or, to delegate the quota to tenant admins:
+  #   # quotaCeiling: {runningWorkspaces: 20, cpu: "32", memory: 128Gi, storage: 400Gi}
   #   namespaceQuota:
   #     resourceQuota:
   #       hard:                         # ~12 desktops at 2CPU/4Gi request each
@@ -347,6 +358,8 @@ backend:
   # the IPv4 ones or v6 clients collapse into the proxy's /64 bucket.
   # See the README "Rate limits and trusted proxies" for Cilium/Traefik
   # examples.
+  # Never list a range where workspace pods run (the cluster pod CIDR): a
+  # trusted peer picks its own client key through X-Forwarded-For.
   # Authenticated traffic keys per session (session probe, live-session
   # re-launches) or per validated OIDC state (callback, bounded by a 10x
   # per-IP ceiling), not per client IP; the anonymous surface — login
@@ -527,7 +540,10 @@ frontend:
 # here; point those at real certificates.
 certManager:
   enabled: false
-  # Signer for the leaf Certificates. Ignored when selfSigned=true.
+  # Signer for the leaf Certificates. Ignored when selfSigned=true. It also
+  # signs the internal client CA, so it must be a dedicated issuer that
+  # signs nothing else (or kind: Issuer in the release namespace): any
+  # certificate it issues with the operator CN can drain workspaces.
   issuerRef:
     kind: ClusterIssuer       # Issuer | ClusterIssuer
     name: ""
@@ -869,7 +885,7 @@ templates: []
   #     # workspace, named from the user's point of view (normative
   #     # semantics: internal/api/openapi.yaml): Disabled | Send (client
   #     # to workspace) | Receive (workspace to client) | Bidirectional.
-  #     # Enforced server-side by the session server's KasmVNC DLP block —
+  #     # Enforced server-side by the session server's KasmVNC DLP block (no VNC parameter is runtime-overridable) —
   #     # the operator passes it to the pod as TCDI_CLIPBOARD_POLICY and a
   #     # change applies on the workspace's next start.
   #     clipboardPolicy: Disabled
@@ -881,37 +897,39 @@ templates: []
   #   appArmorProfile: tinycdi-browser
   #   spec: { ... experience: Browser ... }
 
-# Pod Security Standards enforcement labels for the namespaces the chart
-# creates. Platform namespace allows baseline (infra images), managed
-# namespaces run restricted runtime pods. managedEnforce=privileged is
+# Pod Security Standards level for the managed (tenant) namespaces the
+# chart creates — their enforce and warn labels. The release namespace is
+# created and labelled by the installer (docs/runbooks/install.md,
+# "Install"); the chart never labels it. managedEnforce=privileged is
 # refused unless dev.enabled — it would reopen operator→privileged-pod
 # (CHTR-2).
 podSecurity:
-  platformEnforce: baseline
   managedEnforce: restricted
 
 # Explicit development-mode gate. While false (the only supported value
-# for production), the render FAILS on dev surfaces: operator.devAllowNoBroker;
-# dangerous extraArgs (operator --dev-allow-no-broker /
-# --disable-builtin-egress-excepts / metrics flags, backend
-# --dev-insecure-db / --required-groups / --metrics-listen / the
-# split-mode broker client flags); extraEnv entries carrying a
-# dev-surface env name or the env equivalent of a security-relevant
-# first-class value (TCDI_DEV_INSECURE_DB, TCDI_DEV_ALLOW_NO_BROKER,
-# TCDI_METRICS_LISTEN, TCDI_KASM_ADAPTER_IMAGE, PGSSLMODE,
-# TCDI_OPERATOR_CN, TCDI_WATCH_NAMESPACES, TCDI_REQUIRED_GROUPS,
-# TCDI_CONTROL_TOKEN/TCDI_CONTROL_TOKEN_FILE,
-# TCDI_TRUSTED_PROXIES, TCDI_UPSTREAM_CA, TCDI_OIDC_POST_LOGOUT_REDIRECT,
-# TCDI_TENANT_QUOTAS — the render error names the value to use instead),
-# a non-map/nameless entry, or an env var the chart manages for that
-# component; any
+# for production), the render FAILS on dev surfaces:
+# operator.devAllowNoBroker; extraArgs naming any flag the chart renders
+# or owns for that component, or the flag form of a denied env name
+# (backend -rate-limit-replicas and -login-key-file excepted); extraEnv
+# entries carrying a dev-surface env name or the env equivalent of a
+# security-relevant first-class value (TCDI_DEV_INSECURE_DB,
+# TCDI_DEV_ALLOW_NO_BROKER, TCDI_METRICS_LISTEN,
+# TCDI_KASM_ADAPTER_IMAGE, PGSSLMODE, TCDI_OPERATOR_CN,
+# TCDI_WATCH_NAMESPACES, TCDI_REQUIRED_GROUPS,
+# TCDI_CONTROL_TOKEN/TCDI_CONTROL_TOKEN_FILE, TCDI_TRUSTED_PROXIES,
+# TCDI_UPSTREAM_CA, TCDI_OIDC_POST_LOGOUT_REDIRECT, TCDI_TENANT_QUOTAS,
+# TCDI_TENANT_QUOTA_CEILINGS,
+# TCDI_BROKER_URL/TCDI_BROKER_CA/TCDI_MTLS_CERT/TCDI_MTLS_KEY,
+# SSL_CERT_FILE/SSL_CERT_DIR, the TCDI_ form of any denied flag — the
+# render error names the value to use instead), a non-map/nameless
+# entry, or an env var the chart manages for that component; any
 # podSecurityContext/securityContext override that would weaken the
 # hardened defaults (privileged, allowPrivilegeEscalation, added or
 # replaced capabilities, runAsNonRoot=false, uid/gid/fsGroup 0, writable
-# rootfs, unconfined seccomp, appArmorProfile=Unconfined, seLinuxOptions);
-# hostPath backend.extraVolumes; a non-verifying database.tls.mode
-# (""/prefer/require/allow/disable); and podSecurity.managedEnforce=
-# privileged. hostUsers=false is a hardening and stays allowed. Never true
-# in a release values file.
+# rootfs, unconfined seccomp, appArmorProfile=Unconfined,
+# seLinuxOptions); hostPath backend.extraVolumes; a non-verifying
+# database.tls.mode (""/prefer/require/allow/disable); and
+# podSecurity.managedEnforce=privileged. hostUsers=false is a hardening
+# and stays allowed. Never true in a release values file.
 dev:
   enabled: false

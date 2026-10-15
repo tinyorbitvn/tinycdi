@@ -65,7 +65,7 @@ Usage: preflight.sh [flags]
   --storage-class NAME      require this StorageClass (default: any default class)
   --min-k8s X.Y             minimum Kubernetes version (default 1.30)
   --probe-image IMAGE       image for the probe pods (default registry.k8s.io/e2e-test-images/agnhost:2.53)
-  --no-probe                create nothing: NetworkPolicy and user-namespace checks WARN
+  --no-probe                create nothing: NetworkPolicy, user-namespace and AppArmor checks WARN
   -h, --help                this help
 
 Every flag also has a TCDI_PREFLIGHT_* environment variable
@@ -643,6 +643,75 @@ check_apparmor() {
     "set runtime.appArmor.requireRuntimeDefault=false (nodes without AppArmor refuse the RuntimeDefault profile — see the chart README); when every workspace node has AppArmor, true fits"
 }
 
+# ---- 5c. process bound on the workspace nodes -----------------------------
+# Kubernetes has no pod-spec process limit: a workspace's process and thread
+# count is bounded only by the kubelet's podPidsLimit (default -1, none), or
+# else by its memory limit, and one desktop can then exhaust the node's
+# kernel.threads-max and break fork for every pod on it, the kubelet's
+# included. The value is node configuration; the kubelet reports it on its
+# configz endpoint, read here through the apiserver node proxy (get on
+# nodes/proxy, an administrator right the platform itself never holds).
+# Read-only: nothing is created, so --no-probe does not skip it. An in-pod
+# check cannot replace this: a container's own pids.max is not the
+# pod-level cgroup the kubelet bounds.
+check_pids() {
+  local lines name os rest lim lowest=""
+  local -a nodes=() unbounded=() unknown=()
+  local denied=0
+  if [ "$ALLOW_SHARED" = 1 ]; then
+    kq get nodes -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.operatingSystem}{"|"}{.spec.unschedulable}{"|"}{range .spec.taints[*]}{.key}{":"}{.effect}{";"}{end}{"\n"}{end}'
+  else
+    kq get nodes -l "$NODE_LABEL" -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.operatingSystem}{"|"}{.spec.unschedulable}{"|"}{range .spec.taints[*]}{.key}{":"}{.effect}{";"}{end}{"\n"}{end}'
+  fi
+  if [ "$KRC" != 0 ]; then
+    if [ "$KFORBID" = 1 ]; then
+      report WARN pids "not permitted to list nodes" "grant list on nodes, or check podPidsLimit in each workspace node's kubelet config by hand"
+    else
+      report WARN pids "could not list nodes" "see kubectl error output; check podPidsLimit in each workspace node's kubelet config by hand"
+    fi
+    return
+  fi
+  lines="$(printf '%s\n' "$KOUT" | sed '/^$/d')"
+  while IFS='|' read -r name os rest; do
+    [ -z "$name" ] && continue
+    [ "$os" = linux ] || continue
+    nodes+=("$name")
+  done <<<"$lines"
+  if [ "${#nodes[@]}" = 0 ]; then
+    report WARN pids "no workspace node found" "fix the node pool first (see node-pool), then set podPidsLimit on its kubelets"
+    return
+  fi
+  for name in "${nodes[@]}"; do
+    if ! kq get --raw "/api/v1/nodes/$name/proxy/configz"; then
+      [ "$KFORBID" = 1 ] && denied=1
+      unknown+=("$name")
+      continue
+    fi
+    lim="$(printf '%s' "$KOUT" | sed -n 's/.*"podPidsLimit":[[:space:]]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -n1)"
+    if [ -z "$lim" ] || [ "$lim" -le 0 ]; then
+      unbounded+=("$name")
+    elif [ -z "$lowest" ] || [ "$lim" -lt "$lowest" ]; then
+      lowest="$lim"
+    fi
+  done
+  if [ "${#unbounded[@]}" -gt 0 ]; then
+    local detail="kubelet podPidsLimit unset or -1 on: ${unbounded[*]}"
+    [ "${#unknown[@]}" -gt 0 ] && detail="$detail; not readable on: ${unknown[*]}"
+    report WARN pids "$detail" \
+      "set podPidsLimit (for example 4096) in the kubelet configuration of every workspace node; see docs/runbooks/install.md step 9"
+  elif [ "${#unknown[@]}" -gt 0 ]; then
+    if [ "$denied" = 1 ]; then
+      report WARN pids "not permitted to read the kubelet configz (get nodes/proxy) on: ${unknown[*]}" \
+        "grant get on nodes/proxy for this check, or check podPidsLimit in each workspace node's kubelet config by hand"
+    else
+      report WARN pids "could not read the kubelet configz on: ${unknown[*]}" \
+        "check podPidsLimit in each workspace node's kubelet config by hand"
+    fi
+  else
+    report PASS pids "podPidsLimit set on ${#nodes[@]} workspace node(s) (lowest $lowest)"
+  fi
+}
+
 # ---- 6. wildcard DNS ------------------------------------------------------
 check_dns() {
   if [ -z "$SESSION_DOMAIN" ]; then
@@ -1002,6 +1071,7 @@ check_storage_class
 check_host_users
 check_node_pool
 check_apparmor
+check_pids
 check_dns
 check_tls
 check_oidc

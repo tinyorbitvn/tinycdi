@@ -103,6 +103,7 @@ func (a *Authenticator) RevokeAllSessionsHandler(w http.ResponseWriter, r *http.
 		",tickets="+strconv.Itoa(res.Tickets)+
 		",leases="+strconv.Itoa(res.Leases))
 
+	a.forgetLiveSession(sess.ID)
 	http.SetCookie(w, a.sessionCookie("", -1))
 	if end := a.endSessionURL(sess.IDToken); end != "" {
 		w.Header().Set("Content-Type", "application/json")

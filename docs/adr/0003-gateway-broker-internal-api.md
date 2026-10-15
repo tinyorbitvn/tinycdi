@@ -16,7 +16,7 @@ when the broker's view of Workspace status is stale.
 
 The broker side of the contract is implemented by `internal/broker/httpapi`
 and served from `cmd/backend` on a **separate internal listener**
-(`-internal-listen`, default `:9443`, `internal/backend/config.go:343`;
+(`-internal-listen`, default `:9443`, `internal/backend/config.go`;
 env `TCDI_INTERNAL_LISTEN`), never on the public mux.
 
 ### Transport and identity
@@ -29,20 +29,25 @@ env `TCDI_INTERNAL_LISTEN`), never on the public mux.
   error rather than a TLS abort.
 - The client identity is the verified leaf certificate's `Subject CN`. An
   optional SPIFFE URI SAN, if present, must equal the CN or the request is
-  rejected 403 (`internal/broker/httpapi/server.go:145-172`). The identity
-  maps to `broker.GatewayIdentity{ID: CN, Audience: <configured audience>}`.
-- The operator identity is the client-certificate CN configured by
-  `-operator-cn` (default `operator`, `server.go:48-52`, `config.go:348`).
-  There is no CN allowlist: one operator CN, and any other CN the internal
-  CA signed is a gateway identity. Per-certificate revocation is ADR 0008.
+  rejected 403 (`identify` in `internal/broker/httpapi/server.go`). The
+  identity maps to `broker.GatewayIdentity{ID: CN, Audience: <configured
+  audience>}`.
+- Roles are opt-in by CN. The operator identity is the CN configured by
+  `-operator-cn` (default `operator`). A gateway identity is a CN listed
+  in `-internal-gateway-cns` (`TCDI_INTERNAL_GATEWAY_CNS`, empty by
+  default: the chart's session gateway runs in process, so it renders no
+  gateway CN). Any other CN the internal CA signed is refused 403 before
+  a route runs, and a gateway on an operator route or the operator on a
+  gateway route is refused 403; each refusal is counted as
+  `role_mismatch`. Per-certificate revocation is ADR 0008.
 - `X-Request-Id` is propagated into responses and error bodies.
 
 ### Routes
 
-The listener mounts two route families (`server.go:117-125`). Lease-scoped
+The listener mounts two route families (`server.go`). Lease-scoped
 routes are refused to the operator identity (`requireGateway`,
-`server.go:431-440`); workspace-scoped routes admit only the operator CN
-(`requireOperator`, `server.go:442-450`).
+`server.go`); workspace-scoped routes admit only the operator CN
+(`requireOperator`, `server.go`).
 
 Lease-scoped gateway routes:
 
@@ -77,10 +82,10 @@ JSON shape.
 
 - Renew cadence 10 s; the gateway treats a session as dead after 30 s
   without a successful renew (`gateway.RevokeDeadline`,
-  `internal/gateway/proxy.go:61`).
+  `internal/gateway/proxy.go`).
 - The broker refuses issue/renew/resolve when its Workspace-status view
   (informer `ObservedAt`) is older than 15 s (`MaxBindingAge`,
-  `internal/broker/tickets.go:73`).
+  `internal/broker/tickets.go`).
 
 ### Ticket/lease security properties (broker)
 
@@ -143,7 +148,7 @@ In the chart's (only) mode the session gateway runs inside the backend
 process and calls the broker in process through `broker.LocalGateway`
 (`internal/broker/gatewayshim.go`), so the operator is the only remote
 client of this listener. A backend started with `-broker-url` (split/test
-mode, `config.go:373`) is a remote gateway client of the lease routes; the
+mode, `config.go`) is a remote gateway client of the lease routes; the
 chart refuses `broker-url` in `backend.extraArgs`
 (`deploy/helm/tinycdi/templates/_helpers.tpl` `denyExtraArgs`). The listener
 always mounts both route families — the lease routes exist for split mode

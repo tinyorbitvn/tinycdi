@@ -94,14 +94,12 @@ func (a *Authenticator) requireAuth(next http.Handler, slide bool) http.Handler 
 			writeError(w, r, CodeUnauthenticated, "authentication required")
 			return
 		}
-		var sess *Session
-		if slide {
-			sess, err = a.sessions.Get(r.Context(), c.Value)
-		} else {
-			sess, err = a.sessions.Peek(r.Context(), c.Value)
-		}
+		sess, err := a.lookupSession(r, c.Value, slide)
 		if err != nil {
+			var lim *lookupLimitedError
 			switch {
+			case errors.As(err, &lim):
+				writeLookupLimited(w, r, lim)
 			case errors.Is(err, ErrSessionNotFound):
 				writeError(w, r, CodeUnauthenticated, "session missing or expired")
 			case store.IsTransient(err):
@@ -386,6 +384,17 @@ func outcomeFor(status int) observability.AuditOutcome {
 	}
 }
 
+// routePattern is the matched ServeMux pattern without its method prefix,
+// or "unmatched". Logs and metrics name routes by it — never by the raw
+// path, whose parameters can carry an owner's issuer|sub.
+func routePattern(r *http.Request) string {
+	route := strings.TrimPrefix(r.Pattern, r.Method+" ")
+	if route == "" {
+		return "unmatched"
+	}
+	return route
+}
+
 // InstrumentHTTP records per-request Prometheus metrics (count + duration)
 // labeled by listener, route template, method and code class (E8). A nil
 // Metrics passes requests through unobserved. It must wrap the mux
@@ -400,10 +409,7 @@ func InstrumentHTTP(m *observability.Metrics, listener string) func(http.Handler
 			rec := &statusRecorder{ResponseWriter: w}
 			start := time.Now()
 			next.ServeHTTP(rec, r)
-			route := strings.TrimPrefix(r.Pattern, r.Method+" ")
-			if route == "" {
-				route = "unmatched"
-			}
+			route := routePattern(r)
 			m.ObserveHTTP(listener, route, r.Method, codeClass(statusOrOK(rec.status)), time.Since(start))
 		})
 	}
@@ -417,6 +423,8 @@ func InstrumentHTTP(m *observability.Metrics, listener string) func(http.Handler
 //   - never log request bodies — they may carry credentials;
 //   - the audit actor is the pseudonymous observability.ActorRef
 //     (hash of issuer|subject), never the raw subject;
+//   - never log the raw path — path values can carry an owner's
+//     issuer|sub; the record names the matched route template.
 //   - Detail keys are redacted via observability.RedactDetails.
 func AuditWithSink(log *slog.Logger, sink observability.AuditSink) func(http.Handler) http.Handler {
 	if log == nil {
@@ -433,7 +441,7 @@ func AuditWithSink(log *slog.Logger, sink observability.AuditSink) func(http.Han
 			attrs := []interface{}{
 				"request_id", RequestIDFromContext(r.Context()),
 				"method", r.Method,
-				"path", r.URL.Path,
+				"route", routePattern(r),
 				"status", status,
 				"duration_ms", time.Since(start).Milliseconds(),
 			}
@@ -457,7 +465,7 @@ func AuditWithSink(log *slog.Logger, sink observability.AuditSink) func(http.Han
 					Outcome:   outcomeFor(status),
 					Details: observability.RedactDetails(map[string]string{
 						"method": r.Method,
-						"path":   r.URL.Path,
+						"route":  routePattern(r),
 					}),
 				})
 			}

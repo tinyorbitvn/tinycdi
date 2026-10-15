@@ -376,8 +376,9 @@ type Options struct {
 	// ClusterOnlyEgress (operator --runtime-clusteronly-egress; chart
 	// runtime.networkProfiles.clusterOnly.*) steers the in-cluster
 	// egress rule of NetworkProfileClusterOnly workspaces. Nil keeps
-	// the default posture — egress to pods in namespaces labelled
-	// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces).
+	// the default posture: egress to pods in the namespaces of the
+	// workspace's own tenant (its workspaces.cdi.tinyorbit.vn/tenant
+	// label value), never another tenant's.
 	// Unrestricted is the opt-out: egress to any pod in any namespace.
 	// Otherwise the set selectors admit only pod destinations matching
 	// them, on the listed ports — it can never widen the rule past
@@ -495,6 +496,9 @@ func (b *Backend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.Wo
 	if err != nil {
 		return runtime.Observation{}, err
 	}
+	if err := requireOwnUserNamespace(seccomp, tpl, b.opts); err != nil {
+		return runtime.Observation{}, err
+	}
 	if tpl.Spec.Linux != nil && tpl.Spec.Linux.Adapter == cdiv1.AdapterKasm &&
 		b.opts.KasmAdapterImage == "" {
 		// The adapter is delivered by the operator-configured init image;
@@ -513,13 +517,17 @@ func (b *Backend) Ensure(ctx context.Context, ws *cdiv1.Workspace, tpl *cdiv1.Wo
 			return runtime.Observation{}, err
 		}
 	}
+	// The NetworkPolicy goes first: it selects by the workspace-UID label,
+	// so it can exist before the pod, and tenant code never runs while a
+	// later step (the Service) fails, even in a namespace without a
+	// default-deny (networkPolicy.enabled=false).
+	if err := b.ensureNetPol(ctx, ws, tpl); err != nil {
+		return runtime.Observation{}, err
+	}
 	if err := b.ensurePod(ctx, ws, tpl, appArmor, seccomp); err != nil {
 		return runtime.Observation{}, err
 	}
 	if err := b.ensureService(ctx, ws); err != nil {
-		return runtime.Observation{}, err
-	}
-	if err := b.ensureNetPol(ctx, ws, tpl); err != nil {
 		return runtime.Observation{}, err
 	}
 	return b.Observe(ctx, ws)
@@ -1034,6 +1042,42 @@ func resolveSeccompProfile(ann map[string]string) (*corev1.SeccompProfile, error
 	}
 }
 
+// usernsSeccompProfile is the shipped browser seccomp profile
+// (deploy/node-profiles/seccomp/chromium-userns.json). It allows clone
+// and unshare with CLONE_NEW* flags (plus setns and chroot) for the
+// Chromium sandbox, so the workspace user can create user and network
+// namespaces.
+const usernsSeccompProfile = "profiles/chromium-userns.json"
+
+// requireOwnUserNamespace admits the userns browser profile only when the
+// pod runs in its own user namespace (effective hostUsers false). The
+// profile opens the namespace-gated kernel code to the workspace user;
+// with host users the pod's UIDs are the node's UIDs, so a kernel bug
+// reached that way lands as a node UID rather than an unmapped one.
+// Other profiles pass untouched.
+func requireOwnUserNamespace(seccomp *corev1.SeccompProfile, tpl *cdiv1.WorkspaceTemplate, opts Options) error {
+	if seccomp == nil || seccomp.Type != corev1.SeccompProfileTypeLocalhost ||
+		seccomp.LocalhostProfile == nil || *seccomp.LocalhostProfile != usernsSeccompProfile {
+		return nil
+	}
+	if hu := effectiveHostUsers(tpl, opts); hu != nil && !*hu {
+		return nil
+	}
+	return &templateRejectedError{reason: fmt.Sprintf(
+		"annotation %s=localhost/%s allows unprivileged user namespaces and requires hostUsers: false "+
+			"(spec.linux.hostUsers, or the operator's --runtime-host-users=false)",
+		AnnotationSeccompProfile, usernsSeccompProfile)}
+}
+
+// effectiveHostUsers is the pod hostUsers value: the template field, else
+// the operator default; nil leaves the pod field unset.
+func effectiveHostUsers(tpl *cdiv1.WorkspaceTemplate, opts Options) *bool {
+	if tpl.Spec.Linux != nil && tpl.Spec.Linux.HostUsers != nil {
+		return tpl.Spec.Linux.HostUsers
+	}
+	return opts.DefaultHostUsers
+}
+
 // validSeccompProfileName: the node-loaded profile reference is a RELATIVE
 // path under the kubelet's seccomp root — the chart installs to
 // "<root>/profiles/<name>.json", so path segments are allowed but every
@@ -1352,13 +1396,7 @@ func buildPod(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, appArmor *corev
 		}}
 	}
 
-	// hostUsers: template field → operator default; nil leaves the pod
-	// field unset (D26 — opt-in until the R1 spike lands).
-	hostUsers := opts.DefaultHostUsers
-	if h := tpl.Spec.Linux.HostUsers; h != nil {
-		hostUsers = h
-	}
-	pod.Spec.HostUsers = hostUsers
+	pod.Spec.HostUsers = effectiveHostUsers(tpl, opts)
 	return pod
 }
 
@@ -1543,7 +1581,7 @@ func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options
 			}},
 		})
 	case cdiv1.NetworkProfileClusterOnly:
-		profile = append(profile, clusterOnlyEgressRule(opts))
+		profile = append(profile, clusterOnlyEgressRule(ws, opts))
 	}
 	// NetworkProfileIsolated: DNS only, no extra rules.
 
@@ -1593,27 +1631,35 @@ func buildNetPol(ws *cdiv1.Workspace, tpl *cdiv1.WorkspaceTemplate, opts Options
 	}
 }
 
+// labelTenant is the tenant label the API stamps on every Workspace CR
+// (provisioning.LabelTenant) and the chart puts on every managed namespace
+// (templates/namespaces.yaml), with the same tenant id as its value.
+const labelTenant = "workspaces.cdi.tinyorbit.vn/tenant"
+
+// sameTenantNamespaces selects the managed namespaces of ws's own tenant.
+// A CR without the tenant label fails closed to its own namespace only:
+// the default ClusterOnly peer never spans tenants.
+func sameTenantNamespaces(ws *cdiv1.Workspace) *metav1.LabelSelector {
+	if t := ws.Labels[labelTenant]; t != "" {
+		return &metav1.LabelSelector{MatchLabels: map[string]string{labelTenant: t}}
+	}
+	return &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": ws.Namespace}}
+}
+
 // clusterOnlyEgressRule builds the in-cluster egress rule for
-// NetworkProfileClusterOnly. The zero option is RESTRICTED: egress is
-// confined to pods in namespaces labelled
-// workspaces.cdi.tinyorbit.vn/tenant (the managed namespaces). The
-// Unrestricted opt-out admits any pod in any namespace on any port —
+// NetworkProfileClusterOnly. The zero option is RESTRICTED to the
+// workspace's own tenant: egress reaches pods in the namespaces carrying
+// its tenant label value (sameTenantNamespaces), never another tenant's.
+// The Unrestricted opt-out admits any pod in any namespace on any port;
 // confinement then rests entirely on destination-side ingress policies.
-// A configured selector set narrows the destination set to matching
-// pods in matching namespaces and/or the listed ports; it can never
-// widen past pod peers (external IPs stay denied either way).
-func clusterOnlyEgressRule(opts Options) networkingv1.NetworkPolicyEgressRule {
+// A configured selector set replaces the default peer with matching pods
+// in matching namespaces and/or the listed ports; it can never widen past
+// pod peers (external IPs stay denied either way).
+func clusterOnlyEgressRule(ws *cdiv1.Workspace, opts Options) networkingv1.NetworkPolicyEgressRule {
 	co := opts.ClusterOnlyEgress
 	if co == nil {
 		return networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{{
-				NamespaceSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{{
-						Key:      "workspaces.cdi.tinyorbit.vn/tenant",
-						Operator: metav1.LabelSelectorOpExists,
-					}},
-				},
-			}},
+			To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: sameTenantNamespaces(ws)}},
 		}
 	}
 	if co.Unrestricted {

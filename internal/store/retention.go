@@ -142,3 +142,34 @@ func pruneBatches(ctx context.Context, retention time.Duration, limit int64,
 		}
 	}
 }
+
+// PruneDeadSessions deletes up to limit session rows that no read can
+// resolve any more — a rotated epoch, a passed absolute expiry, or (with
+// idle > 0) a last_seen_at outside the idle window — in one statement, and
+// returns the count. Session reads never delete (a forged-cookie spray must
+// not turn into write traffic), so this leader-only sweep is what bounds
+// the table.
+func (d *DB) PruneDeadSessions(ctx context.Context, idle time.Duration, limit int64) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	idleCond := "FALSE"
+	args := []any{limit}
+	if idle > 0 {
+		idleCond = "last_seen_at <= now() - $2::interval"
+		args = append(args, fmt.Sprintf("%dms", idle.Milliseconds()))
+	}
+	tag, err := d.pool.Exec(ctx, `
+		DELETE FROM sessions
+		WHERE id IN (
+			SELECT id FROM sessions
+			WHERE epoch <> `+currentEpochSQL+`
+			   OR (expires_at IS NOT NULL AND expires_at <= now())
+			   OR `+idleCond+`
+			ORDER BY id
+			LIMIT $1)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune dead sessions %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

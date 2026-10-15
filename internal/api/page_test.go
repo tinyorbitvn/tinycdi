@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
@@ -40,5 +41,22 @@ func TestCursor_RejectsSortMismatchAndTamper(t *testing.T) {
 		if _, e := ParsePage(r, []string{"createdAt", "name"}, "-createdAt"); e == nil || e.Code != CodeInvalidRequest {
 			t.Errorf("%s: want INVALID_REQUEST", q)
 		}
+	}
+}
+
+// TestParsePage_CursorTextMustBePostgresSafe (R1-19): a cursor is decoded
+// from client input, so a key or id Postgres cannot store as text (a NUL
+// byte) is a bad cursor for every ParsePage consumer.
+func TestParsePage_CursorTextMustBePostgresSafe(t *testing.T) {
+	for _, c := range []struct{ key, id string }{{"a\x00", "ws_x"}, {"a", "ws_\x00"}} {
+		cur := NextCursor(SortSpec{Field: "name"}, c.key, c.id)
+		r := httptest.NewRequest(http.MethodGet, "/v1/x?sort=name&cursor="+cur, nil)
+		if _, err := ParsePage(r, []string{"name"}, "name"); err == nil || err.Code != CodeInvalidRequest {
+			t.Fatalf("cursor key=%q id=%q: err=%v, want INVALID_REQUEST", c.key, c.id, err)
+		}
+	}
+	ok := NextCursor(SortSpec{Field: "name"}, "Desktop – é", "ws_x")
+	if _, err := ParsePage(httptest.NewRequest(http.MethodGet, "/v1/x?sort=name&cursor="+ok, nil), []string{"name"}, "name"); err != nil {
+		t.Fatalf("valid UTF-8 cursor refused: %v", err)
 	}
 }

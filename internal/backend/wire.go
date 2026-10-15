@@ -79,6 +79,9 @@ func (b *Backend) wire(ctx context.Context) error {
 		}
 		cfg.ControlToken = strings.TrimSpace(string(raw))
 	}
+	if err := checkControlToken(cfg.ControlToken); err != nil {
+		return err
+	}
 	if cfg.ControlToken == "" {
 		b.log.Warn(controlTokenUnsetWarning)
 	}
@@ -450,6 +453,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			terminalRetentionSweepLoop(db, cfg.TerminalRetentionDays, metrics, log))
 	}
 
+	// Dead portal sessions (rotated epoch, absolute or idle expiry) are
+	// pruned by the leader: session reads never delete, so a forged-cookie
+	// spray cannot turn into write traffic (TM-06).
+	b.singletons = append(b.singletons, deadSessionSweepLoop(db, cfg.SessionIdle, log))
+
 	// Audit retention (ADR 0010): the leader prunes audit_event rows older
 	// than -audit-retention-days at election and then daily. Always on: the
 	// config range check never lets it be disabled.
@@ -494,12 +502,16 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		tlsCfg.Certificates = nil
 		tlsCfg.GetCertificate = rel.GetCertificate
 		hotReloadClientCAs(tlsCfg, caPool)
+		// TM-38: a client-CA rotation also ends established conns whose
+		// chain the new bundle no longer verifies.
+		b.internalConns = newClientConns(caPool)
+		installClientConnTracking(tlsCfg, b.internalConns)
 		// ADR 0008 (SR-3-F5): optional per-certificate revocation. The
 		// blocklist polls+swaps exactly like the CA pool; a bad file at
 		// boot fails startup (a configured revocation control never starts
 		// silently disabled) and a bad reload keeps the last-good list.
-		// Unset flag = no VerifyConnection is installed — the handshake
-		// path stays byte-identical.
+		// With the flag unset no revocation hook is installed; the
+		// client-CA conn tracking (installClientConnTracking) still runs.
 		if cfg.InternalRevokedList != "" {
 			var onErr func()
 			var onSwap func(int)
@@ -509,7 +521,8 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 			}
 			bl, err := tlsreload.NewBlocklist(cfg.InternalRevokedList,
 				tlsreload.WithLogger(log),
-				tlsreload.WithReloadObserver(onErr, onSwap))
+				tlsreload.WithReloadObserver(onErr, onSwap),
+				tlsreload.WithKnownIssuers(caPool.Certs))
 			if err != nil {
 				return fmt.Errorf("internal revoked list: %w", err)
 			}
@@ -522,7 +535,8 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		// listener="internal" — InstrumentHTTP passes through when the
 		// metrics listener is off.
 		b.internalHandler = api.InstrumentHTTP(metrics, "internal")(httpapi.NewHandler(httpapi.Config{
-			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN, Logger: log, Metrics: metrics,
+			Broker: brk, Audience: id.Audience, OperatorCN: cfg.OperatorCN,
+			GatewayCNs: cfg.InternalGatewayCNs, Logger: log, Metrics: metrics,
 		}))
 	} else {
 		log.Warn("internal broker api disabled (-internal-listen unset); remote gateways cannot redeem tickets")
@@ -629,7 +643,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		return fmt.Errorf("gateway init: %w", err)
 	}
 	b.gw = gw
-	b.sessionHandler = b.readyz(api.RequestID(gw))
+	b.sessionHandler = api.RequestID(b.controlHostHealth(gw))
 	b.closers = append(b.closers, gw.Close)
 	return nil
 }
@@ -745,8 +759,19 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	for _, q := range declaredQuotas {
 		managedQuotas[q.TenantID] = true
 	}
+	// -tenant-quota-ceilings bounds tenant-admin quota writes; a tenant
+	// without a declared ceiling cannot have its quota set through the API.
+	declaredCeilings, err := provisioning.ParseTenantQuotas(cfg.TenantQuotaCeilings)
+	if err != nil {
+		return fmt.Errorf("-tenant-quota-ceilings: %w", err)
+	}
+	quotaCeilings := make(map[string]provisioning.ResourceVector, len(declaredCeilings))
+	for _, q := range declaredCeilings {
+		quotaCeilings[q.TenantID] = q.Limits
+	}
 	adminQuotaHandler := api.NewAdminQuotaHandler(api.NewAdminQuotaSource(db), tenants, managedQuotas).
-		WithAuditSink(appAudit)
+		WithAuditSink(appAudit).
+		WithQuotaCeilings(quotaCeilings)
 	adminUserLimitsHandler := api.NewAdminUserLimitsHandler(api.NewAdminUserLimitSource(db), directory, tenants).
 		WithAuditSink(appAudit)
 	// The tenant session-policy ceiling (ADR 0009 §4): API-managed rows
@@ -806,6 +831,11 @@ func (b *Backend) newAppHandler(ctx context.Context, cfg Config, db *store.DB,
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
+	// TM-06: the app listener bounds session-store reads for cookie values
+	// that turn out unknown, per client and per replica, with the session
+	// listener's budget (-session-lookup-rate, burst SessionLookupBurst).
+	authn.WithSessionLookupLimiter(
+		ratelimit.New(cfg.SessionLookupRate, gateway.SessionLookupBurst, rateLimitMaxKeys, nil), trusted)
 	loginLimiter, callbackCeiling := sharedLoginLimiters(cfg, db, b.log, b.rateLimitErrHook(), b.rateLimitDegradedHook())
 	loginLimit := api.RateLimit(loginLimiter, trusted, b.metrics)
 	sessionLimit := api.RateLimitWithKey(loginLimiter, trusted, b.metrics, authn.SessionRateLimitKey())
@@ -909,10 +939,12 @@ func appMux(authn *api.Authenticator, h appRoutes,
 // ID, audit, the trusted-origin CSRF gate and the readiness endpoint. E8
 // wraps the mux innermost with the app-listener HTTP metrics (the
 // middleware passes through when the metrics listener is off).
+// APIBrowserHeaders is outermost, so every app-listener answer (readiness
+// included) carries the browser policy (TM-01).
 func (b *Backend) wrapApp(authn *api.Authenticator, mux http.Handler, portalOrigins []string) http.Handler {
-	return b.readyz(api.RequestID(api.Audit(b.log)(
+	return api.APIBrowserHeaders(b.readyz(api.RequestID(api.Audit(b.log)(
 		api.RequireTrustedOrigin(authn.SessionCookieName(), portalOrigins)(
-			api.InstrumentHTTP(b.metrics, "app")(mux)))))
+			api.InstrumentHTTP(b.metrics, "app")(mux))))))
 }
 
 // bind opens every enabled listener and records the servers.
@@ -957,11 +989,11 @@ func (b *Backend) bind(cfg Config) error {
 		return err
 	}
 	internalSrv := internalServer(cfg.InternalListen, b.internalHandler)
-	if bl := b.internalBlocklist; bl != nil {
-		// ADR 0008: the live-conn registry tracks only conns the server
-		// still holds — drop each on close/hijack so it cannot leak.
-		internalSrv.ConnState = connStateDrop(bl)
-	}
+	// Live-conn registries (TM-38, ADR 0008) track only conns the server
+	// still holds — drop each on close/hijack so neither can leak.
+	internalSrv.ConnState = internalConnState(b.internalConns, b.internalBlocklist)
+	// TM-40: refused handshakes are counted and logged structurally.
+	internalSrv.ErrorLog = internalErrorLog(b.log, b.metrics)
 	if err := add("internal", cfg.InternalListen, internalSrv, b.internalTLSCfg); err != nil {
 		return err
 	}
@@ -1125,6 +1157,7 @@ func catalogEntry(e provisioning.TemplateCatalogEntry) api.TemplateEntry {
 		Experience:             e.Experience,
 		CPUMillis:              e.CPUMillis,
 		MemoryMiB:              e.MemoryBytes >> 20,
+		MemoryBytes:            e.MemoryBytes,
 		StorageGiB:             e.DiskBytes >> 30,
 		StorageBytes:           e.DiskBytes,
 		IdleTimeoutSeconds:     int64(e.IdleTimeout / time.Second),

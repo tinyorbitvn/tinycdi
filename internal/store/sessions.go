@@ -141,9 +141,11 @@ const sessionColumns = `issuer, subject, tenant_id, groups,
 const currentEpochSQL = `(SELECT value FROM platform_meta WHERE key = 'session_epoch')`
 
 // Get returns the session and slides last_seen_at. Unknown, expired, or
-// stale-epoch sessions are deleted and reported as ErrSessionNotFound:
-// the epoch comparison is what makes a restored database dump unable to
-// resurrect a session revoked after the backup (F5). Expiry is evaluated
+// stale-epoch sessions are reported as ErrSessionNotFound and left in
+// place for the leader's sweep (PruneDeadSessions), so a read never writes
+// for a cookie it cannot resolve: the epoch comparison is what makes a
+// restored database dump unable to resurrect a session revoked after the
+// backup (F5). Expiry is evaluated
 // server-side against the PRE-update last_seen_at; an interval string
 // keeps the comparison unambiguously typed.
 func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
@@ -164,13 +166,12 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 			  AND epoch = `+currentEpochSQL+`
 			  AND (expires_at IS NULL OR expires_at > now())`+sessionReturning, key)
 	}
-	return s.scanSession(ctx, row, key, id)
+	return s.scanSession(row, id)
 }
 
-// scanSession materializes the sessionReturning/sessionColumns projection.
-// A no-row read drops dead sessions opportunistically — including ones a
-// rotated epoch orphaned — and reports ErrSessionNotFound.
-func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id string) (*Session, error) {
+// scanSession materializes the sessionReturning/sessionColumns projection;
+// no row is ErrSessionNotFound.
+func (s *SessionStore) scanSession(row pgx.Row, id string) (*Session, error) {
 	var sess Session
 	var groups []byte
 	var expires *time.Time
@@ -179,19 +180,6 @@ func (s *SessionStore) scanSession(ctx context.Context, row pgx.Row, key, id str
 		&sess.DisplayName, &sess.Email,
 		&sess.CreatedAt, &sess.LastSeenAt, &expires, &idToken)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if s.idle > 0 {
-			_, _ = s.db.Pool().Exec(ctx, `
-				DELETE FROM sessions WHERE id = $1
-				  AND (epoch <> `+currentEpochSQL+`
-				    OR (expires_at IS NOT NULL AND expires_at <= now())
-				    OR last_seen_at <= now() - $2::interval)`,
-				key, fmt.Sprintf("%dms", s.idle.Milliseconds()))
-		} else {
-			_, _ = s.db.Pool().Exec(ctx, `
-				DELETE FROM sessions WHERE id = $1
-				  AND (epoch <> `+currentEpochSQL+`
-				    OR (expires_at IS NOT NULL AND expires_at <= now()))`, key)
-		}
 		return nil, ErrSessionNotFound
 	}
 	if err != nil {
@@ -236,7 +224,7 @@ func (s *SessionStore) Peek(ctx context.Context, id string) (*Session, error) {
 			  AND epoch = `+currentEpochSQL+`
 			  AND (expires_at IS NULL OR expires_at > now())`, key)
 	}
-	return s.scanSession(ctx, row, key, id)
+	return s.scanSession(row, id)
 }
 
 // TouchSessionDigestSQL and TouchSessionDigestIdleSQL are the statements

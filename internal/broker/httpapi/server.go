@@ -86,9 +86,15 @@ type Config struct {
 	// allowed on /workspaces/* routes (revoke/drain). Empty defaults to
 	// DefaultOperatorCN.
 	OperatorCN string
+	// GatewayCNs are the client-certificate CNs that hold the gateway role
+	// on the lease and transfer routes. The role is opt-in: a verified CN
+	// that is neither OperatorCN nor listed here is refused 403
+	// (role_mismatch) before any route runs. Empty means no gateway
+	// identity exists — the chart's session gateway runs in process.
+	GatewayCNs []string
 	// Logger receives request logs; nil means silent.
 	Logger *slog.Logger
-	// Metrics counts identify-layer rejections on this listener
+	// Metrics counts identify-layer and role rejections on this listener
 	// (tinycdi_internal_auth_failures_total{reason}); nil disables.
 	Metrics *observability.Metrics
 	// AuthLogLimit bounds the rejection warn line per reason class; nil
@@ -112,7 +118,10 @@ func NewHandler(cfg Config) http.Handler {
 	if cfg.AuthLogLimit == nil {
 		cfg.AuthLogLimit = ratelimit.New(authFailLogPerMinute, authFailLogBurst, 8, nil)
 	}
-	s := &server{cfg: cfg}
+	s := &server{cfg: cfg, gatewayCNs: make(map[string]struct{}, len(cfg.GatewayCNs))}
+	for _, cn := range cfg.GatewayCNs {
+		s.gatewayCNs[cn] = struct{}{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /internal/v1/broker/redeem", s.redeem)
 	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/renew", s.renew)
@@ -126,7 +135,10 @@ func NewHandler(cfg Config) http.Handler {
 	return api.RequestID(s.identify(s.logRequests(mux)))
 }
 
-type server struct{ cfg Config }
+type server struct {
+	cfg        Config
+	gatewayCNs map[string]struct{}
+}
 
 // identify-layer refusal classes — the bounded `reason` label values of
 // tinycdi_internal_auth_failures_total and the rate-limit keys of the
@@ -135,6 +147,7 @@ const (
 	authFailNoCert = "no_cert"
 	authFailNoCN   = "no_cn"
 	authFailSpiffe = "spiffe_mismatch"
+	authFailRole   = "role_mismatch"
 )
 
 const (
@@ -145,6 +158,8 @@ const (
 )
 
 // identify maps the verified peer certificate onto broker.GatewayIdentity.
+// Roles are opt-in: the CN must be the operator CN or one of GatewayCNs;
+// any other CN is refused 403 role_mismatch.
 func (s *server) identify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -167,14 +182,19 @@ func (s *server) identify(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if _, gateway := s.gatewayCNs[id]; !gateway && id != s.cfg.OperatorCN {
+			s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden,
+				"client certificate CN holds no role on this listener", authFailRole)
+			return
+		}
 		gw := broker.GatewayIdentity{ID: id, Audience: s.cfg.Audience}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyGateway, gw)))
 	})
 }
 
-// rejectAuth answers an identify-layer refusal. The request never reaches
-// logRequests (identify wraps it), so the refusal is recorded here instead:
-// counted unconditionally on tinycdi_internal_auth_failures_total{reason}
+// rejectAuth answers an identify-layer or role refusal. Identify refusals
+// never reach logRequests (identify wraps it), so every refusal is recorded
+// here: counted unconditionally on tinycdi_internal_auth_failures_total{reason}
 // and logged as a warn line rate-limited per reason class. The log carries
 // the peer, the reason class and the REDACTED path — the raw path embeds
 // the lease id, bearer material on this listener (SEC-41). Certificate,
@@ -434,7 +454,7 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 // session state.
 func (s *server) requireGateway(w http.ResponseWriter, r *http.Request) bool {
 	if gatewayFrom(r.Context()).ID == s.cfg.OperatorCN {
-		writeErr(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity is not a gateway")
+		s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity is not a gateway", authFailRole)
 		return false
 	}
 	return true
@@ -444,7 +464,7 @@ func (s *server) requireGateway(w http.ResponseWriter, r *http.Request) bool {
 // workspace-scoped routes (revoke/drain) — a gateway cert gets 403.
 func (s *server) requireOperator(w http.ResponseWriter, r *http.Request) bool {
 	if gatewayFrom(r.Context()).ID != s.cfg.OperatorCN {
-		writeErr(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity required")
+		s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity required", authFailRole)
 		return false
 	}
 	return true

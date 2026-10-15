@@ -119,7 +119,23 @@ done
 # DLP logging off in the system file too (verbose logs keypresses/clipboard).
 grep -q 'level: off' < <(sed -n '/^data_loss_prevention:/,$p' "$SYS_YAML") ||
   bad "system kasmvnc.yaml dropped data_loss_prevention.logging.level: off"
-ok "hardening pins (client override off, system floor closed, DLP logging off)"
+# R1-06: without allow_override_standard_vnc_server_settings: true the
+# KasmVNC launcher passes NO -AllowOverride, so Xvnc's compiled default
+# (desktop,AcceptPointerEvents,SendCutText,AcceptCutText,SendPrimary,
+# SetPrimary) lets any X client re-enable the clipboard with
+# `vncconfig -set SendCutText=1`. Both configs must turn the override
+# list on and leave it empty, so the launcher renders -AllowOverride "".
+for f in "$SYS_YAML" "$ADAPTER_EP"; do
+  rc_block="$(awk '/^runtime_configuration:/{on=1; print; next} on && /^[^ ]/{exit} on && /^[[:space:]]*#/{next} on{print}' "$f")"
+  grep -qx '  allow_override_standard_vnc_server_settings: true' <<<"$rc_block" ||
+    bad "$(basename "$(dirname "$f")")/$(basename "$f"): runtime_configuration must set allow_override_standard_vnc_server_settings: true (else Xvnc keeps its default AllowOverride list)"
+  grep -qx '  allow_override_list: \[\]' <<<"$rc_block" ||
+    bad "$(basename "$(dirname "$f")")/$(basename "$f"): runtime_configuration must set allow_override_list: [] (no runtime-overridable VNC parameter)"
+  if grep -qiE 'clipboard|cut_text|primary' <<<"$rc_block"; then
+    bad "$(basename "$(dirname "$f")")/$(basename "$f"): runtime_configuration names a clipboard key"
+  fi
+done
+ok "hardening pins (client override off, override list empty, system floor closed, DLP logging off)"
 
 echo
 if [ "$fails" = 0 ]; then echo "clipboard-policy.test.sh: PASS"; else echo "clipboard-policy.test.sh: FAIL"; fi

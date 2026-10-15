@@ -23,6 +23,16 @@ case "$args" in
     [ -n "${STUB_K8S_DOWN:-}" ] && { echo "Unable to connect to the server" >&2; exit 1; }
     [ -n "${STUB_K8S_FORBIDDEN:-}" ] && forbidden version
     echo "{\"major\":\"1\",\"gitVersion\":\"${STUB_K8S_VERSION:-v1.31.2+rke2r1}\"}" ;;
+  *"get --raw /api/v1/nodes/"*"/proxy/configz"*)
+    [ -n "${STUB_CONFIGZ_FORBIDDEN:-}" ] && forbidden nodes/proxy
+    n="${args#*/api/v1/nodes/}"; n="${n%%/*}"
+    lim="$(printf '%s' "${STUB_PIDS:-}" | tr ';' '\n' | sed -n "s|^$n=||p" | head -n1)"
+    lim="${lim:-${STUB_PIDS_DEFAULT:-4096}}"
+    if [ "$lim" = absent ]; then
+      echo '{"kubeletconfig":{"maxPods":110}}'
+    else
+      echo "{\"kubeletconfig\":{\"maxPods\":110,\"podPidsLimit\":$lim}}"
+    fi ;;
   *"auth can-i create namespaces"*)
     echo "${STUB_CANI_NS:-yes}"; [ "${STUB_CANI_NS:-yes}" = yes ] || exit 1 ;;
   *"create -f -"*)
@@ -176,10 +186,10 @@ run -- --node-label foo;  expect_rc "--node-label without = exits 2" 2
 echo "== all green"
 run -- "${ALL[@]}" --host-users-false
 expect_rc "all green exits 0" 0
-for c in k8s-version netpol storageclass host-users node-pool apparmor dns tls-secret oidc postgres; do
+for c in k8s-version netpol storageclass host-users node-pool apparmor pids dns tls-secret oidc postgres; do
   expect "all green: $c" PASS "$c"
 done
-expect_out "summary line" '^preflight: 10 PASS, 0 WARN, 0 FAIL$'
+expect_out "summary line" '^preflight: 11 PASS, 0 WARN, 0 FAIL$'
 expect_log "probe namespace deleted" 'delete namespace tcdi-preflight-[0-9a-f]{6}'
 expect_log "userns probe pinned to the workspace pool" 'userns-pod-on-pool'
 # Only probe objects are created or deleted; nothing is applied/patched/labeled.
@@ -324,6 +334,40 @@ expect_out "the undetermined node is named" 'not determined: n2'
 run STUB_AA_MAP="$D/aamap" STUB_AA_STATE='n1=failed' STUB_EVENTS='probe-aa-0|FailedCreate|Cannot enforce AppArmor: AppArmor is not enabled on the host;' -- "${ALL[@]}"
 expect "a refusal visible only in events still warns" WARN apparmor
 expect_out "the events-only refusal names its node" 'no AppArmor: n1'
+
+echo "== 5c. process bound (kubelet podPidsLimit)"
+run -- "${ALL[@]}"
+expect "every workspace node bounded passes" PASS pids
+expect_out "the lowest bound is shown" 'podPidsLimit set on 2 workspace node\(s\) \(lowest 4096\)'
+expect_log "configz read through the node proxy" 'get --raw /api/v1/nodes/n1/proxy/configz'
+expect_log "second pool node read" 'get --raw /api/v1/nodes/n2/proxy/configz'
+run STUB_PIDS='n2=-1' -- "${ALL[@]}"
+expect "a node with podPidsLimit -1 warns" WARN pids
+expect_out "the unbounded node is named" 'unset or -1 on: n2'
+expect_rc "an unbounded node is a WARN, not a FAIL" 0
+expect_fix "fix lines"
+run STUB_PIDS='n1=absent' -- "${ALL[@]}"
+expect "a node without the key warns" WARN pids
+expect_out "the node without the key is named" 'unset or -1 on: n1'
+run STUB_PIDS='n1=0' -- "${ALL[@]}"
+expect "podPidsLimit 0 is not a bound" WARN pids
+run STUB_PIDS_DEFAULT=8192 STUB_PIDS='n1=2048' -- "${ALL[@]}"
+expect "mixed positive bounds pass" PASS pids
+expect_out "the lowest of mixed bounds is shown" '\(lowest 2048\)'
+run STUB_CONFIGZ_FORBIDDEN=1 -- "${ALL[@]}"
+expect "configz forbidden warns" WARN pids
+expect_out "the missing permission is named" 'nodes/proxy'
+run STUB_NODES_FORBIDDEN=1 -- "${ALL[@]}"
+expect "node list forbidden warns" WARN pids
+run STUB_AA_NODES_LABELED= -- "${ALL[@]}"
+expect "no workspace node warns" WARN pids
+expect_no_log "no configz read without a node" 'proxy/configz'
+run STUB_PIDS='w2=-1' STUB_AA_NODES_ALL='w1|linux||\nw2|linux||\nw3|windows||\n' -- "${ALL[@]}" --allow-shared-nodes
+expect "shared nodes: every Linux node is checked" WARN pids
+expect_out "the shared unbounded node is named" 'unset or -1 on: w2'
+expect_no_log "a non-Linux node is skipped" 'nodes/w3/proxy'
+run -- "${ALL[@]}" --no-probe
+expect "--no-probe still reads configz (read-only)" PASS pids
 
 echo "== 6. wildcard DNS"
 run -- "${ALL[@]}";                                     expect "resolves passes" PASS dns

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -241,7 +242,7 @@ func newCoverageEnv(t *testing.T, sink *captureSink) *coverageFixtures {
 	MountConnectionStatusRoutes(mux, a, NewConnectionStatusHandler(&fakeStater{}, &fakeWorkspaceGet{}, tenants))
 	MountDataRoutes(mux, a, NewDataHandler(fs, cat, tenants).WithAuditSink(sink))
 	MountQuotaRoutes(mux, a, NewQuotaHandler(&fakeQuotaSource{}, tenants))
-	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithAuditSink(sink))
+	MountAdminQuotaRoutes(mux, a, NewAdminQuotaHandler(&fakeAdminQuotaSource{}, tenants, nil).WithQuotaCeilings(testQuotaCeilings).WithAuditSink(sink))
 	MountAdminUserLimitRoutes(mux, a, NewAdminUserLimitsHandler(newFakeUserLimitSource(), newFakeDirectory(), tenants).WithAuditSink(sink))
 	MountAdminSessionPolicyRoutes(mux, a, NewAdminSessionPolicyHandler(&fakeSessionPolicySource{}, tenants).WithAuditSink(sink).WithApply(&fakeApplyBackend{restarted: map[string]int64{}, live: map[string]bool{}}, fakeRunningPolicies{}, nil))
 	MountAdminSessionRoutes(mux, a, NewAdminSessionsHandler(
@@ -848,5 +849,38 @@ func TestAudit_HandlerPanicStillEmits(t *testing.T) {
 	}
 	if e.TargetUID != "ws_9" || e.Actor != "anonymous" {
 		t.Fatalf("panic event fields wrong: %+v", e)
+	}
+}
+
+// TestAudit_RequestLogNeverContainsRawOwnerRef (R1-16): the per-request
+// http_request record and http.request event name the matched route
+// template, so an owner-addressed admin route never logs the target's raw
+// issuer|sub.
+func TestAudit_RequestLogNeverContainsRawOwnerRef(t *testing.T) {
+	const subject = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+	ownerRef := "https://kc.example/realms/r|" + subject
+	logBuf := &bytes.Buffer{}
+	sink := &captureSink{}
+	mux := http.NewServeMux()
+	mux.Handle(routeAdminUserGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	h := RequestID(AuditWithSink(slog.New(slog.NewJSONHandler(logBuf, nil)), sink)(mux))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/v1/admin/tenants/tenant-a/users/"+url.PathEscape(ownerRef), nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want the handler's 404 (route matched)", rec.Code)
+	}
+	out := logBuf.String() + sink.raw()
+	if strings.Contains(out, subject) {
+		t.Fatalf("request log carries the raw owner subject:\n%s", out)
+	}
+	const route = `"route":"/v1/admin/tenants/{tenant}/users/{ownerRef}"`
+	if !strings.Contains(logBuf.String(), route) {
+		t.Fatalf("http_request record lacks %s:\n%s", route, logBuf.String())
+	}
+	if ev := sink.get(); len(ev) != 1 || ev[0].Details["route"] != "/v1/admin/tenants/{tenant}/users/{ownerRef}" {
+		t.Fatalf("http.request event details = %+v, want the route template", ev)
 	}
 }

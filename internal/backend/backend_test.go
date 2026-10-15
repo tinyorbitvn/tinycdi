@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -47,6 +48,22 @@ import (
 )
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// testControlToken is a control bearer of the minimum accepted length
+// (minControlTokenBytes).
+const testControlToken = "0123456789abcdef0123456789abcdef"
+
+// controlHostGet GETs path on the session listener at base with the
+// control Host the drain tests configure (-session-control-hosts
+// session.test): health answers on control hosts only.
+func controlHostGet(c *http.Client, base, path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = "session.test"
+	return c.Do(req)
+}
 
 // countingHandler records how many requests reach it — used to prove a
 // listener never delegates to another listener's mux.
@@ -243,7 +260,8 @@ func (f *fakeBrokerClient) revokeCount() int {
 // ---------------------------------------------------------------------------
 
 // testSessionHandler builds the production session-listener handler on a
-// fake broker — the same readyz+RequestID+Gateway stack wire() builds.
+// fake broker — the same RequestID+controlHostHealth+Gateway stack wire()
+// builds.
 func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.Handler) {
 	t.Helper()
 	b := &Backend{log: testLog()}
@@ -578,9 +596,10 @@ func TestRouteIsolation_InternalListener(t *testing.T) {
 	ca := newTestCA(t)
 	fake := &fakeInternalBroker{redeemErr: broker.ErrTicketInvalid}
 	h := httpapi.NewHandler(httpapi.Config{
-		Broker:   fake,
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     fake,
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-test"},
+		Logger:     testLog(),
 	})
 	srv := serveInternal(t, h, ca.pem)
 
@@ -675,9 +694,10 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 	fb := newFakeBrokerClient(t)
 	fb.scriptTicket("tk-1", "ws_aaaa0001")
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 
@@ -692,7 +712,7 @@ func TestRun_DrainsOnShutdown(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
 		// The drain window is held for its full length now — keep this
@@ -835,9 +855,10 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// the same one would fence the first stream.
 	fb.scriptTicket("tk-2", "ws_bbbb0002")
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 
@@ -852,7 +873,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-renew-interval", "25ms",
 		"-revoke-deadline", "2s",
 		"-drain-window", window.String(),
@@ -955,7 +976,7 @@ func TestRun_DrainPropagationWait(t *testing.T) {
 	// Readiness fails at once even though streams still flow — the drop
 	// must land inside the wait, well before the drain begins.
 	waitFor(t, propDelay, "readiness to drop inside the propagation wait", func() bool {
-		resp, err := insecure.Get(base + "/readyz")
+		resp, err := controlHostGet(insecure, base, "/readyz")
 		if err != nil {
 			return false
 		}
@@ -1018,9 +1039,10 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 
 	fb := newFakeBrokerClient(t)
 	internalH := httpapi.NewHandler(httpapi.Config{
-		Broker:   internalAdapter{fb},
-		Audience: "session.test",
-		Logger:   testLog(),
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
 	})
 	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
 
@@ -1035,7 +1057,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 		"-session-tls-key", sessionKey,
 		"-session-control-hosts", "session.test",
 		"-session-domain", "session.test",
-		"-control-token-file", writeFile(t, dir, "control.token", []byte("tok")),
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
 		"-drain-window", window.String(),
 		// Keep the test about the window hold; the propagation wait has
 		// its own test.
@@ -1064,7 +1086,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 	}}
 
 	waitFor(t, 5*time.Second, "session listener serving", func() bool {
-		resp, err := insecure.Get(base + "/healthz")
+		resp, err := controlHostGet(insecure, base, "/healthz")
 		if err != nil {
 			return false
 		}
@@ -1078,7 +1100,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 	// Readiness fails at once, but the socket keeps answering for the
 	// whole window — nothing is refused inside it.
 	waitFor(t, window/2, "readiness to drop inside the window", func() bool {
-		resp, err := insecure.Get(base + "/readyz")
+		resp, err := controlHostGet(insecure, base, "/readyz")
 		if err != nil {
 			return false
 		}
@@ -1090,7 +1112,7 @@ func TestRun_HoldsDrainWindow(t *testing.T) {
 		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
 	case <-time.After(window - 100*time.Millisecond):
 	}
-	resp, err := insecure.Get(base + "/readyz")
+	resp, err := controlHostGet(insecure, base, "/readyz")
 	if err != nil {
 		t.Fatalf("session listener refused a connection inside the drain window: %v", err)
 	}
@@ -1286,4 +1308,81 @@ func (a internalAdapter) ClaimTransfer(ctx context.Context, gw broker.GatewayIde
 }
 func (a internalAdapter) CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
 	return a.fb.CompleteTransfer(ctx, gw, leaseID, transferID, bytesDone, ok)
+}
+
+// TestAppListener_UnknownCookieSprayRefused (R1-03, wired stack): the
+// production app handler carries the default unknown-cookie bound (burst
+// 120): a forged-cookie spray from one client gets 401 until the budget is
+// spent, then 429 with Retry-After, never an unbounded run of store reads.
+func TestAppListener_UnknownCookieSprayRefused(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	// The limiter refills on the real clock (5 tokens/s at the default
+	// 300/min), so a slow run may see a few extra non-429 answers; allow
+	// refill-sized slack, never an unbounded run.
+	first429, late := -1, 0
+	for i := 0; i < 200; i++ {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/me", nil)
+		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET /v1/me #%d: %v", i, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Fatalf("#%d: 429 without Retry-After", i)
+			}
+			if first429 < 0 {
+				first429 = i
+			}
+		} else if first429 >= 0 {
+			late++
+		}
+	}
+	if first429 < api.SessionLookupBurst || first429 > api.SessionLookupBurst+5 {
+		t.Fatalf("first 429 at request %d, want ~%d (the default burst)", first429, api.SessionLookupBurst)
+	}
+	if late > 5 {
+		t.Fatalf("%d non-429 answers after the budget was spent, want only refill-sized slack", late)
+	}
+}
+
+// TestWrapApp_PortalBrowserHeaders (R1-10): every app-listener response
+// on the portal host — an authenticated route's 401, the anonymous probe's
+// 200, and the mux's own 404 — carries nosniff, a CSP that denies framing,
+// XFO DENY and no-store.
+func TestWrapApp_PortalBrowserHeaders(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/v1/me", http.StatusUnauthorized},
+		{"/v1/workspaces", http.StatusUnauthorized},
+		{"/v1/session", http.StatusOK},
+		{"/v1/no-such-route", http.StatusNotFound},
+	} {
+		resp, err := http.Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("GET %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+		h := resp.Header
+		if h.Get("X-Content-Type-Options") != "nosniff" ||
+			!strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
+			h.Get("X-Frame-Options") != "DENY" ||
+			h.Get("Cache-Control") != "no-store" ||
+			h.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("GET %s: headers nosniff=%q csp=%q xfo=%q cache=%q referrer=%q",
+				tc.path, h.Get("X-Content-Type-Options"), h.Get("Content-Security-Policy"),
+				h.Get("X-Frame-Options"), h.Get("Cache-Control"), h.Get("Referrer-Policy"))
+		}
+	}
 }

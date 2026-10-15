@@ -286,3 +286,66 @@ func TestParseTrustedProxies(t *testing.T) {
 		t.Fatal("bad CIDR accepted")
 	}
 }
+
+// TestLimiter_RefundReturnsOneToken: Refund gives back exactly one token,
+// never above burst, and is a no-op for a key the limiter has not seen.
+func TestLimiter_RefundReturnsOneToken(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := New(60, 2, 100, func() time.Time { return now }) // frozen clock, burst 2
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("token %d refused", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("third token allowed with a frozen clock")
+	}
+	l.Refund("k")
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("refunded token not available")
+	}
+	l.Refund("k")
+	l.Refund("k")
+	l.Refund("k") // capped at burst 2
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("token %d after refunds refused", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("refunds exceeded burst")
+	}
+	l.Refund("never-seen") // must not create a bucket or panic
+	var nilL *Limiter
+	nilL.Refund("k")
+}
+
+// TestLimiter_PeekDoesNotSpend: Peek answers what Allow would, without
+// spending a token or tracking an unseen key.
+func TestLimiter_PeekDoesNotSpend(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := New(60, 2, 10, func() time.Time { return now })
+	if ok, _ := l.Peek("k"); !ok {
+		t.Fatal("Peek on an unseen key refused")
+	}
+	if len(l.buckets) != 0 {
+		t.Fatalf("Peek created %d buckets, want 0", len(l.buckets))
+	}
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("Allow %d refused inside the burst", i)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if ok, retry := l.Peek("k"); ok || retry <= 0 {
+			t.Fatalf("Peek after the burst = %v, %v; want refused with a retry", ok, retry)
+		}
+	}
+	now = now.Add(time.Second)
+	if ok, _ := l.Peek("k"); !ok {
+		t.Fatal("Peek after one refill refused")
+	}
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("Peek spent the refilled token")
+	}
+}

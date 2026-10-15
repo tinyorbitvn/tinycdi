@@ -235,3 +235,25 @@ func TestTenantQuotaStartup_AuditsFailedPasses(t *testing.T) {
 		t.Fatalf("success-apply event wrong: %+v", e)
 	}
 }
+
+// TestParseFlags_TenantQuotaCeilings (R1-02): -tenant-quota-ceilings /
+// TCDI_TENANT_QUOTA_CEILINGS parse like -tenant-quotas; a malformed value,
+// or a tenant listed in both flags, fails startup naming the flag.
+func TestParseFlags_TenantQuotaCeilings(t *testing.T) {
+	c, err := ParseFlags(append(mergedArgs(), "-tenant-quota-ceilings", goodTenantQuotas), noEnv)
+	if err != nil || c.TenantQuotaCeilings != goodTenantQuotas {
+		t.Fatalf("flag: TenantQuotaCeilings=%q err=%v", c.TenantQuotaCeilings, err)
+	}
+	c, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_TENANT_QUOTA_CEILINGS": goodTenantQuotas}))
+	if err != nil || c.TenantQuotaCeilings != goodTenantQuotas {
+		t.Fatalf("env: TenantQuotaCeilings=%q err=%v", c.TenantQuotaCeilings, err)
+	}
+	_, err = ParseFlags(append(mergedArgs(), "-tenant-quota-ceilings", `[{"tenant":"tenant-a","runningWorkspaces":1}]`), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "-tenant-quota-ceilings") {
+		t.Fatalf("malformed: err=%v, want an error naming -tenant-quota-ceilings", err)
+	}
+	_, err = ParseFlags(append(mergedArgs(), "-tenant-quotas", goodTenantQuotas, "-tenant-quota-ceilings", goodTenantQuotas), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "-tenant-quota-ceilings") || !strings.Contains(err.Error(), "tenant-a") {
+		t.Fatalf("tenant in both flags: err=%v, want an error naming the flag and tenant-a", err)
+	}
+}

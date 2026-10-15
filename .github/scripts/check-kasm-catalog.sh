@@ -3,7 +3,8 @@
 # policy (docs/kasm-images.md, KASM-2/KASM-5, E13). Fast, network-free;
 # runs in PR CI. The heavyweight half — pulling each entry, extracting
 # the engine version and running the trivy gate — lives in
-# scan-kasm-catalog.sh and runs on the kasm-contract schedule job.
+# scan-kasm-catalog.sh and runs in the ci.yml kasm-contract job and the
+# release.yml kasm-catalog job.
 #
 # Enforces:
 #   1. Every kasmweb/* image ref in tracked files is digest-pinned

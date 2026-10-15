@@ -162,6 +162,9 @@ env:
   HELM_TGZ_SHA256: "02ce9722d541238f81459938b84cf47df2fdf1187493b4bfb2346754d82a4700"
   COSIGN_VERSION: "v3.1.3"
   COSIGN_BIN_SHA256: "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+  # R1-09: the publish job refuses a scan leg that finished longer ago
+  # than this (check-scan-age.sh) — approve within a day, or re-tag.
+  SCAN_MAX_AGE_HOURS: "24"
 
 jobs:
   prepare:
@@ -382,6 +385,9 @@ jobs:
 
       - name: compute tags + OCI labels
         run: |
+          # R1-09: one recorded build second — the image label and the
+          # <image>.built-at file the chart and publish jobs read.
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           REF="$IMAGE_NS/tinycdi-linux-base"
           # PUB-2: this image redistributes KasmVNC (GPL-2.0) + noVNC
           # (MPL-2.0) — the licenses label is the SPDX expression for the
@@ -394,6 +400,7 @@ jobs:
           SRC_OFFER="$SRC_OFFER/${VERSION}/kasmvnc-${KASMVNC_VERSION}-corresponding-source.tar.gz"
           {
             echo "IMAGE_REF=$REF"
+            echo "BUILT_AT=$BUILT_AT"
             echo "OCI_LABELS<<__EOF__"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.licenses=MIT AND GPL-2.0-only AND MPL-2.0"
@@ -401,7 +408,7 @@ jobs:
             echo "org.opencontainers.image.description=TinyCDI KasmVNC Linux runtime base (profiles build FROM it)"
             echo "org.opencontainers.image.version=$VERSION"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
-            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "org.opencontainers.image.created=$BUILT_AT"
             echo "io.tinycdi.kasmvnc-source-offer=$SRC_OFFER"
             echo "__EOF__"
           } >> "$GITHUB_ENV"
@@ -441,12 +448,15 @@ jobs:
           else
             echo "$IMAGE_REF@$BUILD_DIGEST" > refs/linux-base.ref
           fi
+          echo "$BUILT_AT" > refs/linux-base.built-at
 
       - name: upload image ref
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: image-ref-linux-base
-          path: refs/linux-base.ref
+          path: |
+            refs/linux-base.ref
+            refs/linux-base.built-at
           retention-days: 5
 
       - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
@@ -566,6 +576,9 @@ jobs:
         env:
           IMG: ${{ matrix.image }}
         run: |
+          # R1-09: one recorded build second — the image label and the
+          # <image>.built-at file the chart and publish jobs read.
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           REF="$IMAGE_NS/tinycdi-$IMG"
           # PUB-2: `linux-desktop` and `browser` redistribute KasmVNC
           # (GPL-2.0), noVNC and Firefox ESR (MPL-2.0) — their licenses
@@ -582,6 +595,7 @@ jobs:
           fi
           {
             echo "IMAGE_REF=$REF"
+            echo "BUILT_AT=$BUILT_AT"
             echo "OCI_LABELS<<__EOF__"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.licenses=$LIC"
@@ -589,7 +603,7 @@ jobs:
             echo "org.opencontainers.image.description=$IMG_DESCRIPTION"
             echo "org.opencontainers.image.version=$VERSION"
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
-            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "org.opencontainers.image.created=$BUILT_AT"
             if [ "$IMG" = "browser" ] || [ "$IMG" = "linux-desktop" ]; then
               echo "io.tinycdi.kasmvnc-source-offer=$SRC_OFFER"
             fi
@@ -668,12 +682,15 @@ jobs:
           else
             echo "$IMAGE_REF@$BUILD_DIGEST" > "refs/$IMG.ref"
           fi
+          echo "$BUILT_AT" > "refs/$IMG.built-at"
 
       - name: upload image ref
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: image-ref-${{ matrix.image }}
-          path: refs/${{ matrix.image }}.ref
+          path: |
+            refs/${{ matrix.image }}.ref
+            refs/${{ matrix.image }}.built-at
           retention-days: 5
 
       - name: install syft ${{ env.SYFT_VERSION }} (sha256-verified)
@@ -906,6 +923,38 @@ jobs:
           sarif_file: trivy-sarif
           category: tinycdi-${{ matrix.image }}
 
+  kasm-catalog:
+    # R1-37 / KASM-2: the chart ships kasmAdapter.browserAllowlist, so the
+    # release re-runs the whole kasm catalog gate: the declared floor
+    # (check-kasm-catalog.sh) and the measured engine floor + trivy gate
+    # (scan-kasm-catalog.sh). In ci.yml the measured half reports but does
+    # not block a merge (network-dependent); here it blocks publish.
+    # SEC-05: read-only, no secrets, pushes nothing.
+    name: kasm catalog scan (trivy gate + engine floor)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install trivy ${{ env.TRIVY_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_TGZ_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C "$PWD/bin" trivy
+          "$PWD/bin/trivy" version
+
+      - name: catalog policy (digest pins + declared floor)
+        run: .github/scripts/check-kasm-catalog.sh
+
+      - name: catalog scan (trivy gate + measured engine floor)
+        run: PATH="$PWD/bin:$PATH" .github/scripts/scan-kasm-catalog.sh
+
   chart:
     name: helm chart (lint, digest-stamp, package)
     needs: [prepare, base, images]
@@ -1101,11 +1150,12 @@ jobs:
     # digests are signed and attested BEFORE any tag is promoted, so a
     # signing failure can never leave unsigned content publicly tagged.
     name: publish (sign, attest, promote tags, release)
-    needs: [prepare, scan, chart, binaries]
+    needs: [prepare, scan, kasm-catalog, chart, binaries]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.outputs.dry_run != 'true'
           && needs.scan.result == 'success'
+          && needs.kasm-catalog.result == 'success'
           && needs.chart.result == 'success'
           && needs.binaries.result == 'success' }}
     environment: release  # SEC-15: required reviewers — .github/README.md
@@ -1179,6 +1229,24 @@ jobs:
                 || contains(fromJSON(needs.prepare.outputs.release_images), 'linux-desktop')
                 || contains(fromJSON(needs.prepare.outputs.release_images), 'browser') }}
         run: .github/scripts/collect-publish-inputs.sh dl "$PWD"
+
+      - name: refuse a stale scan (older than SCAN_MAX_AGE_HOURS)
+        # R1-09: the release approval can come days after the scan, and
+        # "re-run failed jobs" re-enters this job without rescanning. Sign
+        # only digests whose trivy gate finished within the bound.
+        # Completion times come from the jobs API (latest attempt per
+        # job), not from any artifact of this run. Scanners never run in
+        # this job (SEC-05) — the bound replaces a rescan here.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate \
+            "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[]' | jq -s . > jobs.json
+          mapfile -t legs < <(jq -r '.[] | "scan " + .' <<< "$RELEASE_IMAGES")
+          legs+=("kasm catalog scan (trivy gate + engine floor)")
+          .github/scripts/check-scan-age.sh jobs.json "$SCAN_MAX_AGE_HOURS" "${legs[@]}"
 
       - name: login to ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -1297,9 +1365,15 @@ jobs:
 
       - name: push helm chart to OCI + cosign sign
         id: chart
+        # R1-40 / SUPR-13: `helm push` tags X.Y.Z in the same call that
+        # uploads the chart, so the chart is signed right after the push and
+        # push-sign-chart.sh deletes the version this run created if the
+        # push, the digest lookup or the signature fails — an unsigned chart
+        # never stays tagged. Stdout is only the ref= line.
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           printf '%s' "$GHCR_TOKEN" \
             | "$PWD/bin/helm" registry login ghcr.io \
@@ -1309,20 +1383,10 @@ jobs:
           pkgs=(bundle/*.tgz)
           [ "${#pkgs[@]}" -eq 1 ] \
             || { echo "::error::expected exactly one chart tgz, got ${#pkgs[@]}"; exit 1; }
-          "$PWD/bin/helm" push "${pkgs[0]}" "$CHART_OCI"
-          # SUPR-1: helm 4 writes Pushed:/Digest: to stderr, not stdout —
-          # don't parse streams at all; resolve the digest from the
-          # registry by tag instead.
-          CHART_DIGEST="$(docker buildx imagetools inspect \
-            "ghcr.io/tinyorbitvn/charts/${CHART_NAME}:${CHART_VERSION}" \
-            | awk '/^Digest:/ {print $2; exit}')"
-          if [[ ! "$CHART_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::could not resolve pushed chart digest from the registry"
-            exit 1
-          fi
-          # SEC-17: sign the pushed chart manifest by digest (keyless).
-          cosign sign --yes "ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}"
-          echo "ref=ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}" >> "$GITHUB_OUTPUT"
+          RUN_STARTED_AT="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq .run_started_at)"
+          HELM="$PWD/bin/helm" CHART_NAME="$CHART_NAME" RUN_STARTED_AT="$RUN_STARTED_AT" \
+            .github/scripts/push-sign-chart.sh "${pkgs[0]}" >> "$GITHUB_OUTPUT"
 
       - name: promote image tags (:<ver> + :latest)
         # SEC-18: tags are the bare chart version (v1.2.3 -> :1.2.3) so they
@@ -1450,11 +1514,12 @@ jobs:
 
   dryrun-summary:
     name: dry-run summary
-    needs: [prepare, scan, chart, binaries]
+    needs: [prepare, scan, kasm-catalog, chart, binaries]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.outputs.dry_run == 'true'
           && needs.scan.result == 'success'
+          && needs.kasm-catalog.result == 'success'
           && needs.chart.result == 'success'
           && needs.binaries.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -1481,13 +1546,13 @@ jobs:
     # published images' multi-arch children and cosign sha256-* artifacts
     # as unlabelled versions, and sweeping them breaks releases.
     # Dry runs push nothing and are skipped.
-    # Covers every pre-publish leg (prepare, base, images, scan, chart,
-    # binaries). Legs this job does NOT cover: `publish` (its output may
+    # Covers every pre-publish leg (prepare, base, images, scan,
+    # kasm-catalog, chart, binaries). Legs this job does NOT cover: `publish` (its output may
     # already be signed/tagged — an operator decision, not
     # auto-deletion) and cancelled runs (a cancelled job graph runs
     # nothing).
     name: delete this run's digests (failed run)
-    needs: [prepare, base, images, scan, chart, binaries]
+    needs: [prepare, base, images, scan, kasm-catalog, chart, binaries]
     if: failure() && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     permissions:

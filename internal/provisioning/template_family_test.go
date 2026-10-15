@@ -726,3 +726,68 @@ func TestK8sApplierRepointRefusedWhileRunning(t *testing.T) {
 		t.Fatalf("replayed apply changed the CR: %+v", ws.Spec)
 	}
 }
+
+// TestStart_RevisionMoveReservesNewVector (R1-20): a start that re-points
+// the workspace at a larger revision re-reserves that revision's exact
+// vector; a move beyond the tenant's headroom refuses the start and leaves
+// the workspace and its reservation untouched.
+func TestStart_RevisionMoveReservesNewVector(t *testing.T) {
+	ctx := context.Background()
+	newCatalog := func(nextCPU int64) (*fakeTemplateLookup, provisioning.TemplateCatalogEntry) {
+		cat := newFakeTemplateLookup()
+		a := familyEntry("linuxdesk", "aaaa1111", "2026-10-a", "OnStart")
+		a.CPUMillis, a.MemoryBytes = 500, 1<<30
+		cat.put(a)
+		b := familyEntry("linuxdesk", "bbbb2222", "2026-10-b", "OnStart")
+		b.CPUMillis, b.MemoryBytes, b.DiskBytes = nextCPU, 4<<30+4096, 8<<30+512<<20
+		cat.put(b) // newest of the family
+		return cat, b
+	}
+	reservation := func(db *store.DB, ws string) provisioning.ResourceVector {
+		t.Helper()
+		var v provisioning.ResourceVector
+		if err := db.Pool().QueryRow(ctx, `
+			SELECT running_slots, cpu_millis, memory_bytes, disk_bytes
+			FROM quota_reservation WHERE workspace_id = $1`, ws).
+			Scan(&v.RunningSlots, &v.CPUMillis, &v.MemoryBytes, &v.DiskBytes); err != nil {
+			t.Fatalf("reservation: %v", err)
+		}
+		return v
+	}
+
+	t.Run("move re-reserves the exact new vector", func(t *testing.T) {
+		cat, b := newCatalog(2000)
+		db, svc, ws := familyWorkspace(t, cat)
+		res, err := svc.SignalWorkspace(ctx, familyTenant, "iss|sub", "", ws, "fam-r120-01", provisioning.IntentStart, []byte("{}"))
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		if res.Template.ID != b.ID {
+			t.Fatalf("start did not move: template %s, want %s", res.Template.ID, b.ID)
+		}
+		if got, want := reservation(db, ws), b.Vector(); got != want {
+			t.Fatalf("reservation after the move = %+v, want the new revision's exact vector %+v", got, want)
+		}
+	})
+
+	t.Run("move beyond headroom refuses the start", func(t *testing.T) {
+		cat, _ := newCatalog(9000) // familyWorkspace's tenant allows 8000 millicores
+		db, svc, ws := familyWorkspace(t, cat)
+		before := reservation(db, ws)
+		_, err := svc.SignalWorkspace(ctx, familyTenant, "iss|sub", "", ws, "fam-r120-02", provisioning.IntentStart, []byte("{}"))
+		if !provisioning.IsQuotaExceeded(err) {
+			t.Fatalf("start onto a revision beyond headroom = %v, want a quota refusal", err)
+		}
+		if after := reservation(db, ws); after != before {
+			t.Fatalf("refused start moved the reservation %+v -> %+v", before, after)
+		}
+		var tplID, desired string
+		if err := db.Pool().QueryRow(ctx, `SELECT template->>'id', desired_state FROM workspaces WHERE id = $1`, ws).
+			Scan(&tplID, &desired); err != nil {
+			t.Fatal(err)
+		}
+		if tplID != "tpl_linuxdesk-aaaa1111" || desired != "Stopped" {
+			t.Fatalf("refused start left template=%s desired=%s, want the recorded revision and Stopped", tplID, desired)
+		}
+	})
+}

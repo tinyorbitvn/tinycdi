@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"time"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
@@ -80,7 +81,10 @@ type TemplateEntry struct {
 	Experience    string
 	CPUMillis     int64
 	MemoryMiB     int64
-	StorageGiB    int64
+	// MemoryBytes is the untruncated memory size; MemoryMiB is the same
+	// value rounded down for the public view. Reservations use the bytes.
+	MemoryBytes int64
+	StorageGiB  int64
 	// StorageBytes is the untruncated disk size; StorageGiB is the same
 	// value rounded down for the public view.
 	StorageBytes           int64
@@ -415,6 +419,19 @@ func (h *WorkspaceHandler) principalOrFail(w http.ResponseWriter, r *http.Reques
 	return p, true
 }
 
+// workspacePhases is the WorkspacePhase enum (openapi WorkspacePhase,
+// api/v1 validation.go) — the only values the ?phase= filter accepts.
+var workspacePhases = []cdiv1.WorkspacePhase{
+	cdiv1.WorkspacePhasePending, cdiv1.WorkspacePhaseProvisioning, cdiv1.WorkspacePhaseReady,
+	cdiv1.WorkspacePhaseStopping, cdiv1.WorkspacePhaseStopped, cdiv1.WorkspacePhaseFailed,
+	cdiv1.WorkspacePhaseTerminating,
+}
+
+// validWorkspacePhase reports whether s is exactly one WorkspacePhase value.
+func validWorkspacePhase(s string) bool {
+	return slices.Contains(workspacePhases, cdiv1.WorkspacePhase(s))
+}
+
 // List handles GET /v1/workspaces.
 func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principalOrFail(w, r)
@@ -426,12 +443,18 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, r, perr)
 		return
 	}
+	phase := r.URL.Query().Get("phase")
+	if phase != "" && !validWorkspacePhase(phase) {
+		writeError(w, r, CodeInvalidRequest,
+			"phase must be one of Pending, Provisioning, Ready, Stopping, Stopped, Failed, Terminating")
+		return
+	}
 	scope, ok := listScope(w, r, p)
 	if !ok {
 		return
 	}
 	recs, nextKey, nextID, err := h.backend.ListWorkspaces(r.Context(), p.TenantID,
-		scope, r.URL.Query().Get("phase"), toListPage(pg))
+		scope, phase, toListPage(pg))
 	if err != nil {
 		h.writeBackendError(w, r, err)
 		return
@@ -536,8 +559,8 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	vector := provisioning.ResourceVector{
 		RunningSlots: 1,
 		CPUMillis:    tpl.CPUMillis,
-		MemoryBytes:  tpl.MemoryMiB << 20,
-		DiskBytes:    tpl.StorageGiB << 30,
+		MemoryBytes:  tpl.MemoryBytes,
+		DiskBytes:    tpl.StorageBytes,
 	}
 	sum := sha256.Sum256(body)
 	var rec provisioning.WorkspaceRecord

@@ -46,8 +46,10 @@ func (a *Authenticator) SessionProbeHandler(w http.ResponseWriter, r *http.Reque
 	authenticated := false
 	if _, ok := SessionFromContext(r.Context()); ok {
 		authenticated = true
-	} else if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" {
-		_, err := a.sessions.Peek(r.Context(), c.Value)
+	} else if c, err := r.Cookie(a.cfg.SessionCookieName); err == nil && c.Value != "" && !sessionLookedUp(r) {
+		// A spent unknown-cookie budget reads as signed out: the probe
+		// is anonymous and must not cost the store a read (TM-06).
+		_, err := a.lookupSession(r, c.Value, false)
 		authenticated = err == nil
 	}
 	w.Header().Set("Cache-Control", "no-store")

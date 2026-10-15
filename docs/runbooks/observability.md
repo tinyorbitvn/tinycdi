@@ -68,10 +68,10 @@ cardinality cannot leak in.
 | `tinycdi_session_frame_reloads_total` | counter | `dest` | session-frame document loads **re-navigating** a session whose lease already had a stream — the portal connection watch's lease-active reload fallback and user reloads/new-tab loads, same tab only. Two exclusions keep it honest: the KasmVNC client's in-frame websocket retry (`reconnect=true`) is a bare `/websockify` upgrade and never produces a document load, so it is never counted; and a load whose embedded claiming tab id (`path=websockify?tcdi_tab=<id>`) differs from the lease's recorded stream owner is a second tab taking the session over via the shared cookie — a takeover, not a reload — and is skipped (loads with no comparable id — absent/malformed tab id or no recorded owner — still count). `dest=iframe` is the portal's embedded frame, `document` a top-level load, `other` covers clients without fetch metadata. Expected: `0` at steady state; up to 1 per session per backend rollout (a few per session when a rollout's reconnect needs several watch attempts — `RECONNECT_BACKOFF_MS` allows up to 3). Sustained growth with no rollout means in-frame websocket retries are failing and the SPA is reloading the frame |
 | `tinycdi_logins_total` | counter | `outcome` | completed `/v1/auth/callback` attempts |
 | `tinycdi_runtime_image_age_seconds` | gauge | `family` | age of each catalog family's newest published image (refreshed every minute) |
-| `tinycdi_rate_limited_total` | counter | `route` | requests refused by the limiters — a rising series means `429` responses; check `backend.trustedProxies` is set before blaming clients. `route` is a bounded route/family label: the app login family, `/v1/launch`, `session_lookup` (unseen-cookie session-directory lookups — local per-replica bound, `-session-lookup-rate`), and `upstream_streams` (the per-workspace concurrent upstream bound, `-session-stream-cap` — a refusal means `429 too_many_streams` + `Retry-After: 1`, retryable) |
+| `tinycdi_rate_limited_total` | counter | `route` | requests refused by the limiters — a rising series means `429` responses; check `backend.trustedProxies` is set before blaming clients. `route` is a bounded route/family label: the app login family, `/v1/launch`, `session_lookup` (session-store lookups for unknown cookies on either listener — local per-replica bound, `-session-lookup-rate`), and `upstream_streams` (the per-workspace concurrent upstream bound, `-session-stream-cap` — a refusal means `429 too_many_streams` + `Retry-After: 1`, retryable) |
 | `tinycdi_rate_limit_store_errors_total` | counter | `route` | Postgres rate-limit window check failures (ADR 0006) — real store errors only: each check runs under a 500 ms deadline and a failure opens a 10 s circuit-breaker cool-down in which requests skip the store entirely, so a sustained outage shows ~one increment per 10 s per limiter, not one per request; `route` is the limiter family (`login`, `callback_ceiling`, `launch`) |
 | `tinycdi_rate_limit_store_degraded` | gauge | `route` | rate-limit store circuit-breaker state — `1` while open (Postgres checks skipped; each pod's divided local bucket enforces the bound — the limited routes need Postgres to complete anyway) and `0` while closed; `route` is the limiter family (`login`, `callback_ceiling`, `launch`) |
-| `tinycdi_internal_auth_failures_total` | counter | `reason` | mTLS identity rejections on the internal broker listener (`reason` is `no_cert`, `no_cn` or `spiffe_mismatch`) — the complete record of refused attempts; the matching warn line is rate-limited per reason. A rising series means bad or absent client certs are hitting :9443 — check internal cert issuance/rotation or a probing client |
+| `tinycdi_internal_auth_failures_total` | counter | `reason` | mTLS identity rejections on the internal broker listener (`reason` is `no_cert`, `no_cn`, `spiffe_mismatch`, `role_mismatch` — a CN with no role on the route — or `handshake` — a refused TLS handshake, whose warn line names the class: `unknown_ca`, `expired`, `bad_eku`, `revoked` or `other`) — the complete record of refused attempts; the matching warn line is rate-limited per reason. A rising series means bad or absent client certs are hitting :9443 — check internal cert issuance/rotation or a probing client |
 | `tinycdi_retention_rows_pruned_total` | counter | `table` | terminal `connection_lease`/`launch_ticket` rows and expired `audit_event`/`workspace_boot` rows deleted by the leader's retention sweeps (`table` is `connection_lease`, `launch_ticket`, `audit_event` or `workspace_boot`). Flat zero is normal on quiet installs — pair with the last-success gauge before alarming |
 | `tinycdi_retention_last_success_timestamp_seconds` | gauge | — | unix timestamp of the last completed terminal-row retention sweep. Absent until the first pass finishes on this leader; stale > ~2 h means the sweep is not running and the session tables resume growing without bound |
 | `tinycdi_internal_mtls_revoked_serial_total` | counter | `listener` | internal-mTLS handshakes aborted because the verified peer leaf's (issuer, serial) is on the ADR 0008 revocation list — the complete record of refusals; the `internal_mtls_revoked_cert` WARN line (rate-limited) carries peer/serial/issuer. Nonzero means a revoked cert is still being presented — see `runbooks/mtls-cert-revocation.md` |
@@ -186,7 +186,7 @@ Every record carries:
 | `time` | UTC emission timestamp |
 | `actor` | pseudonymous principal ref — `oidc:` + truncated SHA-256 of `issuer\|subject`, stable per user; `"anonymous"` when unauthenticated; `"gateway:<id>"` for gateway-side events; `"config:tenant-quotas"` for the config-driven quota apply |
 | `action` | the domain action (table below) |
-| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; create actions record the id the call just made (`workspace.create` fills the new `ws_*` once known) |
+| `targetUid` | the acted-on id — workspace `ws_*`, retained record `rd_*` or tenant id; create actions record the id the call just made (`workspace.create` fills the new `ws_*` once known); request-controlled values here and in `details` are stored and logged as valid UTF-8 (NUL and invalid bytes become U+FFFD) of at most 256 bytes — a longer value keeps its first 200 bytes followed by `…sha256:` and 16 hex digits of the full value's digest |
 | `tenant` | the verified tenant of the caller |
 | `requestId` | the request's `X-Request-Id` correlation id (`"startup"` for the config apply) |
 | `outcome` | `success`, `failure` or `denied` (401/403) |
@@ -197,7 +197,7 @@ Emitted events:
 
 | `action` | Source | Covers |
 |---|---|---|
-| `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals and `QUOTA_MANAGED_BY_CONFIG` rejections; `details` carry the attempted limits |
+| `admin.quota.get` / `admin.quota.set` | `GET`/`PUT /v1/admin/tenants/{t}/quota` | tenant-admin quota reads/writes — including denied attempts, `If-Match` refusals, `QUOTA_MANAGED_BY_CONFIG` and `QUOTA_ABOVE_CEILING` rejections; `details` carry the attempted limits |
 | `admin.user_limit.get` / `.set` / `.clear` / `.default.get` / `.default.set` / `.default.clear` | `GET`/`PUT`/`DELETE /v1/admin/tenants/{t}/user-limits` and `GET`/`PUT .../default` | tenant-admin per-principal limit reads/writes — including denied attempts (denied pre-decode writes record the `.set` attempt action); `details` carry the pseudonymized `owner` ref and attempted `max_running` |
 | `admin.session_policy.get` / `.set` / `.clear` | `GET`/`PUT /v1/admin/tenants/{t}/session-policy` | session-ceiling reads/writes — an all-`FollowTemplate` body records `.clear` |
 | `admin.session_policy.apply` | `POST /v1/admin/tenants/{t}/session-policy:apply` | apply-now runs, dry runs included — `details` carry `dryRun`, `includeActive`, `affected` and `restarted` |
@@ -214,7 +214,7 @@ Emitted events:
 | `session.touch` | `POST /v1/session:touch` | the portal's activity beat — log stream only, not stored |
 | `connection.create` | `POST /v1/workspaces/{id}/connections` | launch-ticket issue — the ticket itself is never recorded |
 | `session.logout` | `POST /v1/logout` | the sign-out request |
-| `session.revoke` | sign-out + `POST /v1/control/revoke` | revocation of session-bound lease material; bearer-denied control attempts record `denied`/`unauthorized` |
+| `session.revoke` | sign-out + `POST /v1/control/revoke` | revocation of session-bound lease material; bearer-denied control attempts record `denied`/`unauthorized`, and attempts from a client over its failure budget record `denied`/`rate_limited` |
 | `session.list` | `GET /v1/control/session` | the operator's replica-local session listing |
 | `session.host_mismatch` | gateway | a session cookie presented on the wrong workspace host |
 | `session.lookup` | gateway session-listener cookie gate | unseen-cookie lookups refused by the lookup limiter (`denied`/`rate_limited`) |
@@ -224,7 +224,11 @@ Emitted events:
 Requests refused before authentication (no session → `401` from
 `RequireAuth`) emit no dedicated event by design — the wrapper sits inside
 the authenticator, so those refusals are covered by the per-request
-`http_request` log record that every HTTP call produces.
+`http_request` log record that every HTTP call produces. That record, and
+the matching `http.request` event, names the matched route template in
+`route` (for example `/v1/admin/tenants/{tenant}/users/{ownerRef}`, or
+`unmatched`), never the raw path, so path values such as an owner's
+`issuer|sub` stay out of the log.
 
 Redaction is enforced in the sink, not by convention: detail keys matching
 credentials (`token`, `cookie`, `session`, `authorization`, …) are replaced

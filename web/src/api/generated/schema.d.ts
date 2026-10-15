@@ -117,7 +117,11 @@ export interface paths {
          *     discovery document and the deployment configuration — `client_id`
          *     always, `post_logout_redirect_uri` only when the deployment sets
          *     `oidc.postLogoutRedirect` — never from the request (no open redirect).
-         *     The session keeps no ID token, so `id_token_hint` is not sent.
+         *     The session's retained ID token is sent as `id_token_hint` on that
+         *     URL, so the provider can skip its own confirmation page: the raw ID
+         *     token therefore reaches the browser in this response and the provider
+         *     in the navigation URL. A session whose sealed token cannot be opened
+         *     sends `client_id` only.
          *     Otherwise the answer is `204` and the portal stays local.
          *
          *     The server-side session delete is the point of no return: when the
@@ -161,6 +165,8 @@ export interface paths {
          *     `end_session_endpoint` and the deployment has `oidc.endSession` on;
          *     the portal navigates the browser there. The URL is assembled only
          *     from discovery and configuration — never from the request.
+         *     As with logout, the caller's retained ID token is sent on that URL
+         *     as `id_token_hint`.
          *
          *     The revocation is atomic: a store failure rolls the whole
          *     transaction back, so nothing is destroyed, the caller stays signed
@@ -525,7 +531,12 @@ export interface paths {
          * @description Replaces the tenant's quota limits for tenants **not** declared in
          *     `-tenant-quotas`; a declared tenant answers
          *     `409 QUOTA_MANAGED_BY_CONFIG` and must be changed through the
-         *     platform configuration. Limits below current usage are accepted:
+         *     platform configuration. For any other tenant the limits must stay
+         *     within the ceiling the platform operator declared for it
+         *     (`managedNamespaces[].quotaCeiling`, backend flag
+         *     `-tenant-quota-ceilings`); a value above it, or any write for a
+         *     tenant without a declared ceiling, answers
+         *     `409 QUOTA_ABOVE_CEILING`. Limits below current usage are accepted:
          *     held reservations stay, new ones are refused — a lowered limit
          *     therefore takes effect without forcing a release. Requires the
          *     tenant-admin role on the named tenant, the `X-CSRF-Token` header
@@ -706,13 +717,15 @@ export interface paths {
          * Restart running workspaces that are looser than the ceiling
          * @description Applies the tenant's session data-transfer ceiling to running
          *     workspaces whose stamped policy grants more than the ceiling now
-         *     allows (F3). Always dry run first (`{"dryRun": true}` lists the
-         *     affected workspaces and changes nothing); the confirmed call
-         *     restarts each listed workspace through the generation-fenced
-         *     restart — a double-submitted or superseded call never bumps a
-         *     generation twice, and a workspace whose latest intent the
-         *     operator has not reconciled yet is reported `skipped_moved`,
-         *     never restarted again.
+         *     allows (F3). Run a dry run first (`{"dryRun": true}` lists the
+         *     affected workspaces and changes nothing); the portal always does.
+         *     The server does not require one: every call must state `dryRun`,
+         *     and a confirmed call (`{"dryRun": false}`) with a current
+         *     `If-Match` restarts each affected workspace through the
+         *     generation-fenced restart — a double-submitted or superseded call
+         *     never bumps a generation twice, and a workspace whose latest
+         *     intent the operator has not reconciled yet is reported
+         *     `skipped_moved`, never restarted again.
          *
          *     Workspaces with a live desktop session are skipped
          *     (`skipped_active`) unless `includeActive` is true; their users
@@ -1022,6 +1035,7 @@ export interface components {
          *     | `QUOTA_EXHAUSTED` | 409 | false | tenant/user quota has no headroom; free resources or raise quota. A refusal by a per-principal running limit carries `details.reason: UserLimitReached` with `details.params.limit`/`details.params.current`. Exception: when the shortfall is only quota a deleted or stopped workspace still holds pending teardown, the same code is returned with `retryable: true`, `details.reason: release_pending` and a `Retry-After` header — the release lands on the next recovery pass and the request may be retried. A `UserLimitReached` refusal can likewise carry `retryable: true` + `Retry-After` when the caller's own teardown-pending holds cover the shortfall |
          *     | `QUOTA_NOT_CONFIGURED` | 409 | false | no quota is configured for the tenant, so creates fail closed; an administrator must set one |
          *     | `QUOTA_MANAGED_BY_CONFIG` | 409 | false | the tenant's quota is declared in `-tenant-quotas` and can only change through the platform configuration, not the admin quota API |
+         *     | `QUOTA_ABOVE_CEILING` | 409 | false | a tenant-admin quota write exceeds the ceiling the platform operator declared for the tenant (`-tenant-quota-ceilings`), or no ceiling is declared so the quota cannot be set through the API; the message names the field |
          *     | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
          *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
@@ -1033,7 +1047,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /**
          * @description Uniform error envelope returned for every 4xx/5xx response — the body
          *     is the single key `error` carrying an `ErrorBody`.
@@ -1375,7 +1389,10 @@ export interface components {
          *     absent when the tenant has no quota row (`configured: false`,
          *     `source: none` — or `config` while a declared row is still pending
          *     the startup upsert). The row's version travels as the `ETag`
-         *     response header.
+         *     response header. `ceiling` is the operator-declared upper bound on
+         *     writes through this API, in display units (rounded down); it is
+         *     absent when none is declared, and then `PUT` answers
+         *     `QUOTA_ABOVE_CEILING`.
          */
         AdminQuotaView: {
             tenant: string;
@@ -1388,6 +1405,7 @@ export interface components {
             source: components["schemas"]["QuotaSource"];
             limits?: components["schemas"]["QuotaAmounts"];
             usage: components["schemas"]["QuotaAmounts"];
+            ceiling?: components["schemas"]["AdminQuotaLimits"];
         };
         /**
          * @description One page of per-principal running-workspace limits, ordered by
@@ -2377,7 +2395,7 @@ export interface operations {
                  *     caller's natural scope (admins see the tenant, users their own rows).
                  */
                 scope?: components["parameters"]["ListScope"];
-                /** @description Filter by lifecycle phase. */
+                /** @description Filter by lifecycle phase; a value outside the WorkspacePhase enum is 400 INVALID_REQUEST. */
                 phase?: components["schemas"]["WorkspacePhase"];
             };
             header?: never;

@@ -86,7 +86,7 @@ objects. It **keeps**:
 | `images.<name>.tag` | chart `appVersion` | tag; ignored when `digest` is set |
 | `images.<name>.digest` | `""` | `sha256:<64hex>` — digest pinning wins over tag |
 | `images.<name>.pullPolicy` | `IfNotPresent` | per-image pull policy |
-| `images.<name>.builtAt` | `""` | RFC 3339 build time from the runtime train's `runtime-images.json` → `image-built-at` annotation; an image older than `-image-block-after` (45 d default) refuses create/start with 409 IMAGE_STALE (runtime images only) |
+| `images.<name>.builtAt` | `""` | RFC 3339 build time: stamped by the release for the runtime images it ships, or copied from the runtime train's `runtime-images.json` → `image-built-at` annotation; an image older than `-image-block-after` (45 d default) refuses create/start with 409 IMAGE_STALE (runtime images only) |
 | `images.<name>.engines.{chromium,firefox}` | unset | browser engine versions from `runtime-images.json` → `image-chromium`/`image-firefox` annotations, shown on the template's stale-image view (runtime images only) |
 
 ### Topology
@@ -94,8 +94,8 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
-| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas") and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
-| `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
+| `managedNamespaces[]` | `[]` | `{name, tenant, quota?, quotaCeiling?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"); `quotaCeiling` instead lets the tenant's admins set the quota up to it; and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
+| `podSecurity.managedEnforce` | `restricted` | PSS `enforce`/`warn` label on the managed namespaces the chart creates (the installer labels the release namespace — see the install runbook); `privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
 
@@ -110,7 +110,7 @@ objects. It **keeps**:
 | `backend.tls.internal.revokedSerials.existingSecret` | `revoked-serials.txt` (or `.key`) | optional ADR 0008 per-certificate revocation list for the internal mTLS listener — unset leaves the feature off |
 | `backend.extraCA.existingSecret` | `ca.crt` | optional outbound trust (`SSL_CERT_FILE`) |
 | `backend.upstreamCA.existingSecret` | `ca.crt` | optional runtime upstream CA |
-| `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer; unset = routes closed |
+| `backend.controlToken.existingSecret` | `token` | `/v1/control/*` bearer (at least 32 bytes); unset = routes closed |
 | `operator.brokerClient.mtls.existingSecret` | `tls.crt`/`tls.key` | operator broker client cert — **CN must equal `backend.operatorCN` (default `operator`)** |
 | `operator.brokerClient.ca.existingSecret` | `ca.crt` | operator verifies the broker cert |
 | `frontend.tls.existingSecret` | `tls.crt`/`tls.key` | frontend TLS |
@@ -121,7 +121,7 @@ objects. It **keeps**:
 | Key | Default | Description |
 |---|---|---|
 | `certManager.enabled` | `false` | render `Certificate` resources producing the internal mTLS Secrets |
-| `certManager.issuerRef.{kind,name}` | `ClusterIssuer`/`""` | existing signer; required unless `selfSigned` |
+| `certManager.issuerRef.{kind,name}` | `ClusterIssuer`/`""` | existing signer; required unless `selfSigned`. Use a dedicated issuer that signs nothing else (or `kind: Issuer` in the release namespace): it is the internal client CA |
 | `certManager.selfSigned` | `false` | also bootstrap selfsigned ClusterIssuer → CA Certificate → Issuer |
 | `certManager.caSecretName` | `<release>-internal-ca` | bootstrap CA Secret (point `backend.clientCA`/`operator.brokerClient.ca` at it) |
 | `certManager.duration` / `.renewBefore` | `2160h` / `360h` | leaf lifetime/renewal |
@@ -157,7 +157,7 @@ no default cap.
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--tenant-admin-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch. Without `dev.enabled`, an `extraArgs` entry fails the render when it names any flag the chart renders or owns for that component (`tinycdi.args.<component>`, `tinycdi.ownedFlags`), or the flag form of a denied `extraEnv` name. Only backend `-rate-limit-replicas` and `-login-key-file` may repeat a rendered flag; flags the chart never renders (`-login-rate`, `-launch-rate`, `-expiry-interval`, `-image-stale-after`) stay free. Operator `--leader-elect` is refused with `operator.replicas>1` even under `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below, on the `TCDI_<FLAG>` env form of any denied flag, or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win. `backend.extraVolumes` hostPath fails the render unless `dev.enabled`. |
 
 `<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
 on this deny-list — dev-surface env names plus the env equivalents of
@@ -180,6 +180,10 @@ the value to set instead:
 | `TCDI_UPSTREAM_CA` | `backend.upstreamCA.existingSecret` |
 | `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
 | `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
+| `TCDI_TENANT_QUOTA_CEILINGS` | `managedNamespaces[].quotaCeiling` |
+| `TCDI_BROKER_URL` / `TCDI_BROKER_CA` / `TCDI_MTLS_CERT` / `TCDI_MTLS_KEY` | nothing — the chart deploys the merged backend; the split-mode broker client is dev-only |
+| `SSL_CERT_FILE` / `SSL_CERT_DIR` | `backend.extraCA.existingSecret` |
+| `TCDI_<FLAG>` of any flag denied in that component's `extraArgs` | the chart value that renders the flag |
 
 ### Component-specific highlights
 
@@ -222,7 +226,8 @@ the value to set instead:
 Set `frontend.branding.configMap` to the name of a ConfigMap in the release
 namespace to rebrand the portal. The chart mounts it read-only at
 `/branding` in the frontend pods and passes `-branding-dir=/branding`; the
-frontend serves it at `https://<portalHost>/branding/` (regular files only,
+frontend serves it at `https://<portalHost>/branding/` (only `branding.json`,
+`tokens.css`, `favicon.svg`/`.ico` and `logo*.svg`/`.png`, regular files only,
 no listing, `Cache-Control: no-cache`). Empty (the default) renders no flag
 and no volume, and `/branding/tokens.css` answers an empty stylesheet and
 `/branding/branding.json` the empty object `{}` (the portal keeps its default
@@ -235,7 +240,7 @@ ConfigMap layout — every key is optional:
 |---|---|---|
 | `branding.json` | `web/src/app/branding.ts` (`loadBranding`) | `{"productName": "...", "logo": "/branding/<file>", "logoDark": "/branding/<file>"}` — unknown fields ignored; `logo*` must stay under `/branding/` (same origin) |
 | `tokens.css` | `index.html` stylesheet link, after the app CSS | CSS custom-property overrides (`--to-*`/`--tc-*` design tokens) |
-| logo files | referenced from `branding.json` | e.g. `logo.svg` — served with their extension's content type |
+| logo files | referenced from `branding.json` | named `logo*.svg` or `logo*.png` (for example `logo.svg`) — served with their extension's content type |
 | `favicon.svg`, `favicon.ico` | `index.html` `<link rel="icon">` | replaces the shipped TinyOrbit favicon of the same name at `/favicon.svg` / `/favicon.ico` (`no-cache`); either may be given alone. `favicon.ico` is binary, so put it under the ConfigMap's `binaryData` |
 
 ```yaml
@@ -274,20 +279,22 @@ Cluster-wide defaults for workspace (runtime) pods; a template's typed `spec.pla
 | `runtime.placement.allowSharedNodes` | `false` | `false` = dedicated workspace pool: the operator gets `--runtime-node-selector`/`--runtime-tolerations` and the node-profile installer DaemonSet targets the same pool. `true` opts out (kind/dev only): no placement flags, runtime pods schedule anywhere, and install NOTES warn — node-level isolation is lost |
 | `runtime.placement.nodeSelector` | `{cdi.tinyorbit.vn/workspace: "true"}` | node labels every runtime pod selects; **must be non-empty** while `allowSharedNodes=false` (render fails otherwise) |
 | `runtime.placement.tolerations` | the `cdi.tinyorbit.vn/workspace` `NoSchedule` toleration | tolerations every runtime pod carries — keep matching the pool taint |
-| `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace) |
+| `runtime.hostUsers` | `false` | `pod.spec.hostUsers` default for runtime pods (`--runtime-host-users`): `false` gives each pod its own user namespace (verified on the reference environment, see `docs/compatibility.md`); `null` leaves the field unset (apiserver default — host user namespace). A seeded template with `seccompProfile: localhost/profiles/chromium-userns.json` needs an effective `false` (its own `spec.linux.hostUsers`, else this value), or the render fails |
 | `runtime.appArmor.requireRuntimeDefault` | `true` | `true` sets an explicit `securityContext.appArmorProfile: RuntimeDefault` on runtime containers (the operator flag `--runtime-apparmor-require-default` is not rendered — it defaults to `true`). `false` (renders `--runtime-apparmor-require-default=false`, prints an install NOTES line) omits it for **nodes without AppArmor** — kind, RHEL-family/SELinux-based distributions — where the kubelet otherwise refuses the pod (`Cannot enforce AppArmor: AppArmor is not enabled on the host`). See [Nodes without AppArmor](#nodes-without-apparmor) |
 | `runtime.topologySpread.enabled` | `true` | `true` adds a **soft** `topologySpreadConstraint` to every runtime pod (`--runtime-topology-spread`, not rendered at the default): maxSkew 1 over `kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting the namespace's runtime pods — it prefers an even spread of a tenant's workspace pods across pool nodes (the soak found the scheduler packing them onto a subset — see `docs/runbooks/capacity.md`). Soft means it never blocks scheduling: retained-PVC reattach on a node-pinned volume and single-node pools still work. `false` renders `--runtime-topology-spread=false` and keeps packed-by-scoring placement |
 | `runtime.networkProfiles.clusterOnly.unrestricted` | `false` | opt-out of the restricted ClusterOnly default: `true` renders `--runtime-clusteronly-egress=unrestricted` — egress to **any pod in any namespace on any port**, confinement resting entirely on destination-side ingress policies — and install NOTES state the opt-out. Cannot be combined with the `egress*` selectors below (render fails). See [ClusterOnly egress](#clusteronly-egress) |
-| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | narrowing for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress=<json>`). Empty keeps the restricted default: egress to pods in namespaces labelled `workspaces.cdi.tinyorbit.vn/tenant` (the managed namespaces). Set a label selector to confine ClusterOnly egress to pods in matching namespaces instead. DNS egress is unaffected |
+| `runtime.networkProfiles.clusterOnly.egressNamespaceSelector` | `{}` | narrowing for `networkProfile: ClusterOnly` workspaces (`--runtime-clusteronly-egress=<json>`). Empty keeps the restricted default: egress to pods in the namespaces of the workspace's own tenant. Set a label selector to confine ClusterOnly egress to pods in matching namespaces instead. DNS egress is unaffected |
 | `runtime.networkProfiles.clusterOnly.egressPodSelector` | `{}` | optional second axis on the same rule — pods matching the selector inside the selected namespaces (or in the workspace's own namespace when `egressNamespaceSelector` is empty, per `NetworkPolicyPeer` semantics) |
 | `runtime.networkProfiles.clusterOnly.egressPorts` | `[]` | optional port/protocol list on the same rule (`[{protocol: TCP, port: 443}]`); empty keeps every port open to the selected destinations |
 
 #### ClusterOnly egress
 
 `networkProfile: ClusterOnly` workspaces are **restricted by default**:
-egress reaches pods in namespaces labelled
-`workspaces.cdi.tinyorbit.vn/tenant` — the managed namespaces — and no
-pod outside them. To allow egress to any pod in any namespace
+egress reaches pods in the namespaces of the workspace's own tenant
+(labelled `workspaces.cdi.tinyorbit.vn/tenant: <tenant>`) and no pod in
+another tenant's namespace or outside the managed namespaces.
+Cross-tenant reach needs an explicit `egressNamespaceSelector` or
+`unrestricted: true`. To allow egress to any pod in any namespace
 (confinement then rests entirely on destination-side
 ingress policies, so any pod without its own NetworkPolicy is
 reachable), set:
@@ -591,10 +598,12 @@ gatewayApi:
 ```
 
 ```yaml
-# Traefik (or any ingress as pods) — the peer is the proxy pod's address;
-# list the cluster pod CIDR or a tighter range covering the proxy pods.
+# Traefik (or any ingress as pods) — the peer is the proxy pod's address.
+# List only an IP pool dedicated to the ingress namespace (or the node
+# subnet for a hostNetwork proxy). Never list the cluster pod CIDR or any
+# range where workspace pods run: a trusted peer picks its own client key.
 backend:
-  trustedProxies: ["10.42.0.0/16"]      # pod CIDR containing the traefik pods
+  trustedProxies: ["10.42.250.0/24"]    # IP pool of the ingress namespace
 ingress:
   enabled: true
 ```
@@ -780,6 +789,16 @@ values overwrite a hand-edited row for that tenant at the next backend
 start. See `docs/runbooks/install.md` → "Tenant quotas" for the install
 flow and `docs/runbooks/tenant-quotas.md` for day-2 operations (reading
 usage, refusal codes, changing limits).
+
+**Tenant-admin quota writes.** A tenant administrator can set the tenant's
+quota through the portal (`PUT /v1/admin/tenants/{tenant}/quota`) only when
+the entry declares a `quotaCeiling` block (same four keys as `quota`; an
+entry carries one or the other). The chart renders those blocks as
+`-tenant-quota-ceilings`. A write above the ceiling, or for a tenant with
+neither block, is refused with `409 QUOTA_ABOVE_CEILING`, so a tenant left
+without a quota stays fail-closed (`QUOTA_NOT_CONFIGURED`) until the
+operator acts. The ceiling bounds the API-layer quota only; `namespaceQuota`
+(below) bounds the namespace in the apiserver.
 
 ### Namespace object quotas
 

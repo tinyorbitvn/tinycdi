@@ -49,6 +49,19 @@ func TestOperatorLeaderElectionGuard(t *testing.T) {
 		}
 	}
 
+	// The flag form cannot bypass the guard (R1-34): extraArgs renders
+	// after the chart's --leader-elect=true and the last value wins — and
+	// dev.enabled does not reopen it.
+	for _, arg := range []string{"--leader-elect=false", "-leader-elect=false", "--leader-elect false"} {
+		out := renderErrArgs(t,
+			"-f", minimalValues,
+			"--set", "dev.enabled=true",
+			"--set", "operator.extraArgs[0]="+arg)
+		if !strings.Contains(out, "operator.leaderElect") || !strings.Contains(out, "operator.extraArgs") {
+			t.Errorf("replicas=2 + extraArgs %q must fail naming operator.leaderElect, got: %s", arg, out)
+		}
+	}
+
 	// replicas=1 without election stays legal: a single replica needs no
 	// lease and the flag renders through.
 	docs = renderArgs(t,

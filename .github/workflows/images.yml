@@ -54,6 +54,11 @@
 # labels (source, licenses, title, description, version, revision,
 # created) so the GHCR package pages link back to this repository.
 #
+# No shared GHA build cache (SEC-16): like release.yml and
+# runtime-images.yml, these builds neither read nor write the GHA cache.
+# Any main-branch job can write that cache, and these images are signed
+# with the images.yml@refs/heads/main identity.
+#
 # Vulnerability gate (SEC-44): TRIVY_GATE_SEVERITY controls which
 # severities WITH AN AVAILABLE FIX fail the build (--ignore-unfixed);
 # unfixed HIGH/CRITICAL findings are listed in the job summary.
@@ -216,11 +221,8 @@ jobs:
             ${{ env.PUBLISH != 'true'
                 && format('{0}:sha-{1}', env.IMAGE_REF, github.sha) || '' }}
           labels: ${{ env.OCI_LABELS }}
-          cache-from: type=gha,scope=linux-base
-          # cache writes only when publishing — a non-main dispatch must
-          # never poison the shared scope the :main build consumes.
-          cache-to: >-
-            ${{ env.PUBLISH == 'true' && 'type=gha,mode=max,scope=linux-base' || '' }}
+          # No cache-from/cache-to (SEC-16): a signed :main build never
+          # reads the shared GHA cache that other main-branch jobs write.
 
       - name: record image ref for downstream jobs
         env:
@@ -426,9 +428,7 @@ jobs:
                 && format('{0}:sha-{1}', env.IMAGE_REF, github.sha) || '' }}
           labels: ${{ env.OCI_LABELS }}
           build-args: ${{ env.BUILD_ARGS }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: >-
-            ${{ env.PUBLISH == 'true' && format('type=gha,mode=max,scope={0}', matrix.image) || '' }}
+          # No cache-from/cache-to (SEC-16): see the linux-base build.
 
       - name: record image ref for downstream jobs
         env:

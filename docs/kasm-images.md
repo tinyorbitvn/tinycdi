@@ -162,11 +162,16 @@ The catalog is `build/kasm-catalog.txt` — every `kasmweb/*` image
 referenced anywhere in tracked files (chart ci values, docs, examples)
 must appear there, digest-pinned, with an engine + freshness floor +
 class (`browser` | `desktop`: which template experiences may use it).
-`.github/scripts/check-kasm-catalog.sh` enforces that in
-every PR; the heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy
-gate + engine extraction) and the adapter contract test run in the
-`kasm-contract` ci.yml job — weekly, on dispatch, on main pushes, and on
-PRs touching the adapter/catalog surface.
+`.github/scripts/check-kasm-catalog.sh` enforces that, and the
+declared floor, in every PR (the required workflow-policy job). The
+heavyweight `.github/scripts/scan-kasm-catalog.sh` (trivy gate + measured
+engine floor) and the adapter contract test run in the `kasm-contract`
+ci.yml job — weekly, on dispatch, on main pushes, and on PRs touching
+the adapter/catalog surface. There they report but do not block a
+merge (the job is network-dependent). Every release runs both catalog
+scripts again in the release.yml `kasm-catalog` job, which the publish
+job needs: an image that fails the trivy gate or the measured engine
+floor stops the release.
 
 Every `kasmweb/<app>` added to the catalog must clear this list **before
 its template merges**:
@@ -199,8 +204,9 @@ its template merges**:
    back `experience: Browser` templates or sit on the chart's
    `kasmAdapter.browserAllowlist`), **desktop-class entries pin−4** (~4
    upstream release cycles of tolerated lag on Debian/Ubuntu rebuilds),
-   and the installed engine must meet the declared floor. This is a
-   blocking CI gate and stays blocking — the lag is the accepted
+   and the installed engine must meet the declared floor. The declared
+   floor gates every merge; the measured engine gates every release
+   (release.yml `kasm-catalog`). The lag is the accepted
    residual risk of the preview, not a target to grow. The cataloged
    `kasmweb/chrome` carries Chrome 154 vs the native pin's 155 — inside
    the browser budget (class `browser`); `kasmweb/chromium` (Chromium

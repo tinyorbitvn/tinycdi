@@ -108,7 +108,8 @@ func TestRevokePortalSession_RevokesOutstandingTickets(t *testing.T) {
 // TestRedeemTicket_DeadPortalSessionDenied: redemption re-checks the
 // issuing portal session — the second barrier, covering a sign-out whose
 // session delete landed but whose revoke call never did. Denial is
-// stable: while the session stays dead every replay fails the same way.
+// final: the refused attempt consumes the ticket, so a replay is refused
+// as already used.
 func TestRedeemTicket_DeadPortalSessionDenied(t *testing.T) {
 	db, b, clock, src := setup(t)
 	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
@@ -121,10 +122,11 @@ func TestRedeemTicket_DeadPortalSessionDenied(t *testing.T) {
 	}
 	deletePortalSession(t, db, "sess-1")
 
-	for i := 0; i < 2; i++ {
-		if _, err := b.RedeemTicket(ctx, gwA, tk.Token); !errors.Is(err, broker.ErrRevoked) {
-			t.Fatalf("redeem %d under dead session = %v, want ErrRevoked", i, err)
-		}
+	if _, err := b.RedeemTicket(ctx, gwA, tk.Token); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("redeem under dead session = %v, want ErrRevoked", err)
+	}
+	if _, err := b.RedeemTicket(ctx, gwA, tk.Token); !errors.Is(err, broker.ErrTicketInvalid) {
+		t.Fatalf("replay under dead session = %v, want ErrTicketInvalid (consumed)", err)
 	}
 }
 

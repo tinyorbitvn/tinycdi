@@ -12,15 +12,20 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 )
@@ -286,6 +291,7 @@ func TestPodAutomountServiceAccountTokenFalse(t *testing.T) {
 // ClusterOnlyEgress.Unrestricted opt-out.
 func TestClusterOnlyEgressDefaultRestricted(t *testing.T) {
 	ws := testWorkspace()
+	ws.Labels = map[string]string{"workspaces.cdi.tinyorbit.vn/tenant": "tenant-a"}
 	tpl := testTemplate(nil)
 	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
 	np, _ := netPolFor(t, Options{}, ws, tpl)
@@ -308,16 +314,15 @@ func TestClusterOnlyEgressDefaultRestricted(t *testing.T) {
 		t.Fatalf("default ClusterOnly rule must not restrict ports: %+v", rule.Ports)
 	}
 	if len(rule.To) != 1 {
-		t.Fatalf("default ClusterOnly peers = %+v, want the single managed-namespaces peer", rule.To)
+		t.Fatalf("default ClusterOnly peers = %+v, want the single own-tenant peer", rule.To)
 	}
 	peer := rule.To[0]
 	if peer.PodSelector != nil || peer.NamespaceSelector == nil {
-		t.Fatalf("default ClusterOnly peer = %+v, want {namespaceSelector: tenant-label}", peer)
+		t.Fatalf("default ClusterOnly peer = %+v, want {namespaceSelector: own tenant}", peer)
 	}
-	me := peer.NamespaceSelector.MatchExpressions
-	if len(me) != 1 || me[0].Key != "workspaces.cdi.tinyorbit.vn/tenant" ||
-		me[0].Operator != metav1.LabelSelectorOpExists {
-		t.Fatalf("default ClusterOnly namespaceSelector = %+v, want tenant-label Exists", me)
+	if ml := peer.NamespaceSelector.MatchLabels; len(peer.NamespaceSelector.MatchExpressions) != 0 ||
+		len(ml) != 1 || ml["workspaces.cdi.tinyorbit.vn/tenant"] != "tenant-a" {
+		t.Fatalf("default ClusterOnly namespaceSelector = %+v, want matchLabels {tenant: tenant-a}", peer.NamespaceSelector)
 	}
 }
 
@@ -410,11 +415,11 @@ func TestClusterOnlyEgressRestrictionOnPolicy(t *testing.T) {
 		client.ObjectKey{Name: NetPolName(ws.UID), Namespace: ws.Namespace}, back); err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Spec.Egress[1].To) != 1 ||
-		back.Spec.Egress[1].To[0].NamespaceSelector == nil ||
-		len(back.Spec.Egress[1].To[0].NamespaceSelector.MatchExpressions) != 1 {
-		t.Fatalf("stored policy was not reconciled back to the restricted default peer: %+v",
-			back.Spec.Egress[1].To)
+	got := back.Spec.Egress[1].To
+	if len(got) != 1 || got[0].PodSelector != nil || got[0].NamespaceSelector == nil ||
+		len(got[0].NamespaceSelector.MatchExpressions) != 0 ||
+		got[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != ws.Namespace {
+		t.Fatalf("stored policy was not reconciled back to the restricted default peer (an unlabelled CR's own namespace): %+v", got)
 	}
 }
 
@@ -438,5 +443,117 @@ func TestClusterOnlyEgressPortsOnlyStaysPodOnly(t *testing.T) {
 	}
 	if len(rule.Ports) != 1 || rule.Ports[0].Port.IntValue() != 443 {
 		t.Fatalf("ports-only rule ports = %+v, want [443]", rule.Ports)
+	}
+}
+
+// nsLabels is the label set a managed namespace carries: the apiserver's
+// own name label plus the chart's tenant label (namespaces.yaml).
+func nsLabels(name, tenant string) k8slabels.Set {
+	s := k8slabels.Set{"kubernetes.io/metadata.name": name}
+	if tenant != "" {
+		s["workspaces.cdi.tinyorbit.vn/tenant"] = tenant
+	}
+	return s
+}
+
+// clusterOnlyPeerSelector converges ws with the default (nil) ClusterOnly
+// option and returns the profile rule's namespace selector.
+func clusterOnlyPeerSelector(t *testing.T, ws *cdiv1.Workspace) k8slabels.Selector {
+	t.Helper()
+	tpl := testTemplate(nil)
+	tpl.Spec.NetworkProfile = cdiv1.NetworkProfileClusterOnly
+	np, _ := netPolFor(t, Options{}, ws, tpl)
+	rule := np.Spec.Egress[len(np.Spec.Egress)-1]
+	if len(rule.To) != 1 || rule.To[0].NamespaceSelector == nil ||
+		rule.To[0].PodSelector != nil || rule.To[0].IPBlock != nil || len(rule.Ports) != 0 {
+		t.Fatalf("default ClusterOnly rule = %+v, want one namespace-selector peer on every port", rule)
+	}
+	sel, err := metav1.LabelSelectorAsSelector(rule.To[0].NamespaceSelector)
+	if err != nil {
+		t.Fatalf("namespace selector: %v", err)
+	}
+	return sel
+}
+
+// TestClusterOnlyEgressDefaultSameTenantOnly (R1-28, TM-34): with no
+// operator narrowing, a ClusterOnly workspace reaches pods in its own
+// tenant's managed namespaces (every one of them) and in no other
+// tenant's. A Workspace CR without the tenant label fails closed to its
+// own namespace.
+func TestClusterOnlyEgressDefaultSameTenantOnly(t *testing.T) {
+	ws := testWorkspace() // namespace tenant-a
+	ws.Labels = map[string]string{"workspaces.cdi.tinyorbit.vn/tenant": "tenant-a"}
+	sel := clusterOnlyPeerSelector(t, ws)
+	for _, c := range []struct {
+		name string
+		ns   k8slabels.Set
+		want bool
+	}{
+		{"own namespace", nsLabels("tenant-a", "tenant-a"), true},
+		{"second namespace of the same tenant", nsLabels("tenant-a-batch", "tenant-a"), true},
+		{"another tenant's namespace", nsLabels("tenant-b", "tenant-b"), false},
+		{"unmanaged namespace", nsLabels("kube-system", ""), false},
+	} {
+		if got := sel.Matches(c.ns); got != c.want {
+			t.Errorf("default ClusterOnly peer %q matches %s = %v, want %v", sel, c.name, got, c.want)
+		}
+	}
+
+	unlabelled := testWorkspace()
+	sel = clusterOnlyPeerSelector(t, unlabelled)
+	if !sel.Matches(nsLabels("tenant-a", "tenant-a")) {
+		t.Errorf("unlabelled CR: peer %q must match its own namespace", sel)
+	}
+	for _, other := range []k8slabels.Set{nsLabels("tenant-a-batch", "tenant-a"), nsLabels("tenant-b", "tenant-b")} {
+		if sel.Matches(other) {
+			t.Errorf("unlabelled CR: peer %q matches %v; it must fail closed to its own namespace", sel, other)
+		}
+	}
+}
+
+// TestEnsure_NetPolPrecedesPod (R1-35): the workspace's NetworkPolicy
+// exists before its pod is created, so tenant code never runs
+// unconfined, even while a later step (here the Service, refused by a
+// quota) keeps failing and the namespace has no default-deny
+// (networkPolicy.enabled=false).
+func TestEnsure_NetPolPrecedesPod(t *testing.T) {
+	ws := testWorkspace()
+	tpl := testTemplate(nil)
+	var order []string
+	refused := apierrors.NewForbidden(schema.GroupResource{Resource: "services"},
+		ServiceName(ws.UID), errors.New("exceeded quota: tcdi-quota, requested: services=1"))
+	c := fake.NewClientBuilder().WithScheme(backendScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			switch obj.(type) {
+			case *corev1.Pod:
+				order = append(order, "Pod")
+			case *corev1.Service:
+				order = append(order, "Service")
+				return refused
+			case *networkingv1.NetworkPolicy:
+				order = append(order, "NetworkPolicy")
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	if _, err := New(c, Options{}).Ensure(context.Background(), ws, tpl); err == nil {
+		t.Fatal("Ensure succeeded although Service creation is refused")
+	}
+	np := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(),
+		client.ObjectKey{Name: NetPolName(ws.UID), Namespace: ws.Namespace}, np); err != nil {
+		t.Fatalf("runtime pod can run with no NetworkPolicy while the Service step fails: %v (create order %v)", err, order)
+	}
+	npAt, podAt := -1, -1
+	for i, k := range order {
+		switch k {
+		case "NetworkPolicy":
+			npAt = i
+		case "Pod":
+			podAt = i
+		}
+	}
+	if npAt < 0 || podAt < 0 || npAt > podAt {
+		t.Fatalf("create order %v, want NetworkPolicy before Pod", order)
 	}
 }

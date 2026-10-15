@@ -10,20 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// BrowserPolicy carries the admin-set restrictions applied to a Browser
-// experience: which destinations the in-session browser may reach. The end
-// user cannot widen this set.
-type BrowserPolicy struct {
-	// allowedDomains is the allowlist of DNS domains the session browser may
-	// reach. Empty means the network profile alone decides.
-	// +optional
-	AllowedDomains []string `json:"allowedDomains,omitempty"`
-
-	// deniedDomains is subtracted from the allowlist.
-	// +optional
-	DeniedDomains []string `json:"deniedDomains,omitempty"`
-}
-
 // LinuxRuntimeSpec configures a LinuxContainer template. The image is pinned
 // by digest; a tag-only reference is rejected because it is mutable.
 //
@@ -61,11 +47,6 @@ type LinuxRuntimeSpec struct {
 	// +optional
 	// +kubebuilder:validation:Pattern="^[ -~]{1,512}$"
 	SessionCmd string `json:"sessionCmd,omitempty"`
-
-	// browserPolicy restricts the in-session browser when experience is
-	// Browser.
-	// +optional
-	BrowserPolicy *BrowserPolicy `json:"browserPolicy,omitempty"`
 
 	// hostUsers sets the pod's hostUsers field: false runs the runtime in a
 	// user namespace so its root is not node root. Unset applies the

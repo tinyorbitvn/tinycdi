@@ -27,13 +27,13 @@ is the Linux container (`internal/runtime/linux`).
   runtime images are `linux-base`, `linux-desktop`, `browser` and the
   `kasm-adapter` path under `build/`.
 - **Ticket.** A launch is a single-use 60 s ticket (`TicketTTL`,
-  `internal/broker/tickets.go:66`) minted by
+  `internal/broker/tickets.go`) minted by
   `POST /v1/workspaces/{id}/connections` and redeemed by a form POST to the
   workspace's own session host (ADR 0004). A ticket is consumed on the first
   redeem attempt — even an expired one — and a revoked ticket can never
   redeem.
 - **Lease and fence.** A redeemed ticket becomes a connection lease with a
-  30 s sliding TTL that the gateway renews (`LeaseTTL`, `tickets.go:68`).
+  30 s sliding TTL that the gateway renews (`LeaseTTL`, `tickets.go`).
   The lease is fenced to the runtime incarnation by
   `(workspaceUID, runtimeGeneration, runtimeUID)` plus a monotonic fencing
   version (ADR 0003): recreating the runtime changes `runtimeUID` and
@@ -41,10 +41,10 @@ is the Linux container (`internal/runtime/linux`).
 - **One stream per lease.** A second claim on a live lease replaces the old
   stream (sequential replacement across replicas, ADR 0005); a claim while
   another handshake is in flight is refused `409 stream_in_use`
-  (`internal/gateway/proxy.go:724`). A new ticket is a takeover: the old
+  (`internal/gateway/proxy.go`). A new ticket is a takeover: the old
   session is revoked before the new one activates.
 - **Network boundary.** The runtime pod runs default-deny
-  (`ws-<uid>-boundary`, `internal/runtime/linux/backend.go:17`): ingress
+  (`ws-<uid>-boundary`, `internal/runtime/linux/backend.go`): ingress
   only from the gateway pods, egress only to cluster DNS and the workspace
   template's approved network profile.
 

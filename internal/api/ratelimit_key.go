@@ -24,7 +24,8 @@ import (
 // SessionRateLimitKey keys a request carrying a VALID session cookie by a
 // digest of the session ID; anything else yields "" so the caller falls
 // back to the client-IP key. Validity is checked with Peek — no idle
-// slide, no write — so this resolver is wired only where the read is
+// slide, no write — through the per-client unknown-cookie budget
+// (lookupSession), so this resolver is wired only where the read is
 // already owed: the session probe Peeks itself, and the verified session
 // is parked on the request context where RequireAuth would put it, so the
 // handler reuses the lookup instead of reading the store twice. /v1/login
@@ -37,13 +38,14 @@ func (a *Authenticator) SessionRateLimitKey() RateLimitKeyFunc {
 		if err != nil || c.Value == "" {
 			return ""
 		}
-		sess, err := a.sessions.Peek(r.Context(), c.Value)
+		sess, err := a.lookupSession(r, c.Value, false)
 		if err != nil {
-			// Unknown, expired — and a store outage: all mean "no
-			// authenticated key". The IP fallback keeps the limiter
-			// fail-closed without changing what the handler answers
-			// (the probe reports authenticated:false; RequireAuth
-			// still returns its own 503 on transient errors).
+			// Unknown, expired, refused by the unknown-cookie budget, or
+			// a store outage: all mean "no authenticated key". The miss is
+			// parked on the request so the probe answers without a second
+			// read; RequireAuth still returns its own 503 on transient
+			// errors.
+			*r = *r.WithContext(context.WithValue(r.Context(), ctxKeySessionLookedUp, true))
 			return ""
 		}
 		// The assignment mutates the request the middleware passes on —

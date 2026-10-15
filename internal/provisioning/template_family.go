@@ -51,9 +51,17 @@ const (
 	SkipReasonAppArmorProfileChanged    = "apparmor-profile-changed"
 )
 
+// startMove is the revision a start moves to: the row snapshot to record
+// and the exact quota vector the new revision runs with.
+type startMove struct {
+	Info   TemplateInfo
+	Vector ResourceVector
+}
+
 // startTemplateTarget decides whether a Stopped -> Running start moves the
 // workspace to a newer published revision of its template family. It
-// returns the row's new TemplateInfo snapshot and the revision object name
+// returns the move (the row's new TemplateInfo snapshot and the new
+// revision's exact quota vector) and the revision object name
 // spec.templateRef must point at, or nil when the workspace keeps its
 // recorded revision — because the family no longer resolves, the workspace
 // is already on the newest revision, the recorded revision pins the image,
@@ -83,7 +91,7 @@ const (
 // — the same outcome as a pinned template — because a template lookup is
 // advisory, not part of the lifecycle contract the intent was admitted
 // under.
-func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord, log *slog.Logger) (*TemplateInfo, string, string, string, bool, error) {
+func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID string, rec *WorkspaceRecord, log *slog.Logger) (*startMove, string, string, string, bool, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -135,21 +143,24 @@ func startTemplateTarget(ctx context.Context, cat TemplateLookup, tenantID strin
 		}
 		return nil, "", "", builtAt, false, nil
 	}
-	return &TemplateInfo{
-		ID:            newest.ID,
-		Name:          newest.Name,
-		Revision:      newest.Revision,
-		RevisionLabel: newest.RevisionLabel,
-		Runtime:       newest.Runtime,
-		Experience:    newest.Experience,
-		ImageBuiltAt:  newest.ImageBuiltAt,
-		// The guard already refuses a move whose clipboard or
-		// file-transfer policy differs (SkipReasonClipboardPolicyChanged,
-		// SkipReasonFileTransferPolicyChanged), so the snapshot here
-		// equals the recorded revision's — carried explicitly since the
-		// row stores this struct.
-		ClipboardPolicy:    newest.ClipboardPolicy,
-		FileTransferPolicy: newest.FileTransferPolicy,
+	return &startMove{
+		Info: TemplateInfo{
+			ID:            newest.ID,
+			Name:          newest.Name,
+			Revision:      newest.Revision,
+			RevisionLabel: newest.RevisionLabel,
+			Runtime:       newest.Runtime,
+			Experience:    newest.Experience,
+			ImageBuiltAt:  newest.ImageBuiltAt,
+			// The guard already refuses a move whose clipboard or
+			// file-transfer policy differs (SkipReasonClipboardPolicyChanged,
+			// SkipReasonFileTransferPolicyChanged), so the snapshot here
+			// equals the recorded revision's — carried explicitly since the
+			// row stores this struct.
+			ClipboardPolicy:    newest.ClipboardPolicy,
+			FileTransferPolicy: newest.FileTransferPolicy,
+		},
+		Vector: newest.Vector(),
 	}, name, "", newest.ImageBuiltAt, false, nil
 }
 

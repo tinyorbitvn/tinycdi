@@ -90,6 +90,10 @@ type Backend struct {
 	// mTLS listener (nil when -internal-revoked-list is unset): it backs
 	// the handshake VerifyConnection and the ConnState drop hook.
 	internalBlocklist *tlsreload.Blocklist
+	// internalConns is the internal listener's verified-conn registry
+	// (TM-38): a client-CA swap closes conns whose chain the new bundle
+	// no longer verifies. Set whenever the internal listener is on.
+	internalConns *clientConns
 
 	// metrics is the platform metric set (E8), built only when the metrics
 	// listener is enabled — with no listener there is nothing to scrape.
@@ -321,11 +325,27 @@ func (b *Backend) closeAll() {
 	}
 }
 
+// controlHostHealth mounts /healthz and /readyz on the session listener's
+// control hosts only (R1-26), where a split deployment's probes send them.
+// On a workspace or foreign Host every path, the health paths included,
+// goes straight to the gateway, which pins the session-origin headers and
+// answers 404, 401 or 421 by host class.
+func (b *Backend) controlHostHealth(gw *gateway.Gateway) http.Handler {
+	health := b.readyz(gw)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gw.IsControlHost(r) {
+			health.ServeHTTP(w, r)
+			return
+		}
+		gw.ServeHTTP(w, r)
+	})
+}
+
 // readyz wraps a listener handler: /readyz answers 200 while the backend is
 // serving and 503 once shutdown begins, so the chart's readiness probe drops
-// the pod before the drain. /healthz always answers 200 (liveness) — even on
-// the app listener, which has no health endpoint of its own. All other paths
-// pass through to the real handler.
+// the pod before the drain. /healthz always answers 200 (liveness) — on the
+// app listener, and on the session listener's control hosts
+// (`controlHostHealth`). All other paths pass through to the real handler.
 func (b *Backend) readyz(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

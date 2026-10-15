@@ -5,9 +5,9 @@ the trailing comment) and every downloaded tool sha256-verified.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), the soak/drill harness (`tests/soak`: npm ci, npm audit, tsc, unit tests + dry-run), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`) |
-| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation; a failed run's `cleanup` job deletes exactly the digests it pushed. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
-| `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles; a failed real publish's `cleanup` job deletes exactly the digests it pushed |
+| `ci.yml` | PRs + push to `main` + weekly schedule | go vet / `go test -race` on envtest, `tests/integration` against a pinned postgres service container, portal UI (`web/`: npm ci, **npm audit --omit=dev --audit-level=high**, tsc, vitest, vite build), the soak/drill harness (`tests/soak`: npm ci, npm audit, tsc, unit tests + dry-run), helm lint `--strict` + `go test ./deploy/helm/`, **govulncheck**, actionlint + yamllint + zizmor, `.github` regression/policy tests, dependency-review (PRs, gated), kasm catalog policy (`check-kasm-catalog.sh`), and the **kasm adapter contract + catalog scan** (weekly/on-dispatch/main pushes/PRs touching kasm paths — pulls the digest-pinned catalog images and runs the trivy gate, engine freshness floor and `TestKasmAdapterChromium`; reports, does not gate merges) |
+| `images.yml` | push to `main`, `workflow_dispatch` | digest-only build of the seven images (`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`), without the shared build cache → isolated trivy gate + SBOM → promote `ghcr.io/tinyorbitvn/tinycdi-<name>:{sha-<short>,main}` + cosign keyless signature/SBOM attestation; a failed run's `cleanup` job deletes exactly the digests it pushed. Publishes only when `github.ref == refs/heads/main`; a dispatch elsewhere builds + scans without pushing. |
+| `release.yml` | tag `v*.*.*`, `workflow_dispatch` (dry-run only) | digest-only build of the `build/release-images.txt` set → isolated trivy gate + kasm catalog scan (`scan-kasm-catalog.sh`: trivy gate + measured engine floor) → `environment: release` publish job: sign + attest digests, `helm push` to `oci://ghcr.io/tinyorbitvn/charts` + sign the chart, then promote `:<semver>`/`latest` tags, GitHub Release with binaries + CRDs + SBOMs + KasmVNC source bundle + `sha256sums.txt` + sigstore bundles; a failed real publish's `cleanup` job deletes exactly the digests it pushed |
 | `runtime-freshness.yml` | daily schedule, `workflow_dispatch` | runs `check-browser-freshness.sh` for **both** pinned engines (chromium and firefox-esr); when bookworm-security offers a newer build — or the pinned version is gone from there ("pinned version gone": the browser image cannot be built from scratch) — `bump-browser-pin.sh` repins `build/browser/Dockerfile` (and, for firefox-esr, `build/linux-desktop/Dockerfile` — the desktop image carries the same Firefox pin) + the doc pins (firefox-esr: with its deb sha256) and one pin-bump PR is opened (`gh pr create`). Also runs `check-runtime-image-age.sh`: fails when the newest `runtime-*` release is older than 14 days |
 | `runtime-images.yml` | push to `main` touching `build/{linux-base,linux-desktop,browser}/**`, weekly schedule, `workflow_dispatch` | the runtime image release train: digest-only build of linux-base, then linux-desktop + browser (both `FROM` the base digest) → isolated trivy gate → `environment: runtime-train` publish job (required reviewer — every publish waits on a recorded approval) → cosign sign + SBOM attest (+ `attest-build-provenance` under `TRAIN_ATTESTATIONS_ENABLED`, off by default) → promote `rt-YYYYMMDD.N` tag (N = next free number over the day's published `rt-*` tags — successful publishes only) → `runtime-images.json` sign-blob'd and attached to GitHub Release `runtime-YYYY.MM.DD`; a failed run's `cleanup` job deletes exactly the digests it pushed. Never builds or tags control-plane images; publishes only on `refs/heads/main` |
 
@@ -117,6 +117,16 @@ to be public — once it is, run:
 RELEASE_REVIEWERS="vanlongme,alice" .github/scripts/setup-repo-protection.sh --apply
 ```
 
+Approve within a day of the scan. Both signing jobs (`release.yml`
+`publish` and `runtime-images.yml` `publish`) run
+`.github/scripts/check-scan-age.sh` before `cosign sign`. It refuses to
+sign when any scan leg of the run finished more than
+`SCAN_MAX_AGE_HOURS` (24) hours earlier, according to the jobs API. A
+late approval, or a re-run of an old run's failed publish, fails; start
+a fresh run instead. The release chart's `images.{linuxBase,linuxDesktop,browser}.builtAt`
+carry each image's recorded build time, and `collect-publish-inputs.sh`
+refuses a chart where they differ from it.
+
 The script is idempotent (GET-then-create/update only what differs) and sets:
 
 - **`release` environment** — required reviewers (`RELEASE_REVIEWERS`, a
@@ -134,18 +144,26 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   Consequence: `release.yml` `workflow_dispatch` is **dry-run only** —
   a real release is made by an admin pushing the `v*.*.*` tag.
 - **Branch protection on `main`** — required status checks = every ci.yml
-  job except `kasm adapter contract + catalog scan` (network-dependent,
-  must not gate merges; its fast catalog policy leg still runs inside
-  the required workflow-policy job). The browser engine freshness check is
-  equally non-gating — it now lives in `runtime-freshness.yml` (daily)
-  rather than ci.yml, so it never appears as a required check at all.
-  Strict (up-to-date) mode, enforce admins, dismiss stale
+  job except the network-dependent ones, which pull multi-GB images or
+  boot a kind cluster:
+  `kasm adapter contract + catalog scan`,
+  `quickstart (kind up.sh + portal smoke)` and
+  `partitioned (kind up.sh + CHIPS cookie smoke)`.
+  They still run in CI (the kind smokes on every push and pull request,
+  the kasm scan on main pushes, weekly and on PRs touching the kasm
+  paths) but do not block a merge; the fast kasm catalog policy leg runs
+  inside the required workflow-policy job.
+  `setup-repo-protection.test.sh` fails when a ci.yml job is neither
+  required nor on this list. The browser engine freshness check lives in
+  `runtime-freshness.yml` (daily), outside ci.yml, so it is never a
+  required check. Strict (up-to-date) mode, enforce admins, dismiss stale
   reviews, conversation resolution required, no force-push/delete.
   `required_approving_review_count` is 0 while the repo has a single
   maintainer — when a second maintainer joins, set it to 1 +
   `require_last_push_approval`, and `prevent_self_review` true on the
   `release` and `runtime-train` environments, which require a reviewer
-  approval before their jobs run.
+  approval before their jobs run (single-maintainer risk:
+  [security review §5](../docs/security/review-v1.0.md#5-accepted-risks)).
 - **Security features** — private vulnerability reporting, secret
   scanning and push protection.
 - **Actions variables** `ATTESTATIONS_ENABLED=true` and
@@ -180,7 +198,7 @@ Created by `setup-repo-protection.sh --apply` (or manually under
 |---|---|---|
 | `CODE_SCANNING_ENABLED` | `true` | trivy SARIF also pushed to Security → Code scanning; dependency-review runs on PRs. Both need Advanced Security on private repos — off today |
 | `ATTESTATIONS_ENABLED` | `true` | additionally emits `actions/attest-build-provenance` for each release image. Attestation storage on private repos needs GitHub Enterprise — off until the repo goes public |
-| `TRAIN_ATTESTATIONS_ENABLED` | `true` | same for the runtime train's publish job; unset means off (`runtime-images.yml:767` runs the step only when it is `true`). `setup-repo-protection.sh` does not set it (it sets `ATTESTATIONS_ENABLED` and `CODE_SCANNING_ENABLED`, `:473`); create it manually to enable |
+| `TRAIN_ATTESTATIONS_ENABLED` | `true` | same for the runtime train's publish job; unset means off (the `if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'` steps in `runtime-images.yml` run only when it is `true`). `setup-repo-protection.sh` does not set it (it sets `ATTESTATIONS_ENABLED` and `CODE_SCANNING_ENABLED`, `:473`); create it manually to enable |
 | `BASE_MIRROR_REGISTRY` | registry host | optional private mirror for Dockerfile `FROM` bases — when set, build jobs docker-login to it with the `BASE_MIRROR_*` secrets below |
 | unset | (default) | the gated steps are skipped; SARIF/SBOM artifacts and cosign signing are unaffected |
 
@@ -267,6 +285,17 @@ The `chromium`/`firefox` fields are the full Debian package versions the
 signed images actually installed — read off each image's attested SPDX
 SBOM at publish time (what `dpkg-query` reports), not the Dockerfile
 pins that requested them. `linux-base` carries no browser.
+
+`builtAt` is the earliest build time of the train's three images. Each
+build job records one UTC second, stamps it into the image's
+`org.opencontainers.image.created` label and writes it as
+`<image>.built-at` next to the image ref. `write-runtime-manifest.sh`
+refuses to run without it, so `builtAt` is never the publish time. The
+publish job also refuses to sign when any scan leg finished more than
+`SCAN_MAX_AGE_HOURS` (24) hours earlier (`check-scan-age.sh`, reading
+the run's jobs API). An approval granted later than that, or a re-run
+of an old run's failed publish, fails, and the remedy is a fresh run,
+which rebuilds and rescans.
 
 Chart values stay GitOps-owned (P7): deployments bump
 `images.*.digest`/`images.*.builtAt` from the manifest — the train

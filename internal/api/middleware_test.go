@@ -9,12 +9,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 )
 
 func TestCSRFPostWithoutTokenRejected(t *testing.T) {
@@ -431,5 +435,150 @@ func TestRequireAuth_SessionStoreErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// lookupCounter counts every session-store read (Get and Peek).
+type lookupCounter struct {
+	SessionStore
+	reads atomic.Int64
+}
+
+func (s *lookupCounter) Get(ctx context.Context, id string) (*Session, error) {
+	s.reads.Add(1)
+	return s.SessionStore.Get(ctx, id)
+}
+
+func (s *lookupCounter) Peek(ctx context.Context, id string) (*Session, error) {
+	s.reads.Add(1)
+	return s.SessionStore.Peek(ctx, id)
+}
+
+// lookupSprayServer mounts the production shape of the two cookie-reading
+// routes: the probe behind the session-keyed login limiter (burst 1, so
+// almost every probe is refused 429) and GET /v1/me behind passive auth.
+func lookupSprayServer(t *testing.T, counter *lookupCounter, lookups SessionLookupLimiter) *httptest.Server {
+	t.Helper()
+	a := sessionKeyTestAuth(counter)
+	a.WithSessionLookupLimiter(lookups, nil)
+	mux := http.NewServeMux()
+	MountSessionProbeRoute(mux, a, RateLimitWithKey(ratelimit.New(1, 1, 1000, nil), nil, nil, a.SessionRateLimitKey()))
+	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestAppListener_UnknownCookieSprayBounded (R1-03): one client sends 200
+// requests, each with a distinct forged session cookie, across the probe
+// and /v1/me. Store reads stay within the unknown-cookie burst, and the
+// refused /v1/me requests answer 429 with Retry-After, not 401.
+func TestAppListener_UnknownCookieSprayBounded(t *testing.T) {
+	counter := &lookupCounter{SessionStore: NewInMemorySessionStore(30 * time.Minute)}
+	frozen := time.Unix(1_700_000_000, 0)
+	const burst = 10
+	srv := lookupSprayServer(t, counter, ratelimit.New(60, burst, 1000, func() time.Time { return frozen }))
+
+	const n = 200
+	limited := 0
+	for i := 0; i < n; i++ {
+		path := "/v1/session"
+		if i%2 == 1 {
+			path = "/v1/me"
+		}
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s #%d: %v", path, i, err)
+		}
+		resp.Body.Close()
+		if path == "/v1/me" && resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Fatalf("/v1/me #%d: 429 without Retry-After", i)
+			}
+			limited++
+		}
+	}
+	if got := counter.reads.Load(); got > burst+2 {
+		t.Fatalf("store reads = %d for %d forged cookies from one client, want <= %d", got, n, burst+2)
+	}
+	if limited == 0 {
+		t.Fatal("no /v1/me request was refused 429 once the unknown-cookie budget was spent")
+	}
+}
+
+// TestAppListener_StoreErrorsKeepLookupSpent (R1-03, task-6 fix round 1):
+// only a hit gives the token back. A read that ended in any error —
+// a deadline, a cancelled request, a server-side cancel, a non-transient
+// store fault — still cost the store, so a spray against a degraded pool
+// stays inside the burst.
+func TestAppListener_StoreErrorsKeepLookupSpent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"deadline", fmt.Errorf("get session: %w", context.DeadlineExceeded)},
+		{"canceled", fmt.Errorf("get session: %w", context.Canceled)},
+		{"query canceled", &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}},
+		{"non-transient", errors.New("scan: column count mismatch")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &lookupCounter{SessionStore: failingSessionStore{err: tc.err}}
+			frozen := time.Unix(1_700_000_000, 0)
+			const burst = 10
+			srv := lookupSprayServer(t, counter, ratelimit.New(60, burst, 1000, func() time.Time { return frozen }))
+			for i := 0; i < 100; i++ {
+				path := "/v1/session"
+				if i%2 == 1 {
+					path = "/v1/me"
+				}
+				req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+				req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+				resp, err := srv.Client().Do(req)
+				if err != nil {
+					t.Fatalf("%s #%d: %v", path, i, err)
+				}
+				resp.Body.Close()
+			}
+			if got := counter.reads.Load(); got > burst {
+				t.Fatalf("store reads = %d for 100 forged cookies against a failing store, want <= %d", got, burst)
+			}
+		})
+	}
+}
+
+// TestAppListener_ValidSessionsBehindOneClientNotThrottled (Review Focus
+// 5): only misses spend the budget, so fifty signed-in users on one client
+// address, five requests each, are all served by a lookup burst of 10.
+func TestAppListener_ValidSessionsBehindOneClientNotThrottled(t *testing.T) {
+	counter := &lookupCounter{SessionStore: NewInMemorySessionStore(30 * time.Minute)}
+	frozen := time.Unix(1_700_000_000, 0)
+	a := sessionKeyTestAuth(counter)
+	a.WithSessionLookupLimiter(ratelimit.New(60, 10, 1000, func() time.Time { return frozen }), nil)
+	mux := http.NewServeMux()
+	MountSessionProbeRoute(mux, a, RateLimitWithKey(ratelimit.New(60, 20, 1000, nil), nil, nil, a.SessionRateLimitKey()))
+	MountMeRoutes(mux, a, NewMeHandler(testSessionDomain))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	for u := 0; u < 50; u++ {
+		sess := saveSession(t, counter, fmt.Sprintf("sess-nat-%d", u))
+		for j := 0; j < 5; j++ {
+			path := "/v1/me"
+			if j%2 == 0 {
+				path = "/v1/session"
+			}
+			req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+			req.AddCookie(sess)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("user %d %s: %v", u, path, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("user %d request %d %s = %d, want 200 — valid sessions must not spend the unknown-cookie budget", u, j, path, resp.StatusCode)
+			}
+		}
 	}
 }

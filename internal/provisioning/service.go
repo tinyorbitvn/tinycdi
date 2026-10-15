@@ -525,6 +525,7 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				// published revision of its template family; the move is
 				// decided and written in this same transaction.
 				var pinned bool
+				var want *ResourceVector
 				if s.templates != nil {
 					next, objName, skipped, builtAt, immovable, err := startTemplateTarget(ctx, s.templates, tenantID, rec, s.log)
 					if err != nil {
@@ -533,10 +534,11 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 					resolvedBuiltAt = builtAt
 					pinned = immovable
 					if next != nil {
-						rec.Template = *next
+						rec.Template = next.Info
+						want = &next.Vector
 						sigSpec = &IntentSpec{
 							TemplateName: objName,
-							ImageBuiltAt: next.ImageBuiltAt,
+							ImageBuiltAt: next.Info.ImageBuiltAt,
 						}
 					} else {
 						skipReason = skipped
@@ -554,8 +556,11 @@ func (s *Service) SignalWorkspace(ctx context.Context, tenantID, caller, ownerSc
 				// A stop releases the running-quota reservation once the
 				// runtime's absence is proven; the restart re-acquires it in
 				// this same transaction so a start intent can never exist
-				// without its reservation.
-				if err := reserveForStart(ctx, tx, tenantID, wsID); err != nil {
+				// without its reservation. A start that moved revision
+				// re-reserves the new revision's exact vector here, so quota
+				// never counts the old revision's resources for the new pod;
+				// a move that does not fit refuses the start.
+				if err := reserveForStart(ctx, tx, tenantID, wsID, want); err != nil {
 					return err
 				}
 				// The resolved session policy rides every start intent: the
@@ -752,17 +757,21 @@ func (s *Service) startSessionPolicy(ctx context.Context, tx store.Tx, tenantID 
 }
 
 // reserveForStart re-acquires the running-quota reservation a stopped
-// workspace gave up. Two shapes exist:
-//   - released row (Ephemeral): Release keeps the granted vector on the row,
-//     so re-holding reserves exactly what the original admission granted;
-//   - disk-only hold (stopped Retain, see convertToDiskOnly): the row is still
-//     held for its disk and the admitted compute sits in restart_*; it is
-//     added back to the same row and the stored vector cleared, so a second
-//     stop copies it again.
+// workspace gave up, sized for the revision the start runs on. want is the
+// moved-to revision's exact vector, or nil when the start keeps its
+// revision. Three shapes exist:
+//   - released row (Ephemeral): re-held through Reserve with want, or with
+//     the vector the original admission granted when want is nil;
+//   - disk-only hold (stopped Retain, see convertToDiskOnly): the admitted
+//     compute sits in restart_*; it (or want's compute) is added back to the
+//     same row and the stored vector cleared. The disk stays as held — it is
+//     the existing volume;
+//   - still-held row (the stop's absence proof has not landed yet): kept as
+//     is, or regrown to want under the tenant_quota lock.
 //
 // A workspace with no reservation row at all cannot have passed admission —
 // that is an internal inconsistency, not a grant of zero quota.
-func reserveForStart(ctx context.Context, tx store.Tx, tenantID, workspaceID string) error {
+func reserveForStart(ctx context.Context, tx store.Tx, tenantID, workspaceID string, want *ResourceVector) error {
 	var v ResourceVector
 	var state string
 	var rs, rc, rm *int64
@@ -777,11 +786,57 @@ func reserveForStart(ctx context.Context, tx store.Tx, tenantID, workspaceID str
 	if err != nil {
 		return fmt.Errorf("start: read reservation %w", err)
 	}
-	if state == "held" && rs != nil && rc != nil && rm != nil {
-		return reacquireCompute(ctx, tx, tenantID, workspaceID, ResourceVector{
-			RunningSlots: *rs, CPUMillis: *rc, MemoryBytes: *rm})
+	switch {
+	case state == "held" && rs != nil && rc != nil && rm != nil:
+		compute := ResourceVector{RunningSlots: *rs, CPUMillis: *rc, MemoryBytes: *rm}
+		if want != nil {
+			compute = ResourceVector{RunningSlots: want.RunningSlots, CPUMillis: want.CPUMillis, MemoryBytes: want.MemoryBytes}
+		}
+		return reacquireCompute(ctx, tx, tenantID, workspaceID, compute)
+	case state == "held" && want != nil && *want != v:
+		return regrowHeld(ctx, tx, tenantID, workspaceID, v, *want)
+	case state != "held" && want != nil:
+		return Reserve(ctx, tx, tenantID, workspaceID, *want)
 	}
 	return Reserve(ctx, tx, tenantID, workspaceID, v)
+}
+
+// regrowHeld replaces a still-held reservation's vector with want: a start
+// moved the workspace to a revision with other resources before the stop's
+// release landed. It serializes on the tenant_quota row like Reserve and
+// judges want against the tenant's usage without this reservation. The disk
+// never shrinks: the larger of the held and wanted bytes is kept.
+func regrowHeld(ctx context.Context, tx store.Tx, tenantID, workspaceID string, held, want ResourceVector) error {
+	var limit ResourceVector
+	err := tx.QueryRow(ctx, `
+		SELECT max_running_slots, max_cpu_millis, max_memory_bytes, max_disk_bytes
+		FROM tenant_quota WHERE tenant_id = $1 FOR UPDATE`, tenantID).
+		Scan(&limit.RunningSlots, &limit.CPUMillis, &limit.MemoryBytes, &limit.DiskBytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoQuota
+	}
+	if err != nil {
+		return fmt.Errorf("regrow: lock quota %w", err)
+	}
+	if held.DiskBytes > want.DiskBytes {
+		want.DiskBytes = held.DiskBytes
+	}
+	used, err := HeldUsage(ctx, tx, tenantID)
+	if err != nil {
+		return fmt.Errorf("regrow: usage %w", err)
+	}
+	base := used.minus(held)
+	if dim := want.Exceeds(base, limit); dim != "" {
+		return newQuotaExceeded(tenantID, dim, want, base, limit)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE quota_reservation
+		SET running_slots = $3, cpu_millis = $4, memory_bytes = $5, disk_bytes = $6
+		WHERE workspace_id = $1 AND tenant_id = $2 AND state = 'held'`,
+		workspaceID, tenantID, want.RunningSlots, want.CPUMillis, want.MemoryBytes, want.DiskBytes); err != nil {
+		return fmt.Errorf("regrow: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -224,7 +224,7 @@ func (f *fakeCatalog) Resolve(_ context.Context, tenantID, id string) (TemplateE
 			return TemplateEntry{
 				ID: id, Name: e.Name, Revision: e.Revision,
 				Runtime: e.Runtime, Experience: e.Experience,
-				CPUMillis: 2000, MemoryMiB: 4096, StorageGiB: 20,
+				CPUMillis: 2000, MemoryMiB: 4096, MemoryBytes: 4096 << 20, StorageGiB: 20, StorageBytes: 20 << 30,
 				IdleTimeoutSeconds: 1800, DisconnectGraceSeconds: 600, MaxRunningSeconds: 28800,
 				DataPolicyDefault: "Ephemeral", ClipboardPolicy: "Disabled", NetworkProfile: "InternetOnly",
 				PublishedAt: time.Now().UTC(),
@@ -852,5 +852,61 @@ func TestListWorkspaces_BadCursor(t *testing.T) {
 	r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces", "", nil)
 	if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
 		t.Fatalf("bad cursor key: status=%d code=%s, want 400 INVALID_REQUEST", r.StatusCode, e.Code)
+	}
+}
+
+// TestListWorkspaces_BadPhaseIs400 (R1-19): a phase filter outside the
+// WorkspacePhase enum — a NUL byte, an unknown value, the wrong case — and
+// a cursor whose key carries a NUL are client errors (400 INVALID_REQUEST),
+// never a 500 from Postgres. A valid phase still filters.
+func TestListWorkspaces_BadPhaseIs400(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, defaultCatalog(), defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+
+	nulCursor := NextCursor(SortSpec{Field: "name"}, "a\x00b", "ws_x")
+	for _, q := range []string{"phase=Running%00", "phase=Ready%00", "phase=Bogus", "phase=ready", "sort=name&cursor=" + nulCursor} {
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?"+q, "", nil)
+		if e := errBody(t, r); r.StatusCode != http.StatusBadRequest || e.Code != CodeInvalidRequest {
+			t.Fatalf("%s: status=%d code=%s, want 400 INVALID_REQUEST", q, r.StatusCode, e.Code)
+		}
+	}
+	for _, q := range []string{"phase=Ready", "phase=Stopped", "phase=Terminating"} {
+		r := doReq(t, env, sess, csrf, http.MethodGet, "/v1/workspaces?"+q, "", nil)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status=%d, want 200", q, r.StatusCode)
+		}
+	}
+}
+
+// exactCatalog serves one template whose memory and storage are not whole
+// MiB/GiB — the reservation must carry the exact bytes (R1-20).
+type exactCatalog struct{ fakeCatalog }
+
+func (c *exactCatalog) Resolve(ctx context.Context, tenantID, id string) (TemplateEntry, error) {
+	e, err := c.fakeCatalog.Resolve(ctx, tenantID, id)
+	if err != nil {
+		return e, err
+	}
+	e.MemoryMiB, e.MemoryBytes = 1536, 1536<<20+4096
+	e.StorageGiB, e.StorageBytes = 0, 512<<20
+	return e, nil
+}
+
+func TestCreateWorkspace_ReservesExactTemplateBytes(t *testing.T) {
+	be := newFakeBackend()
+	env := newWorkspaceEnv(t, be, &exactCatalog{*defaultCatalog()}, defaultTenants())
+	sess, csrf := login(t, env, "user-a")
+	r := doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces",
+		`{"name":"exact-bytes","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-exact-1000"})
+	r.Body.Close()
+	if r.StatusCode != http.StatusCreated || len(be.gotCreate) != 1 {
+		t.Fatalf("create status=%d creates=%d", r.StatusCode, len(be.gotCreate))
+	}
+	v := be.gotCreate[0].Vector
+	if v.MemoryBytes != 1536<<20+4096 || v.DiskBytes != 512<<20 {
+		t.Fatalf("reserved memory=%d disk=%d, want the exact template bytes %d / %d", v.MemoryBytes, v.DiskBytes, 1536<<20+4096, 512<<20)
 	}
 }

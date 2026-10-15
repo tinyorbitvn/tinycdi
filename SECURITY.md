@@ -5,9 +5,12 @@ or operator can expose one user's workspace, credentials or network
 position to another. This file sets out how to report a vulnerability and
 the hardening rules that contributors and operators must follow.
 
-> **Security review.** Each release's notes state its security-review
-> status. The mandatory rules and the blocking CI scanners in this file
-> are the bar; an independent external review remains an open item.
+> **Security review.** The maintainers completed an internal security
+> review of 1.0.0 before release ([report](docs/security/review-v1.0.md)).
+> It is **not an independent audit**. Each release's notes state its
+> security-review status. The mandatory rules and the blocking CI
+> scanners in this file are the bar; an independent external review
+> remains an open item.
 
 ## Supported versions
 
@@ -138,13 +141,18 @@ and an update to this file.
    *Enforced:* `TestRequiredGroups*`, `TestNewAuthenticatorRejectsEmptyRequiredGroup`,
    `TestGroupListValidation`, `TestHardeningOIDCRequiredGroups`.
 5. Sessions use opaque IDs of at least 256 bits, rotated at login.
-   Cookies are `__Host-`, `Secure`, `HttpOnly` and have no `Domain`.
+   A session cookie the browser already carries is deleted at login
+   unless it is a live session of the same principal (issuer, subject,
+   tenant); that one is kept and re-issued (no second session), so a login navigation cannot end the
+   user's running desktop. Cookies are `__Host-`, `Secure`, `HttpOnly`
+   and have no `Domain`.
    Idle and absolute expiry are enforced server-side and bound to the
    session epoch. The database stores only a hash of the session ID. The
    CSRF token is derived —
    `HMAC-SHA256(key = raw session ID, "tcdi-csrf-v2")` — not random and
    never stored.
    *Enforced:* `TestSessionFixationPrevented`,
+   `TestLogin_SamePrincipalKeepsLiveSession`,
    `TestSessionIdleAndAbsoluteExpiry`, `TestOIDCLoginFlowSucceeds`,
    `TestSessionKeyIsDigest`, `TestCSRF_OtherSessionsTokenRejected`,
    `TestPGSessionStore` (integration).
@@ -361,6 +369,11 @@ and an update to this file.
     - `runAsNonRoot`, `allowPrivilegeEscalation: false`, drop `ALL`;
     - seccomp `RuntimeDefault` or a validated `Localhost` profile, never
       `Unconfined`;
+      - the browser seccomp profile `localhost/profiles/chromium-userns.json`
+        lets the workspace user create user, PID and network namespaces
+        (the Chromium sandbox needs them), so it is admitted only on a pod
+        with `hostUsers: false`: the operator rejects the template
+        (`TemplateRejected`) and the chart fails the render otherwise;
     - `readOnlyRootFilesystem` on platform pods;
     - `automountServiceAccountToken: false` unless the pod calls the
       apiserver;
@@ -378,7 +391,10 @@ and an update to this file.
     with requests/limits + `readOnlyRootFilesystem`, the desktop's ro
     rootfs, and the read-only browser-shim/managed-policy mounts),
     `TestKasmAdapterInitAdmittedUnderQuota` (envtest: the kasm pod is
-    admitted in a ResourceQuota-governed namespace).
+    admitted in a ResourceQuota-governed namespace),
+    `TestEnsureUsernsProfileRequiresHostUsersFalse`,
+    `TestSeededUsernsProfileRequiresHostUsersFalse` (the userns browser
+    profile needs `hostUsers: false`).
     `TestHardeningInstallerNamespaceGuard` (rejects the release, managed,
     `default` and `kube-*` namespaces), `TestHardeningManagedEnforcePrivilegedGated`,
     `TestHardeningDevGateBypasses` (extraArgs, capability lists, Unconfined,
@@ -395,7 +411,8 @@ and an update to this file.
     `dev.enabled`).
     *Not yet enforced:*
     - seccomp and read-only-root assertions on every platform pod;
-    - `readOnlyRootFilesystem` and `hostUsers: false` on runtime pods;
+    - `readOnlyRootFilesystem` on runtime pods, and `hostUsers: false`
+      on runtime pods without the userns browser profile;
     - `localhost/<name>` profile names, which are checked only by
       pattern (allowlist `tinycdi-browser`);
     - the installer verifier still shares `hostPID`.
@@ -407,9 +424,11 @@ and an update to this file.
     - runtime egress = DNS + the template's profile;
     - `InternetOnly` always excludes RFC 1918, 100.64.0.0/10, loopback,
       link-local/metadata, multicast/reserved and the cluster CIDRs;
-    - `ClusterOnly` is restricted by default: egress reaches pods in the
-      managed namespaces (labelled `workspaces.cdi.tinyorbit.vn/tenant`)
-      and no pod outside them. The opt-in
+    - `ClusterOnly` is restricted by default to the workspace's own
+      tenant: egress reaches pods in the namespaces labelled with its
+      tenant (`workspaces.cdi.tinyorbit.vn/tenant: <tenant>`) and no pod
+      in another tenant's namespace or outside the managed namespaces.
+      The opt-in
       `runtime.networkProfiles.clusterOnly.*` values
       (`--runtime-clusteronly-egress`) narrow the rule to
       selector-matched namespaces/pods and/or ports; a ports-only
@@ -536,7 +555,14 @@ and an update to this file.
      retained-disk attach/purge and quota/per-user limit admin —
      misconfiguration is a privilege grant, so keep the list small and
      review the IdP group membership; the match is the same exact,
-     no-full-path form as the login gate and the list must not be empty;
+     no-full-path form as the login gate and the list must not be empty.
+     The role follows the `groups` stored with the portal session at
+     sign-in: removing someone from an admin group at the IdP takes effect
+     at their next sign-in, up to the absolute timeout (12 h by default).
+     To end it at once, another tenant admin signs them out with
+     `POST /v1/admin/tenants/{tenant}/users/{ownerRef}/sessions:revoke-all`
+     (per-user sign-out), which ends their portal sessions, leases and
+     launch tickets in that tenant;
    - **gate who may log in** with `oidc.requiredGroups` (e.g.
      `[platform-admins]`). Every account that passes gets a desktop with
      Internet egress inside your network. The match is verbatim, so emit
@@ -665,5 +691,7 @@ and an update to this file.
     - restrict access to API and session-listener logs (the backend
       pods), which contain OIDC subjects and lease IDs;
     - alert on spikes of denied `launch.redeem` events.
-11. **Clipboard and other in-desktop restrictions are UX defaults, not
-    DLP.** The workspace user controls their own runtime.
+11. **Clipboard, file-transfer and other in-desktop restrictions are UX
+    defaults, not DLP.** The workspace user controls their own runtime:
+    by replacing the in-pod `:8443` server they can move data over the
+    desktop leg with no transfer grant, cap or audit row.

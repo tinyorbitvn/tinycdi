@@ -280,7 +280,9 @@ func TestStreamCap_SlotRelease(t *testing.T) {
 				old := openStream(t, srv, testHost, cookie)
 				defer old.Body.Close()
 				next := openStream(t, srv, testHost, cookie)
-				defer next.Body.Close()
+				// The survivor must outlive run: the caller's settle check
+				// expects its slot, so close it only at test cleanup.
+				t.Cleanup(func() { next.Body.Close() })
 				// The fenced conn dies: a read on the old stream must
 				// error, and its slot unwinds.
 				if _, err := old.Body.Read(make([]byte, 1)); err == nil {

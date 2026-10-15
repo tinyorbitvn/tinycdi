@@ -67,7 +67,7 @@ TRAINC="$(job_block "$TRAIN" cleanup)"
 
 grep -qF 'needs: [base, build, scan]' <<< "$IMGC" \
   || { echo "FAIL: images.yml cleanup needs [base, build, scan]"; fails=1; }
-grep -qF 'needs: [prepare, base, images, scan, chart, binaries]' <<< "$RELC" \
+grep -qF 'needs: [prepare, base, images, scan, kasm-catalog, chart, binaries]' <<< "$RELC" \
   || { echo "FAIL: release.yml cleanup needs all pre-publish legs"; fails=1; }
 grep -qF 'needs: [base, profile, scan]' <<< "$TRAINC" \
   || { echo "FAIL: runtime-images.yml cleanup needs [base, profile, scan]"; fails=1; }

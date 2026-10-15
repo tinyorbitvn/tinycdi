@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,6 +175,10 @@ func FuzzHostClassify(f *testing.F) {
 	} {
 		f.Add(c[0], c[1])
 	}
+	// Each input gets its own client address so the per-client control
+	// failure budget (R1-26) cannot turn a later input's 401 into a 429;
+	// the budget itself is pinned by its own tests.
+	var client atomic.Uint32
 	f.Fuzz(func(t *testing.T, host, path string) {
 		// Wire-realistic bounds (net/http caps the whole header block at
 		// 1 MiB; real Host headers and request paths are far smaller);
@@ -185,6 +190,9 @@ func FuzzHostClassify(f *testing.F) {
 		if !ok {
 			return
 		}
+		n := client.Add(1)
+		addr := net.IPv4(10, byte(n>>16), byte(n>>8), byte(n)).String() + ":51000"
+		req.RemoteAddr = addr
 		rec := httptest.NewRecorder()
 		g.ServeHTTP(rec, req)
 		code := rec.Code
@@ -233,6 +241,7 @@ func FuzzHostClassify(f *testing.F) {
 		// only state a GET can mutate is a session map — nothing can
 		// mint a session without a launch POST.
 		req2, _ := fuzzRequest(http.MethodGet, host, path, "")
+		req2.RemoteAddr = addr
 		rec2 := httptest.NewRecorder()
 		g.ServeHTTP(rec2, req2)
 		if rec2.Code != code {

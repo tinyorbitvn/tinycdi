@@ -216,7 +216,11 @@ command_line:
 $(tcdi_clipboard_dlp)
 runtime_configuration:
   allow_client_to_override_kasm_server_settings: false
-  allow_override_standard_vnc_server_settings: false
+  # true + empty list => the launcher passes -AllowOverride "": no VNC
+  # parameter (SendCutText/AcceptCutText/SendPrimary/SetPrimary included)
+  # can be changed at runtime by an X client in the session.
+  allow_override_standard_vnc_server_settings: true
+  allow_override_list: []
 user_session:
   new_session_disconnects_existing_exclusive_session: true
   concurrent_connections_prompt: false

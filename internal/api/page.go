@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -88,12 +89,20 @@ func ParsePage(r *http.Request, allowed []string, defaultSort string) (PageReque
 	if v := q.Get("cursor"); v != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(v)
 		var c Cursor
-		if err != nil || json.Unmarshal(raw, &c) != nil || c.ID == "" || c.Sort != s.String() {
+		if err != nil || json.Unmarshal(raw, &c) != nil || c.ID == "" || c.Sort != s.String() ||
+			!cursorTextOK(c.Key) || !cursorTextOK(c.ID) {
 			return p, NewError(CodeInvalidRequest, "bad cursor")
 		}
 		p.After = &c
 	}
 	return p, nil
+}
+
+// cursorTextOK reports whether a decoded cursor field can reach Postgres as
+// text: valid UTF-8 without a NUL byte. Anything else would fail in the
+// database (SQLSTATE 22021) and surface as a 500; it is a bad cursor.
+func cursorTextOK(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
 // pageInMemory serves one keyset page of a list held in memory: it orders

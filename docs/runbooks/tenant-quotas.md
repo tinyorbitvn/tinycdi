@@ -48,6 +48,25 @@ upserts on start. Verify in the leader's log:
 kubectl -n <release-ns> logs -l app.kubernetes.io/name=backend --tail=-1 | grep "tenant quotas applied"
 ```
 
+### Tenant-admin quotas under a ceiling
+
+```yaml
+managedNamespaces:
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+    quotaCeiling:
+      runningWorkspaces: 20
+      cpu: "32"
+      memory: 128Gi
+      storage: 400Gi
+```
+
+The tenant's admins set the quota on the portal's Quota page, up to these
+amounts. A write above the ceiling answers `409 QUOTA_ABOVE_CEILING` and
+names the field. A tenant with neither `quota` nor `quotaCeiling` cannot
+have its quota set through the API at all. The backend refuses to start
+when a tenant is in both `-tenant-quotas` and `-tenant-quota-ceilings`.
+
 ## Reading quota state
 
 - `GET /v1/quota` returns the caller's tenant snapshot: `configured`
@@ -133,7 +152,8 @@ the `X-CSRF-Token` header and is audited as `admin.session.revoke`.
 ## Operations checklist
 
 - **New tenant onboarded:** add the `managedNamespaces[]` entry with a
-  `quota` block — without it every create fails `QUOTA_NOT_CONFIGURED`.
+  `quota` block, or a `quotaCeiling` block to let the tenant's admins size
+  it — without either every create fails `QUOTA_NOT_CONFIGURED`.
   Install/upgrade NOTES print a warning for every entry missing `quota`.
 - **Tenant reports `QUOTA_EXHAUSTED`:** check `GET /v1/quota` usage vs
   limits, and whether refusals carry `release_pending` (transient — no

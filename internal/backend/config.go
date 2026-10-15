@@ -70,6 +70,22 @@ func (g *groupList) Set(v string) error {
 	return nil
 }
 
+// minControlTokenBytes is the shortest control bearer the backend accepts
+// (R1-26). On the session listener's control hosts the bearer is the only
+// gate — the host class is a Host-header routing check, not a network
+// boundary — so it must resist guessing on its own.
+const minControlTokenBytes = 32
+
+// checkControlToken refuses a configured control token shorter than
+// minControlTokenBytes. An empty token is allowed: the control surface is
+// then closed (fail closed).
+func checkControlToken(tok string) error {
+	if tok != "" && len(tok) < minControlTokenBytes {
+		return fmt.Errorf("control token is %d bytes; it must be at least %d (for example: openssl rand -hex 32)", len(tok), minControlTokenBytes)
+	}
+	return nil
+}
+
 // controlTokenUnsetWarning is logged at startup when no control token is
 // configured (SEC-I2): the /v1/control surface fails CLOSED in that state —
 // it is disabled, not unauthenticated.
@@ -115,6 +131,7 @@ type Config struct {
 	DBSSLMode            string // resolved sslmode label, for logging
 	TenantNamespaces     string
 	TenantQuotas         string // JSON; see provisioning.ParseTenantQuotas
+	TenantQuotaCeilings  string // JSON, same shape; bounds tenant-admin quota writes
 	SessionIdle          time.Duration
 	Kubeconfig           string
 	ExpiryInterval       time.Duration
@@ -162,11 +179,11 @@ type Config struct {
 	// the close-first order.
 	DrainPropagationDelay time.Duration
 	LaunchRate            int // per-client launches/min on /v1/launch; 0 disables
-	// SessionLookupRate is the per-client bound on session-directory
-	// lookups for unseen cookies — the only pre-auth request that spends
-	// Postgres reads. LOCAL per replica (its purpose is keeping the
-	// cookie spray off the store, so there is no shared window); 0
-	// disables.
+	// SessionLookupRate is the per-client bound on session-store lookups
+	// for cookie values that do not resolve — on the app listener (only
+	// misses spend) and for cookies the session listener has never seen.
+	// LOCAL per replica (its purpose is keeping the cookie spray off the
+	// store, so there is no shared window); 0 disables.
 	SessionLookupRate int
 	// SessionStreamCap is the per-workspace bound on live upstream
 	// connections — websocket streams and plain proxied requests alike —
@@ -182,9 +199,14 @@ type Config struct {
 	InternalTLSKey   string
 	InternalClientCA string
 	OperatorCN       string
+	// InternalGatewayCNs are the client-certificate CNs holding the
+	// gateway role on the internal listener (opt-in; empty = none — the
+	// chart's gateway is in process). Never the operator CN.
+	InternalGatewayCNs stringList
 	// InternalRevokedList is the ADR 0008 per-certificate revocation
 	// list for the internal mTLS listener; empty disables the feature —
-	// the handshake path is then byte-identical to an unlisted build.
+	// with the flag unset no revocation hook is installed; the client-CA
+	// conn tracking (installClientConnTracking) still runs.
 	InternalRevokedList string
 
 	// Metrics listener (scrape-only, plain HTTP).
@@ -291,6 +313,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TenantNamespaces, "tenant-namespaces", envOr(getenv, "TCDI_TENANT_NAMESPACES", ""), "tenant=namespace pairs, comma-separated")
 	fs.StringVar(&c.TenantQuotas, "tenant-quotas", envOr(getenv, "TCDI_TENANT_QUOTAS", ""),
 		"declared tenant quotas as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; the singleton leader upserts exactly the listed tenants at startup, unlisted tenants are untouched (env TCDI_TENANT_QUOTAS)")
+	fs.StringVar(&c.TenantQuotaCeilings, "tenant-quota-ceilings", envOr(getenv, "TCDI_TENANT_QUOTA_CEILINGS", ""),
+		"operator ceilings on tenant-admin quota writes as JSON [{tenant,runningWorkspaces,cpu,memory,storage}]; a tenant-admin quota write above its tenant's ceiling, or for a tenant without one, is refused (env TCDI_TENANT_QUOTA_CEILINGS)")
 	fs.DurationVar(&c.SessionIdle, "session-idle", envDur(getenv, "TCDI_SESSION_IDLE", 30*time.Minute), "session idle timeout")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", envOr(getenv, "KUBECONFIG", ""), "kubeconfig path (default: in-cluster)")
 	fs.DurationVar(&c.ExpiryInterval, "expiry-interval", envDur(getenv, "TCDI_EXPIRY_INTERVAL", 30*time.Second),
@@ -333,7 +357,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.IntVar(&c.LaunchRate, "launch-rate", envInt(getenv, "TCDI_LAUNCH_RATE", 120),
 		"per-client launches/minute on /v1/launch (burst 40), aggregate across replicas via the shared Postgres window (per-replica local limiter in split mode); over the limit answers 429 with Retry-After — 0 disables (env TCDI_LAUNCH_RATE)")
 	fs.IntVar(&c.SessionLookupRate, "session-lookup-rate", envInt(getenv, "TCDI_SESSION_LOOKUP_RATE", gateway.SessionLookupRate),
-		"per-client requests/minute carrying a session cookie this replica has never seen (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
+		"per-client requests/minute carrying a session cookie that does not resolve to a live session — on the app listener and for cookies this replica has never seen on the session listener (burst "+strconv.Itoa(gateway.SessionLookupBurst)+"), enforced by a LOCAL per-replica bucket so a random-cookie spray cannot multiply Postgres reads; over the limit answers 429 with Retry-After — 0 disables (env TCDI_SESSION_LOOKUP_RATE)")
 	fs.IntVar(&c.SessionStreamCap, "session-stream-cap", envInt(getenv, "TCDI_SESSION_STREAM_CAP", gateway.DefaultUpstreamStreamCap),
 		"per-workspace bound on live upstream connections through THIS replica — websocket streams and plain proxied requests alike; over the cap the session origin answers 429 too_many_streams + Retry-After: 1. >= 1 — no unlimited mode; pick a large value when the runtime carries no fd bound (env TCDI_SESSION_STREAM_CAP)")
 	fs.DurationVar(&c.UnattachedSessionTTL, "unattached-session-ttl", envDur(getenv, "TCDI_UNATTACHED_SESSION_TTL", gateway.UnattachedSessionTTL),
@@ -347,6 +371,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.InternalClientCA, "internal-client-ca", envOr(getenv, "TCDI_INTERNAL_CLIENT_CA", ""), "CA bundle verifying internal client certs")
 	fs.StringVar(&c.OperatorCN, "operator-cn", envOr(getenv, "TCDI_OPERATOR_CN", httpapi.DefaultOperatorCN),
 		"client-certificate CN of the operator identity on the internal workspace routes")
+	fs.Var(&c.InternalGatewayCNs, "internal-gateway-cns",
+		"client-certificate CNs holding the gateway role on the internal listener (repeatable or comma-separated; empty: no gateway identity)")
 	fs.StringVar(&c.InternalRevokedList, "internal-revoked-list", envOr(getenv, "TCDI_INTERNAL_REVOKED_LIST", ""),
 		"per-certificate revocation list for the internal mTLS listener (ADR 0008: \"<serial-hex> <issuer-dn>\" per line; empty disables)")
 
@@ -408,6 +434,11 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 			_ = c.LoginKeyFiles.Set(v)
 		}
 	}
+	if !set["internal-gateway-cns"] {
+		if v := envOr(getenv, "TCDI_INTERNAL_GATEWAY_CNS", ""); v != "" {
+			_ = c.InternalGatewayCNs.Set(v)
+		}
+	}
 
 	// Env-only secrets.
 	if getenv != nil {
@@ -422,14 +453,19 @@ func (c *Config) validate() error {
 	if c.Listen == "" && c.SessionListen == "" && c.InternalListen == "" && c.MetricsListen == "" {
 		return errors.New("no listeners enabled: at least one of -listen, -session-listen, -internal-listen, -metrics-listen must be set")
 	}
-	if _, err := provisioning.ParseTenantQuotas(c.TenantQuotas); err != nil {
-		return fmt.Errorf("-tenant-quotas: %w", err)
+	if err := validateTenantQuotaFlags(c.TenantQuotas, c.TenantQuotaCeilings); err != nil {
+		return err
 	}
 	if len(c.TenantAdminGroups) == 0 {
 		// Unreachable through ParseFlags (the default lands first and
 		// groupList rejects empty entries) — kept so a future path can
 		// never silence every admin gate at once.
 		return errors.New("-tenant-admin-groups must name at least one group")
+	}
+	for _, cn := range c.InternalGatewayCNs {
+		if cn == c.OperatorCN {
+			return fmt.Errorf("-internal-gateway-cns must not name the operator CN %q", cn)
+		}
 	}
 	if c.SessionCookieMode != "lax" && c.SessionCookieMode != "partitioned" {
 		return fmt.Errorf("-session-cookie-mode must be lax or partitioned, got %q", c.SessionCookieMode)
@@ -570,6 +606,30 @@ func (c *Config) validate() error {
 		u, err := url.Parse(o)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("bad portal-origin %q (want scheme://host[:port])", o)
+		}
+	}
+	return nil
+}
+
+// validateTenantQuotaFlags parses -tenant-quotas and -tenant-quota-ceilings.
+// A tenant may appear in only one: a declared quota is read-only, so a
+// ceiling on it would never apply.
+func validateTenantQuotaFlags(quotas, ceilings string) error {
+	q, err := provisioning.ParseTenantQuotas(quotas)
+	if err != nil {
+		return fmt.Errorf("-tenant-quotas: %w", err)
+	}
+	c, err := provisioning.ParseTenantQuotas(ceilings)
+	if err != nil {
+		return fmt.Errorf("-tenant-quota-ceilings: %w", err)
+	}
+	declared := make(map[string]bool, len(q))
+	for _, e := range q {
+		declared[e.TenantID] = true
+	}
+	for _, e := range c {
+		if declared[e.TenantID] {
+			return fmt.Errorf("-tenant-quota-ceilings: tenant %q also has a quota in -tenant-quotas, which is read-only; declare one or the other", e.TenantID)
 		}
 	}
 	return nil

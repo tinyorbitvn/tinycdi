@@ -10,6 +10,7 @@ package provisioning_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
@@ -185,8 +186,8 @@ func TestRetainStop_StartedBeforeConversionKeepsCompute(t *testing.T) {
 	e := newRetainEnv(t, "Retain")
 	e.signal(provisioning.IntentStop)
 	e.signal(provisioning.IntentStart)
-	if err := e.rec.SettleQuota(context.Background(), retainTenant, provisioning.PlatformID(e.ws)); err != nil {
-		t.Fatalf("SettleQuota on a running workspace: %v", err)
+	if err := e.rec.SettleQuota(context.Background(), retainTenant, provisioning.PlatformID(e.ws)); !errors.Is(err, provisioning.ErrRuntimeNotProvenGone) {
+		t.Fatalf("SettleQuota on a running workspace = %v, want ErrRuntimeNotProvenGone (ErrSettleRaced)", err)
 	}
 	e.want("running again", quotaVec)
 }

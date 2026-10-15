@@ -32,6 +32,8 @@ build_store() {
     mkdir -p "$dl/image-ref-$img" "$dl/sbom-$img"
     echo "ghcr.io/tinyorbitvn/tinycdi-$img@$(digest_for "$img")" \
       > "$dl/image-ref-$img/$img.ref"
+    # R1-09: each build job records its build second next to the ref.
+    echo "2026-10-20T03:10:00Z" > "$dl/image-ref-$img/$img.built-at"
     echo "{\"spdxVersion\":\"SPDX-2.3\",\"name\":\"$img\"}" \
       > "$dl/sbom-$img/sbom-$img.spdx.json"
   done
@@ -49,15 +51,16 @@ build_store() {
     echo "images:"
     for img in backend browser frontend operator; do
       printf '  %s:\n    repository: tinyorbitvn/tinycdi-%s\n    digest: ""\n' "$img" "$img"
+      if [ "$img" = browser ]; then printf '    builtAt: ""\n'; fi
     done
-    printf '  linuxBase:\n    repository: tinyorbitvn/tinycdi-linux-base\n    digest: ""\n'
-    printf '  linuxDesktop:\n    repository: tinyorbitvn/tinycdi-linux-desktop\n    digest: ""\n'
+    printf '  linuxBase:\n    repository: tinyorbitvn/tinycdi-linux-base\n    digest: ""\n    builtAt: ""\n'
+    printf '  linuxDesktop:\n    repository: tinyorbitvn/tinycdi-linux-desktop\n    digest: ""\n    builtAt: ""\n'
     printf 'kasmAdapter:\n  image:\n    repository: tinyorbitvn/tinycdi-kasm-adapter\n    digest: ""\n'
   } > "$cd_/tinycdi/values.yaml"
   local src_refs="$WORK/src-refs"
   mkdir -p "$src_refs"
   for img in "${IMGS[@]}"; do
-    cp "$dl/image-ref-$img/$img.ref" "$src_refs/$img.ref"
+    cp "$dl/image-ref-$img/$img.ref" "$dl/image-ref-$img/$img.built-at" "$src_refs/"
   done
   "$STAMP" "$cd_/tinycdi/values.yaml" "$src_refs" >/dev/null
   mkdir -p "$dl/release-chart"
@@ -154,6 +157,20 @@ mut_stale_bin()      { local c=api; echo old > "$1/release-assets/tinycdi-$c-$VE
 # a removed image (api/gateway/portal) must not slip into the publish set.
 mut_removed_image()  { local i=portal; mkdir -p "$1/image-ref-$i"; echo "ghcr.io/tinyorbitvn/tinycdi-$i@$(digest_for "$i")" > "$1/image-ref-$i/$i.ref"; }
 mut_stowaway_bundle(){ echo evil > "$1/release-chart/extra.tgz"; }
+# R1-09: the build time rides with the ref and the chart's runtime
+# builtAt must equal it — never empty, never the publish clock.
+mut_no_built_at()   { rm -f "$1/image-ref-browser/browser.built-at"; }
+mut_bad_built_at()  { echo "yesterday" > "$1/image-ref-browser/browser.built-at"; }
+mut_builtat_drift() { echo "2026-10-21T00:00:00Z" > "$1/image-ref-linux-desktop/linux-desktop.built-at"; }
+mut_unstamped_builtat() {
+  # a chart whose runtime builtAt fields were left empty
+  local cd_="$WORK/chart-unstamped"
+  rm -rf "$cd_"; mkdir -p "$cd_"
+  tar -xzf "$1/release-chart/tinycdi-$CHART_VERSION.tgz" -C "$cd_"
+  sed -i 's/^    builtAt: .*/    builtAt: ""/' "$cd_/tinycdi/values.yaml"
+  rm -f "$1/release-chart/tinycdi-$CHART_VERSION.tgz"
+  tar -czf "$1/release-chart/tinycdi-$CHART_VERSION.tgz" -C "$cd_" tinycdi
+}
 
 expect_ok
 expect_fail "forged extra artifact folder" "artifact folder set" mut_extra_artifact
@@ -169,6 +186,10 @@ expect_fail "missing release binary" "missing" mut_missing_bin
 expect_fail "stale removed-component binary" "unexpected release-assets file" mut_stale_bin
 expect_fail "removed image artifact" "artifact folder set" mut_removed_image
 expect_fail "stowaway in chart artifact" "release-chart" mut_stowaway_bundle
+expect_fail "missing build time"           "image-ref-browser" mut_no_built_at
+expect_fail "malformed build time"         "build time"        mut_bad_built_at
+expect_fail "chart builtAt != build time"  "builtAt"           mut_builtat_drift
+expect_fail "runtime builtAt left empty"   "builtAt"           mut_unstamped_builtat
 
 # KASMVNC_SRC=false must reject the bundle and accept a store without it.
 rm -rf "$WORK/dl"; build_store "$WORK/dl"

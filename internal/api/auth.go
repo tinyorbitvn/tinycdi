@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
 	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 )
 
@@ -59,10 +60,12 @@ type AuthConfig struct {
 	// CSRFHeader is the header the CSRF middleware reads.
 	// Defaults to "X-CSRF-Token".
 	CSRFHeader string
-	// SameSite for the session cookie. Defaults to SameSite=Lax: the portal
-	// is a separate origin from the API and OIDC top-level GET navigations
-	// must still carry the session; cross-site POSTs remain blocked and the
-	// synchronizer CSRF token independently guards state changes.
+	// SameSite for the session cookie. Defaults to SameSite=Lax: OIDC
+	// top-level GET navigations must carry the session, and the portal and
+	// session hosts are same-site in the default topology. Lax cookies ride
+	// top-level GETs, so CSRF rests on the synchronizer token (RequireCSRF)
+	// and the Origin / Sec-Fetch-Site gate (RequireTrustedOrigin), not on
+	// SameSite.
 	SameSite http.SameSite
 	// SecureCookies controls the Secure flag. Defaults to true; tests may
 	// set it false for httptest servers, release builds must not.
@@ -159,8 +162,10 @@ func (c *AuthConfig) withDefaults() {
 }
 
 // Session is a server-side authenticated session. The browser only ever holds
-// the opaque session ID in a host-only cookie; ID/access tokens are never sent
-// to the client, never persisted here, and never logged.
+// the opaque session ID in a host-only cookie. The access token is never
+// kept. The ID token is kept sealed at rest (IDToken) and reaches the
+// browser only as id_token_hint in the end-session URL at sign-out; it is
+// never logged.
 //
 // Credential forms (SEC-27): Session.ID is the raw session ID while the
 // session is in flight, but stores persist it only as a SHA-256 digest.
@@ -171,8 +176,9 @@ type Session struct {
 	Principal Principal
 	// IDToken is the raw OIDC id_token retained so logout can send
 	// id_token_hint (the provider then skips its own confirmation page).
-	// It is only ever persisted AEAD-sealed (store); it is never written to
-	// a log line or an API response (V3.24).
+	// It is persisted only AEAD-sealed (store), never logged, and leaves
+	// the server only inside the end-session URL that POST /v1/logout and
+	// POST /v1/me/sessions:revoke-all return.
 	IDToken   string
 	CreatedAt time.Time
 	// LastSeenAt drives the sliding idle timeout; refreshed by store reads.
@@ -327,6 +333,13 @@ type Authenticator struct {
 	// nil leaves that endpoint answering 503 — logout is unaffected.
 	principalRevoker PrincipalRevoker
 	auditSink        observability.AuditSink
+	// lookups bounds session-store reads per client for cookie values that
+	// turn out unknown (TM-06); trusted feeds ratelimit.ClientKey.
+	lookups SessionLookupLimiter
+	trusted []netip.Prefix
+	// live exempts cookies this replica recently confirmed live from the
+	// lookups budget (R1-03); it never replaces the store read.
+	live *liveSessionCache
 	// endSessionEndpoint is the provider's discovered end_session_endpoint,
 	// kept only when EndSession is on and the value is a safe absolute URL.
 	// It is the only source of the sign-out navigation target.
@@ -398,6 +411,8 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, sessions SessionStore
 			Scopes:       cfg.Scopes,
 		},
 		sessions:           sessions,
+		lookups:            ratelimit.New(SessionLookupRate, SessionLookupBurst, sessionLookupMaxKeys, nil),
+		live:               newLiveSessionCache(sessionLookupMaxKeys),
 		endSessionEndpoint: endSession,
 		log:                log,
 		now:                time.Now,
@@ -495,8 +510,9 @@ func (a *Authenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
 // binds the callback's state parameter to the sealed state, exchanges the
 // code with the sealed PKCE verifier, verifies the ID token (issuer,
 // audience, expiry, signature via go-oidc) and its nonce, enforces tenant
-// membership, deletes any pre-existing session cookie (fixation), and issues
-// a fresh rotated session ID.
+// membership, deletes a pre-existing session cookie unless it is a live
+// session of the same principal (fixation), and issues a fresh rotated
+// session ID.
 func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -598,10 +614,31 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Session fixation: if the browser already carries a session cookie,
-	// destroy that session. The new session always gets a fresh random ID.
+	// Session fixation: a session cookie the browser already carries is
+	// destroyed unless it is a live session of the principal that just
+	// signed in. A planted, foreign, expired or unknown session dies here.
+	// The same user's own live session is re-issued as is (same ID, its
+	// own absolute deadline) rather than replaced: a login navigation a
+	// cross-site page triggers (Lax cookies ride top-level GETs, and a live
+	// IdP session answers without a prompt) cannot end their running
+	// desktop, and no second session exists whose leases and tickets
+	// sign-out would miss (TM-07). A new session gets a fresh random ID.
 	if old, err := r.Cookie(a.cfg.SessionCookieName); err == nil && old.Value != "" {
+		prev, err := a.sessions.Peek(ctx, old.Value)
+		if err == nil && samePrincipal(prev.Principal, principal) {
+			if ttl := int(prev.ExpiresAt.Sub(a.now()).Seconds()); ttl > 0 {
+				http.SetCookie(w, a.sessionCookie(old.Value, ttl))
+				a.log.Info("oidc login succeeded",
+					"request_id", RequestIDFromContext(ctx),
+					"actor", observability.ActorRef(principal.Issuer, principal.Subject),
+					"tenant", principal.TenantID,
+				)
+				http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
+				return
+			}
+		}
 		_ = a.sessions.Delete(ctx, old.Value)
+		a.forgetLiveSession(old.Value)
 	}
 
 	sess := &Session{
@@ -638,6 +675,13 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		"tenant", principal.TenantID,
 	)
 	http.Redirect(w, r, a.cfg.PostLoginRedirect, http.StatusFound)
+}
+
+// samePrincipal reports whether two principals are the same account in the
+// same tenant: the verified issuer, subject and tenant claim all match.
+// Groups and display claims may differ between logins and do not count.
+func samePrincipal(a, b Principal) bool {
+	return a.Issuer == b.Issuer && a.Subject == b.Subject && a.TenantID == b.TenantID
 }
 
 // loginOutcome maps a callback response status to the bounded
@@ -722,6 +766,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, CodeUnavailable, "could not sign out; retry")
 			return
 		}
+		a.forgetLiveSession(c.Value)
 		a.revokeSessionMaterial(r, c.Value)
 	}
 	http.SetCookie(w, a.sessionCookie("", -1))
@@ -847,10 +892,10 @@ func isLoopbackHost(host string) bool {
 	return err == nil && ip.Unmap().IsLoopback()
 }
 
-// sessionCookie builds the host-only session cookie: no Domain attribute
-// (browser scopes it to the API host exactly — required because portal and
-// session origins live on separate registrable domains), Secure, HttpOnly,
-// SameSite per config (default Lax).
+// sessionCookie builds the host-only session cookie: the __Host- prefix
+// and no Domain attribute scope it to the portal host exactly, so a
+// session host on the same site can never set or read it. Secure,
+// HttpOnly, SameSite per config (default Lax).
 func (a *Authenticator) sessionCookie(id string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     a.cfg.SessionCookieName,

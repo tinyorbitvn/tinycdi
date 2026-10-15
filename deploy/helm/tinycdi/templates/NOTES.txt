@@ -38,7 +38,10 @@ Tenant quotas: WARNING — no managedNamespaces[].quota for tenant(s)
   {{ join ", " $unquoted }}
   Workspace creates for them are refused with QUOTA_NOT_CONFIGURED (409)
   unless a tenant_quota row already exists. Set quota: {runningWorkspaces,
-  cpu, memory, storage} on each entry — see install.md "Tenant quotas".
+  cpu, memory, storage} on each entry, or quotaCeiling (same keys) to let
+  the tenant's admins set a quota up to it — see install.md "Tenant
+  quotas". Also consider managedNamespaces[].namespaceQuota, which bounds
+  the namespace in the apiserver independently of the platform quota.
 {{- end }}
 
 {{- $placement := (default dict (default dict .Values.runtime).placement) }}
@@ -100,6 +103,13 @@ Node profiles (mode: {{ .Values.nodeProfiles.install.mode | default "install" }}
 {{- if $co.unrestricted }}
 
 ClusterOnly egress: UNRESTRICTED — runtime.networkProfiles.clusterOnly.unrestricted=true opted out of the restricted default; ClusterOnly workspaces can reach any pod in any namespace on any port (confinement rests on destination-side ingress policies).
+{{- end }}
+{{- $np := default dict .Values.networkPolicy }}
+{{- $edgeCIDRs := $np.edgeIngressCIDRs | default list }}
+{{- $edgeOpen := or (not $np.enabled) (eq (toString $np.edgeIngress) "any") (and (eq (toString $np.edgeIngress) "ipBlock") (or (has "0.0.0.0/0" $edgeCIDRs) (has "::/0" $edgeCIDRs))) }}
+{{- if and $co.unrestricted $edgeOpen }}
+
+Edge ingress: WARNING — runtime.networkProfiles.clusterOnly.unrestricted=true lets ClusterOnly workspaces reach any pod, and the backend's edge ingress admits every source (networkPolicy.edgeIngressCIDRs holds 0.0.0.0/0 or ::/0, edgeIngress=any, or networkPolicy.enabled=false), so a workspace can call the backend :8443/:8444 directly. Narrow networkPolicy.edgeIngressCIDRs to the load-balancer range (or use edgeIngress: cilium), and never list a range where workspace pods run in backend.trustedProxies: a trusted peer chooses its own rate-limit key through X-Forwarded-For.
 {{- end }}
 
 Reminder:

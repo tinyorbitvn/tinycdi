@@ -70,6 +70,7 @@ const CODE_TABLE: { readonly [K in ErrorCode]: true } = {
   QUOTA_EXHAUSTED: true,
   QUOTA_NOT_CONFIGURED: true,
   QUOTA_MANAGED_BY_CONFIG: true,
+  QUOTA_ABOVE_CEILING: true,
   PRECONDITION_REQUIRED: true,
   PRECONDITION_FAILED: true,
   CONNECTION_IN_USE: true,

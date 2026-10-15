@@ -125,10 +125,10 @@ jobs:
           KUBEBUILDER_ASSETS="$(./bin/setup-envtest use \
             ${{ env.ENVTEST_K8S_VERSION }} --bin-dir "$PWD/bin" -p path)" \
             go test -tags=integration -race -count=1 \
-            -skip '^TestLinuxRuntime(ReadinessAndHome|FirefoxFallback|Desktop|BrowserBaseline)$|^TestKasmAdapter' \
+            -skip '^TestLinuxRuntime(ReadinessAndHome|FirefoxFallback|Desktop|BrowserBaseline|ClipboardParams.*)$|^TestKasmAdapter' \
             ./tests/integration/...
           # -skip: TestLinuxRuntimeReadinessAndHome, TestLinuxRuntimeFirefoxFallback,
-          # TestLinuxRuntimeDesktop, TestLinuxRuntimeBrowserBaseline
+          # TestLinuxRuntimeDesktop, TestLinuxRuntimeBrowserBaseline, TestLinuxRuntimeClipboardParamsNotOverridable
           # and TestKasmAdapter* need
           # the built runtime/adapter images (tcdi/linux-base:it,
           # tcdi/linux-desktop:it, tcdi/browser:it, a pulled kasmweb/* image) — image-bound suites,

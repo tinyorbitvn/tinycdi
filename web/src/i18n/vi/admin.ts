@@ -375,6 +375,8 @@ export default {
   "admin.errors.quotaNotConfigured": "Tenant của bạn chưa được cấu hình hạn mức. Nhờ quản trị viên thiết lập.",
   "admin.errors.quotaManagedByConfig":
     "Hạn mức của tenant này do cấu hình nền tảng quản lý và không thể thay đổi ở đây.",
+  "admin.errors.quotaAboveCeiling":
+    "Các giới hạn này vượt mức trần mà nhà vận hành nền tảng đặt cho tenant, hoặc chưa có mức trần nào. Hãy chọn giới hạn thấp hơn hoặc liên hệ nhà vận hành nền tảng.",
   "admin.errors.preconditionRequired":
     "Thay đổi này được gửi mà không kèm phiên bản gốc. Hãy tải lại trang rồi lưu lại.",
   "admin.errors.preconditionFailed":

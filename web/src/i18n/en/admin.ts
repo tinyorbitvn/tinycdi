@@ -375,6 +375,8 @@ export default {
   "admin.errors.quotaNotConfigured": "No quota is configured for your tenant. Ask an administrator to set one.",
   "admin.errors.quotaManagedByConfig":
     "This tenant's quota is managed by the platform configuration and cannot be changed here.",
+  "admin.errors.quotaAboveCeiling":
+    "These limits are above the ceiling the platform operator set for this tenant, or no ceiling is set. Choose lower limits or ask the platform operator.",
   "admin.errors.preconditionRequired":
     "This change was sent without the version it was based on. Reload the page and save again.",
   "admin.errors.preconditionFailed":

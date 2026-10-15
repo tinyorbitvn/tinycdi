@@ -120,11 +120,12 @@ func TestEnsureRejectsBadSeccompAnnotation(t *testing.T) {
 }
 
 // A valid localhost profile still reaches the pod — the gate widens
-// nothing, it only refuses what was never validated.
+// nothing, it only refuses what was never validated. The userns browser
+// profile needs hostUsers: false (TestEnsureUsernsProfileRequiresHostUsersFalse).
 func TestBuildPodSeccompLocalhostHonored(t *testing.T) {
-	pod := ensurePodSpec(t, map[string]string{
+	pod := ensurePodSpecFor(t, testTemplate(map[string]string{
 		AnnotationSeccompProfile: "localhost/profiles/chromium-userns.json",
-	})
+	}), Options{DefaultHostUsers: ptr(false)})
 	sc := pod.Spec.Containers[0].SecurityContext.SeccompProfile
 	if sc == nil || sc.Type != corev1.SeccompProfileTypeLocalhost ||
 		sc.LocalhostProfile == nil || *sc.LocalhostProfile != "profiles/chromium-userns.json" {

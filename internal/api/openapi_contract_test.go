@@ -750,3 +750,46 @@ func TestOpenAPIContract_ResponsesValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAPI_SessionCookieMatchesAuthDefaults (R1-11): the published
+// sessionCookie scheme names the cookie the Authenticator really sets, with
+// its real SameSite mode, and the CSRF scheme names the controls that
+// actually block cross-site forgery (the synchronizer token and the
+// Origin / Sec-Fetch-Site gate), not a SameSite=Strict cookie.
+func TestOpenAPI_SessionCookieMatchesAuthDefaults(t *testing.T) {
+	var cfg AuthConfig
+	cfg.withDefaults()
+	schemes := specDoc(t)["components"].(map[string]any)["securitySchemes"].(map[string]any)
+	cookie := schemes["sessionCookie"].(map[string]any)
+	if cookie["name"] != cfg.SessionCookieName {
+		t.Errorf("sessionCookie name = %v, want %q", cookie["name"], cfg.SessionCookieName)
+	}
+	if cfg.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("AuthConfig default SameSite = %v, want Lax — update this test with the contract", cfg.SameSite)
+	}
+	desc, _ := cookie["description"].(string)
+	if !strings.Contains(desc, "SameSite=Lax") || strings.Contains(desc, "Strict") {
+		t.Errorf("sessionCookie description must state SameSite=Lax and never Strict: %q", desc)
+	}
+	csrf, _ := schemes["csrfToken"].(map[string]any)["description"].(string)
+	if strings.Contains(csrf, "Strict") || !strings.Contains(csrf, "Sec-Fetch-Site") || !strings.Contains(csrf, "Origin") {
+		t.Errorf("csrfToken description must name the Origin / Sec-Fetch-Site gate and no Strict cookie: %q", csrf)
+	}
+}
+
+// TestOpenAPI_LogoutDocumentsIDTokenHint (R1-12): logout and sign-out-
+// everywhere return the retained ID token as id_token_hint in
+// endSessionUrl (logout_test.go asserts it), so the contract must say so
+// and must not claim the hint is not sent.
+func TestOpenAPI_LogoutDocumentsIDTokenHint(t *testing.T) {
+	paths := specDoc(t)["paths"].(map[string]any)
+	for _, p := range []string{"/v1/logout", "/v1/me/sessions:revoke-all"} {
+		desc, _ := paths[p].(map[string]any)["post"].(map[string]any)["description"].(string)
+		if strings.Contains(desc, "not sent") || strings.Contains(desc, "keeps no ID token") {
+			t.Errorf("%s description claims no ID token is sent: %q", p, desc)
+		}
+		if !strings.Contains(desc, "id_token_hint") {
+			t.Errorf("%s description does not document id_token_hint", p)
+		}
+	}
+}

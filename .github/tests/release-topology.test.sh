@@ -49,6 +49,16 @@ chk "release: chart job needs image jobs" "$REL" 'needs: \[prepare, base, images
 # SEC-16: no shared GHA cache on release image builds.
 chk_absent "release: no gha cache" "$REL" 'cache-(from|to):\s*>?-?\s*$?\s*\$?\{?\{?.*type=gha|cache-(from|to): type=gha'
 
+# R1-41: signed :main images build without the shared GHA cache.
+chk_absent "images: no gha cache" "$IMG" 'type=gha'
+# R1-37: every release re-runs the kasm catalog gate, and publish needs it.
+chk "release: kasm catalog policy in the release" "$REL" 'run: \.github/scripts/check-kasm-catalog\.sh'
+chk "release: kasm catalog scan in the release" "$REL" 'run: PATH="\$PWD/bin:\$PATH" \.github/scripts/scan-kasm-catalog\.sh'
+chk "release: publish needs kasm-catalog" "$REL" 'needs: \[prepare, scan, kasm-catalog, chart, binaries\]'
+chk "release: publish requires kasm-catalog success" "$REL" "needs\.kasm-catalog\.result == 'success'"
+chk "release: kasm-catalog leg inside the scan-age bound" "$REL" 'legs\+=\("kasm catalog scan \(trivy gate \+ engine floor\)"\)'
+chk "kasm scan: trivy --config empty" "$ROOT/.github/scripts/scan-kasm-catalog.sh" '--config "\$CFG"'
+
 # SEC-17: cosign sign/attest present; GitHub provenance gated on the var.
 chk "release: cosign sign" "$REL" 'cosign sign'
 chk "release: cosign attest (SBOM)" "$REL" 'cosign attest'
@@ -59,6 +69,15 @@ chk "release: provenance gated on ATTESTATIONS_ENABLED" "$REL" "ATTESTATIONS_ENA
 chk "release: tag uses chart_version (no v prefix)" "$REL" 'imagetools create.*CHART_VERSION|\$CHART_VERSION'
 chk "release: latest only when not prerelease" "$REL" 'PRERELEASE'
 chk "release: digest stamping script wired" "$REL" 'stamp-image-digests.sh'
+# R1-09: release builds record their build second, the chart stamps it
+# as the runtime images' builtAt, and publish refuses a stale scan.
+chk "release: base records its build time" "$REL" 'refs/linux-base\.built-at'
+chk "release: image legs record their build time" "$REL" 'refs/\$IMG\.built-at'
+chk "release: label created = recorded build time" "$REL" 'org\.opencontainers\.image\.created=\$BUILT_AT'
+chk "release: stamper writes builtAt" "$ROOT/.github/scripts/stamp-image-digests.sh" 'builtAt'
+chk "release: collector verifies builtAt" "$ROOT/.github/scripts/collect-publish-inputs.sh" 'builtAt'
+chk "release: scan age bound wired" "$REL" 'check-scan-age\.sh jobs\.json "\$SCAN_MAX_AGE_HOURS"'
+order "release: scan age checked before signing" "$REL" 'check-scan-age\.sh jobs\.json' 'name: cosign sign images'
 
 # SEC-15 + SUPR-11: main-ancestry check resolves refs/heads/main to a SHA
 # first — the bare name is ambiguous if a `main` tag ever exists.
@@ -78,10 +97,12 @@ chk_absent "release: no fail-open existence check" "$REL" 'gh api "repos/.*(tags
 # Actions app no bypass, so dry_run=false must be refused up front.
 chk "release: dispatch is dry-run only" "$REL" 'workflow_dispatch is dry-run only'
 
-# SUPR-1: chart digest resolved from the registry, not parsed from helm
-# push stdout (helm 4 prints Pushed:/Digest: to stderr).
-chk "release: chart digest via imagetools inspect" "$REL" 'imagetools inspect'
+chk "release: chart digest via imagetools inspect" "$ROOT/.github/scripts/push-sign-chart.sh" 'imagetools inspect'
 chk_absent "release: no stdout digest parse" "$REL" 'out=.*helm.*push|helm push.*\$\('
+# R1-40: the chart is pushed and signed by push-sign-chart.sh, which rolls
+# back (deletes this run's version) when signing fails.
+chk "release: chart pushed + signed by push-sign-chart.sh" "$REL" 'push-sign-chart\.sh "\$\{pkgs\[0\]\}"'
+chk_absent "release: no inline helm push (rollback lives in the script)" "$REL" 'bin/helm" push'
 
 # SUPR-2 + SUPF-1: publish downloads every input by EXACT artifact name
 # (no pattern/merge-multiple — a forged artifact could overwrite a
@@ -263,6 +284,16 @@ n="$(grep -c 'next-rt-tag\.sh' "$TRAIN")"
 chk_absent "runtime-images: rt N is not the run number" "$TRAIN" 'GITHUB_RUN_NUMBER'
 order "runtime-images: rt derive after attest" "$TRAIN" 'cosign attest image SBOMs' 'derive rt tag at publish time'
 order "runtime-images: rt derive before promote" "$TRAIN" 'derive rt tag at publish time' 'name: promote rt tag$'
+# R1-09: the train's builtAt is the build jobs' recorded time, never the
+# publish clock, and publish refuses a scan older than the bound.
+chk "runtime-images: base records its build time" "$TRAIN" 'refs/linux-base\.built-at'
+chk "runtime-images: profile legs record their build time" "$TRAIN" 'refs/\$IMG\.built-at'
+chk "runtime-images: label created = recorded build time" "$TRAIN" 'org\.opencontainers\.image\.created=\$BUILT_AT'
+chk "runtime-images: manifest builtAt from build times" "$TRAIN" 'earliest-built-at\.sh refs linux-base linux-desktop browser\)'
+chk "runtime-images: scan age bound wired" "$TRAIN" 'check-scan-age\.sh jobs\.json "\$SCAN_MAX_AGE_HOURS"'
+order "runtime-images: scan age checked before signing" "$TRAIN" 'check-scan-age\.sh jobs\.json' 'name: cosign sign images'
+chk_absent "runtime-images: manifest never defaults builtAt to now" \
+  "$ROOT/.github/scripts/write-runtime-manifest.sh" 'BUILT_AT:-'
 [ -x "$ROOT/.github/scripts/next-rt-tag.sh" ] \
   || { echo "FAIL: next-rt-tag.sh missing/not executable"; fails=1; }
 # V3.26: the desktop and browser images must carry the SAME firefox-esr pin.

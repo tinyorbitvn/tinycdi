@@ -369,19 +369,22 @@ func TestEnsureRefusesRetainedDataWithoutClaim(t *testing.T) {
 	}
 }
 
-// ClusterOnly egress defaults to RESTRICTED in v1.0: with no operator
-// narrowing configured the rule confines egress to pods in namespaces
-// carrying the managed-tenant label — never the Unrestricted
-// any-pod-anywhere opt-out. PodSelector stays unset and no ports are
-// pinned; DNS is unaffected (it leads the egress list).
+// ClusterOnly egress defaults to RESTRICTED to the workspace's own tenant:
+// with no operator narrowing configured the rule confines egress to pods
+// in namespaces carrying the workspace's tenant label value, never the
+// Unrestricted any-pod-anywhere opt-out. PodSelector stays unset and no
+// ports are pinned; DNS is unaffected (it leads the egress list).
 func TestClusterOnlyEgress_DefaultRestricted(t *testing.T) {
-	rule := clusterOnlyEgressRule(Options{})
+	ws := testWorkspace()
+	ws.Labels = map[string]string{"workspaces.cdi.tinyorbit.vn/tenant": "tenant-a"}
+	rule := clusterOnlyEgressRule(ws, Options{})
 	if len(rule.To) != 1 || rule.To[0].NamespaceSelector == nil {
 		t.Fatalf("%+v", rule)
 	}
-	me := rule.To[0].NamespaceSelector.MatchExpressions
-	if len(me) != 1 || me[0].Key != "workspaces.cdi.tinyorbit.vn/tenant" || me[0].Operator != metav1.LabelSelectorOpExists {
-		t.Fatalf("%+v", me)
+	sel := rule.To[0].NamespaceSelector
+	if len(sel.MatchExpressions) != 0 || len(sel.MatchLabels) != 1 ||
+		sel.MatchLabels["workspaces.cdi.tinyorbit.vn/tenant"] != "tenant-a" {
+		t.Fatalf("default namespaceSelector = %+v, want matchLabels {tenant: tenant-a}", sel)
 	}
 	if rule.To[0].PodSelector != nil || len(rule.Ports) != 0 {
 		t.Fatalf("%+v", rule)
@@ -392,7 +395,7 @@ func TestClusterOnlyEgress_DefaultRestricted(t *testing.T) {
 // rule keeps pod peers only — any pod in any namespace — and can never
 // admit external IPs.
 func TestClusterOnlyEgress_UnrestrictedOptIn(t *testing.T) {
-	rule := clusterOnlyEgressRule(Options{ClusterOnlyEgress: &ClusterOnlyEgress{Unrestricted: true}})
+	rule := clusterOnlyEgressRule(testWorkspace(), Options{ClusterOnlyEgress: &ClusterOnlyEgress{Unrestricted: true}})
 	if len(rule.To) != 2 {
 		t.Fatalf("%+v", rule)
 	} // any pod, any namespace (pod peers only)

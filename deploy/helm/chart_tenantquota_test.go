@@ -118,6 +118,9 @@ func TestTenantQuotasNotesWarnForTenantsWithoutQuota(t *testing.T) {
 		!strings.Contains(notes, "QUOTA_NOT_CONFIGURED") {
 		t.Errorf("NOTES must warn that tenant-b has no quota (creates refused with QUOTA_NOT_CONFIGURED), got:\n%s", notes)
 	}
+	if !strings.Contains(notes, "quotaCeiling") || !strings.Contains(notes, "namespaceQuota") {
+		t.Errorf("NOTES must point at quotaCeiling and recommend namespaceQuota, got:\n%s", notes)
+	}
 	i := strings.Index(notes, "Tenant quotas")
 	if i < 0 || strings.Contains(notes[i:], "tenant-a") {
 		t.Errorf("NOTES must warn about tenant-b only, not tenant-a, got:\n%s", notes)
@@ -160,6 +163,75 @@ func TestSchemaRejectsBadTenantQuotas(t *testing.T) {
 		out := renderErrArgs(t, "-f", quotaValues(t, entry(bad)))
 		if !strings.Contains(out, "quota") {
 			t.Errorf("%s: render failed but the error does not point at quota:\n%s", name, out)
+		}
+	}
+}
+
+func tenantQuotaCeilingsArg(t *testing.T, valuesFile string) (string, bool) {
+	t.Helper()
+	dep := deployment(renderArgs(t, "-f", valuesFile), "backend")
+	if dep == nil {
+		t.Fatal("no backend Deployment rendered")
+	}
+	for _, a := range firstContainerArgs(dep) {
+		if v, ok := strings.CutPrefix(a, "-tenant-quota-ceilings="); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// TestTenantQuotaCeilingsRenderFlag (R1-02): quotaCeiling entries render
+// -tenant-quota-ceilings; quota entries stay in -tenant-quotas only.
+func TestTenantQuotaCeilingsRenderFlag(t *testing.T) {
+	vf := quotaValues(t, `
+  - name: tcdi-a
+    tenant: tenant-a
+    quotaCeiling: {runningWorkspaces: 20, cpu: "32", memory: 128Gi, storage: 1Ti}
+  - name: tcdi-b
+    tenant: tenant-b
+    quota: {runningWorkspaces: 2, cpu: "2", memory: 4Gi, storage: 20Gi}
+`)
+	raw, ok := tenantQuotaCeilingsArg(t, vf)
+	if !ok {
+		t.Fatal("backend args carry no -tenant-quota-ceilings")
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("-tenant-quota-ceilings is not JSON: %v\n%s", err, raw)
+	}
+	want := map[string]any{"tenant": "tenant-a", "runningWorkspaces": 20.0, "cpu": "32", "memory": "128Gi", "storage": "1Ti"}
+	if len(got) != 1 || len(got[0]) != len(want) {
+		t.Fatalf("-tenant-quota-ceilings = %s, want exactly tenant-a's ceiling", raw)
+	}
+	for k, v := range want {
+		if got[0][k] != v {
+			t.Errorf("ceiling %s = %v (%T), want %v", k, got[0][k], got[0][k], v)
+		}
+	}
+	if q, ok := tenantQuotasArg(t, vf); !ok || strings.Contains(q, "tenant-a") {
+		t.Errorf("-tenant-quotas = %q ok=%v, want tenant-b only", q, ok)
+	}
+}
+
+func TestTenantQuotaCeilingsFlagAbsentByDefault(t *testing.T) {
+	if v, ok := tenantQuotaCeilingsArg(t, filepath.Join("tinycdi", "ci", "minimal-values.yaml")); ok {
+		t.Fatalf("minimal values rendered -tenant-quota-ceilings=%s", v)
+	}
+}
+
+// TestSchemaRejectsBadQuotaCeilings (R1-02): quotaCeiling takes the quota
+// block's validation, and one entry cannot carry both blocks.
+func TestSchemaRejectsBadQuotaCeilings(t *testing.T) {
+	for name, entry := range map[string]string{
+		"unparsable cpu": "\n  - name: tcdi-a\n    tenant: tenant-a\n    quotaCeiling: {runningWorkspaces: 1, cpu: lots, memory: 1Gi, storage: 1Gi}\n",
+		"missing field":  "\n  - name: tcdi-a\n    tenant: tenant-a\n    quotaCeiling: {runningWorkspaces: 1, cpu: \"1\", memory: 1Gi}\n",
+		"both blocks": "\n  - name: tcdi-a\n    tenant: tenant-a\n    quota: {runningWorkspaces: 1, cpu: \"1\", memory: 1Gi, storage: 1Gi}\n" +
+			"    quotaCeiling: {runningWorkspaces: 2, cpu: \"2\", memory: 2Gi, storage: 2Gi}\n",
+	} {
+		out := renderErrArgs(t, "-f", quotaValues(t, entry))
+		if !strings.Contains(out, "managedNamespaces") {
+			t.Errorf("%s: render failed but the error does not point at managedNamespaces:\n%s", name, out)
 		}
 	}
 }

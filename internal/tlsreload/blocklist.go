@@ -45,9 +45,19 @@ func WithReloadObserver(onError func(), onSwap func(entries int)) Option {
 	}
 }
 
-// revokedEntry is one (issuer, serial) pair. issuer is compared
-// byte-for-byte against the leaf's cert.Issuer.String() (pkix.Name
-// RFC 2253 form); serial is the serial number normalized to lowercase hex
+// WithKnownIssuers gives a Blocklist the current client-CA bundle: each
+// load and swap then warns about every entry whose issuer names no
+// certificate in it — an entry that can never match a verified leaf
+// issued directly by a bundle CA (TM-38).
+func WithKnownIssuers(certs func() []*x509.Certificate) Option {
+	return func(o *options) { o.knownIssuers = certs }
+}
+
+// revokedEntry is one (issuer, serial) pair. issuer is the canonical name
+// key (canonicalDN of the file's DN, canonicalRawName of a leaf's
+// RawIssuer), so every spelling of one DN — OpenSSL's RFC 2253 output,
+// Go's pkix.Name.String(), any attribute order or escaping — compares
+// equal; serial is the serial number normalized to lowercase hex
 // (big.Int.Text(16)), so file spellings differing in case, colons or
 // leading-zero octets compare equal.
 type revokedEntry struct {
@@ -57,14 +67,24 @@ type revokedEntry struct {
 
 // Revocations is an immutable snapshot of one loaded blocklist — the set
 // of (issuer, serial) pairs the handshake path matches the verified peer
-// leaf against.
+// leaf against, each mapped to its issuer as written in the file (for
+// warnings).
 type Revocations struct {
-	entries map[revokedEntry]struct{}
+	entries map[revokedEntry]string
 }
 
-// Blocked reports whether the (issuer, serial) pair is listed.
+// Blocked reports whether the (issuer, serial) pair is listed. issuer is
+// any DN spelling canonicalDN accepts; an unparsable one is never listed.
 func (s *Revocations) Blocked(issuer, serial string) bool {
-	_, ok := s.entries[revokedEntry{issuer: issuer, serial: serial}]
+	key, err := canonicalDN(issuer)
+	if err != nil {
+		return false
+	}
+	return s.blocked(key, serial)
+}
+
+func (s *Revocations) blocked(issuerKey, serial string) bool {
+	_, ok := s.entries[revokedEntry{issuer: issuerKey, serial: serial}]
 	return ok
 }
 
@@ -107,6 +127,7 @@ func NewBlocklist(file string, opts ...Option) (*Blocklist, error) {
 	}
 	b.cur = set
 	b.hash = hash
+	b.warnUnknownIssuers(set)
 	if b.onSwap != nil {
 		b.onSwap(set.Len())
 	}
@@ -135,13 +156,16 @@ func (b *Blocklist) Blocked(issuer, serial string) bool {
 // blocked leaf reports ErrCertRevoked and registers nothing. A nil conn
 // checks without registering.
 func (b *Blocklist) Track(conn net.Conn, leaf *x509.Certificate) error {
-	key := revokedEntry{issuer: leaf.Issuer.String()}
+	// A leaf whose issuer name does not decode gets the empty key, which
+	// no entry carries (canonicalDN never returns "").
+	issuer, _ := canonicalRawName(leaf.RawIssuer)
+	key := revokedEntry{issuer: issuer}
 	if leaf.SerialNumber != nil {
 		key.serial = leaf.SerialNumber.Text(16)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.cur.Blocked(key.issuer, key.serial) {
+	if b.cur.blocked(key.issuer, key.serial) {
 		return ErrCertRevoked
 	}
 	if conn != nil {
@@ -163,6 +187,28 @@ func (b *Blocklist) Tracked() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.conns)
+}
+
+// warnUnknownIssuers logs one warning per entry whose issuer names no
+// certificate in the WithKnownIssuers bundle: such an entry can never
+// match a leaf a bundle CA issued directly. Loading still
+// succeeds — the bundle may be mid-rotation.
+func (b *Blocklist) warnUnknownIssuers(set *Revocations) {
+	if b.knownIssuers == nil {
+		return
+	}
+	known := map[string]bool{}
+	for _, c := range b.knownIssuers() {
+		if k, err := canonicalRawName(c.RawSubject); err == nil {
+			known[k] = true
+		}
+	}
+	for e, written := range set.entries {
+		if !known[e.issuer] {
+			b.log.Warn("tlsreload: revocation entry names an issuer outside the client-CA bundle; it matches only leaves whose clients present that issuer as an intermediate",
+				"file", b.file, "serial", e.serial, "issuer", written)
+		}
+	}
 }
 
 // Run re-reads the file every interval until ctx is done.
@@ -201,12 +247,13 @@ func (b *Blocklist) reload() {
 	b.cur = set
 	b.hash = hash
 	for c, key := range b.conns {
-		if set.Blocked(key.issuer, key.serial) {
+		if set.blocked(key.issuer, key.serial) {
 			_ = c.Close()
 			delete(b.conns, c)
 		}
 	}
 	b.mu.Unlock()
+	b.warnUnknownIssuers(set)
 	if b.onSwap != nil {
 		b.onSwap(set.Len())
 	}
@@ -241,9 +288,10 @@ func loadBlocklist(file string) (*Revocations, [32]byte, error) {
 // parseBlocklist parses the ADR 0008 format: "<serial-hex> <issuer-dn>"
 // per line; blank lines and lines whose first non-whitespace character is
 // '#' are ignored; there are no trailing comments — the issuer is the
-// rest of the line, trimmed. Any malformed line fails the whole file.
-func parseBlocklist(data string) (map[revokedEntry]struct{}, error) {
-	entries := map[revokedEntry]struct{}{}
+// rest of the line, trimmed (issuer: an RFC 2253 DN in any spelling,
+// matched canonically). Any malformed line fails the whole file.
+func parseBlocklist(data string) (map[revokedEntry]string, error) {
+	entries := map[revokedEntry]string{}
 	count := 0
 	for i, raw := range strings.Split(data, "\n") {
 		line := strings.TrimSpace(raw)
@@ -254,11 +302,11 @@ func parseBlocklist(data string) (map[revokedEntry]struct{}, error) {
 		if count > maxBlocklistEntries {
 			return nil, fmt.Errorf("tlsreload: revocation list exceeds %d entries", maxBlocklistEntries)
 		}
-		e, err := parseBlocklistLine(line)
+		e, written, err := parseBlocklistLine(line)
 		if err != nil {
 			return nil, fmt.Errorf("tlsreload: revocation list line %d: %w", i+1, err)
 		}
-		entries[e] = struct{}{}
+		entries[e] = written
 	}
 	return entries, nil
 }
@@ -266,26 +314,32 @@ func parseBlocklist(data string) (map[revokedEntry]struct{}, error) {
 // parseBlocklistLine parses one "<serial-hex> <issuer-dn>" line. The
 // serial is hex (colons stripped, case-insensitive, no 0x prefix,
 // leading-zero octets optional) and normalizes via big.Int.Text(16); the
-// issuer is the rest of the line, trimmed — a DN may legitimately carry
-// spaces.
-func parseBlocklistLine(line string) (revokedEntry, error) {
+// issuer is the rest of the line, trimmed — a DN may carry spaces — and
+// must parse as a DN (canonicalDN): an issuer that cannot match any
+// certificate fails the line. It returns the entry and the issuer as
+// written.
+func parseBlocklistLine(line string) (revokedEntry, string, error) {
 	i := strings.IndexAny(line, " \t")
 	if i < 0 {
-		return revokedEntry{}, errors.New("want \"<serial-hex> <issuer-dn>\"")
+		return revokedEntry{}, "", errors.New("want \"<serial-hex> <issuer-dn>\"")
 	}
 	serialTok, issuer := line[:i], strings.TrimSpace(line[i:])
 	if issuer == "" {
-		return revokedEntry{}, errors.New("missing issuer DN")
+		return revokedEntry{}, "", errors.New("missing issuer DN")
 	}
 	hexStr := strings.ReplaceAll(serialTok, ":", "")
 	if hexStr == "" {
-		return revokedEntry{}, fmt.Errorf("bad serial %q", serialTok)
+		return revokedEntry{}, "", fmt.Errorf("bad serial %q", serialTok)
 	}
 	for _, r := range hexStr {
 		if !('0' <= r && r <= '9') && !('a' <= r && r <= 'f') && !('A' <= r && r <= 'F') {
-			return revokedEntry{}, fmt.Errorf("bad serial %q", serialTok)
+			return revokedEntry{}, "", fmt.Errorf("bad serial %q", serialTok)
 		}
 	}
+	key, err := canonicalDN(issuer)
+	if err != nil {
+		return revokedEntry{}, "", err
+	}
 	n, _ := new(big.Int).SetString(hexStr, 16) // hex-only input cannot fail
-	return revokedEntry{issuer: issuer, serial: n.Text(16)}, nil
+	return revokedEntry{issuer: key, serial: n.Text(16)}, issuer, nil
 }

@@ -309,7 +309,7 @@ func TestBrandingDir_NoTraversal(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(dir, "evil.svg")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(dir, "logo-evil.svg")); err != nil {
 		t.Fatal(err)
 	}
 	h := newTestHandlerBranding(t, "session.test", dir)
@@ -318,7 +318,7 @@ func TestBrandingDir_NoTraversal(t *testing.T) {
 		"/branding/../index.html",
 		"/branding/%2e%2e/x",
 		"/branding/sub/../branding.json",
-		"/branding/evil.svg",
+		"/branding/logo-evil.svg",
 	} {
 		res := get(t, h, http.MethodGet, path)
 		if res.StatusCode != http.StatusNotFound {
@@ -408,6 +408,58 @@ func TestBrandingDir_OtherNamesStay404(t *testing.T) {
 		res.Body.Close()
 		if strings.Contains(string(body), "<html>") {
 			t.Fatalf("%s: body is the SPA fallback, want a plain 404: %q", path, body)
+		}
+	}
+}
+
+// TestBrandingDir_OnlyAllowlistedNames (R1-13): /branding/ serves the
+// documented names only — branding.json, tokens.css, favicon.svg/.ico and
+// logo*.svg/.png — in the directory's top level. Any other file the
+// operator (or a ConfigMap's ..data/ layout) puts there answers 404, even
+// though it is a regular file inside the directory.
+func TestBrandingDir_OnlyAllowlistedNames(t *testing.T) {
+	dir := newBrandingDir(t) // branding.json, logo.svg, tokens.css
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("sub/notes.txt", "operator notes")
+	write("notes.txt", "operator notes")
+	write("..data/branding.json", `{"productName":"x"}`)
+	write("logo-dark.png", "png-bytes")
+	write("favicon.ico", "ico-bytes")
+	write("logo.svg.bak", "backup")
+	h := newTestHandlerBranding(t, "session.test", dir)
+
+	for _, path := range []string{
+		"/branding/sub/notes.txt",
+		"/branding/notes.txt",
+		"/branding/..data/branding.json",
+		"/branding/logo.svg.bak",
+	} {
+		res := get(t, h, http.MethodGet, path)
+		res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404 (not an allowlisted branding name)", path, res.StatusCode)
+		}
+	}
+	for _, path := range []string{
+		"/branding/branding.json",
+		"/branding/tokens.css",
+		"/branding/logo.svg",
+		"/branding/logo-dark.png",
+		"/branding/favicon.ico",
+	} {
+		res := get(t, h, http.MethodGet, path)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", path, res.StatusCode)
 		}
 	}
 }

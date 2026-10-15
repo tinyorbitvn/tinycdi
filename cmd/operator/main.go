@@ -435,8 +435,8 @@ func main() {
 		"ClusterOnly egress posture: the literal 'unrestricted' (any pod in any "+
 			"namespace on any port) or a JSON object narrowing it: "+
 			`{"namespaceSelector":{...},"podSelector":{...},"ports":[{"protocol":"TCP","port":443}]}. `+
-			"Empty keeps the restricted default: egress to pods in namespaces "+
-			"labelled workspaces.cdi.tinyorbit.vn/tenant only. "+
+			"Empty keeps the restricted default: egress to pods in the namespaces "+
+			"of the workspace's own tenant (its workspaces.cdi.tinyorbit.vn/tenant label value) only. "+
 			"The chart renders it from runtime.networkProfiles.clusterOnly.*.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", os.Getenv("POD_NAMESPACE"),
 		"Namespace the session gateway pods run in; per-workspace NetworkPolicies admit "+

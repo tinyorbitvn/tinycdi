@@ -6,6 +6,11 @@ signed, attested artifacts as described below — tools are sha256-pinned
 (syft 1.52.0, trivy 0.70.0, cosign v3.1.3). No release tag has been cut yet;
 this documents the mechanism a `vX.Y.Z` release exercises.
 
+All three signing workflows (`images.yml`, `release.yml`,
+`runtime-images.yml`) build without a shared build cache: no build reads
+or writes the GitHub Actions cache, so a cache entry another workflow
+wrote cannot become a layer of a signed image.
+
 ## What a release artifact consists of
 
 Per the release interface contract, a release artifact has: image digests,
@@ -59,6 +64,11 @@ ambiguity):
 Release runs additionally `cosign sign` the pushed OCI chart digest
 (`oci://ghcr.io/tinyorbitvn/charts/tinycdi`) and `cosign sign-blob` every
 release asset (`<asset>.sigstore.json` bundles), then `gh release create`.
+`helm push` tags the chart in the same call that uploads it, so the
+chart is the one release artifact that exists tagged before it is
+signed. `push-sign-chart.sh` signs it right after the push. If the push,
+the digest lookup or the signature fails, it deletes the chart version
+that run created, so an unsigned chart never stays tagged.
 The runtime train does the same for its deployment manifest: every
 `runtime-*` release carries `runtime-images.json` **and**
 `runtime-images.json.sigstore.json` — verify it with `cosign

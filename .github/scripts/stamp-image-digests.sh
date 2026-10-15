@@ -9,7 +9,11 @@
 #   <refs-dir> holds one <image>.ref file per image written by the build
 #   jobs; each file contains "<repo>@sha256:<digest>" or the literal
 #   "local" for unpushed rehearsal builds (skipped).
+#   Next to each ref sits <image>.built-at (the build job's recorded UTC
+#   second, R1-09). A values block that has a builtAt field (the runtime
+#   images) gets it stamped; such a block without a valid .built-at fails.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 VALUES="$1"
 REFS_DIR="$2"
@@ -52,4 +56,22 @@ for f in "$REFS_DIR"/*.ref; do
   fi
   mv "$VALUES.stamped" "$VALUES"
   echo "stamped $section.$key.digest = $digest"
+  # R1-09: runtime images carry builtAt — the stale-image block reads it
+  # (image-built-at annotation). Stamp the build job's recorded time.
+  if awk -v section="$section" -v key="$key" '
+       /^[^ #]/                  { in_sec = ($0 ~ ("^" section ":")) }
+       in_sec && /^  [a-zA-Z]+:/ { cur = substr($1, 1, length($1) - 1) }
+       in_sec && cur == key && /^    builtAt:/ { found = 1 }
+       END { exit !found }' "$VALUES"; then
+    built_at="$("$SCRIPT_DIR/earliest-built-at.sh" "$REFS_DIR" "$name")" \
+      || { echo "::error::$section.$key has a builtAt field but $name has no valid build time"; exit 1; }
+    awk -v section="$section" -v key="$key" -v ba="$built_at" '
+      /^[^ #]/              { in_sec = ($0 ~ ("^" section ":")) }
+      in_sec && /^  [a-zA-Z]+:/ { cur = substr($1, 1, length($1) - 1) }
+      in_sec && cur == key && /^    builtAt:/ { sub(/builtAt:.*/, "builtAt: \"" ba "\"") }
+      { print }
+    ' "$VALUES" > "$VALUES.stamped"
+    mv "$VALUES.stamped" "$VALUES"
+    echo "stamped $section.$key.builtAt = $built_at"
+  fi
 done

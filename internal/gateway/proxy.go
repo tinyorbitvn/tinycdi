@@ -235,6 +235,10 @@ type Gateway struct {
 	embedders     []string // serialized portal origins for frame-ancestors
 	proxy         *httputil.ReverseProxy
 	permissions   string // Permissions-Policy pinned on every response
+	// controlFailures counts failed /v1/control/* bearer checks per client
+	// key (R1-26): once a client spends its budget, every control request
+	// from it answers 429 — the right token included — until it refills.
+	controlFailures *ratelimit.Limiter
 
 	mu          sync.Mutex
 	sessions    map[string]*session                     // cookie value -> session
@@ -319,6 +323,7 @@ func New(cfg Config) (*Gateway, error) {
 		connLogLast:   map[string]time.Time{},
 		done:          make(chan struct{}),
 	}
+	g.controlFailures = ratelimit.New(ControlFailureRate, ControlFailureBurst, controlFailureMaxKeys, cfg.Now)
 	for _, po := range cfg.PortalOrigins {
 		u, ok := parseOrigin(strings.TrimSpace(po))
 		if !ok {
@@ -392,14 +397,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !wsOK && !controlOK {
 		cspHost = g.cfg.SessionDomain.String()
 	}
-	h := w.Header()
-	h.Set("Content-Security-Policy", sessionCSP(cspHost, g.embedders))
-	h.Set("Permissions-Policy", g.permissions)
-	h.Set("Cross-Origin-Resource-Policy", "same-origin")
-	h.Set("Cross-Origin-Opener-Policy", "same-origin")
-	h.Set("Origin-Agent-Cluster", "?1")
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+	g.pinSessionHeaders(w.Header(), cspHost)
 
 	rec := &statusRecorder{ResponseWriter: w}
 	start := g.now()
@@ -453,6 +451,21 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Control plane (operator surface, SEC-2 bearer-gated)
 // ---------------------------------------------------------------------------
 
+// Control-surface failure budget (R1-26): ControlFailureBurst failed
+// bearer checks per client key, refilled at ControlFailureRate per minute.
+// The bearer is the only gate on the control hosts — the host class is a
+// Host-header routing check, not a network boundary — so guessing must not
+// run at line rate. controlFailureMaxKeys caps the LRU of tracked clients.
+const (
+	ControlFailureRate    = 10
+	ControlFailureBurst   = 10
+	controlFailureMaxKeys = 10_000
+)
+
+// IsControlHost reports whether r's Host names a configured control host —
+// the backend mounts its health endpoints on those hosts only.
+func (g *Gateway) IsControlHost(r *http.Request) bool { return g.controlHostOK(r) }
+
 func (g *Gateway) controlAuth(r *http.Request) bool {
 	if g.cfg.ControlToken == "" {
 		return false // no token configured: control surface closed (SEC-2)
@@ -474,7 +487,17 @@ func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
 		"/v1/control/session": "session.list",
 		"/v1/control/revoke":  "session.revoke",
 	}[r.URL.Path]
+	client := ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+	if ok, retry := g.controlFailures.Peek(client); !ok {
+		if action != "" {
+			g.audit(r, action, "", observability.OutcomeDenied, "rate_limited")
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return
+	}
 	if !g.controlAuth(r) {
+		g.controlFailures.Allow(client)
 		if action != "" {
 			g.audit(r, action, "", observability.OutcomeDenied, "unauthorized")
 		}
@@ -760,6 +783,9 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	var captured net.Conn
 	hw := &hijackCapture{
 		ResponseWriter: w,
+		// serveProxy runs only on a matched workspace host, so the CSP
+		// names r.Host exactly as ServeHTTP did.
+		pin: func(h http.Header) { g.pinSessionHeaders(h, r.Host) },
 		// wrapConn intercepts client->upstream bytes so the sniffer can spot
 		// RFB input frames inside the proxied WebSocket stream.
 		wrapConn: func(c net.Conn) net.Conn {
@@ -1239,6 +1265,18 @@ func effectivePortDefault(scheme string) string {
 	return effectivePort(&url.URL{Scheme: scheme})
 }
 
+// pinSessionHeaders sets the session-origin security policy on h (SEC-07).
+// Set replaces every value, so pinning twice never duplicates a header.
+func (g *Gateway) pinSessionHeaders(h http.Header, cspHost string) {
+	h.Set("Content-Security-Policy", sessionCSP(cspHost, g.embedders))
+	h.Set("Permissions-Policy", g.permissions)
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+	h.Set("Origin-Agent-Cluster", "?1")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+}
+
 // responsePolicy is the ModifyResponse policy for runtime-proxied responses
 // (SEC-07). The runtime is tenant-controlled, so headers that mutate
 // session-origin browser state — any Set-Cookie (OBS-4 hardened: now all
@@ -1246,10 +1284,14 @@ func effectivePortDefault(scheme string) string {
 // Clear-Site-Data, Refresh, Link (Link: rel=serviceworker registers a
 // service worker) — are dropped outright, and upstream-supplied security
 // headers are deleted so they can never weaken the policy ServeHTTP pinned.
+// Content-Disposition is dropped too: the desktop leg carries no file
+// transfers (those go through the claimed transfer leg, which sets its
+// own), so a runtime cannot turn a desktop path into a one-click download
+// (TM-37).
 func (g *Gateway) responsePolicy(resp *http.Response) error {
 	for _, h := range []string{
 		"Set-Cookie", "Service-Worker-Allowed", "Clear-Site-Data",
-		"Refresh", "Link",
+		"Refresh", "Link", "Content-Disposition",
 		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
 		"X-Content-Type-Options", "Strict-Transport-Security",
 		"X-Frame-Options", "Permissions-Policy", "Feature-Policy",
@@ -1265,10 +1307,41 @@ func (g *Gateway) responsePolicy(resp *http.Response) error {
 // revoke/fencing can close active streams. wrapConn, when set, replaces the
 // conn handed to the reverse proxy's copy loop — letting us observe
 // client->upstream bytes transparently.
+//
+// It is also the 1xx guard (R1-04): the stdlib ReverseProxy relays an
+// upstream informational response by copying its headers into Header(),
+// calling WriteHeader(1xx) and then clearing the header map, which would
+// erase the policy ServeHTTP pinned. The runtime is tenant-controlled, so
+// informational responses other than 101 are dropped, and pin re-applies
+// the session policy when the final status is written.
 type hijackCapture struct {
 	http.ResponseWriter
 	onHijack func(net.Conn)
 	wrapConn func(net.Conn) net.Conn
+	pin      func(http.Header)
+	wrote    bool
+}
+
+// WriteHeader drops 100 and 102–199, and re-pins the session policy
+// before the first final (or 101) status reaches the client.
+func (h *hijackCapture) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		return
+	}
+	if !h.wrote {
+		h.wrote = true
+		if h.pin != nil {
+			h.pin(h.ResponseWriter.Header())
+		}
+	}
+	h.ResponseWriter.WriteHeader(code)
+}
+
+func (h *hijackCapture) Write(b []byte) (int, error) {
+	if !h.wrote {
+		h.WriteHeader(http.StatusOK)
+	}
+	return h.ResponseWriter.Write(b)
 }
 
 func (h *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {

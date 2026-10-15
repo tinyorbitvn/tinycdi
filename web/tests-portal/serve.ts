@@ -233,7 +233,7 @@ runSync(
   "openssl self-signed cert",
   true,
 );
-writeFileSync(TOKEN_FILE, "e2e-control-token\n", { mode: 0o600 });
+writeFileSync(TOKEN_FILE, "e2e-control-token-0123456789abcdef0123456789abcdef0123456789abcdef\n", { mode: 0o600 });
 
 const cert = readFileSync(CERT_FILE);
 const key = readFileSync(KEY_FILE);

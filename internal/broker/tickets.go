@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/tinyorbitvn/tinycdi/internal/api"
@@ -35,8 +34,9 @@ var (
 	ErrTicketInvalid = errors.New("broker: ticket invalid or already used")
 	// ErrTicketExpired — ticket past its 60 s TTL; the attempt still consumes it.
 	ErrTicketExpired = errors.New("broker: ticket expired")
-	// ErrDenied — authenticated but not permitted (wrong tenant, workspace,
-	// gateway identity or lease ownership).
+	// ErrDenied — authenticated but not permitted (foreign gateway identity,
+	// foreign tenant binding, lease ownership or revoked generation). A
+	// workspace owned by another user of the same tenant is ErrNotFound.
 	ErrDenied = errors.New("broker: denied")
 	// ErrStaleBinding — the fence presented by the gateway no longer matches
 	// the current incarnation (stale runtimeGeneration or runtimeUID).
@@ -329,11 +329,13 @@ func portalSessionDigest(portalSessionID string) []byte {
 
 // IssueTicket mints a 60 s, single-use opaque ticket for workspaceUID bound to
 // (workspaceUID, runtimeGeneration, runtimeUID, gateway audience) of the
-// current incarnation. Fails with ErrNotFound/ErrDenied when the principal may
-// not connect, ErrNotReady when the workspace is not Ready, ErrFreshness when
-// observed state is stale, and ErrConnectionInUse when a live lease exists and
-// takeover is false. With takeover the ticket may supersede the live lease at
-// redemption, fencing the old socket before the new session works.
+// current incarnation. Fails with ErrNotFound when the workspace is unknown,
+// in another tenant or owned by someone else, with ErrDenied when the
+// principal's generation was revoked, ErrNotReady when the workspace is not
+// Ready, ErrFreshness when observed state is stale, and ErrConnectionInUse
+// when a live lease exists and takeover is false. With takeover the ticket
+// may supersede the live lease at redemption, fencing the old socket before
+// the new session works.
 // policy is the session data-transfer vector resolved by the API at
 // issue — the meet of the workspace template's policy and the tenant
 // ceiling (ADR 0009 §2). Its Clipboard field is recorded on the ticket
@@ -365,8 +367,10 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 	if state != "active" || tenantID != p.TenantID {
 		return Ticket{}, ErrNotFound
 	}
+	// Another user's workspace in the same tenant is indistinguishable
+	// from a missing one (TM-04): 404, never a 403 existence oracle.
 	if owner != p.Owner() {
-		return Ticket{}, ErrDenied
+		return Ticket{}, ErrNotFound
 	}
 
 	binding, err := b.currentBinding(ctx, workspaceUID, now)
@@ -425,26 +429,33 @@ func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID 
 			resolved = &s
 		}
 	}
-	if _, err := b.db.Pool().Exec(ctx,
-		`INSERT INTO launch_ticket
-			(ticket_hash, workspace_id, tenant_id, principal_subject,
-			 runtime_generation, runtime_uid, audience, takeover,
-			 request_id, expires_at, clipboard_policy, session_policy,
-			 portal_session_digest)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		ticketHash(token), workspaceUID, tenantID, owner,
-		int64(binding.RuntimeGeneration), binding.RuntimeUID,
-		b.audience, takeover, requestID(ctx), expires, clipboard,
-		resolved, portalSessionDigest(portalSessionID)); err != nil {
+	// In a transaction so the connection route's audit TxHook commits the
+	// audit row with the ticket (ADR 0010).
+	if err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO launch_ticket
+				(ticket_hash, workspace_id, tenant_id, principal_subject,
+				 runtime_generation, runtime_uid, audience, takeover,
+				 request_id, expires_at, clipboard_policy, session_policy,
+				 portal_session_digest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			ticketHash(token), workspaceUID, tenantID, owner,
+			int64(binding.RuntimeGeneration), binding.RuntimeUID,
+			b.audience, takeover, requestID(ctx), expires, clipboard,
+			resolved, portalSessionDigest(portalSessionID))
+		return err
+	}); err != nil {
 		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
 	}
 	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil
 }
 
-// RedeemTicket atomically consumes the ticket — even when expired — and
-// claims the workspace's single active lease in one transaction, bound to the
-// incarnation recorded at issuance. A ticket never redeems twice, and a
-// revoked ticket never redeems. On success it returns the new Lease.
+// RedeemTicket consumes the ticket on every attempt that passes the
+// audience check — an expired, revoked or refused attempt included, because
+// a refusal after the consume commits it — and claims the workspace's
+// single active lease in the same transaction, bound to the incarnation
+// recorded at issuance. A ticket never redeems twice, and a revoked ticket
+// never redeems. On success it returns the new Lease.
 //
 // Lock order matches the session revokes — ticket row first, then the
 // lease row. Both are single-row locks taken by primary key, so the path
@@ -454,6 +465,11 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 	now := b.now()
 	hash := ticketHash(opaque)
 	var lease Lease
+	// refusal is a redemption refused AFTER the consume UPDATE: the closure
+	// returns nil so the consume commits, and the refusal is returned once
+	// the transaction is done (the ClaimTransfer pattern). Every attempt
+	// that passes the audience check therefore spends the ticket.
+	var refusal error
 	err := b.db.WithTx(ctx, func(tx store.Tx) error {
 		var (
 			wsUID, tenantID, subject, runtimeUID, audience string
@@ -494,7 +510,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: consume ticket: %w", err)
 		}
 		if !now.Before(expiresAt) {
-			return ErrTicketExpired
+			refusal = ErrTicketExpired
+			return nil
 		}
 
 		// A revocation covering the ticket's generation blocks redemption:
@@ -508,7 +525,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: revocation check: %w", err)
 		}
 		if revoked {
-			return ErrRevoked
+			refusal = ErrRevoked
+			return nil
 		}
 
 		// A ticket minted under a portal session that no longer exists must
@@ -531,7 +549,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			return fmt.Errorf("broker: portal session check: %w", err)
 		}
 		if !alive {
-			return ErrRevoked
+			refusal = ErrRevoked
+			return nil
 		}
 
 		// Claim the single active lease for this workspace. The FOR UPDATE
@@ -556,7 +575,8 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 			case takeover:
 				next = `UPDATE connection_lease SET state = 'superseded', closed_at = $2 WHERE id = $1`
 			default:
-				return ErrConnectionInUse
+				refusal = ErrConnectionInUse
+				return nil
 			}
 			if _, err := tx.Exec(ctx, next, liveID, now); err != nil {
 				return fmt.Errorf("broker: fence old lease: %w", err)
@@ -594,25 +614,33 @@ func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque st
 		if policy != nil {
 			lease.ClipboardPolicy = *policy
 		}
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO connection_lease
 				(id, workspace_id, tenant_id, principal_subject,
 				 runtime_generation, runtime_uid, fencing_version, gateway_id,
 				 state, created_at, expires_at, last_renewed_at,
 				 portal_session_digest)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)
+			 ON CONFLICT DO NOTHING`,
 			lease.ID, wsUID, tenantID, subject, int64(gen), runtimeUID,
-			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession); err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				return ErrConnectionInUse
-			}
+			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession)
+		if err != nil {
 			return fmt.Errorf("broker: insert lease: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// A concurrent redemption holds the workspace's single active
+			// lease (partial unique index). DO NOTHING keeps the
+			// transaction alive, so the consume still commits.
+			refusal = ErrConnectionInUse
+			return nil
 		}
 		return nil
 	})
 	if err != nil {
 		return Lease{}, err
+	}
+	if refusal != nil {
+		return Lease{}, refusal
 	}
 	return lease, nil
 }
