@@ -43,8 +43,11 @@ images:
   # entries using `image: linuxDesktop` / `image: browser`). Runtime images
   # must be DIGEST-pinned (spec.linux.image requires <repo>@sha256:<64hex>)
   # — a tag-only runtime image is rejected by the CRD.
-  # builtAt is the image build timestamp (RFC 3339) from the runtime
-  # release train's runtime-images.json; it renders as the template's
+  # builtAt is the image build timestamp (RFC 3339, UTC): the second the
+  # build job recorded and stamped into the image's
+  # org.opencontainers.image.created label. A release stamps it here for
+  # linuxBase, linuxDesktop and browser; a runtime-train bump copies it
+  # from runtime-images.json. It renders as the template's
   # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
   # report imageBuiltAt/imageStale on templates and workspaces. A stale
   # image past -image-block-after (45 d default) refuses create/start with

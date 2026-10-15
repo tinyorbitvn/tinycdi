@@ -12,6 +12,7 @@
 #   * every <img>.ref to match ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<64hex>
 #   * every SBOM to be non-empty valid JSON
 #   * the digests stamped into the packaged chart to equal the image refs
+#   * every image-ref artifact to carry <img>.built-at, and the chart's runtime builtAt to equal it (R1-09)
 # Anything unexpected fails closed before a byte is signed or pushed.
 #
 # Usage: collect-publish-inputs.sh <downloads-dir> <out-dir>
@@ -68,7 +69,9 @@ mapfile -t got < <(find "$DL" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | s
 
 # ---- 1. image refs: exactly one file per artifact, strict ref format ---
 for img in "${expected[@]}"; do
-  exact_files "$DL/image-ref-$img" "$img.ref"
+  exact_files "$DL/image-ref-$img" "$img.ref" "$img.built-at"
+  "$SCRIPT_DIR/earliest-built-at.sh" "$DL/image-ref-$img" "$img" >/dev/null \
+    || die "image-ref-$img carries no valid build time"
 done
 mkdir -p "$OUT/refs"
 for img in "${expected[@]}"; do
@@ -143,6 +146,23 @@ for img in "${expected[@]}"; do
   ref="$(tr -d '[:space:]' < "$OUT/refs/$img.ref")"
   [ "$stamped" = "${ref#*@}" ] \
     || die "chart $section.$key.digest ($stamped) != $img.ref digest (${ref#*@})"
+  # R1-09: the runtime images' builtAt must be the build job's time —
+  # an empty or publish-time value would defeat the stale-image block.
+  ba="$(awk -v section="$section" -v key="$key" '
+    /^[^ #]/                          { in_sec = ($0 ~ ("^" section ":")) }
+    in_sec && /^  [a-zA-Z]+:/         { cur = substr($1, 1, length($1) - 1) }
+    in_sec && cur == key && /^    builtAt:/ {
+      v = $2; gsub(/[" ]/, "", v); print "field:" v; exit
+    }' "$OUT/.chart-values.yaml")"
+  case "$img" in
+    linux-base|linux-desktop|browser)
+      [ -n "$ba" ] || die "chart $section.$key has no builtAt field — the runtime image age cannot be enforced" ;;
+  esac
+  if [ -n "$ba" ]; then
+    want_ba="$(tr -d '[:space:]' < "$DL/image-ref-$img/$img.built-at")"
+    [ "${ba#field:}" = "$want_ba" ] \
+      || die "chart $section.$key.builtAt ('${ba#field:}') != $img.built-at ($want_ba) — builtAt was not stamped from the build job"
+  fi
 done
 rm -f "$OUT/.chart-values.yaml"
 

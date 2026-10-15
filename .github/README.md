@@ -117,6 +117,16 @@ to be public — once it is, run:
 RELEASE_REVIEWERS="vanlongme,alice" .github/scripts/setup-repo-protection.sh --apply
 ```
 
+Approve within a day of the scan. Both signing jobs (`release.yml`
+`publish` and `runtime-images.yml` `publish`) run
+`.github/scripts/check-scan-age.sh` before `cosign sign`. It refuses to
+sign when any scan leg of the run finished more than
+`SCAN_MAX_AGE_HOURS` (24) hours earlier, according to the jobs API. A
+late approval, or a re-run of an old run's failed publish, fails; start
+a fresh run instead. The release chart's `images.{linuxBase,linuxDesktop,browser}.builtAt`
+carry each image's recorded build time, and `collect-publish-inputs.sh`
+refuses a chart where they differ from it.
+
 The script is idempotent (GET-then-create/update only what differs) and sets:
 
 - **`release` environment** — required reviewers (`RELEASE_REVIEWERS`, a

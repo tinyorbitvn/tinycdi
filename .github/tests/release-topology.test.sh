@@ -59,6 +59,15 @@ chk "release: provenance gated on ATTESTATIONS_ENABLED" "$REL" "ATTESTATIONS_ENA
 chk "release: tag uses chart_version (no v prefix)" "$REL" 'imagetools create.*CHART_VERSION|\$CHART_VERSION'
 chk "release: latest only when not prerelease" "$REL" 'PRERELEASE'
 chk "release: digest stamping script wired" "$REL" 'stamp-image-digests.sh'
+# R1-09: release builds record their build second, the chart stamps it
+# as the runtime images' builtAt, and publish refuses a stale scan.
+chk "release: base records its build time" "$REL" 'refs/linux-base\.built-at'
+chk "release: image legs record their build time" "$REL" 'refs/\$IMG\.built-at'
+chk "release: label created = recorded build time" "$REL" 'org\.opencontainers\.image\.created=\$BUILT_AT'
+chk "release: stamper writes builtAt" "$ROOT/.github/scripts/stamp-image-digests.sh" 'builtAt'
+chk "release: collector verifies builtAt" "$ROOT/.github/scripts/collect-publish-inputs.sh" 'builtAt'
+chk "release: scan age bound wired" "$REL" 'check-scan-age\.sh jobs\.json "\$SCAN_MAX_AGE_HOURS"'
+order "release: scan age checked before signing" "$REL" 'check-scan-age\.sh jobs\.json' 'name: cosign sign images'
 
 # SEC-15 + SUPR-11: main-ancestry check resolves refs/heads/main to a SHA
 # first — the bare name is ambiguous if a `main` tag ever exists.
