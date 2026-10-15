@@ -54,4 +54,13 @@ describe("vi catalog", () => {
       expect(value, key).not.toMatch(/\p{Extended_Pictographic}/u);
     }
   });
+
+  // A hint that explains option values must name them by the labels the
+  // vi select actually shows, not the English enum names.
+  it("session-policy clipboard hint names the vi option labels", () => {
+    const hint = vi["admin.policy.clipboard.hint"];
+    expect(hint).toContain(vi["templates.clipboard.send"]);
+    expect(hint).toContain(vi["templates.clipboard.receive"]);
+    expect(hint).not.toMatch(/\b(Send|Receive)\b/);
+  });
 });

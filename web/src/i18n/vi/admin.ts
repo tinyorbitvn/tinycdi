@@ -310,7 +310,7 @@ export default {
     "Chưa đặt giới hạn — chính sách riêng của từng template được áp dụng nguyên bản.",
   "admin.policy.clipboard.label": "Clipboard",
   "admin.policy.clipboard.hint":
-    "Send cho phép sao chép từ thiết bị vào workspace; Receive cho phép sao chép từ workspace về thiết bị.",
+    "Chỉ gửi cho phép sao chép từ thiết bị vào workspace; Chỉ nhận cho phép sao chép từ workspace về thiết bị.",
   "admin.policy.fileTransfer.label": "Truyền tệp",
   "admin.policy.fileTransfer.hint":
     "Tải lên là thiết bị → workspace, Tải xuống là workspace → thiết bị. Tệp nằm trong thư mục Transfers của thư mục chính workspace.",
