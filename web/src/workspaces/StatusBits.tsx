@@ -35,6 +35,7 @@ export function ConditionsTable({ workspace }: { workspace: WorkspaceView }) {
       columns={COLUMNS}
       rows={workspace.conditions}
       rowKey={(c) => c.type}
+      stackBelow="md"
       caption={t("workspaces.conditions.label")}
       empty={t("workspaces.conditions.empty")}
     />

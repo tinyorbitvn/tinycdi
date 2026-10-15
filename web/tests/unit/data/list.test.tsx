@@ -131,4 +131,15 @@ describe("data list", () => {
     );
     expect(screen.queryByLabelText(/scope/i)).not.toBeInTheDocument();
   });
+
+  it("row actions: Attach is a secondary button, Purge a danger-ghost button; no raw dataPolicy text", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<DataListPage />, api);
+    const table = await screen.findByRole("table", { name: "Retained data" });
+    const attach = await within(table).findByRole("button", { name: "Attach" });
+    expect(attach).toHaveClass("tc-button--secondary", "tc-button--sm");
+    expect(within(table).getByRole("button", { name: "Purge" })).toHaveClass("tc-button--danger-ghost", "tc-button--sm");
+    expect(document.body).not.toHaveTextContent("dataPolicy");
+  });
 });

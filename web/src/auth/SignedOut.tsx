@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { buttonClass, EmptyState, IconLogout } from "../design";
+import { buttonClass, LogoMark } from "../design";
 import { t } from "../i18n";
 import { SIGN_IN_AGAIN_URL } from "./signOut";
 
@@ -13,17 +13,14 @@ export function SignedOut() {
   }, []);
   return (
     <main className="tc-signedout">
-      <EmptyState
-        icon={<IconLogout size={32} />}
-        headingLevel={2}
-        title={t("auth.signedOut.title")}
-        description={t("auth.signedOut.body")}
-        action={
-          <a className={buttonClass("primary")} href={SIGN_IN_AGAIN_URL}>
-            {t("auth.signedOut.action")}
-          </a>
-        }
-      />
+      <div className="tc-signedout__card">
+        <LogoMark size={48} />
+        <h1 className="tc-signedout__title">{t("auth.signedOut.title")}</h1>
+        <p className="tc-signedout__body">{t("auth.signedOut.body")}</p>
+        <a className={buttonClass("primary")} href={SIGN_IN_AGAIN_URL}>
+          {t("auth.signedOut.action")}
+        </a>
+      </div>
     </main>
   );
 }

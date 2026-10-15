@@ -126,6 +126,25 @@ describe("WorkspaceListPage", () => {
     expect(within(table).getByText("linux-firefox-desktop@7")).toBeInTheDocument();
     expect(within(table).getByText("Retain")).toBeInTheDocument();
   }, 20000);
+
+  it("list: rows stack below md, names keep whole words, Manage is a small secondary button", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    api.state.workspaces.set("ws_one", readyWorkspace({ id: "ws_one", name: "dev-box" }));
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={60_000} />, api);
+
+    const table = await screen.findByRole("table", { name: "workspaces" });
+    expect(table).toHaveClass("tc-table--stack-md");
+    const name = within(table).getByRole("rowheader");
+    expect(name).toHaveAttribute("data-label", "Name");
+    expect(name).toHaveClass("tc-table__nowrap");
+    const manage = within(table).getByRole("link", { name: "Manage" });
+    expect(manage).toHaveClass("tc-button", "tc-button--secondary", "tc-button--sm");
+    expect(manage).toHaveAttribute("href", "/workspaces/ws_one");
+    const pill = within(table).getByText("Ready").closest(".tc-badge")!;
+    expect(pill.parentElement).toHaveClass("tc-cell-stack");
+  }, 20000);
 });
 
 describe("PhasePill", () => {

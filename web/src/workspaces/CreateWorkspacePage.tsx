@@ -1,11 +1,10 @@
 import { useRef, useState, type FormEvent } from "react";
-import { Alert, Button, Checkbox, Input, Page, Select, Spinner } from "../design";
+import { Alert, Button, Checkbox, Form, FormActions, Input, Page, Select, Spinner } from "../design";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { newIdempotencyKey, unwrap } from "../api/client";
 import { isPortalApiError } from "../api/errors";
-import { navigate, Link } from "../lib/router";
-import { IconArrowLeft } from "../design/icons";
+import { navigate } from "../lib/router";
 import { useTemplateLookup } from "../templates/useTemplates";
 import { dataPolicyLabel, networkProfileLabel, runtimeLabel } from "../templates/format";
 import type { DataPolicy } from "../templates/types";
@@ -13,6 +12,7 @@ import { ErrorBanner } from "./ErrorBanner";
 
 // DNS-label display name (same client-side shape the API enforces).
 const NAME_PATTERN = "[a-z0-9][a-z0-9\\-]{0,126}[a-z0-9]|[a-z0-9]";
+const NAME_RE = new RegExp(`^(?:${NAME_PATTERN})$`);
 
 type PolicyChoice = "" | DataPolicy;
 
@@ -31,6 +31,16 @@ export function CreateWorkspacePage() {
   // The name the server refused as taken (409 ALREADY_EXISTS); flagged on
   // the name field until the user edits it.
   const [takenName, setTakenName] = useState<string | null>(null);
+  // Pattern errors show inline once the user leaves the field or submits;
+  // noValidate on the form replaces the browser bubble with this message.
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameInvalid = name.trim() !== "" && !NAME_RE.test(name.trim());
+  const nameError =
+    takenName !== null && name.trim() === takenName
+      ? t("errors.code.alreadyExists")
+      : nameTouched && nameInvalid
+        ? t("workspaces.create.nameInvalid")
+        : undefined;
   // One Idempotency-Key per create attempt; a retry of the SAME attempt reuses
   // it so the server replays the recorded result instead of double-creating.
   const idemKey = useRef<string | null>(null);
@@ -40,7 +50,8 @@ export function CreateWorkspacePage() {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!templateRef || !name.trim()) return;
+    setNameTouched(true);
+    if (!templateRef || !name.trim() || nameInvalid) return;
     setBusy(true);
     setError(null);
     idemKey.current ??= newIdempotencyKey();
@@ -92,20 +103,12 @@ export function CreateWorkspacePage() {
   ];
 
   return (
-    <Page
-      title={t("workspaces.create.title")}
-      width="narrow"
-      eyebrow={
-        <Link to="/">
-          <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
-        </Link>
-      }
-    >
+    <Page title={t("workspaces.create.title")} width="narrow" back={{ to: "/", label: t("nav.allWorkspaces") }}>
       <ErrorBanner error={templates.error ?? error} onDismiss={() => setError(null)} />
       {templates.loading && !templates.data ? (
         <Spinner label={t("workspaces.create.loading")} />
       ) : (
-        <form onSubmit={(e) => void submit(e)}>
+        <Form noValidate onSubmit={(e) => void submit(e)}>
           <Input
             label={t("workspaces.create.nameLabel")}
             name="name"
@@ -113,7 +116,8 @@ export function CreateWorkspacePage() {
             pattern={NAME_PATTERN}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            error={takenName !== null && name.trim() === takenName ? t("errors.code.alreadyExists") : undefined}
+            onBlur={() => setNameTouched(true)}
+            error={nameError}
             placeholder={t("workspaces.create.namePlaceholder")}
             autoComplete="off"
           />
@@ -123,6 +127,11 @@ export function CreateWorkspacePage() {
             required
             value={templateRef}
             onChange={(e) => setTemplateRef(e.target.value)}
+            hint={
+              selected?.networkProfile
+                ? t("workspaces.create.network", { profile: networkProfileLabel(selected.networkProfile) })
+                : undefined
+            }
           >
             <option value="" disabled>
               {t("workspaces.create.templatePlaceholder")}
@@ -147,13 +156,6 @@ export function CreateWorkspacePage() {
               {t("workspaces.create.blocked.body")}
             </Alert>
           ) : null}
-          {selected?.networkProfile ? (
-            <p className="tc-field__hint">
-              {t("workspaces.create.network", {
-                profile: networkProfileLabel(selected.networkProfile),
-              })}
-            </p>
-          ) : null}
           <Select
             label={t("workspaces.create.dataPolicyLabel")}
             name="dataPolicy"
@@ -172,15 +174,17 @@ export function CreateWorkspacePage() {
             checked={startNow}
             onChange={(e) => setStartNow(e.target.checked)}
           />
-          <Button
-            type="submit"
-            variant="primary"
-            loading={busy}
-            disabled={!name.trim() || !templateRef || selected?.imageBlocked === true}
-          >
-            {busy ? t("workspaces.create.submitting") : t("workspaces.create.submit")}
-          </Button>
-        </form>
+          <FormActions>
+            <Button
+              type="submit"
+              variant="primary"
+              loading={busy}
+              disabled={!name.trim() || !templateRef || selected?.imageBlocked === true}
+            >
+              {busy ? t("workspaces.create.submitting") : t("workspaces.create.submit")}
+            </Button>
+          </FormActions>
+        </Form>
       )}
     </Page>
   );

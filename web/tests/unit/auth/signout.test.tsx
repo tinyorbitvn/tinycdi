@@ -316,3 +316,15 @@ describe("user menu", () => {
     }
   });
 });
+
+describe("SignedOut page", () => {
+  it("is a solid card with the product logo, an h1 and a primary sign-in link", () => {
+    const { container } = render(<SignedOut />);
+    expect(screen.getByRole("heading", { level: 1, name: "You have signed out" })).toBeInTheDocument();
+    const card = container.querySelector(".tc-signedout__card");
+    expect(card).not.toBeNull();
+    expect(card!.querySelector(".tc-logo-mark")).not.toBeNull();
+    expect(container.querySelector(".tc-empty")).toBeNull();
+    expect(screen.getByRole("link", { name: "Sign in again" })).toHaveClass("tc-button--primary");
+  });
+});

@@ -83,3 +83,34 @@ test("list -> purge -> row gone", async ({ page, request }) => {
     page.getByRole("row", { name: new RegExp(RETAINED_ID) }),
   ).toHaveCount(0);
 });
+
+// Visual check (plan Task 14): the admin Scope select is a labelled field,
+// so in the header's actions slot it made the title row as tall as label +
+// control and pushed the description far below the title.
+test("admin scope select keeps the description under the title", async ({ page, request }) => {
+  const me = await request.post(`${MOCK}/_control/admin/me`, {
+    data: { roles: ["user", "tenant-admin"] },
+  });
+  expect(me.ok()).toBeTruthy();
+  await login(page);
+  await expect(page.getByLabel("Scope")).toBeVisible();
+  const title = (await page.locator(".tc-page__title").boundingBox())!;
+  const description = (await page.locator(".tc-page__description").boundingBox())!;
+  expect(description.y - (title.y + title.height)).toBeLessThanOrEqual(16);
+});
+
+// Visual check (plan Task 14): a visually hidden column header is
+// position:absolute; unless the table wrapper contains it, it escapes the
+// wrapper's own scroll area and the whole page scrolls sideways at 390px.
+test.describe("at 390px", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("the retained-data page does not scroll sideways", async ({ page }) => {
+    await login(page);
+    await expect(page.getByRole("row", { name: new RegExp(RETAINED_ID) })).toBeVisible();
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+});

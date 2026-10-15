@@ -16,10 +16,9 @@ export default {
   "common.pagination.loadMore": "Load more",
   "common.collectionTooLarge": "This view needs more than {n} records, which is more than the portal reads at once.",
 
-  "errors.banner.fallback": "ERROR",
-  "errors.banner.requestId": "(request {id})",
+  "errors.banner.fallback": "Something went wrong",
+  "errors.banner.requestId": "Request ID: {id}",
   "errors.banner.retry": "Retry",
-  "errors.banner.dismiss": "dismiss error",
   "errors.code.quotaExhausted":
     "Quota exhausted — delete an unused workspace or ask an administrator for more quota.",
   "errors.code.quotaReleasePending":

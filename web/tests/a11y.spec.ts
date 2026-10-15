@@ -154,6 +154,22 @@ test.describe("locale: vi", () => {
 });
 
 test.describe("keyboard", () => {
+  test("skip link: clipped until the first Tab, then visible without a shadow", async ({ page, request }) => {
+    await seed(request);
+    await login(page);
+    await page.goto("/workspaces");
+    await settle(page);
+    const skip = page.locator(".tc-skip-link");
+    expect(await skip.evaluate((el) => getComputedStyle(el).clipPath)).not.toBe("none");
+    await page.keyboard.press("Tab");
+    await expect(skip).toBeFocused();
+    const style = await skip.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { clip: s.clipPath, shadow: s.boxShadow };
+    });
+    expect(style).toEqual({ clip: "none", shadow: "none" });
+  });
+
   test("every interactive element on /workspaces is Tab-reachable with a visible focus ring", async ({
     page,
     request,
@@ -231,5 +247,46 @@ test.describe("keyboard", () => {
 
     const noRing = [...focused.entries()].filter(([, v]) => !v.ring).map(([id]) => id);
     expect(noRing, "focused elements without a visible focus ring").toEqual([]);
+  });
+});
+
+test.describe("locale: vi at 390px", () => {
+  test.use({ locale: "vi-VN", viewport: { width: 390, height: 844 } });
+
+  test("admin overview: Stat cards, tabs and buttons fit without horizontal scroll", async ({ page, request }) => {
+    await seed(request);
+    await login(page, "Workspace");
+    await page.goto("/admin");
+    await settle(page);
+    await expect(page.locator("html")).toHaveAttribute("lang", "vi");
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    const stats = page.locator(".tc-stat");
+    expect(await stats.count()).toBeGreaterThan(0);
+    for (const stat of await stats.all()) {
+      const box = await stat.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    }
+    for (const button of await page.locator(".tc-page__actions .tc-button").all()) {
+      const box = await button.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    }
+  });
+});
+
+// Spec §3.2: the dark canvas is flat. Orbit's navy-night sheet paints a
+// radial page gradient on `html[data-theme="dark"] body` after base.css
+// loads, so this checks the computed result, not the declaration.
+test.describe("theme: dark canvas", () => {
+  test("the page body has no gradient glow", async ({ page, request, context }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await context.addInitScript(() => window.localStorage.setItem("tcdi.theme", "dark"));
+    await seed(request);
+    await login(page);
+    await page.goto("/admin");
+    await settle(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    const backgroundImage = await page.evaluate(() => getComputedStyle(document.body).backgroundImage);
+    expect(backgroundImage).toBe("none");
   });
 });

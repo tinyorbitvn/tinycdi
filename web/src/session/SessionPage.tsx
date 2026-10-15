@@ -16,8 +16,8 @@ import { Link, navigate } from "../lib/router";
 import { Badge, type Tone } from "../design/Badge";
 import { Button, buttonClass } from "../design/Button";
 import { Spinner } from "../design/Spinner";
+import { BackLink } from "../design/Layout";
 import {
-  IconArrowLeft,
   IconClipboard,
   IconClock,
   IconExternalLink,
@@ -962,10 +962,7 @@ export function SessionPage({
   return (
     <section className="tc-session" aria-label={t("session.page.ariaLabel", { name })}>
       <div className="tc-session__toolbar">
-        <Link to="/" className={buttonClass("ghost", "sm")}>
-          <IconArrowLeft aria-hidden="true" />
-          <span className="tc-button__label">{t("session.toolbar.back")}</span>
-        </Link>
+        <BackLink to="/" label={t("session.toolbar.back")} className="tc-session__back" />
         <h1 className="tc-session__title">{name}</h1>
         <StatusBadge status={state.status} recovering={recovering} />
         <LifecycleNotice workspace={workspace} template={template} live={isLive(state.status)} />
@@ -974,7 +971,7 @@ export function SessionPage({
           <ClipboardHint policy={resolvedClipboard ?? template?.clipboardPolicy} />
           <Button
             size="sm"
-            variant="ghost"
+            variant="secondary"
             icon={<IconRefresh aria-hidden="true" />}
             disabled={!canLaunch}
             onClick={() => relaunch("frame")}
@@ -983,7 +980,7 @@ export function SessionPage({
           </Button>
           <Button
             size="sm"
-            variant="ghost"
+            variant="secondary"
             icon={<IconExternalLink aria-hidden="true" />}
             disabled={!canLaunch}
             onClick={() => relaunch("tab")}
@@ -992,7 +989,7 @@ export function SessionPage({
           </Button>
           <Button
             size="sm"
-            variant="ghost"
+            variant="secondary"
             icon={fullscreen ? <IconMinimize aria-hidden="true" /> : <IconMaximize aria-hidden="true" />}
             aria-pressed={fullscreen}
             disabled={!canFullscreen}
@@ -1004,6 +1001,10 @@ export function SessionPage({
       </div>
       {connected && sessionDomain ? <FileTransfer workspaceId={workspaceId} sessionDomain={sessionDomain} policy={resolvedTransfer.policy} maxFileBytes={resolvedTransfer.maxFileBytes} /> : null}
       <div className="tc-session__stage" ref={stageRef} data-status={state.status}>
+        <div className="tc-session__placeholder" aria-hidden="true">
+          <Spinner size="md" decorative />
+          <span>{t("session.progress.connecting")}</span>
+        </div>
         <iframe
           key={frameKey}
           ref={frameRef}
@@ -1423,7 +1424,7 @@ function ClipboardHint({ policy }: { policy: ClipboardPolicy | undefined }) {
   const disabled = policy === "Disabled";
   return (
     <details className="tc-session__clipboard">
-      <summary className={buttonClass("ghost", "sm")}>
+      <summary className={buttonClass("secondary", "sm")}>
         <IconClipboard aria-hidden="true" />
         <span className="tc-button__label">{t("session.clipboard.label")}</span>
       </summary>

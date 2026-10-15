@@ -17,6 +17,8 @@ describe("WorkspaceDetailPage delete flow (V3.27)", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("moves to the retained inventory");
     expect(dialog).toHaveTextContent("research-desktop");
+    // The body explains the consequence; it does not repeat the title's question.
+    expect(within(dialog).getByText("Access is revoked and the runtime is removed.")).toBeInTheDocument();
   }, 20000);
 
   it("delete: confirm names the destroy consequence for Ephemeral", async () => {

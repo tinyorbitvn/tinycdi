@@ -104,6 +104,17 @@ export function ownerRefFromParam(param: string): string | undefined {
   }
 }
 
+/** The issuer half of an `issuer|subject` owner reference ("—" when absent). */
+export function issuerOf(ownerRef: string, subject: string): string {
+  // Subjects may themselves contain "|" (e.g. "auth0|abc"), so strip the known subject suffix.
+  const suffix = "|" + subject;
+  if (subject !== "" && ownerRef.endsWith(suffix) && ownerRef.length > suffix.length) {
+    return ownerRef.slice(0, ownerRef.length - suffix.length);
+  }
+  const cut = ownerRef.indexOf("|");
+  return cut > 0 ? ownerRef.slice(0, cut) : "—";
+}
+
 // Per-user disk counts need the whole tenant's retained-data list; the
 // user rows themselves page on the server.
 async function loadDiskCounts(api: ApiClient): Promise<Map<string, number>> {
@@ -223,7 +234,7 @@ export function UsersAdminPage() {
     >
       <Input
         label={t("admin.users.filter.label")}
-        fieldClassName="tc-admin-toolbar"
+        fieldClassName="tc-admin-toolbar tc-admin-filter"
         type="search"
         placeholder={t("admin.users.filter.placeholder")}
         value={filter}
@@ -384,7 +395,6 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
         icon={<IconUsers size={32} />}
         title={t("admin.userDetail.notFound.title")}
         description={t("admin.userDetail.notFound.body")}
-        action={<Link to="/admin/users">{t("admin.userDetail.notFound.back")}</Link>}
       />
     );
   } else if (!u.data) {
@@ -396,16 +406,10 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
   } else if (row) {
     body = (
       <>
-        <Section
-          title={t("admin.userDetail.limits.title")}
-          actions={
-            <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
-              {t("admin.userLimits.edit.action")}
-            </Button>
-          }
-        >
+        <Section title={t("admin.userDetail.identity.title")}>
           <DescriptionList
             items={[
+              { term: t("admin.userDetail.field.issuer"), detail: <code>{issuerOf(row.limitsEntry.ownerRef, row.subject)}</code> },
               { term: t("admin.userDetail.field.subject"), detail: <code>{row.subject}</code> },
               {
                 term: t("admin.userDetail.field.ownerRef"),
@@ -416,6 +420,19 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
                 term: t("admin.userDetail.field.lastSeen"),
                 detail: <time dateTime={row.lastSeenAt}>{formatDateTime(row.lastSeenAt)}</time>,
               },
+            ]}
+          />
+        </Section>
+        <Section
+          title={t("admin.userDetail.limits.title")}
+          actions={
+            <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
+              {t("admin.userLimits.edit.action")}
+            </Button>
+          }
+        >
+          <DescriptionList
+            items={[
               { term: t("admin.userLimits.column.running"), detail: String(row.running) },
               { term: t("admin.userLimits.column.limit"), detail: <OverrideCell row={row} /> },
               {
@@ -465,7 +482,7 @@ export function UserDetailPage({ ownerRef, now }: { ownerRef: string; now?: numb
   return (
     <AdminLayout
       title={row?.displayName ?? t("admin.userDetail.titleFallback")}
-      description={<code className="tc-admin-muted">{ownerRef}</code>}
+      back={{ to: "/admin/users", label: t("admin.userDetail.notFound.back") }}
     >
       <ApiErrorAlert error={u.error} onRetry={u.reload} />
       <ApiErrorAlert error={ws.error} onRetry={ws.reload} />

@@ -28,7 +28,28 @@ Details: [docs/architecture.md](docs/architecture.md).
 
 - **Desktop & browser workspaces in the browser** — Linux desktop and
   ephemeral Chromium/Firefox sessions streamed over KasmVNC WebSocket
-  (HTTPS, no client install).
+  (HTTPS, no client install). Each workspace is served on its own
+  `<label>.<sessionDomain>` host.
+- **Self-service portal** — users create, start, stop and delete
+  workspaces from the templates their tenant offers, and follow each
+  start step by step.
+- **Persistent / retained home data** — Retain or Ephemeral data policy
+  per workspace; retained disks can be re-attached to a new workspace or
+  purged.
+- **Clipboard and file transfer** — within the ceiling the tenant sets;
+  one file at a time through the workspace's `~/transfers` folder.
+- **Sign out everywhere** — ends every portal session a user holds in the
+  tenant and revokes that tenant's live desktop connections and
+  outstanding launch tickets.
+- **Admin console** — tenant admins see an overview of capacity and
+  health, and manage workspaces, templates, retained data, users (with
+  their live sessions), quota and per-user limits across the tenant.
+- **Session policy** — a tenant-wide clipboard and file-transfer ceiling
+  over each template's own policy; `:apply` restarts running workspaces
+  that are looser than the ceiling, after a dry run lists them.
+- **Audit log** — admin and session actions are persisted in PostgreSQL,
+  browsable in the admin console and pruned after a retention period
+  (default 90 days).
 - **OIDC SSO with a group gate** — users authenticate through your
   identity provider; only allowed groups get in.
 - **One-use launch tickets + hardened session gateway** — opaque,
@@ -39,25 +60,25 @@ Details: [docs/architecture.md](docs/architecture.md).
 - **Isolation by default** — per-workspace NetworkPolicy/egress profiles,
   Localhost seccomp + AppArmor node profiles, non-root runtime with all
   capabilities dropped, and Chromium's sandbox kept *on*.
-- **Persistent / retained home data** — Retain or Ephemeral data policy
-  per workspace; retained disks can be re-attached or purged.
-- **Per-tenant quotas**, workspace lifecycle controls and idempotent API.
 - **Helm chart** — one-command install/upgrade, CRDs, RBAC and
   NetworkPolicy baseline included.
+- **Local trial** — `hack/quickstart/up.sh` brings TinyCDI up on a
+  throwaway local cluster ([quickstart](docs/quickstart.md)).
 - **Signed releases** — images on `ghcr.io` with SBOMs, SLSA provenance
   and signature verification (see `docs/security/provenance.md`).
 
 ## Screenshots
 
-| Workspace portal | Live session |
+| Workspace portal | Tenant admin |
 |---|---|
-| ![Workspace list — desktop and browser workspaces with phase, desired state and data policy](docs/images/screenshots/portal-workspaces.png) | ![Workspace detail — conditions, connect and lifecycle actions](docs/images/screenshots/portal-detail.png) |
-| ![Create workspace — pick a template, data policy and start state](docs/images/screenshots/portal-create.png) | ![Retained data — disks kept after workspace deletion](docs/images/screenshots/portal-data.png) |
-| ![Linux desktop workspace streamed over KasmVNC](docs/images/screenshots/session-desktop.png) | ![Browser workspace — sandboxed Chromium in the browser](docs/images/screenshots/session-browser.png) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/portal-workspaces-dark.png"><img src="docs/images/screenshots/portal-workspaces-light.png" alt="Workspace list with each workspace's phase and start progress"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/admin-overview-dark.png"><img src="docs/images/screenshots/admin-overview-light.png" alt="Admin overview with live sessions, start time, capacity meters and workspaces by phase"></picture> |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/portal-create-dark.png"><img src="docs/images/screenshots/portal-create-light.png" alt="New workspace form with template, data policy and start options"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/admin-session-policy-dark.png"><img src="docs/images/screenshots/admin-session-policy-light.png" alt="Session policy with the tenant clipboard and file-transfer ceiling"></picture> |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/portal-detail-dark.png"><img src="docs/images/screenshots/portal-detail-light.png" alt="Workspace detail with connect, lifecycle actions, conditions and events"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshots/admin-audit-dark.png"><img src="docs/images/screenshots/admin-audit-light.png" alt="Audit log with filters and outcomes"></picture> |
+| <img src="docs/images/screenshots/session-desktop.png" alt="Linux desktop workspace streamed over KasmVNC"> | <img src="docs/images/screenshots/session-browser.png" alt="Browser workspace with sandboxed Chromium in the browser"> |
 
-Screenshots are real captures of the shipped images and portal —
-regenerate them with `node web/scripts/screenshots.mjs`
-(see `docs/development.md`).
+Screenshots are real captures of the shipped portal (light and dark
+follow your GitHub theme) and runtime images. Regenerate them with
+`node web/scripts/screenshots.mjs` (see `docs/development.md`).
 
 ## Quick start
 

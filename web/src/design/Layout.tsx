@@ -1,15 +1,35 @@
 import type { HTMLAttributes, ReactNode } from "react";
+import { Link } from "../lib/router";
 import { cx } from "./cx";
+import { IconChevronLeft } from "./icons";
 import { useDomId } from "./useId";
 
 // Page structure. The app shell owns <main>; pages render <Page> inside it.
 
+/** Where a page's back link goes and what it says. */
+export interface BackTarget {
+  to: string;
+  label: string;
+}
+
+/** Chevron back link: the one back-navigation style on every page. */
+export function BackLink({ to, label, className }: BackTarget & { className?: string }) {
+  return (
+    <Link to={to} className={cx("tc-backlink", className)}>
+      <IconChevronLeft size={16} />
+      <span>{label}</span>
+    </Link>
+  );
+}
+
 export interface PageProps {
   title: ReactNode;
   description?: ReactNode;
-  /** Right-aligned header actions (primary button etc.). */
+  /** Header actions, aligned to the title baseline. */
   actions?: ReactNode;
-  /** Small content above the title (e.g. a back link / breadcrumbs). */
+  /** Back link in the eyebrow slot (chevron + label). */
+  back?: BackTarget;
+  /** Small context text in the eyebrow slot (e.g. the admin tenant). */
   eyebrow?: ReactNode;
   /** `narrow` caps the content at a readable width (forms). */
   width?: "default" | "narrow" | "full";
@@ -17,16 +37,20 @@ export interface PageProps {
   className?: string;
 }
 
-export function Page({ title, description, actions, eyebrow, width = "default", children, className }: PageProps) {
+export function Page({ title, description, actions, back, eyebrow, width = "default", children, className }: PageProps) {
   return (
     <div className={cx("tc-page", `tc-page--${width}`, className)}>
       <header className="tc-page__header">
-        <div className="tc-page__heading">
-          {eyebrow ? <div className="tc-page__eyebrow">{eyebrow}</div> : null}
-          <h1 className="tc-page__title">{title}</h1>
-          {description ? <p className="tc-page__description">{description}</p> : null}
+        {/* Always rendered: every page header has the same height. */}
+        <div className="tc-page__eyebrow">
+          {back ? <BackLink to={back.to} label={back.label} /> : null}
+          {eyebrow ? <span className="tc-page__context">{eyebrow}</span> : null}
         </div>
-        {actions ? <div className="tc-page__actions">{actions}</div> : null}
+        <div className="tc-page__titlerow">
+          <h1 className="tc-page__title">{title}</h1>
+          {actions ? <div className="tc-page__actions">{actions}</div> : null}
+        </div>
+        {description ? <p className="tc-page__description">{description}</p> : null}
       </header>
       <div className="tc-page__body">{children}</div>
     </div>
@@ -66,7 +90,7 @@ export function Section({ title, description, actions, headingLevel = 2, childre
   );
 }
 
-export type Gap = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 8;
+export type Gap = 0 | 1 | 2 | 3 | 4 | 6 | 8;
 
 export interface StackProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
   gap?: Gap;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Badge, Button, Dialog, Input, Pagination, Section, Spinner, Table, useServerTable } from "../design";
+import { Alert, Badge, Button, Dialog, Input, Pagination, Section, Spinner, Stat, Table, useServerTable } from "../design";
 import type { Column } from "../design/Table";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
@@ -251,10 +251,12 @@ export function UserLimitsSection({ tenant }: { tenant: string }) {
         </Button>
       }
     >
-      <p>
-        <span className="tc-admin-muted">{t("admin.userLimits.default")}</span>{" "}
-        {def.data ? (def.data.limit == null ? t("admin.userLimits.unlimited") : def.data.limit) : null}
-      </p>
+      <div className="tc-stat-grid tc-userlimits-default">
+        <Stat
+          label={t("admin.userLimits.default")}
+          value={def.data ? (def.data.limit == null ? t("admin.userLimits.unlimited") : def.data.limit) : null}
+        />
+      </div>
       <ApiErrorAlert error={def.error} onRetry={def.reload} />
       <ApiErrorAlert error={list.error} onRetry={list.refresh} />
       {list.loaded ? (

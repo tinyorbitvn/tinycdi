@@ -184,4 +184,15 @@ describe("session policy page", () => {
       ).toBe(true),
     );
   });
+  it("lays the ceiling out as a two-column Form with Save as the submit action", async () => {
+    renderWithApi(<SessionPolicyPage />, setup());
+    const save = await screen.findByRole("button", { name: "Save ceiling" });
+    expect(save).toHaveAttribute("type", "submit");
+    const form = save.closest("form")!;
+    expect(form).toHaveClass("tc-form", "tc-form--2col");
+    expect(save.parentElement).toHaveClass("tc-form__actions");
+    const info = form.querySelector(".tc-alert--info");
+    expect(info).not.toBeNull();
+    expect(info!.parentElement).toBe(form);
+  });
 });

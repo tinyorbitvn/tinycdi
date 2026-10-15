@@ -1,4 +1,16 @@
-import { cx, useDomId, VisuallyHidden } from "../design";
+import type { ComponentType } from "react";
+import {
+  cx,
+  IconCircle,
+  IconCircleAlert,
+  IconCircleCheck,
+  IconCircleDot,
+  IconCircleMinus,
+  isTransitionalPhase,
+  useDomId,
+  VisuallyHidden,
+  type IconProps,
+} from "../design";
 import { t, type MessageKey } from "../i18n";
 import {
   formatElapsed,
@@ -15,12 +27,13 @@ import "./progress.css";
 // session stage. Marks are shape + text, never colour alone; the polite
 // status region only changes on step/state change, never per second.
 
-const MARK: Record<ProgressStep["state"], string> = {
-  done: "✓",
-  active: "●",
-  waiting: "○",
-  failed: "!",
-  skipped: "–",
+// One icon set for every placement: distinct shapes plus the text state.
+const MARK: Record<ProgressStep["state"], ComponentType<IconProps>> = {
+  done: IconCircleCheck,
+  active: IconCircleDot,
+  waiting: IconCircle,
+  failed: IconCircleAlert,
+  skipped: IconCircleMinus,
 };
 
 const STATE_LABEL: Record<ProgressStep["state"], MessageKey> = {
@@ -73,14 +86,15 @@ function StepRow({
   step: ProgressStep;
   elapsedMs: number | undefined;
 }) {
+  const Mark = MARK[step.state];
   return (
     <li
       className="tc-progress__step"
       data-state={step.state}
       aria-current={step.state === "active" ? "step" : undefined}
     >
-      <span className="tc-progress__mark" aria-hidden="true">
-        {MARK[step.state]}
+      <span className="tc-progress__mark" data-state={step.state} aria-hidden="true">
+        <Mark size={16} data-icon={step.state} />
       </span>
       <span className="tc-progress__stepbody">
         <span className="tc-progress__stepline">
@@ -119,6 +133,9 @@ export function LifecycleProgress({
   if (!model) return null;
 
   const cur = model.steps[model.current];
+  // A timer only while something is happening: terminal (failed) models and
+  // settled phases (Ready/Stopped) show no elapsed clock.
+  const showTimer = model.terminal === null && isTransitionalPhase(workspace.phase);
   const refreshNotice = refreshError ? (
     refreshFailures >= 3 ? (
       <p className="tc-progress__hint" data-tone="warn">
@@ -137,17 +154,20 @@ export function LifecycleProgress({
   if (variant === "compact") {
     return (
       <span className={cx("tc-progress", "tc-progress--compact", className)}>
-        <span className="tc-progress__mark" data-state={cur?.state ?? "done"} aria-hidden="true">
-          {MARK[cur?.state ?? "done"]}
-        </span>{" "}
         <span className="tc-progress__compactline">
-          {t(model.title, { name: workspace.name })} ·{" "}
-          {t("progress.step.of", { current: model.current + 1, total: model.steps.length })}
+          {model.terminal === "failed"
+            ? t("progress.compact.failedAt", { current: model.current + 1, total: model.steps.length })
+            : `${t(model.title, { name: workspace.name })} · ${t("progress.step.of", {
+                current: model.current + 1,
+                total: model.steps.length,
+              })}`}
           {cur ? ` · ${t(cur.label)}` : ""}
-        </span>{" "}
-        <span className="tc-progress__elapsed" aria-hidden="true">
-          {formatElapsed(model.elapsedMs)}
         </span>
+        {showTimer ? (
+          <span className="tc-progress__elapsed" aria-hidden="true">
+            {formatElapsed(model.elapsedMs)}
+          </span>
+        ) : null}
         <VisuallyHidden>
           <span role="status">{announcement(model, workspace.name)}</span>
         </VisuallyHidden>
@@ -164,9 +184,11 @@ export function LifecycleProgress({
         <h2 id={titleId} className="tc-progress__title">
           {t(model.title, { name: workspace.name })}
         </h2>
-        <span className="tc-progress__elapsed" aria-hidden="true">
-          {formatElapsed(model.elapsedMs)}
-        </span>
+        {showTimer ? (
+          <span className="tc-progress__elapsed" aria-hidden="true">
+            {formatElapsed(model.elapsedMs)}
+          </span>
+        ) : null}
       </div>
       <ol className="tc-progress__steps">
         {model.steps.map((s) => (

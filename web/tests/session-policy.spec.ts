@@ -157,3 +157,14 @@ test("admin sets an Upload-only file-transfer ceiling with a size bound", async 
   await expect(page.getByLabel("File transfer", { exact: true })).toHaveValue("Upload");
   await expect(page.getByLabel("Largest file (MiB)")).toHaveValue("10");
 });
+
+// Visual check (plan Task 14): the "where the policy comes from" note sits
+// above the form with the same rhythm as the form's own fields, not glued
+// to the first field label.
+test("the source note is spaced from the ceiling form", async ({ page, request }) => {
+  await makeAdmin(request);
+  await login(page);
+  const note = (await page.getByText("No ceiling is set", { exact: false }).boundingBox())!;
+  const label = (await page.getByText("Clipboard", { exact: true }).first().boundingBox())!;
+  expect(label.y - (note.y + note.height)).toBeGreaterThanOrEqual(16);
+});

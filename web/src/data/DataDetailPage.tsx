@@ -5,11 +5,15 @@ import {
   Cluster,
   DescriptionList,
   EmptyState,
+  IconButton,
+  IconClipboard,
   Page,
+  useToast,
 } from "../design";
 import { Link, navigate } from "../lib/router";
+import { shortId } from "./format";
 import { useApi } from "../api/context";
-import { isPortalApiError } from "../api/errors";
+import { ErrorBanner } from "../workspaces/ErrorBanner";
 import { useResource } from "../workspaces/resource";
 import { t, formatDateTime } from "../i18n";
 import { runtimeLabel } from "../templates/format";
@@ -33,6 +37,16 @@ export function DataDetailPage({
   const api = useApi();
   const me = useMeLoaded();
   const admin = isTenantAdmin(me.data);
+  const { toast } = useToast();
+  async function copyId(id: string) {
+    try {
+      await navigator.clipboard.writeText(id);
+      toast({ tone: "success", title: t("data.detail.copied") });
+    } catch {
+      // Clipboard blocked (permissions / insecure context): the id stays
+      // visible and selectable in the list, so there is nothing to recover.
+    }
+  }
   const load = useCallback(() => getRetainedData(api, dataId), [api, dataId]);
   // Poll while the record is Purging (same cadence as the list); a Purged
   // record either stops being returned (404 -> null) or reports Purged —
@@ -68,23 +82,17 @@ export function DataDetailPage({
   }
 
   if (detail.loading && record === null) {
-    return <Page title={t("data.detail.title", { id: dataId })} />;
+    return <Page title={t("data.detail.title", { id: shortId(dataId) })} back={{ to: "/data", label: t("data.detail.back") }} />;
   }
 
   if (detail.error || record === null) {
     return (
       <Page
-        title={t("data.detail.title", { id: dataId })}
-        eyebrow={<Link to="/data">{t("data.detail.back")}</Link>}
+        title={t("data.detail.title", { id: shortId(dataId) })}
+        back={{ to: "/data", label: t("data.detail.back") }}
       >
         {detail.error && !(detail.data === null) ? (
-          <Alert
-            tone="danger"
-            title={isPortalApiError(detail.error) ? detail.error.code : undefined}
-            actions={<Button onClick={() => void detail.refresh()}>{t("data.error.retry")}</Button>}
-          >
-            {detail.error instanceof Error ? detail.error.message : String(detail.error)}
-          </Alert>
+          <ErrorBanner error={detail.error} onRetry={() => void detail.refresh()} />
         ) : (
           <EmptyState
             title={t("data.detail.notFound.title")}
@@ -99,8 +107,8 @@ export function DataDetailPage({
   const r = record!;
   return (
     <Page
-      title={t("data.detail.title", { id: r.id })}
-      eyebrow={<Link to="/data">{t("data.detail.back")}</Link>}
+      title={r.sourceWorkspaceName || shortId(r.id)}
+      back={{ to: "/data", label: t("data.detail.back") }}
       actions={
         canAttach(r) || canPurge(r) ? (
           <Cluster gap={2}>
@@ -110,7 +118,7 @@ export function DataDetailPage({
               </Button>
             ) : null}
             {canPurge(r) ? (
-              <Button variant="danger" onClick={() => setPurging(true)}>
+              <Button variant="danger-ghost" onClick={() => setPurging(true)}>
                 {t("data.action.purge")}
               </Button>
             ) : null}
@@ -125,7 +133,20 @@ export function DataDetailPage({
       ) : null}
       <DescriptionList
         items={[
-          { term: t("data.detail.field.id"), detail: r.id },
+          {
+            term: t("data.detail.field.id"),
+            detail: (
+              <Cluster gap={2} wrap={false}>
+                <code>{r.id}</code>
+                <IconButton
+                  size="sm"
+                  label={t("data.detail.copyId")}
+                  icon={<IconClipboard />}
+                  onClick={() => void copyId(r.id)}
+                />
+              </Cluster>
+            ),
+          },
           { term: t("data.detail.field.state"), detail: <DataStateBadge state={r.state} /> },
           { term: t("data.detail.field.source"), detail: r.sourceWorkspaceName },
           { term: t("data.detail.field.runtime"), detail: runtimeLabel(r.runtime) },

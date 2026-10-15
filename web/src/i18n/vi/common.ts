@@ -18,10 +18,9 @@ export default {
   "common.pagination.loadMore": "Tải thêm",
   "common.collectionTooLarge": "Chế độ xem này cần hơn {n} bản ghi, vượt quá số lượng cổng thông tin đọc một lần.",
 
-  "errors.banner.fallback": "LỖI",
-  "errors.banner.requestId": "(mã yêu cầu {id})",
+  "errors.banner.fallback": "Đã xảy ra lỗi",
+  "errors.banner.requestId": "Mã yêu cầu: {id}",
   "errors.banner.retry": "Thử lại",
-  "errors.banner.dismiss": "tắt lỗi",
   "errors.code.quotaExhausted":
     "Đã hết hạn mức — hãy xoá một workspace không dùng hoặc nhờ quản trị viên tăng hạn mức.",
   "errors.code.quotaReleasePending":

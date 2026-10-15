@@ -133,6 +133,8 @@ export default {
   "workspaces.create.loading": "Loading templates…",
   "workspaces.create.nameLabel": "Name",
   "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.nameInvalid":
+    "Use lowercase letters, digits and hyphens; start and end with a letter or digit.",
   "workspaces.create.templateLabel": "Template",
   "workspaces.create.templatePlaceholder": "Select a template",
   "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",
@@ -157,7 +159,7 @@ export default {
   "workspaces.delete.action": "Delete",
   "workspaces.delete.title": "Delete {name}?",
   "workspaces.delete.confirm":
-    "Delete {name}? Access is revoked and the runtime is removed.",
+    "Access is revoked and the runtime is removed.",
   "workspaces.delete.dataRetain":
     "Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that).",
   "workspaces.delete.dataEphemeral":

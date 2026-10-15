@@ -35,6 +35,7 @@ const COLUMNS: Column<WorkspaceView>[] = [
     key: "name",
     header: t("workspaces.list.col.name"),
     rowHeader: true,
+    className: "tc-table__nowrap",
     render: (w) => <Link to={`/workspaces/${w.id}`}>{w.name}</Link>,
   },
   {
@@ -47,13 +48,13 @@ const COLUMNS: Column<WorkspaceView>[] = [
     key: "phase",
     header: t("workspaces.list.col.phase"),
     render: (w) => (
-      <>
-        <StatusPill phase={w.phase} label={t(phaseLabelKey(w.phase))} />{" "}
+      <div className="tc-cell-stack">
+        <StatusPill phase={w.phase} label={t(phaseLabelKey(w.phase))} />
         <LifecycleProgress workspace={w} variant="compact" />
         {!isConnectable(w) && w.phase === "Ready" ? (
-          <small>{t("workspaces.list.waitingConnection")}</small>
+          <span className="tc-table__sub">{t("workspaces.list.waitingConnection")}</span>
         ) : null}
-      </>
+      </div>
     ),
   },
   {
@@ -72,7 +73,11 @@ const COLUMNS: Column<WorkspaceView>[] = [
     key: "manage",
     header: "",
     align: "end",
-    render: (w) => <Link to={`/workspaces/${w.id}`}>{t("workspaces.list.manage")}</Link>,
+    render: (w) => (
+      <Link to={`/workspaces/${w.id}`} className={buttonClass("secondary", "sm")}>
+        {t("workspaces.list.manage")}
+      </Link>
+    ),
   },
 ];
 
@@ -143,6 +148,7 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
             rows={items}
             rowKey={(w) => w.id}
             caption={t("workspaces.list.label")}
+            stackBelow="md"
             empty={t("workspaces.list.empty")}
           />
           <Pagination

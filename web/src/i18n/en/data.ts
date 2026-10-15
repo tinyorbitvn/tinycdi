@@ -3,7 +3,7 @@
 export default {
   "data.list.title": "Retained data",
   "data.list.description":
-    "Disks kept after a workspace was deleted with dataPolicy Retain. Attach mounts a disk on a new workspace; purge destroys it permanently.",
+    "Disks kept after their workspace was deleted. Attach mounts a disk on a new workspace; Purge destroys it permanently.",
   "data.list.caption": "Retained data",
   "data.list.col.id": "ID",
   "data.list.col.source": "From workspace",
@@ -28,9 +28,10 @@ export default {
   "data.action.attach": "Attach",
   "data.action.purge": "Purge",
   "data.action.cancel": "Cancel",
-  "data.error.retry": "Retry",
   "data.detail.title": "Retained disk {id}",
   "data.detail.back": "Back to retained data",
+  "data.detail.copyId": "Copy ID",
+  "data.detail.copied": "ID copied",
   "data.detail.notFound.title": "Retained data not found",
   "data.detail.notFound.description":
     "The record does not exist or is not visible to you.",
@@ -59,7 +60,7 @@ export default {
   "data.attach.conflict": "This disk is already being attached. Refresh and try again.",
   "data.purge.title": "Purge {id}?",
   "data.purge.description":
-    "Purging {id} ({size} GiB from {source}) destroys the disk permanently. This cannot be undone.",
+    "{size} GiB from {source}. Purging destroys the disk permanently. This cannot be undone.",
   "data.purge.confirmLabel": "Confirmation",
   "data.purge.confirmHint": "Type {id} to confirm.",
   "data.purge.submit": "Purge permanently",

@@ -136,6 +136,8 @@ export default {
   "workspaces.create.loading": "Đang tải template…",
   "workspaces.create.nameLabel": "Tên",
   "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.nameInvalid":
+    "Chỉ dùng chữ thường, chữ số và dấu gạch ngang; bắt đầu và kết thúc bằng chữ hoặc số.",
   "workspaces.create.templateLabel": "Template",
   "workspaces.create.templatePlaceholder": "Chọn một template",
   "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",
@@ -160,7 +162,7 @@ export default {
   "workspaces.delete.action": "Xoá",
   "workspaces.delete.title": "Xoá {name}?",
   "workspaces.delete.confirm":
-    "Xoá {name}? Quyền truy cập bị thu hồi và runtime bị gỡ.",
+    "Quyền truy cập bị thu hồi và runtime bị gỡ.",
   "workspaces.delete.dataRetain":
     "Đĩa của nó chuyển sang kho dữ liệu giữ lại — không bị huỷ ở đây (dùng Xoá vĩnh viễn trên trang Dữ liệu giữ lại để huỷ).",
   "workspaces.delete.dataEphemeral":

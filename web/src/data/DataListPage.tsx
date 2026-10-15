@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   type Column,
+  Cluster,
   EmptyState,
   Page,
   Pagination,
@@ -15,7 +16,7 @@ import {
 } from "../design";
 import { Link, navigate } from "../lib/router";
 import { useApi } from "../api/context";
-import { isPortalApiError } from "../api/errors";
+import { ErrorBanner } from "../workspaces/ErrorBanner";
 import { t, formatDateTime, type MessageKey } from "../i18n";
 import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
@@ -157,22 +158,18 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
         key: "actions",
         header: <VisuallyHidden>{t("data.list.col.actions")}</VisuallyHidden>,
         render: (r) => (
-          <>
+          <Cluster gap={2}>
             {canAttach(r) ? (
-              <Button size="sm" onClick={() => setAttaching(r)}>
+              <Button size="sm" variant="secondary" onClick={() => setAttaching(r)}>
                 {t("data.action.attach")}
               </Button>
             ) : null}
             {canPurge(r) ? (
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => setPurging(r)}
-              >
+              <Button size="sm" variant="danger-ghost" onClick={() => setPurging(r)}>
                 {t("data.action.purge")}
               </Button>
             ) : null}
-          </>
+          </Cluster>
         ),
       },
     );
@@ -196,8 +193,12 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
     <Page
       title={t("data.list.title")}
       description={t("data.list.description")}
-      actions={
-        admin ? (
+    >
+      {/* A labelled field, so it lives above the table rather than in the
+          header's actions slot, where its label + control height pushed
+          the description away from the title. */}
+      {admin ? (
+        <Cluster gap={2}>
           <Select
             label={t("data.list.scope.label")}
             value={effectiveScope}
@@ -207,23 +208,14 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
               { value: "tenant", label: t("data.list.scope.tenant") },
             ]}
           />
-        ) : undefined
-      }
-    >
+        </Cluster>
+      ) : null}
       {notice ? (
         <Alert tone="success" onDismiss={() => setNotice(null)}>
           {notice}
         </Alert>
       ) : null}
-      {list.error ? (
-        <Alert
-          tone="danger"
-          title={isPortalApiError(list.error) ? list.error.code : undefined}
-          actions={<Button onClick={list.refresh}>{t("data.error.retry")}</Button>}
-        >
-          {list.error instanceof Error ? list.error.message : String(list.error)}
-        </Alert>
-      ) : null}
+      <ErrorBanner error={list.error} onRetry={list.refresh} />
       <Table
         caption={t("data.list.caption")}
         columns={columns}

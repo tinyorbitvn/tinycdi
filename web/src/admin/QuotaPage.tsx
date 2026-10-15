@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Card,
+  Cluster,
   Dialog,
   Grid,
   Input,
@@ -57,7 +58,7 @@ export function QuotaMeters({
     return <Alert tone="warning">{t("admin.quota.notConfigured")}</Alert>;
   }
   return (
-    <Grid gap={4} min="sm">
+    <div className="tc-meter-grid">
       {QUOTA_KEYS.map((k) => {
         const limit = limits?.[k];
         if (limit === undefined || isUnlimited(k, limit)) {
@@ -86,7 +87,7 @@ export function QuotaMeters({
           />
         );
       })}
-    </Grid>
+    </div>
   );
 }
 
@@ -288,8 +289,8 @@ export function QuotaContent({
           ) : undefined
         }
       >
-        <p>
-          <SourceBadge source={quota.source} />{" "}
+        <Cluster gap={2} align="center" className="tc-quota-source">
+          <SourceBadge source={quota.source} />
           <span className="tc-admin-muted">
             {quota.source === "config"
               ? t("admin.quota.source.configNote")
@@ -297,7 +298,7 @@ export function QuotaContent({
                 ? t("admin.quota.source.apiNote")
                 : t("admin.quota.source.noneNote")}
           </span>
-        </p>
+        </Cluster>
         <QuotaMeters configured={quota.configured} limits={quota.limits} usage={quota.usage} />
       </Section>
       <UserLimitsSection tenant={quota.tenant} />

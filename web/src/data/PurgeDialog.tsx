@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Button, Dialog, Input, Stack } from "../design";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
+import { ErrorMeta } from "../api/ErrorMeta";
 import { t } from "../i18n";
 import {
   getRetainedData,
@@ -79,11 +80,7 @@ export function PurgeDialog({
       dismissible={!busy}
       role="alertdialog"
       title={t("data.purge.title", { id: record.id })}
-      description={t("data.purge.description", {
-        id: record.id,
-        size: record.sizeGib,
-        source: record.sourceWorkspaceName,
-      })}
+      description={t("data.purge.description", { size: record.sizeGib, source: record.sourceWorkspaceName })}
       footer={
         <>
           <Button onClick={onClose} disabled={busy}>
@@ -112,13 +109,15 @@ export function PurgeDialog({
         {error ? (
           <Alert
             tone="danger"
-            title={isPortalApiError(error) ? error.code : undefined}
+            title={
+              isPortalApiError(error) && error.code === "INVALID_STATE"
+                ? t("data.purge.conflict")
+                : isPortalApiError(error)
+                  ? error.message
+                  : t("data.purge.notFound")
+            }
           >
-            {isPortalApiError(error) && error.code === "INVALID_STATE"
-              ? t("data.purge.conflict")
-              : isPortalApiError(error)
-                ? error.message
-                : t("data.purge.notFound")}
+            <ErrorMeta error={error} />
           </Alert>
         ) : null}
       </Stack>

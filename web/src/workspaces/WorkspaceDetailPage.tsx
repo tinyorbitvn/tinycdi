@@ -12,11 +12,10 @@ import {
   useToast,
 } from "../design";
 import type { Column } from "../design/Table";
-import { IconArrowLeft } from "../design/icons";
 import { t } from "../i18n";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
-import { navigate, Link } from "../lib/router";
+import { navigate } from "../lib/router";
 import { resolveTemplate } from "../templates/family";
 import { useTemplateLookup } from "../templates/useTemplates";
 import {
@@ -127,6 +126,7 @@ function EventsTable({ events }: { events: WorkspaceEvent[] }) {
       columns={columns}
       rows={events}
       rowKey={(ev) => ev.id}
+      stackBelow="md"
       caption={t("workspaces.detail.events.title")}
       empty={t("workspaces.detail.events.empty")}
     />
@@ -235,11 +235,7 @@ export function WorkspaceDetailPage({
     return (
       <Page
         title={t("workspaces.detail.loading")}
-        eyebrow={
-          <Link to="/">
-            <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
-          </Link>
-        }
+        back={{ to: "/", label: t("nav.allWorkspaces") }}
       >
         <ErrorBanner error={error} onRetry={() => void detail.refresh()} onDismiss={detail.clearError} />
         {error ? null : <Spinner label={t("workspaces.detail.loading")} />}
@@ -329,11 +325,7 @@ export function WorkspaceDetailPage({
 
   return (
     <Page
-      eyebrow={
-        <Link to="/">
-          <IconArrowLeft size={14} aria-hidden="true" /> {t("nav.allWorkspaces")}
-        </Link>
-      }
+      back={{ to: "/", label: t("nav.allWorkspaces") }}
       title={
         <Cluster gap={3}>
           {ws.name} <PhasePill phase={ws.phase} />

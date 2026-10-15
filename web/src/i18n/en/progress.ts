@@ -31,6 +31,7 @@ export default {
   "progress.state.failed": "failed",
   "progress.state.skipped": "skipped",
 
+  "progress.compact.failedAt": "Failed at step {current} of {total}",
   "progress.step.of": "step {current} of {total}",
   "progress.step.elapsed": "for {elapsed}",
   "progress.step.reason": "Status: {reason}",

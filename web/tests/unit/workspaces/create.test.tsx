@@ -299,4 +299,30 @@ describe("CreateWorkspacePage", () => {
       expect(alert).not.toHaveTextContent("only after an administrator publishes a fresh image");
     }
   }, 20000);
+
+  it("create: a name that breaks the DNS-label pattern is flagged inline on blur", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<CreateWorkspacePage />, api);
+    const name = await screen.findByLabelText(/^Name/);
+    fireEvent.change(name, { target: { value: "Bad_Name" } });
+    fireEvent.blur(name);
+    expect(
+      await screen.findByText("Use lowercase letters, digits and hyphens; start and end with a letter or digit."),
+    ).toHaveClass("tc-field__error");
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    fireEvent.change(name, { target: { value: "good-name" } });
+    await waitFor(() => expect(name).not.toHaveAttribute("aria-invalid"));
+  });
+
+  it("create: the form uses the Form layout and a back link", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<CreateWorkspacePage />, api);
+    const submit = await screen.findByRole("button", { name: "Create workspace" });
+    expect(submit.closest("form")).toHaveClass("tc-form");
+    expect(submit.closest("form")).toHaveAttribute("novalidate");
+    expect(submit.parentElement).toHaveClass("tc-form__actions");
+    expect(screen.getByRole("link", { name: "All workspaces" })).toHaveClass("tc-backlink");
+  });
 });
