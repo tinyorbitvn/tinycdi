@@ -157,7 +157,7 @@ no default cap.
 | `<c>.nodeSelector` / `.tolerations` / `.affinity` | `{}`/`[]`/`{}` | platform pod placement; backend ships a preferred `kubernetes.io/hostname` anti-affinity that `backend.affinity` keys merge over |
 | `<c>.podSecurityContext` / `.securityContext` | `{}` | merged **over** the hardened defaults (non-root, drop ALL, RO rootfs); keys that would WEAKEN them (privileged, allowPrivilegeEscalation, added caps or a `drop` list missing ALL, root uid/gid/fsGroup/supplementalGroups, writable rootfs, Unconfined seccomp/AppArmor, seLinuxOptions) fail the render unless `dev.enabled` |
 | `<c>.pdb.{enabled,minAvailable,maxUnavailable}` | on for all three (`minAvailable: 1`) | PDB for backend/frontend; an explicit `enabled` wins, otherwise a sizing key turns it on. `operator.podDisruptionBudget` keeps the old `enabled`-required shape |
-| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch — dangerous flags (operator `--dev-allow-no-broker`/`--disable-builtin-egress-excepts`/metrics flags, backend `--dev-insecure-db`/`--required-groups`/`--tenant-admin-groups`/`--metrics-listen`/the split-mode broker client flags) and `backend.extraVolumes` hostPath fail the render unless `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win |
+| `<c>.extraArgs` / `.extraEnv` | `[]` | escape hatch. Without `dev.enabled`, an `extraArgs` entry fails the render when it names any flag the chart renders or owns for that component (`tinycdi.args.<component>`, `tinycdi.ownedFlags`), or the flag form of a denied `extraEnv` name. Only backend `-rate-limit-replicas` and `-login-key-file` may repeat a rendered flag; flags the chart never renders (`-login-rate`, `-launch-rate`, `-expiry-interval`, `-image-stale-after`) stay free. Operator `--leader-elect` is refused with `operator.replicas>1` even under `dev.enabled`. `extraEnv` fails the render likewise on the deny-list below, on the `TCDI_<FLAG>` env form of any denied flag, or when an entry duplicates an env var the chart manages for that component — `extraEnv` renders after the managed env block, so a duplicate name would silently win. `backend.extraVolumes` hostPath fails the render unless `dev.enabled`. |
 
 `<c>.extraEnv` entries are refused unless `dev.enabled` when the name is
 on this deny-list — dev-surface env names plus the env equivalents of
@@ -181,6 +181,9 @@ the value to set instead:
 | `TCDI_OIDC_POST_LOGOUT_REDIRECT` | `oidc.postLogoutRedirect` |
 | `TCDI_TENANT_QUOTAS` | `managedNamespaces[].quota` |
 | `TCDI_TENANT_QUOTA_CEILINGS` | `managedNamespaces[].quotaCeiling` |
+| `TCDI_BROKER_URL` / `TCDI_BROKER_CA` / `TCDI_MTLS_CERT` / `TCDI_MTLS_KEY` | nothing — the chart deploys the merged backend; the split-mode broker client is dev-only |
+| `SSL_CERT_FILE` / `SSL_CERT_DIR` | `backend.extraCA.existingSecret` |
+| `TCDI_<FLAG>` of any flag denied in that component's `extraArgs` | the chart value that renders the flag |
 
 ### Component-specific highlights
 

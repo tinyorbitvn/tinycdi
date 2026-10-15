@@ -15,12 +15,16 @@ package chart_test
 // hand-maintained copy that could drift).
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// deniedEnvNames mirrors the $deniedEnv map in templates/_helpers.tpl —
+// deniedEnvNames mirrors tinycdi.staticDeniedEnv in templates/_helpers.tpl —
 // dev-surface env names plus the env equivalents of security-relevant
 // flags the chart exposes as first-class values (the env path bypasses
 // the chart's wiring/validation whenever the flag is unset).
@@ -41,6 +45,12 @@ var deniedEnvNames = []string{
 	"TCDI_OIDC_POST_LOGOUT_REDIRECT",
 	"TCDI_TENANT_QUOTAS",
 	"TCDI_TENANT_QUOTA_CEILINGS",
+	"TCDI_BROKER_URL",
+	"TCDI_BROKER_CA",
+	"TCDI_MTLS_CERT",
+	"TCDI_MTLS_KEY",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
 }
 
 // extraEnvSet builds the --set pair for one extraEnv entry.
@@ -217,4 +227,141 @@ func TestExtraEnvBenignPasses(t *testing.T) {
 	if got := firstContainerEnv(deployment(docs, "backend"))["TCDI_LOGIN_RATE"]; got != "10" {
 		t.Errorf("benign extraEnv must render, got %q", got)
 	}
+}
+
+// documentedFlagOverrides are the extraArgs knobs that may repeat a
+// chart-rendered backend flag (capacity.md, install.md).
+var documentedFlagOverrides = map[string]bool{"rate-limit-replicas": true, "login-key-file": true}
+
+// chartArgFlags scans templates/_args.tpl and returns, per component,
+// every flag name tinycdi.args.<component> can emit — rendered by
+// default or only on some values.
+func chartArgFlags(t *testing.T) map[string][]string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("tinycdi", "templates", "_args.tpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := regexp.MustCompile(`define "tinycdi\.args\.([a-z]+)"`)
+	flag := regexp.MustCompile(`^\s*- (?:\{\{ printf ")?-{1,2}([a-z][a-z0-9-]*)`)
+	out := map[string][]string{}
+	seen := map[string]bool{}
+	cur := ""
+	for _, line := range strings.Split(string(src), "\n") {
+		if m := def.FindStringSubmatch(line); m != nil {
+			cur = m[1]
+			continue
+		}
+		if m := flag.FindStringSubmatch(line); m != nil && cur != "" && !seen[cur+"/"+m[1]] {
+			seen[cur+"/"+m[1]] = true
+			out[cur] = append(out[cur], m[1])
+		}
+	}
+	if len(out["backend"]) < 30 || len(out["operator"]) < 10 || len(out["frontend"]) < 5 {
+		t.Fatalf("_args.tpl scan found too few flags: %v", out)
+	}
+	return out
+}
+
+// argFlagName strips an args entry to its flag name.
+func argFlagName(a string) string {
+	n := strings.TrimLeft(a, "-")
+	if i := strings.IndexAny(n, "= \t"); i >= 0 {
+		n = n[:i]
+	}
+	return n
+}
+
+// flagEnvName is the env form a TinyCDI binary reads a flag from.
+func flagEnvName(flag string) string {
+	return "TCDI_" + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))
+}
+
+// TestExtraArgsCannotOverrideRenderedFlags (R1-34, TM-42): extraArgs
+// renders after the chart's own flags and the last value of a flag wins,
+// so without dev.enabled no <component>.extraArgs entry may name a flag
+// the chart can render for that component (except the documented
+// backend knobs), nor the flag form of a denied extraEnv name; and the
+// deny lists are symmetric — every such flag's TCDI_ env form fails in
+// extraEnv. Every arg the minimal render emits must come from
+// tinycdi.args.<component>, so the scan sees it.
+func TestExtraArgsCannotOverrideRenderedFlags(t *testing.T) {
+	flags := chartArgFlags(t)
+	docs := renderArgs(t, "-f", minimalValues)
+	for c, names := range flags {
+		inSrc := map[string]bool{}
+		for _, n := range names {
+			inSrc[n] = true
+		}
+		for _, a := range firstContainerArgs(deployment(docs, c)) {
+			if !inSrc[argFlagName(a)] {
+				t.Errorf("%s renders %q outside tinycdi.args.%s — the extraArgs guard cannot see it", c, a, c)
+			}
+		}
+	}
+
+	type probe struct {
+		label, want string
+		sets        []string
+	}
+	var probes []probe
+	for c, names := range flags {
+		for _, n := range names {
+			if c == "backend" && documentedFlagOverrides[n] {
+				continue
+			}
+			arg := "--" + n + "=x"
+			probes = append(probes, probe{
+				label: c + "/flag/" + n,
+				want:  fmt.Sprintf("%s.extraArgs entry %q", c, arg),
+				sets:  []string{"--set", c + ".extraArgs[0]=" + arg},
+			})
+			env := flagEnvName(n)
+			probes = append(probes, probe{
+				label: c + "/env/" + env,
+				want:  fmt.Sprintf("%s.extraEnv entry %q", c, env),
+				sets:  []string{"--set", c + ".extraEnv[0].name=" + env, "--set", c + ".extraEnv[0].value=x"},
+			})
+		}
+	}
+	for _, env := range deniedEnvNames {
+		if !strings.HasPrefix(env, "TCDI_") {
+			continue
+		}
+		arg := "--" + strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(env, "TCDI_"), "_", "-")) + "=x"
+		for _, c := range []string{"backend", "operator", "frontend"} {
+			probes = append(probes, probe{
+				label: c + "/flagform/" + env,
+				want:  fmt.Sprintf("%s.extraArgs entry %q", c, arg),
+				sets:  []string{"--set", c + ".extraArgs[0]=" + arg},
+			})
+		}
+	}
+	sort.Slice(probes, func(i, j int) bool { return probes[i].label < probes[j].label })
+	t.Run("denied", func(t *testing.T) {
+		for _, p := range probes {
+			t.Run(p.label, func(t *testing.T) {
+				t.Parallel()
+				out := renderErrArgs(t, append([]string{"-f", minimalValues}, p.sets...)...)
+				if !strings.Contains(out, p.want) {
+					t.Errorf("render must fail naming %s, got: %s", p.want, out)
+				}
+			})
+		}
+	})
+
+	// The documented knobs and unrendered tuning flags still render, and
+	// dev.enabled reopens a rendered flag.
+	docs = renderArgs(t, "-f", minimalValues,
+		"--set", "backend.extraArgs[0]=-rate-limit-replicas=4",
+		"--set", "backend.extraArgs[1]=-login-key-file=/etc/login-keys/previous",
+		"--set", "backend.extraArgs[2]=-login-rate=0",
+		"--set", "backend.extraArgs[3]=--expiry-interval=45s")
+	args := strings.Join(firstContainerArgs(deployment(docs, "backend")), " ")
+	for _, want := range []string{"-rate-limit-replicas=4", "-login-key-file=/etc/login-keys/previous", "-login-rate=0"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("documented extraArgs knob %s missing: %s", want, args)
+		}
+	}
+	renderArgs(t, "-f", minimalValues, "--set", "dev.enabled=true", "--set", "backend.extraArgs[0]=-session-idle=1h")
 }

@@ -262,9 +262,18 @@ Install-time invariants. Rendering FAILS when violated:
 {{- /* E4: election off with more than one operator replica runs two
         active reconcilers double-driving the same Workspaces — refuse the
         render; the binary cannot see the Deployment's replica count, so
-        the guard lives here. replicas<=1 without election stays legal. */ -}}
+        the guard lives here. replicas<=1 without election stays legal.
+        --leader-elect in operator.extraArgs is refused with replicas > 1
+        even under dev.enabled: it renders after the chart's flag and wins. */ -}}
 {{- if and (gt (int .Values.operator.replicas) 1) (not .Values.operator.leaderElect) -}}
 {{- fail "operator.leaderElect=false is refused when operator.replicas > 1 — unelected replicas would double-drive reconciliation; set operator.replicas: 1 for a single-replica install without election" -}}
+{{- end -}}
+{{- if gt (int .Values.operator.replicas) 1 -}}
+{{- range $a := (.Values.operator.extraArgs | default (list)) -}}
+{{- if regexMatch "^--?leader-elect([=\\s]|$)" (printf "%v" $a) -}}
+{{- fail (printf "operator.extraArgs entry %q is refused when operator.replicas > 1 — set operator.leaderElect instead; unelected replicas would double-drive reconciliation" $a) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- /* FX-R34 drain budget: the propagation wait plus the drain window
         must leave >= 4 s of the backend's 24 s shared shutdown deadline
@@ -408,44 +417,20 @@ Install-time invariants. Rendering FAILS when violated:
 {{- if .Values.operator.devAllowNoBroker -}}
 {{- fail "operator.devAllowNoBroker requires dev.enabled=true — never set it in a production values file" -}}
 {{- end -}}
-{{- /* CHTR-3: extraArgs must not reopen the surfaces the chart pins closed
-        (the operator's dev/no-broker and egress-except flags and its
-        metrics endpoint, the backend's DB-TLS escape hatch, login gate,
-        chart-managed metrics listener and the split/test-mode broker
-        client flags). */ -}}
-{{- include "tinycdi.denyExtraArgs" (dict "component" "operator" "args" .Values.operator.extraArgs "denied" (list "dev-allow-no-broker" "disable-builtin-egress-excepts" "metrics-bind-address" "metrics-secure" "metrics-cert-path" "metrics-cert-name" "metrics-cert-key")) -}}
-{{- include "tinycdi.denyExtraArgs" (dict "component" "backend" "args" .Values.backend.extraArgs "denied" (list "dev-insecure-db" "required-groups" "tenant-admin-groups" "metrics-listen" "broker-url" "broker-ca" "mtls-cert" "mtls-key")) -}}
-{{- /* SR-3-F2: the same surfaces are reachable through <component>.extraEnv
-        — the environment equivalents of the denied flags, plus the env
-        names of security-relevant flags the chart already exposes as
-        first-class values (an env var bypasses the chart's wiring and
-        validation whenever the flag is not rendered), plus ANY name the
-        chart itself manages for that component (extraEnv renders after
-        the managed block, so a duplicate name silently wins). The value
-        of each $deniedEnv entry names the chart value to use instead;
-        the managed set is derived from the rendered
-        tinycdi.env.<component> blocks by tinycdi.managedEnvNames — never
-        a second copy. */ -}}
-{{- $deniedEnv := dict
-  "TCDI_DEV_INSECURE_DB" "database.tls.mode (verify-ca/verify-full)"
-  "TCDI_DEV_ALLOW_NO_BROKER" "operator.devAllowNoBroker (dev-only)"
-  "TCDI_METRICS_LISTEN" "backend.metrics.enabled"
-  "TCDI_KASM_ADAPTER_IMAGE" "kasmAdapter.enabled + kasmAdapter.image.digest"
-  "PGSSLMODE" "database.tls.mode"
-  "TCDI_OPERATOR_CN" "backend.operatorCN"
-  "TCDI_WATCH_NAMESPACES" "managedNamespaces"
-  "TCDI_REQUIRED_GROUPS" "oidc.requiredGroups"
-  "TCDI_TENANT_ADMIN_GROUPS" "oidc.tenantAdminGroups"
-  "TCDI_CONTROL_TOKEN" "backend.controlToken.existingSecret"
-  "TCDI_CONTROL_TOKEN_FILE" "backend.controlToken.existingSecret"
-  "TCDI_TRUSTED_PROXIES" "backend.trustedProxies"
-  "TCDI_UPSTREAM_CA" "backend.upstreamCA.existingSecret"
-  "TCDI_OIDC_POST_LOGOUT_REDIRECT" "oidc.postLogoutRedirect"
-  "TCDI_TENANT_QUOTAS" "managedNamespaces[].quota"
-  "TCDI_TENANT_QUOTA_CEILINGS" "managedNamespaces[].quotaCeiling"
--}}
+{{- /* CHTR-3/SR-3-F2/TM-42: extraArgs renders after the chart's own flags
+        and the last value of a flag wins, so no extraArgs entry may name a
+        flag the chart renders for that component (tinycdi.renderedFlagNames,
+        read back from tinycdi.args.<component>) or owns but renders only on
+        some values (tinycdi.ownedFlags). extraEnv renders after the
+        managed env block, so no entry may name a managed env var, a
+        dev-surface or security env name (tinycdi.staticDeniedEnv), or the
+        env form TCDI_<UPPER_SNAKE> of any denied flag. The flag and env
+        deny lists are symmetric: every denied flag denies its env name and
+        every denied TCDI_ env name denies its flag. */ -}}
+{{- $deniedEnv := include "tinycdi.deniedEnvMap" (dict "root" $) | fromJson -}}
 {{- range $c := list "backend" "operator" "frontend" -}}
 {{- $cv := default dict (index $.Values $c) -}}
+{{- include "tinycdi.denyExtraArgs" (dict "component" $c "args" (index $cv "extraArgs") "denied" (include "tinycdi.deniedFlagNames" (dict "component" $c "root" $) | fromJsonArray)) -}}
 {{- include "tinycdi.denyExtraEnv" (dict "component" $c "env" (index $cv "extraEnv") "denied" $deniedEnv "root" $) -}}
 {{- end -}}
 {{- /* A hostPath extraVolume would mount the host filesystem into the
@@ -505,6 +490,119 @@ Called with {component, args, denied}.
 {{- fail (printf "%s.extraArgs entry %q reopens a surface the chart pins closed — it requires dev.enabled=true" $.component $arg) -}}
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+TM-42: every flag name the chart renders for a component — DERIVED by
+rendering tinycdi.args.<component> and reading the names back (the same
+shape as tinycdi.managedEnvNames; never a hand-maintained copy). Called
+with {component, root}; renders a JSON array of names without dashes.
+*/}}
+{{- define "tinycdi.renderedFlagNames" -}}
+{{- $names := list -}}
+{{- range $a := (include (printf "tinycdi.args.%s" .component) .root | fromYamlArray) -}}
+{{- $n := regexReplaceAll "^-+" (printf "%v" $a) "" -}}
+{{- $n = regexReplaceAll "[=\\s].*$" $n "" -}}
+{{- $names = append $names $n -}}
+{{- end -}}
+{{- toJson ($names | uniq) -}}
+{{- end }}
+
+{{/*
+TM-42: flags the chart owns for a component but renders only on some
+values (or, for the split-mode broker client and the dev surfaces, never).
+An extraArgs entry naming one would switch on a surface the chart keeps
+off or replace a chart-validated value. Every flag tinycdi.args.<component>
+emits only conditionally must be listed here
+(TestExtraArgsCannotOverrideRenderedFlags). Called with {component}.
+*/}}
+{{- define "tinycdi.ownedFlags" -}}
+{{- $owned := dict
+  "backend" (list "dev-insecure-db" "required-groups" "tenant-admin-groups" "oidc-post-logout-redirect" "tenant-quotas" "tenant-quota-ceilings" "upstream-ca" "control-token-file" "internal-client-ca" "internal-revoked-list" "internal-gateway-cns" "operator-cn" "metrics-listen" "trusted-proxies" "broker-url" "broker-ca" "mtls-cert" "mtls-key")
+  "operator" (list "dev-allow-no-broker" "disable-builtin-egress-excepts" "metrics-bind-address" "metrics-secure" "metrics-cert-path" "metrics-cert-name" "metrics-cert-key" "internet-except-cidrs" "broker-internal-url" "broker-ca-file" "broker-client-cert-file" "broker-client-key-file" "kasm-adapter-image" "watch-namespaces" "gateway-namespace" "runtime-node-selector" "runtime-tolerations" "runtime-host-users" "runtime-apparmor-require-default" "runtime-topology-spread" "runtime-clusteronly-egress")
+  "frontend" (list "web-root" "branding-dir")
+-}}
+{{- toJson (index $owned .component) -}}
+{{- end }}
+
+{{/*
+TM-42: the documented extraArgs knobs that may repeat a rendered flag —
+-rate-limit-replicas (an HPA's maxReplicas; capacity.md) and
+-login-key-file (the rotation's "previous" key under helm template /
+GitOps; install.md). Called with {component}.
+*/}}
+{{- define "tinycdi.flagOverrides" -}}
+{{- toJson (index (dict "backend" (list "rate-limit-replicas" "login-key-file") "operator" (list) "frontend" (list)) .component) -}}
+{{- end }}
+
+{{/*
+SR-3-F2/TM-42: env names refused in every component's extraEnv, mapped to
+the chart value to set instead: dev-surface names, security env names the
+chart wires as first-class values, the split-mode broker client, and the
+outbound trust store. Renders a JSON object.
+*/}}
+{{- define "tinycdi.staticDeniedEnv" -}}
+{{- toJson (dict
+  "TCDI_DEV_INSECURE_DB" "database.tls.mode (verify-ca/verify-full)"
+  "TCDI_DEV_ALLOW_NO_BROKER" "operator.devAllowNoBroker (dev-only)"
+  "TCDI_METRICS_LISTEN" "backend.metrics.enabled"
+  "TCDI_KASM_ADAPTER_IMAGE" "kasmAdapter.enabled + kasmAdapter.image.digest"
+  "PGSSLMODE" "database.tls.mode"
+  "TCDI_OPERATOR_CN" "backend.operatorCN"
+  "TCDI_WATCH_NAMESPACES" "managedNamespaces"
+  "TCDI_REQUIRED_GROUPS" "oidc.requiredGroups"
+  "TCDI_TENANT_ADMIN_GROUPS" "oidc.tenantAdminGroups"
+  "TCDI_CONTROL_TOKEN" "backend.controlToken.existingSecret"
+  "TCDI_CONTROL_TOKEN_FILE" "backend.controlToken.existingSecret"
+  "TCDI_TRUSTED_PROXIES" "backend.trustedProxies"
+  "TCDI_UPSTREAM_CA" "backend.upstreamCA.existingSecret"
+  "TCDI_OIDC_POST_LOGOUT_REDIRECT" "oidc.postLogoutRedirect"
+  "TCDI_TENANT_QUOTAS" "managedNamespaces[].quota"
+  "TCDI_TENANT_QUOTA_CEILINGS" "managedNamespaces[].quotaCeiling"
+  "TCDI_BROKER_URL" "nothing — the chart deploys the merged backend; the split-mode broker client is dev-only"
+  "TCDI_BROKER_CA" "nothing — the chart deploys the merged backend; the split-mode broker client is dev-only"
+  "TCDI_MTLS_CERT" "nothing — the chart deploys the merged backend; the split-mode broker client is dev-only"
+  "TCDI_MTLS_KEY" "nothing — the chart deploys the merged backend; the split-mode broker client is dev-only"
+  "SSL_CERT_FILE" "backend.extraCA.existingSecret"
+  "SSL_CERT_DIR" "backend.extraCA.existingSecret"
+) -}}
+{{- end }}
+
+{{/*
+TM-42: the extraArgs deny list of one component — rendered flags, owned
+flags, and the flag form of every TCDI_ name in tinycdi.staticDeniedEnv,
+minus the documented knobs (tinycdi.flagOverrides). Called with
+{component, root}; renders a JSON array.
+*/}}
+{{- define "tinycdi.deniedFlagNames" -}}
+{{- $denied := concat (include "tinycdi.renderedFlagNames" . | fromJsonArray) (include "tinycdi.ownedFlags" . | fromJsonArray) -}}
+{{- range $env, $_ := (include "tinycdi.staticDeniedEnv" . | fromJson) -}}
+{{- if hasPrefix "TCDI_" $env -}}
+{{- $denied = append $denied (trimPrefix "TCDI_" $env | lower | replace "_" "-") -}}
+{{- end -}}
+{{- end -}}
+{{- $allowed := include "tinycdi.flagOverrides" . | fromJsonArray -}}
+{{- $out := list -}}
+{{- range $n := ($denied | uniq) -}}
+{{- if not (has $n $allowed) -}}{{- $out = append $out $n -}}{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}
+
+{{/*
+TM-42: the extraEnv deny map shared by every component — the env form
+TCDI_<UPPER_SNAKE> of every component's denied flags, then
+tinycdi.staticDeniedEnv on top (its hints win). Called with {root};
+renders a JSON object name -> chart value to use instead.
+*/}}
+{{- define "tinycdi.deniedEnvMap" -}}
+{{- $m := dict -}}
+{{- range $c := list "backend" "operator" "frontend" -}}
+{{- range $f := (include "tinycdi.deniedFlagNames" (dict "component" $c "root" $.root) | fromJsonArray) -}}
+{{- $_ := set $m (printf "TCDI_%s" ($f | upper | replace "-" "_")) (printf "the %s chart value that renders -%s (a flag and its env name are one setting)" $c $f) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson (merge (include "tinycdi.staticDeniedEnv" . | fromJson) $m) -}}
 {{- end }}
 
 {{/*
@@ -614,9 +712,9 @@ JSON array.
 
 {{/*
 SR-3-F2/CHTR-3 helper: refuses <component>.extraEnv entries whose name is
-on the denied map (dev-surface env names and env equivalents of
-security-relevant flags — the map value names the chart value to use
-instead) or duplicates a name the chart itself manages for that
+on the denied map (tinycdi.deniedEnvMap: dev-surface and security env
+names, the trust store, and the env form of every denied flag — the map
+value names the chart value to use instead) or duplicates a name the chart itself manages for that
 component — extraEnv renders AFTER the managed block, so a duplicate
 name would silently win. A non-map or nameless entry fails too: it
 cannot bypass the guard by carrying no name. Called with

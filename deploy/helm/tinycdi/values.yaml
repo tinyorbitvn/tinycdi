@@ -902,28 +902,29 @@ podSecurity:
   managedEnforce: restricted
 
 # Explicit development-mode gate. While false (the only supported value
-# for production), the render FAILS on dev surfaces: operator.devAllowNoBroker;
-# dangerous extraArgs (operator --dev-allow-no-broker /
-# --disable-builtin-egress-excepts / metrics flags, backend
-# --dev-insecure-db / --required-groups / --metrics-listen / the
-# split-mode broker client flags); extraEnv entries carrying a
-# dev-surface env name or the env equivalent of a security-relevant
-# first-class value (TCDI_DEV_INSECURE_DB, TCDI_DEV_ALLOW_NO_BROKER,
-# TCDI_METRICS_LISTEN, TCDI_KASM_ADAPTER_IMAGE, PGSSLMODE,
-# TCDI_OPERATOR_CN, TCDI_WATCH_NAMESPACES, TCDI_REQUIRED_GROUPS,
-# TCDI_CONTROL_TOKEN/TCDI_CONTROL_TOKEN_FILE,
-# TCDI_TRUSTED_PROXIES, TCDI_UPSTREAM_CA, TCDI_OIDC_POST_LOGOUT_REDIRECT,
-# TCDI_TENANT_QUOTAS, TCDI_TENANT_QUOTA_CEILINGS — the render error names
-# the value to use instead),
-# a non-map/nameless entry, or an env var the chart manages for that
-# component; any
+# for production), the render FAILS on dev surfaces:
+# operator.devAllowNoBroker; extraArgs naming any flag the chart renders
+# or owns for that component, or the flag form of a denied env name
+# (backend -rate-limit-replicas and -login-key-file excepted); extraEnv
+# entries carrying a dev-surface env name or the env equivalent of a
+# security-relevant first-class value (TCDI_DEV_INSECURE_DB,
+# TCDI_DEV_ALLOW_NO_BROKER, TCDI_METRICS_LISTEN,
+# TCDI_KASM_ADAPTER_IMAGE, PGSSLMODE, TCDI_OPERATOR_CN,
+# TCDI_WATCH_NAMESPACES, TCDI_REQUIRED_GROUPS,
+# TCDI_CONTROL_TOKEN/TCDI_CONTROL_TOKEN_FILE, TCDI_TRUSTED_PROXIES,
+# TCDI_UPSTREAM_CA, TCDI_OIDC_POST_LOGOUT_REDIRECT, TCDI_TENANT_QUOTAS,
+# TCDI_TENANT_QUOTA_CEILINGS,
+# TCDI_BROKER_URL/TCDI_BROKER_CA/TCDI_MTLS_CERT/TCDI_MTLS_KEY,
+# SSL_CERT_FILE/SSL_CERT_DIR, the TCDI_ form of any denied flag — the
+# render error names the value to use instead), a non-map/nameless
+# entry, or an env var the chart manages for that component; any
 # podSecurityContext/securityContext override that would weaken the
 # hardened defaults (privileged, allowPrivilegeEscalation, added or
 # replaced capabilities, runAsNonRoot=false, uid/gid/fsGroup 0, writable
-# rootfs, unconfined seccomp, appArmorProfile=Unconfined, seLinuxOptions);
-# hostPath backend.extraVolumes; a non-verifying database.tls.mode
-# (""/prefer/require/allow/disable); and podSecurity.managedEnforce=
-# privileged. hostUsers=false is a hardening and stays allowed. Never true
-# in a release values file.
+# rootfs, unconfined seccomp, appArmorProfile=Unconfined,
+# seLinuxOptions); hostPath backend.extraVolumes; a non-verifying
+# database.tls.mode (""/prefer/require/allow/disable); and
+# podSecurity.managedEnforce=privileged. hostUsers=false is a hardening
+# and stays allowed. Never true in a release values file.
 dev:
   enabled: false
