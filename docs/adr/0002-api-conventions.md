@@ -122,8 +122,9 @@ operation looks like the existing ones and a client can rely on them.
     (`adminuserlimit.go`), and the `PUT …/user-limits/{ownerRef}`
     response (`adminuserlimit.go`);
   - `GET …/session-policy` (`adminsessionpolicy.go`).
-- Their writes require `If-Match` (`CheckIfMatch`, `etag.go`; strong
-  comparison, a comma-separated list of tags accepted):
+- Their writes require `If-Match` (`CheckIfMatch`, `etag.go`; a
+  comma-separated list of tags accepted, any member naming the current
+  version passes):
   - `PUT …/quota` (`adminquota.go`);
   - `PUT …/user-limits/{ownerRef}`, `DELETE …/user-limits/{ownerRef}` and
     `PUT …/user-limits/default` (`adminuserlimit.go`);
@@ -133,6 +134,20 @@ operation looks like the existing ones and a client can rely on them.
   A missing `If-Match` is `428 PRECONDITION_REQUIRED`; a stale one is
   `412 PRECONDITION_FAILED`. `If-Match: *` only creates a resource that
   does not exist yet. The API has no `PATCH`.
+- The comparison ignores a weak indicator (`W/`) on the client's tag and
+  matches the opaque part exactly. This is a deliberate deviation from the
+  strong comparison RFC 9110 §13.1.1 requires: the tag is a content hash
+  the server issued strong, and a compressing CDN (gzip/zstd) weakens it
+  in transit, so a browser behind one echoes `W/"…"` for the exact version
+  it read. Without the deviation every `If-Match` write behind such a proxy
+  is `412`. The store's compare-and-swap on the version still decides the
+  write.
+- Every `/v1` response carries `Cache-Control: no-store, no-transform`
+  (`APICacheControl`, `internal/api/headers.go`): `no-store` keeps
+  tenant data out of shared browser caches, and `no-transform`
+  (RFC 9111 §5.2.2.6) asks intermediaries not to recode the body, which
+  is what weakens the tag. It is set on every response rather than only
+  those with an `ETag` so no route can miss it.
 
 ### Idempotency
 
@@ -187,6 +202,7 @@ operation looks like the existing ones and a client can rely on them.
 - **Offset/limit paging.** Rejected: unstable under concurrent writes, and
   its cost grows with the offset.
 - **Weak ETags or `Last-Modified`.** Rejected: one-second resolution and no
-  byte identity.
+  byte identity. (Accepting a weakened echo of a strong tag in `If-Match`
+  is not this: the server still issues and checks the exact strong value.)
 - **Per-route error shapes.** Rejected: every client would need one parser
   per route.

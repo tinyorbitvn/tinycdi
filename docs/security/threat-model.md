@@ -157,7 +157,7 @@ Controls:
   `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and, unless the
-  handler sets its own, `Cache-Control: no-store`.
+  handler sets its own, `Cache-Control: no-store, no-transform`.
 - **OIDC login**: authorization code with PKCE S256; go-oidc discovery
   verifies issuer and audience (`internal/api/auth.go`). The in-flight
   login rides in an AEAD-sealed `__Host-tcdi_login` cookie (AES-256-GCM,

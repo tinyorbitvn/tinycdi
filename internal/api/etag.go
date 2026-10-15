@@ -14,8 +14,19 @@ func ETagOf(version string) string {
 }
 
 // CheckIfMatch enforces the If-Match precondition on a mutation (RFC 9110
-// §13.1.1, strong comparison). exists reports whether the resource has a stored
-// version; "*" is accepted only for a resource that does not exist yet.
+// §13.1.1). exists reports whether the resource has a stored version; "*" is
+// accepted only for a resource that does not exist yet. The header may carry
+// a comma-separated list of entity tags; any one naming the current version
+// passes.
+//
+// Deliberate deviation from RFC 9110 §8.8.3.2: the comparison ignores a weak
+// indicator ("W/") on the client's tag. The API only ever emits strong tags
+// (ETagOf, a content hash of the store version), but intermediaries that
+// compress a response (for example a CDN applying zstd/gzip) weaken the tag
+// in transit, so the client echoes W/"…" for a version that is byte-for-byte
+// the one we issued. The opaque-tag still has to match exactly, so a stale or
+// foreign tag remains 412; the version check itself is the store's
+// compare-and-swap, which the tag only selects.
 func CheckIfMatch(r *http.Request, currentVersion string, exists bool) *Error {
 	h := strings.TrimSpace(r.Header.Get("If-Match"))
 	if h == "" {
@@ -30,11 +41,17 @@ func CheckIfMatch(r *http.Request, currentVersion string, exists bool) *Error {
 	if !exists {
 		return NewError(CodePreconditionFailed, "resource does not exist")
 	}
-	want := ETagOf(currentVersion)
+	want := opaqueTag(ETagOf(currentVersion))
 	for _, tag := range strings.Split(h, ",") {
-		if strings.TrimSpace(tag) == want {
+		if opaqueTag(tag) == want {
 			return nil
 		}
 	}
 	return NewError(CodePreconditionFailed, "resource was modified")
+}
+
+// opaqueTag returns an entity tag's quoted opaque-tag with any weak
+// indicator removed (see CheckIfMatch for why weakness is ignored).
+func opaqueTag(tag string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tag), "W/")
 }

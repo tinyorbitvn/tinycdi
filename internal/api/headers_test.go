@@ -11,7 +11,8 @@ import (
 
 // TestAPIBrowserHeaders_SetOnEveryResponse (R1-10): the app-listener
 // header middleware pins the browser policy on JSON, error and mux-404
-// answers alike, and a handler's own Cache-Control wins over the default.
+// answers alike (Cache-Control no-store, no-transform), and a handler's own
+// Cache-Control wins over the default.
 func TestAPIBrowserHeaders_SetOnEveryResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/echo", func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +31,7 @@ func TestAPIBrowserHeaders_SetOnEveryResponse(t *testing.T) {
 			"Content-Security-Policy": APIContentSecurityPolicy,
 			"X-Frame-Options":         "DENY",
 			"Referrer-Policy":         "no-referrer",
-			"Cache-Control":           "no-store",
+			"Cache-Control":           "no-store, no-transform",
 		}
 		if path == "/v1/cached" {
 			want["Cache-Control"] = "private, max-age=60"

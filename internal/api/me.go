@@ -69,7 +69,7 @@ func (h *MeHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if p.IsTenantAdmin() {
 		roles = append(roles, TenantAdminGroup)
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	respondJSON(w, meView{
 		Subject:       p.Subject,
 		DisplayName:   displayName,

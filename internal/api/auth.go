@@ -776,7 +776,7 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(LogoutResult{EndSessionURL: endSession})
 }

@@ -119,6 +119,6 @@ func (h *ConnectionStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, r, apiErr)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	respondJSON(w, st)
 }

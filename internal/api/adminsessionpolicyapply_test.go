@@ -220,6 +220,24 @@ func TestApplySessionPolicy_Preconditions(t *testing.T) {
 	}
 }
 
+// TestApplySessionPolicy_WeakIfMatch: the ETag weakened
+// by a compressing proxy still pins the reviewed ceiling version.
+func TestApplySessionPolicy_WeakIfMatch(t *testing.T) {
+	be, cr := applyFixture()
+	env, etag := newApplyEnv(t, be, cr)
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	res := doReq(t, env, sess, csrf, http.MethodPost, applyPath, `{"dryRun":true}`, map[string]string{"If-Match": "W/" + etag})
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("weak echo of the current tag: status=%d, want 200", res.StatusCode)
+	}
+	res = doReq(t, env, sess, csrf, http.MethodPost, applyPath, `{"dryRun":true}`, map[string]string{"If-Match": `W/"stale"`})
+	res.Body.Close()
+	if res.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("weak stale tag: status=%d, want 412", res.StatusCode)
+	}
+}
+
 // Tenant isolation and role: a regular user and an admin of another tenant
 // are refused before any workspace is read or restarted.
 func TestApplySessionPolicy_AuthzAndTenantIsolation(t *testing.T) {

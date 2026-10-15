@@ -1352,7 +1352,7 @@ func TestAppListener_UnknownCookieSprayRefused(t *testing.T) {
 // TestWrapApp_PortalBrowserHeaders (R1-10): every app-listener response
 // on the portal host — an authenticated route's 401, the anonymous probe's
 // 200, and the mux's own 404 — carries nosniff, a CSP that denies framing,
-// XFO DENY and no-store.
+// XFO DENY and no-store, no-transform.
 func TestWrapApp_PortalBrowserHeaders(t *testing.T) {
 	srv := httptest.NewServer(testAppHandler(t))
 	t.Cleanup(srv.Close)
@@ -1378,7 +1378,7 @@ func TestWrapApp_PortalBrowserHeaders(t *testing.T) {
 		if h.Get("X-Content-Type-Options") != "nosniff" ||
 			!strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
 			h.Get("X-Frame-Options") != "DENY" ||
-			h.Get("Cache-Control") != "no-store" ||
+			h.Get("Cache-Control") != "no-store, no-transform" ||
 			h.Get("Referrer-Policy") != "no-referrer" {
 			t.Errorf("GET %s: headers nosniff=%q csp=%q xfo=%q cache=%q referrer=%q",
 				tc.path, h.Get("X-Content-Type-Options"), h.Get("Content-Security-Policy"),

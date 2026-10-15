@@ -203,7 +203,7 @@ func (h *FileTransferHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(fileTransferView{
 		ID: tid, Direction: req.Direction, Path: req.Path, DeclaredBytes: declared, MaxBytes: pol.MaxFileBytes,

@@ -226,7 +226,7 @@ and an update to this file.
 
    *Enforced:* `TestIssueTicket_*`, `TestRedeemTicket_*`,
    `TestLaunch_TicketInQueryRejected`, `TestCreateConnection_NoTicketInLogs`,
-   `TestCreateConnection_IssuesTicket` (`Cache-Control: no-store`). The
+   `TestCreateConnection_IssuesTicket` (`Cache-Control: no-store, no-transform`). The
    SPA posts a ticket only to the per-workspace `launchUrl` host the API
    returns, validated against the configured session domain
    (`web/tests/unit/session/launch.test.ts`).

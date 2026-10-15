@@ -45,7 +45,7 @@ export interface paths {
          *     browser console. The probe is passive — it never slides the idle
          *     timer, sets no cookie and needs no CSRF token — and discloses nothing
          *     but the boolean (no subject, tenant, roles or token). The response is
-         *     `Cache-Control: no-store`.
+         *     `Cache-Control: no-store, no-transform`.
          */
         get: operations["getSessionProbe"];
         put?: never;
@@ -2208,11 +2208,16 @@ export interface components {
          */
         Sort: string;
         /**
-         * @description Strong entity tag of the resource's current version, as returned in
-         *     the `ETag` header or body of the last read/write. Missing → `428
+         * @description Entity tag of the resource's current version, as returned in the
+         *     `ETag` header or body of the last read/write; a comma-separated list
+         *     passes when any member names the current version. Missing → `428
          *     PRECONDITION_REQUIRED`; stale or malformed → `412
          *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-         *     exist yet (create-or-replace semantics).
+         *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+         *     a tag is ignored: the server only issues strong tags, but a
+         *     compressing proxy can weaken one in transit, and the opaque part
+         *     still has to match exactly. This deliberately departs from the strong
+         *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
          */
         IfMatch: string;
         /**
@@ -2228,7 +2233,10 @@ export interface components {
         /**
          * @description Strong entity tag of the returned resource's current version — a
          *     quoted string clients echo verbatim in `If-Match` on the next
-         *     mutation.
+         *     mutation. Every `/v1` response carries `Cache-Control: no-store,
+         *     no-transform` so compliant intermediaries leave the tag (and the
+         *     body) unchanged; a tag a proxy weakened to `W/"…"` is still accepted
+         *     in `If-Match`.
          */
         ETag: string;
     };
@@ -2318,7 +2326,7 @@ export interface operations {
             /** @description Portal session ended; continue at the identity provider. */
             200: {
                 headers: {
-                    "Cache-Control"?: "no-store";
+                    "Cache-Control"?: "no-store, no-transform";
                     [name: string]: unknown;
                 };
                 content: {
@@ -2351,7 +2359,7 @@ export interface operations {
             /** @description All portal sessions ended; continue at the identity provider. */
             200: {
                 headers: {
-                    "Cache-Control"?: "no-store";
+                    "Cache-Control"?: "no-store, no-transform";
                     [name: string]: unknown;
                 };
                 content: {
@@ -2851,11 +2859,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -2948,11 +2961,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3003,11 +3021,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3085,11 +3108,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3167,11 +3195,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3216,11 +3249,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
