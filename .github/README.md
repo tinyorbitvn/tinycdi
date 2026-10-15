@@ -198,7 +198,7 @@ Created by `setup-repo-protection.sh --apply` (or manually under
 |---|---|---|
 | `CODE_SCANNING_ENABLED` | `true` | trivy SARIF also pushed to Security → Code scanning; dependency-review runs on PRs. Both need Advanced Security on private repos — off today |
 | `ATTESTATIONS_ENABLED` | `true` | additionally emits `actions/attest-build-provenance` for each release image. Attestation storage on private repos needs GitHub Enterprise — off until the repo goes public |
-| `TRAIN_ATTESTATIONS_ENABLED` | `true` | same for the runtime train's publish job; unset means off (`runtime-images.yml:767` runs the step only when it is `true`). `setup-repo-protection.sh` does not set it (it sets `ATTESTATIONS_ENABLED` and `CODE_SCANNING_ENABLED`, `:473`); create it manually to enable |
+| `TRAIN_ATTESTATIONS_ENABLED` | `true` | same for the runtime train's publish job; unset means off (the `if: vars.TRAIN_ATTESTATIONS_ENABLED == 'true'` steps in `runtime-images.yml` run only when it is `true`). `setup-repo-protection.sh` does not set it (it sets `ATTESTATIONS_ENABLED` and `CODE_SCANNING_ENABLED`, `:473`); create it manually to enable |
 | `BASE_MIRROR_REGISTRY` | registry host | optional private mirror for Dockerfile `FROM` bases — when set, build jobs docker-login to it with the `BASE_MIRROR_*` secrets below |
 | unset | (default) | the gated steps are skipped; SARIF/SBOM artifacts and cosign signing are unaffected |
 
