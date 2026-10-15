@@ -49,6 +49,16 @@ chk "release: chart job needs image jobs" "$REL" 'needs: \[prepare, base, images
 # SEC-16: no shared GHA cache on release image builds.
 chk_absent "release: no gha cache" "$REL" 'cache-(from|to):\s*>?-?\s*$?\s*\$?\{?\{?.*type=gha|cache-(from|to): type=gha'
 
+# R1-41: signed :main images build without the shared GHA cache.
+chk_absent "images: no gha cache" "$IMG" 'type=gha'
+# R1-37: every release re-runs the kasm catalog gate, and publish needs it.
+chk "release: kasm catalog policy in the release" "$REL" 'run: \.github/scripts/check-kasm-catalog\.sh'
+chk "release: kasm catalog scan in the release" "$REL" 'run: PATH="\$PWD/bin:\$PATH" \.github/scripts/scan-kasm-catalog\.sh'
+chk "release: publish needs kasm-catalog" "$REL" 'needs: \[prepare, scan, kasm-catalog, chart, binaries\]'
+chk "release: publish requires kasm-catalog success" "$REL" "needs\.kasm-catalog\.result == 'success'"
+chk "release: kasm-catalog leg inside the scan-age bound" "$REL" 'legs\+=\("kasm catalog scan \(trivy gate \+ engine floor\)"\)'
+chk "kasm scan: trivy --config empty" "$ROOT/.github/scripts/scan-kasm-catalog.sh" '--config "\$CFG"'
+
 # SEC-17: cosign sign/attest present; GitHub provenance gated on the var.
 chk "release: cosign sign" "$REL" 'cosign sign'
 chk "release: cosign attest (SBOM)" "$REL" 'cosign attest'

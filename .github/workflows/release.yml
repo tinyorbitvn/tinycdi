@@ -923,6 +923,38 @@ jobs:
           sarif_file: trivy-sarif
           category: tinycdi-${{ matrix.image }}
 
+  kasm-catalog:
+    # R1-37 / KASM-2: the chart ships kasmAdapter.browserAllowlist, so the
+    # release re-runs the whole kasm catalog gate: the declared floor
+    # (check-kasm-catalog.sh) and the measured engine floor + trivy gate
+    # (scan-kasm-catalog.sh). In ci.yml the measured half reports but does
+    # not block a merge (network-dependent); here it blocks publish.
+    # SEC-05: read-only, no secrets, pushes nothing.
+    name: kasm catalog scan (trivy gate + engine floor)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install trivy ${{ env.TRIVY_VERSION }} (sha256-verified)
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -fsSL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_TGZ_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C "$PWD/bin" trivy
+          "$PWD/bin/trivy" version
+
+      - name: catalog policy (digest pins + declared floor)
+        run: .github/scripts/check-kasm-catalog.sh
+
+      - name: catalog scan (trivy gate + measured engine floor)
+        run: PATH="$PWD/bin:$PATH" .github/scripts/scan-kasm-catalog.sh
+
   chart:
     name: helm chart (lint, digest-stamp, package)
     needs: [prepare, base, images]
@@ -1118,11 +1150,12 @@ jobs:
     # digests are signed and attested BEFORE any tag is promoted, so a
     # signing failure can never leave unsigned content publicly tagged.
     name: publish (sign, attest, promote tags, release)
-    needs: [prepare, scan, chart, binaries]
+    needs: [prepare, scan, kasm-catalog, chart, binaries]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.outputs.dry_run != 'true'
           && needs.scan.result == 'success'
+          && needs.kasm-catalog.result == 'success'
           && needs.chart.result == 'success'
           && needs.binaries.result == 'success' }}
     environment: release  # SEC-15: required reviewers — .github/README.md
@@ -1212,6 +1245,7 @@ jobs:
             "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
             --jq '.jobs[]' | jq -s . > jobs.json
           mapfile -t legs < <(jq -r '.[] | "scan " + .' <<< "$RELEASE_IMAGES")
+          legs+=("kasm catalog scan (trivy gate + engine floor)")
           .github/scripts/check-scan-age.sh jobs.json "$SCAN_MAX_AGE_HOURS" "${legs[@]}"
 
       - name: login to ghcr.io
@@ -1480,11 +1514,12 @@ jobs:
 
   dryrun-summary:
     name: dry-run summary
-    needs: [prepare, scan, chart, binaries]
+    needs: [prepare, scan, kasm-catalog, chart, binaries]
     if: >-
       ${{ always() && !cancelled()
           && needs.prepare.outputs.dry_run == 'true'
           && needs.scan.result == 'success'
+          && needs.kasm-catalog.result == 'success'
           && needs.chart.result == 'success'
           && needs.binaries.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -1511,13 +1546,13 @@ jobs:
     # published images' multi-arch children and cosign sha256-* artifacts
     # as unlabelled versions, and sweeping them breaks releases.
     # Dry runs push nothing and are skipped.
-    # Covers every pre-publish leg (prepare, base, images, scan, chart,
-    # binaries). Legs this job does NOT cover: `publish` (its output may
+    # Covers every pre-publish leg (prepare, base, images, scan,
+    # kasm-catalog, chart, binaries). Legs this job does NOT cover: `publish` (its output may
     # already be signed/tagged — an operator decision, not
     # auto-deletion) and cancelled runs (a cancelled job graph runs
     # nothing).
     name: delete this run's digests (failed run)
-    needs: [prepare, base, images, scan, chart, binaries]
+    needs: [prepare, base, images, scan, kasm-catalog, chart, binaries]
     if: failure() && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     permissions:

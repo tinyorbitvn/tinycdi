@@ -713,6 +713,13 @@ Full inventory: [`test-inventory.md`](test-inventory.md).
   packaged chart and static binaries.
 - Required checks and enforce-admins are codified in
   `.github/scripts/setup-repo-protection.sh`.
+- Kasm catalog: `check-kasm-catalog.sh` runs in the required
+  workflow-policy job and requires every `kasmweb/*` reference to be a
+  digest-pinned catalog entry whose declared engine floor meets its
+  class budget. The measured engine floor and the trivy gate
+  (`scan-kasm-catalog.sh`) report in the CI `kasm-contract` job and gate
+  every release in the release.yml `kasm-catalog` job, which the publish
+  job needs.
 
 Register: TM-48, TM-49.
 

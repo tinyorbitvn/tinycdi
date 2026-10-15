@@ -95,4 +95,12 @@ need_row R1-15 TM-34 'backend\.trustedProxies` must never cover'
 absent R1-36 deploy/helm/tinycdi/README.md 'platformEnforce'
 absent R1-36 deploy/helm/tinycdi/values.yaml 'platformEnforce'
 
+# R1-37: the measured kasm engine floor and trivy gate block releases, not
+# merges; the docs must not call the CI job a blocking gate.
+need R1-37 docs/kasm-images.md 'release\.yml `kasm-catalog` job'
+absent R1-37 docs/kasm-images.md 'blocking CI gate and stays blocking'
+
+# R1-41: no signing workflow builds from the shared GHA cache.
+need R1-41 docs/security/provenance.md 'without (a|the) shared build cache'
+
 exit "$fails"

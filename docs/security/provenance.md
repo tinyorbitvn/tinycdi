@@ -6,6 +6,11 @@ signed, attested artifacts as described below — tools are sha256-pinned
 (syft 1.52.0, trivy 0.70.0, cosign v3.1.3). No release tag has been cut yet;
 this documents the mechanism a `vX.Y.Z` release exercises.
 
+All three signing workflows (`images.yml`, `release.yml`,
+`runtime-images.yml`) build without a shared build cache: no build reads
+or writes the GitHub Actions cache, so a cache entry another workflow
+wrote cannot become a layer of a signed image.
+
 ## What a release artifact consists of
 
 Per the release interface contract, a release artifact has: image digests,

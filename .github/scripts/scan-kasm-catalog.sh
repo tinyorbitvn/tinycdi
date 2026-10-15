@@ -28,7 +28,7 @@ err() { echo "::error::$*"; fail=1; }
 # dormant-path findings, time-boxed the same as .trivyignore (SEC-44). The
 # effective file pins trivy's native exp: so an expired exception can
 # never suppress a finding at scan time.
-IGN="$(mktemp)"; trap 'rm -f "$IGN"' EXIT
+IGN="$(mktemp)"; CFG="$(mktemp)"; trap 'rm -f "$IGN" "$CFG"' EXIT
 .github/scripts/check-trivyignore.sh --out "$IGN" build/kasm-catalog.trivyignore
 
 engine_version() { # <image> <engine> -> prints version string
@@ -66,7 +66,9 @@ while read -r ref engine floor _; do
   fi
 
   echo "    trivy gate: --severity CRITICAL,HIGH --ignore-unfixed"
-  if ! "$TRIVY" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+  # SUPR-8: the empty --config means a committed trivy.yaml can never
+  # neuter the gate.
+  if ! "$TRIVY" --config "$CFG" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
        --ignorefile "$IGN" --exit-code 1 --quiet "$ref"; then
     err "$ref: trivy gate failed (fixable CRITICAL/HIGH present)"
   fi
