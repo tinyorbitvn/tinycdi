@@ -415,13 +415,17 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   `sessions_test.go`, `bindings_envtest_test.go` /
   `bindings_internal_test.go`, `targets_internal_test.go` — lease
   lifecycle, fencing/freshness (TM-24), stale binding, target
-  resolution. Binding freshness follows watch health, not resync
-  replays (TM-16): `TestK8sBindingSource_ResyncDoesNotMaskDeadWatch`
-  (a refused watch goes stale though resync keeps firing; the broker
-  refuses), `TestK8sBindingSource_WatchFailureStreak` (a failure streak
-  over 15 s is stale while lists succeed),
-  `TestK8sBindingSource_IdleHealthyWatchStaysFresh` (the liveness probe
-  keeps an idle healthy watch fresh).
+  resolution. Binding freshness means the cache matches the API server
+  (TM-16): `TestK8sBindingSource_SilentStalledWatchGoesStale` (a watch
+  that stops delivering with no error, lists still succeeding and resync
+  still firing, goes stale within 15 s of an update, deletion or creation
+  it misses; the broker refuses),
+  `TestK8sBindingSource_UnreachableAPIServerGoesStale`,
+  `TestK8sBindingSource_WatchFailureStreak` (a failure streak over 15 s is
+  stale while the cache matches), `TestK8sBindingSource_InFlightChangeStaysFresh`
+  (a cache trailing a busy Workspace by one interval stays fresh),
+  `TestK8sBindingSource_IdleHealthyWatchStaysFresh`; the envtest
+  `TestK8sBindingSource_Projection` runs the real metadata-list probe.
 - `internal/broker/signout_test.go` — `RevokePortalSession` semantics
   (TM-07): digest-bound leases revoked with drain accounting,
   outstanding tickets revoked, redemption denied once the issuing

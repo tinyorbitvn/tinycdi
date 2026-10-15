@@ -24,34 +24,50 @@ import (
 // tenant namespaces.
 //
 // Freshness contract: CurrentBinding reports ErrFreshness until the informer
-// has synced and whenever its watch is unhealthy, and the returned
-// RuntimeBinding.ObservedAt is the last heartbeat — the broker refuses
-// issue/renew once that stamp ages past MaxBindingAge, so a stalled watch
-// fails closed. Freshness reflects watch health, not how recently a
-// Workspace changed. The source is fresh while
+// has synced and whenever the cache cannot be shown to match the API server,
+// and the returned RuntimeBinding.ObservedAt is the last time it was shown
+// to — the broker refuses issue/renew once that stamp ages past
+// MaxBindingAge, so a stalled watch fails closed. Freshness means "the cache
+// matches the API server", not "an event arrived recently". The source is
+// fresh while
 //
-//   - a heartbeat arrived within MaxBindingAge: an informer event that
-//     carries a new object version, or, while the informer is quiet, a
-//     successful uncached probe of the API server (RunLiveness). A periodic
-//     resync replays the local store with unchanged resource versions and
-//     keeps firing while the watch is down, so it never counts; and
+//   - a consistency probe (RunLiveness) succeeded within MaxBindingAge: an
+//     uncached metadata-only list of the watched Workspaces agrees with the
+//     informer cache on membership and every resourceVersion, apart from
+//     differences still inside their grace period (see below). An idle but
+//     healthy watch therefore stays fresh, and informer events, resync
+//     replays included, are never evidence on their own;
+//   - no difference has outlived its grace: a Workspace whose API-server
+//     version differs from the cache (changed, created or deleted) while
+//     the cache copy stays unchanged for longer than one probe interval
+//     means the watch is not delivering — a silent stall, a watch retried
+//     after a refusal or 429, or one namespace's watch stuck while others
+//     flow. The cache moving on (a delivered event) restarts the grace;
 //   - no watch failure streak (NoteWatchError, fed by the cache's watch error
 //     handler) has lasted longer than MaxBindingAge. A streak ends on the
-//     next event or watchRetryWindow after its last report.
+//     next delivered event or watchRetryWindow after its last report.
 //
-// client-go retries a refused or throttled watch inside the reflector with
-// the resync still running and without reporting it, so before this rule a
-// broker cut off from its API server kept acting on cached bindings for as
-// long as the outage lasted.
+// A change the watch never delivers is caught at the probe that sees it
+// plus one interval of grace: with the 5 s probe, within 15 s.
 type K8sBindingSource struct {
 	cache crcache.Cache
 	now   func() time.Time // nil: time.Now
 
 	mu        sync.Mutex
 	synced    bool
-	lastEvent time.Time // last heartbeat: informer event or liveness probe success
+	lastEvent time.Time // last proof the cache matched the API server
+	drifted   bool      // the last probe found a difference past its grace
+	pending   map[string]driftEntry
 	failSince time.Time // first watch failure of the current streak; zero when none
 	failLast  time.Time // latest watch failure of the current streak
+}
+
+// driftEntry is one Workspace on which the cache and the API server
+// disagreed: the cache's version at that moment ("" when absent) and when the
+// disagreement with that cache version was first seen.
+type driftEntry struct {
+	cacheRV string
+	since   time.Time
 }
 
 // watchRetryWindow is how long one reported watch failure keeps the source
@@ -92,7 +108,8 @@ func (s *K8sBindingSource) clock() time.Time {
 	return time.Now()
 }
 
-// MarkSynced records that the informer cache has completed its initial sync.
+// MarkSynced records that the informer cache has completed its initial sync
+// (a full list: the cache matches the API server at this moment).
 func (s *K8sBindingSource) MarkSynced() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -100,8 +117,9 @@ func (s *K8sBindingSource) MarkSynced() {
 	s.lastEvent = s.clock()
 }
 
-// onUpdate counts an informer update as a heartbeat only when it carries a
-// new object version: a resync replay is no evidence the watch is alive.
+// onUpdate treats an informer update as a delivered watch event only when it
+// carries a new object version: a resync replay is no evidence the watch is
+// alive.
 func (s *K8sBindingSource) onUpdate(oldObj, newObj interface{}) {
 	o, ok1 := oldObj.(metav1.Object)
 	n, ok2 := newObj.(metav1.Object)
@@ -110,13 +128,11 @@ func (s *K8sBindingSource) onUpdate(oldObj, newObj interface{}) {
 	}
 }
 
-// note records a watch event: the informer is live and emitting, which also
-// ends any watch failure streak.
+// note records a delivered watch event, which ends any watch failure streak.
+// It is not a freshness heartbeat: only a matching probe is.
 func (s *K8sBindingSource) note() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.synced = true
-	s.lastEvent = s.clock()
 	s.failSince, s.failLast = time.Time{}, time.Time{}
 }
 
@@ -140,12 +156,16 @@ func (s *K8sBindingSource) NoteWatchError(typeDescription string, err error) {
 	s.failLast = now
 }
 
-// RunLiveness probes the API server every interval in which the informer
-// delivered no event and counts a success as a heartbeat; it returns when
-// ctx ends. This keeps an idle but healthy watch fresh: silence alone cannot
-// tell it from a dead one. probe must bypass the informer cache (see
-// WorkspaceListProbe).
-func (s *K8sBindingSource) RunLiveness(ctx context.Context, probe func(context.Context) error, every time.Duration) {
+// WorkspaceVersions lists the API server's Workspaces as "namespace/name" ->
+// resourceVersion.
+type WorkspaceVersions func(context.Context) (map[string]string, error)
+
+// RunLiveness runs the consistency probe every interval until ctx ends (see
+// K8sBindingSource). Cost per probe: one paged metadata-only list per
+// watched namespace (cluster-wide when none) returning every Workspace's
+// metadata (~1 KiB each, no spec/status), plus one no-copy read of the
+// informer cache — linear in the Workspace count, every interval.
+func (s *K8sBindingSource) RunLiveness(ctx context.Context, api WorkspaceVersions, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -154,57 +174,113 @@ func (s *K8sBindingSource) RunLiveness(ctx context.Context, probe func(context.C
 			return
 		case <-t.C:
 		}
-		s.livenessTick(ctx, probe, every)
+		s.livenessTick(ctx, api, every)
 	}
 }
 
-// livenessTick runs one RunLiveness round: probe only while synced and quiet
-// for at least every, and record a success as a heartbeat.
-func (s *K8sBindingSource) livenessTick(ctx context.Context, probe func(context.Context) error, every time.Duration) {
+// livenessTick runs one probe: list the API server, then the cache, and
+// compare. A difference is in flight until the cache copy has stayed the same
+// for longer than grace while the API server disagrees. A failed list
+// records nothing, so an unreachable API server goes stale by age.
+func (s *K8sBindingSource) livenessTick(ctx context.Context, api WorkspaceVersions, grace time.Duration) {
 	s.mu.Lock()
-	quiet := s.synced && s.clock().Sub(s.lastEvent) >= every
+	synced := s.synced
 	s.mu.Unlock()
-	if !quiet {
+	if !synced {
 		return
 	}
-	pctx, cancel := context.WithTimeout(ctx, every)
-	err := probe(pctx)
-	cancel()
+	pctx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+	want, err := api(pctx)
 	if err != nil {
 		return
 	}
+	// Listed after the API server, so a change that reached the cache in
+	// between shows as the cache ahead — in flight, not drift.
+	var cached cdiv1.WorkspaceList
+	if err := s.cache.List(pctx, &cached, client.UnsafeDisableDeepCopyOption(true)); err != nil {
+		return
+	}
+	have := make(map[string]string, len(cached.Items))
+	for i := range cached.Items {
+		ws := &cached.Items[i]
+		have[ws.Namespace+"/"+ws.Name] = ws.ResourceVersion
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if now := s.clock(); now.After(s.lastEvent) {
+	now := s.clock()
+	pending := map[string]driftEntry{}
+	drifted := false
+	check := func(key string) {
+		if want[key] == have[key] {
+			return
+		}
+		e, ok := s.pending[key]
+		if !ok || e.cacheRV != have[key] {
+			e = driftEntry{cacheRV: have[key], since: now}
+		}
+		pending[key] = e
+		if now.Sub(e.since) > grace {
+			drifted = true
+		}
+	}
+	for key := range want {
+		check(key)
+	}
+	for key := range have {
+		if _, ok := want[key]; !ok {
+			check(key)
+		}
+	}
+	s.pending, s.drifted = pending, drifted
+	if !drifted && now.After(s.lastEvent) {
 		s.lastEvent = now
 	}
 }
 
-// WorkspaceListProbe returns a liveness probe that lists at most one
-// Workspace in each namespace (cluster-wide when namespaces is empty)
-// through reader, which must be an uncached client: it proves the API server
-// still serves the resource the informer watches.
-func WorkspaceListProbe(reader client.Reader, namespaces []string) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if len(namespaces) == 0 {
-			return reader.List(ctx, &cdiv1.WorkspaceList{}, client.Limit(1))
+// WorkspaceMetadataVersions returns the probe's API-server side: a paged,
+// metadata-only list of Workspaces in each namespace (cluster-wide when
+// namespaces is empty) through reader, which must be an uncached client.
+func WorkspaceMetadataVersions(reader client.Reader, namespaces []string) WorkspaceVersions {
+	return func(ctx context.Context) (map[string]string, error) {
+		out := map[string]string{}
+		scopes := namespaces
+		if len(scopes) == 0 {
+			scopes = []string{""}
 		}
-		for _, ns := range namespaces {
-			if err := reader.List(ctx, &cdiv1.WorkspaceList{}, client.InNamespace(ns), client.Limit(1)); err != nil {
-				return err
+		for _, ns := range scopes {
+			cont := ""
+			for {
+				list := &metav1.PartialObjectMetadataList{}
+				list.SetGroupVersionKind(cdiv1.GroupVersion.WithKind("WorkspaceList"))
+				opts := []client.ListOption{client.Limit(500), client.Continue(cont)}
+				if ns != "" {
+					opts = append(opts, client.InNamespace(ns))
+				}
+				if err := reader.List(ctx, list, opts...); err != nil {
+					return nil, err
+				}
+				for i := range list.Items {
+					m := &list.Items[i]
+					out[m.Namespace+"/"+m.Name] = m.ResourceVersion
+				}
+				if cont = list.Continue; cont == "" {
+					break
+				}
 			}
 		}
-		return nil
+		return out, nil
 	}
 }
 
 // health reports whether the source is fresh (see K8sBindingSource) and the
-// time of the last heartbeat.
+// time it was last shown to match the API server.
 func (s *K8sBindingSource) health() (bool, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
-	if !s.synced || now.Sub(s.lastEvent) > MaxBindingAge {
+	if !s.synced || s.drifted || now.Sub(s.lastEvent) > MaxBindingAge {
 		return false, s.lastEvent
 	}
 	if !s.failSince.IsZero() && now.Sub(s.failLast) <= watchRetryWindow && now.Sub(s.failSince) > MaxBindingAge {

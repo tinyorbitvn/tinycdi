@@ -80,8 +80,7 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 	}
 
 	// Live informer cache restricted to the managed namespace. Resync
-	// replays are not a heartbeat; the Workspace create/update events below
-	// keep the source fresh for the test's few seconds.
+	// replays are not a heartbeat; the consistency probe started below is.
 	resync := time.Second
 	kcache, err := crcache.New(restCfg, crcache.Options{
 		Scheme:     scheme,
@@ -104,6 +103,10 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 		t.Fatal("cache did not sync")
 	}
 	src.MarkSynced()
+	// The consistency probe against the real API server: a metadata-only
+	// list that must match the cache for the source to stay fresh.
+	const probeEvery = time.Second
+	go src.RunLiveness(cctx, broker.WorkspaceMetadataVersions(kc, []string{ns.Name}), probeEvery)
 
 	if _, err := src.CurrentBinding(context.Background(), "ws-nope"); !errors.Is(err, broker.ErrNotFound) {
 		t.Fatalf("unknown uid = %v, want ErrNotFound", err)
@@ -158,6 +161,14 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 				b.CRUID == ws.UID && string(b.CRUID) != string(wsUID) {
 				if time.Since(b.ObservedAt) > broker.MaxBindingAge {
 					t.Fatalf("ObservedAt stale: %v", b.ObservedAt)
+				}
+				// Past the probe's grace with no further change, the real
+				// metadata list still matches the cache: fresh, and the
+				// stamp comes from a recent probe.
+				time.Sleep(4 * probeEvery)
+				b, err := src.CurrentBinding(context.Background(), wsUID)
+				if err != nil || time.Since(b.ObservedAt) > 2*probeEvery {
+					t.Fatalf("after probes: binding=%+v err=%v, want fresh within %s", b, err, 2*probeEvery)
 				}
 				return
 			}

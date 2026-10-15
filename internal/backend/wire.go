@@ -327,10 +327,10 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 
 	// Binding source: an informer cache over Workspace CRs, scoped to the
 	// managed tenant namespaces. Resync replays are not a heartbeat (they
-	// keep firing while the watch is down): the binding source judges watch
-	// health from delivered events, an uncached liveness probe on the same
-	// period and the cache's list/watch failures, so a stalled watch stops
-	// issuance within broker.MaxBindingAge (15 s, fail closed).
+	// keep firing while the watch is down): the binding source is fresh while
+	// an uncached metadata list on the same period matches the cache and the
+	// watch reports no lasting failures, so a stalled watch stops issuance
+	// within broker.MaxBindingAge (15 s, fail closed).
 	bindingResync := 5 * time.Second
 	// The status view and the binding source read watch health from the
 	// cache's list/watch failures; both are created after the cache, so the
@@ -364,12 +364,11 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		return fmt.Errorf("binding source: %w", err)
 	}
 	bindingsRef.Store(bindings)
-	// Liveness heartbeat for an idle watch: while no Workspace changes, an
-	// uncached one-item list proves the API server still serves the
-	// resource, so a quiet tenant keeps connecting and an unreachable API
-	// server stops it.
+	// Consistency probe: an uncached metadata-only list compared with the
+	// informer cache, so a quiet tenant keeps connecting while a watch that
+	// stopped delivering (or an unreachable API server) stops it.
 	b.bg = append(b.bg, func(ctx context.Context) {
-		bindings.RunLiveness(ctx, broker.WorkspaceListProbe(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
+		bindings.RunLiveness(ctx, broker.WorkspaceMetadataVersions(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
 	})
 	// Event-driven quota settle: the operator writes its observed runtime
 	// absence into Workspace CR status (or the CR's deletion); every event

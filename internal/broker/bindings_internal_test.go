@@ -35,19 +35,26 @@ func TestK8sBindingSource_FreshnessGate(t *testing.T) {
 	}
 }
 
-// oneWorkspaceCache is a cache whose List always answers one Ready
-// Workspace — the cached copy a broken watch would leave behind.
-type oneWorkspaceCache struct {
+// workspaceCache is a fake informer cache holding Workspaces by
+// "namespace/name"; List answers those carrying testWS, or every one when
+// asked without a label selector (the probe's read).
+type workspaceCache struct {
 	crcache.Cache
-	ws cdiv1.Workspace
+	items map[string]*cdiv1.Workspace
 }
 
-func (c *oneWorkspaceCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+func (c *workspaceCache) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	l, ok := list.(*cdiv1.WorkspaceList)
 	if !ok {
 		return fmt.Errorf("unexpected list %T", list)
 	}
-	l.Items = []cdiv1.Workspace{c.ws}
+	lo := (&client.ListOptions{}).ApplyOptions(opts)
+	l.Items = nil
+	for _, ws := range c.items {
+		if lo.LabelSelector == nil || ws.Labels[provisioning.LabelWorkspaceUID] == string(testWS) {
+			l.Items = append(l.Items, *ws)
+		}
+	}
 	return nil
 }
 
@@ -56,7 +63,11 @@ type fakeClock struct{ t time.Time }
 func (c *fakeClock) Now() time.Time          { return c.t }
 func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
-const testWS PlatformID = "ws_fresh01"
+const (
+	testWS  PlatformID = "ws_fresh01"
+	testKey            = "tenant-a/ws-fresh01"
+	every              = 5 * time.Second // production probe interval
+)
 
 func cachedWorkspace(rv string) *cdiv1.Workspace {
 	return &cdiv1.Workspace{
@@ -74,113 +85,183 @@ func cachedWorkspace(rv string) *cdiv1.Workspace {
 	}
 }
 
-// syncedSource returns a synced source over a one-Workspace cache, a broker
-// reading through it, and the shared fake clock.
-func syncedSource(t *testing.T) (*K8sBindingSource, *Broker, *fakeClock) {
-	t.Helper()
-	clk := &fakeClock{t: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-	src := &K8sBindingSource{cache: &oneWorkspaceCache{ws: *cachedWorkspace("100")}, now: clk.Now}
-	src.MarkSynced()
-	return src, New(nil, src, WithClock(clk)), clk
+// probeEnv is a synced source over a fake cache, a broker reading through
+// it, the fake clock and the API server's view the probe lists.
+type probeEnv struct {
+	src   *K8sBindingSource
+	b     *Broker
+	clk   *fakeClock
+	cache *workspaceCache
+	api   map[string]string // namespace/name -> resourceVersion on the API server
+	down  bool              // the API server refuses connections
 }
 
-var (
-	probeOK      = func(context.Context) error { return nil }
-	probeRefused = func(context.Context) error {
-		return fmt.Errorf("dial tcp 10.0.0.1:6443: %w", syscall.ECONNREFUSED)
+func newProbeEnv(t *testing.T) *probeEnv {
+	t.Helper()
+	clk := &fakeClock{t: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	cache := &workspaceCache{items: map[string]*cdiv1.Workspace{testKey: cachedWorkspace("100")}}
+	src := &K8sBindingSource{cache: cache, now: clk.Now}
+	src.MarkSynced()
+	return &probeEnv{src: src, b: New(nil, src, WithClock(clk)), clk: clk, cache: cache,
+		api: map[string]string{testKey: "100"}}
+}
+
+func (e *probeEnv) versions(context.Context) (map[string]string, error) {
+	if e.down {
+		return nil, fmt.Errorf("dial tcp 10.0.0.1:6443: %w", syscall.ECONNREFUSED)
 	}
-)
+	out := make(map[string]string, len(e.api))
+	for k, v := range e.api {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// tick advances one probe interval, replays the cache like a resync does,
+// and runs one probe.
+func (e *probeEnv) tick() {
+	e.clk.Advance(every)
+	for _, ws := range e.cache.items {
+		e.src.onUpdate(ws, ws)
+	}
+	e.src.livenessTick(context.Background(), e.versions, every)
+}
+
+func (e *probeEnv) fresh(t *testing.T, what string) {
+	t.Helper()
+	got, err := e.b.currentBinding(context.Background(), testWS, e.clk.Now())
+	if err != nil {
+		t.Fatalf("%s: currentBinding = %v, want a binding", what, err)
+	}
+	if e.clk.Now().Sub(got.ObservedAt) > every {
+		t.Fatalf("%s: ObservedAt %v is older than one probe interval", what, got.ObservedAt)
+	}
+}
+
+func (e *probeEnv) stale(t *testing.T, what string) {
+	t.Helper()
+	if _, err := e.src.CurrentBinding(context.Background(), testWS); !errors.Is(err, ErrFreshness) {
+		t.Fatalf("%s: CurrentBinding = %v, want ErrFreshness", what, err)
+	}
+	if _, err := e.b.currentBinding(context.Background(), testWS, e.clk.Now()); !errors.Is(err, ErrFreshness) {
+		t.Fatalf("%s: broker currentBinding = %v, want ErrFreshness", what, err)
+	}
+	if err := e.b.RequestStop(context.Background(), testWS, 1, "idle"); !errors.Is(err, ErrFreshness) {
+		t.Fatalf("%s: RequestStop = %v, want ErrFreshness", what, err)
+	}
+}
 
 // TestK8sBindingSource_IdleHealthyWatchStaysFresh: a tenant whose
 // Workspaces never change emits no watch events (and resync replays do not
-// count); the uncached liveness probe keeps the healthy watch fresh, so the
-// broker keeps serving well past MaxBindingAge.
+// count); the probe finds the cache matching the API server, so the broker
+// keeps serving well past MaxBindingAge.
 func TestK8sBindingSource_IdleHealthyWatchStaysFresh(t *testing.T) {
-	src, b, clk := syncedSource(t)
-	const every = 5 * time.Second
-	ws := cachedWorkspace("100")
-	for i := 0; i < 12; i++ { // one minute of idle watch
-		clk.Advance(every)
-		src.onUpdate(ws, ws) // resync replay
-		src.livenessTick(context.Background(), probeOK, every)
+	e := newProbeEnv(t)
+	for i := 0; i < 12; i++ { // one minute
+		e.tick()
 	}
-	got, err := b.currentBinding(context.Background(), testWS, clk.Now())
-	if err != nil {
-		t.Fatalf("idle healthy watch: currentBinding = %v, want a binding", err)
+	e.fresh(t, "idle healthy watch")
+}
+
+// TestK8sBindingSource_SilentStalledWatchGoesStale: the watch stops
+// delivering without reporting anything (a silent stall, or client-go
+// retrying a refused/429 watch) while lists still succeed and resync keeps
+// replaying. A change on the API server the cache never sees — an update, a
+// deletion, a new Workspace — goes stale within MaxBindingAge of the change,
+// and the broker refuses; once the cache catches up it is fresh again.
+func TestK8sBindingSource_SilentStalledWatchGoesStale(t *testing.T) {
+	cases := map[string]func(e *probeEnv){
+		"updated": func(e *probeEnv) { e.api[testKey] = "101" },
+		"deleted": func(e *probeEnv) { delete(e.api, testKey) },
+		"created": func(e *probeEnv) { e.api["tenant-a/ws-other"] = "102" },
 	}
-	if got.Phase != PhaseReady || got.RuntimeUID != "rt-1" || clk.Now().Sub(got.ObservedAt) > every {
-		t.Fatalf("binding = %+v, want Ready rt-1 observed within %s", got, every)
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newProbeEnv(t)
+			e.tick()
+			e.fresh(t, "before the change")
+			change(e)
+			changedAt := e.clk.Now()
+			for e.clk.Now().Sub(changedAt) < MaxBindingAge {
+				e.tick()
+			}
+			e.stale(t, "stalled watch "+name)
+
+			// The watch recovers and delivers: the cache matches again.
+			e.cache.items = map[string]*cdiv1.Workspace{}
+			for k, rv := range e.api {
+				ws := cachedWorkspace(rv)
+				ws.Name = k[len("tenant-a/"):]
+				if k != testKey {
+					ws.Labels = map[string]string{provisioning.LabelWorkspaceUID: "ws_other"}
+				}
+				e.cache.items[k] = ws
+			}
+			if _, ok := e.api[testKey]; !ok {
+				return // the bound Workspace is gone; nothing to serve
+			}
+			e.tick()
+			e.fresh(t, "after the cache caught up")
+		})
 	}
 }
 
-// TestK8sBindingSource_ResyncDoesNotMaskDeadWatch: the API server refuses
-// connections; client-go retries the watch without reporting it while the
-// 5 s resync keeps replaying the cached Workspace. The replays are not a
-// heartbeat and the probe fails, so the source goes stale past
-// MaxBindingAge and the broker refuses (issue, renew, target resolution and
-// stop all go through currentBinding).
-func TestK8sBindingSource_ResyncDoesNotMaskDeadWatch(t *testing.T) {
-	src, b, clk := syncedSource(t)
-	const every = 5 * time.Second
-	ws := cachedWorkspace("100")
-	for i := 0; i < 4; i++ { // 20 s > MaxBindingAge
-		clk.Advance(every)
-		src.onUpdate(ws, ws)
-		src.livenessTick(context.Background(), probeRefused, every)
+// TestK8sBindingSource_InFlightChangeStaysFresh: a busy Workspace changes
+// at every probe and the cache always trails the API server by one version,
+// delivered within the probe interval. The cache keeps moving, so no
+// difference outlives its grace and the source stays fresh.
+func TestK8sBindingSource_InFlightChangeStaysFresh(t *testing.T) {
+	e := newProbeEnv(t)
+	for i := 101; i < 113; i++ { // one minute
+		e.cache.items[testKey] = cachedWorkspace(e.api[testKey]) // the last change arrives
+		e.api[testKey] = fmt.Sprint(i)                           // the next one is in flight
+		e.tick()
+		e.fresh(t, fmt.Sprintf("in-flight change to %d", i))
 	}
-	if _, err := src.CurrentBinding(context.Background(), testWS); !errors.Is(err, ErrFreshness) {
-		t.Fatalf("dead watch with resync replays: CurrentBinding = %v, want ErrFreshness", err)
-	}
-	if _, err := b.currentBinding(context.Background(), testWS, clk.Now()); !errors.Is(err, ErrFreshness) {
-		t.Fatalf("broker currentBinding = %v, want ErrFreshness", err)
-	}
-	if err := b.RequestStop(context.Background(), testWS, 1, "idle"); !errors.Is(err, ErrFreshness) {
-		t.Fatalf("RequestStop on stale binding = %v, want ErrFreshness", err)
-	}
+}
 
-	// A real watch event (new resource version) is fresh again.
-	src.onUpdate(ws, cachedWorkspace("101"))
-	if _, err := b.currentBinding(context.Background(), testWS, clk.Now()); err != nil {
-		t.Fatalf("after a delivered event: currentBinding = %v, want a binding", err)
+// TestK8sBindingSource_UnreachableAPIServerGoesStale: the API server
+// refuses connections; client-go retries the watch without reporting it
+// while resync keeps replaying the cache. The probe cannot list, so the
+// source goes stale past MaxBindingAge.
+func TestK8sBindingSource_UnreachableAPIServerGoesStale(t *testing.T) {
+	e := newProbeEnv(t)
+	e.down = true
+	for i := 0; i < 4; i++ { // 20 s > MaxBindingAge
+		e.tick()
 	}
+	e.stale(t, "unreachable API server")
+	e.down = false
+	e.tick()
+	e.fresh(t, "API server back")
 }
 
 // TestK8sBindingSource_WatchFailureStreak: the watch keeps failing while
-// uncached lists still succeed (so the probe and the re-lists keep the
-// heartbeat alive). A non-benign failure streak longer than MaxBindingAge is
-// stale; benign closes, other informers' failures and a streak whose last
-// report is older than watchRetryWindow are not.
+// lists still succeed and the cache still matches. A non-benign failure
+// streak longer than MaxBindingAge is stale; benign closes, other informers'
+// failures and a streak whose last report is older than watchRetryWindow are
+// not.
 func TestK8sBindingSource_WatchFailureStreak(t *testing.T) {
-	src, b, clk := syncedSource(t)
-	const every = 5 * time.Second
-	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "cdi.tinyorbit.vn", Resource: "workspaces"}, "", errors.New("watch denied"))
+	e := newProbeEnv(t)
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "workspaces.cdi.tinyorbit.vn", Resource: "workspaces"}, "", errors.New("watch denied"))
 
-	src.NoteWatchError("*v1.Secret", forbidden)
-	src.NoteWatchError(workspaceTypeDescription, apierrors.NewResourceExpired("too old"))
+	e.src.NoteWatchError("*v1.Secret", forbidden)
+	e.src.NoteWatchError(workspaceTypeDescription, apierrors.NewResourceExpired("too old"))
 	for i := 0; i < 4; i++ {
-		clk.Advance(every)
-		src.livenessTick(context.Background(), probeOK, every)
+		e.tick()
 	}
-	if _, err := b.currentBinding(context.Background(), testWS, clk.Now()); err != nil {
-		t.Fatalf("benign/foreign watch errors: currentBinding = %v, want a binding", err)
-	}
+	e.fresh(t, "benign/foreign watch errors")
 
-	src.NoteWatchError(workspaceTypeDescription, forbidden)
+	e.src.NoteWatchError(workspaceTypeDescription, forbidden)
 	for i := 0; i < 4; i++ { // streak reaches 20 s > MaxBindingAge
-		clk.Advance(every)
-		src.livenessTick(context.Background(), probeOK, every)
-		src.NoteWatchError(workspaceTypeDescription, forbidden)
+		e.tick()
+		e.src.NoteWatchError(workspaceTypeDescription, forbidden)
 	}
-	if _, err := b.currentBinding(context.Background(), testWS, clk.Now()); !errors.Is(err, ErrFreshness) {
-		t.Fatalf("failing watch: currentBinding = %v, want ErrFreshness", err)
-	}
+	e.stale(t, "failing watch")
 
 	// No new report for longer than watchRetryWindow: the watch re-established.
 	for d := time.Duration(0); d <= watchRetryWindow; d += every {
-		clk.Advance(every)
-		src.livenessTick(context.Background(), probeOK, every)
+		e.tick()
 	}
-	if _, err := b.currentBinding(context.Background(), testWS, clk.Now()); err != nil {
-		t.Fatalf("after the streak lapsed: currentBinding = %v, want a binding", err)
-	}
+	e.fresh(t, "after the streak lapsed")
 }
