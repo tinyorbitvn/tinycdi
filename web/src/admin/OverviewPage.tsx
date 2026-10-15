@@ -1,4 +1,4 @@
-import { Alert, Badge, Card, Grid, Section, Spinner, StatusPill } from "../design";
+import { Alert, Section, Spinner, Stat, StatList, StatusPill } from "../design";
 import type { ApiClient } from "../api/client";
 import { Link } from "../lib/router";
 import { t } from "../i18n";
@@ -74,45 +74,33 @@ export function OverviewPage({ now }: { now?: number }) {
           {h.data.fresh === false ? (
             <Alert tone="warning">{t("admin.overview.health.stale")}</Alert>
           ) : null}
-          <Grid gap={3} min="xs">
-            <Card as="div" className="tc-admin-stat">
-              <span className="tc-admin-stat__value">{h.data.liveSessions}</span>
-              <span className="tc-admin-muted">{t("admin.overview.health.liveSessions")}</span>
-            </Card>
-            <Card as="div" className="tc-admin-stat">
-              <span className="tc-admin-stat__value">
-                {h.data.provisioning.p95Seconds === undefined
+          <div className="tc-stat-grid">
+            <Stat label={t("admin.overview.health.liveSessions")} value={h.data.liveSessions} />
+            <Stat
+              label={t("admin.overview.health.p95")}
+              value={
+                h.data.provisioning.p95Seconds === undefined
                   ? t("admin.overview.health.noSamples")
-                  : `${Math.round(h.data.provisioning.p95Seconds)} s`}
-              </span>
-              <span className="tc-admin-muted">{t("admin.overview.health.p95")}</span>
-              <span className="tc-admin-muted">
-                {t("admin.overview.health.samples", { n: h.data.provisioning.samples })}
-              </span>
-            </Card>
-            <Card as="div" className="tc-admin-stat">
-              <span className="tc-admin-stat__value">{h.data.stuckFinalizers}</span>
-              {h.data.stuckFinalizers > 0 ? (
-                <Link to="/admin/workspaces">
-                  <Badge tone="warning">{t("admin.overview.health.stuck")}</Badge>
-                </Link>
-              ) : (
-                <span className="tc-admin-muted">{t("admin.overview.health.stuck")}</span>
-              )}
-            </Card>
-            <Card as="div" className="tc-admin-stat">
-              <span className="tc-admin-muted">{t("admin.overview.health.running")}</span>
-              {h.data.runningByTemplate.length === 0 ? (
-                <span className="tc-admin-muted">{t("admin.overview.health.noneRunning")}</span>
-              ) : (
-                <ul className="tc-admin-list">
-                  {h.data.runningByTemplate.map((r) => (
-                    <li key={r.template}>{`${r.template} — ${r.count}`}</li>
-                  ))}
-                </ul>
-              )}
-            </Card>
-          </Grid>
+                  : `${Math.round(h.data.provisioning.p95Seconds)} s`
+              }
+              hint={t("admin.overview.health.samples", { n: h.data.provisioning.samples })}
+            />
+            <Stat
+              label={t("admin.overview.health.stuck")}
+              value={h.data.stuckFinalizers}
+              {...(h.data.stuckFinalizers > 0
+                ? {
+                    tone: "warning" as const,
+                    action: <Link to="/admin/workspaces">{t("admin.overview.health.stuckReview")}</Link>,
+                  }
+                : {})}
+            />
+            <StatList
+              label={t("admin.overview.health.running")}
+              empty={t("admin.overview.health.noneRunning")}
+              items={h.data.runningByTemplate.map((r) => ({ key: r.template, term: r.template, value: r.count }))}
+            />
+          </div>
         </Section>
       ) : h.loading ? (
         <Spinner label={t("admin.overview.loading")} />
@@ -138,24 +126,20 @@ export function OverviewPage({ now }: { now?: number }) {
             {o.data.workspaces.length === 0 ? (
               <p className="tc-admin-muted">{t("admin.overview.empty")}</p>
             ) : (
-              <Grid gap={3} min="xs">
+              <div className="tc-stat-grid">
                 {phaseCounts(o.data.workspaces).map(({ phase, count }) => (
-                  <Card key={phase} as="div" className="tc-admin-stat">
-                    <span className="tc-admin-stat__value">{count}</span>
-                    <StatusPill phase={phase} label={t(phaseLabelKey(phase))} />
-                  </Card>
+                  <Stat key={phase} label={<StatusPill phase={phase} label={t(phaseLabelKey(phase))} />} value={count} />
                 ))}
-              </Grid>
+              </div>
             )}
           </Section>
           <Section
             title={t("admin.overview.data.title")}
             actions={<Link to="/admin/data">{t("admin.overview.data.all")}</Link>}
           >
-            <Card as="div" className="tc-admin-stat">
-              <span className="tc-admin-stat__value">{o.data.retained.length}</span>
-              <span className="tc-admin-muted">{t("admin.overview.data.disks")}</span>
-            </Card>
+            <div className="tc-stat-grid">
+              <Stat label={t("admin.overview.data.disks")} value={o.data.retained.length} />
+            </div>
           </Section>
           {failed.length > 0 ? (
             <Alert

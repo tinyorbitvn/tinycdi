@@ -17,7 +17,7 @@ async function userLimitsTable() {
 }
 
 function defaultLine() {
-  return screen.getByText("Default per-user limit:").closest("p")!;
+  return screen.getByRole("group", { name: "Default per-user limit" });
 }
 
 const GRACE_REF = "https://idp.invalid|user-01J4ZDGRC";

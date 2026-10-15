@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { createMockApi, loginCookies, renderWithApi } from "../helpers";
 import { control, makeAdmin } from "./helpers";
 import { OverviewPage } from "../../../src/admin/OverviewPage";
@@ -17,11 +17,16 @@ describe("overview: health cards", () => {
   it("shows live sessions, p95, sample count, the stuck-deletion warning and running per template", async () => {
     renderWithApi(<OverviewPage />, setup());
     const health = await screen.findByRole("region", { name: "Health" });
-    expect(health).toHaveTextContent("12 s");
+    expect(within(health).getByRole("group", { name: "Start time (p95, 24 h)" })).toHaveTextContent("12 s");
     expect(health).toHaveTextContent("7 starts measured");
-    expect(health).toHaveTextContent("Stuck deletions");
-    expect(health.querySelector(".tc-badge--warning")).not.toBeNull();
-    expect(health).toHaveTextContent("chrome-r1 — 2");
+    const stuck = within(health).getByRole("group", { name: "Stuck deletions" });
+    expect(stuck).toHaveClass("tc-stat--warning");
+    expect(within(stuck).getByRole("link", { name: "Review stuck deletions" })).toHaveAttribute(
+      "href",
+      "/admin/workspaces",
+    );
+    const running = within(health).getByRole("group", { name: "Running by template" });
+    expect(within(running).getByText("chrome-r1").nextElementSibling).toHaveTextContent("2");
   });
 
   it("says so when the Kubernetes watch is stale", async () => {
@@ -30,5 +35,14 @@ describe("overview: health cards", () => {
     renderWithApi(<OverviewPage />, api);
     expect(await screen.findByText(/Workspace status is out of date/)).toBeInTheDocument();
     expect(screen.getByText("Nothing running")).toBeInTheDocument();
+  });
+});
+
+describe("overview: capacity and retained data", () => {
+  it("lays the meters out in the auto-fit grid and shows retained disks as a Stat", async () => {
+    renderWithApi(<OverviewPage />, setup());
+    const capacity = await screen.findByRole("region", { name: "Capacity" });
+    expect(capacity.querySelector(".tc-meter-grid")).not.toBeNull();
+    expect(await screen.findByRole("group", { name: "Retained disks" })).toHaveClass("tc-stat");
   });
 });

@@ -249,3 +249,27 @@ test.describe("keyboard", () => {
     expect(noRing, "focused elements without a visible focus ring").toEqual([]);
   });
 });
+
+test.describe("locale: vi at 390px", () => {
+  test.use({ locale: "vi-VN", viewport: { width: 390, height: 844 } });
+
+  test("admin overview: Stat cards, tabs and buttons fit without horizontal scroll", async ({ page, request }) => {
+    await seed(request);
+    await login(page, "Workspace");
+    await page.goto("/admin");
+    await settle(page);
+    await expect(page.locator("html")).toHaveAttribute("lang", "vi");
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    const stats = page.locator(".tc-stat");
+    expect(await stats.count()).toBeGreaterThan(0);
+    for (const stat of await stats.all()) {
+      const box = await stat.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    }
+    for (const button of await page.locator(".tc-page__actions .tc-button").all()) {
+      const box = await button.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    }
+  });
+});

@@ -777,10 +777,19 @@
 }
 
 /* ---------- meter ---------- */
+/* Five quota meters fit one row at desktop width; narrower screens re-flow
+   evenly instead of leaving a lone fifth meter. */
+.tc-meter-grid {
+  display: grid;
+  gap: var(--tc-space-4) var(--tc-space-6);
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+}
+
 .tc-meter__header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: var(--tc-space-2);
+  gap: 0 var(--tc-space-2);
   margin-bottom: var(--tc-space-1);
   font-size: var(--tc-text-sm);
 }

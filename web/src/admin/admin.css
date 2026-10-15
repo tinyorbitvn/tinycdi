@@ -10,18 +10,6 @@
   color: var(--tc-color-text-muted);
 }
 
-.tc-admin-stat {
-  display: flex;
-  flex-direction: column;
-  gap: var(--tc-space-2);
-}
-
-.tc-admin-stat__value {
-  font-size: var(--tc-text-2xl);
-  font-weight: var(--tc-weight-semibold);
-  line-height: var(--tc-leading-tight);
-}
-
 .tc-admin-cell-stack {
   display: flex;
   flex-direction: column;
@@ -71,5 +59,13 @@
   flex-wrap: wrap;
   align-items: flex-end;
   gap: var(--tc-space-3);
+  margin-block-end: var(--tc-space-4);
+}
+
+.tc-quota-source {
+  margin-block-end: var(--tc-space-4);
+}
+
+.tc-userlimits-default {
   margin-block-end: var(--tc-space-4);
 }
