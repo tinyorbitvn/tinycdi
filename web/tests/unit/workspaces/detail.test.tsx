@@ -215,4 +215,13 @@ describe("WorkspaceDetailPage", () => {
     expect(await screen.findByText(/Starting again would fail the same way/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry start" })).not.toBeInTheDocument();
   }, 20000);
+
+  it("detail: back link and stacked conditions table", async () => {
+    const api = createMockApi();
+    api.state.workspaces.set(WS_ID, readyWorkspace({ id: WS_ID }));
+    loginCookies();
+    renderWithApi(<WorkspaceDetailPage workspaceId={WS_ID} pollIntervalMs={60_000} />, api);
+    expect(await screen.findByRole("link", { name: "All workspaces" })).toHaveClass("tc-backlink");
+    expect(await screen.findByRole("table", { name: "conditions" })).toHaveClass("tc-table--stack-md");
+  });
 });

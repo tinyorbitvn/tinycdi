@@ -133,6 +133,8 @@ export default {
   "workspaces.create.loading": "Loading templates…",
   "workspaces.create.nameLabel": "Name",
   "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.nameInvalid":
+    "Use lowercase letters, digits and hyphens; start and end with a letter or digit.",
   "workspaces.create.templateLabel": "Template",
   "workspaces.create.templatePlaceholder": "Select a template",
   "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",

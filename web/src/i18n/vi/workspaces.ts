@@ -136,6 +136,8 @@ export default {
   "workspaces.create.loading": "Đang tải template…",
   "workspaces.create.nameLabel": "Tên",
   "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.nameInvalid":
+    "Chỉ dùng chữ thường, chữ số và dấu gạch ngang; bắt đầu và kết thúc bằng chữ hoặc số.",
   "workspaces.create.templateLabel": "Template",
   "workspaces.create.templatePlaceholder": "Chọn một template",
   "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",
