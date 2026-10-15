@@ -144,12 +144,19 @@ The script is idempotent (GET-then-create/update only what differs) and sets:
   Consequence: `release.yml` `workflow_dispatch` is **dry-run only** —
   a real release is made by an admin pushing the `v*.*.*` tag.
 - **Branch protection on `main`** — required status checks = every ci.yml
-  job except `kasm adapter contract + catalog scan` (network-dependent,
-  must not gate merges; its fast catalog policy leg still runs inside
-  the required workflow-policy job). The browser engine freshness check is
-  equally non-gating — it now lives in `runtime-freshness.yml` (daily)
-  rather than ci.yml, so it never appears as a required check at all.
-  Strict (up-to-date) mode, enforce admins, dismiss stale
+  job except the network-dependent ones, which pull multi-GB images or
+  boot a kind cluster:
+  `kasm adapter contract + catalog scan`,
+  `quickstart (kind up.sh + portal smoke)` and
+  `partitioned (kind up.sh + CHIPS cookie smoke)`.
+  They still run in CI (the kind smokes on every push and pull request,
+  the kasm scan on main pushes, weekly and on PRs touching the kasm
+  paths) but do not block a merge; the fast kasm catalog policy leg runs
+  inside the required workflow-policy job.
+  `setup-repo-protection.test.sh` fails when a ci.yml job is neither
+  required nor on this list. The browser engine freshness check lives in
+  `runtime-freshness.yml` (daily), outside ci.yml, so it is never a
+  required check. Strict (up-to-date) mode, enforce admins, dismiss stale
   reviews, conversation resolution required, no force-push/delete.
   `required_approving_review_count` is 0 while the repo has a single
   maintainer — when a second maintainer joins, set it to 1 +

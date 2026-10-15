@@ -19,12 +19,18 @@
 #      release.yml workflow_dispatch is dry-run only — a real release is
 #      made by an admin pushing the tag.
 #   4. Branch protection on `main` — required status checks = every ci.yml
-#      job EXCEPT the network-dependent ones (SUPF-4): the chromium
-#      apt-pin freshness job (polls Debian security feeds) and the
-#      kasm-contract job (pulls a ~2 GB Docker Hub image; the weekly
-#      schedule + PR path gate still cover it — and a tag-only or
-#      uncataloged kasm ref is already blocked by the required
-#      workflow-policy job via check-kasm-catalog.sh). Enforce admins,
+#      job EXCEPT the network-dependent ones (SUPF-4), which pull
+#      multi-GB images or boot a kind cluster, so an outage upstream
+#      would hold every merge hostage:
+#        - "kasm adapter contract + catalog scan" (pulls the Docker Hub
+#          kasmweb catalog images; main pushes, the weekly schedule and
+#          the kasm path gate on PRs still run it, and the declared
+#          catalog floor is checked by the required workflow-policy job);
+#        - "quickstart (kind up.sh + portal smoke)";
+#        - "partitioned (kind up.sh + CHIPS cookie smoke)".
+#      .github/tests/setup-repo-protection.test.sh derives the ci.yml job
+#      names and fails when a job is neither required nor listed here.
+#      Enforce admins,
 #      dismiss stale reviews. Single maintainer today, so
 #      required_approving_review_count is 0 — when a second maintainer
 #      joins: set
@@ -367,8 +373,8 @@ fi
 
 # --- 4. branch protection on main -------------------------------------------
 # SUPF-4: required_approving_review_count 0 while the repo has a single
-# maintainer; the chromium freshness job stays OUT of the required
-# contexts — it polls the Debian security feed (network-dependent).
+# maintainer; the contexts are every ci.yml job except the network-dependent
+# ones listed in the header (item 4) — R1-39.
 echo "== branch protection: main"
 cat > "$TMP/protection.json" <<'EOF'
 {
@@ -382,7 +388,9 @@ cat > "$TMP/protection.json" <<'EOF'
       "govulncheck (Go vuln scan)",
       "dependency review (PRs)",
       "workflow policy tests (.github)",
-      "workflow lint (actionlint + yamllint + zizmor)"
+      "workflow lint (actionlint + yamllint + zizmor)",
+      "soak harness (npm ci, tsc, unit + dry-run)",
+      "go fuzz (auth/session parsing boundaries)"
     ]
   },
   "enforce_admins": true,

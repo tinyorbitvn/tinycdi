@@ -135,7 +135,7 @@ case "$epath" in
     reply '{"id":7,"name":"release-tags","target":"tag","enforcement":"evaluate","bypass_actors":[],"conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*"]}},"rules":[{"type":"deletion"}]}' ;;
   repos/test/repo/branches/main/protection)
     [ "$mode" = "partial" ] && reply '{}'
-    [ "$mode" = "converged" ] && reply '{"url":"x","required_status_checks":{"strict":true,"contexts":["workflow lint (actionlint + yamllint + zizmor)","go vet + test -race (envtest)","integration (postgres service + envtest)","portal ui (npm ci, tsc, vitest, build)","chart (helm lint --strict + chart tests)","govulncheck (Go vuln scan)","dependency review (PRs)","workflow policy tests (.github)"],"checks":[]},"enforce_admins":{"enabled":true},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"required_approving_review_count":0},"required_linear_history":{"enabled":false},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"lock_branch":{"enabled":false},"allow_fork_syncing":{"enabled":false}}'
+    [ "$mode" = "converged" ] && reply '{"url":"x","required_status_checks":{"strict":true,"contexts":["workflow lint (actionlint + yamllint + zizmor)","go vet + test -race (envtest)","integration (postgres service + envtest)","portal ui (npm ci, tsc, vitest, build)","chart (helm lint --strict + chart tests)","govulncheck (Go vuln scan)","dependency review (PRs)","workflow policy tests (.github)","soak harness (npm ci, tsc, unit + dry-run)","go fuzz (auth/session parsing boundaries)"],"checks":[]},"enforce_admins":{"enabled":true},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"required_approving_review_count":0},"required_linear_history":{"enabled":false},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"lock_branch":{"enabled":false},"allow_fork_syncing":{"enabled":false}}'
     notfound ;;
   repos/test/repo/vulnerability-alerts)
     [ "$mode" = "converged" ] && reply ''
@@ -336,6 +336,50 @@ if GH_REPO=test/repo PATH="$WORK/bin:$PATH" GH_STUB_MODE=err500perms \
 else
   chk "$WORK/err-perms.out" 'refusing to continue' "actions/permissions GET did not fail closed"
 fi
+
+# R1-39 / TM-49: the required contexts are exactly the ci.yml job names
+# minus a documented list of network-dependent jobs, and every excluded
+# job is named in the script header and in .github/README.md.
+EXCLUDED=(
+  "kasm adapter contract + catalog scan"
+  "quickstart (kind up.sh + portal smoke)"
+  "partitioned (kind up.sh + CHIPS cookie smoke)"
+)
+python3 -I - "$ROOT" "${EXCLUDED[@]}" <<'PY' || fails=1
+import json, re, sys
+try:
+    import yaml
+except ImportError:
+    print("FAIL: PyYAML is not importable — cannot derive the ci.yml job set")
+    sys.exit(1)
+root, excluded = sys.argv[1], set(sys.argv[2:])
+with open(f"{root}/.github/workflows/ci.yml") as fh:
+    ci = yaml.safe_load(fh)
+jobs = {b.get("name", k) for k, b in ci["jobs"].items()}
+with open(f"{root}/.github/scripts/setup-repo-protection.sh") as fh:
+    src = fh.read()
+m = re.search(r"cat > \"\$TMP/protection\.json\" <<'EOF'\n(.*?)\nEOF\n", src, re.S)
+if not m:
+    print("FAIL: protection.json heredoc not found in setup-repo-protection.sh")
+    sys.exit(1)
+contexts = set(json.loads(m.group(1))["required_status_checks"]["contexts"])
+bad = 0
+for x in sorted(excluded - jobs):
+    print(f"FAIL: documented exclusion '{x}' is not a ci.yml job name"); bad = 1
+for x in sorted(jobs - excluded - contexts):
+    print(f"FAIL: ci.yml job '{x}' is neither a required check nor a documented exclusion"); bad = 1
+for x in sorted(contexts - jobs):
+    print(f"FAIL: required context '{x}' is not a ci.yml job name"); bad = 1
+for x in sorted(contexts & excluded):
+    print(f"FAIL: network-dependent job '{x}' is required"); bad = 1
+sys.exit(bad)
+PY
+for x in "${EXCLUDED[@]}"; do
+  grep -qF -- "\"$x\"" "$SCRIPT" \
+    || { echo "FAIL: setup-repo-protection.sh header does not name excluded job \"$x\""; fails=1; }
+  grep -qF -- "\`$x\`" "$ROOT/.github/README.md" \
+    || { echo "FAIL: .github/README.md does not name excluded job \`$x\`"; fails=1; }
+done
 
 if [ "$fails" -eq 0 ]; then echo "setup-repo-protection: all guards pass"; fi
 exit "$fails"

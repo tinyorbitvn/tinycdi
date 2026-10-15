@@ -87,10 +87,12 @@ chk_absent "release: no fail-open existence check" "$REL" 'gh api "repos/.*(tags
 # Actions app no bypass, so dry_run=false must be refused up front.
 chk "release: dispatch is dry-run only" "$REL" 'workflow_dispatch is dry-run only'
 
-# SUPR-1: chart digest resolved from the registry, not parsed from helm
-# push stdout (helm 4 prints Pushed:/Digest: to stderr).
-chk "release: chart digest via imagetools inspect" "$REL" 'imagetools inspect'
+chk "release: chart digest via imagetools inspect" "$ROOT/.github/scripts/push-sign-chart.sh" 'imagetools inspect'
 chk_absent "release: no stdout digest parse" "$REL" 'out=.*helm.*push|helm push.*\$\('
+# R1-40: the chart is pushed and signed by push-sign-chart.sh, which rolls
+# back (deletes this run's version) when signing fails.
+chk "release: chart pushed + signed by push-sign-chart.sh" "$REL" 'push-sign-chart\.sh "\$\{pkgs\[0\]\}"'
+chk_absent "release: no inline helm push (rollback lives in the script)" "$REL" 'bin/helm" push'
 
 # SUPR-2 + SUPF-1: publish downloads every input by EXACT artifact name
 # (no pattern/merge-multiple — a forged artifact could overwrite a

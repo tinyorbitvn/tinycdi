@@ -59,6 +59,11 @@ ambiguity):
 Release runs additionally `cosign sign` the pushed OCI chart digest
 (`oci://ghcr.io/tinyorbitvn/charts/tinycdi`) and `cosign sign-blob` every
 release asset (`<asset>.sigstore.json` bundles), then `gh release create`.
+`helm push` tags the chart in the same call that uploads it, so the
+chart is the one release artifact that exists tagged before it is
+signed. `push-sign-chart.sh` signs it right after the push. If the push,
+the digest lookup or the signature fails, it deletes the chart version
+that run created, so an unsigned chart never stays tagged.
 The runtime train does the same for its deployment manifest: every
 `runtime-*` release carries `runtime-images.json` **and**
 `runtime-images.json.sigstore.json` — verify it with `cosign

@@ -1331,9 +1331,15 @@ jobs:
 
       - name: push helm chart to OCI + cosign sign
         id: chart
+        # R1-40 / SUPR-13: `helm push` tags X.Y.Z in the same call that
+        # uploads the chart, so the chart is signed right after the push and
+        # push-sign-chart.sh deletes the version this run created if the
+        # push, the digest lookup or the signature fails — an unsigned chart
+        # never stays tagged. Stdout is only the ref= line.
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           printf '%s' "$GHCR_TOKEN" \
             | "$PWD/bin/helm" registry login ghcr.io \
@@ -1343,20 +1349,10 @@ jobs:
           pkgs=(bundle/*.tgz)
           [ "${#pkgs[@]}" -eq 1 ] \
             || { echo "::error::expected exactly one chart tgz, got ${#pkgs[@]}"; exit 1; }
-          "$PWD/bin/helm" push "${pkgs[0]}" "$CHART_OCI"
-          # SUPR-1: helm 4 writes Pushed:/Digest: to stderr, not stdout —
-          # don't parse streams at all; resolve the digest from the
-          # registry by tag instead.
-          CHART_DIGEST="$(docker buildx imagetools inspect \
-            "ghcr.io/tinyorbitvn/charts/${CHART_NAME}:${CHART_VERSION}" \
-            | awk '/^Digest:/ {print $2; exit}')"
-          if [[ ! "$CHART_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::could not resolve pushed chart digest from the registry"
-            exit 1
-          fi
-          # SEC-17: sign the pushed chart manifest by digest (keyless).
-          cosign sign --yes "ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}"
-          echo "ref=ghcr.io/tinyorbitvn/charts/${CHART_NAME}@${CHART_DIGEST}" >> "$GITHUB_OUTPUT"
+          RUN_STARTED_AT="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq .run_started_at)"
+          HELM="$PWD/bin/helm" CHART_NAME="$CHART_NAME" RUN_STARTED_AT="$RUN_STARTED_AT" \
+            .github/scripts/push-sign-chart.sh "${pkgs[0]}" >> "$GITHUB_OUTPUT"
 
       - name: promote image tags (:<ver> + :latest)
         # SEC-18: tags are the bare chart version (v1.2.3 -> :1.2.3) so they
