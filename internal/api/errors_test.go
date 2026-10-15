@@ -121,6 +121,7 @@ func TestErrorCodeTableCoverage(t *testing.T) {
 		CodePreconditionFailed:   http.StatusPreconditionFailed,
 		CodeConnectionInUse:      http.StatusConflict,
 		CodeImageStale:           http.StatusConflict,
+		CodeAlreadyExists:        http.StatusConflict,
 		CodeRateLimited:          http.StatusTooManyRequests,
 		CodeUnavailable:          http.StatusServiceUnavailable,
 		CodeInternal:             http.StatusInternalServerError,

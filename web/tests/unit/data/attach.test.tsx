@@ -185,4 +185,36 @@ describe("data attach", () => {
     expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
     expect(alert).not.toHaveTextContent("still shutting down");
   });
+
+  it("says the name is taken on ALREADY_EXISTS", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const origHandle = api.handle;
+    api.handle = (req) => {
+      if (req.method === "POST" && req.path.endsWith(":attach")) {
+        return {
+          status: 409,
+          headers: { "content-type": "application/json" },
+          body: { error: {
+            code: "ALREADY_EXISTS",
+            message: "a workspace with this name already exists; choose a different name",
+            retryable: false,
+            requestId: "req_dup",
+          } },
+        };
+      }
+      return origHandle(req);
+    };
+    renderWithApi(<DataListPage />, api);
+
+    await screen.findByRole("table", { name: /retained/i });
+    fireEvent.click(within(retainedRow()).getByRole("button", { name: /^attach$/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(/workspace name/i), { target: { value: "home" } });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /attach disk/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("You already have a workspace with this name. Choose a different name.");
+    expect(alert).not.toHaveTextContent("already being attached");
+  });
 });

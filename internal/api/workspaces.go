@@ -761,7 +761,7 @@ func (h *WorkspaceHandler) writeBackendError(w http.ResponseWriter, r *http.Requ
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
 	case errors.Is(err, provisioning.ErrNameTaken):
-		writeError(w, r, CodeInvalidState, "workspace name already in use")
+		writeError(w, r, CodeAlreadyExists, nameTakenMessage)
 	case errors.Is(err, provisioning.ErrReservationConflict):
 		writeError(w, r, CodeInvalidState, err.Error())
 	case store.IsTransient(err):

@@ -36,6 +36,8 @@ export default {
     "Yêu cầu tạo xung đột với một lần thử trước đó. Kiểm tra danh sách trước khi thử lại.",
   "errors.code.invalidState":
     "Tài nguyên hiện không ở trạng thái cho phép thao tác này — có thể nó vừa thay đổi; làm mới rồi thử lại.",
+  "errors.code.alreadyExists":
+    "Bạn đã có một workspace với tên này. Hãy chọn tên khác.",
   "errors.code.connectionInUse":
     "Một phiên khác đang kết nối tới workspace này.",
   "errors.code.imageStale":

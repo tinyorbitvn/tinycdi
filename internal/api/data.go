@@ -482,7 +482,7 @@ func (h *DataHandler) writeDataError(w http.ResponseWriter, r *http.Request, err
 	case provisioning.IsIdempotencyConflict(err):
 		writeError(w, r, CodeIdempotencyConflict, "idempotency key reused with a different request")
 	case errors.Is(err, provisioning.ErrNameTaken):
-		writeError(w, r, CodeInvalidState, "workspace name already in use")
+		writeError(w, r, CodeAlreadyExists, nameTakenMessage)
 	default:
 		writeError(w, r, CodeInternal, "internal error")
 	}

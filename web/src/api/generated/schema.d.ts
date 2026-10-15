@@ -215,6 +215,9 @@ export interface paths {
          *     (default 45 d) is refused with `409 IMAGE_STALE` (E3); a template
          *     without a parseable `imageBuiltAt` never blocks.
          *
+         *     Workspace names are unique per owner among live workspaces: a name
+         *     the caller already uses is `409 ALREADY_EXISTS`.
+         *
          *     Idempotent: same `Idempotency-Key` + same body returns the recorded
          *     workspace; same key + different body returns `409 IDEMPOTENCY_CONFLICT`.
          */
@@ -1041,6 +1044,7 @@ export interface components {
          *     | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
          *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
+         *     | `ALREADY_EXISTS` | 409 | false | the name is already used by another of the caller's live workspaces (create, `:attach`); choose a different name |
          *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
@@ -1049,7 +1053,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "ALREADY_EXISTS" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /**
          * @description Uniform error envelope returned for every 4xx/5xx response — the body
          *     is the single key `error` carrying an `ErrorBody`.
@@ -2079,7 +2083,8 @@ export interface components {
         /**
          * @description State or idempotency conflict — `IDEMPOTENCY_CONFLICT` (key reused with
          *     a different body), `INVALID_STATE` (operation not valid in the current
-         *     phase/record state), `CONNECTION_IN_USE` (a live interactive lease
+         *     phase/record state), `ALREADY_EXISTS` (the workspace name is already
+         *     in use by the caller), `CONNECTION_IN_USE` (a live interactive lease
          *     exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
          *     quota has no headroom), `QUOTA_NOT_CONFIGURED` (the tenant has no
          *     quota at all, so creates fail closed), or `QUOTA_MANAGED_BY_CONFIG`

@@ -35,6 +35,7 @@ const (
 	CodePreconditionFailed   ErrorCode = "PRECONDITION_FAILED"     // 412
 	CodeConnectionInUse      ErrorCode = "CONNECTION_IN_USE"       // 409
 	CodeImageStale           ErrorCode = "IMAGE_STALE"             // 409
+	CodeAlreadyExists        ErrorCode = "ALREADY_EXISTS"          // 409
 	CodeRateLimited          ErrorCode = "RATE_LIMITED"            // 429
 	CodeUnavailable          ErrorCode = "UNAVAILABLE"             // 503
 	CodeInternal             ErrorCode = "INTERNAL"                // 500
@@ -44,6 +45,10 @@ const (
 // QUOTA_NOT_CONFIGURED: the tenant has no tenant_quota row, so admission
 // fails closed. Clients switch on the code; the web copy mirrors this text.
 const quotaNotConfiguredMessage = "No quota is configured for your tenant. Ask an administrator to set one."
+
+// nameTakenMessage is the text of ALREADY_EXISTS for a workspace name the
+// owner already uses (create and :attach alike).
+const nameTakenMessage = "a workspace with this name already exists; choose a different name"
 
 // AllErrorCodes enumerates every code in the contract. Keep in sync with the
 // constants above and the OpenAPI ErrorCode enum.
@@ -64,6 +69,7 @@ var AllErrorCodes = []ErrorCode{
 	CodePreconditionFailed,
 	CodeConnectionInUse,
 	CodeImageStale,
+	CodeAlreadyExists,
 	CodeRateLimited,
 	CodeUnavailable,
 	CodeInternal,
@@ -80,7 +86,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeQuotaManagedByConfig, CodeQuotaAboveCeiling, CodeConnectionInUse, CodeImageStale:
+	case CodeInvalidState, CodeIdempotencyConflict, CodeQuotaExhausted, CodeQuotaNotConfigured, CodeQuotaManagedByConfig, CodeQuotaAboveCeiling, CodeConnectionInUse, CodeImageStale, CodeAlreadyExists:
 		return http.StatusConflict
 	case CodeInvalidTemplate:
 		return http.StatusUnprocessableEntity

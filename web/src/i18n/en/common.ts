@@ -34,6 +34,8 @@ export default {
     "The create request conflicted with a previous attempt. Review the list before trying again.",
   "errors.code.invalidState":
     "The resource is not in a state that allows this right now — it may have changed; refresh and retry.",
+  "errors.code.alreadyExists":
+    "You already have a workspace with this name. Choose a different name.",
   "errors.code.connectionInUse":
     "Another session is already connected to this workspace.",
   "errors.code.imageStale":

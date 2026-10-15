@@ -134,6 +134,41 @@ describe("CreateWorkspacePage", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   }, 20000);
 
+  // A duplicate name is 409 ALREADY_EXISTS: the name field says so in place
+  // (not a generic "refresh and retry" banner), and editing the name clears it.
+  it("create: a taken name is flagged on the name field", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const calls = interceptCreates(api, {
+      status: 409,
+      body: { error: {
+        code: "ALREADY_EXISTS",
+        message: "a workspace with this name already exists; choose a different name",
+        retryable: false,
+        requestId: "r-dup",
+      } },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const nameInput = screen.getByLabelText(/Name/);
+    await waitFor(() => expect(nameInput).toHaveAttribute("aria-invalid", "true"));
+    expect(
+      screen.getByText("You already have a workspace with this name. Choose a different name."),
+    ).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // A new name is a new attempt: the error clears and the retry mints a
+    // fresh Idempotency-Key (the same key with a different body would be
+    // IDEMPOTENCY_CONFLICT).
+    fireEvent.change(nameInput, { target: { value: "my-box-2" } });
+    expect(nameInput).not.toHaveAttribute("aria-invalid");
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]!.headers["idempotency-key"]).not.toBe(calls[0]!.headers["idempotency-key"]);
+  }, 20000);
+
   // QS-FLAKE: QUOTA_EXHAUSTED + details.reason=release_pending is the
   // transient teardown refusal — it gets its own "still shutting down"
   // copy instead of the exhaustion guidance.
