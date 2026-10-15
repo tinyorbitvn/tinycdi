@@ -599,7 +599,7 @@ function podEnv(workspaceId: string): Record<string, string> {
 // train older than the entrypoint DLP render, so the round-trip cannot
 // run there (up.sh writes it into the install's env file). On the
 // default runtime pins
-// (runtime-2026.10.12, hack/quickstart/common.sh) the round-trip is
+// (runtime-2026.10.15, hack/quickstart/common.sh) the round-trip is
 // MANDATORY — a runtime image without the render fails the check below
 // loudly instead of skipping silently.
 const ROUNDTRIP_OPTOUT = process.env.TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT ?? "";

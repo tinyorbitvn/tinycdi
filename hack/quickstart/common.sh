@@ -71,9 +71,9 @@ TRAEFIK_VERSION="v3.7.13"
 TRAEFIK_DIGEST="sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0"
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc"
 POSTGRES_IMAGE="docker.io/library/postgres:18.0@sha256:41fc5342eefba6cc2ccda736aaf034bbbb7c3df0fdb81516eba1ba33f360162c"
-# Runtime images: the published runtime release train (runtime-2026.10.12,
-# rt-20261012.1 — the first train carrying the entrypoint clipboard DLP
-# render, so the smoke's browser round-trip is mandatory on these pins),
+# Runtime images: the published runtime release train (runtime-2026.10.15,
+# rt-20261015.1 — it carries the entrypoint clipboard DLP render, so the
+# smoke's browser round-trip is mandatory on these pins),
 # digest-pinned exactly like a production values file would. The env
 # overrides exist for installing an older release with ITS chart's pinned
 # runtime digests (set TCDI_QS_CLIPBOARD_ROUNDTRIP_OPTOUT with them when
@@ -86,10 +86,10 @@ POSTGRES_IMAGE="docker.io/library/postgres:18.0@sha256:41fc5342eefba6cc2ccda736a
 # renders), so a tree that changes that contract cannot be tested against a
 # published train that predates it: CI builds them.
 RUNTIME_IMAGES="${TCDI_QS_RUNTIME_IMAGES:-published}"
-BROWSER_DIGEST="${TCDI_QS_BROWSER_DIGEST:-sha256:960ed53041e616ff544085b389360298a99bd31d2f0803f1fbcb4f0a682131c6}"
-BROWSER_BUILT_AT="${TCDI_QS_BROWSER_BUILT_AT:-2026-10-12T05:33:32Z}"
-DESKTOP_DIGEST="${TCDI_QS_DESKTOP_DIGEST:-sha256:7dbfe5a5247250000abeea01a943a7673bd97a5bb02dce049a3d190f03d8f4d8}"
-DESKTOP_BUILT_AT="${TCDI_QS_DESKTOP_BUILT_AT:-2026-10-12T05:33:32Z}"
+BROWSER_DIGEST="${TCDI_QS_BROWSER_DIGEST:-sha256:3a6f98bb326c4e1a4abe7eb00a7e17430dc53ac7fe2adad560af58d2b3678b6a}"
+BROWSER_BUILT_AT="${TCDI_QS_BROWSER_BUILT_AT:-2026-10-15T05:42:03Z}"
+DESKTOP_DIGEST="${TCDI_QS_DESKTOP_DIGEST:-sha256:f582c0cc7e9dbd599b48acd8094ca74a78967ab67574731d6adde9587a84ace5}"
+DESKTOP_BUILT_AT="${TCDI_QS_DESKTOP_BUILT_AT:-2026-10-15T05:42:03Z}"
 
 # ---- dev-only demo login (loopback-only, throwaway cluster) ------------------
 # These credentials exist ONLY inside the kind cluster's dev Keycloak realm.
